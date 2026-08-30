@@ -38,28 +38,21 @@ replacement = "one actor-authorized prepublication retry action"
 [[symbols]]
 id = "replacement-kill"
 pattern = "kill_child_for_replacement"
-expected_occurrences = 13
+expected_occurrences = 12
 kind = "replacement_owner"
 replacement = "the exact-attempt supervisor executing one actor decision"
 
 [[symbols]]
 id = "replacement-install"
 pattern = "install_replacement_child"
-expected_occurrences = 4
+expected_occurrences = 3
 kind = "replacement_owner"
 replacement = "the session executor installing one actor-authorized attempt"
 
 [[symbols]]
-id = "hardware-downgrade"
-pattern = "downgrade_one_step"
-expected_occurrences = 1
-kind = "replacement_policy"
-replacement = "test-only legacy helper; production uses one immutable ValidatedRetryRecipe consumed once by the actor"
-
-[[symbols]]
 id = "direct-session-failure"
 pattern = "(?:self|session)\\.fail\\("
-expected_occurrences = 15
+expected_occurrences = 12
 kind = "failure_owner"
 replacement = "typed producer facts entering the actor; only prepublication and compatibility failures project Session::failed, while published actor failures retain admitted media"
 
@@ -171,7 +164,7 @@ replacement = "the rate-control refresh schedule remains a named lifecycle timer
 [[symbols]]
 id = "all-ffmpeg-process-starts"
 pattern = "\\bspawn_ffmpeg\\("
-expected_occurrences = 7
+expected_occurrences = 6
 kind = "process_start_scan"
 replacement = "one session executor acquires process capacity and cleanup registration before every rolling spawn"
 
@@ -275,7 +268,7 @@ expected_occurrences = 29
 [[module_symbols]]
 id = "legacy-downgrade-owner"
 pattern = "downgrade_one_step"
-expected_occurrences = 1
+expected_occurrences = 0
 
 [[module_symbols]]
 id = "legacy-stall-watch-owner"
