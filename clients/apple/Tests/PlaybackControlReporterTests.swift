@@ -157,11 +157,28 @@ private final class Harness: @unchecked Sendable {
 
     /// Wait for `count` exchange outcomes rather than sleeping a guessed
     /// interval, so a slow machine cannot turn a passing test into a flake.
+    ///
+    /// The gate counts every exchange the reporter has ever made, so this is
+    /// only sound for "at least this many have happened by now". A test that
+    /// needs "something happened *after* this moment" must poll a predicate
+    /// instead — see `waitUntil`.
     func awaitExchanges(_ count: Int, timeout: TimeInterval = 5) -> Bool {
         for _ in 0..<count where gate.wait(timeout: .now() + timeout) == .timedOut {
             return false
         }
         return true
+    }
+
+    /// Poll until the reporter has done something a test can name, rather than
+    /// counting exchanges it did not ask for. Bounded, so a genuine failure
+    /// fails rather than hanging.
+    func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            usleep(5_000)
+        }
+        return condition()
     }
 }
 
@@ -310,11 +327,13 @@ final class PlaybackControlReporterTests: XCTestCase {
         let harness = Harness()
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
-        XCTAssertTrue(harness.awaitExchanges(4))
+        XCTAssertTrue(harness.waitUntil { harness.requests.count >= 4 })
         let beforeChange = harness.requests
         harness.setSnapshot(snapshot(position: 3_000, maxHeight: 1_080))
         await reporter.notify()
-        XCTAssertTrue(harness.awaitExchanges(2))
+        let resent = harness.waitUntil {
+            harness.requests.contains { $0.capabilities == capabilities(maxHeight: 1_080) }
+        }
         await reporter.stop()
 
         XCTAssertEqual(
@@ -325,8 +344,7 @@ final class PlaybackControlReporterTests: XCTestCase {
             beforeChange.dropFirst().allSatisfy { $0.capabilities == nil },
             "unchanged capabilities are already on the server"
         )
-        let resent = harness.requests.first { $0.capabilities == capabilities(maxHeight: 1_080) }
-        XCTAssertNotNil(resent, "a capability change must be resent")
+        XCTAssertTrue(resent, "a capability change must be resent")
     }
 
     func testSequencesAreMonotonicAndNeverReused() async throws {
