@@ -325,8 +325,11 @@ data class ControlRequest(
     val selection: ClientSelection,
     val capabilities: DynamicCapabilities? = null,
     val observation: ClientObservation? = null,
-    @SerialName("supported_actions") val supportedActions: List<String> =
-        PlaybackControl.SUPPORTED_ACTIONS,
+    // No default. `Json` encodes defaults only when asked to, so a defaulted
+    // value here would be silently dropped from the request — and a server that
+    // never sees the vocabulary never sends the action, which is the exact
+    // failure this field exists to prevent.
+    @SerialName("supported_actions") val supportedActions: List<String>,
 )
 
 @Serializable
@@ -552,6 +555,7 @@ class PlaybackControlReporter private constructor(
             selection = newest.selection,
             capabilities = if (repeats) null else newest.capabilities,
             observation = newest.observation?.bounded(),
+            supportedActions = PlaybackControl.SUPPORTED_ACTIONS,
         )
     }
 

@@ -732,6 +732,7 @@ class PlaybackControlWireTest {
                     droppedFrames = 9,
                     decoderState = DecoderState.READY,
                 ),
+                supportedActions = PlaybackControl.SUPPORTED_ACTIONS,
             ),
         )
         listOf(
