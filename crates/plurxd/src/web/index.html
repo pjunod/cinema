@@ -10560,8 +10560,27 @@ function activityNodeStatusText(status){
   return ({unhealthy:"unhealthy",unreachable:"unreachable",timed_out:"timed out",
     invalid_response:"sent an invalid response",unavailable:"directory unavailable"})[status]||"unavailable";
 }
-function activityNodeFailureText(node){
-  const name=node.node_id?`Node ${node.node_id}`:"The cluster peer directory";
+// A node id is stable but names nothing: nobody recognizes a machine from
+// `5deeeebc-…`. The response carries the roster's id -> short-hostname map, so
+// every node the page mentions is labelled with the name its operator uses at a
+// shell, keeping the id as the copyable detail behind it. The map is passed in
+// rather than kept in a module variable so a snapshot that arrives without one
+// (a non-admin read, a roster read that failed) cannot be painted with the
+// names of the snapshot before it.
+function activityNodeName(names,nodeId){
+  if(!nodeId) return "";
+  const name=names&&names[nodeId];
+  return typeof name==="string"&&name?name:nodeId;
+}
+function activityNodeCell(names,nodeId){
+  if(!nodeId) return `<span class="clid">Unknown</span>`;
+  const name=activityNodeName(names,nodeId);
+  return name===nodeId
+    ? `<span class="clid">${esc(nodeId)}</span>`
+    : `<span title="Node ID ${esc(nodeId)}">${esc(name)}</span>`;
+}
+function activityNodeFailureText(node,names){
+  const name=node.node_id?`Node ${activityNodeName(names,node.node_id)}`:"The cluster peer directory";
   return `${name} · ${activityNodeStatusText(node.status)}`;
 }
 function detailActivitySummary(d,deliveries){
@@ -10655,6 +10674,7 @@ function paintActivityBody(d){
     target_height:se.target_height,encoder:se.encoder}));
   paintActivity(detailActivitySummary(d,dels));
   const missing=activityNodeFailures(d);
+  const nodeNames=d.node_hostnames||{};
   const attributed=dels.some(de=>de.node_id);
   const sessionsById=Object.fromEntries((d.sessions||[]).map(se=>[se.id,se]));
   const rows=dels.map(de=>{
@@ -10667,7 +10687,7 @@ function paintActivityBody(d){
     return `<tr>
       <td><b><a href="#/item/${de.item_id}">${esc(de.title)}</a></b></td>
       <td>${esc(de.user)}</td>
-      ${attributed?`<td><span class="clid">${esc(de.node_id||"Unknown")}</span></td>`:""}
+      ${attributed?`<td>${activityNodeCell(nodeNames,de.node_id)}</td>`:""}
       <td>${presentation?`<span class="mode-chip ${de.presentation==="vod"?'vod':'live'}">${esc(presentation)}</span> `:""}${esc(de.method)}${de.session_id&&de.target_height?` · ${de.target_height}p`:''}${de.session_id&&de.encoder?` · ${esc(de.encoder)}`:''}${control?` · ${esc(control)}`:""}${flow}</td>
       <td class="muted">${fmtAgo(de.started_unix)}${de.idle_seconds>30?` · idle ${Math.round(de.idle_seconds)}s`:''}</td>
       <td style="text-align:right">${(ME&&ME.is_admin&&de.session_id)?`<button class="ghost sm" onclick="stopSession(${esc(JSON.stringify(de.session_id))})">Stop</button>`:''}</td></tr>`;
@@ -10711,7 +10731,7 @@ function paintActivityBody(d){
   m.innerHTML=`
     <h2 class="section" style="margin-top:6px">Now playing</h2>
     ${missing.length?`<div class="clrefusal" role="status" aria-live="polite"><b>Activity is incomplete</b>
-      ${esc(missing.map(activityNodeFailureText).join("; "))}. Streams on those nodes may be missing from this page.</div>`:""}
+      ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Streams on those nodes may be missing from this page.</div>`:""}
     ${dels.length
       ? `<table><thead><tr><th>Title</th><th>User</th>${attributed?"<th>Node</th>":""}<th>Stream</th><th>Started</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="empty">Nothing streaming right now. Every delivery is listed here — direct play, remux and both HLS kinds.</div>`}
