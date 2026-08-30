@@ -49,6 +49,71 @@ pub(crate) const FRAGMENT_INDEXES_PROMOTION_COLUMNS: &str = "
 ALTER TABLE fragment_indexes ADD COLUMN promotion TEXT NOT NULL DEFAULT '';
 ALTER TABLE fragment_indexes ADD COLUMN parameter_sets_constant INTEGER NOT NULL DEFAULT 0;";
 
+/// Re-key the table on `(file_id, argv_fingerprint)` — PLAYBACK-CAPS-V2-PLAN
+/// §4.7's M1 migration.
+///
+/// One file has as many indexable byte streams as there are copy pipelines a
+/// real client can ask for, and a Dolby Vision title has at least two: the
+/// preserved-DV envelope a Safari or Apple TV session requests, and the
+/// stripped one everything else gets. `file_id INTEGER PRIMARY KEY` let only
+/// one of them exist, and the background pass indexes the stripped identity —
+/// so every preserved-DV session landed on `vod_index_pending` and the
+/// temporary live-HLS recovery path.
+///
+/// A rebuild rather than an `ALTER TABLE`, because SQLite cannot change a
+/// primary key in place. Rows carry over verbatim: an existing index is still
+/// a true statement about the pipeline its fingerprint names, and dropping
+/// them would re-run a whole library's indexing for nothing.
+///
+/// Its own constant, applied by both backends, rather than an edit to
+/// [`FRAGMENT_INDEXES_SCHEMA`]: the migration lists are append-only, so
+/// editing the create would leave a fresh install and an upgraded one on
+/// different paths to the same shape. A fresh database creates the old table
+/// and rebuilds it while it is still empty, which costs nothing.
+pub(crate) const FRAGMENT_INDEXES_IDENTITY_KEY: &str = "
+CREATE TABLE fragment_indexes_identity_keyed (
+    file_id           INTEGER NOT NULL,
+    source_size       INTEGER NOT NULL,
+    source_mtime      INTEGER NOT NULL,
+    argv_fingerprint  TEXT NOT NULL,
+    segplan_version   INTEGER NOT NULL,
+    timescale         INTEGER NOT NULL,
+    init_sha256       TEXT NOT NULL,
+    fragments         INTEGER NOT NULL,
+    rows_packed       BLOB NOT NULL,
+    built_at_ms       INTEGER NOT NULL,
+    promotion         TEXT NOT NULL DEFAULT '',
+    parameter_sets_constant INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (file_id, argv_fingerprint)
+) STRICT;
+INSERT INTO fragment_indexes_identity_keyed (
+    file_id, source_size, source_mtime, argv_fingerprint, segplan_version,
+    timescale, init_sha256, fragments, rows_packed, built_at_ms, promotion,
+    parameter_sets_constant
+) SELECT
+    file_id, source_size, source_mtime, argv_fingerprint, segplan_version,
+    timescale, init_sha256, fragments, rows_packed, built_at_ms, promotion,
+    parameter_sets_constant
+  FROM fragment_indexes;
+DROP TABLE fragment_indexes;
+ALTER TABLE fragment_indexes_identity_keyed RENAME TO fragment_indexes;";
+
+/// How many pipeline identities one file may hold an index for at once.
+///
+/// The set a file can legitimately be asked for is small and bounded by code —
+/// at most three, once the Profile 7 conversion adds its own
+/// (PLAYBACK-CAPS-V2-PLAN §4.7). This ceiling is not that bound restated; it is
+/// the backstop for identities that used to *replace* each other and now
+/// accumulate. An ffmpeg upgrade that flips the `dovi_rpu` probe, or a
+/// parameter-set promotion that turns on, changes the fingerprint without
+/// changing anything about the file, and nothing else would ever collect the
+/// row it orphaned.
+///
+/// Eviction is oldest-built first, so the row a live client is serving from —
+/// necessarily built after the ones it displaced — is the last to go. Six
+/// leaves double the headroom the code can actually request.
+const MAX_IDENTITIES_PER_FILE: i64 = 6;
+
 /// Bytes per packed row: dts u64, duration u32, wire bytes u32, video bytes
 /// u32, class u8, 3 pad.
 ///
@@ -124,6 +189,18 @@ fn class_from_code(code: u8) -> Option<CutClass> {
     }
 }
 
+/// Store one index, keyed by the file **and** the pipeline it describes.
+///
+/// Two housekeeping steps ride along, both of which the old `file_id`-only key
+/// got for free by overwriting:
+///
+/// 1. Rows describing different source bytes are dropped. A re-encoded or
+///    replaced file keeps its fingerprints (they name the pipeline, not the
+///    content) but changes size and mtime, so without this every edit to a
+///    file would strand its whole identity set.
+/// 2. The identity set is capped at [`MAX_IDENTITIES_PER_FILE`], oldest built
+///    first, so a fingerprint that no code path asks for any more cannot
+///    accumulate.
 pub(crate) fn put(
     conn: &Connection,
     file_id: i64,
@@ -131,12 +208,17 @@ pub(crate) fn put(
     now_ms: i64,
 ) -> Result<(), StoreError> {
     conn.execute(
+        "DELETE FROM fragment_indexes
+          WHERE file_id = ?1 AND (source_size <> ?2 OR source_mtime <> ?3)",
+        params![file_id, index.source.size as i64, index.source.mtime_ms],
+    )?;
+    conn.execute(
         "INSERT INTO fragment_indexes (
              file_id, source_size, source_mtime, argv_fingerprint,
              segplan_version, timescale, init_sha256, fragments, rows_packed,
              built_at_ms, promotion, parameter_sets_constant
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-         ON CONFLICT(file_id) DO UPDATE SET
+         ON CONFLICT(file_id, argv_fingerprint) DO UPDATE SET
              source_size = excluded.source_size,
              source_mtime = excluded.source_mtime,
              argv_fingerprint = excluded.argv_fingerprint,
@@ -164,6 +246,17 @@ pub(crate) fn put(
             i64::from(index.parameter_sets_constant),
         ],
     )?;
+    conn.execute(
+        "DELETE FROM fragment_indexes
+          WHERE file_id = ?1
+            AND argv_fingerprint NOT IN (
+                SELECT argv_fingerprint FROM fragment_indexes
+                 WHERE file_id = ?1
+                 ORDER BY built_at_ms DESC, argv_fingerprint ASC
+                 LIMIT ?2
+            )",
+        params![file_id, MAX_IDENTITIES_PER_FILE],
+    )?;
     Ok(())
 }
 
@@ -172,6 +265,13 @@ pub(crate) fn put(
 /// Invalidation is by mismatch, never by deletion — the same discipline the
 /// transcode cache keeps. A file that changes, or a pipeline that changes,
 /// simply stops matching, so nothing has to notice and nothing can fail to.
+///
+/// The fingerprint selects the row and the size/mtime check still runs in
+/// Rust. Since M1 a file holds one row per pipeline, so addressing the row by
+/// fingerprint is the difference between "this pipeline has no index" and
+/// "some other pipeline's index is in the way" — but the remaining checks stay
+/// where they were, because a stale row for the *right* pipeline is still the
+/// case that has to answer `None`.
 pub(crate) fn get(
     conn: &Connection,
     file_id: i64,
@@ -183,8 +283,8 @@ pub(crate) fn get(
                     timescale, init_sha256, rows_packed, promotion,
                     parameter_sets_constant
                FROM fragment_indexes
-              WHERE file_id = ?1",
-            params![file_id],
+              WHERE file_id = ?1 AND argv_fingerprint = ?2",
+            params![file_id, identity.argv_fingerprint],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -308,7 +408,28 @@ mod tests {
         conn.execute_batch(FRAGMENT_INDEXES_SCHEMA).expect("schema");
         conn.execute_batch(FRAGMENT_INDEXES_PROMOTION_COLUMNS)
             .expect("promotion columns");
+        conn.execute_batch(FRAGMENT_INDEXES_IDENTITY_KEY)
+            .expect("identity key");
         conn
+    }
+
+    fn index_with(fingerprint: &str, size: u64, mtime_ms: i64) -> FragmentIndex {
+        let mut built = index();
+        built.source = SourceIdentity::new(size, mtime_ms, fingerprint);
+        built
+    }
+
+    fn fingerprints(conn: &Connection, file_id: i64) -> Vec<String> {
+        let mut statement = conn
+            .prepare(
+                "SELECT argv_fingerprint FROM fragment_indexes
+                  WHERE file_id = ?1 ORDER BY argv_fingerprint",
+            )
+            .expect("prepare");
+        let rows = statement
+            .query_map(params![file_id], |row| row.get::<_, String>(0))
+            .expect("query");
+        rows.collect::<rusqlite::Result<Vec<_>>>().expect("collect")
     }
 
     #[test]
@@ -382,6 +503,112 @@ mod tests {
         put(&conn, 7, &index(), 1).expect("put");
         assert!(forget(&conn, 7).expect("forget present"));
         assert_eq!(get(&conn, 7, &index().source).expect("get"), None);
+    }
+
+    #[test]
+    fn one_file_holds_an_index_per_pipeline() {
+        let conn = conn();
+        let stripped = index_with("stripped", 4_096, 1_700_000_000_000);
+        let mut preserved = index_with("preserved", 4_096, 1_700_000_000_000);
+        preserved.rows.truncate(2);
+
+        put(&conn, 7, &stripped, 1).expect("put stripped");
+        put(&conn, 7, &preserved, 2).expect("put preserved");
+
+        assert_eq!(fingerprints(&conn, 7), vec!["preserved", "stripped"]);
+        assert_eq!(
+            get(&conn, 7, &stripped.source)
+                .expect("get stripped")
+                .expect("stripped present")
+                .rows
+                .len(),
+            3,
+            "the Dolby Vision strip and the preserved envelope are different \
+             byte streams; writing one must not answer for the other"
+        );
+        assert_eq!(
+            get(&conn, 7, &preserved.source)
+                .expect("get preserved")
+                .expect("preserved present")
+                .rows
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_replaced_file_takes_its_whole_identity_set_with_it() {
+        let conn = conn();
+        put(&conn, 7, &index_with("stripped", 4_096, 1_700_000_000_000), 1).expect("put");
+        put(&conn, 7, &index_with("preserved", 4_096, 1_700_000_000_000), 2).expect("put");
+
+        // A re-encode changes the bytes but not the pipelines, so the
+        // fingerprints survive and only the source identity moves. Without the
+        // prune the old rows would sit there forever, matching nothing.
+        put(&conn, 7, &index_with("stripped", 9_000, 1_700_000_500_000), 3).expect("put");
+
+        assert_eq!(fingerprints(&conn, 7), vec!["stripped"]);
+        assert_eq!(
+            get(
+                &conn,
+                7,
+                &SourceIdentity::new(4_096, 1_700_000_000_000, "preserved")
+            )
+            .expect("get"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_identity_set_cannot_grow_without_bound() {
+        let conn = conn();
+        let wanted = MAX_IDENTITIES_PER_FILE as usize;
+        for step in 0..(wanted + 3) {
+            let fingerprint = format!("pipeline-{step:02}");
+            put(
+                &conn,
+                7,
+                &index_with(&fingerprint, 4_096, 1_700_000_000_000),
+                1_000 + step as i64,
+            )
+            .expect("put");
+        }
+        let held = fingerprints(&conn, 7);
+        assert_eq!(held.len(), wanted);
+        assert_eq!(
+            held.first().map(String::as_str),
+            Some("pipeline-03"),
+            "eviction is oldest-built first, so the rows a live session could \
+             still be serving from are the last to go"
+        );
+    }
+
+    #[test]
+    fn forgetting_takes_every_pipeline_for_the_file() {
+        let conn = conn();
+        put(&conn, 7, &index_with("stripped", 4_096, 1_700_000_000_000), 1).expect("put");
+        put(&conn, 7, &index_with("preserved", 4_096, 1_700_000_000_000), 2).expect("put");
+        put(&conn, 8, &index_with("stripped", 4_096, 1_700_000_000_000), 3).expect("put other");
+
+        assert!(forget(&conn, 7).expect("forget"));
+        assert!(fingerprints(&conn, 7).is_empty());
+        assert_eq!(fingerprints(&conn, 8), vec!["stripped"]);
+    }
+
+    #[test]
+    fn a_file_with_several_pipelines_is_swept_once() {
+        let conn = conn();
+        conn.execute_batch(crate::store::renditionplan::RENDITION_PLANS_SCHEMA)
+            .expect("plans schema");
+        put(&conn, 7, &index_with("stripped", 4_096, 1_700_000_000_000), 1).expect("put");
+        put(&conn, 7, &index_with("preserved", 4_096, 1_700_000_000_000), 2).expect("put");
+
+        assert_eq!(
+            vod_row_file_ids(&conn, 512).expect("ids"),
+            vec![7],
+            "the sweep window counts files, not pipelines: a Dolby Vision \
+             library must not halve the number of files each tick examines"
+        );
     }
 
     #[test]
