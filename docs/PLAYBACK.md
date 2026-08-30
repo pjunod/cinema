@@ -223,6 +223,14 @@ curl -X POST "$PLURX/api/v1/files/1234/decision?force=auto" \
 | `dv_transport` | `dvhls` | `hls` when preserved DV must ride the copy-video envelope |
 | `display` | folded into `hdr` | facts about the attached output, separate from decode |
 
+The web sends this document (`capsDocument`, `askDecision`) and keeps
+`CAPS_Q` for the progressive `play_url`, which still needs a query string. A
+node that predates the POST answers 404/405 and one that cannot read the
+version answers 400; both fall back to the GET, which returns the same verdict
+— so a fleet mid-deploy is a non-event rather than a broken player, and that
+is the only reason it is safe to send the document while nodes are still
+rolling.
+
 Both wire shapes reach `DeviceProfile` through one function
 (`DeviceCaps::from_caps_v2`), and a test asserts a legacy `CAPS_Q` and the
 equivalent document produce identical profiles — two verdicts for one device
