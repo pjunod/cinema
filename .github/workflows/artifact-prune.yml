@@ -1,0 +1,114 @@
+name: artifact prune
+
+# Cross-built binaries already declare `retention-days: 1` in ci.yml, but the
+# repository still accumulated 4,885 artifacts / ~34 GB, and a full quota does
+# not fail a build — it fails the *upload*, which `ci.yml` deliberately treats
+# as fatal for a qualification. So a full quota silently reds every effort
+# promotion until someone deletes by hand. This keeps that from recurring.
+#
+# It deletes only cross-built binaries older than the retention they already
+# declare. Validation evidence, cluster topology and failure-drill artifacts,
+# nightly evidence and qualification receipts are never touched.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      older_than_days:
+        description: "Delete plurxd-* binaries older than this many days"
+        required: false
+        default: "2"
+      dry_run:
+        description: "List what would be deleted without deleting it"
+        required: false
+        default: "false"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: artifact-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: prune stale cross-built binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Delete stale plurxd binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OLDER_THAN_DAYS: ${{ inputs.older_than_days || '2' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, datetime, sys
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          older = float(os.environ.get("OLDER_THAN_DAYS") or 2)
+          dry = os.environ.get("DRY_RUN", "false").lower() == "true"
+          now = datetime.datetime.now(datetime.timezone.utc)
+
+          def api(method, path):
+              out = subprocess.run(
+                  ["gh", "api", "--method", method, path],
+                  capture_output=True, text=True,
+              )
+              if out.returncode != 0:
+                  raise SystemExit(f"gh api {method} {path} failed: {out.stderr.strip()}")
+              return json.loads(out.stdout) if out.stdout.strip() else {}
+
+          # Only names ci.yml publishes as cross-built binaries. Anything else
+          # — evidence, receipts, topology, nightlies — is left alone. A prefix
+          # rather than an exact name because the matrix target is appended.
+          KEEP_PREFIXES_EXEMPT = ("plurxd-",)
+
+          stale, kept, total_bytes, freed = [], 0, 0, 0
+          page = 1
+          while True:
+              body = api("GET", f"/repos/{repo}/actions/artifacts?per_page=100&page={page}")
+              batch = body.get("artifacts", [])
+              if not batch:
+                  break
+              for a in batch:
+                  total_bytes += a["size_in_bytes"]
+                  if a.get("expired"):
+                      continue
+                  age = (now - datetime.datetime.fromisoformat(
+                      a["created_at"].replace("Z", "+00:00"))).total_seconds() / 86400
+                  if a["name"].startswith(KEEP_PREFIXES_EXEMPT) and age > older:
+                      stale.append(a)
+                      freed += a["size_in_bytes"]
+                  else:
+                      kept += 1
+              page += 1
+              if page > 60:
+                  print("::warning::stopped paging at 6000 artifacts")
+                  break
+
+          print(f"total {total_bytes/1e9:.2f} GB · keeping {kept} · "
+                f"{'would delete' if dry else 'deleting'} {len(stale)} "
+                f"({freed/1e9:.2f} GB)")
+
+          if dry:
+              for a in stale[:25]:
+                  print(f"  would delete {a['id']} {a['name']} {a['created_at']}")
+              sys.exit(0)
+
+          failed = 0
+          for a in stale:
+              try:
+                  api("DELETE", f"/repos/{repo}/actions/artifacts/{a['id']}")
+              except SystemExit:
+                  failed += 1
+          print(f"deleted {len(stale) - failed}, failed {failed}")
+
+          # GitHub recalculates quota usage every 6-12 hours, so freeing space
+          # here is not visible to an uploader immediately. That is the reason
+          # this runs on a schedule rather than as a pre-flight step.
+          if failed:
+              print(f"::warning::{failed} artifact deletions failed")
+          PY
