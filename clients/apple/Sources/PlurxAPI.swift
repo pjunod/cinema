@@ -69,10 +69,11 @@ struct PlurxAPI {
 
     private func post<B: Encodable, T: Decodable>(
         _ path: String,
+        query: [URLQueryItem] = [],
         body: B,
         using session: URLSession? = nil
     ) async throws -> T {
-        var req = try jsonRequest(path, body: body)
+        var req = try jsonRequest(path, query: query, body: body)
         Session.shared.authorize(&req)
         return try await run(req, using: session)
     }
@@ -117,8 +118,12 @@ struct PlurxAPI {
         try Self.check(resp)
     }
 
-    private func jsonRequest<B: Encodable>(_ path: String, body: B) throws -> URLRequest {
-        guard let url = makeURL(path) else { throw APIError.badURL }
+    private func jsonRequest<B: Encodable>(
+        _ path: String,
+        query: [URLQueryItem] = [],
+        body: B
+    ) throws -> URLRequest {
+        guard let url = makeURL(path, query: query) else { throw APIError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -249,8 +254,37 @@ struct PlurxAPI {
         ])
     }
 
-    func decision(fileId: Int, caps: [URLQueryItem]) async throws -> Decision {
-        try await get("files/\(fileId)/decision", query: caps)
+    private struct DecisionBody: Encodable {
+        let caps: DeviceCaps
+    }
+
+    /// Ask with caps v2, then use the unchanged query only when the peer is
+    /// old enough not to know the route or the document version. Other errors
+    /// are real failures; hiding a 401 or 500 behind a second request makes the
+    /// viewer's error both slower and less truthful.
+    func decision(
+        fileId: Int,
+        caps: DeviceCaps,
+        query: [URLQueryItem],
+        legacyQuery: () -> [URLQueryItem]
+    ) async throws -> Decision {
+        do {
+            return try await post(
+                "files/\(fileId)/decision",
+                query: query,
+                body: DecisionBody(caps: caps)
+            )
+        } catch {
+            guard Self.shouldFallBackToLegacyDecision(after: error) else { throw error }
+            return try await get("files/\(fileId)/decision", query: legacyQuery())
+        }
+    }
+
+    static func shouldFallBackToLegacyDecision(after error: Error) -> Bool {
+        guard let apiError = error as? APIError,
+              case .http(let status) = apiError
+        else { return false }
+        return status == 400 || status == 404 || status == 405
     }
 
     func pgsOverlayManifest(

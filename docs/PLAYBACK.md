@@ -124,7 +124,7 @@ one.
 
 | ID | Fork | Current rule | Regression pin |
 |---|---|---|---|
-| `apple.transport-and-dv` | AVPlayer direct vs HLS | Execute the server mode, except normalize even a legacy direct Dolby Vision answer through preserving copy HLS. Overrides, audio changes, and subtitle needs decide whether that session copies or transcodes. | XCTest for legacy direct-DV normalization |
+| `apple.transport-and-dv` | AVPlayer caps and direct vs HLS | Probe HEVC, AV1, HDR output, and Dolby Vision output for every decision; POST the v2 document and repeat that snapshot on session create. A 400/404/405 falls back to the unchanged legacy query. Execute the server mode, except normalize even a legacy direct Dolby Vision answer through preserving copy HLS. Apple claims only DV Profiles 5 and 8, and preserved DV always uses HLS because raw progressive MP4 can advance while rendering black. | XCTest caps matrix, fallback-status contract, create-body encoding, and legacy direct-DV normalization |
 | `apple.compatibility-fallback` | Apple startup decode failure recovery | Before real playback, a preserved DV stream with an HDR10/HLG base strips to that base first; only the next media rejection uses the universal transcode. Each rescue is once and resumes the last truthful film position. | XCTest recovery ladder |
 | `apple.established-hdr-recovery` | Interruption after HDR rendered | Once the item has advanced for ≥5 s, a stall or item failure reconnects the same HDR delivery once. An immediate repeat stops visibly instead of falling through to the SDR compatibility transcode. | XCTest established-delivery guard |
 | `apple.buffering-recovery` | Sustained or self-recovered wait after playback began | Each newly opened item must advance for ≥5 s before six stagnant two-second samples during an explicit AVPlayer buffer wait may reopen the same delivery. The third sample first nudges Play; an immediate repeat stops with network-specific copy. Every report carries the HLS session, a per-item attempt, contiguous loaded runway, AVPlayer wait/buffer flags, access-log request/transfer counters, and the last polled server supply state; the server replaces that snapshot with a fresher live join when possible. Recovery TTFF is measured separately, and copy-HLS replacements seek forward from the preceding keyframe origin instead of replaying it. None of this is codec/HDR evidence. | XCTest recovery, runway, keyframe correction, status decode, and beacon-payload suite; Rust snapshot-race and live-join regressions; physical-iPad throttling pending |
@@ -155,11 +155,12 @@ unit test and this prose in the same commit.
 
 ## Runtime caps — what each client tells the server
 
-Before the first `/decision`, each player reports what that device can decode.
-The server folds those query parameters into an ad-hoc device profile
-(`caps_profile` in
-`plurx-core/src/playback`), so a file only transcodes when *this* device
-genuinely can't play it — not because a fixed profile guessed conservatively.
+On every `/decision`, each player reports what that device can decode and what
+its current output can present. The v2 clients send the structured document
+below; the flat query remains the mixed-fleet fallback and the spelling used by
+legacy progressive URLs. Both reach the same `DeviceProfile`, so a file only
+transcodes when *this* device genuinely cannot play it — not because a fixed
+profile guessed conservatively.
 
 | Cap | Probed with | Notes |
 |---|---|---|
@@ -180,6 +181,10 @@ The native clients use platform codec/display APIs instead of browser probes.
 Android also includes audio support exposed by the active HDMI/audio sink,
 because passthrough eligibility changes with the route. Apple limits progressive
 containers to MP4/MOV/M4V and asks the server to remux everything else into HLS.
+Apple omits `max_height` because its four probes do not prove one; it claims
+Profiles 5 and 8 only when HEVC decoding, HDR presentation, and a Dolby Vision
+output all agree. Generic HDR eligibility alone never becomes a DV claim,
+because that hands an HDR10-only output metadata AVPlayer rejects.
 
 **How to read it:** the caps are why the same file behaves differently across
 browsers. A 4K HEVC/HDR MKV with DTS audio reports the *same* verdict on Chrome
