@@ -35,6 +35,12 @@ const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
 const MAX_OBSERVED_DOWNLOAD_BPS: u64 = 10_000_000_000_000;
 const MAX_ERROR_DETAIL_BYTES: usize = 512;
 const MAX_CAPABILITY_VALUES: usize = 8;
+/// The protocol names seven actions. A client may name more than it will ever
+/// receive, so the bound is generous; it exists to stop an unbounded list, not
+/// to police the vocabulary.
+const MAX_SUPPORTED_ACTIONS: usize = 16;
+const MAX_ACTION_NAME_LEN: usize = 32;
+const HOLD_ACTION: &str = "hold";
 const MIN_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 const RELAY_BUCKETS_MS: [u64; 9] = [10, 25, 50, 100, 250, 500, 1_000, 2_500, 4_000];
 /// Compatibility budget retained only by legacy actor fixtures. Production
@@ -130,6 +136,19 @@ pub(crate) struct ControlRequestV1 {
     pub capabilities: Option<DynamicCapabilities>,
     pub observation: Option<ClientObservation>,
     pub acknowledgement: Option<ActionAcknowledgement>,
+    /// Action type names this client will apply. Absent or empty means the
+    /// client is passive, and the server may then return only `none`.
+    ///
+    /// This is the fence that makes server-first deployment safe. Every M2
+    /// reporter stops reporting on any action it does not recognise, so a
+    /// server that returned a new action to an older client would silence it
+    /// for the rest of the film — with no partial failure to notice, because
+    /// playback itself never depended on the control plane. The server
+    /// therefore never sends an action the client has not named.
+    ///
+    /// Unknown names are ignored rather than refused: a client from a later
+    /// version must be able to name actions this server has never heard of.
+    pub supported_actions: Option<Vec<String>>,
 }
 
 impl ControlRequestV1 {
@@ -216,7 +235,27 @@ impl ControlRequestV1 {
         if let Some(acknowledgement) = &self.acknowledgement {
             acknowledgement.validate()?;
         }
+        if let Some(actions) = &self.supported_actions {
+            // Bounded because it is attacker-controlled input on an
+            // authenticated but client-driven path. The names themselves are
+            // not checked against a vocabulary: an unrecognised action name is
+            // a client this server is older than, which must not be a 400.
+            if actions.len() > MAX_SUPPORTED_ACTIONS
+                || actions
+                    .iter()
+                    .any(|name| name.is_empty() || name.len() > MAX_ACTION_NAME_LEN)
+            {
+                return Err("supported_actions");
+            }
+        }
         Ok(())
+    }
+
+    /// Whether this client said it will apply `hold`.
+    pub(crate) fn accepts_hold(&self) -> bool {
+        self.supported_actions
+            .as_deref()
+            .is_some_and(|actions| actions.iter().any(|name| name == HOLD_ACTION))
     }
 
     /// Canonical digest for binding a retained terminal acknowledgement to
@@ -545,7 +584,24 @@ impl ControlResponseV1 {
                 .dynamic_range
                 .as_deref()
                 .is_none_or(|value| matches!(value, "dolby_vision" | "hdr10" | "hlg" | "sdr"))
-            && self.action == ControlAction::None
+            && self.action_is_believable(request)
+    }
+
+    /// Whether the action this peer returned is one the relaying node should
+    /// forward.
+    ///
+    /// A relayed hold is only believable if the same response's delivery
+    /// reports the same hold, and if the requesting client asked for the
+    /// action at all. Anything else is a peer inventing an instruction out of
+    /// a fact it did not send, and the client would obey it.
+    fn action_is_believable(&self, request: &ControlRelayRequest) -> bool {
+        match &self.action {
+            ControlAction::None => true,
+            ControlAction::Hold { reason } => {
+                request.control.accepts_hold()
+                    && self.delivery.hold_reason.as_deref() == Some(reason.as_delivery_str())
+            }
+        }
     }
 }
 
@@ -672,10 +728,105 @@ pub(crate) fn target_duration_ms(recipe: &crate::media_sessions::RemoteStartRequ
     i64::from(seconds) * 1_000
 }
 
+/// Why production is deliberately not advancing.
+///
+/// One vocabulary, shared with `DeliveryView::hold_reason` rather than
+/// invented alongside it: the first four are the rolling producer's
+/// `AheadHoldReason`, the last three the VOD producer's hold strings. The
+/// action carries the same value the delivery view reports, so an operator
+/// reading either sees the same word.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HoldReason {
+    Demand,
+    Time,
+    Bytes,
+    Global,
+    Ahead,
+    WorkingSet,
+    NoRoom,
+}
+
+impl HoldReason {
+    pub(crate) fn from_delivery(reason: &str) -> Option<Self> {
+        Some(match reason {
+            "demand" => Self::Demand,
+            "time" => Self::Time,
+            "bytes" => Self::Bytes,
+            "global" => Self::Global,
+            "ahead" => Self::Ahead,
+            "working_set" => Self::WorkingSet,
+            "no_room" => Self::NoRoom,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn as_delivery_str(self) -> &'static str {
+        match self {
+            Self::Demand => "demand",
+            Self::Time => "time",
+            Self::Bytes => "bytes",
+            Self::Global => "global",
+            Self::Ahead => "ahead",
+            Self::WorkingSet => "working_set",
+            Self::NoRoom => "no_room",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ControlAction {
     None,
+    /// Production is deliberately not advancing, and this is not a failure.
+    ///
+    /// Without it a client cannot tell a server that has stopped producing
+    /// because the client's own runway is already long from a server that has
+    /// stopped producing because it is broken. Every client currently guesses,
+    /// and guesses toward recovery: it tears the player down and reopens the
+    /// session, which is the single most expensive possible response to a
+    /// server working exactly as designed.
+    ///
+    /// It is advisory and carries no `action_id`. There is no transaction to
+    /// fence, nothing to acknowledge, and a replay recomputes it from current
+    /// delivery rather than replaying a stale one — a hold that has since
+    /// lifted must not be replayed as though it were still in force.
+    Hold {
+        reason: HoldReason,
+    },
+}
+
+impl ControlAction {
+    /// The one action a passive client is always safe to receive.
+    pub(crate) fn is_passive(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+/// Resolve the action this response carries.
+///
+/// Two sources, deliberately ordered. An action the actor decided is a
+/// transaction: it has identity, it is fenced by `prior_action`, and it
+/// replays exactly. It always wins. Only when the actor has nothing to say
+/// does the advisory hold get derived from the delivery the response is
+/// already carrying, so the action and `delivery.hold_reason` can never
+/// disagree — they are the same fact read once.
+pub(crate) fn resolve_action(
+    decided: &ControlAction,
+    delivery: &DeliveryView,
+    request: &ControlRequestV1,
+) -> ControlAction {
+    if !decided.is_passive() {
+        return decided.clone();
+    }
+    if !request.accepts_hold() {
+        return ControlAction::None;
+    }
+    delivery
+        .hold_reason
+        .as_deref()
+        .and_then(HoldReason::from_delivery)
+        .map_or(ControlAction::None, |reason| ControlAction::Hold { reason })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -9055,7 +9206,188 @@ mod tests {
             }),
             observation: None,
             acknowledgement: None,
+            supported_actions: None,
         }
+    }
+
+    fn delivery_with_hold(reason: Option<&str>) -> DeliveryView {
+        DeliveryView {
+            presentation: "live-recovery".to_owned(),
+            producer_state: "held".to_owned(),
+            produced_through_ms: Some(30_000),
+            fetched_through_ms: 25_000,
+            delivered_bps: Some(4_000_000),
+            delivered_idle_ms: Some(0),
+            recent_producer_speed: Some(1.4),
+            client_runway_ms: 15_000,
+            admitted: None,
+            hold_reason: reason.map(str::to_owned),
+            owner_node_hash: "n-0123456789abcdef".to_owned(),
+            owner_epoch: 1,
+        }
+    }
+
+    #[test]
+    fn a_passive_client_is_never_sent_a_hold_it_cannot_apply() {
+        // The whole reason the vocabulary exists. Every M2 reporter stops on
+        // an action it does not recognise, so a server that ignored this would
+        // silence the fleet the moment production held for any reason at all.
+        let passive = request();
+        assert!(passive.supported_actions.is_none());
+        assert_eq!(
+            resolve_action(
+                &ControlAction::None,
+                &delivery_with_hold(Some("demand")),
+                &passive,
+            ),
+            ControlAction::None,
+        );
+
+        let mut names_other_actions = request();
+        names_other_actions.supported_actions =
+            Some(vec!["terminal".to_owned(), "retry_resource".to_owned()]);
+        assert_eq!(
+            resolve_action(
+                &ControlAction::None,
+                &delivery_with_hold(Some("demand")),
+                &names_other_actions,
+            ),
+            ControlAction::None,
+        );
+    }
+
+    #[test]
+    fn a_client_that_accepts_hold_is_told_why_production_is_held() {
+        let mut accepting = request();
+        accepting.supported_actions = Some(vec![HOLD_ACTION.to_owned()]);
+        for (delivery_reason, expected) in [
+            ("demand", HoldReason::Demand),
+            ("time", HoldReason::Time),
+            ("bytes", HoldReason::Bytes),
+            ("global", HoldReason::Global),
+            ("ahead", HoldReason::Ahead),
+            ("working_set", HoldReason::WorkingSet),
+            ("no_room", HoldReason::NoRoom),
+        ] {
+            assert_eq!(
+                resolve_action(
+                    &ControlAction::None,
+                    &delivery_with_hold(Some(delivery_reason)),
+                    &accepting,
+                ),
+                ControlAction::Hold { reason: expected },
+                "delivery reported {delivery_reason}",
+            );
+        }
+        // No hold reported is not a hold. A client that accepts the action
+        // must still receive `none` while production is advancing.
+        assert_eq!(
+            resolve_action(&ControlAction::None, &delivery_with_hold(None), &accepting),
+            ControlAction::None,
+        );
+        // A reason this server does not know is not promoted to an
+        // instruction. Reporting it in the delivery view is harmless; telling
+        // a client to hold on a word we cannot explain is not.
+        assert_eq!(
+            resolve_action(
+                &ControlAction::None,
+                &delivery_with_hold(Some("something_new")),
+                &accepting,
+            ),
+            ControlAction::None,
+        );
+    }
+
+    #[test]
+    fn a_decided_action_outranks_the_advisory_hold() {
+        // An action the actor decided is a transaction fenced by
+        // `prior_action`; the advisory hold is derived per response. When both
+        // exist the transaction is the one with identity, so it wins and its
+        // reason is not quietly rewritten by current delivery.
+        let mut accepting = request();
+        accepting.supported_actions = Some(vec![HOLD_ACTION.to_owned()]);
+        assert_eq!(
+            resolve_action(
+                &ControlAction::Hold {
+                    reason: HoldReason::Demand,
+                },
+                &delivery_with_hold(Some("bytes")),
+                &accepting,
+            ),
+            ControlAction::Hold {
+                reason: HoldReason::Demand,
+            },
+        );
+    }
+
+    #[test]
+    fn every_hold_reason_round_trips_its_delivery_spelling() {
+        // The action and `DeliveryView::hold_reason` are one vocabulary read
+        // twice. If either side gains a value without the other, an operator
+        // reading the two fields sees different words for one fact — and the
+        // relay check below starts refusing valid responses.
+        for reason in [
+            HoldReason::Demand,
+            HoldReason::Time,
+            HoldReason::Bytes,
+            HoldReason::Global,
+            HoldReason::Ahead,
+            HoldReason::WorkingSet,
+            HoldReason::NoRoom,
+        ] {
+            assert_eq!(
+                HoldReason::from_delivery(reason.as_delivery_str()),
+                Some(reason),
+            );
+        }
+        assert_eq!(HoldReason::from_delivery("unheard_of"), None);
+    }
+
+    #[test]
+    fn the_action_is_tagged_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(ControlAction::Hold {
+                reason: HoldReason::WorkingSet,
+            })
+            .expect("action json"),
+            serde_json::json!({"type": "hold", "reason": "working_set"}),
+        );
+        assert_eq!(
+            serde_json::to_value(ControlAction::None).expect("action json"),
+            serde_json::json!({"type": "none"}),
+        );
+    }
+
+    #[test]
+    fn the_action_vocabulary_is_bounded_but_not_policed() {
+        let target = 60_000;
+        let mut unknown_names = request();
+        // A client newer than this server names actions it has never heard of.
+        // Refusing that would be a 400, which the reporter reads as terminal.
+        unknown_names.supported_actions = Some(vec![
+            "hold".to_owned(),
+            "an_action_from_next_year".to_owned(),
+        ]);
+        assert!(unknown_names.validate(None, target).is_ok());
+        assert!(unknown_names.accepts_hold());
+
+        let mut too_many = request();
+        too_many.supported_actions = Some(vec!["hold".to_owned(); MAX_SUPPORTED_ACTIONS + 1]);
+        assert_eq!(too_many.validate(None, target), Err("supported_actions"),);
+
+        let mut empty_name = request();
+        empty_name.supported_actions = Some(vec![String::new()]);
+        assert_eq!(empty_name.validate(None, target), Err("supported_actions"));
+
+        let mut long_name = request();
+        long_name.supported_actions = Some(vec!["x".repeat(MAX_ACTION_NAME_LEN + 1)]);
+        assert_eq!(long_name.validate(None, target), Err("supported_actions"));
+
+        // Absent is the passive default, and stays valid.
+        let mut absent = request();
+        absent.supported_actions = None;
+        assert!(absent.validate(None, target).is_ok());
+        assert!(!absent.accepts_hold());
     }
 
     #[test]
@@ -12599,9 +12931,39 @@ mod tests {
             exited.is_valid_for(&request),
             "a remote owner may truthfully report an unsuccessful producer exit"
         );
-        let mut invented_state = response;
+        let mut invented_state = response.clone();
         invented_state.delivery.producer_state = "probably_running".to_owned();
         assert!(!invented_state.is_valid_for(&request));
+
+        // A relayed hold is an instruction arriving from another node. The
+        // relaying node forwards it only when the same response's delivery
+        // reports the same hold and the client actually asked for the action —
+        // otherwise a peer could manufacture an instruction out of a fact it
+        // never sent, and the client would obey it.
+        let mut accepting = request.clone();
+        accepting.control.supported_actions = Some(vec![HOLD_ACTION.to_owned()]);
+        let mut held = response.clone();
+        held.delivery.hold_reason = Some("working_set".to_owned());
+        held.action = ControlAction::Hold {
+            reason: HoldReason::WorkingSet,
+        };
+        assert!(held.is_valid_for(&accepting));
+
+        let mut disagreeing = held.clone();
+        disagreeing.delivery.hold_reason = Some("no_room".to_owned());
+        assert!(
+            !disagreeing.is_valid_for(&accepting),
+            "the action and the delivery fact it came from must agree"
+        );
+
+        let mut unreported = held.clone();
+        unreported.delivery.hold_reason = None;
+        assert!(!unreported.is_valid_for(&accepting));
+
+        assert!(
+            !held.is_valid_for(&request),
+            "a passive client must never be relayed an action it cannot apply"
+        );
 
         let mut terminal_request = request.clone();
         terminal_request.control.demand = PlaybackDemand::End;

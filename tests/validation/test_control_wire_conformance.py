@@ -191,9 +191,14 @@ class ControlRequestWireCase(unittest.TestCase):
     def test_the_request_itself(self) -> None:
         rust = rust_struct_fields(self.rust, "ControlRequestV1")
         # The server accepts an acknowledgement M2 clients never send: they
-        # consume no action, so they have nothing to acknowledge. Every other
-        # field must match exactly.
+        # consume no action, so they have nothing to acknowledge.
         rust.discard("acknowledgement")
+        # `supported_actions` is the client's action vocabulary, and the server
+        # deploys before the clients do. An absent list means passive, which is
+        # exactly what an M2 client is, so a server that has the field and
+        # clients that do not is the correct intermediate state rather than a
+        # drift. This discard comes out in the client PR that adds it.
+        rust.discard("supported_actions")
         self.assertSameWire(
             "ControlRequestV1",
             rust,
