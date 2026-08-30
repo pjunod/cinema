@@ -117,16 +117,30 @@ let finished = 0;
 // simply disappears from the run. Counting starts against finishes catches the
 // second; the count is asserted below. Keep this identical to the harness in
 // tests/web/page-read-budget.test.js.
-async function test(name, run) {
-  started += 1;
-  try {
-    await run();
-    process.stdout.write(`PASS ${name}\n`);
-  } catch (error) {
-    failures += 1;
-    process.stdout.write(`FAIL ${name}\n${error && error.stack}\n`);
+// Queued and run in order, not fired off as they are declared. A bare
+// `async function test()` called without `await` yields at the first `await`
+// inside the body and lets the next declaration start, so these ran
+// concurrently and in a different order each time. Nothing here shares mutable
+// state today, which is the only reason it was harmless — and it is not a
+// property this file can keep on purpose, because each new test would have to
+// re-establish it.
+const QUEUE = [];
+function test(name, run) {
+  QUEUE.push({ name, run });
+}
+
+async function main() {
+  for (const { name, run } of QUEUE) {
+    started += 1;
+    try {
+      await run();
+      process.stdout.write(`PASS ${name}\n`);
+    } catch (error) {
+      failures += 1;
+      process.stdout.write(`FAIL ${name}\n${error && error.stack}\n`);
+    }
+    finished += 1;
   }
-  finished += 1;
 }
 
 // Words that assert redundancy or fault tolerance. Any of these in the
@@ -3005,6 +3019,11 @@ test("the model reaches for nothing the shell owns", () => {
   // One esc, one escaping contract to review.
   assert.doesNotMatch(source, /function esc\(/);
   assert.match(shippedSource("clenv"), /return \{esc,fmtAgo,fmtBytes\};/);
+});
+
+main().catch((error) => {
+  failures += 1;
+  process.stdout.write(`FAIL the suite itself threw\n${error && error.stack}\n`);
 });
 
 let reported = false;
