@@ -6,13 +6,16 @@
 //! release (REQ-PLAY-4). Phase 1 serves DirectPlay and Remux; a Transcode
 //! verdict is reported honestly and its serving lands in Phase 2.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::MediaFile;
+
+pub mod caps;
 use crate::transcode::OutputGrade;
+pub use caps::{DeviceCaps, LearnedLimit, LegacyCaps, Transfer, VideoCaps};
 
 /// Built-in device profiles, parsed once from the embedded TOML.
 static PROFILES: LazyLock<HashMap<String, DeviceProfile>> = LazyLock::new(|| {
@@ -69,6 +72,9 @@ pub fn caps_profile(
         supports_dolby_vision,
         dolby_vision_profiles: Vec::new(),
         remux_dolby_vision: false,
+        presents: BTreeMap::new(),
+        profile_max_heights: BTreeMap::new(),
+        learned_limits: Vec::new(),
         // Set by the caller after construction, like `remux_dolby_vision` and
         // `dolby_vision_profiles`: adding a seventh positional argument to a
         // function with six booleans and vectors in a row is how a caller
@@ -99,7 +105,7 @@ impl Force {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DeviceProfile {
     #[serde(default)]
     pub name: String,
@@ -160,6 +166,26 @@ pub struct DeviceProfile {
     /// video sample/RPU while rebuilding the delivery signaling it expects.
     #[serde(default)]
     pub remux_dolby_vision: bool,
+    /// Per codec: the transfer functions this client can PRESENT, not merely
+    /// decode. Empty means the caller built this profile the old way — a
+    /// named profile, or a `caps_profile` call — and the boolean fields above
+    /// are the answer.
+    #[serde(default)]
+    pub presents: BTreeMap<String, BTreeSet<caps::Transfer>>,
+    /// Per (codec, codec profile): the height ceiling, where the client
+    /// reported one narrower than the codec's own.
+    ///
+    /// This is the field that lets a browser stop sending the minimum of its
+    /// 8-bit and 10-bit rungs: a device that decodes 8-bit 4K but Main10 only
+    /// at 1080p can say so, instead of capping every 4K title at 1080p to
+    /// protect the Main10 one (PLAYBACK-CAPS-V2-PLAN §2, edge E5).
+    #[serde(default)]
+    pub profile_max_heights: BTreeMap<(String, String), i64>,
+    /// Decode limits this client learned itself and now applies. Reported by
+    /// the client so the server's reasons can name the client's own words for
+    /// a demotion the client asked for.
+    #[serde(default)]
+    pub learned_limits: Vec<caps::LearnedLimit>,
 }
 
 impl DeviceProfile {
@@ -179,6 +205,53 @@ impl DeviceProfile {
         self.audio_codecs
             .iter()
             .any(|x| x.eq_ignore_ascii_case(codec))
+    }
+
+    /// This client's height ceiling for a source in `codec`, narrowed by the
+    /// source's own codec profile where the client reported a narrower one.
+    ///
+    /// A decoder's ceiling is not one number. A device can take 8-bit 4K HEVC
+    /// and Main10 only at 1080p, and before the caps document could say so the
+    /// web sent the minimum of its two rungs — capping every 4K 8-bit title at
+    /// 1080p to protect the Main10 one, which is a transcode of a file the
+    /// browser would have direct-played (PLAYBACK-CAPS-V2-PLAN §2, edge E5).
+    ///
+    /// The profile match is on the *source's* declared profile, normalized:
+    /// ffprobe writes "Main 10", the caps document says "main10".
+    ///
+    /// When the source's profile is absent or is one the client did not
+    /// enumerate, the answer is the **narrowest** ceiling that client gave for
+    /// the codec — not the widest, and not the codec-wide one. `video_profile`
+    /// is the raw ffprobe field and is nullable in both schemas; ffprobe omits
+    /// it for plenty of HEVC streams, and every `MediaFile` the transcode path
+    /// synthesises leaves it `None`. Reading the widest ceiling there would
+    /// hand a client that said "hevc main 2160, hevc main10 1080" a 4K Main10
+    /// title at 2160 on nothing but a missing column — the optimistic reading
+    /// this module's header rules out, and a black screen rather than a
+    /// transcode. A client that reported one ceiling per codec is unaffected:
+    /// its minimum is its ceiling.
+    fn codec_height_ceiling(&self, codec: &str, video_profile: Option<&str>) -> Option<i64> {
+        let codec = codec.to_ascii_lowercase();
+        let by_profile = video_profile.and_then(|profile| {
+            let normalized: String = profile
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .flat_map(char::to_lowercase)
+                .collect();
+            self.profile_max_heights
+                .get(&(codec.clone(), normalized))
+                .copied()
+        });
+        if let Some(height) = by_profile {
+            return Some(height);
+        }
+        let narrowest = self
+            .profile_max_heights
+            .range((codec.clone(), String::new())..)
+            .take_while(|((entry_codec, _), _)| *entry_codec == codec)
+            .map(|(_, height)| *height)
+            .min();
+        narrowest.or_else(|| self.video_max_heights.get(&codec).copied())
     }
 
     fn allows_dolby_vision(&self, file: &MediaFile) -> bool {
@@ -563,12 +636,10 @@ fn evaluate(file: &MediaFile, profile: &DeviceProfile) -> (Checks, Vec<String>) 
         ));
     }
 
-    let codec_height = file.video_codec.as_ref().and_then(|codec| {
-        profile
-            .video_max_heights
-            .get(&codec.to_ascii_lowercase())
-            .copied()
-    });
+    let codec_height = file
+        .video_codec
+        .as_ref()
+        .and_then(|codec| profile.codec_height_ceiling(codec, file.video_profile.as_deref()));
     let height_ceiling = match (profile.max_height, codec_height) {
         (Some(global), Some(codec)) => Some(global.min(codec)),
         (global, codec) => global.or(codec),
@@ -1842,6 +1913,102 @@ mod tests {
                 hdr_route(&file) == Some(HdrRoute::DolbyVisionRpu),
                 dolby_vision_needs_rpu_render(&file),
                 "{hdr:?} / {label:?}"
+            );
+        }
+    }
+
+    /// The two-entry HEVC ladder that replaces the web's min-of-rungs hack —
+    /// and the fallback that decides what an unknown profile gets.
+    ///
+    /// The hack it replaces (PLAYBACK-CAPS-V2-PLAN §2, edge E5): a browser
+    /// that decodes 8-bit HEVC at 4K and Main10 only at 1080p had one number
+    /// to send, so it sent 1080 — transcoding every 4K 8-bit title it would
+    /// have direct-played. The document says both, and this is where the
+    /// saying pays off.
+    #[test]
+    fn a_per_profile_ceiling_narrows_by_profile_and_falls_back_to_the_narrowest() {
+        let caps: caps::DeviceCaps = serde_json::from_str(
+            r#"{"v":2,
+                "video":[
+                  {"codec":"hevc","profiles":["main"],"max_height":2160},
+                  {"codec":"hevc","profiles":["main10"],"max_height":1080},
+                  {"codec":"h264","max_height":1080}
+                ],
+                "audio":["aac"],"containers":["mp4"]}"#,
+        )
+        .expect("the two-entry ladder parses");
+        let profile = DeviceProfile::from_caps_v2(&caps);
+
+        // The point of the ladder: 8-bit 4K is admitted…
+        assert_eq!(
+            profile.codec_height_ceiling("hevc", Some("Main")),
+            Some(2160)
+        );
+        // …and Main10 4K is not, from the same document.
+        assert_eq!(
+            profile.codec_height_ceiling("hevc", Some("Main 10")),
+            Some(1080),
+            "ffprobe writes 'Main 10'; the document says 'main10'"
+        );
+        assert_eq!(
+            profile.codec_height_ceiling("hevc", Some("main10")),
+            Some(1080)
+        );
+
+        // The case that decides whether this is safe: `video_profile` is the
+        // raw ffprobe column and is nullable, and ffprobe omits it for plenty
+        // of HEVC streams. An unknown profile takes the NARROWEST ceiling the
+        // client gave for the codec. Taking the widest would hand this device
+        // a 4K Main10 title at 2160 on nothing but a missing column — it
+        // plays black, and the file looks fine in the library.
+        for unknown in [None, Some("unknown"), Some("Rext")] {
+            assert_eq!(
+                profile.codec_height_ceiling("hevc", unknown),
+                Some(1080),
+                "{unknown:?}"
+            );
+        }
+
+        // A codec with one entry is unaffected: its minimum is its ceiling,
+        // profile or no profile.
+        assert_eq!(profile.codec_height_ceiling("h264", None), Some(1080));
+        assert_eq!(
+            profile.codec_height_ceiling("h264", Some("High")),
+            Some(1080)
+        );
+        assert_eq!(profile.codec_height_ceiling("av1", None), None);
+    }
+
+    /// A legacy client keeps the ceiling behaviour it has always had.
+    ///
+    /// `profile_max_heights` is empty for every named profile and for every
+    /// `CAPS_Q` translation, so the whole per-profile path has to degenerate
+    /// to the old `video_max_heights` lookup. If it does not, this change
+    /// re-decides playback for every device on the fleet that never sent a
+    /// v2 document.
+    #[test]
+    fn a_client_with_no_profile_ladder_keeps_the_old_codec_ceiling() {
+        let mut profile = caps_profile(
+            vec!["mp4".into()],
+            vec!["hevc".into(), "h264".into()],
+            vec!["aac".into()],
+            Some(2160),
+            true,
+            false,
+        );
+        profile.video_max_heights = [("hevc".to_owned(), 2160), ("h264".to_owned(), 1080)].into();
+        assert!(profile.profile_max_heights.is_empty());
+
+        for source_profile in [None, Some("Main 10"), Some("High"), Some("garbage")] {
+            assert_eq!(
+                profile.codec_height_ceiling("hevc", source_profile),
+                Some(2160),
+                "{source_profile:?}"
+            );
+            assert_eq!(
+                profile.codec_height_ceiling("h264", source_profile),
+                Some(1080),
+                "{source_profile:?}"
             );
         }
     }

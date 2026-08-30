@@ -58,6 +58,7 @@ plurx-core = { path = "../plurx-core", features = [
   "scratch-fault-injection",
 ] }
 http-body-util = { workspace = true }
+serde_urlencoded = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
 tempfile = { workspace = true }
