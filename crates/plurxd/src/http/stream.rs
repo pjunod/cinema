@@ -389,6 +389,21 @@ pub struct SourceSummary {
     pub hdr: Option<String>,
     /// Rich HDR label for display ("Dolby Vision · Profile 7 (HDR10-compatible)").
     pub hdr_format: Option<String>,
+    /// The Dolby Vision profile as a number, from the configuration record
+    /// rather than parsed back out of the label above. Null for a non-DV file
+    /// and for a row the M2 backfill has not reached.
+    ///
+    /// Sent because clients and the stats overlay have been reading it off the
+    /// display string, which cannot express "Dolby Vision, profile unknown" —
+    /// the state that makes a file unclaimable by every client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_profile: Option<i64>,
+    /// Does this Dolby Vision source carry an enhancement layer? True for the
+    /// dual-layer profiles, which no consumer decoder takes — so it is the
+    /// fact that says whether a disc remux needs converting rather than
+    /// merely stripping.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_el_present: Option<bool>,
     /// Overall bitrate in bits/sec, if the container reported one.
     pub bitrate: Option<i64>,
     pub duration_ms: Option<i64>,
@@ -614,6 +629,8 @@ fn source_summary(file: &MediaFile) -> SourceSummary {
         bit_depth: file.bit_depth,
         hdr: file.hdr.clone(),
         hdr_format: file.hdr_format.clone(),
+        dv_profile: file.dolby_vision.profile,
+        dv_el_present: file.dolby_vision.el_present,
         bitrate: file.bitrate,
         duration_ms: file.duration_ms,
     }
@@ -2398,6 +2415,7 @@ mod tests {
             scanned_at: 1,
             audio_offset_ms: 0,
             probed: true,
+            dolby_vision: Default::default(),
         };
         let caps = Caps {
             vcodec: Some("h264,hevc,av1,vp9".into()),
@@ -2922,6 +2940,7 @@ mod tests {
             scanned_at: 0,
             audio_offset_ms: 0,
             probed: true,
+            dolby_vision: Default::default(),
         };
         let tracks = sub_tracks(&file, false);
 

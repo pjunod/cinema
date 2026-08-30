@@ -8,6 +8,20 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- **The Dolby Vision configuration record is stored as columns.** The profile
+  used to live only inside the human display label, and everything that needed
+  it read a number back out of that string — so a scan that saw a Dolby Vision
+  codec tag but no configuration record wrote the bare "Dolby Vision", which
+  parses to no profile at all and left the file unclaimable by every client.
+  `files` now carries the profile, level, base-layer compatibility, and whether
+  an enhancement layer and an RPU are present, on both store backends; the
+  label is derived from them. A bounded background pass fills the columns in
+  from probe data already stored on each row, so an existing library gains them
+  without a re-scan, and rewrites a label only where it would actually change.
+  `/decision` and the file listing report the profile as a number.
+
 ## [0.2.8] — 2026-08-30
 
 ### Added

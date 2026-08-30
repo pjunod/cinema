@@ -36,7 +36,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use super::{keys, ArtworkRepairFence, MetricsStore, PrometheusStoreSnapshot, SettingsStore};
 use crate::cluster::coordination::Lease;
-use crate::domain::{Item, ItemKind, MediaFile, OfflinePackageStats, User};
+use crate::domain::{DolbyVisionFacts, Item, ItemKind, MediaFile, OfflinePackageStats, User};
 use crate::error::StoreError;
 use crate::store::telemetry::{NETWORK_PRIORS_V2_SCHEMA, PLAYBACK_EVENTS_SCHEMA};
 
@@ -866,6 +866,16 @@ const MIGRATIONS: &[&str] = &[
     // session fell through to live-HLS recovery (PLAYBACK-CAPS-V2-PLAN §4.7).
     // A table rebuild, because SQLite cannot re-key in place; rows carry over.
     crate::store::fragindex::FRAGMENT_INDEXES_IDENTITY_KEY,
+    // v38: the Dolby Vision configuration record as columns, so nothing has to
+    // read a profile number back out of a display label
+    // (PLAYBACK-CAPS-V2-PLAN §4.3). Two of them — the enhancement layer and
+    // the RPU — the label never carried at all, and they decide whether a
+    // Profile 7 disc can be converted to single-layer Profile 8.1.
+    //
+    // Nullable with no default: a row that predates the backfill and a record
+    // that genuinely reported zero must stay distinguishable, or the fallback
+    // to the label can never know when to stop.
+    super::FILES_DOLBY_VISION_COLUMNS_BATCH,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -959,7 +969,8 @@ fn item_from_row(row: &Row<'_>, base: usize) -> rusqlite::Result<Item> {
 const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, \
      video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, \
      subtitle_streams, scanned_at, hdr_format, audio_offset_ms, \
-     (probe_json IS NOT NULL)";
+     (probe_json IS NOT NULL), \
+     dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present";
 
 fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     let path: String = row.get(2)?;
@@ -988,6 +999,13 @@ fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
         hdr_format: row.get(17)?,
         audio_offset_ms: row.get(18)?,
         probed: row.get::<_, i64>(19)? != 0,
+        dolby_vision: DolbyVisionFacts {
+            profile: row.get(20)?,
+            level: row.get(21)?,
+            bl_compat_id: row.get(22)?,
+            el_present: row.get::<_, Option<i64>>(23)?.map(|value| value != 0),
+            rpu_present: row.get::<_, Option<i64>>(24)?.map(|value| value != 0),
+        },
     })
 }
 
@@ -1817,10 +1835,46 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 37,
+            version, 38,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
+        let files: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'files'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("files table");
+        // The two spellings of the same migration must not drift. The
+        // replicated backend runs one statement per transaction entry and
+        // rusqlite refuses a multi-statement `execute`, so the DDL exists as a
+        // list and as a batch; the single-node list is append-only, which
+        // makes a divergent edit unfixable once shipped.
+        assert_eq!(
+            super::super::FILES_DOLBY_VISION_COLUMNS
+                .iter()
+                .map(|statement| format!("{statement};"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            super::super::FILES_DOLBY_VISION_COLUMNS_BATCH.trim(),
+            "the per-statement and batch spellings of the Dolby Vision \
+             migration have drifted"
+        );
+        for column in [
+            "dv_profile",
+            "dv_level",
+            "dv_bl_compat_id",
+            "dv_el_present",
+            "dv_rpu_present",
+        ] {
+            assert!(
+                files.contains(column),
+                "v38 carries the Dolby Vision configuration record as columns \
+                 so nothing has to read a profile number back out of a display \
+                 label: {files}"
+            );
+        }
         let fragment_indexes: String = conn
             .query_row(
                 "SELECT sql FROM sqlite_master
