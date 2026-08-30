@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["a9e7ae63"]
-points = ["web.experience"]
-checks = ["web-membership", "web-static"]
-reason = "The staleness this commit closes is pinned in both directions by retained assertions in tests/web/cluster-membership.test.js. The cadence: a settingsTick harness runs the real shipped tick against a fake clock and proves the direct status is collected on first entry, that a probe slower than the interval is never stacked behind itself, that nine seconds later nothing is collected, and that fifteen seconds later it is. The discipline: an aggregate that differs only in its observed-at stamps, per-node sample ages, Raft sample and watermark ages, and the embedded roster's last_seen_at projects identically and paints nothing, while an advanced commit index or a flipped restart verdict projects differently and paints exactly once; key order in the response is proven not to be a change either. The freshness row is asserted to be patched in place on the quiet path, so the one reading whose job is freshness cannot itself freeze. The preservation: repaintClusterPreserving is exercised against a stub document that clears the roster's scroll position and closes every drill-down, and both come back; its three call sites — the tick, the manual refresh, and the restart poll — are asserted by name, because a helper with free call sites is how this panel's last review found six dead features."
