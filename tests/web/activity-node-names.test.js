@@ -45,7 +45,7 @@ const BORROWED = [
   "fmtAgo",
   "activityNodeFailures",
   "activityNodeStatusText",
-  "activityNodeName",
+  "nodeLabel",
   "activityNodeCell",
   "activityNodeFailureText",
   "detailActivitySummary",
@@ -70,7 +70,7 @@ const painter = new Function(
   "return (function(){" +
     PRELUDE +
     BORROWED.map(shippedSource).join("\n") +
-    "\nreturn {paintActivityBody, main, activityNodeName};})()",
+    "\nreturn {paintActivityBody, main, nodeLabel};})()",
 )();
 
 const NODE_A = "5deeeebc-8f39-4cb5-8e4a-aa5f912f327f";

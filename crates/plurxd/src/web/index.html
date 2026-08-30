@@ -10416,6 +10416,26 @@ function analysisSummaryCard(value,context="activity"){
       <span class="analysis-state ${s.enabled?'ready':'cancelled'}">Queue ${s.enabled?'enabled':'paused'}</span>
     </div>${latest&&attention?`<div class="analysis-sub">Latest problem: <b>${esc(latest.title)}</b></div>`:""}</div>`;
 }
+// The analysis workspace attributes every row to a node, and printed the id
+// raw in three places. It shares `nodeLabel` with the Now playing table but not
+// the cell shape: this row already carries a "Technical details" disclosure, so
+// the name goes in the column and the id keeps a labelled line in there —
+// visible, selectable, and in the Copy details text — instead of being repeated
+// under every cell in a table that is already four rows deep per record.
+function analysisNodeCell(names,nodeId){
+  if(!nodeId) return `<span class="clid">—</span>`;
+  const name=nodeLabel(names,nodeId);
+  return name===nodeId
+    ? `<span class="clid">${esc(nodeId)}</span>`
+    : `<span class="clnode">${esc(name)}</span>`;
+}
+// Both, for the places an operator reads the row rather than scans it. A named
+// node still shows its id, because the id is what a support question quotes.
+function analysisNodeDetail(names,nodeId){
+  if(!nodeId) return null;
+  const name=nodeLabel(names,nodeId);
+  return name===nodeId?nodeId:`${name} · ${nodeId}`;
+}
 function analysisRowKey(row){
   return row.row_key;
 }
@@ -10459,7 +10479,7 @@ function openAnalysisSettings(){
   if(location.hash==="#/settings"||location.hash==="#/admin") viewSettings(++PAGE_RENDER_GENERATION,false);
   else location.hash="#/settings";
 }
-function analysisDiagnosticText(row){
+function analysisDiagnosticText(row,names){
   const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator"):"Background";
   return [
     `Title: ${row.title||`File ${row.file_id}`}`,
@@ -10470,8 +10490,8 @@ function analysisDiagnosticText(row){
     `Trigger: ${trigger}`,
     row.request_id?`Request: ${row.request_id}`:null,
     row.job_id?`Job: ${row.job_id}`:null,
-    row.owner_node_id?`Owner: ${row.owner_node_id}`:null,
-    row.target_node_id?`Target: ${row.target_node_id}`:null,
+    row.owner_node_id?`Owner: ${analysisNodeDetail(names,row.owner_node_id)}`:null,
+    row.target_node_id?`Target: ${analysisNodeDetail(names,row.target_node_id)}`:null,
     row.pipeline_version?`Pipeline: ${row.pipeline_version}`:null,
     `Attempts: ${row.attempts||0}`,
     ...analysisErrors(row).map(error=>`${error.stage} error: ${error.code}`),
@@ -10480,7 +10500,9 @@ function analysisDiagnosticText(row){
 async function copyAnalysisDetails(key,btn){
   const row=ANALYSIS_ROW_LOOKUP.get(key); if(!row) return;
   try{
-    await navigator.clipboard.writeText(analysisDiagnosticText(row));
+    // The painted snapshot, which is the one whose rows this lookup holds.
+    await navigator.clipboard.writeText(
+      analysisDiagnosticText(row,(ANALYSIS_SNAPSHOT&&ANALYSIS_SNAPSHOT.node_hostnames)||{}));
     const label=btn.textContent; btn.textContent="Copied"; setTimeout(()=>{if(document.body.contains(btn))btn.textContent=label;},1200);
   }catch(error){ toast("Couldn’t copy diagnostics"); }
 }
@@ -10506,8 +10528,9 @@ function paintAnalysis(snapshot){
   const pages=Math.max(1,Math.ceil(filteredTotal/ANALYSIS_VIEW.pageSize));
   ANALYSIS_VIEW.page=Math.min(ANALYSIS_VIEW.page,pages);
   ANALYSIS_ROW_LOOKUP=new Map(pageRows.map(row=>[analysisRowKey(row),row]));
+  const nodeNames=snapshot.node_hostnames||{};
   const rows=pageRows.map(row=>{
-    const owner=row.owner_node_id||row.target_node_id||"—";
+    const owner=row.owner_node_id||row.target_node_id||"";
     const attempt=row.attempts||0, lease=row.lease_expires_ms||0, retryAt=row.not_before_ms||0;
     const pipeline=row.pipeline_version?` · pipeline ${esc(row.pipeline_version)}`:"";
     const key=analysisRowKey(row), action=analysisAction(row);
@@ -10516,7 +10539,8 @@ function paintAnalysis(snapshot){
     const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator request"):"Background build";
     const details=[
       ["Request",row.request_id],["Worker job",row.job_id],
-      ["Target node",row.target_node_id],["Owner",owner!=="—"?owner:null],
+      ["Target node",analysisNodeDetail(nodeNames,row.target_node_id)],
+      ["Owner",analysisNodeDetail(nodeNames,owner)],
       ["Lease",lease?(lease>snapshot.now_ms?`expires in ${Math.ceil((lease-snapshot.now_ms)/1000)}s`:"expired"):null],
       ["Retry",row.state==="queued"&&retryAt>snapshot.now_ms?`in ${Math.ceil((retryAt-snapshot.now_ms)/1000)}s`:null],
       ["Source size",row.source_size!=null?fmtBytes(row.source_size):null],
@@ -10530,7 +10554,7 @@ function paintAnalysis(snapshot){
           ${details.map(([label,value])=>`<b>${esc(label)}</b><span>${esc(value)}</span>`).join("")}
           <b>Disposition</b><span>${esc(analysisDisposition(row))}</span><b>Attempts</b><span>${attempt}</span><b>Updated</b><span>${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</span>
         </div></details></td>
-      <td><span class="clid">${esc(owner)}</span><div class="analysis-sub">${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</div></td>
+      <td>${analysisNodeCell(nodeNames,owner)}<div class="analysis-sub">${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</div></td>
       <td style="text-align:right"><div class="analysis-actions">${actionLabel?`<button class="ghost sm" data-analysis-focus="action:${esc(key)}" onclick='requestAnalysis(${esc(JSON.stringify(String(row.file_id)))},true,this,true)'>${actionLabel}</button>`:""}<button class="ghost sm" data-analysis-focus="copy:${esc(key)}" onclick='copyAnalysisDetails(${esc(JSON.stringify(key))},this)'>Copy details</button></div></td></tr>`;
   }).join("");
   const attention=counts.attention||0, working=counts.active||0, expected=counts.expected||0;
@@ -10571,7 +10595,7 @@ function activityNodeStatusText(status){
 // that failed) cannot be painted with the names of the snapshot before it.
 //
 // Callers guarantee a node id; the map is what may be missing.
-function activityNodeName(names,nodeId){
+function nodeLabel(names,nodeId){
   const name=names&&names[nodeId];
   return typeof name==="string"&&name?name:nodeId;
 }
@@ -10583,13 +10607,13 @@ function activityNodeName(names,nodeId){
 // hostname, keep the node id as a copyable detail.
 function activityNodeCell(names,nodeId){
   if(!nodeId) return `<span class="clid">Unknown</span>`;
-  const name=activityNodeName(names,nodeId);
+  const name=nodeLabel(names,nodeId);
   return name===nodeId
     ? `<span class="clid">${esc(nodeId)}</span>`
     : `<div class="clnode">${esc(name)}</div><div class="clid">${esc(nodeId)}</div>`;
 }
 function activityNodeFailureText(node,names){
-  const name=node.node_id?`Node ${activityNodeName(names,node.node_id)}`:"The cluster peer directory";
+  const name=node.node_id?`Node ${nodeLabel(names,node.node_id)}`:"The cluster peer directory";
   return `${name} · ${activityNodeStatusText(node.status)}`;
 }
 function detailActivitySummary(d,deliveries){

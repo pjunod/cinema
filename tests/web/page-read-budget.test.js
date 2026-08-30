@@ -190,7 +190,7 @@ test("Activity names missing cluster nodes and attributes delivered rows", () =>
   const harness = new Function(
     `${shippedSource("activityNodeFailures")};
      ${shippedSource("activityNodeStatusText")};
-     ${shippedSource("activityNodeName")};
+     ${shippedSource("nodeLabel")};
      ${shippedSource("activityNodeFailureText")};
      ${shippedSource("detailActivitySummary")};
      return {activityNodeFailures,activityNodeFailureText,detailActivitySummary};`,
@@ -712,6 +712,9 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
      ${shippedSource("analysisErrorHtml")}
      ${shippedSource("analysisRows")}
      ${shippedSource("analysisCounts")}
+     ${shippedSource("nodeLabel")}
+     ${shippedSource("analysisNodeCell")}
+     ${shippedSource("analysisNodeDetail")}
      ${shippedSource("analysisRowKey")}
      ${shippedSource("analysisDisposition")}
      ${shippedSource("analysisErrors")}
@@ -912,6 +915,9 @@ test("Analysis repaint restores row-link and disclosure focus with stable keys",
      ${shippedSource("analysisErrorHtml")}
      ${shippedSource("analysisRows")}
      ${shippedSource("analysisCounts")}
+     ${shippedSource("nodeLabel")}
+     ${shippedSource("analysisNodeCell")}
+     ${shippedSource("analysisNodeDetail")}
      ${shippedSource("analysisRowKey")}
      ${shippedSource("analysisDisposition")}
      ${shippedSource("analysisErrors")}
