@@ -217,6 +217,16 @@ pub struct Caps {
     /// Request-local subtitle choice (`s:{index}`), or `-1` for Off. Absent
     /// keeps the shared playback-default policy.
     pub subtitle: Option<i64>,
+    /// The v2 capabilities document, when the client posted one.
+    ///
+    /// Never read from the query string — it is a JSON body — so it is
+    /// skipped by the deserializer and filled in by the POST handler. When
+    /// present it replaces every flat flag above; when absent the flat flags
+    /// are translated into the same document and reach the same translation,
+    /// which is what stops the two wire shapes from ever answering
+    /// differently.
+    #[serde(skip)]
+    pub caps_v2: Option<playback::DeviceCaps>,
 }
 
 fn csv(s: &Option<String>) -> Vec<String> {
@@ -249,9 +259,18 @@ impl Caps {
         self.vcodec.is_some() || self.acodec.is_some() || self.container.is_some()
     }
 
-    /// The effective device profile: a runtime-probed one when caps were sent,
-    /// else the named/default profile (cloned to a single owned type).
+    /// The effective device profile: a runtime-probed one when caps were
+    /// sent, else the named/default profile (cloned to a single owned type).
+    ///
+    /// Both wire shapes land on `DeviceProfile::from_caps_v2`. That is the
+    /// point rather than a tidiness: a client that upgrades from the flat
+    /// query to the v2 document has to get the same verdict for the same
+    /// hardware, and the only way to be sure is for there to be one
+    /// translation with one set of absent-means-what rules.
     fn profile(&self) -> playback::DeviceProfile {
+        if let Some(caps) = self.caps_v2.as_ref().filter(|caps| !caps.is_empty()) {
+            return playback::DeviceProfile::from_caps_v2(caps);
+        }
         if self.has_caps() {
             let containers = {
                 let c = csv(&self.container);
@@ -277,24 +296,25 @@ impl Caps {
                     a
                 }
             };
-            let mut profile = playback::caps_profile(
+            let legacy = playback::LegacyCaps {
                 containers,
-                vcodec,
-                acodec,
-                self.maxheight,
-                self.hdr == Some(1),
-                self.dvprofile.is_none() && self.dv == Some(1),
-            );
-            profile.video_max_heights = codec_max_heights(&self.vmaxheight);
-            profile.dolby_vision_profiles = csv(&self.dvprofile)
-                .into_iter()
-                .filter_map(|value| value.parse::<u8>().ok())
-                .collect();
-            profile.remux_dolby_vision = self.dvhls == Some(1);
-            // Only a client that PROVED it. Absent is not proven, and not
-            // proven tone-maps — see the field's doc comment.
-            profile.supports_hdr10_transcode = self.hdr10t == Some(1);
-            profile
+                video_codecs: vcodec,
+                audio_codecs: acodec,
+                max_height: self.maxheight,
+                codec_max_heights: codec_max_heights(&self.vmaxheight),
+                hdr: self.hdr == Some(1),
+                dv: self.dv == Some(1),
+                dv_profiles: csv(&self.dvprofile)
+                    .into_iter()
+                    .filter_map(|value| value.parse::<u8>().ok())
+                    .collect(),
+                dv_profiles_sent: self.dvprofile.is_some(),
+                dvhls: self.dvhls == Some(1),
+                // Only a client that PROVED it. Absent is not proven, and not
+                // proven tone-maps — see the field's doc comment.
+                hdr10t: self.hdr10t == Some(1),
+            };
+            playback::DeviceProfile::from_caps_v2(&playback::DeviceCaps::from_legacy_query(&legacy))
         } else {
             self.profile
                 .as_deref()
@@ -592,7 +612,7 @@ pub struct DecisionResponse {
 /// covers every other PQ source. Both are boot probes that run the real graph
 /// into the real encoder, so `false` means this node has not been shown to
 /// produce those bytes — never that it refuses to.
-async fn render_caps(state: &AppState) -> playback::RenderCaps {
+pub(super) async fn render_caps(state: &AppState) -> playback::RenderCaps {
     playback::RenderCaps {
         dv_strippable: state.system.dovi_rpu,
         dolby_vision_p5_render: state.system.dovi_passthrough,
@@ -1075,6 +1095,44 @@ async fn probe_chapters(path: &Path) -> Option<Vec<serde_json::Value>> {
 /// acodec=…&container=…&hdr=…&force=…&audio=…&subtitle=…` (runtime
 /// capabilities + request-local track/quality choices); native clients still
 /// pass `?profile=`. `subtitle=-1` explicitly selects Off.
+/// The body of `POST /api/v1/files/:id/decision`.
+///
+/// The same question the GET asks, with the capabilities as a document
+/// instead of a growing bag of query keys. `force`, `audio` and `subtitle`
+/// stay where they are — they are request-local choices, not capabilities —
+/// and may still ride the query string.
+#[derive(Deserialize)]
+pub struct DecisionBody {
+    pub caps: playback::DeviceCaps,
+}
+
+/// POST /api/v1/files/:id/decision — the same verdict, from a capabilities
+/// document.
+///
+/// Refuses an unknown document version outright rather than guessing at it. A
+/// client that sends `v: 3` knows something this server does not, and reading
+/// its fields as if they meant what v2's mean is how a device ends up handed
+/// a stream it never claimed.
+pub async fn decision_post(
+    auth: AuthUser,
+    state: State<AppState>,
+    path: AxPath<i64>,
+    Query(mut q): Query<Caps>,
+    headers: HeaderMap,
+    remote: super::network::RemoteAddress,
+    Json(body): Json<DecisionBody>,
+) -> Result<Json<DecisionResponse>, ApiError> {
+    if body.caps.v != playback::DeviceCaps::VERSION {
+        return Err(ApiError::BadRequest(format!(
+            "capabilities document version {} is not understood by this server (expected {})",
+            body.caps.v,
+            playback::DeviceCaps::VERSION
+        )));
+    }
+    q.caps_v2 = Some(body.caps);
+    decision(auth, state, path, Query(q), headers, remote).await
+}
+
 pub async fn decision(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -1528,6 +1586,7 @@ impl StreamQuery {
             force: self.force.clone(),
             audio: None,
             subtitle: None,
+            caps_v2: None,
         }
     }
 }
@@ -2202,6 +2261,95 @@ fn is_progress_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PLAYBACK-CAPS-V2-PLAN §4.2: two wire shapes, one translation, one
+    /// profile.
+    ///
+    /// The migration's whole risk is here. Every client will send both shapes
+    /// for at least one release — the v2 body to `/decision`, the legacy
+    /// `CAPS_Q` on the progressive `play_url` the web still builds — and a
+    /// device that gets Dolby Vision from one and a tone-mapped SDR ladder
+    /// from the other is a bug that looks like flaky hardware. So the two
+    /// shapes are not merely *expected* to agree: they are compared field for
+    /// field, from a real query string decoded by the same decoder axum's
+    /// `Query` extractor uses.
+    #[test]
+    fn the_legacy_query_and_the_v2_document_build_the_same_profile() {
+        const CAPS_Q: &str = "vcodec=hevc,h264&hdr=1&dv=1&dvprofile=5,8&dvhls=1\
+                              &hdr10t=1&maxheight=2160";
+
+        let legacy: Caps = serde_urlencoded::from_str(CAPS_Q).expect("CAPS_Q decodes as Caps");
+        let from_query = legacy.profile();
+
+        // The same claims, said the v2 way. `hdr=1` is a *display* fact and
+        // `hdr10t=1` is a per-codec presentation fact about HEVC — the legacy
+        // query could not tell those apart, which is why the document does.
+        let document: playback::DeviceCaps = serde_json::from_str(
+            r#"{
+                "v": 2,
+                "video": [
+                  { "codec": "hevc", "present": ["sdr", "pq"], "dv_profiles": [5, 8] },
+                  { "codec": "h264", "present": ["sdr"] }
+                ],
+                "containers": [],
+                "audio": [],
+                "dv_transport": "hls",
+                "display": { "hdr": true, "dolby_vision": true },
+                "max_height": 2160
+            }"#,
+        )
+        .expect("the v2 document parses");
+        let from_document = playback::DeviceProfile::from_caps_v2(&document);
+
+        assert_eq!(
+            from_query, from_document,
+            "the legacy query and the v2 document must produce byte-identical \
+             profiles; a difference here is a client that gets two different \
+             verdicts for one device"
+        );
+    }
+
+    /// The one legacy claim that is deliberately unspellable in v2.
+    ///
+    /// `dv=1` with no `dvprofile` meant "every profile, including the
+    /// dual-layer ones no consumer decoder takes". Safari sent exactly that
+    /// and got Profile 7 preserved — which changed the badge and never
+    /// rendered. It has to keep working byte-for-byte for one release, and it
+    /// has to be impossible to say in the new shape, or the deprecation never
+    /// lands.
+    #[test]
+    fn the_blanket_dolby_vision_claim_survives_translation_and_has_no_v2_spelling() {
+        let blanket: Caps =
+            serde_urlencoded::from_str("vcodec=hevc&dv=1").expect("the query decodes");
+        let profile = blanket.profile();
+        assert!(
+            profile.supports_dolby_vision,
+            "a client that sent the blanket claim yesterday gets the same answer today"
+        );
+        assert!(
+            profile.dolby_vision_profiles.is_empty(),
+            "the blanket claim enumerates nothing; it is a separate bit"
+        );
+
+        // Enumerating profiles retires the blanket claim, exactly as the
+        // legacy rule at the old `stream.rs:286` did.
+        let enumerated: Caps =
+            serde_urlencoded::from_str("vcodec=hevc&dv=1&dvprofile=5").expect("the query decodes");
+        let enumerated = enumerated.profile();
+        assert!(!enumerated.supports_dolby_vision);
+        assert_eq!(enumerated.dolby_vision_profiles, vec![5]);
+
+        // And there is no JSON that sets it: the field is `serde(skip)`.
+        let claimed: playback::DeviceCaps = serde_json::from_str(
+            r#"{"v":2,"legacy_blanket_dolby_vision":true,
+                "video":[{"codec":"hevc"}],"containers":[],"audio":[]}"#,
+        )
+        .expect("unknown-to-v2 keys are ignored, not refused");
+        assert!(
+            !playback::DeviceProfile::from_caps_v2(&claimed).supports_dolby_vision,
+            "a v2 client cannot claim every Dolby Vision profile"
+        );
+    }
 
     #[test]
     fn progressive_minimal_hevc_uses_an_in_band_sample_entry() {

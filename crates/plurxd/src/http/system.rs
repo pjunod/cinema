@@ -162,8 +162,37 @@ pub struct SystemDto {
     /// fast enough surfaced as a *client* stall and sent everyone to look at
     /// the encoder.
     pub storage: crate::storeprobe::StorageReport,
+    /// What session create did with the plan each client handed it
+    /// (PLAYBACK-CAPS-V2-PLAN §4.5).
+    pub plan_derivation: PlanDerivationDto,
     #[serde(flatten)]
     pub info: crate::state::SystemInfo,
+}
+
+/// Create's reconciliation of the client's plan with the server's, counted
+/// for this process.
+///
+/// Two numbers to watch, and they say opposite things. `legacy_trusted`
+/// falling to zero is the migration finishing: every build on the fleet now
+/// sends the capabilities its plan was derived from, so the server is the
+/// only decider again. `mismatched` rising off zero is a client that started
+/// disagreeing with a plan derived from its own claims — nothing breaks
+/// (the server's plan is used, and a create is never refused over this), but
+/// it is the first sign a shipped build's caps and its player have drifted
+/// apart.
+#[derive(Serialize)]
+pub struct PlanDerivationDto {
+    /// Creates whose body carried no usable caps document, so the client's
+    /// `preserve_dolby_vision`/`hdr10` echo was trusted as before.
+    pub legacy_trusted: u64,
+    /// Creates whose plan was re-derived from the caps in the body.
+    pub rederived: u64,
+    /// Of those, how many disagreed with the client, with no named override
+    /// to explain it.
+    pub mismatched: u64,
+    /// Of those, how many carried a named override (`compatible_hdr_base`,
+    /// `force`) — a legitimate, client-declared departure from the plan.
+    pub overridden: u64,
 }
 
 #[derive(Serialize)]
@@ -223,6 +252,16 @@ pub async fn system_info(
             last_correlation_id: last.and_then(|r| r.correlation_id.clone()),
         },
         storage: state.storage.read().await.clone(),
+        plan_derivation: {
+            let (legacy_trusted, rederived, mismatched, overridden) =
+                super::hls::plan_derivation::snapshot();
+            PlanDerivationDto {
+                legacy_trusted,
+                rederived,
+                mismatched,
+                overridden,
+            }
+        },
         info: (*state.system).clone(),
     }))
 }

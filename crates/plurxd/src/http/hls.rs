@@ -156,6 +156,17 @@ pub struct StartResponse {
     /// contract of an already-open session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<crate::playback_control::ControlBootstrap>,
+    /// Why this session's plan is not the one the client asked for, when it
+    /// isn't (PLAYBACK-CAPS-V2-PLAN §4.5). Every entry is either a named
+    /// override the client itself supplied or a `plan_mismatch:` line naming
+    /// the field, the client's value and the server's.
+    ///
+    /// Empty and omitted on the wire for every agreeing create, which is the
+    /// case this exists to make visible by its absence. The stats overlay
+    /// shows these next to the badge: a viewer whose Dolby Vision title is
+    /// playing as HDR10 can read *why* without an admin reading the log.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan_notes: Vec<String>,
 }
 
 /// Owns a published worker until the replicated activation has a definitive
@@ -577,6 +588,23 @@ pub struct CreateSession {
     /// audio. It is carried into every seek/reopen by the client and is never
     /// written back to the media file.
     pub audio_offset_ms: Option<i64>,
+    /// The same capabilities document the client posted to `/decision`
+    /// (PLAYBACK-CAPS-V2-PLAN §4.5).
+    ///
+    /// When present, create re-derives the plan from it and the two fields
+    /// above become *assertions* rather than instructions — a disagreement is
+    /// logged and counted, and the server's plan is used. When absent, the
+    /// echo is trusted exactly as it always was, so every shipped build keeps
+    /// working unchanged; that path is counted too, so the fleet can be
+    /// watched for stragglers.
+    pub caps: Option<plurx_core::playback::DeviceCaps>,
+    /// Advisory hash of the decision this create is acting on. Recorded in
+    /// the create log so a mismatch can be traced back to the exact
+    /// `/decision` response the client was holding; never used to refuse.
+    pub plan_ref: Option<String>,
+    /// The named reasons this body may legitimately differ from the plan the
+    /// server derives from `caps`.
+    pub overrides: Option<CreateOverrides>,
     /// The only accepted value is `"vod"`. Omitted also means VOD so clients
     /// predating this field cannot accidentally enter the removed growing
     /// live-HLS path. An explicit legacy value receives a typed refusal.
@@ -622,6 +650,217 @@ impl CreateSession {
             block_budget_secs: self.block_budget_secs.filter(|s| s.is_finite() && *s > 0.0),
         }
     }
+}
+
+/// Process-lifetime counters for what create did with the plan it was handed.
+///
+/// The seam this closes (PLAYBACK-CAPS-V2-PLAN E4) was never a live bug — all
+/// three shipped clients propagate `/decision`'s answer faithfully. It was a
+/// *trust* relationship with no way to tell whether it still held. These four
+/// numbers are that way: `legacy_trusted` falling to zero is how the fleet
+/// proves every build has moved to caps v2, and `mismatched` rising is how a
+/// client that started lying about itself gets noticed before a viewer files
+/// a bug about a black screen.
+pub mod plan_derivation {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static LEGACY_TRUSTED: AtomicU64 = AtomicU64::new(0);
+    static REDERIVED: AtomicU64 = AtomicU64::new(0);
+    static MISMATCHED: AtomicU64 = AtomicU64::new(0);
+    static OVERRIDDEN: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn count_legacy_trusted() {
+        LEGACY_TRUSTED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn count_rederived() {
+        REDERIVED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn count_mismatched() {
+        MISMATCHED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn count_overridden() {
+        OVERRIDDEN.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `(legacy_trusted, rederived, mismatched, overridden)`, this process.
+    pub fn snapshot() -> (u64, u64, u64, u64) {
+        (
+            LEGACY_TRUSTED.load(Ordering::Relaxed),
+            REDERIVED.load(Ordering::Relaxed),
+            MISMATCHED.load(Ordering::Relaxed),
+            OVERRIDDEN.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// The named reasons a create body is *allowed* to disagree with the plan the
+/// server derives from the same capabilities.
+///
+/// Named, because the alternative is a client that can silently opt out of
+/// the server's verdict by echoing whatever it likes — which is the seam this
+/// milestone exists to close. Each override that fires appends its own reason
+/// to the session's notes, so the badge shows why the delivery is not the one
+/// the caps alone would have produced.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CreateOverrides {
+    /// Apple's `forceCompatibleHDRBase` retry (`PlayerController.swift:2373`):
+    /// the client decoded the Dolby Vision stream, failed, and is asking for
+    /// the HDR10-compatible base instead. A legitimate decline of a plan the
+    /// server derived correctly from capabilities that were themselves
+    /// correct — the device really does claim the profile, and really did
+    /// fail on this title.
+    #[serde(default)]
+    pub compatible_hdr_base: Option<bool>,
+    /// The quality menu: `"auto" | "original" | "transcode"`. It is fed into
+    /// the re-derivation itself rather than compared against it, so a forced
+    /// rung produces the server's plan *for that force* — but it still leaves
+    /// a note, because a viewer who forced a transcode and then reads an SDR
+    /// badge deserves to see the two facts next to each other.
+    #[serde(default)]
+    pub force: Option<String>,
+}
+
+/// What create decided about the plan the client echoed, and what to say
+/// about it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct PlanReview {
+    /// The value create must use, whatever the body asked for.
+    pub preserve_dolby_vision: bool,
+    /// Likewise for the HDR10 re-encode request. Still only a *request*:
+    /// `TranscodeManager::hdr10_grade_for` refuses it for any source, rung, or
+    /// build that did not prove the chain, and that refusal is unchanged.
+    pub hdr10: bool,
+    /// Reasons, in the order they were established. Empty means the client's
+    /// echo and the server's derivation agreed and no override fired — the
+    /// case that should be every case.
+    pub notes: Vec<String>,
+    /// A disagreement no override explained. Counted and logged; never a
+    /// refusal (Paul, 2026-08-29: "I don't see a reason for it to prevent
+    /// functionality").
+    pub mismatched: bool,
+}
+
+/// Re-derive the plan from the capabilities the client sent, and reconcile it
+/// with what the client asked for.
+///
+/// The server's derivation wins in **both** directions, and the only way to
+/// decline it is a named override. That is stricter than "the client may
+/// always ask for less", and deliberately so: `preserve_dolby_vision=false`
+/// against a server `true` is exactly the shape of Apple's compatible-base
+/// retry, so letting an unnamed `false` through would leave the retry
+/// indistinguishable from a client that quietly stopped honouring the plan.
+/// No shipped build is affected — a client that sends no `caps` never reaches
+/// this function at all.
+pub(crate) fn review_client_plan(
+    caps: &plurx_core::playback::DeviceCaps,
+    overrides: Option<&CreateOverrides>,
+    file: &MediaFile,
+    node: &plurx_core::playback::RenderCaps,
+    asked_preserve_dolby_vision: bool,
+    asked_hdr10: bool,
+) -> PlanReview {
+    use plurx_core::playback::{decide_forced, DeviceProfile, Force};
+
+    let profile = DeviceProfile::from_caps_v2(caps);
+    let force = overrides
+        .and_then(|o| o.force.as_deref())
+        .map(Force::parse)
+        .unwrap_or(Force::Auto);
+    let derived = decide_forced(file, &profile, force, node);
+    let mut review = PlanReview {
+        preserve_dolby_vision: derived.preserve_dolby_vision,
+        // The body's `hdr10` is the create-side spelling of `hdr10t=1`: a
+        // claim about the *client*, not about the source or the node. The
+        // caps document already carries that claim as a PQ transfer on the
+        // codec, so the derivation is simply whether the document says so.
+        hdr10: profile.supports_hdr10_transcode,
+        notes: Vec::new(),
+        mismatched: false,
+    };
+
+    if matches!(force, Force::Original | Force::Transcode) {
+        review.notes.push(format!(
+            "override force={}",
+            overrides.and_then(|o| o.force.as_deref()).unwrap_or("auto")
+        ));
+    }
+
+    // The compatible-base retry only ever *lowers* the plan, and only for
+    // Dolby Vision. It cannot be used to claim a profile the caps deny.
+    let compatible_hdr_base = overrides
+        .and_then(|o| o.compatible_hdr_base)
+        .unwrap_or(false);
+    if compatible_hdr_base && review.preserve_dolby_vision {
+        review.preserve_dolby_vision = false;
+        review
+            .notes
+            .push("override compatible_hdr_base: Dolby Vision declined by the client".to_owned());
+        plan_derivation::count_overridden();
+    } else if compatible_hdr_base {
+        // Harmless, and worth saying: a client retrying a title the server
+        // was never going to send as Dolby Vision is a client chasing the
+        // wrong failure.
+        review.notes.push(
+            "override compatible_hdr_base had nothing to decline: the plan was not Dolby Vision"
+                .to_owned(),
+        );
+        plan_derivation::count_overridden();
+    } else if matches!(force, Force::Original | Force::Transcode) {
+        plan_derivation::count_overridden();
+    }
+
+    for (field, asked, derived) in [
+        (
+            "preserve_dolby_vision",
+            asked_preserve_dolby_vision,
+            review.preserve_dolby_vision,
+        ),
+        ("hdr10", asked_hdr10, review.hdr10),
+    ] {
+        if asked != derived {
+            review.mismatched = true;
+            review.notes.push(format!(
+                "plan_mismatch: client asked {field}={asked}, server derived {derived}"
+            ));
+        }
+    }
+    if review.mismatched {
+        plan_derivation::count_mismatched();
+    }
+    plan_derivation::count_rederived();
+    review
+}
+
+/// How to name the build in a create log line.
+///
+/// The v2 document names itself (`client.kind`/`client.build`), which is the
+/// whole point of it carrying a `client` block at all. A body without one
+/// leaves the User-Agent, truncated: these lines are for counting builds, not
+/// for fingerprinting devices, and an unbounded header does not belong in a
+/// log a support request gets pasted into.
+fn client_build_label(
+    caps: Option<&plurx_core::playback::DeviceCaps>,
+    headers: &HeaderMap,
+) -> String {
+    if let Some(client) = caps.and_then(|caps| caps.client.as_ref()) {
+        let named = match (client.kind.as_str(), client.build.as_str()) {
+            ("", "") => None,
+            ("", build) => Some(build.to_owned()),
+            (kind, "") => Some(kind.to_owned()),
+            (kind, build) => Some(format!("{kind}/{build}")),
+        };
+        if let Some(named) = named {
+            return named;
+        }
+    }
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|ua| ua.chars().take(96).collect::<String>())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 const HDR_SUBTITLE_BURN_REFUSAL: &str =
@@ -680,7 +919,7 @@ pub async fn create(
     AxPath(id): AxPath<i64>,
     headers: HeaderMap,
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
-    Json(req): Json<CreateSession>,
+    Json(mut req): Json<CreateSession>,
 ) -> Result<Json<StartResponse>, ApiError> {
     if !valid_playback_id(&req.playback_id) {
         return Err(ApiError::BadRequest(
@@ -716,6 +955,65 @@ pub async fn create(
             "error": HDR_SUBTITLE_BURN_REFUSAL,
         })));
     }
+    // Whose build this is, for every line below. The v2 document names
+    // itself; a client that sends none leaves only its User-Agent, which is
+    // exactly the population these lines exist to count down to zero.
+    let client_build = client_build_label(req.caps.as_ref(), &headers);
+    // E4: the client's echo stops being an instruction the moment it sends
+    // the capabilities the plan was derived from. Everything below reads the
+    // reconciled values, so there is exactly one decider again.
+    let plan_notes = match (req.caps.as_ref(), source.as_ref()) {
+        (Some(caps), Some(file)) if caps.v == plurx_core::playback::DeviceCaps::VERSION => {
+            let review = review_client_plan(
+                caps,
+                req.overrides.as_ref(),
+                file,
+                &super::stream::render_caps(&state).await,
+                req.preserve_dolby_vision == Some(true),
+                req.hdr10 == Some(true),
+            );
+            if review.mismatched {
+                tracing::warn!(
+                    file_id = id,
+                    user_id = user.id,
+                    client_build = %client_build,
+                    plan_ref = req.plan_ref.as_deref().unwrap_or(""),
+                    asked_preserve_dolby_vision = req.preserve_dolby_vision == Some(true),
+                    derived_preserve_dolby_vision = review.preserve_dolby_vision,
+                    asked_hdr10 = req.hdr10 == Some(true),
+                    derived_hdr10 = review.hdr10,
+                    "plan_mismatch: the create body disagrees with the plan its own caps derive; \
+                     proceeding with the server's plan"
+                );
+            }
+            req.preserve_dolby_vision = Some(review.preserve_dolby_vision);
+            req.hdr10 = Some(review.hdr10);
+            review.notes
+        }
+        // A document from a version this server does not understand is worth
+        // exactly as much as no document: its fields may not mean what v2's
+        // mean. It falls back to the trust path rather than being refused,
+        // because a create is not the place to fail a client over metadata.
+        (Some(caps), _) => {
+            plan_derivation::count_legacy_trusted();
+            tracing::warn!(
+                file_id = id,
+                client_build = %client_build,
+                caps_version = caps.v,
+                "create could not re-derive the plan; trusting the client's echo"
+            );
+            Vec::new()
+        }
+        (None, _) => {
+            plan_derivation::count_legacy_trusted();
+            tracing::warn!(
+                file_id = id,
+                client_build = %client_build,
+                "create trusted the client's plan echo: this build sends no caps document"
+            );
+            Vec::new()
+        }
+    };
     let source_height = source.as_ref().and_then(|f| f.height);
     let hdr10_requested = req.hdr10 == Some(true);
     let ladder_ceiling = state
@@ -1375,6 +1673,7 @@ pub async fn create(
             )
             .expect("new media-session owner epochs begin at one")
         }),
+        plan_notes,
     };
     let response_json = serde_json::to_string(&response)?;
     let activation_now_ms = unix_ms();
@@ -3002,6 +3301,11 @@ pub async fn start(
         // The deprecated GET bridge has no capability parameters at all, so
         // it keeps the SDR ladder it has always had.
         hdr10: None,
+        // …and no capabilities document to re-derive from, so it lands on the
+        // trust path with every other client that predates caps v2.
+        caps: None,
+        plan_ref: None,
+        overrides: None,
         audio_offset_ms: None,
         presentation: None,
         block_budget_secs: None,
@@ -8163,6 +8467,7 @@ mod tests {
                 1,
                 crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
             ),
+            plan_notes: Vec::new(),
         };
         let route = MediaSessionRoute {
             incarnation_id: generation.clone(),
@@ -8777,6 +9082,7 @@ mod tests {
                 1,
                 crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
             ),
+            plan_notes: Vec::new(),
         };
         let now_ms = unix_ms();
         let route = activate_ready(
@@ -9004,6 +9310,7 @@ mod tests {
                     1,
                     lease_timeout_ms,
                 ),
+                plan_notes: Vec::new(),
             };
             let now_ms = unix_ms();
             let route = activate_ready(
@@ -11213,6 +11520,286 @@ mod tests {
         }
     }
 
+    /// A node that can do everything, so the review's answers are the
+    /// client's answers and nothing is confounded by what this server proved
+    /// at boot.
+    fn capable_node() -> plurx_core::playback::RenderCaps {
+        plurx_core::playback::RenderCaps::proven(true)
+    }
+
+    /// `hls_file` carries a bare "Dolby Vision" label — deliberately, because
+    /// the HLS master tests exist to prove a stream with no configuration
+    /// record still gets a coherent playlist. The plan review needs the
+    /// opposite: a title whose profile is actually knowable, or every
+    /// derivation below answers "no Dolby Vision" for a reason that has
+    /// nothing to do with the client.
+    fn dolby_vision_p8_file() -> MediaFile {
+        let mut file = hls_file(Vec::new());
+        file.hdr_format = Some("Dolby Vision · Profile 8 (HDR10-compatible)".into());
+        file
+    }
+
+    fn caps_v2(json: &str) -> plurx_core::playback::DeviceCaps {
+        serde_json::from_str(json).expect("the v2 document parses")
+    }
+
+    /// A client that decodes Profile 8 Dolby Vision over HLS. The plan for
+    /// `hls_file` (a P8-labelled 2160p HEVC title) is to preserve it.
+    fn dolby_vision_client() -> plurx_core::playback::DeviceCaps {
+        caps_v2(
+            r#"{"v":2,
+                "video":[{"codec":"hevc","present":["sdr","pq"],"dv_profiles":[5,8],
+                          "max_height":2160}],
+                "audio":["aac"],"containers":["mkv","mp4"],
+                "dv_transport":"hls",
+                "display":{"hdr":true,"dolby_vision":true}}"#,
+        )
+    }
+
+    /// The same hardware minus the Dolby Vision decoder — Chrome, in other
+    /// words, which is the client the whole plan was written for.
+    fn no_dolby_vision_client() -> plurx_core::playback::DeviceCaps {
+        caps_v2(
+            r#"{"v":2,
+                "video":[{"codec":"hevc","present":["sdr"],"dv_profiles":[],
+                          "max_height":2160}],
+                "audio":["aac"],"containers":["mkv","mp4"],
+                "display":{"hdr":false,"dolby_vision":false}}"#,
+        )
+    }
+
+    /// The acceptance case from PLAYBACK-CAPS-V2-PLAN M3: a create whose body
+    /// claims Dolby Vision for a client whose caps enumerate none.
+    ///
+    /// It **succeeds**, with the server's plan, and says so. Paul's ruling
+    /// (2026-08-29): "I don't see a reason for it to prevent functionality."
+    /// A refusal here would turn a client bug into an unplayable title, which
+    /// is strictly worse than the tone-mapped stream the viewer would
+    /// otherwise have got anyway.
+    #[test]
+    fn a_create_that_claims_more_than_its_caps_gets_the_servers_plan_and_a_note() {
+        let file = dolby_vision_p8_file();
+        let review = review_client_plan(
+            &no_dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            true,  // the body says preserve_dolby_vision
+            false, // …and asks for no HDR10 rung
+        );
+
+        assert!(
+            !review.preserve_dolby_vision,
+            "the caps enumerate no Dolby Vision profile, so the plan cannot preserve it"
+        );
+        assert!(review.mismatched);
+        assert_eq!(
+            review.notes,
+            vec!["plan_mismatch: client asked preserve_dolby_vision=true, \
+                 server derived false"
+                .to_owned()],
+            "the note names the field, the claim, and the answer — it is what the \
+             stats overlay shows a viewer asking why the badge changed"
+        );
+    }
+
+    /// The case that must stay silent: the client and the server agree.
+    ///
+    /// This is the one that should be every create once the fleet has moved,
+    /// and the absence of notes is the signal. A review that leaves a note on
+    /// an agreeing create makes `plan_notes` useless, because a field that is
+    /// always populated is a field nobody reads.
+    #[test]
+    fn an_agreeing_create_leaves_no_note_at_all() {
+        let file = dolby_vision_p8_file();
+        let review = review_client_plan(
+            &dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            true,
+            true,
+        );
+        assert!(review.preserve_dolby_vision);
+        assert!(review.hdr10, "the caps present PQ on hevc");
+        assert!(!review.mismatched);
+        assert!(review.notes.is_empty(), "{:?}", review.notes);
+    }
+
+    /// Apple's `forceCompatibleHDRBase` retry, and why it needs a name.
+    ///
+    /// The client decoded the Dolby Vision stream, failed on this title, and
+    /// is asking for the HDR10-compatible base. Its caps are still correct —
+    /// the device really does take Profile 8 — so the re-derivation says
+    /// "preserve", and without a named override the create would hand it back
+    /// exactly the stream it just failed on, forever. The override lowers the
+    /// plan and leaves its own reason, and it is *not* counted as a mismatch:
+    /// nothing disagreed, the client asked for something legitimate.
+    #[test]
+    fn the_compatible_base_override_lowers_the_plan_without_being_a_mismatch() {
+        let file = dolby_vision_p8_file();
+        let review = review_client_plan(
+            &dolby_vision_client(),
+            Some(&CreateOverrides {
+                compatible_hdr_base: Some(true),
+                force: None,
+            }),
+            &file,
+            &capable_node(),
+            false, // the retry's body echoes the lowered plan
+            true,
+        );
+
+        assert!(!review.preserve_dolby_vision);
+        assert!(
+            !review.mismatched,
+            "a named override is an explanation, not a disagreement"
+        );
+        assert_eq!(
+            review.notes,
+            vec!["override compatible_hdr_base: Dolby Vision declined by the client".to_owned()]
+        );
+    }
+
+    /// The same override on a title the plan was never going to send as
+    /// Dolby Vision.
+    ///
+    /// Harmless — the plan is already what the client is asking for — but
+    /// worth a line, because a client retrying the compatible base on an
+    /// HDR10 title is a client chasing a failure that came from somewhere
+    /// else, and the next person debugging it should not have to guess that.
+    #[test]
+    fn the_compatible_base_override_says_so_when_it_had_nothing_to_decline() {
+        let mut file = hls_file(Vec::new());
+        file.hdr = Some("hdr10".into());
+        file.hdr_format = Some("HDR10".into());
+        let review = review_client_plan(
+            &no_dolby_vision_client(),
+            Some(&CreateOverrides {
+                compatible_hdr_base: Some(true),
+                force: None,
+            }),
+            &file,
+            &capable_node(),
+            false,
+            false,
+        );
+        assert!(!review.preserve_dolby_vision);
+        assert!(!review.mismatched);
+        assert_eq!(
+            review.notes,
+            vec![
+                "override compatible_hdr_base had nothing to decline: the plan was \
+                 not Dolby Vision"
+                    .to_owned()
+            ]
+        );
+    }
+
+    /// The quality menu is fed *into* the derivation, not compared against
+    /// it.
+    ///
+    /// A forced transcode is a viewer's answer to a different question — how
+    /// big should this stream be — and the plan it produces is still the
+    /// server's. It leaves a note anyway: a viewer who forced a transcode and
+    /// then read an SDR badge deserves those two facts next to each other
+    /// rather than a support thread.
+    #[test]
+    fn a_forced_rung_produces_the_servers_plan_for_that_force_and_says_which() {
+        let file = dolby_vision_p8_file();
+        let review = review_client_plan(
+            &dolby_vision_client(),
+            Some(&CreateOverrides {
+                compatible_hdr_base: None,
+                force: Some("transcode".to_owned()),
+            }),
+            &file,
+            &capable_node(),
+            false,
+            true,
+        );
+        assert!(
+            !review.preserve_dolby_vision,
+            "a transcode cannot preserve Dolby Vision; it re-encodes"
+        );
+        assert!(!review.mismatched);
+        assert_eq!(review.notes, vec!["override force=transcode".to_owned()]);
+    }
+
+    /// The `hdr10` field is a claim about the CLIENT, and the review checks
+    /// it against the client's own document — not against what this node or
+    /// this source can do.
+    ///
+    /// Keeping those separate matters: `hdr10_grade_for` still refuses the
+    /// rung for any source, height or build that did not prove the chain, and
+    /// folding that refusal in here would report a "mismatch" every time a
+    /// perfectly honest client asked for a rung this particular title cannot
+    /// have.
+    #[test]
+    fn the_hdr10_claim_is_checked_against_the_document_not_against_the_node() {
+        let file = dolby_vision_p8_file();
+        // A node that proved nothing at all: no RPU render, no HDR10 chain.
+        let bare = plurx_core::playback::RenderCaps::proven(false);
+        let review = review_client_plan(&dolby_vision_client(), None, &file, &bare, false, true);
+        assert!(
+            review.hdr10,
+            "the document presents PQ on hevc, so the claim stands; whether this \
+             node can honour it is `hdr10_grade_for`'s question, asked later"
+        );
+
+        // …and a client whose document does not present PQ cannot claim it,
+        // however capable the node.
+        let review = review_client_plan(
+            &no_dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            false,
+            true,
+        );
+        assert!(!review.hdr10);
+        assert!(review.mismatched);
+        assert!(
+            review
+                .notes
+                .iter()
+                .any(|note| note.contains("client asked hdr10=true, server derived false")),
+            "{:?}",
+            review.notes
+        );
+    }
+
+    /// The build label is what every create log line is keyed by, so it has
+    /// to be right for the population it is counting.
+    #[test]
+    fn the_build_label_prefers_the_document_and_bounds_the_user_agent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            axum::http::HeaderValue::from_str(&"M".repeat(400)).expect("ascii"),
+        );
+
+        let named = caps_v2(
+            r#"{"v":2,"client":{"kind":"ios","build":"86"},
+                "video":[],"audio":[],"containers":[]}"#,
+        );
+        assert_eq!(client_build_label(Some(&named), &headers), "ios/86");
+
+        // A document with a client block that says nothing falls through to
+        // the header, same as no document at all.
+        let anonymous = caps_v2(r#"{"v":2,"client":{},"video":[],"audio":[],"containers":[]}"#);
+        for caps in [Some(&anonymous), None] {
+            let label = client_build_label(caps, &headers);
+            assert_eq!(
+                label.chars().count(),
+                96,
+                "an unbounded header does not belong in a log line: {label}"
+            );
+        }
+
+        assert_eq!(client_build_label(None, &HeaderMap::new()), "unknown");
+    }
+
     fn hls_context(
         codecs: &str,
         supplemental_codecs: Option<&str>,
@@ -11284,6 +11871,9 @@ mod tests {
             audio_offset_ms: Some(20_000),
             presentation: None,
             block_budget_secs: None,
+            caps: None,
+            plan_ref: None,
+            overrides: None,
         }
         .into_request(7, 1080);
 
@@ -11313,6 +11903,9 @@ mod tests {
             audio_offset_ms: None,
             presentation: None,
             block_budget_secs: None,
+            caps: None,
+            plan_ref: None,
+            overrides: None,
         }
         .into_request(5615, 2160);
         assert_eq!(request.subtitle_burn, Some(5));

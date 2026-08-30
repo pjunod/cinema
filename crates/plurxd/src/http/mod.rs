@@ -230,7 +230,10 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         // Playback
-        .route("/files/{id}/decision", get(stream::decision))
+        .route(
+            "/files/{id}/decision",
+            get(stream::decision).post(stream::decision_post),
+        )
         .route("/files/{id}/audio-offset", put(stream::set_audio_offset))
         // App-managed offline viewing. JSON/package ownership uses bearer
         // auth; only immutable child media uses the package-scoped capability.

@@ -6,13 +6,16 @@
 //! release (REQ-PLAY-4). Phase 1 serves DirectPlay and Remux; a Transcode
 //! verdict is reported honestly and its serving lands in Phase 2.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::MediaFile;
+
+pub mod caps;
 use crate::transcode::OutputGrade;
+pub use caps::{DeviceCaps, LearnedLimit, LegacyCaps, Transfer, VideoCaps};
 
 /// Built-in device profiles, parsed once from the embedded TOML.
 static PROFILES: LazyLock<HashMap<String, DeviceProfile>> = LazyLock::new(|| {
@@ -69,6 +72,9 @@ pub fn caps_profile(
         supports_dolby_vision,
         dolby_vision_profiles: Vec::new(),
         remux_dolby_vision: false,
+        presents: BTreeMap::new(),
+        profile_max_heights: BTreeMap::new(),
+        learned_limits: Vec::new(),
         // Set by the caller after construction, like `remux_dolby_vision` and
         // `dolby_vision_profiles`: adding a seventh positional argument to a
         // function with six booleans and vectors in a row is how a caller
@@ -99,7 +105,7 @@ impl Force {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DeviceProfile {
     #[serde(default)]
     pub name: String,
@@ -160,6 +166,26 @@ pub struct DeviceProfile {
     /// video sample/RPU while rebuilding the delivery signaling it expects.
     #[serde(default)]
     pub remux_dolby_vision: bool,
+    /// Per codec: the transfer functions this client can PRESENT, not merely
+    /// decode. Empty means the caller built this profile the old way — a
+    /// named profile, or a `caps_profile` call — and the boolean fields above
+    /// are the answer.
+    #[serde(default)]
+    pub presents: BTreeMap<String, BTreeSet<caps::Transfer>>,
+    /// Per (codec, codec profile): the height ceiling, where the client
+    /// reported one narrower than the codec's own.
+    ///
+    /// This is the field that lets a browser stop sending the minimum of its
+    /// 8-bit and 10-bit rungs: a device that decodes 8-bit 4K but Main10 only
+    /// at 1080p can say so, instead of capping every 4K title at 1080p to
+    /// protect the Main10 one (PLAYBACK-CAPS-V2-PLAN §2, edge E5).
+    #[serde(default)]
+    pub profile_max_heights: BTreeMap<(String, String), i64>,
+    /// Decode limits this client learned itself and now applies. Reported by
+    /// the client so the server's reasons can name the client's own words for
+    /// a demotion the client asked for.
+    #[serde(default)]
+    pub learned_limits: Vec<caps::LearnedLimit>,
 }
 
 impl DeviceProfile {
@@ -179,6 +205,34 @@ impl DeviceProfile {
         self.audio_codecs
             .iter()
             .any(|x| x.eq_ignore_ascii_case(codec))
+    }
+
+    /// This client's height ceiling for a source in `codec`, narrowed by the
+    /// source's own codec profile where the client reported a narrower one.
+    ///
+    /// A decoder's ceiling is not one number. A device can take 8-bit 4K HEVC
+    /// and Main10 only at 1080p, and before the caps document could say so the
+    /// web sent the minimum of its two rungs — capping every 4K 8-bit title at
+    /// 1080p to protect the Main10 one, which is a transcode of a file the
+    /// browser would have direct-played (PLAYBACK-CAPS-V2-PLAN §2, edge E5).
+    ///
+    /// The profile match is on the *source's* declared profile, normalized:
+    /// ffprobe writes "Main 10", the caps document says "main10". An
+    /// unrecognised or absent profile falls back to the codec's own ceiling,
+    /// which is the old behaviour exactly.
+    fn codec_height_ceiling(&self, codec: &str, video_profile: Option<&str>) -> Option<i64> {
+        let codec = codec.to_ascii_lowercase();
+        let by_profile = video_profile.and_then(|profile| {
+            let normalized: String = profile
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .flat_map(char::to_lowercase)
+                .collect();
+            self.profile_max_heights
+                .get(&(codec.clone(), normalized))
+                .copied()
+        });
+        by_profile.or_else(|| self.video_max_heights.get(&codec).copied())
     }
 
     fn allows_dolby_vision(&self, file: &MediaFile) -> bool {
@@ -563,12 +617,10 @@ fn evaluate(file: &MediaFile, profile: &DeviceProfile) -> (Checks, Vec<String>) 
         ));
     }
 
-    let codec_height = file.video_codec.as_ref().and_then(|codec| {
-        profile
-            .video_max_heights
-            .get(&codec.to_ascii_lowercase())
-            .copied()
-    });
+    let codec_height = file
+        .video_codec
+        .as_ref()
+        .and_then(|codec| profile.codec_height_ceiling(codec, file.video_profile.as_deref()));
     let height_ceiling = match (profile.max_height, codec_height) {
         (Some(global), Some(codec)) => Some(global.min(codec)),
         (global, codec) => global.or(codec),
