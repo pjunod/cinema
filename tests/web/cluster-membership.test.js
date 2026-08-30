@@ -91,11 +91,12 @@ const BORROWED = [
 
 // One sandbox per test so a mutation of ME or CLUSTER_REFUSAL cannot leak into
 // the next assertion.
-function sandbox({ isAdmin = true, refusal = null, token = null } = {}) {
+function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [] } = {}) {
   const source = `
     let ME = ${JSON.stringify({ is_admin: isAdmin })};
     let CLUSTER_REFUSAL = ${JSON.stringify(refusal)};
     let CLUSTER_TOKEN = ${JSON.stringify(token)};
+    let CLUSTER_RAIL_EXPANDED = ${JSON.stringify(expanded)};
     let CLUSTER_LEAVING = false;
     ${BORROWED.map(shippedSource).join("\n")}
     // The shell's own esc/fmtAgo/fmtBytes, handed to the model exactly the way
@@ -914,7 +915,10 @@ test("the healthy cluster layout combines node membership and operations evidenc
   assert.match(html, /class="clrail"/);
   assert.match(html, /Enter maintenance on node-a/);
   assert.match(html, /Force a leader election/);
-  assert.match(html, /Danger zone · membership changes/);
+  // The membership controls are the rail's own rows now, not a second card.
+  assert.equal(html.includes("cldanger"), false);
+  assert.match(html, /id="clrail-add"/);
+  assert.match(html, /id="clrail-leave"/);
   assert.equal(html.includes("<table"), false);
 });
 
@@ -1050,8 +1054,14 @@ test("maintenance resume requires direct local process evidence", () => {
     node("node-c", 3, "voter"),
   ]);
   const panel = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
-  assert.match(panel, /disabled title="Finish maintenance before changing membership[^>]*>Create a join token/);
-  assert.match(panel, /disabled title="Finish maintenance before changing membership[^>]*>Leave this cluster/);
+  // A membership change is in flight, so the rows that would start another one
+  // are blocked — and a blocked row carries no expansion at all. An unreachable
+  // control is better than a disabled control the operator has to open to find.
+  assert.equal(panel.includes('id="clrail-add"'), false);
+  assert.equal(panel.includes("Create a join token"), false);
+  assert.match(panel, /A membership change is already in flight on node-b/);
+  const leaving = ui.leavePanel("node-a", true);
+  assert.match(leaving, /disabled title="Finish maintenance before changing membership[^>]*>Leave this cluster/);
   assert.match(panel, /disabled[^>]*>Remove permanently/);
 });
 
@@ -1141,7 +1151,7 @@ test("the local row cannot use generic removal", () => {
   const local = ui.clusterNodeRow(node("node-a", 1, "voter"), "node-a");
   const peer = ui.clusterNodeRow(node("node-b", 2, "voter"), "node-a");
   assert.match(local, /This node/);
-  assert.match(local, /Use graceful leave in Danger zone/);
+  assert.match(local, /Use Leave this cluster on the Maintenance card/);
   assert.equal(local.includes(">Remove<"), false);
   assert.match(peer, />Remove permanently</);
 });
@@ -1320,7 +1330,7 @@ test("late cluster work can repaint only a live Settings route", () => {
   for (const handler of ["loadCluster", "mintJoinToken", "removeNode"]) {
     assert.match(
       shippedSource(handler),
-      /renderSettings\(\)/,
+      /renderSettings\(\)|repaintClusterPreserving\(renderSettings\)/,
       `${handler} no longer renders through the guarded Settings choke point`,
     );
   }
@@ -1980,9 +1990,18 @@ test("the rail routes to the credential rather than minting a second one", () =>
     node("node-c", 3, "voter"),
   ]);
   const rows = railRows(ui, cluster, operationStatus(cluster));
-  assert.match(rows.get("Add a node").action, /openClusterDanger\(\)/);
-  assert.match(rows.get("Leave this cluster").action, /openClusterDanger\(\)/);
-  assert.doesNotMatch(ui.clusterOperationsRail(cluster, operationStatus(cluster)), /mintJoinToken|leaveCluster\(/);
+  assert.match(rows.get("Add a node").action, /toggleClusterRailPanel\('add'\)/);
+  assert.match(rows.get("Leave this cluster").action, /toggleClusterRailPanel\('leave'\)/);
+
+  // The row that decides the change carries the control for it, and it is the
+  // only place either one exists. Two surfaces that mint one credential is the
+  // failure this panel must never ship.
+  const html = ui.clusterPanel({ cluster, clusterOps: operationStatus(cluster), sys: { replication: REPLICATION } });
+  assert.equal((html.match(/mintJoinToken\(this\)/g) || []).length, 1);
+  assert.equal((html.match(/leaveCluster\(this,/g) || []).length, 1);
+  const rail = html.slice(html.indexOf('<div class="clrail">'));
+  assert.match(rail, /mintJoinToken\(this\)/);
+  assert.match(rail, /leaveCluster\(this,/);
   assert.doesNotMatch(PANEL.clusterOperationRows.toString(), /localStorage/);
 });
 
@@ -2225,7 +2244,7 @@ test("the two components stay in their own columns, and the rail with the cluste
   assert.match(left, /<h3>Replicated database<\/h3>/);
   assert.match(left, /<h3>Maintenance<\/h3>/);
   assert.match(left, /class="clrail"/);
-  assert.match(left, /Danger zone · membership changes/);
+  assert.match(left, /id="clrail-add"/);
   assert.doesNotMatch(left, /id="cluster-node-list"/);
   assert.match(right, /<h3>Cluster nodes<\/h3>/);
   assert.match(right, /id="cluster-node-list"/);
@@ -2248,9 +2267,79 @@ test("the controls the rail routes to actually do something", () => {
   // Both of these are one line each and both were deletable with the suite
   // green: the credential panel would never open, and a card opened near the
   // bottom of the scroller would open below the fold.
-  assert.match(shippedSource("openClusterDanger"), /querySelector\("\.cldanger"\)/);
-  assert.match(shippedSource("openClusterDanger"), /zone\.open=true/);
+  assert.match(shippedSource("toggleClusterRailPanel"), /scrollIntoView\(\{block:"nearest"\}\)/);
   assert.match(shippedSource("clusterNodeFoldLater"), /scrollIntoView\(\{block:"nearest"\}\)/);
+});
+
+// ---- one credential surface ------------------------------------------------
+
+test("the credential is an expansion of the row that decides it", () => {
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ops = operationStatus(cluster);
+  const collapsed = sandbox().clusterOperationsRail(cluster, ops);
+  // Shipped state: the panel exists in the markup and is not showing. A fresh
+  // page must never open a credential surface by itself.
+  assert.match(collapsed, /<div class="clrailpanel" id="clrail-add" hidden>/);
+  assert.match(collapsed, /aria-controls="clrail-add" aria-expanded="false"/);
+  assert.match(collapsed, /<div class="clrailpanel" id="clrail-leave" hidden>/);
+
+  const open = sandbox({ expanded: ["add"] }).clusterOperationsRail(cluster, ops);
+  assert.match(open, /<div class="clrailpanel" id="clrail-add">/);
+  assert.match(open, /aria-controls="clrail-add" aria-expanded="true"/);
+  assert.match(open, />Hide</);
+  // Opening one does not open the other.
+  assert.match(open, /<div class="clrailpanel" id="clrail-leave" hidden>/);
+});
+
+test("the token survives a repaint and never reaches storage", () => {
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ui = sandbox({
+    expanded: ["add"],
+    token: { token: "plxjoin:v1:aaaa:bbbb", expires_at: Date.now() + 600_000, raft_id: 4, role: "voter" },
+  });
+  const rail = ui.clusterOperationsRail(cluster, operationStatus(cluster));
+  // Rendered from state rather than captured from the DOM, so the 15s status
+  // repaint cannot pull a half-read credential shut underneath someone.
+  assert.match(rail, /plxjoin:v1:aaaa:bbbb/);
+  assert.equal((rail.match(/plxjoin:v1:aaaa:bbbb/g) || []).length, 1, "shown once means once");
+  assert.match(rail, /Shown once/);
+
+  // The expansion is module state, and the same three exits that drop the token
+  // drop it too — so returning to this tab starts collapsed, with nothing to
+  // reopen onto.
+  const forget = shippedSource("forgetJoinToken");
+  assert.match(forget, /CLUSTER_TOKEN=null/);
+  assert.match(forget, /CLUSTER_RAIL_EXPANDED=\[\]/);
+  const toggle = shippedSource("toggleClusterRailPanel");
+  assert.doesNotMatch(toggle, /forgetJoinToken|CLUSTER_TOKEN/);
+  for (const sink of ["localStorage", "sessionStorage", "clusterFoldSave"]) {
+    assert.equal(toggle.includes(sink), false, `the rail expansion reaches ${sink}`);
+  }
+  // The fold's whitelist is still exactly the fold: nothing credential-adjacent
+  // can ride into storage on it.
+  const read = PANEL.clusterFoldRead.toString();
+  for (const key of ["database", "nodes_closed", "tab"]) assert.ok(read.includes(key));
+  assert.doesNotMatch(read, /rail|expand|token/i);
+});
+
+test("the danger zone is gone, not renamed", () => {
+  for (const trace of ["cldanger", "cldangerbody", "openClusterDanger", "Danger zone"]) {
+    assert.equal(SHIPPED_UI.includes(trace), false, `index.html still ships ${trace}`);
+  }
+  // Leave keeps its friction and its binding: the graceful-leave wording, the
+  // roster-bound node_id, and the destructive treatment all moved as they were.
+  const leave = sandbox().leavePanel("node-a");
+  assert.match(leave, /leaveCluster\(this,&quot;node-a&quot;\)/);
+  assert.match(leave, /permanent, not an update or restart action/);
+  assert.match(leave, /fresh data directory/);
 });
 
 // ---- the direct status keeps itself fresh ----------------------------------

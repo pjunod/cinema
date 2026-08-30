@@ -97,8 +97,9 @@
         "on the leader itself and use Leave this cluster; it coordinates its own removal with the surviving "+
         "quorum and then shuts down.",
       self_removal_requires_leave:
-        "That row is this server. Use Leave this cluster below so the daemon settles local work, commits its "+
-        "own removal, drains active connections, and shuts down instead of leaving a tombstoned process online.",
+        "That row is this server. Use Leave this cluster on the Maintenance card so the daemon settles local "+
+        "work, commits its own removal, drains active connections, and shuts down instead of leaving a "+
+      "tombstoned process online.",
       leave_node_mismatch:
         "The leave confirmation reached a different backend than the roster you confirmed, so nothing was "+
         "removed. Refresh this page and retry against the same node; configure sticky admin requests at the proxy.",
@@ -193,6 +194,12 @@
   // the server's own answer.
   function clusterRailRow(row){
     const state=row.blocked?"blocked":row.destructive?"destructive":"ready";
+    // A row that decides a membership change also carries the control for it.
+    // The shell supplies the markup (those panels read module state the model
+    // cannot see); the row owns whether it is showing.
+    const panel=row.expansion
+      ? `<div class="clrailpanel" id="clrail-${row.expand}"${row.expanded?"":" hidden"}>${row.expansion}</div>`
+      : "";
     const chip=row.blocked
       ? `<span class="pill" style="color:var(--muted)">Blocked</span>`
       : row.destructive
@@ -201,7 +208,7 @@
     const action=row.action||"";
     return `<div class="clrailrow ${state}"><div class="clrailtext"><div class="t">${row.title}</div>
         <div class="r">${row.reason}</div></div>
-      <div class="clrailside">${chip}${action}</div></div>`;
+      <div class="clrailside">${chip}${action}</div>${panel}</div>`;
   }
   // A server verdict ships the condition it actually hit. Naming it is the
   // whole point of stating a precondition, so a row reports the blocker rather
@@ -213,8 +220,12 @@
     return `${esc(clusterOperationReason(first.code))}${first.node_id?` on ${esc(first.node_id)}`:""}${
       (blockers||[]).length>1?`, and ${blockers.length-1} more`:""}.`;
   }
-  function clusterOperationRows(env,cluster,ops){
+  function clusterOperationRows(env,cluster,ops,expanded){
     const {esc,fmtBytes}=env;
+    const showing=id=>(expanded||[]).indexOf(id)!==-1;
+    const disclose=(id,label,tone)=>`<button class="${tone} sm" aria-controls="clrail-${id}" `+
+      `aria-expanded="${showing(id)?"true":"false"}" onclick="toggleClusterRailPanel('${id}')">${
+        showing(id)?"Hide":label}</button>`;
     const nodes=cluster.nodes||[];
     const name=n=>esc(n.hostname||n.node_id);
     const arg=n=>esc(JSON.stringify(n.node_id));
@@ -227,8 +238,9 @@
     const recovery=clusterRecoveryState(cluster);
     const rows=[];
 
-    // Adding a node mints a credential, so the row routes to the panel that
-    // shows it once rather than minting from here.
+    // Adding a node mints a credential, and this row is where that decision is
+    // already made — so the panel that shows the token once is this row's own
+    // expansion rather than a second surface further down the card.
     // Recovery locks every membership change: issuing a token and removing a
     // member both need a leader and a committed quorum read.
     const locked=recovery.required?{reason:"The cluster cannot prove both an elected leader and a reachable voter majority, so a membership change cannot commit."}:null;
@@ -239,9 +251,9 @@
       ? {title:"Add a node",blocked:true,
          reason:`A membership change is already in flight on ${name(lifecycle)}. Finish it before admitting another node.`,
          action:`<button class="ghost sm" disabled>Add</button>`}
-      : {title:"Add a node",
+      : {title:"Add a node",expand:"add",expanded:showing("add"),
          reason:"Mints one single-use join token, shown once, for a machine with a fresh data directory.",
-         action:`<button class="ghost sm" onclick="openClusterDanger()">Add</button>`});
+         action:disclose("add","Add","ghost")});
 
     // Promotion is refused until the learner has published a fresh zero-lag
     // apply proof and its filesystem has proved the voter reserve. Both are on
@@ -335,9 +347,9 @@
         action:""});
     }
 
-    rows.push({title:"Leave this cluster",destructive:true,
+    rows.push({title:"Leave this cluster",destructive:true,expand:"leave",expanded:showing("leave"),
       reason:"This node resolves its owned work, commits its own removal, drains and shuts down. Rejoining needs a fresh data directory and a new token.",
-      action:`<button class="btn-danger sm" onclick="openClusterDanger()">Leave</button>`});
+      action:disclose("leave","Leave","btn-danger")});
     return rows;
   }
 

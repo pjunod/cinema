@@ -992,9 +992,8 @@
   .clrecovery .recovery-count{font-size:25px;font-weight:750;color:var(--text);margin:12px 0 2px}
   .clvoters{display:grid;gap:6px;margin:12px 0}
   .clvoter{display:flex;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px}
-  .cldanger{margin-top:0;border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:0 14px}
-  .cldanger>summary{cursor:pointer;padding:13px 0;font-weight:650;font-size:13px}
-  .cldangerbody{padding:0 0 14px}
+  .clrailpanel{flex-basis:100%;margin-top:11px;padding-top:11px;border-top:1px solid var(--line)}
+  .clrailrow.destructive .clrailpanel{border-top-color:color-mix(in srgb,var(--bad) 35%,var(--line))}
   .cldialog{width:min(540px,calc(100vw - 30px));border:1px solid var(--line);border-radius:13px;background:var(--panel);color:var(--text);padding:0;box-shadow:0 22px 70px #0009}
   .cldialog::backdrop{background:#0009}
   .cldialogbody{padding:20px}
@@ -11394,7 +11393,12 @@ let CLUSTER_LEAVING=false;
 // for exactly as long as the panel showing it is on screen, and dropped on tab
 // change and on every re-entry into Settings.
 let CLUSTER_TOKEN=null;
-function forgetJoinToken(){ CLUSTER_TOKEN=null; CLUSTER_REFUSAL=null; }
+// Which rail rows have their membership control showing. Module state, never
+// storage: a credential surface must not reopen itself on the next visit, and a
+// fresh page is always collapsed. Because it is state rather than markup, a
+// repaint cannot yank the form shut under someone mid-mint.
+let CLUSTER_RAIL_EXPANDED=[];
+function forgetJoinToken(){ CLUSTER_TOKEN=null; CLUSTER_REFUSAL=null; CLUSTER_RAIL_EXPANDED=[]; }
 async function loadCluster(){
   const generation=PAGE_RENDER_GENERATION;
   SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
@@ -11554,7 +11558,7 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
     ? `<button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?'Resume only after direct process drain proof is complete; leadership is handed off first when needed.':'Open this node directly to resume it.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},false)'>Resume service</button>`
     : `<button class="ghost sm" ${!maintenanceAllowed||!localTarget||!n.reachable||n.removal_pending?"disabled":""} title="${!localTarget?'Open this node directly to fence and drain it.':!maintenanceAllowed?'Direct maintenance preflight has not approved this node.':'Fence new work, hand off leadership when needed, and let existing work drain.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},true)'>Enter maintenance</button>`;
   const remove=n.node_id===localNodeId
-    ? `<span class="muted">Use graceful leave in Danger zone</span>`
+    ? `<span class="muted">Use Leave this cluster on the Maintenance card</span>`
     : `<button class="ghost sm" ${lifecycleLocked?"disabled":""} title="${lifecycleLocked?'Finish maintenance before changing membership.':'Permanently remove this member.'}" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove permanently"}</button>`;
   const direct=PlurxClusterPanel.clusterDirectMaintenanceStatus(context.operations,n.node_id);
   const sessions=direct&&direct.media?Number(direct.media.local_active_sessions||0):Number(n.active_media_sessions||0);
@@ -11622,16 +11626,32 @@ function clusterMaintenanceProgress(active,ops,localNodeId,recovering=false){
 // Every action this screen can take, with its precondition evaluated before the
 // click rather than after it. The rows themselves — and the preconditions they
 // state — are the model's, in cluster-panel.js; this is the mount.
+//
+// Two rows carry their control inside them: the join credential and the
+// graceful leave. Those panels read module state (the minted token, the leaving
+// flag) that the model cannot see, so the shell renders them and hands them
+// over. A blocked row gets none — the blocked reason is its whole content, and
+// an unreachable expansion is a control that lies about being available.
 function clusterOperationsRail(cluster,ops){
-  return `<div class="clrail">${PlurxClusterPanel.clusterOperationRows(clenv(),cluster,ops).map(PlurxClusterPanel.clusterRailRow).join("")}</div>`;
+  const maintenanceActive=(cluster.nodes||[]).some(node=>node.maintenance);
+  const controls={add:()=>joinPanel(maintenanceActive),
+    leave:()=>leavePanel(cluster.local_node_id,maintenanceActive)};
+  const rows=PlurxClusterPanel.clusterOperationRows(clenv(),cluster,ops,CLUSTER_RAIL_EXPANDED)
+    .map(row=>row.expand&&!row.blocked&&controls[row.expand]
+      ? Object.assign({},row,{expansion:controls[row.expand]()}):row);
+  return `<div class="clrail">${rows.map(PlurxClusterPanel.clusterRailRow).join("")}</div>`;
 }
-// The join credential and the graceful leave keep their fenced panel; the rail
-// routes here rather than duplicating either control.
-function openClusterDanger(){
-  const zone=document.querySelector(".cldanger");
-  if(!zone) return;
-  zone.open=true;
-  zone.scrollIntoView({block:"nearest"});
+// Expanding is state, not markup: the panel is re-rendered from it, so a mint
+// or a status repaint cannot close a credential someone is reading. It is never
+// written to storage, and forgetJoinToken() clears it on the same three exits
+// that drop the token itself.
+function toggleClusterRailPanel(id){
+  CLUSTER_RAIL_EXPANDED=CLUSTER_RAIL_EXPANDED.indexOf(id)===-1
+    ? CLUSTER_RAIL_EXPANDED.concat([id])
+    : CLUSTER_RAIL_EXPANDED.filter(open=>open!==id);
+  repaintClusterPreserving(renderSettings);
+  const panel=document.getElementById("clrail-"+id);
+  if(panel&&!panel.hidden&&panel.scrollIntoView) panel.scrollIntoView({block:"nearest"});
 }
 function clusterOperationsPanel(cluster,ops){
   const recovery=PlurxClusterPanel.clusterRecoveryState(cluster);
@@ -11997,8 +12017,7 @@ function clusterPanel(d){
         <p>Every action this screen can take, with its precondition already evaluated.</p></div></div>
         ${recoveryRequired?"":operations}
         ${clusterOperationsRail(cluster,d.clusterOps)}
-        ${recoveryRequired?"":forceElectionDialog(true)}
-        <details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel(maintenanceActive)}${leavePanel(cluster.local_node_id,maintenanceActive)}</div></details></section>`:""}</div>
+        ${recoveryRequired?"":forceElectionDialog(true)}</section>`:""}</div>
       ${roomForRoster?`<div class="clcolumn"><section class="cluster-card"><div class="clophead"><div><h3>Cluster nodes</h3><p>Each card combines committed membership with direct process, Raft, WAL, snapshot, media, and build evidence for that machine.</p></div>
         <div class="row">${nodes.length?`<button class="ghost sm" id="clnodes-toggle" aria-controls="cluster-node-list" aria-expanded="true" onclick="toggleClusterNodes(this)">Collapse all</button>`:""}<button class="ghost sm" onclick="retryCluster()">Refresh nodes</button></div></div>
         ${roster}${statusFailure?`<div class="empty">The committed roster could not be read from this node.</div>
@@ -12091,8 +12110,7 @@ function clusterRefusalHtml(){
 // server hands back the only copy and keeps nothing but its digest.
 function joinPanel(lifecycleLocked=false){
   if(CLUSTER_TOKEN) return joinTokenHtml(CLUSTER_TOKEN);
-  return `<h2 class="section">Add a node</h2>
-    <div class="row" style="gap:10px;align-items:center">
+  return `<div class="row" style="gap:10px;align-items:center">
       <span class="schedpair">Token valid for
         <select id="clttl" style="max-width:130px;font-size:12px;padding:3px 6px">
           <option value="600" selected>10 minutes</option>
@@ -12107,14 +12125,11 @@ function joinPanel(lifecycleLocked=false){
       other machine is ready to start, not before.</div>`;
 }
 function leavePanel(localNodeId,lifecycleLocked=false){
-  if(CLUSTER_LEAVING) return `<h2 class="section">Remove this node</h2>
-    <div class="clstate calm"><h3>Leaving the cluster</h3><p>The membership change committed. This
+  if(CLUSTER_LEAVING) return `<div class="clstate calm"><h3>Leaving the cluster</h3><p>The membership change committed. This
       Cinema node is draining connections and will shut down.</p></div>`;
-  if(!localNodeId) return `<h2 class="section">Remove this node</h2>
-    <div class="clstate warn"><h3>Local node identity unavailable</h3><p>Refresh the roster before
+  if(!localNodeId) return `<div class="clstate warn"><h3>Local node identity unavailable</h3><p>Refresh the roster before
       leaving. The server will not guess which backend this destructive action should remove.</p></div>`;
-  return `<h2 class="section">Remove this node</h2>
-    <button class="ghost sm" ${lifecycleLocked?'disabled title="Finish maintenance before changing membership."':''} onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
+  return `<button class="ghost sm" ${lifecycleLocked?'disabled title="Finish maintenance before changing membership."':''} onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
     <div class="hint">A graceful leave is permanent, not an update or restart action. This node resolves
       its owned offline work and coordinates a safe membership change with the surviving quorum. It then
       drains and shuts down. Rejoining this machine requires a fresh data directory and
@@ -12126,8 +12141,7 @@ function leavePanel(localNodeId,lifecycleLocked=false){
 function joinTokenHtml(issued){
   const mins=Math.max(0,Math.round((issued.expires_at-Date.now())/60000));
   const role=issued.role==="learner"?"a non-voting read worker":"a voting member";
-  return `<h2 class="section">Add a node</h2>
-    <div class="jointoken" id="cltoken">${esc(issued.token)}</div>
+  return `<div class="jointoken" id="cltoken">${esc(issued.token)}</div>
     <div class="hint"><b>Shown once.</b> plurx keeps only this token's digest, so closing this is the end of
       it — create another if you lose it. Until it is redeemed or expires it carries the complete authority
       to join a node to this cluster: treat it like a password, and do not paste it into a chat, an issue, or
@@ -12154,7 +12168,7 @@ async function mintJoinToken(btn){
     if(!settingsCurrent(generation,"cluster")) return;
     CLUSTER_TOKEN={...token,role};
     CLUSTER_REFUSAL=null;
-    renderSettings();
+    repaintClusterPreserving(renderSettings);
   }catch(e){
     if(e&&e.status===401) throw e;
     if(!settingsCurrent(generation,"cluster")) return;
