@@ -114,6 +114,24 @@ final class PlaybackControlSession {
     /// player pushes here, the reporter never pulls from the player.
     private let latest = PlaybackControlLatestSnapshot()
 
+    /// What the reporter writes. The mirror of `latest`, and it exists for the
+    /// same reason: the reporter is an actor and the player is `@MainActor`,
+    /// so the two never call each other. A lock-guarded slot is the whole
+    /// bridge.
+    ///
+    /// `MainActor.assumeIsolated` inside a closure an actor pulls
+    /// synchronously is an assertion, not a bridge, and it killed every play
+    /// on build 90. Nothing here hops.
+    private let verdicts = PlaybackControlLatestVerdict()
+
+    /// The last terminal verdict this session was given, if any.
+    ///
+    /// It deliberately outlives the reporter. A terminal verdict stops
+    /// reporting — correctly, since the reporter owns no recovery — so a
+    /// verdict that died with it would be discarded exactly when it mattered:
+    /// at the failure it explains, minutes later.
+    var terminalVerdict: ControlAction? { verdicts.load() }
+
     /// One identity per player instance, not per session: a reopen is the same
     /// viewer on the same device continuing, and the server reads a new
     /// `client_instance_id` as a different client.
@@ -130,6 +148,9 @@ final class PlaybackControlSession {
         observe: @escaping () -> PlayerControlObservation?
     ) {
         end()
+        // A new session is a new verdict. The old one described a recipe that
+        // is no longer playing.
+        verdicts.store(nil)
         self.observe = observe
         // The reporter takes its first snapshot the moment it starts, so the
         // first one has to be there before it does.
@@ -142,7 +163,22 @@ final class PlaybackControlSession {
             sleep: { milliseconds, _ in
                 try await Task.sleep(nanoseconds: UInt64(max(0, milliseconds)) * 1_000_000)
             },
-            now: { Int(Date().timeIntervalSince1970 * 1_000) }
+            now: { Int(Date().timeIntervalSince1970 * 1_000) },
+            // The return path. Until now this defaulted to a no-op, so the
+            // server could send a verdict the player would never see.
+            //
+            // Only `terminal` is retained, and it is retained rather than
+            // acted on: ruling D1 in the M5 handoff. `hold` and
+            // `retry_resource` are exchange-level and the reporter already
+            // honours them; a player that acted on them here would be
+            // deciding, which is M5e.
+            onExchange: { [verdicts] exchange in
+                guard let action = exchange.response?.action,
+                      action.type == "terminal",
+                      action.message?.isEmpty == false
+                else { return }
+                verdicts.store(action)
+            }
         )
         guard let reporter else {
             latest.store(nil)
@@ -195,6 +231,25 @@ final class PlaybackControlSession {
 /// The staleness this admits is bounded by how often the player reports that
 /// it changed — once a second from the periodic time observer, plus every
 /// rate change — against an exchange cadence the server never sets faster.
+/// The reporter's half of the bridge: one verdict, written from an actor and
+/// read from `@MainActor`, with a lock rather than an isolation assertion.
+private final class PlaybackControlLatestVerdict: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: ControlAction?
+
+    func store(_ action: ControlAction?) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = action
+    }
+
+    func load() -> ControlAction? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 private final class PlaybackControlLatestSnapshot: @unchecked Sendable {
     private let lock = NSLock()
     private var value: PlaybackControlSnapshot?

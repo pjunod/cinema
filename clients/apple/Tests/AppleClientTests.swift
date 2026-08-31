@@ -1915,6 +1915,42 @@ final class AppleClientTests: XCTestCase {
     /// the assertions below failing: the floor-stopped stall would consume a
     /// slot, and the unrelated stall a minute later would find the cap already
     /// two-thirds spent.
+    /// The three stall kinds are not one condition, and the evidence the
+    /// server gets has to say which. A buffering stall is a starved decoder
+    /// and says nothing about the file; a silent freeze is a decoder that
+    /// accepted the media and then stopped presenting it, which is the
+    /// Profile-5 shape the server cannot derive from anything it holds; a
+    /// delivery wedge is the server's own clock saying this client stopped
+    /// fetching, so the decoder is not the subject at all.
+    ///
+    /// Collapsing them would hand the arbiter one word — "stalled" — which is
+    /// exactly the ambiguity M5 exists to remove.
+    func testStallEvidenceNamesWhichConditionTheServerIsBeingToldAbout() {
+        let buffering = PlayerController.stallEvidence(for: .buffering)
+        XCTAssertEqual(buffering.decoderState, .starved)
+        XCTAssertNil(buffering.errorCode, "a starved decoder is not a decoder error")
+
+        let silent = PlayerController.stallEvidence(for: .silent)
+        XCTAssertEqual(silent.decoderState, .failed)
+        XCTAssertEqual(silent.errorCode, .decoder)
+        XCTAssertEqual(silent.errorDetail, "silent_freeze")
+
+        let delivery = PlayerController.stallEvidence(for: .delivery)
+        XCTAssertEqual(delivery.decoderState, .starved)
+        XCTAssertEqual(delivery.errorCode, .network,
+                       "a delivery wedge is the transport, not the decoder")
+        XCTAssertEqual(delivery.errorDetail, "delivery_wedge")
+
+        // Every kind must survive the wire's own bounding, or the evidence is
+        // dropped silently at the last step.
+        for kind in [PlaybackStallKind.buffering, .silent, .delivery] {
+            let bounded = PlayerController.stallEvidence(for: kind).bounded
+            XCTAssertNotNil(bounded, "\(kind) produced evidence the wire discards")
+            XCTAssertEqual(bounded?.decoderState,
+                           PlayerController.stallEvidence(for: kind).decoderState)
+        }
+    }
+
     func testAFloorStoppedStallDoesNotSpendARollingReopenSlot() {
         var storm = RecoveryReopenBudget()
 

@@ -34,6 +34,27 @@ private final class ControlExchangeLog: @unchecked Sendable {
 
 private let controlExchanges = ControlExchangeLog()
 
+/// What the stub server answers with. `none` unless a test says otherwise,
+/// because every node in the fleet answers `none` today.
+private final class ControlAnswer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = ControlAction(type: "none")
+
+    func set(_ action: ControlAction) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = action
+    }
+
+    func get() -> ControlAction {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+private let controlAnswer = ControlAnswer()
+
 /// Accepts every exchange the way the server does, and records what it carried.
 private final class ControlExchangeURLProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -61,7 +82,7 @@ private final class ControlExchangeURLProtocol: URLProtocol {
             generation: decoded.generation,
             controlEpoch: decoded.controlEpoch,
             acceptedSequence: decoded.sequence,
-            action: ControlAction(type: "none")
+            action: controlAnswer.get()
         )
         let body = (try? PlaybackControl.encoder.encode(response)) ?? Data()
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
@@ -214,6 +235,92 @@ final class PlaybackControlSessionTests: XCTestCase {
         XCTAssertEqual(first.generation, "11111111-1111-4111-8111-111111111111")
         XCTAssertEqual(first.controlEpoch, 7)
         XCTAssertNotNil(first.capabilities)
+    }
+
+    /// The return path M5 exists to open. Before this the reporter was built
+    /// without `onExchange`, so it defaulted to a no-op and the server could
+    /// send a verdict the player would never see.
+    func testATerminalVerdictReachesThePlayerAndOutlivesTheReporter() async throws {
+        controlExchanges.reset()
+        controlAnswer.set(ControlAction(
+            type: "terminal",
+            code: "unsupported",
+            message: "This file's audio is not playable here."
+        ))
+        defer { controlAnswer.set(ControlAction(type: "none")) }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        // The reporter stops on a terminal verdict, as it always has. The
+        // verdict must not stop with it: the failure it explains arrives
+        // later, and by then there is nothing left to ask.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(
+            session.terminalVerdict?.message,
+            "This file's audio is not playable here."
+        )
+        XCTAssertEqual(session.terminalVerdict?.code, "unsupported")
+        session.end()
+        XCTAssertNotNil(session.terminalVerdict, "ending reporting does not retract a verdict")
+    }
+
+    func testAnOrdinaryVerdictArmsNothing() async throws {
+        controlExchanges.reset()
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        session.end()
+        XCTAssertNil(session.terminalVerdict)
+    }
+
+    /// A new session is a new verdict. The old one described a recipe that is
+    /// no longer playing, and showing it against the next failure would be a
+    /// confident lie rather than a stale guess.
+    func testBeginningAgainClearsThePreviousVerdict() async throws {
+        controlExchanges.reset()
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "the old recipe"
+        ))
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNotNil(session.terminalVerdict)
+
+        controlAnswer.set(ControlAction(type: "none"))
+        controlExchanges.reset()
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        XCTAssertNil(session.terminalVerdict)
+        _ = try await waitForExchange { $0.sequence == 1 }
+        session.end()
     }
 
     func testTheNextExchangeCarriesWhereThePlayerMovedTo() async throws {

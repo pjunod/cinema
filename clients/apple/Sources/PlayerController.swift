@@ -1375,6 +1375,12 @@ final class PlayerController: ObservableObject {
     /// The protocol separates waiting from stalled by how long, and AVPlayer
     /// reports only that it is waiting.
     private var controlWaitingSince: Date?
+    /// Evidence a recovery owner is about to act on, published for the next
+    /// exchange. It is set immediately before the owner reports and cleared
+    /// when the player renders again, so the server sees why this client
+    /// thought it was stuck rather than only that it was.
+    private var controlObservationOverride: ClientObservation?
+    private var controlRenderOverride: RenderState?
     private var sessionId: String?
     private var activeMediaPath: String?
     private var activeMediaAuthenticated = false
@@ -3154,6 +3160,11 @@ final class PlayerController: ObservableObject {
     /// stalled, so the server resolves it one rung down instead of rebuilding
     /// the rung that just starved.
     private func retrySameDeliveryAfterStall(_ event: PlaybackStallEvent) async {
+        // Publish this owner's evidence before it decides anything. The
+        // server's picture of a wedge is otherwise whatever the periodic
+        // observer happened to catch, which is the same moment described
+        // less precisely. M5e asks for a verdict here; this only tells.
+        reportControlEvidence(Self.stallEvidence(for: event.kind), render: .stalled)
         var decision = sameDeliveryStallRecovery.next(for: event.kind)
         #if os(iOS)
         let hasOfflineAsset = offlineAssetURL != nil
@@ -3188,7 +3199,37 @@ final class PlayerController: ObservableObject {
             isChangingStream = false
             failed = terminal.failed
             playbackFailureTitle = Self.playbackStoppedFailureTitle
-            playbackError = terminal.message
+            // Ruling D1: a terminal verdict arms the words this failure will
+            // carry rather than causing one. The client's own message is a
+            // guess at why production stopped; the server's is the answer.
+            playbackError = playbackControl.terminalVerdict?.message ?? terminal.message
+        }
+    }
+
+    /// What each stall kind is evidence *of*, in the protocol's vocabulary.
+    ///
+    /// The three kinds are not one condition. A buffering stall is a starved
+    /// decoder and says nothing about the file; a silent freeze is a decoder
+    /// that accepted the media and then stopped presenting it, which is the
+    /// Profile-5 shape the server cannot derive; a delivery wedge is the
+    /// server's own clock saying this client stopped fetching, so the decoder
+    /// is not the subject at all.
+    nonisolated static func stallEvidence(for kind: PlaybackStallKind) -> ClientObservation {
+        switch kind {
+        case .buffering:
+            return ClientObservation(decoderState: .starved)
+        case .silent:
+            return ClientObservation(
+                decoderState: .failed,
+                errorCode: .decoder,
+                errorDetail: "silent_freeze"
+            )
+        case .delivery:
+            return ClientObservation(
+                decoderState: .starved,
+                errorCode: .network,
+                errorDetail: "delivery_wedge"
+            )
         }
     }
 
@@ -3668,7 +3709,11 @@ final class PlayerController: ObservableObject {
         playbackFailureTitle = currentMs > 0
             ? Self.playbackStoppedFailureTitle
             : Self.playbackStartFailureTitle
-        playbackError = item.error?.localizedDescription
+        // AVPlayer's own error object is a generic fallback and its message
+        // can carry a media URL, so an armed server verdict is both more
+        // accurate and safer to show.
+        playbackError = playbackControl.terminalVerdict?.message
+            ?? item.error?.localizedDescription
             ?? PlaybackPreparationError.failed.localizedDescription
     }
 
@@ -5266,8 +5311,12 @@ extension PlayerController {
             errorDetail: failed ? "avplayer_item_failed" : nil,
             droppedFrames: nil,
             observedDownloadBps: nil,
-            observationOverride: nil,
-            renderOverride: nil,
+            // A recovery path's evidence is more specific than anything
+            // derived from the player's own state, so it wins field by field.
+            // Until now both were hardcoded nil and no recovery site set
+            // them, so the mapper's merge had nothing to merge.
+            observationOverride: controlObservationOverride,
+            renderOverride: controlRenderOverride,
             selection: playbackControlSelection(),
             capabilities: Caps.controlCapabilities()
         )
@@ -5308,6 +5357,27 @@ extension PlayerController {
         } else {
             controlWaitingSince = nil
         }
+        // A player that is playing has outlived whatever a recovery owner
+        // last said about it. Keeping the override would report a stall the
+        // viewer stopped having.
+        if player.timeControlStatus == .playing {
+            controlObservationOverride = nil
+            controlRenderOverride = nil
+        }
         playbackControl.playerChanged()
+    }
+
+    /// Publish what a recovery owner is about to act on, then report it.
+    ///
+    /// The order is the point: the override has to be on the player before
+    /// `playerChanged()` takes the snapshot, or the exchange carries the
+    /// player's own vaguer version of the same moment.
+    func reportControlEvidence(
+        _ observation: ClientObservation?,
+        render: RenderState? = nil
+    ) {
+        controlObservationOverride = observation
+        controlRenderOverride = render
+        playbackControlPlayerChanged()
     }
 }
