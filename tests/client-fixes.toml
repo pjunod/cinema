@@ -556,3 +556,35 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlR
 source_anchor = '@SerialName("supported_actions") val supportedActions: List<String>,'
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "the request encodes the server's field names"
+
+[[fixes]]
+id = "native.caps-decision-session-binding"
+commits = ["08447df6"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
+source_anchor = "internal fun bindDecisionPlan("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "decisionPlanBindingRepeatsCapsAndRequestsOnlyAnHdr10Transcode"
+
+[[fixes]]
+id = "native.compatibility-rescue-sdr"
+commits = ["9243855b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
+source_anchor = "internal fun sessionHDR10Request("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "compatibilityRescueAndBurnNeverRepeatTheReplacedHdr10Plan"
+
+[[fixes]]
+id = "native.apple-session-recipe-hdr10"
+commits = ["8d3ed9e6"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "nonisolated static func sessionHDR10Request("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testManualQualityTranscodePreservesDirectOrRemuxHDR10Decision"
+
+[[fixes]]
+id = "clients.marker-provenance-auto-skip"
+commits = ["ce253a55"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "val isAutoSkipEligible: Boolean"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/MarkerLabelTest.kt"
+test_anchor = "provenanceControlsExactnessAndAutomaticEligibility"

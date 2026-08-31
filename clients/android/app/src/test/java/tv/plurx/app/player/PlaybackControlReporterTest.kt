@@ -393,6 +393,73 @@ class PlaybackControlRefusalTest {
     }
 
     @Test
+    fun `a terminal verdict ends reporting without a protocol error`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.success(
+                ControlResponse(
+                    PlaybackControl.PROTOCOL,
+                    GENERATION,
+                    7,
+                    1,
+                    ControlAction("terminal", code = "unsupported", message = "no"),
+                ),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertTrue(subject.isStopped(), "a terminal verdict ends reporting")
+        assertNull(harness.exchanges.first().failure)
+    }
+
+    @Test
+    fun `a retry is an answer and keeps the reporter running`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.success(
+                ControlResponse(
+                    PlaybackControl.PROTOCOL,
+                    GENERATION,
+                    7,
+                    1,
+                    ControlAction("retry_resource", reason = "reader_failed", afterMs = 9_000),
+                ),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertFalse(subject.isStopped(), "a retry is not a reason to stop reporting")
+        assertNull(harness.exchanges.first().failure)
+        subject.stop()
+    }
+
+    @Test
+    fun `a verdict missing the field it would be acted on is terminal`() = runTest {
+        // Inside the declared vocabulary but unusable. Worse than an unknown
+        // action, because this one would be acted on.
+        listOf(
+            ControlAction("terminal", message = "no code"),
+            ControlAction("retry_resource", reason = "reader_failed"),
+            ControlAction("retry_resource", reason = "reader_failed", afterMs = 0),
+            ControlAction("retry_resource", reason = "reader_failed", afterMs = 60_001),
+        ).forEach { action ->
+            val harness = Harness(this)
+            harness.enqueue(
+                Result.success(
+                    ControlResponse(PlaybackControl.PROTOCOL, GENERATION, 7, 1, action),
+                ),
+            )
+            val subject = assertNotNull(reporter(harness))
+            subject.start(backgroundScope)
+            advanceTimeBy(30_001)
+            assertTrue(subject.isStopped(), "$action must stop the reporter")
+            assertEquals("protocol:action", harness.exchanges.last().failure)
+        }
+    }
+
+    @Test
     fun `a hold without its reason is terminal`() = runTest {
         val harness = Harness(this)
         harness.enqueue(
@@ -418,7 +485,10 @@ class PlaybackControlRefusalTest {
         val subject = assertNotNull(reporter(harness))
         subject.start(backgroundScope)
         advanceTimeBy(30_001)
-        assertEquals(listOf("hold"), harness.requests.first().supportedActions)
+        assertEquals(
+            listOf("hold", "retry_resource", "terminal"),
+            harness.requests.first().supportedActions,
+        )
         subject.stop()
     }
 }
@@ -748,7 +818,7 @@ class PlaybackControlWireTest {
         assertTrue(encoded.contains("\"dynamic_range\":\"dolby_vision\""))
         assertTrue(encoded.contains("\"render_state\":\"waiting\""))
         assertTrue(encoded.contains("\"demand\":\"hold\""))
-        assertTrue(encoded.contains("\"supported_actions\":[\"hold\"]"))
+        assertTrue(encoded.contains("\"supported_actions\":[\"hold\",\"retry_resource\",\"terminal\"]"))
         assertFalse(encoded.contains("\"error_detail\""), "explicitNulls is off; absent means absent")
     }
 
@@ -789,5 +859,106 @@ class PlaybackControlWireTest {
         )
         assertEquals(4, decoded.acceptedSequence)
         assertEquals("none", decoded.action.type)
+    }
+}
+
+/**
+ * Reporting now rather than at the server's cadence.
+ *
+ * `notify` only replaces the waiting snapshot; the pump stays asleep for
+ * `next_exchange_ms`, which the server may set as high as a minute. That is
+ * right for a position update and fatal for a recovery owner: the owner's own
+ * reopen ends the reporter before the pump wakes, so its evidence is not sent
+ * late — it is never sent at all. The web reporter has always drained inline
+ * at that call site for exactly this reason.
+ */
+class PlaybackControlUrgentNotifyTest {
+
+    @Test
+    fun `an ordinary report waits out the server's cadence`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(this)
+        runCurrent()
+        assertEquals(1, harness.requests.size)
+
+        subject.notify()
+        advanceTimeBy(PlaybackControl.MIN_EXCHANGE_MS * 4)
+        runCurrent()
+        assertEquals(1, harness.requests.size, "the cadence is unchanged for a position update")
+        subject.stop()
+    }
+
+    @Test
+    fun `an urgent report is sent as soon as the rate limit allows`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(this)
+        runCurrent()
+        assertEquals(1, harness.requests.size)
+        val evidence = ClientObservation(
+            decoderState = DecoderState.STARVED,
+            errorCode = ClientErrorCode.NETWORK,
+            errorDetail = "stall",
+        )
+        harness.current = snapshot(observation = evidence)
+
+        subject.notifyUrgently(this)
+        advanceTimeBy(PlaybackControl.MIN_EXCHANGE_MS + 1)
+        runCurrent()
+
+        assertEquals(2, harness.requests.size, "the evidence went out without waiting")
+        assertEquals(DecoderState.STARVED, harness.requests[1].observation?.decoderState)
+        assertEquals(ClientErrorCode.NETWORK, harness.requests[1].observation?.errorCode)
+        subject.stop()
+    }
+
+    /**
+     * The swap that wakes the pump is one critical section. Releasing the lock
+     * between clearing and setting it would let a concurrent `start()` — whose
+     * guard is `pump != null` — launch a second run loop, and `stop()` can
+     * only cancel the one it can see.
+     */
+    @Test
+    fun `waking the pump does not leave a second one running`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(this)
+        runCurrent()
+        harness.current = snapshot(position = 2_000)
+        subject.notifyUrgently(this)
+        subject.start(this)
+        subject.notifyUrgently(this)
+        advanceTimeBy(PlaybackControl.MIN_EXCHANGE_MS * 2)
+        runCurrent()
+        subject.stop()
+        val after = harness.requests.size
+
+        // A stopped reporter has no pump left anywhere. If the swap had
+        // orphaned one, it would keep exchanging past the stop.
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(after, harness.requests.size, "nothing exchanges after stop")
+        assertTrue(subject.status().stopped)
+    }
+
+    /**
+     * An urgent report from a reporter that has already stopped is a no-op
+     * rather than a resurrection: a terminal verdict ends reporting, and a
+     * recovery owner firing afterwards must not restart it.
+     */
+    @Test
+    fun `a stopped reporter cannot be woken`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(this)
+        runCurrent()
+        val before = harness.requests.size
+        subject.stop()
+
+        subject.notifyUrgently(this)
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(before, harness.requests.size)
     }
 }

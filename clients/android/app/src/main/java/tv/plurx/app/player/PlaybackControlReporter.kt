@@ -40,7 +40,7 @@ object PlaybackControl {
      * server will send it. An action that is never declared is never sent, so
      * a client cannot be silenced by one it does not understand.
      */
-    val SUPPORTED_ACTIONS = listOf("hold")
+    val SUPPORTED_ACTIONS = listOf("hold", "retry_resource", "terminal")
     const val MIN_EXCHANGE_MS = 250L
     const val MAX_EXCHANGE_MS = 60_000L
     const val EXCHANGE_DEADLINE_MS = 6_000L
@@ -336,10 +336,16 @@ data class ControlRequest(
 data class ControlAction(
     val type: String,
     /**
-     * Present on `hold`, and diagnostic rather than dispositive: a reason this
-     * client has never heard of is a newer server, not a broken one.
+     * Present on `hold` and `retry_resource`, and diagnostic rather than
+     * dispositive: a reason this client has never heard of is a newer server,
+     * not a broken one.
      */
     val reason: String? = null,
+    /** `retry_resource` only: when the server wants to be asked again. */
+    @SerialName("after_ms") val afterMs: Long? = null,
+    /** `terminal` only: which producer decision ended this session. */
+    val code: String? = null,
+    val message: String? = null,
 )
 
 @Serializable
@@ -476,6 +482,39 @@ class PlaybackControlReporter private constructor(
         }
     }
 
+    /**
+     * Report now rather than at the next cadence.
+     *
+     * [notify] leaves the pump asleep for `next_exchange_ms`, which the server
+     * may set as high as a minute. For a position update that is the point.
+     * For a recovery owner about to reopen it is fatal: the reopen ends this
+     * reporter before the pump wakes, so the evidence is never sent at all
+     * rather than sent late. The web reporter drains inline at exactly this
+     * call site, for exactly this reason.
+     *
+     * Waking is a cancel-and-relaunch because the pump is suspended inside the
+     * injected pace. An exchange already in flight is left alone: [run] picks
+     * up `pending` immediately after it without pacing.
+     */
+    suspend fun notifyUrgently(
+        scope: CoroutineScope,
+        value: PlaybackControlSnapshot? = null,
+    ) {
+        notify(value)
+        // The swap is one critical section on purpose. Releasing the lock
+        // between clearing `pump` and setting it would let a concurrent
+        // `start()` — whose guard is `pump != null` — launch a second run
+        // loop, and `stop()` can only cancel the one it can see. `launch`
+        // does not suspend, so holding the mutex across it is safe.
+        val stale = mutex.withLock {
+            if (stopped || inFlight || pending == null) return
+            val running = pump
+            pump = scope.launch { run() }
+            running
+        }
+        stale?.cancel()
+    }
+
     suspend fun stop() {
         val job = mutex.withLock {
             if (stopped) return
@@ -589,7 +628,20 @@ class PlaybackControlReporter private constructor(
             retryRequest = null
             request.capabilities?.let { acceptedCapabilities = it }
             acceptedSequence = maxOf(acceptedSequence, response.acceptedSequence)
-            request.demand == PlaybackDemand.END
+            // `retry_resource` paces the next exchange from the server's own
+            // cadence rather than this client's guess. The exchange succeeded;
+            // the server only said when to ask again, so this does not touch
+            // the retry path.
+            if (response.action.type == "retry_resource" && response.action.afterMs != null) {
+                nextAllowedAt = now() + maxOf(
+                    PlaybackControl.MIN_EXCHANGE_MS,
+                    response.action.afterMs,
+                )
+            }
+            // A terminal verdict ends reporting. It does not tear the player
+            // down: this reporter still owns no recovery, and buffer already
+            // fetched is still worth playing.
+            request.demand == PlaybackDemand.END || response.action.type == "terminal"
         }
         onExchange(Exchange(request, response, null))
         if (ended) stop()
@@ -620,6 +672,23 @@ class PlaybackControlReporter private constructor(
                 if (response.action.reason == null) {
                     throw ControlProtocolException("action")
                 }
+            // An action inside the declared vocabulary but missing the field
+            // this client acts on is worse than one it has never heard of,
+            // because it would be acted on.
+            "terminal" ->
+                if (response.action.code == null || response.action.message == null) {
+                    throw ControlProtocolException("action")
+                }
+            "retry_resource" -> {
+                val afterMs = response.action.afterMs
+                if (response.action.reason == null ||
+                    afterMs == null ||
+                    afterMs <= 0 ||
+                    afterMs > PlaybackControl.MAX_EXCHANGE_MS
+                ) {
+                    throw ControlProtocolException("action")
+                }
+            }
             else -> throw ControlProtocolException("action")
         }
     }

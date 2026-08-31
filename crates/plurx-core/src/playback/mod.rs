@@ -350,6 +350,14 @@ pub struct RenderCaps {
     /// this whole type exists to end, and it would have been widened from
     /// Profile 5 to every HDR title.
     pub hdr10_max_height: i64,
+    /// This build can convert Dolby Vision Profile 7 RPUs to Profile 8.1 on
+    /// the way through a copy (PLAYBACK-CAPS-V2-PLAN §4.8).
+    ///
+    /// A build fact rather than a node one — the conversion is plurx's own
+    /// code, not an ffmpeg filter — but it belongs here with the other
+    /// server-side answers, and it is a setting an operator can turn off
+    /// without rebuilding.
+    pub dolby_vision_convert: bool,
 }
 
 impl RenderCaps {
@@ -362,6 +370,7 @@ impl RenderCaps {
             dolby_vision_p5_render: false,
             hdr10_passthrough: false,
             hdr10_max_height: 0,
+            dolby_vision_convert: false,
         }
     }
 
@@ -372,6 +381,7 @@ impl RenderCaps {
             dolby_vision_p5_render: true,
             hdr10_passthrough: true,
             hdr10_max_height: HDR10_MAX_MEASURED_HEIGHT,
+            dolby_vision_convert: true,
         }
     }
 }
@@ -878,6 +888,24 @@ fn has_compatible_dv_base(file: &MediaFile) -> bool {
         .is_some_and(|label| label.contains("HDR10-compatible") || label.contains("HLG-compatible"))
 }
 
+/// Narrower than [`has_compatible_dv_base`]: is the base layer specifically
+/// **HDR10**?
+///
+/// Compatibility ids 1 and 6 are HDR10 bases; 4 is HLG. The distinction does
+/// not matter to the strip, which hands over whatever the base is and lets
+/// `delivered_dynamic_range` report it — but it matters to the Profile 7
+/// conversion, which produces Profile **8.1**, and 8.1 means an HDR10 base
+/// specifically. The HLG spelling is 8.4, a different conversion with a
+/// different target that plurx has no rung for.
+fn has_hdr10_dv_base(file: &MediaFile) -> bool {
+    if let Some(compat) = file.dolby_vision.bl_compat_id {
+        return matches!(compat, 1 | 6);
+    }
+    file.hdr_format
+        .as_deref()
+        .is_some_and(|label| label.contains("HDR10-compatible"))
+}
+
 /// Does this source need the RPU-driven renderer rather than the ordinary
 /// HDR10 base-layer route — i.e. is it the Profile 5 case?
 ///
@@ -922,6 +950,41 @@ enum DvHandling {
     /// spells the invariant instead of documenting it, and every existing
     /// `== DvHandling::None` comparison keeps working unchanged.
     Reencode(OutputGrade),
+}
+
+/// Whether this client should be served a Profile 7 title converted to
+/// Profile 8.1 rather than stripped to its HDR10 base.
+///
+/// The three conditions, and each one is doing work:
+///
+/// - **The source is Profile 7 with an HDR10 base.** A P7 stream is a
+///   base layer plus an enhancement layer no consumer decoder takes — no
+///   shipping player outside Blu-ray hardware has ever decoded dual-layer.
+///   Profile 8.1 is that same base layer with the same RPUs, minus the
+///   references to the layer nobody could use. The base has to be HDR10
+///   specifically: 8.1 *means* an HDR10 base, and an HLG base would be 8.4 —
+///   a different conversion, with a target plurx has no rung for.
+/// - **The client takes 8 but not 7.** A client that enumerates 7 gets the
+///   stream untouched; converting for it would discard an enhancement layer
+///   it asked for. A client that takes neither gets the ordinary strip.
+/// - **This build can do it**, which an operator can turn off.
+///
+/// The value of the conversion is exactly the gap between those two client
+/// answers: today a Profile 7 title reaches Safari and Apple TV as HDR10,
+/// because the only thing plurx could do with an undecodable profile was
+/// remove the Dolby Vision entirely. Converted, it reaches them as Dolby
+/// Vision.
+pub fn dolby_vision_converts_to_p81(
+    file: &MediaFile,
+    profile: &DeviceProfile,
+    node: &RenderCaps,
+) -> bool {
+    node.dolby_vision_convert
+        && is_dolby_vision(file)
+        && dolby_vision_profile(file) == Some(7)
+        && has_hdr10_dv_base(file)
+        && profile.dolby_vision_profiles.contains(&8)
+        && !profile.dolby_vision_profiles.contains(&7)
 }
 
 fn dv_handling(
@@ -1833,12 +1896,14 @@ mod tests {
             dolby_vision_p5_render: true,
             hdr10_passthrough: false,
             hdr10_max_height: HDR10_MAX_MEASURED_HEIGHT,
+            dolby_vision_convert: false,
         };
         let no_rpu = RenderCaps {
             dv_strippable: true,
             dolby_vision_p5_render: false,
             hdr10_passthrough: true,
             hdr10_max_height: HDR10_MAX_MEASURED_HEIGHT,
+            dolby_vision_convert: false,
         };
         let nothing = RenderCaps::strip_only(true);
 
@@ -2508,6 +2573,203 @@ mod tests {
         );
     }
 
+    /// Who gets a converted Profile 7 stream, and who does not.
+    ///
+    /// The whole value of the conversion is the gap between two client
+    /// answers: a device that takes Profile 8 but not 7 — which is every
+    /// consumer Dolby Vision decoder, because dual-layer never shipped
+    /// outside Blu-ray hardware — gets a Profile 7 title as HDR10 today, and
+    /// as Dolby Vision after. Every other client is unaffected, and each of
+    /// those "unaffected" cases is a separate way to get this wrong.
+    #[test]
+    fn only_a_client_that_takes_eight_but_not_seven_gets_a_converted_stream() {
+        let p7 = || {
+            let mut file = file("mkv", "hevc", "aac");
+            file.hdr = Some("dolby_vision".to_owned());
+            file.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".to_owned());
+            file
+        };
+        let client = |profiles: Vec<u8>| {
+            let mut profile = caps_profile(
+                vec!["mkv".into(), "mp4".into()],
+                vec!["hevc".into()],
+                vec!["aac".into()],
+                None,
+                true,
+                false,
+            );
+            profile.dolby_vision_profiles = profiles;
+            profile
+        };
+        let node = RenderCaps::proven(true);
+
+        assert!(
+            dolby_vision_converts_to_p81(&p7(), &client(vec![5, 8]), &node),
+            "Safari and Apple TV: the case this exists for"
+        );
+
+        // A client that enumerates 7 takes the stream as it is. Converting
+        // would discard an enhancement layer it asked for.
+        assert!(!dolby_vision_converts_to_p81(
+            &p7(),
+            &client(vec![7, 8]),
+            &node
+        ));
+        // A client that takes neither gets the ordinary strip to HDR10.
+        assert!(!dolby_vision_converts_to_p81(&p7(), &client(vec![]), &node));
+        assert!(!dolby_vision_converts_to_p81(
+            &p7(),
+            &client(vec![5]),
+            &node
+        ));
+
+        // An operator can turn it off, and then nobody gets it.
+        assert!(!dolby_vision_converts_to_p81(
+            &p7(),
+            &client(vec![5, 8]),
+            &RenderCaps {
+                dolby_vision_convert: false,
+                ..node
+            }
+        ));
+    }
+
+    /// Every source shape that must not be converted, and why each is its own
+    /// refusal rather than one rule.
+    #[test]
+    fn a_source_without_a_profile_7_compatible_base_is_never_converted() {
+        let client = {
+            let mut profile = caps_profile(
+                vec!["mkv".into()],
+                vec!["hevc".into()],
+                vec!["aac".into()],
+                None,
+                true,
+                false,
+            );
+            profile.dolby_vision_profiles = vec![5, 8];
+            profile
+        };
+        let node = RenderCaps::proven(true);
+        let source = |hdr: Option<&str>, label: Option<&str>| {
+            let mut file = file("mkv", "hevc", "aac");
+            file.hdr = hdr.map(str::to_owned);
+            file.hdr_format = label.map(str::to_owned);
+            file
+        };
+
+        for (hdr, label, why) in [
+            (None, None, "an SDR title has no Dolby Vision to convert"),
+            (Some("hdr10"), Some("HDR10"), "neither does plain HDR10"),
+            (
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
+                "a Profile 8 title is already what the conversion produces",
+            ),
+            (
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 5"),
+                "Profile 5 has no HDR10-compatible base to keep",
+            ),
+            (
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 7 (HLG-compatible)"),
+                "an HLG base is not an HDR10 one, and there is no HLG rung",
+            ),
+            (
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 7"),
+                "no compatible base named at all: nothing to convert to",
+            ),
+        ] {
+            assert!(
+                !dolby_vision_converts_to_p81(&source(hdr, label), &client, &node),
+                "{why}"
+            );
+        }
+
+        // …and the one that is converted, so the list above is a set of
+        // exclusions rather than a function that always says no.
+        assert!(dolby_vision_converts_to_p81(
+            &source(
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 7 (HDR10-compatible)")
+            ),
+            &client,
+            &node
+        ));
+    }
+
+    /// The same exclusions, decided from the stored columns rather than the
+    /// label — which is the branch that actually runs.
+    ///
+    /// M2 populates `dv_profile` and `bl_compat_id` from the container, and
+    /// both `dolby_vision_profile` and `has_hdr10_dv_base` prefer them; the
+    /// label parse is the fallback for rows scanned before those columns
+    /// existed. A suite that only sets label strings therefore leaves the
+    /// production path uncovered — widening the compatibility set from `1 | 6`
+    /// to `1 | 4 | 6`, which would convert an HLG-based Profile 7 into an
+    /// HDR10-labelled 8.1 and get every frame's transfer function wrong,
+    /// passes every label-only test there is.
+    #[test]
+    fn the_conversion_reads_the_stored_columns_not_only_the_label() {
+        let client = {
+            let mut profile = caps_profile(
+                vec!["mkv".into()],
+                vec!["hevc".into()],
+                vec!["aac".into()],
+                None,
+                true,
+                false,
+            );
+            profile.dolby_vision_profiles = vec![5, 8];
+            profile
+        };
+        let node = RenderCaps::proven(true);
+
+        // No label at all, so nothing but the columns can answer.
+        let source = |dv_profile: i64, compat: i64| {
+            let mut file = file("mkv", "hevc", "aac");
+            file.hdr = Some("dolby_vision".into());
+            file.hdr_format = None;
+            file.dolby_vision.profile = Some(dv_profile);
+            file.dolby_vision.bl_compat_id = Some(compat);
+            file
+        };
+
+        // 1 and 6 are the two ids that mean an HDR10 base layer, and an HDR10
+        // base layer is what 8.1 is defined as. Both convert.
+        for compat in [1, 6] {
+            assert!(
+                dolby_vision_converts_to_p81(&source(7, compat), &client, &node),
+                "compatibility id {compat} is an HDR10 base"
+            );
+        }
+
+        // Everything else is a different base, and plurx has a rung for none
+        // of them: 4 is HLG (whose target would be 8.4), 2 is SDR, 0 is a base
+        // no client can watch on its own.
+        for (compat, what) in [(4, "HLG"), (2, "SDR"), (0, "none")] {
+            assert!(
+                !dolby_vision_converts_to_p81(&source(7, compat), &client, &node),
+                "a {what} base is not the HDR10 one profile 8.1 promises"
+            );
+        }
+
+        // And the profile column gates it exactly as the label did.
+        assert!(!dolby_vision_converts_to_p81(&source(5, 1), &client, &node));
+        assert!(!dolby_vision_converts_to_p81(&source(8, 1), &client, &node));
+
+        // A column and a label that disagree: the column wins, because it came
+        // out of the container and the label came out of a scanner's prose.
+        let mut contradicted = source(7, 4);
+        contradicted.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".into());
+        assert!(
+            !dolby_vision_converts_to_p81(&contradicted, &client, &node),
+            "the stored compatibility id is the fact; the label is the fallback"
+        );
+    }
+
     /// The two-entry HEVC ladder that replaces the web's min-of-rungs hack —
     /// and the fallback that decides what an unknown profile gets.
     ///
@@ -2661,6 +2923,7 @@ mod tests {
             dolby_vision_p5_render: true,
             hdr10_passthrough: false,
             hdr10_max_height: HDR10_MAX_MEASURED_HEIGHT,
+            dolby_vision_convert: false,
         };
         let d = decide(&uhd, &capped, &unproved);
         assert_eq!(d.transcode_grade, OutputGrade::Sdr);
@@ -2797,6 +3060,7 @@ mod tests {
             dolby_vision_p5_render: false,
             hdr10_passthrough: true,
             hdr10_max_height: HDR10_MAX_MEASURED_HEIGHT,
+            dolby_vision_convert: false,
         };
         let manual = decide_forced(&p5, &client, Force::Transcode, &unproved);
         assert_eq!(manual.transcode_grade, OutputGrade::Sdr);

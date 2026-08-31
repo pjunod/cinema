@@ -19,7 +19,6 @@ import java.net.URI
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.CapabilitySnapshot
 import tv.plurx.app.data.DecisionCapsReq
-import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.Appearance
 import tv.plurx.app.data.HomeGrouping
 import tv.plurx.app.data.PlaybackQuality
@@ -78,6 +77,12 @@ data class HomeState(
         get() = libraries.isNotEmpty() || hubs.continue_watching.isNotEmpty() ||
             hubs.next_up.isNotEmpty() || hubs.recently_added.isNotEmpty()
 }
+
+/** A server decision and the one live route probe that produced it. */
+internal data class PlaybackDecision(
+    val decision: Decision,
+    val capabilities: CapabilitySnapshot,
+)
 
 data class PlaybackTarget(val itemId: Long, val fileId: Long, val startMs: Long = 0)
 
@@ -141,25 +146,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** One dashboard load at a time — a refresh replaces the one in flight. */
     private var homeJob: Job? = null
-
-    /**
-     * The caps most recently reported to `/decision`, so a progressive remux
-     * URL asks for the stream the decision was actually made about. Never a
-     * substitute for probing: audio support is route-dependent, so every
-     * decision re-probes (see [Caps]).
-     */
-    @Volatile
-    var playbackCaps: Map<String, String> = emptyMap()
-        private set
-
-    /** The snapshot bound to the most recent decision, retained only so its
-     * session create can repeat the same facts. Every decision still probes
-     * again; route-dependent audio support is never reused as evidence. */
-    private var currentDecisionCaps: DeviceCaps? = null
-
-    /** Runtime playback caps for this device — both wire spellings from one probe. */
-    private suspend fun caps(): CapabilitySnapshot =
-        Caps.snapshot(getApplication<Application>()).also { playbackCaps = it.legacyQuery }
 
     init {
         viewModelScope.launch {
@@ -642,8 +628,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun decision(
         fileId: Long,
         tracks: PreplayTracks = PreplayTracks.NONE,
-    ): Decision {
-        val snapshot = caps()
+    ): Decision = playbackDecision(fileId, tracks).decision
+
+    /** Bind the route-dependent probe to the player that owns the answer.
+     * Detail preflights may finish between this decision and session create. */
+    internal suspend fun playbackDecision(
+        fileId: Long,
+        tracks: PreplayTracks = PreplayTracks.NONE,
+    ): PlaybackDecision {
+        val snapshot = Caps.snapshot(getApplication<Application>())
         // Request-local only. Omitting a parameter keeps the shared playback-
         // default policy and the response older clients get; the server never
         // writes a Playback setting from these.
@@ -655,8 +648,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             if (!shouldFallBackToLegacyDecision(error.code())) throw error
             api().decision(fileId, snapshot.legacyQuery + request)
         }
-        currentDecisionCaps = snapshot.document
-        return decision
+        return PlaybackDecision(decision, snapshot)
     }
 
     suspend fun setWatched(itemId: Long, watched: Boolean): Int = if (watched) {
@@ -732,10 +724,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart {
-        val document = currentDecisionCaps
-            ?: Caps.snapshot(getApplication<Application>()).document
+        requireNotNull(body.caps) {
+            "Playback session is missing its decision capabilities."
+        }
         return acceptHlsSessionPresentation(
-            api().createHlsSession(fileId, body.copy(caps = body.caps ?: document)),
+            api().createHlsSession(fileId, body),
         )
     }
 

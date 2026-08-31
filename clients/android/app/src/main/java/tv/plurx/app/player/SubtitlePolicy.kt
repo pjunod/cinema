@@ -1,6 +1,7 @@
 package tv.plurx.app.player
 
 import tv.plurx.app.data.CreateSessionReq
+import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.ReopenReason
 import tv.plurx.app.data.SubTrack
@@ -280,6 +281,30 @@ internal fun subtitleSessionBody(
         quality_auto = true.takeIf { qualityAuto(quality, delivery) },
     )
 }
+
+/** Whether this create repeats an HDR10 transcode selected by `/decision`.
+ * Compatibility rescue and burn-in deliberately produce universal SDR bytes;
+ * neither may inherit HDR10 merely because the route it replaces was HDR. */
+internal fun sessionHDR10Request(
+    decisionMode: String,
+    deliveredDynamicRange: String?,
+    compatibilityTranscode: Boolean,
+    delivery: SubtitleDelivery,
+): Boolean =
+    !compatibilityTranscode &&
+        delivery != SubtitleDelivery.Burn &&
+        decisionMode.lowercase(Locale.ROOT) == "transcode" &&
+        deliveredDynamicRange?.lowercase(Locale.ROOT) == "hdr10"
+
+/** Repeat the immutable decision facts and its already-classified HDR10 ask. */
+internal fun bindDecisionPlan(
+    body: CreateSessionReq,
+    caps: DeviceCaps,
+    requestHDR10: Boolean,
+): CreateSessionReq = body.copy(
+    hdr10 = true.takeIf { requestHDR10 && body.copy != true },
+    caps = caps,
+)
 
 /**
  * Which of the player's own text tracks is the server's track [serverIndex] —

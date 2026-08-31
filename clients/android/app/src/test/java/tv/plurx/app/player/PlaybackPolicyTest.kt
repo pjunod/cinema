@@ -1,5 +1,6 @@
 package tv.plurx.app.player
 
+import androidx.media3.common.PlaybackException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -200,5 +201,101 @@ class PlaybackPolicyTest {
         const val COLOR_TRANSFER_SDR = 3
         const val COLOR_TRANSFER_ST2084 = 6
         const val COLOR_TRANSFER_UNSET = -1
+    }
+}
+
+/**
+ * Which class of failure Media3 reported, in the protocol's vocabulary.
+ *
+ * The classes are not decoration. A decoder error says this device cannot play
+ * this recipe and a different rung might; a network error says nothing about
+ * the recipe at all; a manifest error is about what the server produced.
+ * Collapsing them to `unknown` hands the arbiter one word where it has to
+ * choose between three different answers — which is exactly the ambiguity M5
+ * exists to remove.
+ */
+class ControlErrorClassTest {
+
+    @Test
+    fun eachMedia3ErrorFamilyKeepsItsOwnAnswer() {
+        assertEquals(
+            ClientErrorCode.NETWORK,
+            controlErrorCode(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED),
+        )
+        assertEquals(ClientErrorCode.NETWORK, controlErrorCode(PlaybackException.ERROR_CODE_TIMEOUT))
+        assertEquals(
+            ClientErrorCode.MANIFEST,
+            controlErrorCode(PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED),
+        )
+        assertEquals(
+            ClientErrorCode.DECODER,
+            controlErrorCode(PlaybackException.ERROR_CODE_DECODING_FAILED),
+        )
+        assertEquals(
+            ClientErrorCode.DECODER,
+            controlErrorCode(PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED),
+        )
+        assertEquals(
+            ClientErrorCode.DRM,
+            controlErrorCode(PlaybackException.ERROR_CODE_DRM_UNSPECIFIED),
+        )
+    }
+
+    /**
+     * The parsing family splits, and getting it wrong tells the arbiter the
+     * opposite of what this client believes. A malformed or unsupported
+     * *container* is what drives the DV-remux and compatibility-transcode
+     * ladder — the client is about to re-encode the file — so reporting it as
+     * a manifest error would say the server produced a bad playlist.
+     */
+    @Test
+    fun aBadContainerIsNotABadPlaylist() {
+        for (code in listOf(
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+        )) {
+            assertEquals(ClientErrorCode.MEDIA, controlErrorCode(code))
+            // The same codes this client's own ladder calls a compatibility
+            // failure. If these two ever disagree, one of them is lying to
+            // somebody.
+            assertEquals(true, isCompatibilityPlaybackError(code))
+        }
+        assertEquals(
+            ClientErrorCode.MANIFEST,
+            controlErrorCode(PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED),
+        )
+    }
+
+    /**
+     * An unrecognised code is `unknown` rather than a nearby guess. A wrong
+     * class is worse than no class: the arbiter would act on it.
+     */
+    @Test
+    fun anUnrecognisedCodeClaimsNothing() {
+        assertEquals(ClientErrorCode.UNKNOWN, controlErrorCode(PlaybackException.ERROR_CODE_UNSPECIFIED))
+        assertEquals(ClientErrorCode.UNKNOWN, controlErrorCode(999_999))
+    }
+
+    /**
+     * Every class must survive the wire's own bounding, or the evidence is
+     * dropped silently at the last step.
+     */
+    @Test
+    fun everyClassSurvivesTheWiresBounding() {
+        for (code in listOf(
+            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+            PlaybackException.ERROR_CODE_DECODING_FAILED,
+            PlaybackException.ERROR_CODE_UNSPECIFIED,
+        )) {
+            val observation = ClientObservation(
+                decoderState = DecoderState.FAILED,
+                errorCode = controlErrorCode(code),
+                errorDetail = "detail",
+            )
+            val bounded = observation.bounded()
+            assertEquals(controlErrorCode(code), bounded?.errorCode)
+            assertEquals(DecoderState.FAILED, bounded?.decoderState)
+        }
     }
 }

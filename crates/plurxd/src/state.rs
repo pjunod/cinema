@@ -103,6 +103,15 @@ pub struct SystemInfo {
     /// `hevc_qsv` Main10. Separate from `dovi_passthrough_qsv`, which is
     /// gated behind a Dolby Vision filter this route does not use.
     pub hdr10_passthrough_qsv: bool,
+    /// Whether this build converts Dolby Vision Profile 7 to Profile 8.1 on
+    /// the way through a copy (PLAYBACK-CAPS-V2-PLAN §4.8).
+    ///
+    /// Not a probe: the conversion is plurx's own code, so the answer is
+    /// "this binary has it" — which is always true — narrowed by the
+    /// `playback.dv_convert` setting an operator can turn off. It sits with
+    /// the probes because a client asking why a title played as HDR10 rather
+    /// than Dolby Vision needs all four answers in one place.
+    pub dolby_vision_convert: bool,
 }
 
 /// The daemon's managed directories across the configured storage roots.
@@ -4077,6 +4086,16 @@ impl JobManager {
     /// input to `copy_video_args`, so rewriting one re-keys that file's
     /// fragment index and orphans what was built. Comparing first makes the
     /// common case structurally free instead of empirically free.
+    ///
+    /// `bl_compat_id` is now an input to `copy_video_args` too — it is what
+    /// `transcode::dolby_vision_has_compatible_base` reads before the label —
+    /// and this backfill writes the columns unconditionally. That is free only
+    /// while the stored label is the one `scan::probe::dolby_vision_label`
+    /// derives from those same columns, so the two answers move together and
+    /// a rewritten column cannot change the argv on its own. `probe.rs`'s
+    /// `the_derived_label_is_the_label_the_scan_used_to_write` is what holds
+    /// that; if the label's marker mapping and the compatibility-id set ever
+    /// drift apart, this becomes a re-key of every Dolby Vision row.
     async fn backfill_dolby_vision_facts(self: Arc<Self>) {
         const BACKFILL_PER_TICK: i64 = 256;
 

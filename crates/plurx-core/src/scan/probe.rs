@@ -572,6 +572,14 @@ mod tests {
     /// re-keys every affected file's index and orphans what was built. The
     /// backfill compares before it writes for the same reason; this is what
     /// makes that comparison usually come out equal.
+    ///
+    /// It carries a second weight since the Dolby Vision columns became the
+    /// authoritative half of that question: `copy_video_args` reads
+    /// `bl_compat_id` first and this label only as a fallback, so the two must
+    /// agree on which base layers are watchable. This test is what keeps the
+    /// derivation honest, and the compatibility-id set in
+    /// `transcode::dolby_vision_has_compatible_base` is what it has to stay
+    /// honest against.
     #[test]
     fn the_derived_label_is_the_label_the_scan_used_to_write() {
         for (profile, compat, expected) in [

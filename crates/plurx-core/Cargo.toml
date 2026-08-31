@@ -33,6 +33,7 @@ hiqlite-contract-tests = ["hiqlite-store"]
 scratch-fault-injection = []
 
 [dependencies]
+dolby_vision = { workspace = true }
 async-trait = { workspace = true }
 hiqlite = { workspace = true, optional = true }
 # Only to install the process-level provider before a TLS Hiqlite client is

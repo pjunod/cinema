@@ -311,7 +311,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(request.proto, PlaybackControl.protocolName)
         XCTAssertEqual(
             request.supportedActions,
-            ["hold"],
+            ["hold", "retry_resource", "terminal"],
             "the server sends only actions this client has declared"
         )
         XCTAssertEqual(request.sequence, 1)
@@ -444,6 +444,65 @@ final class PlaybackControlReporterTests: XCTestCase {
             acceptedSequence: 1,
             action: ControlAction(type: "prepare_replacement")
         ))
+    }
+
+    func testATerminalVerdictEndsReportingWithoutAProtocolError() async throws {
+        let harness = Harness()
+        harness.enqueue([.success(ControlResponse(
+            proto: PlaybackControl.protocolName,
+            generation: bootstrap().generation,
+            controlEpoch: 7,
+            acceptedSequence: 1,
+            action: ControlAction(type: "terminal", code: "unsupported", message: "no")
+        ))])
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let stopped = await reporter.stopped
+        XCTAssertTrue(stopped, "a terminal verdict ends reporting")
+        XCTAssertNil(
+            harness.exchanges.first?.failure,
+            "a terminal verdict is an answer, not a protocol error"
+        )
+    }
+
+    func testAVerdictMissingTheFieldItWouldBeActedOnIsTerminal() async throws {
+        // Inside the declared vocabulary but unusable. Worse than an unknown
+        // action, because this one would be acted on.
+        for action in [
+            ControlAction(type: "terminal", message: "no code"),
+            ControlAction(type: "retry_resource", reason: "reader_failed"),
+            ControlAction(type: "retry_resource", reason: "reader_failed", afterMs: 0),
+            ControlAction(type: "retry_resource", reason: "reader_failed", afterMs: 60_001),
+        ] {
+            try await assertTerminal(response: ControlResponse(
+                proto: PlaybackControl.protocolName,
+                generation: bootstrap().generation,
+                controlEpoch: 7,
+                acceptedSequence: 1,
+                action: action
+            ))
+        }
+    }
+
+    func testARetryIsAnAnswerAndKeepsTheReporterRunning() async throws {
+        let harness = Harness()
+        harness.enqueue([.success(ControlResponse(
+            proto: PlaybackControl.protocolName,
+            generation: bootstrap().generation,
+            controlEpoch: 7,
+            acceptedSequence: 1,
+            action: ControlAction(type: "retry_resource", reason: "reader_failed", afterMs: 9_000)
+        ))])
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let stopped = await reporter.stopped
+        XCTAssertFalse(stopped, "a retry is not a reason to stop reporting")
+        XCTAssertNil(harness.exchanges.first?.failure)
+        await reporter.stop()
     }
 
     func testAHoldWithoutItsReasonIsTerminal() async throws {
@@ -850,7 +909,9 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertTrue(json.contains("\"dynamic_range\":\"dolby_vision\""))
         XCTAssertTrue(json.contains("\"render_state\":\"waiting\""))
         XCTAssertTrue(json.contains("\"demand\":\"hold\""))
-        XCTAssertTrue(json.contains("\"supported_actions\":[\"hold\"]"))
+        XCTAssertTrue(
+            json.contains("\"supported_actions\":[\"hold\",\"retry_resource\",\"terminal\"]")
+        )
         XCTAssertFalse(json.contains("\"proto\""), "the wire name is protocol, not proto")
     }
 
