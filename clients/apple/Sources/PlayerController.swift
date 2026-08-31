@@ -5402,7 +5402,12 @@ extension PlayerController {
     /// and would discard it inside the same call that published it.
     private func expireControlEvidenceIfProgressed() {
         guard let publishedAt = controlEvidencePositionMs else { return }
-        guard realPositionMs() > publishedAt else { return }
+        // Any movement, not only forward movement. A viewer who stalls an hour
+        // in and scrubs back to five minutes has ended the stall this evidence
+        // describes, and the mapper ranks an override above everything the
+        // player reports — so a forward-only test would report `stalled` for
+        // the rest of the title.
+        guard realPositionMs() != publishedAt else { return }
         controlObservationOverride = nil
         controlRenderOverride = nil
         controlEvidencePositionMs = nil

@@ -374,6 +374,44 @@ final class PlaybackControlSessionTests: XCTestCase {
         session.end()
     }
 
+    /// A verdict outlives its reporter and its session, but not the lease the
+    /// server gave that session.
+    ///
+    /// Without a bound a sentence delivered at ten o'clock captions an
+    /// unrelated failure at eleven with total confidence, because nothing but
+    /// a new title clears it.
+    func testAVerdictDoesNotOutliveTheLeaseItWasGivenUnder() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "an hour ago"
+        ))
+        defer { controlAnswer.set(ControlAction(type: "none")) }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        // The shortest lease the bootstrap validator accepts — it must be at
+        // least `nextExchangeMs` — so the bound is reachable in a test rather
+        // than in five minutes.
+        var short = sessionBootstrap()
+        short.leaseTimeoutMs = PlaybackControl.minimumExchangeMs
+        session.begin(
+            bootstrap: short,
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(session.terminalVerdict?.message, "an hour ago",
+                       "inside the lease it is the answer")
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertNil(session.terminalVerdict,
+                     "past the lease the session it described is gone")
+        session.end()
+    }
+
     /// An exchange from the reporter a reopen just replaced must not arm a
     /// verdict for the session that replaced it.
     ///
