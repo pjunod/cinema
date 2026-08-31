@@ -826,7 +826,12 @@ class Controller(
                     reopenReason = ReopenReason.Stall,
                 ),
                 caps = decisionCaps,
-                deliveredDynamicRange = plan.deliveredDynamicRange,
+                requestHDR10 = sessionHDR10Request(
+                    decisionMode = plan.mode,
+                    deliveredDynamicRange = plan.deliveredDynamicRange,
+                    compatibilityTranscode = forceCompatibilityTranscode,
+                    delivery = subtitleDelivery,
+                ),
             )
             val hls = try {
                 sessionCreateCoordinator.reopenAfterStall(
@@ -908,7 +913,12 @@ class Controller(
             deliveredDynamicRange = deliveredRange,
         ),
         caps = decisionCaps,
-        deliveredDynamicRange = plan.deliveredDynamicRange,
+        requestHDR10 = sessionHDR10Request(
+            decisionMode = plan.mode,
+            deliveredDynamicRange = plan.deliveredDynamicRange,
+            compatibilityTranscode = forceCompatibilityTranscode,
+            delivery = subtitleDelivery,
+        ),
     )
 
     private fun trackFor(index: Long?): SubTrack? =

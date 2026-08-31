@@ -282,17 +282,27 @@ internal fun subtitleSessionBody(
     )
 }
 
-/** Repeat the immutable decision facts and the decision's per-title HDR10
- * request. A caps document permits HDR10; it must never manufacture the ask
- * for an SDR title or a copy session. */
+/** Whether this create repeats an HDR10 transcode selected by `/decision`.
+ * Compatibility rescue and burn-in deliberately produce universal SDR bytes;
+ * neither may inherit HDR10 merely because the route it replaces was HDR. */
+internal fun sessionHDR10Request(
+    decisionMode: String,
+    deliveredDynamicRange: String?,
+    compatibilityTranscode: Boolean,
+    delivery: SubtitleDelivery,
+): Boolean =
+    !compatibilityTranscode &&
+        delivery != SubtitleDelivery.Burn &&
+        decisionMode.lowercase(Locale.ROOT) == "transcode" &&
+        deliveredDynamicRange?.lowercase(Locale.ROOT) == "hdr10"
+
+/** Repeat the immutable decision facts and its already-classified HDR10 ask. */
 internal fun bindDecisionPlan(
     body: CreateSessionReq,
     caps: DeviceCaps,
-    deliveredDynamicRange: String?,
+    requestHDR10: Boolean,
 ): CreateSessionReq = body.copy(
-    hdr10 = true.takeIf {
-        body.copy != true && deliveredDynamicRange?.lowercase(Locale.ROOT) == "hdr10"
-    },
+    hdr10 = true.takeIf { requestHDR10 && body.copy != true },
     caps = caps,
 )
 

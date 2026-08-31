@@ -2488,8 +2488,9 @@ final class PlayerController: ObservableObject {
                     aac: copy ? aac : nil,
                     preserveDolbyVision: copy ? preserveDolbyVision : nil,
                     hdr10: Self.sessionHDR10Request(
-                        copy: copy,
-                        deliveredRange: decision.deliveredDynamicRange
+                        decisionMode: normalMode,
+                        deliveredRange: decision.deliveredDynamicRange,
+                        forcesSDR: forceCompatibilityTranscode || burnSubtitle != nil
                     ),
                     caps: decisionCaps
                 ),
@@ -3315,12 +3316,19 @@ final class PlayerController: ObservableObject {
     static let stallReopenReason = "stall"
 
     /// The document says whether HDR10 output is allowed; this echo says the
-    /// current title's decision actually selected that transcode rung.
+    /// current title's decision actually selected that transcode rung. A
+    /// compatibility rescue and a subtitle burn are explicitly SDR, even when
+    /// the decision they replace described HDR10 source bytes.
     nonisolated static func sessionHDR10Request(
-        copy: Bool,
-        deliveredRange: String?
+        decisionMode: String,
+        deliveredRange: String?,
+        forcesSDR: Bool
     ) -> Bool? {
-        !copy && deliveredRange?.lowercased() == "hdr10" ? true : nil
+        !forcesSDR
+            && decisionMode.lowercased() == "transcode"
+            && deliveredRange?.lowercased() == "hdr10"
+            ? true
+            : nil
     }
 
     /// The unbound body to re-post when the server refuses a bound stall

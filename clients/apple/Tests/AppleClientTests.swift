@@ -4632,11 +4632,28 @@ final class AppleClientTests: XCTestCase {
 
     func testSessionCreateRequestsOnlyTheDecisionsHDR10Transcode() throws {
         XCTAssertEqual(
-            PlayerController.sessionHDR10Request(copy: false, deliveredRange: "HDR10"),
+            PlayerController.sessionHDR10Request(
+                decisionMode: "transcode",
+                deliveredRange: "HDR10",
+                forcesSDR: false
+            ),
             true
         )
-        XCTAssertNil(PlayerController.sessionHDR10Request(copy: false, deliveredRange: "sdr"))
-        XCTAssertNil(PlayerController.sessionHDR10Request(copy: true, deliveredRange: "hdr10"))
+        XCTAssertNil(PlayerController.sessionHDR10Request(
+            decisionMode: "transcode",
+            deliveredRange: "sdr",
+            forcesSDR: false
+        ))
+        XCTAssertNil(PlayerController.sessionHDR10Request(
+            decisionMode: "remux",
+            deliveredRange: "hdr10",
+            forcesSDR: false
+        ))
+        XCTAssertNil(PlayerController.sessionHDR10Request(
+            decisionMode: "transcode",
+            deliveredRange: "hdr10",
+            forcesSDR: true
+        ))
 
         let request = CreateSessionRequest(
             playbackId: "player-hdr10",
@@ -4655,6 +4672,19 @@ final class AppleClientTests: XCTestCase {
         )
         XCTAssertEqual(json["hdr10"] as? Bool, true)
         XCTAssertNotNil(json["caps"])
+    }
+
+    func testCompatibilityRescueNeverRepeatsTheReplacedHDR10Plan() {
+        XCTAssertNil(PlayerController.sessionHDR10Request(
+            decisionMode: "direct",
+            deliveredRange: "hdr10",
+            forcesSDR: true
+        ))
+        XCTAssertNil(PlayerController.sessionHDR10Request(
+            decisionMode: "remux",
+            deliveredRange: "hdr10",
+            forcesSDR: true
+        ))
     }
 
     func testPictureInPictureCommandStartsStopsAndWaitsForAvailability() {

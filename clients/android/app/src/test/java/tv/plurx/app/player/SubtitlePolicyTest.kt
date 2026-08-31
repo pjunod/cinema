@@ -419,15 +419,52 @@ class SubtitlePolicyTest {
                 quality = PlaybackQuality.Auto, sourceHeight = 2160,
             ),
             caps = decisionCaps,
-            deliveredDynamicRange = "hdr10",
+            requestHDR10 = sessionHDR10Request(
+                decisionMode = "transcode",
+                deliveredDynamicRange = "hdr10",
+                compatibilityTranscode = false,
+                delivery = SubtitleDelivery.Plan,
+            ),
         )
         assertEquals(decisionCaps, transcode.caps)
         assertEquals(true, transcode.hdr10)
 
-        val sdr = bindDecisionPlan(transcode, decisionCaps, "sdr")
+        val sdr = bindDecisionPlan(transcode, decisionCaps, requestHDR10 = false)
         assertNull(sdr.hdr10)
-        val copy = bindDecisionPlan(transcode.copy(copy = true), decisionCaps, "hdr10")
+        val copy = bindDecisionPlan(transcode.copy(copy = true), decisionCaps, requestHDR10 = true)
         assertNull(copy.hdr10)
+    }
+
+    @Test
+    fun compatibilityRescueAndBurnNeverRepeatTheReplacedHdr10Plan() {
+        for (mode in listOf("direct", "remux")) {
+            val requestHDR10 = sessionHDR10Request(
+                decisionMode = mode,
+                deliveredDynamicRange = "hdr10",
+                compatibilityTranscode = true,
+                delivery = SubtitleDelivery.Plan,
+            )
+            val rescue = bindDecisionPlan(
+                body = subtitleSessionBody(
+                    playbackId = "pb", requestId = "rescue-$mode", startSeconds = 0.0,
+                    delivery = SubtitleDelivery.Plan, subtitleIndex = null,
+                    copyableVideo = false, aac = false, preserveDolbyVision = false,
+                    audioIndex = null, audioOffsetMs = 0,
+                    quality = PlaybackQuality.Auto, sourceHeight = 2160,
+                ),
+                caps = decisionCaps,
+                requestHDR10 = requestHDR10,
+            )
+            assertNull(rescue.hdr10)
+        }
+        assertFalse(
+            sessionHDR10Request(
+                decisionMode = "transcode",
+                deliveredDynamicRange = "hdr10",
+                compatibilityTranscode = false,
+                delivery = SubtitleDelivery.Burn,
+            ),
+        )
     }
 
     @Test
