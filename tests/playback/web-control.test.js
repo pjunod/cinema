@@ -666,7 +666,11 @@ async function main() {
     send: async (_url, request) => { declared = request.supported_actions; return response(request); },
   }).start();
   await flush();
-  assert.deepEqual(declared, ["hold"], "the request declares the actions this client accepts");
+  assert.deepEqual(
+    declared,
+    ["hold", "retry_resource", "terminal"],
+    "the request declares the actions this client accepts",
+  );
   declaring.stop();
 
   // A hold is not a failure and not a reason to stop. This is the whole point:
@@ -719,6 +723,79 @@ async function main() {
   assert.equal(malformedHold, 1, "a hold must carry its reason");
   assert.equal(malformed.status().stopped, true);
   malformed.stop();
+
+  // A retry is the server naming its own cadence. It is not a failure, so the
+  // exchange still counts as good; it only says when to ask again.
+  const pacedTimers = [];
+  let pacedNowMs = 0;
+  const paced = new control.Reporter({
+    bootstrap: bootstrap(),
+    clientInstanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    snapshot: () => snapshot(),
+    send: async (_url, request) =>
+      Object.assign(response(request), {
+        action: { type: "retry_resource", after_ms: 9_000, reason: "reader_failed" },
+      }),
+    setTimer: (fn, delay) => { pacedTimers.push({ fn, delay }); return pacedTimers.length; },
+    clearTimer: () => {},
+    now: () => pacedNowMs,
+    onExchange: ({ error }) => { assert.equal(error, null, "a retry is not an error"); },
+  }).start();
+  await flush();
+  assert.equal(paced.status().stopped, false, "a retry keeps the reporter alive");
+  // The next exchange is held to the server's interval rather than this
+  // client's default.
+  assert.ok(
+    pacedTimers.some((entry) => entry.delay >= 9_000),
+    `expected a timer at the server's 9000ms, saw ${JSON.stringify(pacedTimers.map((e) => e.delay))}`,
+  );
+  paced.stop();
+
+  // A terminal verdict ends reporting. It does not tear the player down —
+  // this reporter owns no recovery, and the buffer already fetched is still
+  // worth playing.
+  let terminalErrors = 0;
+  let terminalSeen = null;
+  const ended = new control.Reporter({
+    bootstrap: bootstrap(),
+    clientInstanceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    snapshot: () => snapshot(),
+    send: async (_url, request) =>
+      Object.assign(response(request), {
+        action: { type: "terminal", code: "unsupported", message: "cannot be carried" },
+      }),
+    onExchange: ({ response: seen, error }) => {
+      if (error) terminalErrors += 1;
+      else terminalSeen = seen.action;
+    },
+  }).start();
+  await flush();
+  assert.equal(terminalErrors, 0, "a terminal verdict is an answer, not a protocol error");
+  assert.equal(terminalSeen && terminalSeen.code, "unsupported");
+  assert.equal(ended.status().stopped, true, "a terminal verdict ends reporting");
+  ended.stop();
+
+  // Malformed verdicts are still refused: an action inside the declared
+  // vocabulary but missing the field the client acts on is worse than one it
+  // has never heard of, because it would be acted on.
+  for (const [label, action] of [
+    ["terminal without a code", { type: "terminal", message: "x" }],
+    ["retry without an interval", { type: "retry_resource", reason: "reader_failed" }],
+    ["retry with a negative interval",
+      { type: "retry_resource", reason: "reader_failed", after_ms: -1 }],
+  ]) {
+    let refused = 0;
+    const bad = new control.Reporter({
+      bootstrap: bootstrap(),
+      clientInstanceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      snapshot: () => snapshot(),
+      send: async (_url, request) => Object.assign(response(request), { action }),
+      onExchange: ({ error }) => { if (error) refused += 1; },
+    }).start();
+    await flush();
+    assert.equal(refused, 1, label);
+    bad.stop();
+  }
 
   reporter.stop();
   process.stdout.write("PASS passive web playback-control reporter\n");

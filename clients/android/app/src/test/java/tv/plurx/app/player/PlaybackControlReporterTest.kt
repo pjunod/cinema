@@ -393,6 +393,73 @@ class PlaybackControlRefusalTest {
     }
 
     @Test
+    fun `a terminal verdict ends reporting without a protocol error`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.success(
+                ControlResponse(
+                    PlaybackControl.PROTOCOL,
+                    GENERATION,
+                    7,
+                    1,
+                    ControlAction("terminal", code = "unsupported", message = "no"),
+                ),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertTrue(subject.isStopped(), "a terminal verdict ends reporting")
+        assertNull(harness.exchanges.first().failure)
+    }
+
+    @Test
+    fun `a retry is an answer and keeps the reporter running`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.success(
+                ControlResponse(
+                    PlaybackControl.PROTOCOL,
+                    GENERATION,
+                    7,
+                    1,
+                    ControlAction("retry_resource", reason = "reader_failed", afterMs = 9_000),
+                ),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertFalse(subject.isStopped(), "a retry is not a reason to stop reporting")
+        assertNull(harness.exchanges.first().failure)
+        subject.stop()
+    }
+
+    @Test
+    fun `a verdict missing the field it would be acted on is terminal`() = runTest {
+        // Inside the declared vocabulary but unusable. Worse than an unknown
+        // action, because this one would be acted on.
+        listOf(
+            ControlAction("terminal", message = "no code"),
+            ControlAction("retry_resource", reason = "reader_failed"),
+            ControlAction("retry_resource", reason = "reader_failed", afterMs = 0),
+            ControlAction("retry_resource", reason = "reader_failed", afterMs = 60_001),
+        ).forEach { action ->
+            val harness = Harness(this)
+            harness.enqueue(
+                Result.success(
+                    ControlResponse(PlaybackControl.PROTOCOL, GENERATION, 7, 1, action),
+                ),
+            )
+            val subject = assertNotNull(reporter(harness))
+            subject.start(backgroundScope)
+            advanceTimeBy(30_001)
+            assertTrue(subject.isStopped(), "$action must stop the reporter")
+            assertEquals("protocol:action", harness.exchanges.last().failure)
+        }
+    }
+
+    @Test
     fun `a hold without its reason is terminal`() = runTest {
         val harness = Harness(this)
         harness.enqueue(
@@ -418,7 +485,10 @@ class PlaybackControlRefusalTest {
         val subject = assertNotNull(reporter(harness))
         subject.start(backgroundScope)
         advanceTimeBy(30_001)
-        assertEquals(listOf("hold"), harness.requests.first().supportedActions)
+        assertEquals(
+            listOf("hold", "retry_resource", "terminal"),
+            harness.requests.first().supportedActions,
+        )
         subject.stop()
     }
 }
@@ -748,7 +818,7 @@ class PlaybackControlWireTest {
         assertTrue(encoded.contains("\"dynamic_range\":\"dolby_vision\""))
         assertTrue(encoded.contains("\"render_state\":\"waiting\""))
         assertTrue(encoded.contains("\"demand\":\"hold\""))
-        assertTrue(encoded.contains("\"supported_actions\":[\"hold\"]"))
+        assertTrue(encoded.contains("\"supported_actions\":[\"hold\",\"retry_resource\",\"terminal\"]"))
         assertFalse(encoded.contains("\"error_detail\""), "explicitNulls is off; absent means absent")
     }
 
