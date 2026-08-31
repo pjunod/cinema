@@ -52,6 +52,13 @@ the other builds the durable state that measurement gets encoded into.
 
 ### 2.1 The spike (§5.4)
 
+**The procedure is written and needs only hardware:**
+[M5.5-PREPARATION-FEASIBILITY-SPIKE.md](M5.5-PREPARATION-FEASIBILITY-SPIKE.md).
+It names the tool for each platform, the seven fields to record, the named
+fleet hardware, and the table that has to be filled in before M6 may freeze
+the contract. What follows is the summary that document expands.
+
+
 Three platform-independent meanings of "ready" have to be measured, not
 assumed:
 
