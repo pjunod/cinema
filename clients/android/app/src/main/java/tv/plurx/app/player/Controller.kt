@@ -402,8 +402,17 @@ class Controller(
         // is the screen's own scope — main-dispatched and cancelled with
         // the screen — so every player call below still lands on the main
         // thread and none of them outlive the surface they belong to.
+        //
+        // The token is minted HERE, not inside the launched body. `launch`
+        // dispatches, so a body that mints its own would leave a window in
+        // which a stall reopen or a viewer seek could take ownership first
+        // and never be noticed. Minting it also invalidates whatever was in
+        // flight, which is the correct ownership: the player is `IDLE` with
+        // an error, so a reopen answering the stall that preceded the error
+        // is answering a question this failure has superseded.
         override fun onPlayerError(error: PlaybackException) {
-            scope.launch { handlePlayerError(error) }
+            val errorVersion = stallGuard.beginRequest()
+            scope.launch { handlePlayerError(error, errorVersion) }
         }
 
         override fun onRenderedFirstFrame() {
@@ -437,7 +446,7 @@ class Controller(
      * Split out of the listener because it suspends. Everything below the
      * ask runs only if the player is still holding this same failure.
      */
-    private suspend fun handlePlayerError(error: PlaybackException) {
+    private suspend fun handlePlayerError(error: PlaybackException, errorVersion: Long) {
         val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
         // The ask goes before rung one, not before rung two. Rung one is
         // `retryMediaOnNextNode`, and a verdict about the *source* does not
@@ -446,6 +455,16 @@ class Controller(
         // at retry the whole way and failing three times to learn what the
         // server knew before the first one. Each rung costs a full player
         // prepare the viewer watches.
+        //
+        // What that costs, stated plainly: ingress failover now waits too, so
+        // a dead node freezes the picture for the ask's bound before the
+        // second node is tried. That is the right side of the trade only
+        // because both cases arrive as transport codes — an ended session's
+        // 404 is a transport code, and failing over for one walks EVERY node
+        // at a prepare each. One bounded wait beats N prepares. `askForAction`
+        // returns at its first line when there is no reporter, so direct play
+        // and progressive remux — the plans without a failover list — pay
+        // nothing.
         //
         // The evidence is published from INSIDE the ask, after it has read the
         // sequence floor — see `askForAction`. Publishing first lets the pump
@@ -465,20 +484,62 @@ class Controller(
                 )
             },
         )
-        // Seconds passed. `playerError` is this exception only while nothing
-        // has re-prepared the player: a restart, a failover, a new session or
-        // a release all clear or replace it, and each one means this failure
-        // is no longer the one on screen.
-        if (released) return
-        if (player.playerError !== error) return
+        // Seconds passed, and it takes all three of these to notice.
+        //
+        // `released` first, because the other two touch a player that
+        // `release()` has torn down. It is load-bearing on its own terms:
+        // ExoPlayer's `release` does not clear `playbackError`, so the
+        // identity check below would happily pass on a dead player.
+        //
+        // The guard version catches what `playerError` cannot. A VOD seek, a
+        // `playPause`, an in-place subtitle change and the pre-`prepare` half
+        // of `openSession` all leave `playbackError` exactly as it was, so the
+        // identity check alone would let this ladder discard a viewer's seek
+        // and burn a rung restarting at the position they had just left.
+        //
+        // And `playerError` catches what the version cannot: anything that
+        // re-prepared the player without going through the guard.
+        val holdsFailure = !released && player.playerError === error
+        if (!ladderStillOwnsFailure(
+                released = released,
+                guardCurrent = stallGuard.isCurrent(errorVersion),
+                playerHoldsFailure = holdsFailure,
+            )
+        ) {
+            // The beacon below never fires on this path, and the fleet run
+            // reads these. Say that the failure was superseded rather than
+            // leaving no client-side record of it at all.
+            playbackTelemetry.report(
+                event = "playback_error_superseded",
+                level = "warn",
+                message = error.errorCodeName,
+                code = error.errorCode,
+                detail = "released=$released current=${stallGuard.isCurrent(errorVersion)} " +
+                    "held=$holdsFailure",
+            )
+            return
+        }
         // Only `terminal` short-circuits. A `hold` or a `retry_resource` on a
         // dead item would leave the player with nothing to render and no path
         // forward, so those fall through to the ladder — the ladder is the
         // only thing that can still produce a picture. This is the opposite of
         // the stall funnel, where a `hold` means *don't churn* and the media
         // is still there.
+        //
+        // A transport failure is not carved out here, and the `Fail` branch
+        // below still carves one out, because they are answering different
+        // questions. That branch borrows `terminalVerdict`, which survives
+        // reopens and may have been formed for another cause entirely; this
+        // one is a fresh answer to evidence published for this exact failure.
+        // And the case the carve-out protects — a dead ingress — is the case
+        // a `terminal` most wants to short-circuit: an ended session's 404 is
+        // the same on every node, so failing over walks the whole list to
+        // arrive at the sentence the server already sent.
         if (verdict != null && verdict.type == "terminal") {
-            onError(verdict.message ?: "Playback stopped.")
+            onError(
+                verdict.message
+                    ?: error.errorCodeName.let { "Playback stopped ($it)." },
+            )
             return
         }
         // Only a transport failure can be answered by another node. A
@@ -569,7 +630,16 @@ class Controller(
         stallWatchdogJob = scope.launch {
             while (isActive) {
                 playbackControlPlayerChanged()
-                val measurement = playbackTelemetry.sampleStall(establishedPlayback, monotonicNowMs())
+                // A player holding a `PlaybackException` is not a recovered
+                // stall, and `sampleStall` cannot tell the difference: an
+                // error moves ExoPlayer to `IDLE`, so `buffering` goes false
+                // on the falling edge the tracker reports as recovery, while
+                // `playWhenReady` and `establishedPlayback` both stay true
+                // until the ladder restarts. Without this the failure and the
+                // stall race for the same evidence slot and the same answer,
+                // and whichever loses spends a rung on the other's verdict.
+                val stallable = establishedPlayback && player.playerError == null
+                val measurement = playbackTelemetry.sampleStall(stallable, monotonicNowMs())
                 if (measurement != null) {
                     onStall(measurement.positionMs)
                 }
@@ -1486,6 +1556,29 @@ internal const val CONTROL_ASK_CAP_MS = 3_000L
  * produced. Sending `unknown` for all of them would hand the arbiter one word
  * where it has to choose between three different answers.
  */
+/**
+ * Does the deferred compatibility ladder still own the failure it waited on?
+ *
+ * Three conditions, and the ladder needs all three. Extracted so the SET is
+ * pinned by a test: the hazard this function exists for is not any one check
+ * being wrong, it is a later edit dropping one and leaving a ladder that
+ * restarts a player somebody else already moved.
+ *
+ * - [released]: `release()` tore the player down. ExoPlayer's `release` does
+ *   not clear `playbackError`, so [playerHoldsFailure] is no defence here.
+ * - [guardCurrent]: nothing took ownership while the ask was out. A viewer
+ *   seek, a `playPause`, an in-place subtitle change, and the pre-`prepare`
+ *   half of `openSession` all leave `playbackError` untouched, so this is the
+ *   only check that sees them.
+ * - [playerHoldsFailure]: the player is still holding this exact exception.
+ *   Catches anything that re-prepared without going through the guard.
+ */
+internal fun ladderStillOwnsFailure(
+    released: Boolean,
+    guardCurrent: Boolean,
+    playerHoldsFailure: Boolean,
+): Boolean = !released && guardCurrent && playerHoldsFailure
+
 internal fun controlErrorCode(errorCode: Int): ClientErrorCode = when (errorCode) {
     // Media3's 3xxx family is *parsing*, and it splits: the container codes
     // are about the media, the manifest codes are about what the server

@@ -1,9 +1,9 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-31 · **Baseline:** `main` at `55c6f374` ·
+**Updated:** 2026-08-31 · **Baseline:** `main` at `377107c9` ·
 **Fleet:** nuc3 · nuc4 · m6 serve `v0.2.8-106-g55abad8f`; nynuc serves a
 later untagged build · **Devices:** Android 47 · Apple 86 —
-the tree is Android 54 · Apple 95, and neither has run on hardware
+the tree is Android 57 · Apple 100, and neither has run on hardware
 
 Companion to
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) (what
@@ -57,11 +57,10 @@ merge target: two client PRs in flight means the second always fails.
 | M5e ladder | Apple: ask before walking the compatibility ladder | [#721](https://github.com/pjunod/plurx/pull/721) | in review |
 | M5g ladder | Android: ask before walking the compatibility ladder | this change | open |
 
-**What is left in M5, and what each is waiting for.** With the two ladder
-asks landed, M5c and M5h — deleting the web and mobile budgets — are the only
-remaining slices, and both are gated on
-[M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any code. No
-buildable M5 work remains.
+**What is left in M5, and what each is waiting for.** The two ladder asks are
+the last buildable M5 work; once they land, M5c and M5h — deleting the web and
+mobile budgets — are all that remains, and both are gated on
+[M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any code.
 
 ## The gate that blocks every deletion, and what it does not block
 

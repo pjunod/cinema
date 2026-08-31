@@ -318,3 +318,70 @@ class ControlAskBoundTest {
         assertTrue(CONTROL_ASK_CAP_MS > CONTROL_ASK_MS)
     }
 }
+
+
+/**
+ * The compatibility ladder waits on a verdict now, so it resumes into a
+ * player that may have moved. These tests pin the SET of conditions it
+ * re-checks, because the hazard is not any one of them being wrong — it is a
+ * later edit dropping one, which leaves a ladder that restarts a player
+ * somebody else already moved and no test that notices.
+ */
+class LadderOwnershipTest {
+
+    @Test
+    fun theLadderProceedsOnlyWhenAllThreeHold() {
+        assertTrue(
+            ladderStillOwnsFailure(
+                released = false,
+                guardCurrent = true,
+                playerHoldsFailure = true,
+            ),
+        )
+    }
+
+    /**
+     * `release()` tore the player down. ExoPlayer's `release` does not clear
+     * `playbackError`, so the identity check passes on a dead player and this
+     * is the only thing standing between the ladder and a released ExoPlayer.
+     */
+    @Test
+    fun aReleasedPlayerStopsTheLadderEvenWhileItStillHoldsTheFailure() {
+        assertFalse(
+            ladderStillOwnsFailure(
+                released = true,
+                guardCurrent = true,
+                playerHoldsFailure = true,
+            ),
+        )
+    }
+
+    /**
+     * A VOD seek, a `playPause`, an in-place subtitle change, and the
+     * pre-`prepare` half of `openSession` all leave `playbackError` exactly as
+     * it was. Without the guard version the ladder would discard the viewer's
+     * seek and burn a rung restarting at the position they had just left.
+     */
+    @Test
+    fun anotherOwnerStopsTheLadderEvenWhilePlayerErrorIsUnchanged() {
+        assertFalse(
+            ladderStillOwnsFailure(
+                released = false,
+                guardCurrent = false,
+                playerHoldsFailure = true,
+            ),
+        )
+    }
+
+    /** Anything that re-prepared without going through the guard. */
+    @Test
+    fun aRePreparedPlayerStopsTheLadderEvenWhileTheGuardIsCurrent() {
+        assertFalse(
+            ladderStillOwnsFailure(
+                released = false,
+                guardCurrent = true,
+                playerHoldsFailure = false,
+            ),
+        )
+    }
+}
