@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["f8a67415"]
+reason = "This commit corrects the Markdown and HTML project status pages for the playback-control rewrite: the item 8 tally, the stale M4 section framing, and the At a glance rows. It changes no runtime or validation behavior."
+ignore = true
