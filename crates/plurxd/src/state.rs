@@ -7549,8 +7549,8 @@ mod tests {
         ));
     }
     use plurx_core::store::{
-        DvConversionStore, LibraryStore, MediaStore, PlaybackTelemetryStore, SettingsStore,
-        SqliteStore,
+        DvConversionMode, DvConversionStore, LibraryStore, MediaStore, PlaybackTelemetryStore,
+        SettingsStore, SqliteStore,
     };
     use plurx_core::transcode::Pipeline;
     use serde_json::json;
@@ -8483,6 +8483,10 @@ mod tests {
             )
             .await
             .expect("P7 file");
+        assert!(store
+            .set_library_dv_conversion_mode(library.id, DvConversionMode::Manual)
+            .await
+            .expect("enable manual conversion"));
         assert!(matches!(
             store.queue_dv_conversion(file_id, 1).await.expect("queue"),
             QueueDvConversionOutcome::Queued(_)
@@ -8647,6 +8651,10 @@ mod tests {
             )
             .await
             .expect("P7 file");
+        assert!(store
+            .set_library_dv_conversion_mode(library.id, DvConversionMode::Manual)
+            .await
+            .expect("enable manual conversion"));
         assert!(matches!(
             store.queue_dv_conversion(file_id, 1).await.expect("queue"),
             QueueDvConversionOutcome::Queued(_)

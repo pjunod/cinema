@@ -3275,10 +3275,12 @@ mod tests {
     fn v41_schema_commit_with_a_stale_marker_recovers_without_replaying_ddl() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("plurx.db");
-        SqliteStore::open(&db).expect("create current database");
-
         {
             let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(41) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
             conn.pragma_update(None, "user_version", 40)
                 .expect("simulate interruption after the v41 schema commit");
         }
