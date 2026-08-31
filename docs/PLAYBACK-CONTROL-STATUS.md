@@ -104,10 +104,10 @@ this programme owes it.
 mobile budgets — are all that remains, and both are gated on
 [M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any code. The
 next thing that has to happen is a fleet run, and it is not a thing this side
-can do. §3 and §4 of that document are the procedure. §4.0 is the web arm,
-which needs no device and should be settled first — and it is the arm that
-matters most, because the web reporter's fix has never been confirmed on
-hardware.
+can do from here. §3 and §4 of that document are the procedure, and §4.0 is
+the web arm, which needs no device and should be settled first — it is the
+only platform that can prove an exchange completes without a person holding
+something, and the web reporter's fix is still unconfirmed on the fleet.
 
 ### Why Android does not await the verdict, and Apple does
 
@@ -518,7 +518,7 @@ not being counted as complete merely because its foundation has landed.
 |---|---|---|---|
 | Design and adversarial review | **Complete** | End-to-end protocol, actor, replacement, cluster, index, observability, and watchdog-deletion contracts | Re-review each implementation PR against the contract |
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Actions are no longer disabled — the server emits them and all three clients consume them — but the advertisement is still default-off behind `playback.control_protocol_v1`, and turning it on is M9's |
-| M2 — passive clients | **Partial** | Web, Apple, and Android all report demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Alternate-ingress retry, which plan §13.2 makes an M2 deliverable and which no native client implements — this is a missing feature, not a missing measurement; and the playback-lab run that joins each legacy recovery to its preceding control snapshot |
+| M2 — passive clients | **Partial** | Web, Apple, and Android all report demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence; Apple and Android both retry through an alternate ingress (`retryMediaOnNextNode`) | Physical evidence for that retry, and the §13.2 playback-lab run that joins each legacy recovery to the control snapshot before it. Web cannot claim alternate-ingress retry at all without a CORS/auth contract — see [M2-WEB](PLAYBACK-CONTROL-PROTOCOL-M2-WEB.md) — so this row stays partial on measurement, not on missing native code |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | Nothing — M4 moved recovery decisions through that owner and merged |
 | M4 — server watchdog removal | **Complete** | #636 merged production startup recovery; #641 merged actor-managed published lifetime, frozen frontier, typed `producer_ended`, and removal of its compatibility watcher; #642 merged actor-owned copy lifetime and removed the copy watchdog, election, request-side exit inference, and copy-owned replacement policy; #663 re-anchored the replacement tests and closed handoff item 5 | Nothing — later lifecycle/observability cleanup is a separate slice |
 | M5 — one client action owner | **Complete in source** | Web, Apple, and Android each ask the server before recovering; a terminal verdict is recipe-scoped, so it gates only the rung that re-prepares the identical recipe | A fleet acceptance run, which is what the budget deletions (M5c, M5h) are gated on |
@@ -530,11 +530,17 @@ not being counted as complete merely because its foundation has landed.
 ## Merged evidence
 
 **This table stops at #636, and nothing replaced it.** The slice ledger above
-begins at #705, so the PRs that merged between them — #641, #642, #652, #654,
-#655, #656, and #663 — are recorded in neither table, only in prose. #700,
-#716, and #726 are in the ledger. The table is kept for the exact heads and
-hosted run ids it carries, which the ledger does not; the gap between the two
-is real and is the reason a reader should trust the roadmap table over either.
+begins at #705. Roughly eighteen playback-control PRs merged between them and
+are recorded in neither table — #641, #642, #656 (carrying #652, #654, #655),
+#663, the two M2 passive reporters #667 and #668, the wire conformance and
+telemetry slices #674, #686, #690, #692, #695, #696, #702, #703, and the M5
+handoff #704. Most appear nowhere in this file at all, including the two that
+built the M2 milestone this table's own rows credit. #700, #716, and #726 are
+in the ledger.
+
+Neither table is an index, in other words, and this one is kept only for the
+exact heads and hosted run ids it carries. **Trust the roadmap table over
+either of them**, and `git log --merges` over all three.
 
 | PR | Merged result | Verification at merge |
 |---|---|---|
@@ -566,16 +572,19 @@ history, not as a queue — it is kept because its failure modes recur and the
 reasoning is worth more than the tense. Two things need saying before it, both
 of which the tense hides:
 
-- **"the active branch" is not one branch.** Most of the section means
-  `codex/playback-control-m4-copy-lifetime`, which became #642. A few
-  sentences written earlier mean #641's branch, which merged to `main` first
-  as `32af5fa9`. Where the two appear in adjacent sentences, the earlier one
-  is #641.
+- **"the active branch" names two different branches, once each.** The
+  occurrence that names `codex/playback-control-m4-copy-lifetime` in its own
+  sentence is #642's. The other one — in §"Merged baseline and active-cut
+  watchdog disposition", beside a sentence about actor-managed transcode
+  published lifetime — is **#641's branch**, which merged to `main` first as
+  `32af5fa9`. The section says elsewhere that #641 is merged, so it
+  contradicts itself on that one; #641 is merged.
 - **Every "present on merged `main`" cell below is now false.** Those cells
-  were true when written and describe symbols that no longer exist.
-`SOFTWARE_GRACE`, `WATCHDOG_POLL`, `watchdog_active`, `begin_copy_child_replacement`,
-`downgrade_one_step`, and `FIRST_SEGMENT_GRACE` now have zero occurrences
-anywhere under `crates/`.
+  were true when written and describe symbols that no longer exist. The
+  removal is checkable rather than asserted: `SOFTWARE_GRACE`,
+  `WATCHDOG_POLL`, `watchdog_active`, `begin_copy_child_replacement`,
+  `downgrade_one_step`, and `FIRST_SEGMENT_GRACE` now have zero occurrences
+  anywhere under `crates/`.
 
 PR #618 merged the complete M4 implementation contract at `f9cef83b`, after
 seven adversarial passes and green local, cluster, and hosted gates. The actor
