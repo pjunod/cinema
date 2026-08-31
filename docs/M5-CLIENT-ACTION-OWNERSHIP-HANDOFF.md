@@ -90,7 +90,7 @@ This distinction matters more than the symbol list, and §7.4 does not draw it.
 |---|---|---|
 | `persistentWait` | ~3424 | **Yes.** Calls `PlaybackPolicy.stallRecoveryAction(...)`; either prompts or silently reopens at a lower rung |
 | `handleEnded` truncated branch | ~8947 | **Yes.** Resumes up to `endedTries > 3`, then prompts |
-| `stallDiagnose` | ~8350 | **No.** Diagnoses and shows *Try again / Force transcode / Close*. This is viewer intent — §7.4's `PlayerReopenQueue` row says retain that half |
+| `stallDiagnose` | ~8350 | **No.** Diagnoses and shows *Try again / Force transcode / Close*. This is viewer intent — §7.4 classifies it `no` and says retain it |
 | `pollSessionHealth` | ~10126, 2 s interval | Reads `/status`. Not a recovery decision by itself; M9 deletes it |
 
 **Do not delete `stallDiagnose`.** Its verdicts ("the stream request looks
@@ -150,17 +150,208 @@ on #663.
 emulator, seconds not minutes. **This is why web is the platform to start
 with.** `make web-check` and the layout golden cover the rest.
 
-## 4. Apple and Android — not yet recced
+## 4. Apple and Android — live recon, 2026-08-31
 
-§7.4 lists the symbols. Both have a real cost web does not: Apple needs Xcode
-and Android needs an emulator, so neither can be run outside CI from a Linux
-box, and the Android instrumented lane flakes on `adb: device offline` roughly
-one run in three.
+Recced at `bc504681`. Verify line numbers at build time; both files move.
+§7.4 has been rewritten from this pass — ten classifications changed and five
+owners were added. What follows is the part that changes how the milestone is
+built, not a restatement of the table.
 
-Recon each before planning the change, the way §3 does for web. In particular
-find out, for each owner, whether it is genuinely automatic or is viewer-intent
-wearing a recovery-shaped name — the web table shows that assumption is wrong
-at least a third of the time.
+### 4.1 The finding that reorders the work
+
+**§3.2's "the observation half is done" is a web-only claim.** Neither mobile
+client can receive an action at all:
+
+| platform | reporter constructed at | `onExchange` |
+|---|---|---|
+| Apple | `PlaybackControlSession.swift:137`, inside `begin` (`:127`) | defaults to `{ _ in }` (`PlaybackControlReporter.swift:419`) |
+| Android | `PlaybackControlSession.kt:128`, inside `begin` (`:122`) | defaults to `{}` (`PlaybackControlReporter.kt:445`) |
+
+Both reporters already accept, validate and pace all three actions. The
+parameter that would deliver one back to the player exists on both and is
+defaulted away on both; the only other construction sites are the test files.
+**Nothing is missing except the wire from the reporter back to the
+controller** — two files and roughly thirty lines per platform.
+
+The observation half is likewise unfinished. Both snapshot mappers consume an
+`observationOverride` / `renderOverride`
+(`PlaybackControlSnapshotMapper.swift:145`, `:199`;
+`PlaybackControlSnapshotMapper.kt:95`, `:149`) with the right comment on it —
+*a recovery path's evidence is more specific than anything derived from the
+player's own state, so it wins field by field* — and **no production site sets
+either**. Apple hardcodes both to `nil` at `PlayerController.swift:5269-5270`;
+Android leaves the `= null` defaults and never sets `errorCode` or
+`errorDetail` (`Controller.kt:1170-1201`).
+
+So each mobile platform needs a preliminary slice — M5d and M5f in §7 — before
+its first `switch` on a `ControlAction` can exist.
+
+Apple's telemetry is not the control plane, and is easy to mistake for it:
+`reportPlaybackStall` (`:3898`), `reportPlaybackFailure` (`:3777`) and
+`reportPlaybackProbe` (`:3877`) all POST to `/api/v1/client-log`. They are
+evidence for a human, not an exchange.
+
+### 4.2 Apple — one function is six ledger rows
+
+`clients/apple/Sources/PlayerController.swift`, 5313 lines.
+
+Every stall owner funnels through `retrySameDeliveryAfterStall` (`:3156`) —
+`PlaybackRecoveryMonitor`, `observeDeliveryStarvation`, and through them
+`statusTask`, and it is where both bounds are consulted:
+
+```
+ statusTask :3016 ─┐
+ recovery monitor ─┼──▶ retrySameDeliveryAfterStall :3156
+ starvation :3039 ─┘        │
+                            ├─ :3157 next(for:)  ◀── SPENDS the one attempt
+                            ├─ :3164 observedStall  (rearm, not a spend)
+                            ├─ :3238 boundedStallRecoveryDecision  (admits the storm budget)
+                            ├─ .reopen :3183 ─▶ reopen(at:)
+                            └─ .stop   :3184 ─▶ pause + verdict
+```
+
+**The ask goes before `:3157`, the function's first statement.** This is the
+one placement detail worth getting right, and it is not where it looks. `:3157`
+is `sameDeliveryStallRecovery.next(for:)`, which sets `attempted = true` and
+returns `.stop` on every later call — it *is* the spend. `:3164`
+(`observedStall`) is the opposite of a spend: it *rearms* the floor when a
+minute of film has passed. An ask placed anywhere after `:3157` means a server
+`hold` permanently retires the one same-delivery reopen the client had — the
+exact failure a `hold` exists to avoid.
+
+`boundedStallRecoveryDecision` (`:3238`) is `nonisolated static` and
+unit-tested, and it is the Apple analogue of web's
+`PlaybackPolicy.stallRecoveryAction`. **It is not pure** — it takes
+`reopenStorm: inout` and calls `admit()`, which records a timestamp; its own
+doc comment says so. Keep it until the arbiter demonstrably replaces it, then
+delete it with its tests in the same PR.
+
+Two more asks, each its own slice:
+
+- the early-end `.reopen` arm (`:3543`), before the
+  `recoveryReopenBudget.admit()` guard;
+- `handleItemFailure` (`:3598`) — and the ask goes **before rung one**, the
+  transport failover at `:3616`, not before `:3658`. The ladder's first rung
+  is `retryMediaOnNextNode`, and a source verdict does not change by node:
+  today an `unsupported` producer decision walks next-node → established HDR →
+  transcode, guessing at retry the whole way. `terminal` short-circuits all
+  three, which is the point of the slice.
+
+The teardown a `terminal` verdict needs already exists at `:3184-3191` — the
+`.stop` arm's body, starting at `player.pause()`. Take the body, not the range:
+`:3183` is the tail of the `.reopen` arm and is an `await reopen(...)`.
+
+### 4.3 Android — cheaper, with one detector that is weaker than it looks
+
+`clients/android/app/src/main/java/tv/plurx/app/player/`.
+
+The ask goes in `onStall` (`Controller.kt:783`), **before** the
+`stallReopenBudget.canReopen()` guard at `:788` — before, not replacing it:
+§1 forbids deleting a bound before its replacement is proved. **The
+viewer-visible verdict path is already built**: `onError` (`:123`) is surfaced
+as `playFailure` in `PlayerScreen.kt:645`, so `terminal` costs one call.
+
+A second ask goes in `onPlayerError` (`:391`), **before `:398`** — before the
+node-failover attempt, for the same reason as Apple's: `:398` both attempts the
+failover and returns, so anything placed after it never sees a transport
+failure at all.
+
+Android has one genuine head start over Apple: `playbackControlPlayerChanged()`
+is called at `Controller.kt:499`, on the same tick and immediately before
+`sampleStall` and `onStall`. The snapshot the server holds when a stall fires
+is at most one tick old.
+
+**And one genuine weakness worth knowing before writing the PR.**
+`BufferingStallTracker.sampleStall` returns a measurement only once the
+playhead moves again — either when Media3 leaves the buffering state, or when
+the playhead advances past `progressThresholdMs` while still buffering — and
+the interval must have lasted `thresholdMs = 6_000`
+(`PlaybackTelemetry.kt:264`). While the playhead is genuinely stuck it returns
+`null`, forever. So `onStall` never fires during an open-ended freeze, and a
+freeze in `STATE_READY` arms no baseline at all.
+
+That is materially weaker than Apple's detector, and the control plane can only
+be asked at the moments the detector reaches. **An Android freeze that never
+ends stays invisible to the control plane after this milestone.** Closing it is
+its own slice, and no document should describe M5g as if it were closed.
+
+`playbackErrorAction` (`PlaybackPolicy.kt:62`) is pure and unit-tested: same
+treatment as its Apple and web counterparts.
+
+### 4.4 Build numbers, and the two gates that are not the same gate
+
+| | current | source of truth | how to bump |
+|---|---|---|---|
+| Apple | 95 | `clients/apple/project.yml:18` | `make apple-build-bump` — six surfaces across four files, and a note under `docs/apple-builds/` carrying `Build: N` |
+| Android | 54 | `clients/android/app/build.gradle.kts:48` | **no tool exists.** Hand-edit, plus `clients/android/README.md:23` |
+
+The counter itself is gated by `python3 -m validation.mobile_versions`, CI job
+`mobile_version`, which reads **only** `build.gradle.kts`. The *prose* copies
+are a different gate: `validation/doc_versions.py`, reached through
+`tests/operations/test_mobile_build_claims.py` and `make operations-check`, in
+CI job **`preflight`**. An agent that bumps the counter and re-runs only
+`mobile_version` goes green and then fails `preflight`.
+
+`docs/STATUS.html` carries the Apple build under `doc_versions` too; **the
+Android number there is unenforced**, which is a reason to update it by hand
+rather than a reason to skip it.
+
+`mobile_versions` compares against the **merge target**, not the branch point,
+so every mobile PR merging after the first must re-bump. Four mobile slices
+are planned here, so **budget three re-bumps** — two Apple, which have a tool,
+and one Android, which does not.
+
+### 4.5 Test lanes
+
+| lane | command | CI job | runnable here? |
+|---|---|---|---|
+| wire conformance | `python3 -m unittest discover -s tests/validation` | `preflight` | **yes — seconds** |
+| Android JVM + lint | `make android-test` | `android_jvm` | yes, via Docker |
+| Apple iOS + tvOS | `make apple-test` | `apple` | no — needs `xcodebuild` |
+| Android instrumented | `make android-instrumentation` | `android_device` | no — needs an emulator; flakes on `adb: device offline` |
+
+`tests/validation/test_control_wire_conformance.py` reads both reporters by
+path and pins the three action names across all four ports. Any edit to either
+reporter's supported-action list or to `ClientObservation`'s wire field names
+fails there, on Linux, in seconds — so run it before pushing either mobile PR
+even though the slices as specified change neither.
+
+Apple's existing coverage for `boundedStallRecoveryDecision` and
+`PlaybackStallDetector` is in `clients/apple/Tests/AppleClientTests.swift`.
+There is no `PlayerControllerTests`.
+
+### 4.6 Ruling D1 — what `terminal` does to the player
+
+§8 question 2 was open, and both mobile slices need an answer to be written at
+all. **Decided 2026-08-31, in the absence of the operator; flag it if it is
+wrong.**
+
+> A `terminal` verdict arms the verdict; it does not tear the player down.
+> Buffered media plays out. The moment playback can no longer continue, the
+> viewer sees the server's message and a *Try again* instead of the client's
+> own guess.
+
+Three reasons, in order of weight:
+
+1. **It is the only answer that is safe on today's fleet.** §5's gate exists
+   because a client acting on a server verdict it cannot yet receive turns a
+   stall into a dead player. A verdict that only *replaces the text of an
+   already-failed path* cannot do that, so M5d and M5f stay genuinely
+   behaviour-neutral and can land ahead of the gate.
+2. **The reporter is already right.** `PlaybackControlReporter.swift:564-568`
+   and `.kt:608-613` both stop reporting and deliberately leave the player
+   alone, with the comment *buffer already fetched is still worth playing*.
+   Tearing down on `terminal` would contradict working code for no gain — the
+   viewer loses film they already have.
+3. **A terminal verdict is about a recipe and a source, not about the
+   viewer's intent.** Web already offers *Force transcode* from a diagnosed
+   stall for exactly this case. Removing the viewer's remaining options
+   because production gave up is a product regression wearing a protocol
+   change's clothes.
+
+What this rules out: any acceptance criterion of the form "an exchange
+returning `terminal` stops playback". The criterion is that the *verdict shown
+at the end of playback is the server's*, not the client's invented one.
 
 ## 5. Do not start before this reads non-zero
 
@@ -252,9 +443,71 @@ with their tests, in one PR.
 **Acceptance:** the symbols are absent from `index.html`; `stallDiagnose` and
 the viewer-intent buttons still work.
 
-### M5d, M5e — Apple, Android
+### M5d — Apple opens the return path
 
-Recon first (§4), then the same three steps per platform.
+`PlaybackControlSession.begin` (`:127`) forwards an `onAction` handler to the
+reporter's existing `onExchange` parameter (`PlaybackControlReporter.swift:419`);
+`PlayerController` gains a `pendingControlObservationOverride` that
+`playbackControlObservation()` reads instead of the hardcoded `nil` at
+`:5269-5270`. Per ruling D1 (§4.6), `terminal` arms the verdict rather than
+tearing the player down: it sets the message the *already-failed* path will
+show, replacing the client's invented one.
+
+Behaviour-neutral on a fleet that sends no action, which is every node today —
+so this lands ahead of the §5 gate.
+
+**Acceptance:** an exchange returning `none` changes nothing observable; an
+exchange returning `terminal` followed by an exhausted buffer shows the
+server's message rather than `playbackStoppedFailureTitle`'s generic text;
+`python3 -m unittest discover -s tests/validation` passes.
+
+### M5e — Apple defers its stall decision
+
+The ask goes into `retrySameDeliveryAfterStall` **before `:3157`** — before
+`next(for:)` spends the one same-delivery attempt (§4.2). Then, as separate
+slices, the early-end `.reopen` arm (`:3543`) and `handleItemFailure` (`:3598`,
+before the `:3616` node-failover rung).
+
+Nothing is deleted. The existing path stays as the `none`-or-timeout fallback.
+
+**Acceptance:** the four branches are covered in
+`clients/apple/Tests/AppleClientTests.swift`; a stall with the server returning
+`none` behaves exactly as it does today; and a `hold` leaves
+`sameDeliveryStallRecovery.attempted` false, proved by a test that asserts a
+subsequent real stall still reopens.
+
+### M5f — Android opens the return path
+
+Same two-part unlock, smaller: `onExchange` forwarded from
+`PlaybackControlSession.begin` (`:122`) to the `PlaybackControlReporter.create`
+call at `:128`, and an override field read by `playbackControlObservation()`.
+`terminal` sets the message that the existing `onError` path will show.
+
+**Acceptance:** as M5d, on the `android_jvm` lane.
+
+### M5g — Android defers its stall decision
+
+The ask goes into `onStall` **before** the `stallReopenBudget.canReopen()`
+guard at `:788`, and into `onPlayerError` **before `:398`**, the node-failover
+attempt (§4.3). Neither guard is removed in this slice.
+
+**Acceptance:** as M5e. And §4.3's limit is stated in the PR body rather than
+elided — this slice does not make an open-ended freeze visible to the control
+plane, and must not be described as if it does.
+
+### M5h — delete the mobile budgets
+
+Only after `vocabulary_total` reads non-zero. Apple's
+`SameDeliveryStallRecoveryState`, `StallReopenBudget`'s counting half and
+`RecoveryReopenBudget`; Android's `StallReopenBudget` counting half.
+
+**The prerequisite that is easy to miss:** on both platforms the bound and the
+viewer-intent fencing sequence live in the same type — Apple's
+`StallReopenBudget` and Android's `StallReopenBudget.userActionSequence`, which
+`ControllerStallGuard` delegates to. **Move the fencing out first, in its own
+PR**, or deleting the bound deletes fencing §7.4 says to retain.
+`StallBudgetTest.kt` covers `ControllerStallGuard` and
+`SessionCreateCoordinator` as well, and cannot travel with the deletion.
 
 ## 8. Open questions
 
@@ -262,10 +515,13 @@ Recon first (§4), then the same three steps per platform.
    controller's exchange is bounded at four seconds server-side, but a stalled
    viewer is already waiting. A number is needed and this document does not
    invent one.
-2. **Does `terminal` end playback, or offer the verdict with a Try again
-   button?** The plan says it authorises teardown; it does not say teardown is
-   mandatory. The kinder reading is that the player stops and the viewer is
-   told why, with their place saved.
+2. ~~**Does `terminal` end playback, or offer the verdict with a Try again
+   button?**~~ **Answered by ruling D1 (§4.6).** Neither: it arms the verdict
+   that the already-failed path shows, buffered media plays out, and the
+   viewer keeps *Try again*. Decided 2026-08-31 without the operator, because
+   both mobile slices need an answer to be written at all — flag it if it is
+   wrong. The plan authorises teardown but does not mandate it, and the
+   reporters' existing comments already take this position.
 3. **`retry_resource` while a player is starved** — the client keeps its buffer
    and re-observes, but nothing says how many times before it gives up, or
    whether that bound belongs on the client at all.
