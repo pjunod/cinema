@@ -5086,7 +5086,24 @@ pub async fn remove_orphan_recovery_guard(
         return Err("recovery-guard scratch changed while its ownership was validated".to_owned());
     }
     if !logical_child_exists(&scratch.directory, PUBLIC_PROOF_FILE).await? {
-        require_guard_attested_witness(&parent, file_id, source_path, guard_id).await?;
+        let staged_original =
+            logical_child_exists(&scratch.directory, "source.p7.original").await?;
+        let discard_pending =
+            logical_child_exists(&scratch.directory, DISCARD_PENDING_FILE).await?;
+        if staged_original || discard_pending {
+            return Err(
+                "refusing an unmaterialized recovery guard while scratch retains an original"
+                    .to_owned(),
+            );
+        }
+        // The Store intent is durable before publication creates the hard-link
+        // proof. A crash in that interval may later leave an orphaned intent,
+        // but it has not moved or deleted the source. Once the owned scratch
+        // proves that neither original-bearing namespace exists, attest that
+        // proof removal is already complete and let the ordinary monotone
+        // GuardRemoved -> ScratchRemoved lifecycle retire the scratch.
+        ensure_guard_attested_witness(&parent, &scratch.directory, file_id, source_path, guard_id)
+            .await?;
         return Ok(());
     }
     let expected = scratch
@@ -8009,6 +8026,186 @@ mod tests {
         attest_orphan_recovery_tombstone(file.id, source_path, &intent.guard_id)
             .await
             .expect("terminal tombstone attestation");
+    }
+
+    #[tokio::test]
+    async fn orphan_guard_cleanup_converges_when_intent_precedes_proof_creation() {
+        let root = crate::test_tempdir().expect("unmaterialized orphan guard root");
+        let source = root.path().join("movie.mkv");
+        tokio::fs::write(&source, b"original profile seven")
+            .await
+            .expect("source");
+        let file = media_file(source.clone());
+        let paths = ConversionPaths::for_file(&file).expect("paths");
+        prepare_fresh_directory(&paths, &file)
+            .await
+            .expect("scratch");
+        bind_test_replacement(&paths, &file, b"profile eight", false).await;
+        let intent = recovery_guard_intent(&file)
+            .await
+            .expect("guard intent")
+            .expect("discard guard");
+        let source_path = source.to_str().expect("utf8 source");
+        let loss = CancellationToken::new();
+
+        let scratch =
+            require_recovery_guard_scratch(&paths, file.id, source_path, &intent.guard_id)
+                .await
+                .expect("owned unmaterialized scratch");
+        assert!(!logical_child_exists(&scratch.directory, PUBLIC_PROOF_FILE)
+            .await
+            .expect("proof absent"));
+        assert!(
+            !logical_child_exists(&scratch.directory, "source.p7.original")
+                .await
+                .expect("staged original absent")
+        );
+        assert!(
+            !logical_child_exists(&scratch.directory, DISCARD_PENDING_FILE)
+                .await
+                .expect("pending original absent")
+        );
+
+        remove_orphan_recovery_guard(
+            file.id,
+            source_path,
+            &intent.recovery_path,
+            &intent.guard_id,
+            TEST_NODE_ID,
+            &loss,
+        )
+        .await
+        .expect("attest unmaterialized guard removal");
+        let parent = SecureDirectory::open(root.path())
+            .await
+            .expect("witness parent");
+        assert_eq!(
+            read_recovery_guard_witness(&parent, file.id, source_path, &intent.guard_id)
+                .await
+                .expect("guard witness")
+                .expect("attested guard witness")
+                .state,
+            RecoveryGuardWitnessState::GuardAttested
+        );
+        assert_eq!(
+            tokio::fs::read(&source).await.expect("source survives"),
+            b"original profile seven"
+        );
+
+        remove_orphan_recovery_scratch(file.id, source_path, &intent.guard_id, &loss)
+            .await
+            .expect("remove unmaterialized orphan scratch");
+        assert!(!path_entry_exists(&paths.directory)
+            .await
+            .expect("scratch absent"));
+        assert_eq!(
+            read_recovery_guard_witness(&parent, file.id, source_path, &intent.guard_id)
+                .await
+                .expect("terminal witness")
+                .expect("retained tombstone")
+                .state,
+            RecoveryGuardWitnessState::ScratchRemoved
+        );
+        attest_orphan_recovery_tombstone(file.id, source_path, &intent.guard_id)
+            .await
+            .expect("terminal tombstone attestation");
+    }
+
+    async fn assert_unmaterialized_guard_preserves_original_child(original_child: &str) {
+        let root = crate::test_tempdir().expect("unmaterialized guard refusal root");
+        let source = root.path().join("movie.mkv");
+        tokio::fs::write(&source, b"original profile seven")
+            .await
+            .expect("source");
+        let file = media_file(source.clone());
+        let paths = ConversionPaths::for_file(&file).expect("paths");
+        prepare_fresh_directory(&paths, &file)
+            .await
+            .expect("scratch");
+        bind_test_replacement(&paths, &file, b"profile eight", false).await;
+        let intent = recovery_guard_intent(&file)
+            .await
+            .expect("guard intent")
+            .expect("discard guard");
+        let scratch = require_recovery_guard_scratch(
+            &paths,
+            file.id,
+            source.to_str().expect("utf8 source"),
+            &intent.guard_id,
+        )
+        .await
+        .expect("owned scratch");
+        let before_owner = scratch
+            .directory
+            .read_bounded_child(SCRATCH_OWNER_FILE, MAX_SCRATCH_OWNER_BYTES)
+            .await
+            .expect("owner bytes before refusal");
+        assert!(rename_expected_noreplace_between(
+            &SecureDirectory::open(root.path())
+                .await
+                .expect("source parent"),
+            "movie.mkv",
+            &scratch.owner.source.local.identity,
+            &scratch.directory,
+            original_child,
+        )
+        .await
+        .expect("stage original-bearing child")
+        .is_some());
+
+        let error = remove_orphan_recovery_guard(
+            file.id,
+            source.to_str().expect("utf8 source"),
+            &intent.recovery_path,
+            &intent.guard_id,
+            TEST_NODE_ID,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("an original-bearing scratch must fail closed");
+        assert!(error.contains("scratch retains an original"), "{error}");
+        assert_eq!(
+            tokio::fs::read(paths.directory.join(original_child))
+                .await
+                .expect("original survives"),
+            b"original profile seven"
+        );
+        assert_eq!(
+            tokio::fs::read(&paths.replacement)
+                .await
+                .expect("replacement survives"),
+            b"profile eight"
+        );
+        assert_eq!(
+            scratch
+                .directory
+                .read_bounded_child(SCRATCH_OWNER_FILE, MAX_SCRATCH_OWNER_BYTES)
+                .await
+                .expect("owner bytes after refusal"),
+            before_owner
+        );
+        assert!(
+            read_recovery_guard_witness(
+                &SecureDirectory::open(root.path()).await.expect("parent"),
+                file.id,
+                source.to_str().expect("utf8 source"),
+                &intent.guard_id,
+            )
+            .await
+            .expect("witness read")
+            .is_none(),
+            "refusal must not advance the filesystem side of the guard ledger"
+        );
+    }
+
+    #[tokio::test]
+    async fn unmaterialized_guard_refuses_a_staged_original() {
+        assert_unmaterialized_guard_preserves_original_child("source.p7.original").await;
+    }
+
+    #[tokio::test]
+    async fn unmaterialized_guard_refuses_a_discard_pending_original() {
+        assert_unmaterialized_guard_preserves_original_child(DISCARD_PENDING_FILE).await;
     }
 
     #[tokio::test]
