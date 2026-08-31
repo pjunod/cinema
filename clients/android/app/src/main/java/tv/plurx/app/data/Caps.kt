@@ -88,8 +88,6 @@ object Caps {
         val audio = audioCodecClaims(decoderMimes, sinkEncodings(context))
 
         val hdrTypes = displayHdrTypes(context)
-        val hdr = displayIsHdr(hdrTypes) &&
-            ("hevc" in video.codecs || "av1" in video.codecs)
         // Ask the same Media3 decoder selector that ExoPlayer uses. The raw
         // platform registry can omit aliases and device workarounds that
         // Media3 applies at playback time, which made capable Google TV boxes
@@ -117,8 +115,7 @@ object Caps {
             // too. Leaving them out routes audio-only sources through the
             // video HLS machinery even when this device can play them raw.
             "container" to DIRECT_PLAY_CONTAINERS,
-            "hdr" to if (hdr) "1" else "0",
-        ) + dolbyVision + diagnostics
+        ) + legacyPresentationClaims(video, hdrTypes) + dolbyVision + diagnostics
         Log.i(
             LOG_TAG,
             "model=${Build.MODEL} hdrTypes=${hdrTypes.sorted()} " +

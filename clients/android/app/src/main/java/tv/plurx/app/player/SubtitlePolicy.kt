@@ -1,6 +1,7 @@
 package tv.plurx.app.player
 
 import tv.plurx.app.data.CreateSessionReq
+import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.ReopenReason
 import tv.plurx.app.data.SubTrack
@@ -280,6 +281,20 @@ internal fun subtitleSessionBody(
         quality_auto = true.takeIf { qualityAuto(quality, delivery) },
     )
 }
+
+/** Repeat the immutable decision facts and the decision's per-title HDR10
+ * request. A caps document permits HDR10; it must never manufacture the ask
+ * for an SDR title or a copy session. */
+internal fun bindDecisionPlan(
+    body: CreateSessionReq,
+    caps: DeviceCaps,
+    deliveredDynamicRange: String?,
+): CreateSessionReq = body.copy(
+    hdr10 = true.takeIf {
+        body.copy != true && deliveredDynamicRange?.lowercase(Locale.ROOT) == "hdr10"
+    },
+    caps = caps,
+)
 
 /**
  * Which of the player's own text tracks is the server's track [serverIndex] —

@@ -59,6 +59,7 @@ import kotlinx.coroutines.launch
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.CreateSessionReq
+import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.ReopenReason
 import tv.plurx.app.data.AudioTrack
 import tv.plurx.app.data.SubTrack
@@ -113,6 +114,7 @@ class Controller(
     builtPlayer: BuiltPlayer,
     private val plan: PlanLike,
     private val caps: Map<String, String>,
+    private val decisionCaps: DeviceCaps,
     private val vm: AppViewModel,
     private val scope: CoroutineScope,
     initialAudioOffsetMs: Long = 0,
@@ -805,22 +807,26 @@ class Controller(
         encoder = null
         sessionIsVod = false
         scope.launch {
-            val body = subtitleSessionBody(
-                playbackId = playbackId,
-                requestId = UUID.randomUUID().toString(),
-                startSeconds = positionMs / 1000.0,
-                delivery = subtitleDelivery,
-                subtitleIndex = selectedSubtitle,
-                copyableVideo = planMode != "transcode",
-                aac = plan.aac,
-                preserveDolbyVision = plan.preserveDolbyVision,
-                audioIndex = selectedAudio,
-                audioOffsetMs = audioOffsetMs,
-                quality = vm.preferences.value.playbackQuality,
-                sourceHeight = plan.sourceHeight,
-                deliveredDynamicRange = deliveredRange,
-                previousSessionId = prevId,
-                reopenReason = ReopenReason.Stall,
+            val body = bindDecisionPlan(
+                body = subtitleSessionBody(
+                    playbackId = playbackId,
+                    requestId = UUID.randomUUID().toString(),
+                    startSeconds = positionMs / 1000.0,
+                    delivery = subtitleDelivery,
+                    subtitleIndex = selectedSubtitle,
+                    copyableVideo = planMode != "transcode",
+                    aac = plan.aac,
+                    preserveDolbyVision = plan.preserveDolbyVision,
+                    audioIndex = selectedAudio,
+                    audioOffsetMs = audioOffsetMs,
+                    quality = vm.preferences.value.playbackQuality,
+                    sourceHeight = plan.sourceHeight,
+                    deliveredDynamicRange = deliveredRange,
+                    previousSessionId = prevId,
+                    reopenReason = ReopenReason.Stall,
+                ),
+                caps = decisionCaps,
+                deliveredDynamicRange = plan.deliveredDynamicRange,
             )
             val hls = try {
                 sessionCreateCoordinator.reopenAfterStall(
@@ -880,25 +886,29 @@ class Controller(
         }
     }
 
-    internal fun sessionBody(ms: Long): CreateSessionReq = subtitleSessionBody(
-        playbackId = playbackId,
-        requestId = UUID.randomUUID().toString(),
-        startSeconds = ms / 1000.0,
-        delivery = subtitleDelivery,
-        subtitleIndex = selectedSubtitle,
-        // A transcode verdict is the only one that forbids copying the video;
-        // direct and remux verdicts both mean the source stream is playable
-        // as-is, which is what makes the native-rendition session free. The
-        // compatibility rescue turns `planMode` into a transcode precisely so
-        // it lands here — the copy is the thing the device just refused.
-        copyableVideo = planMode != "transcode",
-        aac = plan.aac,
-        preserveDolbyVision = plan.preserveDolbyVision,
-        audioIndex = selectedAudio,
-        audioOffsetMs = audioOffsetMs,
-        quality = vm.preferences.value.playbackQuality,
-        sourceHeight = plan.sourceHeight,
-        deliveredDynamicRange = deliveredRange,
+    internal fun sessionBody(ms: Long): CreateSessionReq = bindDecisionPlan(
+        body = subtitleSessionBody(
+            playbackId = playbackId,
+            requestId = UUID.randomUUID().toString(),
+            startSeconds = ms / 1000.0,
+            delivery = subtitleDelivery,
+            subtitleIndex = selectedSubtitle,
+            // A transcode verdict is the only one that forbids copying the video;
+            // direct and remux verdicts both mean the source stream is playable
+            // as-is, which is what makes the native-rendition session free. The
+            // compatibility rescue turns `planMode` into a transcode precisely so
+            // it lands here — the copy is the thing the device just refused.
+            copyableVideo = planMode != "transcode",
+            aac = plan.aac,
+            preserveDolbyVision = plan.preserveDolbyVision,
+            audioIndex = selectedAudio,
+            audioOffsetMs = audioOffsetMs,
+            quality = vm.preferences.value.playbackQuality,
+            sourceHeight = plan.sourceHeight,
+            deliveredDynamicRange = deliveredRange,
+        ),
+        caps = decisionCaps,
+        deliveredDynamicRange = plan.deliveredDynamicRange,
     )
 
     private fun trackFor(index: Long?): SubTrack? =

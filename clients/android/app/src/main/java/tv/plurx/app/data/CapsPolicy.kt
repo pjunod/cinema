@@ -156,6 +156,24 @@ internal fun presentationTransfers(hdrTypes: Set<Int>): List<String> = buildList
 
 internal fun displayIsHdr(hdrTypes: Set<Int>): Boolean = hdrTypes.isNotEmpty()
 
+/** Legacy spelling of the same display and HEVC/PQ facts carried by v2. */
+internal fun legacyPresentationClaims(
+    video: VideoCodecCaps,
+    hdrTypes: Set<Int>,
+): Map<String, String> = mapOf(
+    // `hdr` is an output fact, so a VP9-only HDR box must still report it.
+    "hdr" to if (displayIsHdr(hdrTypes)) "1" else "0",
+    // Without `hdr10t`, an old server chooses SDR where v2 chooses HDR10.
+    "hdr10t" to if (
+        "hevc" in video.codecs &&
+        (HdrType.HDR10 in hdrTypes || HdrType.HDR10_PLUS in hdrTypes)
+    ) {
+        "1"
+    } else {
+        "0"
+    },
+)
+
 internal fun capsDocument(
     video: VideoCodecCaps,
     audio: List<String>,

@@ -47,6 +47,14 @@ struct LearnedLimit: Codable, Equatable {
     let atMs: Int
 }
 
+/// One live probe result expressed in both protocols. A mixed-fleet fallback
+/// must not re-read the display after the POST: the decision and every session
+/// derived from it need one immutable description of the output route.
+struct CapabilitySnapshot: Equatable {
+    let document: DeviceCaps
+    let legacyQuery: [URLQueryItem]
+}
+
 /// Runtime playback capabilities for this Apple device, sent to `/decision` so
 /// the server only transcodes what AVPlayer/VideoToolbox genuinely can't take.
 /// Apple's shape differs from Android's: AVPlayer direct-plays MP4/MOV/M4V (not
@@ -56,11 +64,35 @@ enum Caps {
     private static let logger = Logger(subsystem: "tv.plurx.app", category: "capabilities")
 
     static func capsDocument() -> DeviceCaps {
-        capsDocument(
-            hevc: VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC),
-            av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1),
-            displayHDR: displayIsHDR,
-            dolbyVision: dolbyVisionIsAvailable
+        snapshot().document
+    }
+
+    /// Capture the four live probes once, then spell that exact state in both
+    /// protocols. Output format can change while a POST is in flight on tvOS.
+    static func snapshot() -> CapabilitySnapshot {
+        let hevc = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
+        let av1 = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)
+        let displayHDR = displayIsHDR
+        let dolbyVision = dolbyVisionIsAvailable
+        let device = UIDevice.current.model
+        var legacyQuery = query(
+            hevc: hevc,
+            av1: av1,
+            displayHDR: displayHDR,
+            dolbyVision: dolbyVision
+        )
+        legacyQuery.append(URLQueryItem(name: "client", value: "apple"))
+        legacyQuery.append(URLQueryItem(name: "device", value: device))
+        let snapshot = legacyQuery.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: " ")
+        logger.info("runtime playback capabilities: \(snapshot, privacy: .public)")
+        return CapabilitySnapshot(
+            document: capsDocument(
+                hevc: hevc,
+                av1: av1,
+                displayHDR: displayHDR,
+                dolbyVision: dolbyVision
+            ),
+            legacyQuery: legacyQuery
         )
     }
 
@@ -120,19 +152,7 @@ enum Caps {
     }
 
     static func query() -> [URLQueryItem] {
-        let hevc = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
-        let av1 = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)
-        var result = query(
-            hevc: hevc,
-            av1: av1,
-            displayHDR: displayIsHDR,
-            dolbyVision: dolbyVisionIsAvailable
-        )
-        result.append(URLQueryItem(name: "client", value: "apple"))
-        result.append(URLQueryItem(name: "device", value: UIDevice.current.model))
-        let snapshot = result.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: " ")
-        logger.info("runtime playback capabilities: \(snapshot, privacy: .public)")
-        return result
+        snapshot().legacyQuery
     }
 
     /// Pure spelling of the wire capabilities. Keeping AVFoundation outside
@@ -161,6 +181,9 @@ enum Caps {
             URLQueryItem(name: "acodec", value: acodec.joined(separator: ",")),
             URLQueryItem(name: "container", value: container.joined(separator: ",")),
             URLQueryItem(name: "hdr", value: displayHDR ? "1" : "0"),
+            // Legacy translation needs this per-codec fact to derive the same
+            // HDR transcode target as v2's HEVC `present: ["pq"]` entry.
+            URLQueryItem(name: "hdr10t", value: hevc && displayHDR ? "1" : "0"),
             // Generic HDR eligibility must not be promoted into a Dolby
             // Vision claim. On an HDR10-only output that overclaim makes the
             // server preserve DV metadata, AVPlayer rejects the stream, and

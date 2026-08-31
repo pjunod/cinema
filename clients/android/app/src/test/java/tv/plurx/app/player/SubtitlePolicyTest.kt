@@ -5,9 +5,13 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tv.plurx.app.data.ClientInfo
+import tv.plurx.app.data.DeviceCaps
+import tv.plurx.app.data.DisplayCaps
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.ReopenReason
 import tv.plurx.app.data.SubTrack
+import tv.plurx.app.data.VideoEntry
 
 /**
  * The subtitle contract, exercised where it is decidable: which arm a
@@ -15,6 +19,16 @@ import tv.plurx.app.data.SubTrack
  * one veto over the server's automatic pick.
  */
 class SubtitlePolicyTest {
+    private val decisionCaps = DeviceCaps(
+        v = 2,
+        client = ClientInfo("android", "53", "test device"),
+        video = listOf(VideoEntry(codec = "hevc", present = listOf("sdr", "pq"))),
+        audio = listOf("aac"),
+        containers = listOf("mp4"),
+        transports = listOf("progressive", "hls"),
+        display = DisplayCaps(hdr = true, dolby_vision = false),
+    )
+
     private fun srt(index: Long, language: String? = "eng", default: Boolean = false, forced: Boolean = false, title: String? = null) =
         SubTrack(index = index, codec = "subrip", language = language, title = title, default = default, forced = forced, text = true, native = true)
 
@@ -392,6 +406,28 @@ class SubtitlePolicyTest {
         )
         assertEquals("prev-session-42", body.previous_session_id)
         assertEquals(ReopenReason.Stall, body.reopen_reason)
+    }
+
+    @Test
+    fun decisionPlanBindingRepeatsCapsAndRequestsOnlyAnHdr10Transcode() {
+        val transcode = bindDecisionPlan(
+            body = subtitleSessionBody(
+                playbackId = "pb", requestId = "hdr", startSeconds = 0.0,
+                delivery = SubtitleDelivery.Plan, subtitleIndex = null,
+                copyableVideo = false, aac = false, preserveDolbyVision = false,
+                audioIndex = null, audioOffsetMs = 0,
+                quality = PlaybackQuality.Auto, sourceHeight = 2160,
+            ),
+            caps = decisionCaps,
+            deliveredDynamicRange = "hdr10",
+        )
+        assertEquals(decisionCaps, transcode.caps)
+        assertEquals(true, transcode.hdr10)
+
+        val sdr = bindDecisionPlan(transcode, decisionCaps, "sdr")
+        assertNull(sdr.hdr10)
+        val copy = bindDecisionPlan(transcode.copy(copy = true), decisionCaps, "hdr10")
+        assertNull(copy.hdr10)
     }
 
     @Test

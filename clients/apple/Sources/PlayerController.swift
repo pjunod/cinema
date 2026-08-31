@@ -1310,6 +1310,9 @@ final class PlayerController: ObservableObject {
     let player = AVPlayer()
 
     @Published private(set) var decision: Decision?
+    /// Immutable facts used to obtain `decision`; every session opened by this
+    /// controller repeats them even if another screen probes in the meantime.
+    private var decisionCaps: DeviceCaps?
     @Published private(set) var sessionStatus: PlaybackSessionStatus?
     /// Last successful status response for a stall report. The visible status
     /// is allowed to become unavailable when a poll fails, but that failure is
@@ -2211,11 +2214,13 @@ final class PlayerController: ObservableObject {
     private func load(startMs: Int) async {
         guard let model else { return }
         do {
-            let decision = try await model.decision(
+            let playbackDecision = try await model.playbackDecision(
                 fileId: fileId,
                 selection: prePlaySelection
             )
+            let decision = playbackDecision.decision
             guard started else { return }
+            decisionCaps = playbackDecision.caps
             self.decision = decision
             if knownDurationMs <= 0 { knownDurationMs = decision.source?.durationMs ?? 0 }
             // `default` on a decision track is the server's own shared-policy
@@ -2441,6 +2446,9 @@ final class PlayerController: ObservableObject {
             url = Session.shared.mediaURL(deliveryPath)
             if startMs > 0 { seekAfterAttach = startMs }
         } else {
+            guard let decisionCaps else {
+                throw APIError.transport("Playback decision capabilities were not retained.")
+            }
             let copy = !forceTranscode
                 && (normalMode == "direct" || normalMode == "remux" || customAudio)
             canRetryCurrentItemWithHDRBase = copy
@@ -2478,7 +2486,12 @@ final class PlayerController: ObservableObject {
                     subtitle: nativeSubtitle,
                     copy: copy ? true : nil,
                     aac: copy ? aac : nil,
-                    preserveDolbyVision: copy ? preserveDolbyVision : nil
+                    preserveDolbyVision: copy ? preserveDolbyVision : nil,
+                    hdr10: Self.sessionHDR10Request(
+                        copy: copy,
+                        deliveredRange: decision.deliveredDynamicRange
+                    ),
+                    caps: decisionCaps
                 ),
                 intent: intent,
                 currentSessionId: superseded,
@@ -3300,6 +3313,15 @@ final class PlayerController: ObservableObject {
 
     /// The wire value for a typed stall recovery. The server accepts no other.
     static let stallReopenReason = "stall"
+
+    /// The document says whether HDR10 output is allowed; this echo says the
+    /// current title's decision actually selected that transcode rung.
+    nonisolated static func sessionHDR10Request(
+        copy: Bool,
+        deliveredRange: String?
+    ) -> Bool? {
+        !copy && deliveredRange?.lowercased() == "hdr10" ? true : nil
+    }
 
     /// The unbound body to re-post when the server refuses a bound stall
     /// reopen, or `nil` when this failure is not that case.
