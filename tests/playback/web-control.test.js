@@ -88,7 +88,65 @@ async function flush() {
   await Promise.resolve();
 }
 
+// The reporter's DEFAULT timers, which every other test in this file replaces.
+//
+// A browser's `setTimeout` is a Window method and refuses any other receiver.
+// Storing it bare in a field and calling `this.setTimer(...)` therefore throws
+// `TypeError: Illegal invocation` on the very first exchange — before a single
+// request reaches `/playback/control` — and that is exactly what shipped to the
+// fleet on 2026-08-31: every node's accepted-exchange counter read zero, with
+// the web client rendering a picture and its control panel stuck on "awaiting
+// first acceptance".
+//
+// Node's timers accept any receiver, so nothing here could have seen it. This
+// substitutes the browser's rule for the duration of the check, which is the
+// only way a node test can hold this contract.
+async function defaultTimersAreCallableFromAnyReceiver() {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  let armed = 0;
+  let cleared = 0;
+  globalThis.setTimeout = function (run, ms) {
+    if (this !== undefined && this !== globalThis) {
+      throw new TypeError("Illegal invocation");
+    }
+    armed += 1;
+    return realSetTimeout(run, ms);
+  };
+  globalThis.clearTimeout = function (handle) {
+    if (this !== undefined && this !== globalThis) {
+      throw new TypeError("Illegal invocation");
+    }
+    cleared += 1;
+    return realClearTimeout(handle);
+  };
+  try {
+    const sent = [];
+    // No setTimer/clearTimer: the branch the browser actually takes.
+    const reporter = new control.Reporter({
+      bootstrap: bootstrap(),
+      clientInstanceId: "33333333-3333-4333-8333-333333333333",
+      snapshot: () => snapshot(1_000),
+      send: async (url, request) => {
+        sent.push(request);
+        return response(request);
+      },
+      now: () => 1_000,
+    });
+    reporter.start();
+    await flush();
+    assert.equal(sent.length, 1, "the first exchange must actually be sent");
+    assert.ok(armed > 0, "…and the deadline timer must actually have been armed");
+    reporter.stop();
+    assert.ok(cleared > 0, "stop must be able to clear what start armed");
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  }
+}
+
 async function main() {
+  await defaultTimersAreCallableFromAnyReceiver();
   assert.equal(control.validBootstrap(bootstrap()), true);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { control_epoch: 0 })), false);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { url: "https://attacker/control" })), false);

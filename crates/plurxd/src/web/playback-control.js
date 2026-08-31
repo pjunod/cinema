@@ -143,8 +143,16 @@
       this.clientInstanceId = value.clientInstanceId;
       this.snapshot = value.snapshot;
       this.send = value.send;
-      this.setTimer = value.setTimer || setTimeout;
-      this.clearTimer = value.clearTimer || clearTimeout;
+      // Wrapped, not stored bare. `this.setTimer(...)` calls whatever is in
+      // the field with THIS REPORTER as the receiver, and a browser's
+      // `setTimeout` is a Window method that refuses any other one:
+      // `TypeError: Illegal invocation`, thrown on the first exchange, before
+      // a single request reaches `/playback/control`. Node's timers accept any
+      // receiver, so nothing in the test suite could see it — and every test
+      // injects its own timer anyway, which is how the one branch that ships
+      // reached the fleet with no coverage at all.
+      this.setTimer = value.setTimer || ((run, ms) => globalThis.setTimeout(run, ms));
+      this.clearTimer = value.clearTimer || ((handle) => globalThis.clearTimeout(handle));
       this.now = value.now || defaultNow;
       this.onExchange = typeof value.onExchange === "function" ? value.onExchange : function () {};
       this.sequence = 0;
