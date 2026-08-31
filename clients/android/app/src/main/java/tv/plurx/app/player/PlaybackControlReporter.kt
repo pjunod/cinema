@@ -482,6 +482,39 @@ class PlaybackControlReporter private constructor(
         }
     }
 
+    /**
+     * Report now rather than at the next cadence.
+     *
+     * [notify] leaves the pump asleep for `next_exchange_ms`, which the server
+     * may set as high as a minute. For a position update that is the point.
+     * For a recovery owner about to reopen it is fatal: the reopen ends this
+     * reporter before the pump wakes, so the evidence is never sent at all
+     * rather than sent late. The web reporter drains inline at exactly this
+     * call site, for exactly this reason.
+     *
+     * Waking is a cancel-and-relaunch because the pump is suspended inside the
+     * injected pace. An exchange already in flight is left alone: [run] picks
+     * up `pending` immediately after it without pacing.
+     */
+    suspend fun notifyUrgently(
+        scope: CoroutineScope,
+        value: PlaybackControlSnapshot? = null,
+    ) {
+        notify(value)
+        val stale = mutex.withLock {
+            if (stopped || inFlight || pending == null) return
+            val running = pump
+            pump = null
+            running
+        }
+        stale?.cancel()
+        val job = scope.launch { run() }
+        val alreadyStopped = mutex.withLock {
+            if (stopped) true else { pump = job; false }
+        }
+        if (alreadyStopped) job.cancel()
+    }
+
     suspend fun stop() {
         val job = mutex.withLock {
             if (stopped) return
