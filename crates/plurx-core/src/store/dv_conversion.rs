@@ -224,6 +224,13 @@ pub trait DvConversionStore: Send + Sync + 'static {
         limit: i64,
     ) -> Result<Vec<DvConversionCandidate>, StoreError>;
 
+    /// Return the next terminal conversion whose owned scratch may need
+    /// crash-convergent cleanup. The caller wraps by retrying from zero.
+    async fn dv_committed_cleanup_candidate(
+        &self,
+        after_file_id: i64,
+    ) -> Result<Option<i64>, StoreError>;
+
     async fn dv_conversion_progress(
         &self,
         library_id: Option<i64>,

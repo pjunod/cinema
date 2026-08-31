@@ -1770,12 +1770,14 @@ impl JobManager {
     async fn work_dv_disk_queue(self: Arc<Self>) {
         const CANDIDATES_PER_TICK: i64 = 32;
 
-        if !self.dv_disk_capabilities.available
-            || self.dv_disk_working.swap(true, Ordering::Relaxed)
-        {
+        if self.dv_disk_working.swap(true, Ordering::Relaxed) {
             return;
         }
         let _guard = DvDiskWorkingGuard(Arc::clone(&self));
+        self.reconcile_one_committed_dv_cleanup().await;
+        if !self.dv_disk_capabilities.available {
+            return;
+        }
         match self.enqueue_automatic_dv_conversions().await {
             Ok(batch) if batch.queued > 0 => {
                 tracing::info!(
@@ -1905,6 +1907,61 @@ impl JobManager {
         }
     }
 
+    /// Revisit exactly one terminal conversion per worker tick. Publication
+    /// prunes every full-size intermediate before the ledger commit, so this
+    /// bounded pass only has to converge an owned marker directory left by a
+    /// process crash during post-commit cleanup.
+    async fn reconcile_one_committed_dv_cleanup(&self) {
+        const CURSOR: &str = "jobs.dv_disk_committed_cleanup_cursor";
+
+        let cursor_key = self.local_job_key(CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        let mut candidate = match self.store.dv_committed_cleanup_candidate(cursor).await {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                tracing::warn!(%error, "selecting committed Dolby Vision cleanup candidate");
+                return;
+            }
+        };
+        if candidate.is_none() && cursor != 0 {
+            candidate = match self.store.dv_committed_cleanup_candidate(0).await {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    tracing::warn!(%error, "wrapping committed Dolby Vision cleanup cursor");
+                    return;
+                }
+            };
+        }
+        let Some(file_id) = candidate else {
+            if cursor != 0 {
+                let _ = self.store.put_setting(&cursor_key, "0").await;
+            }
+            return;
+        };
+        match self.store.get_file(file_id).await {
+            Ok(Some(file)) => crate::dv_disk::cleanup_after_commit(&file).await,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(file_id, %error, "reading committed Dolby Vision cleanup file");
+                return;
+            }
+        }
+        if let Err(error) = self
+            .store
+            .put_setting(&cursor_key, &file_id.to_string())
+            .await
+        {
+            tracing::warn!(file_id, %error, "advancing committed Dolby Vision cleanup cursor");
+        }
+    }
+
     async fn process_dv_candidate(
         &self,
         file_id: i64,
@@ -1933,21 +1990,40 @@ impl JobManager {
         };
 
         let verified = if ledger.state == DvConversionState::Verified {
-            let mut published_recovery_error = None;
-            if let Some(bytes_after) = ledger.bytes_after {
-                match crate::dv_disk::recover_published(&file, bytes_after, keep_original).await {
-                    Ok(published) => {
-                        if let Err(error) = self
-                            .finish_dv_publication(&publisher, &file, published)
-                            .await
-                        {
-                            tracing::warn!(file_id, %error, "finishing recovered Dolby Vision publication");
-                        }
-                        return;
+            let Some(bytes_after) = ledger.bytes_after else {
+                tracing::warn!(
+                    file_id,
+                    "verified Dolby Vision row has no verified byte count"
+                );
+                return;
+            };
+            let published_recovery_error = match crate::dv_disk::recover_published(
+                &file,
+                bytes_after,
+                loss,
+            )
+            .await
+            {
+                Ok(crate::dv_disk::PublicationOutcome::Published(published)) => {
+                    if let Err(error) = self
+                        .finish_dv_publication(&publisher, &file, *published)
+                        .await
+                    {
+                        tracing::warn!(file_id, %error, "finishing recovered Dolby Vision publication");
                     }
-                    Err(error) => published_recovery_error = Some(error),
+                    return;
                 }
-            }
+                Ok(crate::dv_disk::PublicationOutcome::SafelyRolledBack { reason }) => {
+                    if let Err(error) = self
+                        .finish_dv_safe_rollback(&publisher, &file, &reason)
+                        .await
+                    {
+                        tracing::warn!(file_id, %error, "recording recovered Dolby Vision rollback");
+                    }
+                    return;
+                }
+                Err(error) => Some(error),
+            };
             match crate::dv_disk::verify_existing(
                 &file,
                 ledger.el_type.as_deref().and_then(|value| match value {
@@ -1955,6 +2031,7 @@ impl JobManager {
                     "fel" => Some("fel"),
                     _ => None,
                 }),
+                bytes_after,
             )
             .await
             {
@@ -1993,8 +2070,8 @@ impl JobManager {
                     return;
                 }
             }
-            let source_version = match crate::fragment_index_cluster::inspect_source(&file).await {
-                Ok(version) => version,
+            match crate::fragment_index_cluster::inspect_source(&file).await {
+                Ok(_) => {}
                 Err(error) => {
                     self.fail_dv_conversion(&publisher, &file, loss, &error)
                         .await;
@@ -2013,14 +2090,15 @@ impl JobManager {
                 }
             }
             let tools = crate::dv_disk::DvDiskTools::from_environment();
-            let verified = match crate::dv_disk::build_and_verify(&tools, &file, loss).await {
-                Ok(verified) => verified,
-                Err(error) => {
-                    self.fail_dv_conversion(&publisher, &file, loss, &error)
-                        .await;
-                    return;
-                }
-            };
+            let verified =
+                match crate::dv_disk::build_and_verify(&tools, &file, loss, keep_original).await {
+                    Ok(verified) => verified,
+                    Err(error) => {
+                        self.fail_dv_conversion(&publisher, &file, loss, &error)
+                            .await;
+                        return;
+                    }
+                };
             if loss.is_cancelled() {
                 return;
             }
@@ -2048,13 +2126,21 @@ impl JobManager {
             // again immediately before the first source rename below.
             let published = match crate::dv_disk::publish_verified(
                 &file,
-                keep_original,
                 loss,
-                Some(&source_version),
+                verified.bytes_after,
             )
             .await
             {
-                Ok(published) => published,
+                Ok(crate::dv_disk::PublicationOutcome::Published(published)) => *published,
+                Ok(crate::dv_disk::PublicationOutcome::SafelyRolledBack { reason }) => {
+                    if let Err(error) = self
+                        .finish_dv_safe_rollback(&publisher, &file, &reason)
+                        .await
+                    {
+                        tracing::warn!(file_id, %error, "recording Dolby Vision publication rollback");
+                    }
+                    return;
+                }
                 Err(error) => {
                     tracing::warn!(file_id, %error, "publishing verified Dolby Vision replacement");
                     return;
@@ -2069,23 +2155,23 @@ impl JobManager {
             return;
         };
 
-        let source_version = crate::fragment_index_cluster::inspect_source(&file)
-            .await
-            .ok();
-        let published = match crate::dv_disk::publish_verified(
-            &file,
-            keep_original,
-            loss,
-            source_version.as_deref(),
-        )
-        .await
-        {
-            Ok(published) => published,
-            Err(error) => {
-                tracing::warn!(file_id, %error, "resuming verified Dolby Vision publication");
-                return;
-            }
-        };
+        let published =
+            match crate::dv_disk::publish_verified(&file, loss, verified.bytes_after).await {
+                Ok(crate::dv_disk::PublicationOutcome::Published(published)) => *published,
+                Ok(crate::dv_disk::PublicationOutcome::SafelyRolledBack { reason }) => {
+                    if let Err(error) = self
+                        .finish_dv_safe_rollback(&publisher, &file, &reason)
+                        .await
+                    {
+                        tracing::warn!(file_id, %error, "recording resumed Dolby Vision rollback");
+                    }
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(file_id, %error, "resuming verified Dolby Vision publication");
+                    return;
+                }
+            };
         if published.bytes_after != verified.bytes_after {
             tracing::warn!(
                 file_id,
@@ -2134,6 +2220,24 @@ impl JobManager {
         }
         crate::dv_disk::cleanup_after_commit(file).await;
         tracing::info!(file_id = file.id, path = %path, "Dolby Vision conversion committed");
+        Ok(())
+    }
+
+    async fn finish_dv_safe_rollback(
+        &self,
+        publisher: &PublicationStore<'_>,
+        file: &MediaFile,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        if !publisher
+            .mark_dv_conversion_failed(file.id, reason, clock_ms())
+            .await?
+        {
+            return Err(StoreError::Task(
+                "ledger refused the safely-rolled-back transition".to_owned(),
+            ));
+        }
+        crate::dv_disk::cleanup_after_failure(file).await;
         Ok(())
     }
 

@@ -175,6 +175,7 @@ const DV_CONVERSION_METHODS: &[&str] = &[
     "queue_dv_conversion",
     "queue_library_dv_conversion_batch",
     "dv_conversion_candidates",
+    "dv_committed_cleanup_candidate",
     "dv_conversion_progress",
     "dv_conversion_progress_snapshot",
     "set_library_dv_conversion_mode",
@@ -13589,6 +13590,138 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .mark_dv_conversion_failed(p7, "stale worker", 106)
             .await
             .expect("terminal row"));
+
+        assert!(store
+            .mark_dv_conversion_running(p7_second, 81_000)
+            .await
+            .expect("second cleanup candidate running"));
+        assert!(store
+            .mark_dv_conversion_verified(p7_second, Some("fel"), 61_000)
+            .await
+            .expect("second cleanup candidate verified"));
+        assert!(store
+            .mark_dv_conversion_committed(p7_second, None, 61_000, 107)
+            .await
+            .expect("second cleanup candidate committed"));
+
+        let first_cleanup = store
+            .dv_committed_cleanup_candidate(0)
+            .await
+            .expect("first cleanup candidate")
+            .expect("first committed row");
+        assert_eq!(first_cleanup, p7, "{backend}");
+        let second_cleanup = store
+            .dv_committed_cleanup_candidate(first_cleanup)
+            .await
+            .expect("second cleanup candidate")
+            .expect("second committed row");
+        assert_eq!(second_cleanup, p7_second, "{backend}");
+        assert_eq!(
+            store
+                .dv_committed_cleanup_candidate(second_cleanup)
+                .await
+                .expect("exhausted cleanup cursor"),
+            None,
+            "{backend}: cleanup selector never wraps implicitly"
+        );
+        assert_eq!(
+            store
+                .dv_committed_cleanup_candidate(0)
+                .await
+                .expect("caller-driven cleanup wrap"),
+            Some(first_cleanup),
+            "{backend}: caller can wrap cleanup selection back to zero"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn dv_conversion_retry_batch_does_not_starve_never_queued_files() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("DV retry fairness {backend}"),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from(format!(
+                    "/contract/dv-retry-fairness-{backend}"
+                ))],
+                anime: false,
+            })
+            .await
+            .expect("DV retry fairness library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "DV Retry Fairness".to_owned(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("DV retry fairness item");
+
+        let mut file_ids = Vec::new();
+        for ordinal in 0..3 {
+            let file_id = store
+                .upsert_file(
+                    item,
+                    &format!("/contract/dv-retry-fairness-{backend}/{ordinal:02}.mkv"),
+                    80_000 + ordinal,
+                    7 + ordinal,
+                    &ProbeResult {
+                        container: Some("mkv".to_owned()),
+                        dolby_vision: DolbyVisionFacts {
+                            profile: Some(7),
+                            level: Some(6),
+                            bl_compat_id: Some(6),
+                            el_present: Some(true),
+                            rpu_present: Some(true),
+                        },
+                        raw_json: Some("{}".to_owned()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("DV retry fairness file");
+            file_ids.push(file_id);
+        }
+
+        let initial = store
+            .queue_library_dv_conversion_batch(library.id, 100, false, 2)
+            .await
+            .expect("queue initial bounded prefix");
+        assert_eq!(initial.queued, 2, "{backend}");
+        assert!(initial.saturated, "{backend}");
+        for file_id in &file_ids[..2] {
+            assert!(store
+                .mark_dv_conversion_running(*file_id, 80_000)
+                .await
+                .expect("mark prefix running"));
+            assert!(store
+                .mark_dv_conversion_failed(*file_id, "permanent prefix failure", 101)
+                .await
+                .expect("mark prefix failed"));
+        }
+
+        let retry = store
+            .queue_library_dv_conversion_batch(library.id, 102, true, 2)
+            .await
+            .expect("retry bounded prefix without starving new work");
+        assert_eq!(retry.queued, 2, "{backend}");
+        assert!(retry.saturated, "{backend}");
+        assert_eq!(
+            store
+                .dv_conversion(file_ids[2])
+                .await
+                .expect("read never-queued tail")
+                .expect("never-queued tail must be admitted before all retries")
+                .state,
+            DvConversionState::Queued,
+            "{backend}: failed low IDs must not starve unseen eligible files"
+        );
     })
     .await;
 }

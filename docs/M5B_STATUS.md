@@ -12,7 +12,9 @@ a forecast.
 
 > This work can replace or delete an operator's only media copy. The source
 > stays untouched until the replacement passes every verification gate and
-> the source size and modification time still match the queued observation.
+> the worker confirms that its open source still matches the scanner's
+> size/mtime identity and the exact storage-object identity captured after the
+> row is leased, before the long conversion begins.
 
 ## Progress — one candidate, one complete qualification
 

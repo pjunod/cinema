@@ -713,7 +713,7 @@ test("Settings loads only the active tab manifest", () => {
   }
 });
 
-test("Dolby Vision progress polling runs only for active durable work", () => {
+test("Dolby Vision progress polling runs only for active durable work", async () => {
   const conversionActive = new Function(
     `${shippedSource("dvConversionIsActive")}; return dvConversionIsActive;`,
   )();
@@ -763,6 +763,62 @@ test("Dolby Vision progress polling runs only for active durable work", () => {
   const queueLibrary = shippedSource("convertDvLibrary");
   assert.match(queueLibrary, /result\.saturated/,
     "a cap-hit batch tells the operator another bounded pass may be needed");
+
+  const fileMount = { innerHTML: "", dataset: {} };
+  let fileApiCalls = 0;
+  const fileHarness = new Function(
+    "api", "toast", "document", "exactWireId", "dvConversionStateHtml", "armDvFilePoll",
+    `let DV_FILE_PAGE_FILES=[{id:"42"}];
+     ${shippedSource("dvConversionIsActive")}
+     ${shippedSource("queueDvFile")}
+     return {queue:queueDvFile};`,
+  )(
+    async () => {
+      fileApiCalls += 1;
+      return { queued: true, conversion: { state: "queued" } };
+    },
+    () => {},
+    { getElementById: () => fileMount },
+    (file) => String(file.id),
+    (_file, snapshot) => snapshot.conversion.state,
+    () => { fileMount.armed = true; },
+  );
+  await fileHarness.queue("42", { disabled: false });
+  assert.equal(fileMount.innerHTML, "queued",
+    "the file mutation response paints success without a follow-up read");
+  assert.equal(fileMount.dataset.dvActive, "true");
+  assert.equal(fileApiCalls, 1,
+    "file queue success never depends on a second status request");
+  assert.equal(fileMount.armed, true,
+    "the active mutation response arms terminal-bounded item polling");
+
+  const libraryEvents = [];
+  let libraryApiCalls = 0;
+  const libraryHarness = new Function(
+    "api", "toast", "renderSettings",
+    `let SETTINGS_DATA={dvConversions:{progress:{},progress_by_library:{}}};
+     let DV_SETTINGS_POLL_AT=1234;
+     ${shippedSource("noteDvLibraryQueueResult")}
+     ${shippedSource("convertDvLibrary")}
+     return {queue:convertDvLibrary,state:()=>({data:SETTINGS_DATA,pollAt:DV_SETTINGS_POLL_AT})};`,
+  )(
+    async () => {
+      libraryApiCalls += 1;
+      return { queued: 2, saturated: false };
+    },
+    (message) => libraryEvents.push(message),
+    () => libraryEvents.push("rendered"),
+  );
+  await libraryHarness.queue(7, { disabled: false });
+  const queuedState = libraryHarness.state();
+  assert.equal(queuedState.data.dvConversions.progress.queued, 2);
+  assert.equal(queuedState.data.dvConversions.progress_by_library["7"].queued, 2);
+  assert.equal(queuedState.pollAt, 0,
+    "an accepted library batch makes the next bounded settings tick eligible");
+  assert.equal(libraryApiCalls, 1,
+    "library queue success never depends on an immediate progress refresh");
+  assert.deepEqual(libraryEvents, ["2 Dolby Vision files queued", "rendered"],
+    "an accepted queue is displayed as success without depending on a refresh");
 });
 
 test("Dolby Vision settings controls have accessible names", () => {
@@ -773,6 +829,38 @@ test("Dolby Vision settings controls have accessible names", () => {
   assert.match(mode, /aria-label="Dolby Vision conversion mode for/);
   assert.match(mode, /aria-label="Save Dolby Vision conversion mode for/);
   assert.match(mode, /aria-label="Convert Dolby Vision files in/);
+  const renderMode = new Function(
+    "esc", "dvProgressText",
+    `${mode}; return dvModeSelect;`,
+  )((value) => String(value), () => "idle");
+  const unavailable = renderMode(
+    { id: 7, name: "Movies" },
+    {
+      library_modes: { "7": "auto" },
+      capabilities: { available: false, reason: "tools missing" },
+      progress_by_library: {},
+    },
+  );
+  assert.doesNotMatch(unavailable, /<select[^>]* disabled/,
+    "a missing tool never traps an Automatic library in its stored mode");
+  assert.match(unavailable, /<option value="off">Off<\/option>/,
+    "Off remains selectable without conversion tools");
+  assert.match(unavailable, /<option value="auto" selected disabled>Automatic<\/option>/,
+    "unavailable conversion modes cannot be newly selected");
+
+  const select = { value: "off", dataset: { dvToolsAvailable: "false" } };
+  const save = { disabled: true };
+  const convert = { disabled: true };
+  const updateMode = new Function(
+    "document",
+    `${shippedSource("updateDvModeControls")}; return updateDvModeControls;`,
+  )({ getElementById: (id) => id === "dv-mode-7" ? select : id === "dv-mode-save-7" ? save : convert });
+  updateMode(7);
+  assert.equal(save.disabled, false, "Off can be saved while tools are unavailable");
+  assert.equal(convert.disabled, true, "conversion remains refused while tools are unavailable");
+  select.value = "auto";
+  updateMode(7);
+  assert.equal(save.disabled, true, "Manual/Automatic cannot be saved without tools");
   const panel = shippedSource("dvDiskPanel");
   assert.match(panel, /<label class="schedpair" for="dv-parallel">Parallel files/);
   assert.match(panel, /aria-label="Save Dolby Vision conversion settings"/);

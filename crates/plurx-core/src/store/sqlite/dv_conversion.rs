@@ -216,6 +216,8 @@ impl DvConversionStore for SqliteStore {
             return Ok(DvConversionQueueBatch::default());
         }
         self.with_conn(move |conn| {
+            // Unseen files lead retries so a permanent low-ID failure prefix
+            // cannot consume every bounded manual pass forever.
             let changed = conn.execute(
                 "WITH candidates(file_id) AS (
                    SELECT f.id
@@ -228,7 +230,8 @@ impl DvConversionStore for SqliteStore {
                     AND f.dv_el_present = 1
                     AND f.dv_rpu_present = 1
                     AND (d.file_id IS NULL OR (?3 AND d.state = 'failed'))
-                   ORDER BY f.id LIMIT ?4
+                   ORDER BY CASE WHEN d.file_id IS NULL THEN 0 ELSE 1 END, f.id
+                   LIMIT ?4
                  )
                  INSERT INTO dv_conversions (file_id, state, queued_at_ms)
                  SELECT file_id, 'queued', ?2 FROM candidates WHERE true
@@ -276,6 +279,24 @@ impl DvConversionStore for SqliteStore {
                 })
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    async fn dv_committed_cleanup_candidate(
+        &self,
+        after_file_id: i64,
+    ) -> Result<Option<i64>, StoreError> {
+        self.with_read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT file_id FROM dv_conversions
+                      WHERE file_id > ?1 AND state = 'committed'
+                      ORDER BY file_id LIMIT 1",
+                    [after_file_id],
+                    |row| row.get(0),
+                )
+                .optional()?)
         })
         .await
     }

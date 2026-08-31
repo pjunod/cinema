@@ -5516,9 +5516,20 @@ function armDvFilePoll(files,generation=PAGE_RENDER_GENERATION){
 async function queueDvFile(id,btn){
   btn.disabled=true;
   try{
-    await api(`/files/${id}/dv-conversion`,{method:"POST"});
+    const result=await api(`/files/${id}/dv-conversion`,{method:"POST"});
+    // The mutation response is the authoritative first active snapshot. Paint
+    // and poll from it instead of making queue success depend on a second read.
+    const file=DV_FILE_PAGE_FILES.find(candidate=>exactWireId(candidate)===String(id));
+    const mount=document.getElementById(`dv-file-${id}`);
+    const active=dvConversionIsActive(result&&result.conversion);
+    if(file&&mount&&result&&result.conversion){
+      mount.innerHTML=dvConversionStateHtml(file,{
+        conversion:result.conversion,eligible:true,capabilities:{available:true},
+      });
+      mount.dataset.dvActive=active?"true":"false";
+    }
     toast("Dolby Vision conversion queued");
-    if(await hydrateDvFileActions(DV_FILE_PAGE_FILES)) armDvFilePoll(DV_FILE_PAGE_FILES);
+    if(active) armDvFilePoll(DV_FILE_PAGE_FILES);
   }catch(e){ toast(e.message||"Couldn't queue conversion"); }
   finally{ btn.disabled=false; }
 }
@@ -11295,12 +11306,21 @@ function dvModeSelect(l,dv){
   const unavailable=!(dv&&dv.capabilities&&dv.capabilities.available);
   const reason=unavailable?(dv&&dv.capabilities&&dv.capabilities.reason)||"dovi_tool or mkvmerge is unavailable":"";
   return `<div class="sched" title="${esc(reason)}"><span class="schedpair">Dolby Vision
-    <select id="dv-mode-${l.id}" aria-label="Dolby Vision conversion mode for ${esc(l.name)}" style="max-width:105px;font-size:12px;padding:3px 6px"${unavailable?' disabled':''}>
-      ${[["off","Off"],["manual","Manual"],["auto","Automatic"]].map(([v,label])=>`<option value="${v}"${mode===v?' selected':''}>${label}</option>`).join("")}
+    <select id="dv-mode-${l.id}" aria-label="Dolby Vision conversion mode for ${esc(l.name)}" aria-describedby="dv-progress-${l.id}" data-dv-tools-available="${unavailable?'false':'true'}" onchange="updateDvModeControls(${l.id})" style="max-width:105px;font-size:12px;padding:3px 6px">
+      ${[["off","Off"],["manual","Manual"],["auto","Automatic"]].map(([v,label])=>`<option value="${v}"${mode===v?' selected':''}${unavailable&&v!=="off"?' disabled':''}>${label}</option>`).join("")}
     </select></span>
-    <span class="schedpair"><button class="ghost sm" aria-label="Save Dolby Vision conversion mode for ${esc(l.name)}" onclick="saveDvMode(${l.id},this)"${unavailable?' disabled':''}>Save</button>
-    <button class="ghost sm" aria-label="Convert Dolby Vision files in ${esc(l.name)} now" onclick="convertDvLibrary(${l.id},this)"${unavailable||mode==="off"?' disabled':''}>Convert now</button></span>
+    <span class="schedpair"><button class="ghost sm" id="dv-mode-save-${l.id}" aria-label="Save Dolby Vision conversion mode for ${esc(l.name)}" aria-describedby="dv-progress-${l.id}" onclick="saveDvMode(${l.id},this)"${unavailable&&mode!=="off"?' disabled':''}>Save</button>
+    <button class="ghost sm" id="dv-convert-${l.id}" aria-label="Convert Dolby Vision files in ${esc(l.name)} now" aria-describedby="dv-progress-${l.id}" onclick="convertDvLibrary(${l.id},this)"${unavailable||mode==="off"?' disabled':''}>Convert now</button></span>
     <span class="muted" id="dv-progress-${l.id}" aria-live="polite">${esc(unavailable?`Unavailable: ${reason}`:dvProgressText(dv.progress_by_library&&dv.progress_by_library[String(l.id)]))}</span></div>`;
+}
+function updateDvModeControls(id){
+  const select=document.getElementById(`dv-mode-${id}`);
+  if(!select) return;
+  const unavailable=select.dataset.dvToolsAvailable!=="true";
+  const save=document.getElementById(`dv-mode-save-${id}`);
+  const convert=document.getElementById(`dv-convert-${id}`);
+  if(save) save.disabled=unavailable&&select.value!=="off";
+  if(convert) convert.disabled=unavailable||select.value==="off";
 }
 async function refreshDvConversions(){
   // Stamp before the request so a slow or failed read cannot stack another
@@ -11322,18 +11342,37 @@ async function saveDvMode(id,btn){
   const mode=document.getElementById(`dv-mode-${id}`).value;
   btn.disabled=true;
   try{
-    await api(`/libraries/${id}/dv-conversion`,{method:"PUT",body:{mode}});
-    await refreshDvConversions();
+    const saved=await api(`/libraries/${id}/dv-conversion`,{method:"PUT",body:{mode}});
+    const snapshot=SETTINGS_DATA.dvConversions;
+    if(snapshot){
+      snapshot.library_modes=snapshot.library_modes||{};
+      snapshot.library_modes[String(id)]=saved.mode;
+    }
     toast(mode==="off"?"On-disk conversion disabled":mode==="auto"?"Automatic conversion enabled":"Manual conversion enabled");
     renderSettings();
   }catch(e){ toast(e.message||"Couldn't save Dolby Vision mode"); }
   finally{ btn.disabled=false; }
 }
+function noteDvLibraryQueueResult(id,result){
+  const queued=Math.max(0,Number(result&&result.queued||0));
+  const snapshot=SETTINGS_DATA.dvConversions;
+  if(!snapshot||!queued) return false;
+  snapshot.progress=snapshot.progress||{};
+  snapshot.progress.queued=Number(snapshot.progress.queued||0)+queued;
+  snapshot.progress_by_library=snapshot.progress_by_library||{};
+  const progress=snapshot.progress_by_library[String(id)]||{};
+  progress.queued=Number(progress.queued||0)+queued;
+  snapshot.progress_by_library[String(id)]=progress;
+  // settingsTick owns the bounded ten-second reads. Make its next two-second
+  // tick eligible; the first terminal snapshot turns polling off again.
+  DV_SETTINGS_POLL_AT=0;
+  return true;
+}
 async function convertDvLibrary(id,btn){
   btn.disabled=true;
   try{
     const result=await api(`/libraries/${id}/dv-conversions`,{method:"POST",body:{retry_failed:true}});
-    await refreshDvConversions();
+    noteDvLibraryQueueResult(id,result);
     const more=result.saturated?"; more eligible files may remain — run Convert now again":"";
     toast(`${result.queued||0} Dolby Vision file${Number(result.queued)===1?'':'s'} queued${more}`);
     renderSettings();
@@ -11347,7 +11386,11 @@ async function saveDvDiskSettings(btn){
       dv_disk_keep_original:document.getElementById("dv-keep-original").checked,
       dv_disk_convert_parallel:Number(document.getElementById("dv-parallel").value)}});
     cacheSettings(saved);
-    await refreshDvConversions();
+    const snapshot=SETTINGS_DATA.dvConversions;
+    if(snapshot){
+      snapshot.keep_original=saved.dv_disk_keep_original;
+      snapshot.parallel=saved.dv_disk_convert_parallel;
+    }
     toast("Dolby Vision conversion settings saved");
     renderSettings();
   }catch(e){ toast(e.message||"Couldn't save Dolby Vision settings"); }

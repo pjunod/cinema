@@ -354,6 +354,8 @@ impl DvConversionStore for HiqliteAuthStore {
         if limit == 0 {
             return Ok(DvConversionQueueBatch::default());
         }
+        // Unseen files lead retries so a permanent low-ID failure prefix
+        // cannot consume every bounded manual pass forever.
         let changed = self
             .client()
             .execute(
@@ -372,7 +374,8 @@ impl DvConversionStore for HiqliteAuthStore {
                       AND f.dv_rpu_present = 1
                       AND (d.file_id IS NULL OR
                            (requested.retry_failed AND d.state = 'failed'))
-                    ORDER BY f.id LIMIT $4
+                    ORDER BY CASE WHEN d.file_id IS NULL THEN 0 ELSE 1 END, f.id
+                    LIMIT $4
                  )
                  INSERT INTO dv_conversions (file_id, state, queued_at_ms)
                  SELECT candidates.file_id, 'queued', requested.queued_at_ms
@@ -426,6 +429,24 @@ impl DvConversionStore for HiqliteAuthStore {
                 })
             })
             .collect()
+    }
+
+    async fn dv_committed_cleanup_candidate(
+        &self,
+        after_file_id: i64,
+    ) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .client()
+            .query_consistent_map::<PresentRow, _>(
+                "SELECT file_id AS present FROM dv_conversions
+                  WHERE file_id > $1 AND state = 'committed'
+                  ORDER BY file_id LIMIT 1",
+                params!(after_file_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.present))
     }
 
     async fn dv_conversion_progress(

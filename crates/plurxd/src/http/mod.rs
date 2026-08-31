@@ -5026,6 +5026,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settings_reject_late_invalid_field_before_any_dv_policy_write() {
+        let (app, _) = test_state_with_dv_disk_tools();
+        let admin = setup_admin(&app).await;
+
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "dv_disk_keep_original": false,
+                    "dv_disk_convert_parallel": 2,
+                    "stream_readrate": "not-a-number"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["dv_disk_keep_original"], true);
+        assert_eq!(settings["dv_disk_convert_parallel"], 1);
+    }
+
+    #[tokio::test]
     async fn dv_disk_queue_refuses_missing_tools_before_media_lookup() {
         let app = test_app();
         let admin = setup_admin(&app).await;
