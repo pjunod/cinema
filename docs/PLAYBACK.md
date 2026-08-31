@@ -125,7 +125,7 @@ one.
 
 | ID | Fork | Current rule | Regression pin |
 |---|---|---|---|
-| `apple.transport-and-dv` | AVPlayer caps and direct vs HLS | Probe HEVC, AV1, HDR output, and Dolby Vision output for every decision; POST the v2 document and repeat that snapshot on session create. A 400/404/405 falls back to the unchanged legacy query. Execute the server mode, except normalize even a legacy direct Dolby Vision answer through preserving copy HLS. Apple claims only DV Profiles 5 and 8, and preserved DV always uses HLS because raw progressive MP4 can advance while rendering black. | XCTest caps matrix, fallback-status contract, create-body encoding, and legacy direct-DV normalization |
+| `apple.transport-and-dv` | AVPlayer caps and direct vs HLS | Probe HEVC, AV1, HDR output, and Dolby Vision output once for every decision; bind both wire spellings to that player and repeat its v2 snapshot on every session create. A 400/404/405 falls back to the matching legacy query, including `hdr10t`, without re-probing. An HDR10 transcode decision echoes `hdr10: true` on create. Execute the server mode, except normalize even a legacy direct Dolby Vision answer through preserving copy HLS. Apple claims only DV Profiles 5 and 8, and preserved DV always uses HLS because raw progressive MP4 can advance while rendering black. | XCTest caps matrix, fallback-status contract, HDR10/create-body encoding, and legacy direct-DV normalization |
 | `apple.compatibility-fallback` | Apple startup decode failure recovery | Before real playback, a preserved DV stream with an HDR10/HLG base strips to that base first; only the next media rejection uses the universal transcode. Each rescue is once and resumes the last truthful film position. | XCTest recovery ladder |
 | `apple.established-hdr-recovery` | Interruption after HDR rendered | Once the item has advanced for ≥5 s, a stall or item failure reconnects the same HDR delivery once. An immediate repeat stops visibly instead of falling through to the SDR compatibility transcode. | XCTest established-delivery guard |
 | `apple.buffering-recovery` | Sustained or self-recovered wait after playback began | Each newly opened item must advance for ≥5 s before six stagnant two-second samples during an explicit AVPlayer buffer wait may reopen the same delivery. The third sample first nudges Play; an immediate repeat stops with network-specific copy. Every report carries the HLS session, a per-item attempt, contiguous loaded runway, AVPlayer wait/buffer flags, access-log request/transfer counters, and the last polled server supply state; the server replaces that snapshot with a fresher live join when possible. Recovery TTFF is measured separately, and copy-HLS replacements seek forward from the preceding keyframe origin instead of replaying it. None of this is codec/HDR evidence. | XCTest recovery, runway, keyframe correction, status decode, and beacon-payload suite; Rust snapshot-race and live-join regressions; physical-iPad throttling pending |
@@ -137,7 +137,7 @@ one.
 | `apple.subtitle-route` | Media selection vs reopen | Native rendition switches stay inside AVPlayer once the session exists. A recognized PGS overlay stays on the current item. Entering from direct, selecting/leaving a burn, or changing a burn reopens; other bitmap/styled tracks still burn. | XCTest route matrix |
 | `apple.hdr-subtitle-guard` | Burn-only subtitle on HDR | A recognized PGS overlay is allowed because it does not change video. Unknown overlay versions, VobSub, and styled tracks are refused while the current delivery is DV, HDR10, or HLG. Native text still selects, and SDR playback may still burn. | XCTest subtitle/dynamic-range matrix |
 | `apple.pgs-overlay` | PGS application overlay vs video mutation | Only `overlay: "pgs-v1"` selects the authenticated manifest/PNG renderer. It schedules complete compositions against the current `AVPlayerItem`, maps authored coordinates into `videoRect`, and never sends subtitle/burn session fields or reopens video. PiP and external playback are blocked while active rather than falling back to an SDR burn. | XCTest manifest, timeline, layout, item-replacement, and no-reopen policy suite |
-| `android.capability-profile` | Decoder/display/sink claims | Probe decoders, display, and active audio sink for every decision; POST the v2 document and repeat that snapshot on session create. A 400/404/405 falls back to the unchanged legacy query. Apply each video decoder's own 30 fps height ceiling and claim passthrough audio when either the decoder or active sink can take it. Claim DV only when decoder and display agree; P7 is allowed only from the platform's exact `DvheDtb` enumeration and is never inferred from generic HDR or a device name. | JVM document, codec-height, DV-enumeration, fallback-status, and create-body matrix + Rust per-codec decision regressions |
+| `android.capability-profile` | Decoder/display/sink claims | Probe decoders, display, and active audio sink for every decision; bind both wire spellings to that player and repeat its v2 snapshot on every session create. A 400/404/405 falls back to the matching legacy query; its raw `hdr` display fact and HEVC/PQ `hdr10t` fact match v2. An HDR10 transcode decision echoes `hdr10: true` on create. Apply each video decoder's own 30 fps height ceiling and claim passthrough audio when either the decoder or active sink can take it. Claim DV only when decoder and display agree; P7 is allowed only from the platform's exact `DvheDtb` enumeration and is never inferred from generic HDR or a device name. | JVM document, codec-height, display/PQ, DV-enumeration, fallback-status, and create-body matrix + Rust per-codec decision regressions |
 | `android.compatibility-fallback` | Media3 startup decode recovery | Before a frame renders, failed preserving direct DV first gets a normalized remux; any remaining direct/remux failure gets one compatibility transcode; a failed transcode is terminal. | JVM fallback matrix |
 | `android.established-hdr-recovery` | Interruption after HDR rendered | Once Media3 renders a frame, a later HDR error retries the same delivery once. A repeat is terminal instead of silently becoming the SDR compatibility stream. | JVM established-delivery matrix |
 | `android.manual-quality` | Auto/Original/rung force | Auto asks for the normal verdict, Original forbids video re-encode, and every server-advertised rung requests a transcode. The menu never invents a rung above the source. | JVM force and ladder matrix |
@@ -170,13 +170,15 @@ profile guessed conservatively.
 | `acodec` | `canPlayType` | `aac`,`mp3` always; `ac3`/`eac3` where supported (Safari), `opus`/`flac` per browser. |
 | `container` | fixed | `mp4,webm,mov` — what a browser `<video>` accepts as a file. Notably **not** `mkv`. |
 | `hdr` | `matchMedia("(dynamic-range: high)")` | `1` only on an HDR display *and* an HDR-capable codec — else the server tone-maps, because HDR on an SDR screen looks washed-out. |
+| `hdr10t` | codec decode + HDR display probes | `1` only when HEVC output can be presented as PQ. This is the legacy spelling of an HEVC v2 entry whose `present` contains `pq`. |
 | `dvprofile` | platform codec APIs | Exact Dolby Vision profiles the decoder and current display both accept. Apple advertises Profiles 5 and 8. Android may advertise P7 only when `MediaCodec` enumerates `DvheDtb`; neither client infers it from generic HDR. |
 | `dvhls` | platform policy | Apple sends `1`: an approved DV stream still needs normalized copy HLS rather than a raw progressive file. Browser/Android omit it unless they need the same envelope. |
 
 Android re-runs these probes for every decision because its passthrough audio
-answer belongs to the active HDMI route. It posts the v2 document, repeats the
-same snapshot on session create, and uses the legacy query only when the POST
-returns 400, 404, or 405 during a mixed-fleet rollout.
+answer belongs to the active HDMI route. Each player retains that decision's
+snapshot, repeats it on every session create and reopen, and uses its matching
+legacy query only when the POST returns 400, 404, or 405 during a mixed-fleet
+rollout. Detail-screen preflights cannot replace a running player's snapshot.
 
 The native clients use platform codec/display APIs instead of browser probes.
 Android also includes audio support exposed by the active HDMI/audio sink,
@@ -186,6 +188,9 @@ Apple omits `max_height` because its four probes do not prove one; it claims
 Profiles 5 and 8 only when HEVC decoding, HDR presentation, and a Dolby Vision
 output all agree. Generic HDR eligibility alone never becomes a DV claim,
 because that hands an HDR10-only output metadata AVPlayer rejects.
+Apple captures those four probes once per decision, so the POST, a legacy GET
+fallback, and session creation all describe the same output state even when an
+Apple TV changes display format while the POST is in flight.
 
 **How to read it:** the caps are why the same file behaves differently across
 browsers. A 4K HEVC/HDR MKV with DTS audio reports the *same* verdict on Chrome
@@ -262,7 +267,9 @@ Two rules the document is strict about, both in the refusing direction:
 ### Session create re-derives the plan
 
 `/decision` computes the plan; the client echoes `preserve_dolby_vision` and
-`hdr10` back in the create body. That echo used to be trusted. A create that
+`hdr10` back in the create body. `hdr10` is sent only when the decision selected
+an HDR10 transcode; a capability document permits that rung but cannot request
+it for an SDR title or a copy session. Those echoes used to be trusted. A create that
 also carries `caps` re-runs the decision from those capabilities, and the echo
 becomes an assertion:
 

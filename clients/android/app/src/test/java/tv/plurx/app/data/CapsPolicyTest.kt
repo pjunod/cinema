@@ -192,6 +192,25 @@ class CapsPolicyTest {
     }
 
     @Test
+    fun legacyPresentationClaimsMatchTheV2DisplayAndHevcPqFacts() {
+        val hevc = videoCodecCaps(listOf(VideoDecoderLimit("hevc", 2160)))
+        assertEquals(
+            mapOf("hdr" to "1", "hdr10t" to "1"),
+            legacyPresentationClaims(hevc, setOf(HdrType.HDR10)),
+        )
+
+        val vp9Only = videoCodecCaps(listOf(VideoDecoderLimit("vp9", 2160)))
+        assertEquals(
+            mapOf("hdr" to "1", "hdr10t" to "0"),
+            legacyPresentationClaims(vp9Only, setOf(HdrType.HDR10, HdrType.HLG)),
+        )
+        assertEquals(
+            mapOf("hdr" to "0", "hdr10t" to "0"),
+            legacyPresentationClaims(hevc, emptySet()),
+        )
+    }
+
+    @Test
     fun decisionPostFallsBackOnlyForTheMixedFleetStatuses() {
         assertTrue(shouldFallBackToLegacyDecision(400))
         assertTrue(shouldFallBackToLegacyDecision(404))

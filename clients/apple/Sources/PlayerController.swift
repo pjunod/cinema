@@ -1310,6 +1310,9 @@ final class PlayerController: ObservableObject {
     let player = AVPlayer()
 
     @Published private(set) var decision: Decision?
+    /// Immutable facts used to obtain `decision`; every session opened by this
+    /// controller repeats them even if another screen probes in the meantime.
+    private var decisionCaps: DeviceCaps?
     @Published private(set) var sessionStatus: PlaybackSessionStatus?
     /// Last successful status response for a stall report. The visible status
     /// is allowed to become unavailable when a poll fails, but that failure is
@@ -1372,6 +1375,15 @@ final class PlayerController: ObservableObject {
     /// The protocol separates waiting from stalled by how long, and AVPlayer
     /// reports only that it is waiting.
     private var controlWaitingSince: Date?
+    /// Evidence a recovery owner is about to act on, published for the next
+    /// exchange. It is set immediately before the owner reports and cleared
+    /// when the player renders again, so the server sees why this client
+    /// thought it was stuck rather than only that it was.
+    private var controlObservationOverride: ClientObservation?
+    private var controlRenderOverride: RenderState?
+    /// The film position when the override was published, so progress past it
+    /// can expire the override without trusting `timeControlStatus`.
+    private var controlEvidencePositionMs: Int?
     private var sessionId: String?
     private var activeMediaPath: String?
     private var activeMediaAuthenticated = false
@@ -2159,7 +2171,14 @@ final class PlayerController: ObservableObject {
         clearPGSOverlaySelection()
         pgsOverlayItemGeneration &+= 1
         playbackControl.end()
+        // A verdict survives a reopen because the failure it explains usually
+        // arrives after one. It must not survive the title: a confident
+        // sentence about the wrong film is worse than a generic one.
+        playbackControl.clearVerdict()
         controlWaitingSince = nil
+        controlObservationOverride = nil
+        controlRenderOverride = nil
+        controlEvidencePositionMs = nil
         playbackRecoveryMonitor.reset()
         stallReopenBudget.reset()
         sessionHeight = nil
@@ -2211,11 +2230,13 @@ final class PlayerController: ObservableObject {
     private func load(startMs: Int) async {
         guard let model else { return }
         do {
-            let decision = try await model.decision(
+            let playbackDecision = try await model.playbackDecision(
                 fileId: fileId,
                 selection: prePlaySelection
             )
+            let decision = playbackDecision.decision
             guard started else { return }
+            decisionCaps = playbackDecision.caps
             self.decision = decision
             if knownDurationMs <= 0 { knownDurationMs = decision.source?.durationMs ?? 0 }
             // `default` on a decision track is the server's own shared-policy
@@ -2441,6 +2462,9 @@ final class PlayerController: ObservableObject {
             url = Session.shared.mediaURL(deliveryPath)
             if startMs > 0 { seekAfterAttach = startMs }
         } else {
+            guard let decisionCaps else {
+                throw APIError.transport("Playback decision capabilities were not retained.")
+            }
             let copy = !forceTranscode
                 && (normalMode == "direct" || normalMode == "remux" || customAudio)
             canRetryCurrentItemWithHDRBase = copy
@@ -2478,7 +2502,13 @@ final class PlayerController: ObservableObject {
                     subtitle: nativeSubtitle,
                     copy: copy ? true : nil,
                     aac: copy ? aac : nil,
-                    preserveDolbyVision: copy ? preserveDolbyVision : nil
+                    preserveDolbyVision: copy ? preserveDolbyVision : nil,
+                    hdr10: Self.sessionHDR10Request(
+                        copy: copy,
+                        deliveredRange: decision.deliveredDynamicRange,
+                        forcesSDR: forceCompatibilityTranscode || burnSubtitle != nil
+                    ),
+                    caps: decisionCaps
                 ),
                 intent: intent,
                 currentSessionId: superseded,
@@ -3140,6 +3170,11 @@ final class PlayerController: ObservableObject {
     /// stalled, so the server resolves it one rung down instead of rebuilding
     /// the rung that just starved.
     private func retrySameDeliveryAfterStall(_ event: PlaybackStallEvent) async {
+        // Publish this owner's evidence before it decides anything. The
+        // server's picture of a wedge is otherwise whatever the periodic
+        // observer happened to catch, which is the same moment described
+        // less precisely. M5e asks for a verdict here; this only tells.
+        reportControlEvidence(Self.stallEvidence(for: event.kind), render: .stalled)
         var decision = sameDeliveryStallRecovery.next(for: event.kind)
         #if os(iOS)
         let hasOfflineAsset = offlineAssetURL != nil
@@ -3174,7 +3209,37 @@ final class PlayerController: ObservableObject {
             isChangingStream = false
             failed = terminal.failed
             playbackFailureTitle = Self.playbackStoppedFailureTitle
-            playbackError = terminal.message
+            // Ruling D1: a terminal verdict arms the words this failure will
+            // carry rather than causing one. The client's own message is a
+            // guess at why production stopped; the server's is the answer.
+            playbackError = playbackControl.terminalVerdict?.message ?? terminal.message
+        }
+    }
+
+    /// What each stall kind is evidence *of*, in the protocol's vocabulary.
+    ///
+    /// The three kinds are not one condition. A buffering stall is a starved
+    /// decoder and says nothing about the file; a silent freeze is a decoder
+    /// that accepted the media and then stopped presenting it, which is the
+    /// Profile-5 shape the server cannot derive; a delivery wedge is the
+    /// server's own clock saying this client stopped fetching, so the decoder
+    /// is not the subject at all.
+    nonisolated static func stallEvidence(for kind: PlaybackStallKind) -> ClientObservation {
+        switch kind {
+        case .buffering:
+            return ClientObservation(decoderState: .starved)
+        case .silent:
+            return ClientObservation(
+                decoderState: .failed,
+                errorCode: .decoder,
+                errorDetail: "silent_freeze"
+            )
+        case .delivery:
+            return ClientObservation(
+                decoderState: .starved,
+                errorCode: .network,
+                errorDetail: "delivery_wedge"
+            )
         }
     }
 
@@ -3300,6 +3365,24 @@ final class PlayerController: ObservableObject {
 
     /// The wire value for a typed stall recovery. The server accepts no other.
     static let stallReopenReason = "stall"
+
+    /// The document says whether HDR10 output is allowed; this echo says the
+    /// session create actually requests an HDR10 transcode. Manual quality
+    /// selection can turn a direct/remux decision into a non-copy create
+    /// without re-running `/decision`, while a compatibility rescue and a
+    /// subtitle burn are explicitly SDR even when the decision they replace
+    /// described HDR10 source bytes.
+    nonisolated static func sessionHDR10Request(
+        copy: Bool,
+        deliveredRange: String?,
+        forcesSDR: Bool
+    ) -> Bool? {
+        !copy
+            && !forcesSDR
+            && deliveredRange?.lowercased() == "hdr10"
+            ? true
+            : nil
+    }
 
     /// The unbound body to re-post when the server refuses a bound stall
     /// reopen, or `nil` when this failure is not that case.
@@ -3636,7 +3719,19 @@ final class PlayerController: ObservableObject {
         playbackFailureTitle = currentMs > 0
             ? Self.playbackStoppedFailureTitle
             : Self.playbackStartFailureTitle
-        playbackError = item.error?.localizedDescription
+        // AVPlayer's own error object is a generic fallback and its message
+        // can carry a media URL, so an armed server verdict is both more
+        // accurate and safer to show.
+        //
+        // Except for a transport failure, which is the one case the verdict
+        // demonstrably does not explain: a verdict says production stopped
+        // for a reason retrying cannot change, and a link that dropped is a
+        // different cause with a different answer. Showing it there would be
+        // the failure mode of arming a verdict at all — a confident sentence
+        // about the wrong thing.
+        let verdict = isTransportFailure ? nil : playbackControl.terminalVerdict?.message
+        playbackError = verdict
+            ?? item.error?.localizedDescription
             ?? PlaybackPreparationError.failed.localizedDescription
     }
 
@@ -4275,8 +4370,11 @@ final class PlayerController: ObservableObject {
             isChangingStream = false
             failed = true
             playbackFailureTitle = Self.playbackStoppedFailureTitle
-            playbackError =
-                "The HDR stream stopped responding. Playback was stopped instead of switching to SDR."
+            // A silent stall reaches this rung before the stall funnel's own
+            // stop, so leaving it out would hide the verdict on the path most
+            // likely to have earned one.
+            playbackError = playbackControl.terminalVerdict?.message
+                ?? "The HDR stream stopped responding. Playback was stopped instead of switching to SDR."
             return true
         }
         establishedHDRRetryAttempted = true
@@ -5183,6 +5281,12 @@ extension PlayerController {
             playbackControl.end()
             return
         }
+        // The override describes the session that just ended. Carrying it into
+        // the replacement would make its very first exchange — a session that
+        // has rendered nothing yet — report a wedge that belongs to another.
+        controlObservationOverride = nil
+        controlRenderOverride = nil
+        controlEvidencePositionMs = nil
         playbackControl.begin(
             bootstrap: bootstrap,
             transport: PlaybackControlTransport(
@@ -5234,8 +5338,12 @@ extension PlayerController {
             errorDetail: failed ? "avplayer_item_failed" : nil,
             droppedFrames: nil,
             observedDownloadBps: nil,
-            observationOverride: nil,
-            renderOverride: nil,
+            // A recovery path's evidence is more specific than anything
+            // derived from the player's own state, so it wins field by field.
+            // Until now both were hardcoded nil and no recovery site set
+            // them, so the mapper's merge had nothing to merge.
+            observationOverride: controlObservationOverride,
+            renderOverride: controlRenderOverride,
             selection: playbackControlSelection(),
             capabilities: Caps.controlCapabilities()
         )
@@ -5271,11 +5379,50 @@ extension PlayerController {
     /// Called wherever the player's state moves. The reporter coalesces, so
     /// this is cheap enough for the periodic time observer.
     func playbackControlPlayerChanged() {
+        refreshControlWaiting()
+        expireControlEvidenceIfProgressed()
+        playbackControl.playerChanged()
+    }
+
+    private func refreshControlWaiting() {
         if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
             if controlWaitingSince == nil { controlWaitingSince = Date() }
         } else {
             controlWaitingSince = nil
         }
-        playbackControl.playerChanged()
+    }
+
+    /// A moving film clock is the only proof the stall this evidence describes
+    /// is over.
+    ///
+    /// `timeControlStatus == .playing` is not that proof and must never be
+    /// used as it: a `.silent` stall is *defined* as a player whose clock
+    /// stopped while it claimed motion, so clearing on that status would
+    /// discard the one kind the server cannot derive from anything it holds —
+    /// and would discard it inside the same call that published it.
+    private func expireControlEvidenceIfProgressed() {
+        guard let publishedAt = controlEvidencePositionMs else { return }
+        guard realPositionMs() > publishedAt else { return }
+        controlObservationOverride = nil
+        controlRenderOverride = nil
+        controlEvidencePositionMs = nil
+    }
+
+    /// Publish what a recovery owner is about to act on, and send it now.
+    ///
+    /// Two things are load-bearing. The override is set before the snapshot is
+    /// taken, or the exchange carries the player's own vaguer version of the
+    /// same moment. And the report is urgent rather than coalesced, because
+    /// the owner's reopen normally ends this reporter before its next
+    /// scheduled exchange — the same reason the web client drains inline here.
+    func reportControlEvidence(
+        _ observation: ClientObservation?,
+        render: RenderState? = nil
+    ) {
+        refreshControlWaiting()
+        controlObservationOverride = observation
+        controlRenderOverride = render
+        controlEvidencePositionMs = realPositionMs()
+        playbackControl.reportEvidence()
     }
 }

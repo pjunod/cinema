@@ -13,13 +13,14 @@ hardware genuinely can't play — everything else streams the original file unto
 
 The probe covers three things a device knows and a server can't guess: which
 video and audio codecs decode here, which **Dolby Vision** profiles the decoder
-delivers on a panel that shows them (4, 5, and 8 — never dual-layer 7), and what
+delivers on a panel that shows them (4, 5, 7, and 8; Profile 7 only from an
+exact `DvheDtb` decoder enumeration), and what
 the **active audio route** takes as a bitstream. That last one is why a Shield
 feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.2.8**, build `52` — native viewer parity across phone, foldable,
+> Status: **v0.2.8**, build `54` — native viewer parity across phone, foldable,
 > and TV. Build 46 accepts the temporary live-HLS recovery presentation while
 > immutable VOD indexes are backfilled. Build 44
 > retries a stalled stream through another cluster node's

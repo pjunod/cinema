@@ -16,7 +16,7 @@
   // is not a protocol error; it is not yet a promise to act on it. Recovery
   // authority still belongs to this client's own timers until the milestone
   // that moves it.
-  const SUPPORTED_ACTIONS = Object.freeze(["hold"]);
+  const SUPPORTED_ACTIONS = Object.freeze(["hold", "retry_resource", "terminal"]);
 
   function defaultNow() {
     if (typeof performance === "object" && typeof performance.now === "function") {
@@ -117,6 +117,15 @@
     if (!action) return false;
     if (action.type === "none") return true;
     if (action.type === "hold") return typeof action.reason === "string";
+    if (action.type === "terminal") {
+      return typeof action.code === "string" && typeof action.message === "string";
+    }
+    if (action.type === "retry_resource") {
+      return typeof action.reason === "string"
+        && Number.isSafeInteger(action.after_ms)
+        && action.after_ms > 0
+        && action.after_ms <= MAX_EXCHANGE_MS;
+    }
     return false;
   }
 
@@ -175,9 +184,13 @@
     schedule() {
       if (this.stopped || this.inFlight || this.pending || this.timer !== null) return;
       const retrying = this.retryRequest !== null;
+      // `nextAllowedAt` is honoured on the ordinary path too, so a server that
+      // named its own retry interval is waited out in one timer rather than
+      // scheduled at the default and then re-deferred inside `drain`. Both
+      // reach the same instant; one is observable.
       const delay = retrying
         ? Math.max(0, this.nextAllowedAt - this.now())
-        : this.bootstrap.next_exchange_ms;
+        : Math.max(this.bootstrap.next_exchange_ms, this.nextAllowedAt - this.now());
       this.timer = this.setTimer(() => {
         this.timer = null;
         this.notify();
@@ -255,8 +268,23 @@
             ? null : request.observed_download_bps,
           observation: boundedObservation(request.observation),
         };
+        // `retry_resource` paces the next exchange from the server's own
+        // cadence rather than this client's guess. It is not a failure, so it
+        // does not touch the retry path — the exchange succeeded, and the
+        // server simply said when to ask again.
+        if (response.action.type === "retry_resource") {
+          this.nextAllowedAt = this.now()
+            + Math.max(MIN_EXCHANGE_MS, response.action.after_ms);
+        }
         this.onExchange({ request, response, error: null });
-        if (request.demand === "end") this.stop();
+        // A terminal verdict ends reporting. It does not tear down the player:
+        // this reporter still owns no recovery, and the buffer already fetched
+        // is still worth playing. The milestone that moves that authority is
+        // the one that acts on this.
+        if (request.demand === "end" || response.action.type === "terminal") {
+          this.stop();
+          return;
+        }
       } catch (error) {
         const canceled = error && error.name === "AbortError" && !this.deadlineExceeded;
         if (!this.stopped && !canceled) {

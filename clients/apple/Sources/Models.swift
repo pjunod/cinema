@@ -828,6 +828,9 @@ struct CreateSessionRequest: Codable {
     /// Retain a source profile the server already decided this AVPlayer can
     /// decode. Omitted/false remains the safe legacy behavior.
     var preserveDolbyVision: Bool?
+    /// Request the HDR10 transcode rung only when this title's decision chose
+    /// it. The caps document is permission; it is not a per-title request.
+    var hdr10: Bool?
     /// The exact capability snapshot used for `/decision`. Repeating it here
     /// lets the server derive the plan again instead of trusting the DV/HDR
     /// echo above.
