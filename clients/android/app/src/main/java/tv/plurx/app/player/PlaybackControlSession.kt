@@ -197,18 +197,18 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         val hardDeadline = startedAt + capMs
         var seen = seenAtStart
         var extended = false
-        while (now() < deadline) {
-            val ready = synchronized(answerLock) {
-                // Both conditions. An answer that arrived before this ask
-                // cannot be its answer, and a 409 owner reset zeroes the
-                // reporter's sequence, so the floor alone is not enough.
-                if (answersSeen > seenAtStart && answerRequestSequence >= floor) {
-                    Result.success(answerAction)
-                } else {
-                    null
-                }
+        // Both conditions. An answer that arrived before this ask cannot be its
+        // answer, and a 409 owner reset zeroes the reporter's sequence, so the
+        // floor alone is not enough.
+        fun ready(): Result<ControlAction?>? = synchronized(answerLock) {
+            if (answersSeen > seenAtStart && answerRequestSequence >= floor) {
+                Result.success(answerAction)
+            } else {
+                null
             }
-            if (ready != null) return ready.getOrNull()
+        }
+        while (now() < deadline) {
+            ready()?.let { return it.getOrNull() }
             val count = synchronized(answerLock) { answersSeen }
             if (count > seen) {
                 seen = count
@@ -222,10 +222,17 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                 }
             }
             kotlinx.coroutines.delay(ASK_POLL_MS)
-            val current = reporter ?: return null
-            if (current.status().stopped) return null
+            // Read the slot again before giving up on a reporter that went
+            // away. A terminal verdict is answered and then stops the reporter
+            // in the same instant, so bailing on `stopped` without re-reading
+            // discards the one verdict this ask most needed to see — which is
+            // exactly what happened, and what the terminal test now pins.
+            val current = reporter
+            if (current == null || current.status().stopped) {
+                return ready()?.getOrNull()
+            }
         }
-        return null
+        return ready()?.getOrNull()
     }
 
     /**
