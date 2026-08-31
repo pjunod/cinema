@@ -325,62 +325,118 @@ class ControlAskBoundTest {
  * player that may have moved. These tests pin the SET of conditions it
  * re-checks, because the hazard is not any one of them being wrong — it is a
  * later edit dropping one, which leaves a ladder that restarts a player
- * somebody else already moved and no test that notices.
+ * somebody else already moved, or one that stands aside from a player nobody
+ * else is going to fix.
  */
 class LadderOwnershipTest {
 
+    private val failure = PlaybackException(
+        "failed",
+        null,
+        PlaybackException.ERROR_CODE_DECODING_FAILED,
+    )
+
     @Test
-    fun theLadderProceedsOnlyWhenAllThreeHold() {
+    fun theLadderProceedsWhenNothingHasMoved() {
         assertTrue(
             ladderStillOwnsFailure(
                 released = false,
-                guardCurrent = true,
-                playerHoldsFailure = true,
+                openedAt = 4L,
+                opensNow = 4L,
+                failure = failure,
+                playerError = { failure },
             ),
         )
     }
 
     /**
      * `release()` tore the player down. ExoPlayer's `release` does not clear
-     * `playbackError`, so the identity check passes on a dead player and this
-     * is the only thing standing between the ladder and a released ExoPlayer.
+     * `playbackError`, so the identity check would pass on a dead player —
+     * and the lambda must not even be reached, because everything that reads
+     * a released ExoPlayer is reading freed state.
      */
     @Test
-    fun aReleasedPlayerStopsTheLadderEvenWhileItStillHoldsTheFailure() {
+    fun aReleasedPlayerIsNeverEvenAsked() {
+        var asked = false
         assertFalse(
             ladderStillOwnsFailure(
                 released = true,
-                guardCurrent = true,
-                playerHoldsFailure = true,
+                openedAt = 4L,
+                opensNow = 4L,
+                failure = failure,
+                playerError = { asked = true; failure },
+            ),
+        )
+        assertFalse("a released player must not be interrogated", asked)
+    }
+
+    /**
+     * A session open started while the ask was out, so a `prepare` this
+     * function cannot see synchronously is already coming — and `playerError`
+     * is unchanged until it lands, so this is the only check that sees it.
+     */
+    @Test
+    fun aSessionOpenInFlightStopsTheLadderWhilePlayerErrorIsUnchanged() {
+        assertFalse(
+            ladderStillOwnsFailure(
+                released = false,
+                openedAt = 4L,
+                opensNow = 5L,
+                failure = failure,
+                playerError = { failure },
             ),
         )
     }
 
     /**
-     * A VOD seek, a `playPause`, an in-place subtitle change, and the
-     * pre-`prepare` half of `openSession` all leave `playbackError` exactly as
-     * it was. Without the guard version the ladder would discard the viewer's
-     * seek and burn a rung restarting at the position they had just left.
+     * The dangerous direction. A VOD seek, a `playPause` and an in-place
+     * subtitle change re-prepare nothing, so they must NOT look like a session
+     * open — a ladder that stood down for one would leave a frozen picture
+     * with no error and no affordance for the life of the screen.
      */
     @Test
-    fun anotherOwnerStopsTheLadderEvenWhilePlayerErrorIsUnchanged() {
-        assertFalse(
+    fun anActionThatRePreparesNothingLeavesTheLadderInCharge() {
+        assertTrue(
             ladderStillOwnsFailure(
                 released = false,
-                guardCurrent = false,
-                playerHoldsFailure = true,
+                openedAt = 7L,
+                opensNow = 7L,
+                failure = failure,
+                playerError = { failure },
             ),
         )
     }
 
-    /** Anything that re-prepared without going through the guard. */
+    /** Anything that re-prepared inline: `prepare()` clears `playbackError`. */
     @Test
-    fun aRePreparedPlayerStopsTheLadderEvenWhileTheGuardIsCurrent() {
+    fun aRePreparedPlayerStopsTheLadderEvenWithNoSessionOpen() {
         assertFalse(
             ladderStillOwnsFailure(
                 released = false,
-                guardCurrent = true,
-                playerHoldsFailure = false,
+                openedAt = 4L,
+                opensNow = 4L,
+                failure = failure,
+                playerError = { null },
+            ),
+        )
+    }
+
+    /** A different failure is a different failure, not this one. */
+    @Test
+    fun aDifferentExceptionIsNotThisOne() {
+        assertFalse(
+            ladderStillOwnsFailure(
+                released = false,
+                openedAt = 4L,
+                opensNow = 4L,
+                failure = failure,
+                playerError = {
+                    PlaybackException(
+                        "failed",
+                        null,
+                        PlaybackException.ERROR_CODE_DECODING_FAILED,
+                    )
+                },
             ),
         )
     }

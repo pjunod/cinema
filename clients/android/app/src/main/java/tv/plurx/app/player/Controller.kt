@@ -285,6 +285,26 @@ class Controller(
      * touching `player`.
      */
     private var released = false
+
+    /**
+     * How many session opens have been *started*, including ones still in
+     * flight.
+     *
+     * This exists for one reader: the compatibility ladder, which resumes
+     * seconds after the failure it is recovering from and has to know whether
+     * anything is already on its way to re-preparing the player.
+     *
+     * It counts session opens and nothing else, which is the whole point.
+     * `stallGuard` is the wrong fence for this question in both directions: it
+     * is bumped by a VOD seek, a `playPause` and an in-place subtitle change,
+     * none of which re-prepare an `IDLE` player — a ladder that stood down for
+     * those would leave a frozen picture with no error and no affordance for
+     * the life of the screen — and bumping it from the failure path cancels
+     * creates that are already running. A session open is the only thing that
+     * promises a `prepare` this function cannot see synchronously; every other
+     * re-prepare happens inline and is caught by the `playerError` identity.
+     */
+    private var sessionOpenGeneration = 0L
     private var activeMediaPath: String? = null
 
     private val playbackTelemetry = ControllerPlaybackTelemetry(
@@ -403,16 +423,17 @@ class Controller(
         // the screen — so every player call below still lands on the main
         // thread and none of them outlive the surface they belong to.
         //
-        // The token is minted HERE, not inside the launched body. `launch`
-        // dispatches, so a body that mints its own would leave a window in
-        // which a stall reopen or a viewer seek could take ownership first
-        // and never be noticed. Minting it also invalidates whatever was in
-        // flight, which is the correct ownership: the player is `IDLE` with
-        // an error, so a reopen answering the stall that preceded the error
-        // is answering a question this failure has superseded.
+        // The generation is READ here, not claimed, and it is read before the
+        // dispatch rather than inside the launched body. A failure is not an
+        // owner of anything — `stallGuard.beginRequest()` would invalidate a
+        // create already in flight, which is how a viewer's seek turns into an
+        // error banner: `openSession` ends the old session server-side before
+        // its create returns, the player's next segment request against the
+        // deleted playlist 404s, and that 404 would then cancel the very seek
+        // that caused it.
         override fun onPlayerError(error: PlaybackException) {
-            val errorVersion = stallGuard.beginRequest()
-            scope.launch { handlePlayerError(error, errorVersion) }
+            val openedAt = sessionOpenGeneration
+            scope.launch { handlePlayerError(error, openedAt) }
         }
 
         override fun onRenderedFirstFrame() {
@@ -446,7 +467,7 @@ class Controller(
      * Split out of the listener because it suspends. Everything below the
      * ask runs only if the player is still holding this same failure.
      */
-    private suspend fun handlePlayerError(error: PlaybackException, errorVersion: Long) {
+    private suspend fun handlePlayerError(error: PlaybackException, openedAt: Long) {
         val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
         // The ask goes before rung one, not before rung two. Rung one is
         // `retryMediaOnNextNode`, and a verdict about the *source* does not
@@ -484,39 +505,43 @@ class Controller(
                 )
             },
         )
-        // Seconds passed, and it takes all three of these to notice.
-        //
-        // `released` first, because the other two touch a player that
-        // `release()` has torn down. It is load-bearing on its own terms:
-        // ExoPlayer's `release` does not clear `playbackError`, so the
-        // identity check below would happily pass on a dead player.
-        //
-        // The guard version catches what `playerError` cannot. A VOD seek, a
-        // `playPause`, an in-place subtitle change and the pre-`prepare` half
-        // of `openSession` all leave `playbackError` exactly as it was, so the
-        // identity check alone would let this ladder discard a viewer's seek
-        // and burn a rung restarting at the position they had just left.
-        //
-        // And `playerError` catches what the version cannot: anything that
-        // re-prepared the player without going through the guard.
-        val holdsFailure = !released && player.playerError === error
+        // Seconds passed, and it takes all three of these to notice. The
+        // predicate is a function so the set is pinned by a test, and it takes
+        // the raw inputs rather than three booleans computed here, so that
+        // there is no logic at this call site for a mutation to slip past.
+        val opensNow = sessionOpenGeneration
         if (!ladderStillOwnsFailure(
                 released = released,
-                guardCurrent = stallGuard.isCurrent(errorVersion),
-                playerHoldsFailure = holdsFailure,
+                openedAt = openedAt,
+                opensNow = opensNow,
+                failure = error,
+                // Lazy on purpose: `release()` tore this player down, and
+                // ExoPlayer's `release` does not clear `playbackError`, so
+                // reading it here is both meaningless and unsafe. The
+                // predicate must not reach this lambda when `released`.
+                playerError = { player.playerError },
             )
         ) {
-            // The beacon below never fires on this path, and the fleet run
-            // reads these. Say that the failure was superseded rather than
-            // leaving no client-side record of it at all.
-            playbackTelemetry.report(
-                event = "playback_error_superseded",
-                level = "warn",
-                message = error.errorCodeName,
-                code = error.errorCode,
-                detail = "released=$released current=${stallGuard.isCurrent(errorVersion)} " +
-                    "held=$holdsFailure",
+            // The `playback_error` beacon below never fires on this path, and
+            // the fleet run reads these. Say the failure was superseded rather
+            // than leaving no client-side record of it at all — but say it
+            // without `playbackTelemetry.report`, which samples position,
+            // buffer and video height straight off the player.
+            Log.w(
+                "plurx-playback",
+                "file=${plan.fileId} superseded error=${error.errorCodeName} " +
+                    "code=${error.errorCode} released=$released " +
+                    "opens=$openedAt->$opensNow",
             )
+            if (!released) {
+                playbackTelemetry.report(
+                    event = "playback_error_superseded",
+                    level = "warn",
+                    message = error.errorCodeName,
+                    code = error.errorCode,
+                    detail = "opened_at=$openedAt opens_now=$opensNow",
+                )
+            }
             return
         }
         // Only `terminal` short-circuits. A `hold` or a `retry_resource` on a
@@ -630,17 +655,22 @@ class Controller(
         stallWatchdogJob = scope.launch {
             while (isActive) {
                 playbackControlPlayerChanged()
-                // A player holding a `PlaybackException` is not a recovered
-                // stall, and `sampleStall` cannot tell the difference: an
+                val measurement = playbackTelemetry.sampleStall(establishedPlayback, monotonicNowMs())
+                // The measurement is still taken, because the viewer really
+                // did stare at a frozen picture for that long and the fleet
+                // run needs the number. What is suppressed is the *recovery*:
+                // a player holding a `PlaybackException` is not a recovered
+                // stall, and `sampleStall` cannot tell the difference. An
                 // error moves ExoPlayer to `IDLE`, so `buffering` goes false
-                // on the falling edge the tracker reports as recovery, while
+                // on exactly the falling edge the tracker reports, while
                 // `playWhenReady` and `establishedPlayback` both stay true
                 // until the ladder restarts. Without this the failure and the
-                // stall race for the same evidence slot and the same answer,
-                // and whichever loses spends a rung on the other's verdict.
-                val stallable = establishedPlayback && player.playerError == null
-                val measurement = playbackTelemetry.sampleStall(stallable, monotonicNowMs())
-                if (measurement != null) {
+                // stall race for the same evidence slot and the same answer:
+                // the stall's `STARVED/STALLED` overrides the ladder's
+                // `FAILED/MEDIA` before it is ever sent, both asks read one
+                // answer slot, and whichever resumes first clears
+                // `establishedPlayback` and pushes the other into `Fail`.
+                if (measurement != null && player.playerError == null) {
                     onStall(measurement.positionMs)
                 }
                 delay(1_000)
@@ -851,6 +881,7 @@ class Controller(
      * client sends is unit-tested rather than assembled inline.
      */
     private fun openSession(ms: Long, attempt: PlaybackAttempt) {
+        sessionOpenGeneration++
         val requestVersion = stallGuard.beginRequest()
         sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
@@ -1026,6 +1057,7 @@ class Controller(
         // server validates previous_session_id against a live session
         // map.  Session creation supersedes and kills the predecessor
         // atomically.
+        sessionOpenGeneration++
         sessionId = null
         clearStatusPolling()
         encoder = null
@@ -1559,25 +1591,37 @@ internal const val CONTROL_ASK_CAP_MS = 3_000L
 /**
  * Does the deferred compatibility ladder still own the failure it waited on?
  *
- * Three conditions, and the ladder needs all three. Extracted so the SET is
- * pinned by a test: the hazard this function exists for is not any one check
- * being wrong, it is a later edit dropping one and leaving a ladder that
- * restarts a player somebody else already moved.
+ * Three conditions, and the ladder needs all three. It takes the raw inputs
+ * rather than three ready-made booleans so that the call site has no logic of
+ * its own — a predicate that only ANDs what the caller already decided pins
+ * nothing.
  *
  * - [released]: `release()` tore the player down. ExoPlayer's `release` does
- *   not clear `playbackError`, so [playerHoldsFailure] is no defence here.
- * - [guardCurrent]: nothing took ownership while the ask was out. A viewer
- *   seek, a `playPause`, an in-place subtitle change, and the pre-`prepare`
- *   half of `openSession` all leave `playbackError` untouched, so this is the
- *   only check that sees them.
- * - [playerHoldsFailure]: the player is still holding this exact exception.
- *   Catches anything that re-prepared without going through the guard.
+ *   not clear `playbackError`, so the identity check is no defence here — and
+ *   it must not even be *attempted*, which is why [playerError] is a lambda
+ *   and why this check comes first.
+ * - [openedAt] vs [opensNow]: a session open started while the ask was out, so
+ *   a `prepare` this function cannot see synchronously is already coming.
+ *   Standing aside for anything wider than that is the dangerous direction: a
+ *   VOD seek, a `playPause` and an in-place subtitle change bump no counter
+ *   here and re-prepare nothing, and a ladder that stood down for them would
+ *   leave a frozen picture with no error and no affordance.
+ * - [playerError] identity: the player is still holding this exact exception.
+ *   Catches every re-prepare that happened inline — `retryMediaOnNextNode`,
+ *   the remux seek arm, the direct-play arm — since `prepare()` is the only
+ *   thing that clears `playbackError`.
  */
 internal fun ladderStillOwnsFailure(
     released: Boolean,
-    guardCurrent: Boolean,
-    playerHoldsFailure: Boolean,
-): Boolean = !released && guardCurrent && playerHoldsFailure
+    openedAt: Long,
+    opensNow: Long,
+    failure: PlaybackException,
+    playerError: () -> PlaybackException?,
+): Boolean {
+    if (released) return false
+    if (openedAt != opensNow) return false
+    return playerError() === failure
+}
 
 internal fun controlErrorCode(errorCode: Int): ClientErrorCode = when (errorCode) {
     // Media3's 3xxx family is *parsing*, and it splits: the container codes
