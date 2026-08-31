@@ -17,8 +17,8 @@ use super::{
     keys, DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
     DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
     DvRecoveryGuard, DvRecoveryGuardSnapshot, DvRecoveryGuardState, DvRecoveryGuardSummary,
-    QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_CONVERSION_QUEUE_BATCH_MAX,
-    DV_RECOVERY_GUARD_READ_MAX,
+    QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_CONVERSION_MODE_DISABLED_REASON,
+    DV_CONVERSION_QUEUE_BATCH_MAX, DV_RECOVERY_GUARD_READ_MAX,
 };
 use crate::error::StoreError;
 
@@ -302,12 +302,21 @@ impl QueueAdmissionEnvelope {
                 })?;
                 Ok(QueueDvConversionOutcome::Ineligible(reason))
             }
+            "disabled" => Ok(QueueDvConversionOutcome::Ineligible(
+                DV_CONVERSION_MODE_DISABLED_REASON,
+            )),
             "file_missing" => Ok(QueueDvConversionOutcome::FileMissing),
             outcome => Err(StoreError::Database(format!(
                 "invalid Dolby Vision queue outcome `{outcome}`"
             ))),
         }
     }
+}
+
+#[derive(Deserialize)]
+struct BatchAdmissionEnvelope {
+    outcome: String,
+    queued: i64,
 }
 
 struct QueueAdmissionRow {
@@ -729,13 +738,19 @@ impl DvConversionStore for HiqliteAuthStore {
         let row = self
             .client()
             .execute_returning_map_one::<_, QueueAdmissionRow>(
-                "WITH requested(requested_file_id, requested_queued_at_ms, request_key) AS
-                       (VALUES ($1, $2, $3)),
+                "WITH requested(requested_file_id, requested_queued_at_ms, mode_key, request_key) AS
+                       (VALUES ($1, $2, $3, $4)),
                  snapshot AS (
                    SELECT requested.*,
                           f.id AS present_file_id, f.container AS container,
                           f.dv_profile AS profile, f.dv_bl_compat_id AS bl_compat_id,
                           f.dv_el_present AS el_present, f.dv_rpu_present AS rpu_present,
+                          CASE WHEN json_valid(mode_setting.value)
+                                    AND json_type(mode_setting.value) = 'object'
+                               THEN json_extract(
+                                      mode_setting.value,
+                                      '$.\"' || i.library_id || '\"')
+                               ELSE NULL END AS conversion_mode,
                           CASE WHEN LOWER(f.container) = 'mkv' AND f.dv_profile = 7
                                       AND f.dv_bl_compat_id IN (1, 6)
                                       AND f.dv_el_present = 1 AND f.dv_rpu_present = 1
@@ -756,6 +771,8 @@ impl DvConversionStore for HiqliteAuthStore {
                           g.updated_at_ms AS guard_updated_at_ms
                      FROM requested
                 LEFT JOIN files f ON f.id = requested.requested_file_id
+                LEFT JOIN items i ON i.id = f.item_id
+                LEFT JOIN settings mode_setting ON mode_setting.key = requested.mode_key
                 LEFT JOIN dv_conversions d ON d.file_id = f.id
                 LEFT JOIN dv_recovery_guards g ON g.guard_id = d.recovery_guard_id
                  ), classified AS (
@@ -765,8 +782,11 @@ impl DvConversionStore for HiqliteAuthStore {
                             WHEN conversion_state IN ('queued', 'running', 'verified')
                               THEN 'already_active'
                             WHEN present_file_id IS NULL THEN 'file_missing'
-                            WHEN eligible = 1 AND
-                                 (conversion_state IS NULL OR conversion_state = 'failed')
+                            WHEN eligible != 1 THEN 'ineligible'
+                            WHEN conversion_mode IS NULL OR
+                                 conversion_mode NOT IN ('manual', 'auto')
+                              THEN 'disabled'
+                            WHEN conversion_state IS NULL OR conversion_state = 'failed'
                               THEN 'queued'
                             ELSE 'ineligible'
                           END AS outcome
@@ -775,6 +795,7 @@ impl DvConversionStore for HiqliteAuthStore {
                  INSERT INTO settings (key, value, updated_at)
                  SELECT request_key,
                         json_object(
+                          'request_kind', 'single',
                           'outcome', outcome,
                           'requested_file_id', requested_file_id,
                           'requested_queued_at_ms', requested_queued_at_ms,
@@ -822,7 +843,12 @@ impl DvConversionStore for HiqliteAuthStore {
                         requested_queued_at_ms
                    FROM classified
                  RETURNING value AS envelope",
-                params!(file_id, queued_at_ms, request_key),
+                params!(
+                    file_id,
+                    queued_at_ms,
+                    keys::LIBRARY_DV_DISK_CONVERT,
+                    request_key
+                ),
             )
             .await?;
         #[cfg(feature = "hiqlite-contract-tests")]
@@ -858,43 +884,101 @@ impl DvConversionStore for HiqliteAuthStore {
         if limit == 0 {
             return Ok(DvConversionQueueBatch::default());
         }
+        let request_key = format!(
+            "__plurx_internal.dv_queue_admission.{}",
+            uuid::Uuid::new_v4().simple()
+        );
         // Unseen files lead retries so a permanent low-ID failure prefix
-        // cannot consume every bounded manual pass forever.
-        let changed = self
+        // cannot consume every bounded manual pass forever. Classification,
+        // exact candidate selection, and trigger admission are one replicated
+        // statement so switching a library off cannot race this mutation.
+        let row = self
             .client()
-            .execute(
-                "WITH requested(library_id, queued_at_ms, retry_failed, batch_limit) AS
-                       (VALUES ($1, $2, $3, $4)),
+            .execute_returning_map_one::<_, QueueAdmissionRow>(
+                "WITH requested(
+                       library_id, queued_at_ms, retry_failed, batch_limit,
+                       mode_key, request_key) AS
+                       (VALUES ($1, $2, $3, $4, $5, $6)),
+                 mode_snapshot AS (
+                   SELECT requested.*,
+                          CASE WHEN json_valid(mode_setting.value)
+                                    AND json_type(mode_setting.value) = 'object'
+                               THEN json_extract(
+                                      mode_setting.value,
+                                      '$.\"' || requested.library_id || '\"')
+                               ELSE NULL END AS conversion_mode
+                     FROM requested
+                LEFT JOIN settings mode_setting ON mode_setting.key = requested.mode_key
+                 ),
                  candidates(file_id) AS (
                    SELECT f.id
                      FROM files f
                      JOIN items i ON i.id = f.item_id
                      LEFT JOIN dv_conversions d ON d.file_id = f.id
-                     JOIN requested ON requested.library_id = i.library_id
-                    WHERE LOWER(f.container) = 'mkv'
+                     JOIN mode_snapshot ON mode_snapshot.library_id = i.library_id
+                    WHERE mode_snapshot.conversion_mode IN ('manual', 'auto')
+                      AND LOWER(f.container) = 'mkv'
                       AND f.dv_profile = 7
                       AND f.dv_bl_compat_id IN (1, 6)
                       AND f.dv_el_present = 1
                       AND f.dv_rpu_present = 1
                       AND (d.file_id IS NULL OR
-                           (requested.retry_failed AND d.state = 'failed'))
+                           (mode_snapshot.retry_failed AND d.state = 'failed'))
                     ORDER BY CASE WHEN d.file_id IS NULL THEN 0 ELSE 1 END, f.id
                     LIMIT $4
+                 ), classified AS (
+                   SELECT mode_snapshot.*,
+                          CASE WHEN conversion_mode IN ('manual', 'auto')
+                               THEN 'queued' ELSE 'disabled' END AS outcome,
+                          COALESCE(
+                            (SELECT json_group_array(file_id) FROM candidates),
+                            json('[]')) AS candidate_ids,
+                          (SELECT COUNT(*) FROM candidates) AS queued
+                     FROM mode_snapshot
                  )
-                 INSERT INTO dv_conversions (file_id, state, queued_at_ms)
-                 SELECT candidates.file_id, 'queued', requested.queued_at_ms
-                   FROM candidates JOIN requested WHERE true
-                 ON CONFLICT(file_id) DO UPDATE SET
-                   state = 'queued', el_type = NULL, original_path = NULL,
-                   bytes_before = NULL, bytes_after = NULL, error = NULL,
-                   queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL
-                 WHERE $3 AND dv_conversions.state = 'failed'",
-                params!(library_id, queued_at_ms, retry_failed, limit),
+                 INSERT INTO settings (key, value, updated_at)
+                 SELECT request_key,
+                        json_object(
+                          'request_kind', 'library_batch',
+                          'outcome', outcome,
+                          'requested_library_id', library_id,
+                          'requested_queued_at_ms', queued_at_ms,
+                          'retry_failed', retry_failed,
+                          'candidate_ids', json(candidate_ids),
+                          'queued', queued),
+                        queued_at_ms
+                   FROM classified
+                 RETURNING value AS envelope",
+                params!(
+                    library_id,
+                    queued_at_ms,
+                    retry_failed,
+                    limit,
+                    keys::LIBRARY_DV_DISK_CONVERT,
+                    request_key
+                ),
             )
             .await?;
+        let envelope =
+            serde_json::from_str::<BatchAdmissionEnvelope>(&row.envelope).map_err(|error| {
+                StoreError::Database(format!(
+                    "decoding replicated Dolby Vision batch queue outcome: {error}"
+                ))
+            })?;
+        if envelope.outcome == "disabled" {
+            return Err(StoreError::Task(
+                DV_CONVERSION_MODE_DISABLED_REASON.to_owned(),
+            ));
+        }
+        if envelope.outcome != "queued" || envelope.queued < 0 {
+            return Err(StoreError::Database(
+                "invalid replicated Dolby Vision batch queue outcome".to_owned(),
+            ));
+        }
+        let changed = envelope.queued as u64;
         Ok(DvConversionQueueBatch {
-            queued: changed as u64,
-            saturated: changed as i64 == limit,
+            queued: changed,
+            saturated: envelope.queued == limit,
         })
     }
 
@@ -1357,16 +1441,30 @@ impl DvConversionStore for HiqliteAuthStore {
                       WHERE file_id = (SELECT file_id FROM requested)
                         AND recovery_guard_id = (SELECT guard_id FROM requested)
                         AND ((state = 'verified' AND EXISTS (
-                               SELECT 1 FROM dv_recovery_guards
-                                WHERE guard_id = (SELECT guard_id FROM requested)
-                                  AND state = 'intent'))
+                               SELECT 1
+                                 FROM dv_recovery_guards g
+                                 JOIN files f
+                                   ON f.id = (SELECT file_id FROM requested)
+                                 JOIN items i ON i.id = f.item_id
+                                WHERE g.guard_id = (SELECT guard_id FROM requested)
+                                  AND g.file_id = (SELECT file_id FROM requested)
+                                  AND g.library_id = i.library_id
+                                  AND g.source_path = f.path
+                                  AND g.state = 'intent'))
                           OR (state = 'committed' AND original_path IS NULL
                               AND bytes_after = (SELECT bytes_after FROM requested)
                               AND finished_at_ms = (SELECT finished_at_ms FROM requested)
-                              AND EXISTS (SELECT 1 FROM dv_recovery_guards
-                                           WHERE guard_id =
-                                             (SELECT guard_id FROM requested)
-                                             AND state = 'active'))) ",
+                              AND EXISTS (
+                                SELECT 1
+                                  FROM dv_recovery_guards g
+                                  JOIN files f
+                                    ON f.id = (SELECT file_id FROM requested)
+                                  JOIN items i ON i.id = f.item_id
+                                 WHERE g.guard_id = (SELECT guard_id FROM requested)
+                                   AND g.file_id = (SELECT file_id FROM requested)
+                                   AND g.library_id = i.library_id
+                                   AND g.source_path = f.path
+                                   AND g.state = 'active'))) ",
                     params!(file_id, guard_id, bytes_after, finished_at_ms),
                 ),
                 (
@@ -1378,13 +1476,19 @@ impl DvConversionStore for HiqliteAuthStore {
                       WHERE guard_id = (SELECT guard_id FROM requested)
                         AND file_id = (SELECT file_id FROM requested)
                         AND state IN ('intent', 'active')
-                        AND EXISTS (SELECT 1 FROM dv_conversions
-                                     WHERE file_id = (SELECT file_id FROM requested)
-                                       AND recovery_guard_id = (SELECT guard_id FROM requested)
-                                       AND state = 'committed' AND original_path IS NULL
-                                       AND bytes_after = (SELECT bytes_after FROM requested)
-                                       AND finished_at_ms =
-                                         (SELECT finished_at_ms FROM requested))",
+                        AND EXISTS (
+                          SELECT 1
+                            FROM dv_conversions d
+                            JOIN files f ON f.id = d.file_id
+                            JOIN items i ON i.id = f.item_id
+                           WHERE d.file_id = (SELECT file_id FROM requested)
+                             AND d.recovery_guard_id = (SELECT guard_id FROM requested)
+                             AND d.state = 'committed' AND d.original_path IS NULL
+                             AND d.bytes_after = (SELECT bytes_after FROM requested)
+                             AND d.finished_at_ms =
+                               (SELECT finished_at_ms FROM requested)
+                             AND dv_recovery_guards.library_id = i.library_id
+                             AND dv_recovery_guards.source_path = f.path)",
                     params!(file_id, guard_id, finished_at_ms, bytes_after),
                 ),
             ])

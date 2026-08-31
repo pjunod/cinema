@@ -1811,10 +1811,11 @@ fn verify_source(source: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Refuse an audit claim that the original was deleted unless the immutable
-/// backup also contains the exact active recovery guard that makes that claim
-/// recoverable. Pre-v44 sources have no guard ledger, so such a claim cannot be
-/// made truthful by import and must be repaired on the source install first.
+/// Refuse every non-null recovery link unless the immutable backup contains
+/// its exact guard identity. A committed deleted-original claim additionally
+/// requires that exact guard to be active. Pre-v44 sources have no guard
+/// ledger, so such a claim cannot be made truthful by import and must be
+/// repaired on the source install first.
 fn verify_source_dv_recovery_guards(
     source: &Connection,
     schema_version: i64,
@@ -1844,9 +1845,10 @@ fn verify_source_dv_recovery_guards(
                     AND g.file_id = d.file_id
                     AND g.library_id = i.library_id
                     AND g.source_path = f.path
-                    AND g.state = 'active'
-                  WHERE d.state = 'committed' AND d.original_path IS NULL
-                    AND (d.recovery_guard_id IS NULL OR g.guard_id IS NULL)
+                  WHERE (d.recovery_guard_id IS NOT NULL AND g.guard_id IS NULL)
+                     OR (d.state = 'committed' AND d.original_path IS NULL
+                         AND (d.recovery_guard_id IS NULL OR g.guard_id IS NULL
+                              OR g.state != 'active'))
                   LIMIT 1
              )",
             [],
@@ -1860,7 +1862,7 @@ fn verify_source_dv_recovery_guards(
     })?;
     if invalid != 0 {
         return Err(import_error(
-            "SQLite backup contains a committed Dolby Vision conversion whose deleted original lacks its exact active recovery guard; repair or retain the original on the source install before clustering",
+            "SQLite backup contains a Dolby Vision conversion without its exact recovery guard linkage, or a committed deleted-original claim without its exact active recovery guard; repair the recovery link or retain the original on the source install before clustering",
         ));
     }
     Ok(())
@@ -2306,6 +2308,68 @@ impl From<&mut Row<'_>> for ParityPageRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_guard_validation_rejects_every_malformed_link_and_allows_repairs() {
+        let source = Connection::open_in_memory().expect("source");
+        source
+            .execute_batch(
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, library_id INTEGER NOT NULL);
+                 CREATE TABLE files (
+                   id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL, path TEXT NOT NULL);
+                 CREATE TABLE dv_conversions (
+                   file_id INTEGER PRIMARY KEY, state TEXT NOT NULL,
+                   original_path TEXT, recovery_guard_id TEXT);
+                 CREATE TABLE dv_recovery_guards (
+                   guard_id TEXT PRIMARY KEY, file_id INTEGER NOT NULL,
+                   library_id INTEGER NOT NULL, source_path TEXT NOT NULL,
+                   state TEXT NOT NULL);
+                 INSERT INTO items VALUES (1, 7);
+                 INSERT INTO files VALUES (11, 1, '/library/movie.mkv');
+                 INSERT INTO dv_conversions
+                   VALUES (11, 'verified', NULL, 'guard-11');
+                 INSERT INTO dv_recovery_guards
+                   VALUES ('guard-11', 11, 7, '/wrong/movie.mkv', 'intent');",
+            )
+            .expect("fixture");
+
+        let malformed_verified =
+            verify_source_dv_recovery_guards(&source, 44).expect_err("reject verified link");
+        assert!(
+            malformed_verified
+                .to_string()
+                .contains("exact recovery guard linkage"),
+            "{malformed_verified}"
+        );
+        source
+            .execute(
+                "UPDATE dv_recovery_guards SET source_path = '/library/movie.mkv'",
+                [],
+            )
+            .expect("repair verified link");
+        verify_source_dv_recovery_guards(&source, 44).expect("accept repaired verified link");
+
+        source
+            .execute_batch(
+                "UPDATE dv_conversions
+                    SET state = 'committed', original_path = '/library/movie.mkv.p7.orig';
+                 UPDATE dv_recovery_guards SET library_id = 8, state = 'active';",
+            )
+            .expect("break retained-original link");
+        let malformed_retained = verify_source_dv_recovery_guards(&source, 44)
+            .expect_err("retained original does not excuse malformed recovery link");
+        assert!(
+            malformed_retained
+                .to_string()
+                .contains("exact recovery guard linkage"),
+            "{malformed_retained}"
+        );
+        source
+            .execute("UPDATE dv_recovery_guards SET library_id = 7", [])
+            .expect("repair retained-original link");
+        verify_source_dv_recovery_guards(&source, 44)
+            .expect("accept repaired retained-original link");
+    }
 
     #[test]
     fn incremental_digest_matches_the_original_ordered_json_contract() {

@@ -13,8 +13,8 @@ use crate::store::{
     keys, DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
     DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
     DvRecoveryGuard, DvRecoveryGuardSnapshot, DvRecoveryGuardState, DvRecoveryGuardSummary,
-    QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_CONVERSION_QUEUE_BATCH_MAX,
-    DV_RECOVERY_GUARD_READ_MAX,
+    QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_CONVERSION_MODE_DISABLED_REASON,
+    DV_CONVERSION_QUEUE_BATCH_MAX, DV_RECOVERY_GUARD_READ_MAX,
 };
 
 const JOINED_CONVERSION_COLS: &str = "d.file_id, d.state, d.el_type, d.original_path,
@@ -111,6 +111,49 @@ fn read_conversion(
     .optional()
 }
 
+fn queue_refusal_outcome(
+    conn: &rusqlite::Connection,
+    file_id: i64,
+) -> rusqlite::Result<QueueDvConversionOutcome> {
+    let facts = conn
+        .query_row(
+            "SELECT f.container, f.dv_profile, f.dv_bl_compat_id,
+                    f.dv_el_present, f.dv_rpu_present,
+                    CASE WHEN json_valid(s.value) AND json_type(s.value) = 'object'
+                         THEN json_extract(s.value, '$.\"' || i.library_id || '\"')
+                         ELSE NULL END
+               FROM files f
+               JOIN items i ON i.id = f.item_id
+          LEFT JOIN settings s ON s.key = ?2
+              WHERE f.id = ?1",
+            params![file_id, keys::LIBRARY_DV_DISK_CONVERT],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?.map(|value| value != 0),
+                    row.get::<_, Option<i64>>(4)?.map(|value| value != 0),
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(match facts {
+        None => QueueDvConversionOutcome::FileMissing,
+        Some((container, profile, compat, el, rpu, mode)) => {
+            if let Some(reason) = eligibility_reason(container.as_deref(), profile, compat, el, rpu)
+            {
+                QueueDvConversionOutcome::Ineligible(reason)
+            } else if !mode.is_some_and(|mode| mode == "manual" || mode == "auto") {
+                QueueDvConversionOutcome::Ineligible(DV_CONVERSION_MODE_DISABLED_REASON)
+            } else {
+                QueueDvConversionOutcome::Ineligible("eligible file was not admitted")
+            }
+        }
+    })
+}
+
 #[async_trait]
 impl DvConversionStore for SqliteStore {
     async fn dv_conversion(&self, file_id: i64) -> Result<Option<DvConversion>, StoreError> {
@@ -204,66 +247,52 @@ impl DvConversionStore for SqliteStore {
         queued_at_ms: i64,
     ) -> Result<QueueDvConversionOutcome, StoreError> {
         self.with_conn(move |conn| {
-            let queued = conn
+            let tx = conn.unchecked_transaction()?;
+            let queued = tx
                 .query_row(
                     "INSERT INTO dv_conversions
                    (file_id, state, queued_at_ms)
-                 SELECT id, 'queued', ?2 FROM files
-                  WHERE id = ?1 AND LOWER(container) = 'mkv' AND dv_profile = 7
-                    AND dv_bl_compat_id IN (1, 6)
-                    AND dv_el_present = 1 AND dv_rpu_present = 1
+                 SELECT f.id, 'queued', ?2
+                   FROM files f
+                   JOIN items i ON i.id = f.item_id
+                   JOIN settings s ON s.key = ?3
+                  WHERE f.id = ?1 AND LOWER(f.container) = 'mkv' AND f.dv_profile = 7
+                    AND f.dv_bl_compat_id IN (1, 6)
+                    AND f.dv_el_present = 1 AND f.dv_rpu_present = 1
+                    AND json_valid(s.value) AND json_type(s.value) = 'object'
+                    AND json_extract(s.value, '$.\"' || i.library_id || '\"')
+                        IN ('manual', 'auto')
                  ON CONFLICT(file_id) DO UPDATE SET
                    state = 'queued', el_type = NULL, original_path = NULL,
                    bytes_before = NULL, bytes_after = NULL, error = NULL,
-                   queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL
+                   queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL,
+                   recovery_guard_id = NULL
                  WHERE dv_conversions.state = 'failed'
                  RETURNING file_id, state, el_type, original_path, bytes_before,
                            bytes_after, error, queued_at_ms, finished_at_ms",
-                    params![file_id, queued_at_ms],
+                    params![file_id, queued_at_ms, keys::LIBRARY_DV_DISK_CONVERT],
                     conversion_from_row,
                 )
                 .optional()?;
-            if let Some(queued) = queued {
-                return Ok(QueueDvConversionOutcome::Queued(queued));
-            }
-            if let Some(existing) = read_conversion(conn, file_id)? {
+            let outcome = if let Some(queued) = queued {
+                QueueDvConversionOutcome::Queued(queued)
+            } else if let Some(existing) = read_conversion(&tx, file_id)? {
                 match existing.state {
                     DvConversionState::Committed => {
-                        return Ok(QueueDvConversionOutcome::AlreadyCommitted(existing));
+                        QueueDvConversionOutcome::AlreadyCommitted(existing)
                     }
                     DvConversionState::Queued
                     | DvConversionState::Running
                     | DvConversionState::Verified => {
-                        return Ok(QueueDvConversionOutcome::AlreadyActive(existing));
+                        QueueDvConversionOutcome::AlreadyActive(existing)
                     }
-                    DvConversionState::Failed => {}
+                    DvConversionState::Failed => queue_refusal_outcome(&tx, file_id)?,
                 }
-            }
-            let facts = conn
-                .query_row(
-                    "SELECT container, dv_profile, dv_bl_compat_id, dv_el_present, dv_rpu_present
-                       FROM files WHERE id = ?1",
-                    [file_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<String>>(0)?,
-                            row.get::<_, Option<i64>>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                            row.get::<_, Option<i64>>(3)?.map(|value| value != 0),
-                            row.get::<_, Option<i64>>(4)?.map(|value| value != 0),
-                        ))
-                    },
-                )
-                .optional()?;
-            Ok(match facts {
-                None => QueueDvConversionOutcome::FileMissing,
-                Some((container, profile, compat, el, rpu)) => {
-                    QueueDvConversionOutcome::Ineligible(
-                        eligibility_reason(container.as_deref(), profile, compat, el, rpu)
-                            .unwrap_or("eligible file was not admitted"),
-                    )
-                }
-            })
+            } else {
+                queue_refusal_outcome(&tx, file_id)?
+            };
+            tx.commit()?;
+            Ok(outcome)
         })
         .await
     }
@@ -280,9 +309,26 @@ impl DvConversionStore for SqliteStore {
             return Ok(DvConversionQueueBatch::default());
         }
         self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let enabled = tx
+                .query_row(
+                    "SELECT json_extract(value, '$.\"' || ?2 || '\"')
+                       FROM settings
+                      WHERE key = ?1 AND json_valid(value) AND json_type(value) = 'object'",
+                    params![keys::LIBRARY_DV_DISK_CONVERT, library_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten()
+                .is_some_and(|mode| mode == "manual" || mode == "auto");
+            if !enabled {
+                return Err(StoreError::Task(
+                    DV_CONVERSION_MODE_DISABLED_REASON.to_owned(),
+                ));
+            }
             // Unseen files lead retries so a permanent low-ID failure prefix
             // cannot consume every bounded manual pass forever.
-            let changed = conn.execute(
+            let changed = tx.execute(
                 "WITH candidates(file_id) AS (
                    SELECT f.id
                    FROM files f JOIN items i ON i.id = f.item_id
@@ -306,6 +352,7 @@ impl DvConversionStore for SqliteStore {
                  WHERE ?3 AND dv_conversions.state = 'failed'",
                 params![library_id, queued_at_ms, retry_failed, limit],
             )?;
+            tx.commit()?;
             Ok(DvConversionQueueBatch {
                 queued: changed as u64,
                 saturated: changed as i64 == limit,
@@ -776,9 +823,14 @@ impl DvConversionStore for SqliteStore {
                 .query_row(
                     "SELECT 1 FROM dv_conversions d
                      JOIN dv_recovery_guards g ON g.guard_id = d.recovery_guard_id
+                     JOIN files f ON f.id = d.file_id
+                     JOIN items i ON i.id = f.item_id
                      WHERE d.file_id = ?1 AND d.state = 'committed'
                        AND d.original_path IS NULL AND d.recovery_guard_id = ?2
                        AND d.bytes_after = ?3 AND d.finished_at_ms = ?4
+                       AND g.file_id = d.file_id
+                       AND g.library_id = i.library_id
+                       AND g.source_path = f.path
                        AND g.state = 'active'",
                     params![file_id, guard_id, bytes_after, finished_at_ms],
                     |_| Ok(()),
@@ -794,17 +846,35 @@ impl DvConversionStore for SqliteStore {
                     SET state = 'committed', original_path = NULL, bytes_after = ?3,
                         error = NULL, finished_at_ms = ?4
                   WHERE file_id = ?1 AND state = 'verified' AND recovery_guard_id = ?2
-                    AND EXISTS (SELECT 1 FROM dv_recovery_guards
-                                 WHERE guard_id = ?2 AND state = 'intent')",
+                    AND EXISTS (
+                      SELECT 1
+                        FROM dv_recovery_guards g
+                        JOIN files f ON f.id = ?1
+                        JOIN items i ON i.id = f.item_id
+                       WHERE g.guard_id = ?2 AND g.file_id = ?1
+                         AND g.library_id = i.library_id
+                         AND g.source_path = f.path
+                         AND g.state = 'intent')",
                 params![file_id, guard_id, bytes_after, finished_at_ms],
             )?;
             if committed != 1 {
                 return Ok(false);
             }
             let activated = tx.execute(
-                "UPDATE dv_recovery_guards SET state = 'active', updated_at_ms = ?3
-                  WHERE guard_id = ?2 AND file_id = ?1 AND state = 'intent'",
-                params![file_id, guard_id, finished_at_ms],
+                "UPDATE dv_recovery_guards AS g
+                    SET state = 'active', updated_at_ms = ?4
+                  WHERE g.guard_id = ?2 AND g.file_id = ?1 AND g.state = 'intent'
+                    AND EXISTS (
+                      SELECT 1
+                        FROM dv_conversions d
+                        JOIN files f ON f.id = d.file_id
+                        JOIN items i ON i.id = f.item_id
+                       WHERE d.file_id = ?1 AND d.recovery_guard_id = ?2
+                         AND d.state = 'committed' AND d.original_path IS NULL
+                         AND d.bytes_after = ?3 AND d.finished_at_ms = ?4
+                         AND g.library_id = i.library_id
+                         AND g.source_path = f.path)",
+                params![file_id, guard_id, bytes_after, finished_at_ms],
             )?;
             if activated != 1 {
                 return Err(StoreError::Database(
@@ -931,6 +1001,10 @@ mod tests {
             )
             .await
             .expect("file");
+        store
+            .set_library_dv_conversion_mode(library.id, DvConversionMode::Manual)
+            .await
+            .expect("enable manual conversion");
         (library.id, file)
     }
 
@@ -991,6 +1065,60 @@ mod tests {
             .expect("progress");
         assert_eq!(progress.eligible, 1);
         assert_eq!(progress.committed, 1);
+    }
+
+    #[tokio::test]
+    async fn guarded_commit_refuses_a_mismatched_raw_guard_without_partial_commit() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let (_, file_id) = p7_file(&store, "GuardMismatch", 6).await;
+        assert!(matches!(
+            store.queue_dv_conversion(file_id, 1).await.expect("queue"),
+            QueueDvConversionOutcome::Queued(_)
+        ));
+        assert!(store
+            .mark_dv_conversion_running(file_id, 80_000)
+            .await
+            .expect("running"));
+        assert!(store
+            .mark_dv_conversion_verified(file_id, Some("fel"), 60_000)
+            .await
+            .expect("verified"));
+        assert!(store
+            .begin_dv_recovery_guard(
+                file_id,
+                "mismatched-guard",
+                "/GuardMismatch/.plurx-recovery.mkv",
+                2,
+            )
+            .await
+            .expect("begin guard"));
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE dv_recovery_guards
+                        SET source_path = '/wrong/source.mkv'
+                      WHERE guard_id = 'mismatched-guard'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("raw-seed mismatched guard");
+
+        assert!(!store
+            .mark_dv_conversion_committed_with_guard(file_id, "mismatched-guard", 60_000, 3)
+            .await
+            .expect("refuse mismatched guard"));
+        let conversion = store
+            .dv_conversion(file_id)
+            .await
+            .expect("read conversion")
+            .expect("conversion");
+        assert_eq!(conversion.state, DvConversionState::Verified);
+        assert_eq!(
+            conversion.recovery_guard.expect("linked guard").state,
+            DvRecoveryGuardState::Intent
+        );
     }
 
     #[cfg(feature = "hiqlite-store")]

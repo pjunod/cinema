@@ -1565,16 +1565,30 @@ impl FencedPublicationStore for HiqliteAuthStore {
                           WHERE file_id = (SELECT file_id FROM requested)
                             AND recovery_guard_id = (SELECT guard_id FROM requested)
                             AND ((state = 'verified' AND EXISTS (
-                                   SELECT 1 FROM dv_recovery_guards
-                                    WHERE guard_id = (SELECT guard_id FROM requested)
-                                      AND state = 'intent'))
+                                   SELECT 1
+                                     FROM dv_recovery_guards g
+                                     JOIN files f
+                                       ON f.id = (SELECT file_id FROM requested)
+                                     JOIN items i ON i.id = f.item_id
+                                    WHERE g.guard_id = (SELECT guard_id FROM requested)
+                                      AND g.file_id = (SELECT file_id FROM requested)
+                                      AND g.library_id = i.library_id
+                                      AND g.source_path = f.path
+                                      AND g.state = 'intent'))
                               OR (state = 'committed' AND original_path IS NULL
                                   AND bytes_after = (SELECT bytes_after FROM requested)
                                   AND finished_at_ms = (SELECT finished_at_ms FROM requested)
-                                  AND EXISTS (SELECT 1 FROM dv_recovery_guards
-                                               WHERE guard_id =
-                                                 (SELECT guard_id FROM requested)
-                                                 AND state = 'active')))
+                                  AND EXISTS (
+                                    SELECT 1
+                                      FROM dv_recovery_guards g
+                                      JOIN files f
+                                        ON f.id = (SELECT file_id FROM requested)
+                                      JOIN items i ON i.id = f.item_id
+                                     WHERE g.guard_id = (SELECT guard_id FROM requested)
+                                       AND g.file_id = (SELECT file_id FROM requested)
+                                       AND g.library_id = i.library_id
+                                       AND g.source_path = f.path
+                                       AND g.state = 'active')))
                             AND EXISTS (SELECT 1 FROM job_leases
                               JOIN requested
                               WHERE job_leases.resource = requested.resource
@@ -1605,12 +1619,19 @@ impl FencedPublicationStore for HiqliteAuthStore {
                           WHERE guard_id = (SELECT guard_id FROM requested)
                             AND file_id = (SELECT file_id FROM requested)
                             AND state IN ('intent', 'active')
-                            AND EXISTS (SELECT 1 FROM dv_conversions
-                              WHERE file_id = (SELECT file_id FROM requested)
-                                AND recovery_guard_id = (SELECT guard_id FROM requested)
-                                AND state = 'committed' AND original_path IS NULL
-                                AND bytes_after = (SELECT bytes_after FROM requested)
-                                AND finished_at_ms = (SELECT finished_at_ms FROM requested))
+                            AND EXISTS (
+                              SELECT 1
+                                FROM dv_conversions d
+                                JOIN files f ON f.id = d.file_id
+                                JOIN items i ON i.id = f.item_id
+                               WHERE d.file_id = (SELECT file_id FROM requested)
+                                 AND d.recovery_guard_id = (SELECT guard_id FROM requested)
+                                 AND d.state = 'committed' AND d.original_path IS NULL
+                                 AND d.bytes_after = (SELECT bytes_after FROM requested)
+                                 AND d.finished_at_ms =
+                                   (SELECT finished_at_ms FROM requested)
+                                 AND dv_recovery_guards.library_id = i.library_id
+                                 AND dv_recovery_guards.source_path = f.path)
                             AND EXISTS (SELECT 1 FROM job_leases
                               JOIN requested
                               WHERE job_leases.resource = requested.resource

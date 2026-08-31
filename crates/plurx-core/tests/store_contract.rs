@@ -18159,6 +18159,39 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .await
             .expect("racing P7 file");
 
+        assert_eq!(
+            store
+                .queue_dv_conversion(p7, 99)
+                .await
+                .expect("off mode refuses single-file admission"),
+            QueueDvConversionOutcome::Ineligible("library Dolby Vision conversion mode is Off"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .dv_conversion(p7)
+                .await
+                .expect("read refused single-file admission")
+                .is_none(),
+            "{backend}: Off mode must not create a ledger row"
+        );
+        let off_batch = store
+            .queue_library_dv_conversion_batch(library.id, 99, false, 1)
+            .await
+            .expect_err("off mode refuses library batch admission");
+        assert!(
+            matches!(
+                off_batch,
+                StoreError::Task(ref reason)
+                    if reason == "library Dolby Vision conversion mode is Off"
+            ),
+            "{backend}: {off_batch}"
+        );
+        store
+            .set_library_dv_conversion_mode(library.id, DvConversionMode::Manual)
+            .await
+            .expect("enable manual conversion mode");
+
         assert!(matches!(
             store
                 .queue_dv_conversion(hlg, 100)
@@ -18663,6 +18696,10 @@ async fn hiqlite_dv_queue_outcome_is_bound_to_the_atomic_admission_snapshot() {
         })
         .await
         .expect("create race library");
+    store
+        .set_library_dv_conversion_mode(library.id, DvConversionMode::Manual)
+        .await
+        .expect("enable atomic queue race library");
     let item = store
         .insert_item(&NewItem {
             library_id: library.id,
@@ -18789,6 +18826,10 @@ async fn dv_recovery_guard_fenced_contract_runs_through_dyn_store() {
             })
             .await
             .expect("fenced guard library");
+        store
+            .set_library_dv_conversion_mode(library.id, DvConversionMode::Manual)
+            .await
+            .expect("enable fenced guard conversion");
         let item = store
             .insert_item(&NewItem {
                 library_id: library.id,
@@ -18946,6 +18987,10 @@ async fn dv_conversion_retry_batch_does_not_starve_never_queued_files() {
             })
             .await
             .expect("DV retry fairness library");
+        store
+            .set_library_dv_conversion_mode(library.id, DvConversionMode::Manual)
+            .await
+            .expect("enable retry fairness conversion");
         let item = store
             .insert_item(&NewItem {
                 library_id: library.id,

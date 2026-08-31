@@ -511,24 +511,45 @@ impl FencedPublicationStore for SqliteStore {
                         error = NULL, finished_at_ms = ?4
                   WHERE file_id = ?1 AND recovery_guard_id = ?2
                     AND ((state = 'verified' AND EXISTS (
-                           SELECT 1 FROM dv_recovery_guards
-                            WHERE guard_id = ?2 AND state = 'intent'))
+                           SELECT 1
+                             FROM dv_recovery_guards g
+                             JOIN files f ON f.id = ?1
+                             JOIN items i ON i.id = f.item_id
+                            WHERE g.guard_id = ?2 AND g.file_id = ?1
+                              AND g.library_id = i.library_id
+                              AND g.source_path = f.path
+                              AND g.state = 'intent'))
                       OR (state = 'committed' AND original_path IS NULL
                           AND bytes_after = ?3 AND finished_at_ms = ?4
-                          AND EXISTS (SELECT 1 FROM dv_recovery_guards
-                                       WHERE guard_id = ?2 AND state = 'active'))) ",
+                          AND EXISTS (
+                            SELECT 1
+                              FROM dv_recovery_guards g
+                              JOIN files f ON f.id = ?1
+                              JOIN items i ON i.id = f.item_id
+                             WHERE g.guard_id = ?2 AND g.file_id = ?1
+                               AND g.library_id = i.library_id
+                               AND g.source_path = f.path
+                               AND g.state = 'active'))) ",
                 params![file_id, guard_id, bytes_after, finished_at_ms],
             )?;
             if committed != 1 {
                 return Ok(false);
             }
             let activated = conn.execute(
-                "UPDATE dv_recovery_guards SET state = 'active', updated_at_ms = ?3
-                  WHERE guard_id = ?2 AND file_id = ?1 AND state IN ('intent', 'active')
-                    AND EXISTS (SELECT 1 FROM dv_conversions
-                                 WHERE file_id = ?1 AND recovery_guard_id = ?2
-                                   AND state = 'committed' AND original_path IS NULL
-                                   AND bytes_after = ?4 AND finished_at_ms = ?3)",
+                "UPDATE dv_recovery_guards AS g
+                    SET state = 'active', updated_at_ms = ?3
+                  WHERE g.guard_id = ?2 AND g.file_id = ?1
+                    AND g.state IN ('intent', 'active')
+                    AND EXISTS (
+                      SELECT 1
+                        FROM dv_conversions d
+                        JOIN files f ON f.id = d.file_id
+                        JOIN items i ON i.id = f.item_id
+                       WHERE d.file_id = ?1 AND d.recovery_guard_id = ?2
+                         AND d.state = 'committed' AND d.original_path IS NULL
+                         AND d.bytes_after = ?4 AND d.finished_at_ms = ?3
+                         AND g.library_id = i.library_id
+                         AND g.source_path = f.path)",
                 params![file_id, guard_id, finished_at_ms, bytes_after],
             )?;
             if activated != 1 {

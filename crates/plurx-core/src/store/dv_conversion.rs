@@ -56,16 +56,56 @@ macro_rules! dv_queue_admission_trigger {
               'queued',
               CAST(json_extract(NEW.value, '$.requested_queued_at_ms') AS INTEGER)
          FROM files f
+         JOIN items i ON i.id = f.item_id
+         JOIN settings mode_setting ON mode_setting.key = 'library.dv_disk_convert'
         WHERE f.id = CAST(json_extract(NEW.value, '$.requested_file_id') AS INTEGER)
+          AND json_extract(NEW.value, '$.request_kind') = 'single'
           AND json_extract(NEW.value, '$.outcome') = 'queued'
           AND LOWER(f.container) = 'mkv' AND f.dv_profile = 7
           AND f.dv_bl_compat_id IN (1, 6)
           AND f.dv_el_present = 1 AND f.dv_rpu_present = 1
+          AND json_valid(mode_setting.value)
+          AND json_type(mode_setting.value) = 'object'
+          AND json_extract(
+                mode_setting.value, '$.\"' || i.library_id || '\"')
+              IN ('manual', 'auto')
        ON CONFLICT(file_id) DO UPDATE SET
          state = 'queued', el_type = NULL, original_path = NULL,
          bytes_before = NULL, bytes_after = NULL, error = NULL,
-         queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL
+         queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL,
+         recovery_guard_id = NULL
        WHERE dv_conversions.state = 'failed';
+       INSERT INTO dv_conversions (file_id, state, queued_at_ms)
+       SELECT f.id,
+              'queued',
+              CAST(json_extract(NEW.value, '$.requested_queued_at_ms') AS INTEGER)
+         FROM json_each(NEW.value, '$.candidate_ids') candidate
+         JOIN files f ON f.id = CAST(candidate.value AS INTEGER)
+         JOIN items i ON i.id = f.item_id
+         JOIN settings mode_setting ON mode_setting.key = 'library.dv_disk_convert'
+    LEFT JOIN dv_conversions d ON d.file_id = f.id
+        WHERE json_extract(NEW.value, '$.request_kind') = 'library_batch'
+          AND json_extract(NEW.value, '$.outcome') = 'queued'
+          AND i.library_id =
+                CAST(json_extract(NEW.value, '$.requested_library_id') AS INTEGER)
+          AND LOWER(f.container) = 'mkv' AND f.dv_profile = 7
+          AND f.dv_bl_compat_id IN (1, 6)
+          AND f.dv_el_present = 1 AND f.dv_rpu_present = 1
+          AND json_valid(mode_setting.value)
+          AND json_type(mode_setting.value) = 'object'
+          AND json_extract(
+                mode_setting.value, '$.\"' || i.library_id || '\"')
+              IN ('manual', 'auto')
+          AND (d.file_id IS NULL OR
+               (json_extract(NEW.value, '$.retry_failed') = 1
+                AND d.state = 'failed'))
+       ON CONFLICT(file_id) DO UPDATE SET
+         state = 'queued', el_type = NULL, original_path = NULL,
+         bytes_before = NULL, bytes_after = NULL, error = NULL,
+         queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL,
+         recovery_guard_id = NULL
+       WHERE json_extract(NEW.value, '$.retry_failed') = 1
+         AND dv_conversions.state = 'failed';
        DELETE FROM settings WHERE key = NEW.key;
      END"
         )
@@ -76,7 +116,7 @@ pub(crate) const DV_QUEUE_ADMISSION_TRIGGER: &str = dv_queue_admission_trigger!(
 
 /// Versioned migrations must create the trigger themselves rather than rely
 /// on the fresh-cluster installer. Strict DDL makes a pre-existing trigger at
-/// a v20 marker fail closed: the migration can advance to v21 only when it
+/// a v24 marker fail closed: the migration can advance to v25 only when it
 /// created this exact canonical body in the same replicated transaction.
 pub(crate) const DV_QUEUE_ADMISSION_MIGRATION_TRIGGER: &str = dv_queue_admission_trigger!("");
 
@@ -153,6 +193,11 @@ pub const DV_CONVERSION_LEDGER_READ_MAX: usize = 256;
 
 /// One operator/cleanup guard scan may never expand without a hard ceiling.
 pub const DV_RECOVERY_GUARD_READ_MAX: i64 = 256;
+
+/// A new or retried conversion is admitted only while its library explicitly
+/// opts into permanent media mutation. Existing active/committed rows remain
+/// observable after an operator turns the mode off.
+pub const DV_CONVERSION_MODE_DISABLED_REASON: &str = "library Dolby Vision conversion mode is Off";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
