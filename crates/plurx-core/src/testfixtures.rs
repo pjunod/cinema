@@ -425,7 +425,10 @@ fn trailer_at(stream: &[u8]) -> Option<usize> {
     let mut at = 0usize;
     while at + 8 <= stream.len() {
         let size = u32::from_be_bytes(stream[at..at + 4].try_into().ok()?) as usize;
-        assert!(size >= 8, "a 64-bit box size is not something these fixtures emit");
+        assert!(
+            size >= 8,
+            "a 64-bit box size is not something these fixtures emit"
+        );
         if &stream[at + 4..at + 8] == b"mfra" {
             return Some(at);
         }

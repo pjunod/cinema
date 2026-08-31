@@ -25837,7 +25837,10 @@ mod tests {
             "and claiming the conversion advertises dvh1.08 over media that is \
              plain HDR10"
         );
-        assert!(served.transcode_audio == asked.transcode_audio, "audio is unrelated");
+        assert!(
+            served.transcode_audio == asked.transcode_audio,
+            "audio is unrelated"
+        );
 
         // Every other session is untouched: a preserving copy still preserves,
         // which is the case that would break if the strip-down were

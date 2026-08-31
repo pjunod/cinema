@@ -9494,7 +9494,7 @@ mod tests {
                 ladder: vec![],
                 prior_kbps: None,
                 delivered_dynamic_range: Some("sdr".to_owned()),
-            delivered_dolby_vision_profile: None,
+                delivered_dolby_vision_profile: None,
                 control: crate::playback_control::ControlBootstrap::new(
                     &session_id,
                     &generation,

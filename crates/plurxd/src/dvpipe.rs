@@ -239,7 +239,9 @@ mod tests {
         assert_eq!(report.source_profile, Some(7));
 
         // Converting the converted fragment refuses, because its RPUs now say 8.
-        let refused = converter.convert(&mut first).expect_err("already converted");
+        let refused = converter
+            .convert(&mut first)
+            .expect_err("already converted");
         assert!(
             refused.to_string().contains('8'),
             "the refusal should name the profile it found: {refused}"
@@ -285,7 +287,9 @@ mod tests {
         let mut converter = Converter::for_init(&init).expect("a describable init");
         let mut fragment = fragments[0].clone();
         let before = fragment.bytes.clone();
-        assert!(!converter.convert(&mut fragment).expect("no RPUs is not an error"));
+        assert!(!converter
+            .convert(&mut fragment)
+            .expect("no RPUs is not an error"));
         assert_eq!(fragment.bytes, before);
         assert_eq!(converter.report().rpus, 0);
         assert_eq!(converter.report().source_profile, None);
@@ -310,7 +314,10 @@ mod tests {
             }
             let refused = Converter::for_init(&broken)
                 .expect_err("a {width}-byte prefix is not an hvcC value");
-            assert!(refused.to_string().contains("NAL length prefix"), "{refused}");
+            assert!(
+                refused.to_string().contains("NAL length prefix"),
+                "{refused}"
+            );
         }
         // …and the widths a real container carries are all accepted.
         for width in [1u8, 2, 4] {
@@ -404,6 +411,9 @@ mod tests {
             detail: "invalid mapping_idc".into(),
         };
         let refused = Refused(error.to_string());
-        assert!(refused.to_string().contains("invalid mapping_idc"), "{refused}");
+        assert!(
+            refused.to_string().contains("invalid mapping_idc"),
+            "{refused}"
+        );
     }
 }

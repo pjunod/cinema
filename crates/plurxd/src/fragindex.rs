@@ -583,12 +583,7 @@ async fn build_with_args(
 
     let outcome = match tokio::time::timeout(
         budget,
-        index_stream(
-            stdout,
-            identity,
-            expected_ms,
-            dolby_vision,
-        ),
+        index_stream(stdout, identity, expected_ms, dolby_vision),
     )
     .await
     {
@@ -855,13 +850,7 @@ mod tests {
         testfixtures::require_ffmpeg();
         let bytes = index_pipe_bytes("closed-gop");
 
-        let plain = index_stream(
-            std::io::Cursor::new(bytes.clone()),
-            identity(),
-            None,
-            None,
-        )
-        .await;
+        let plain = index_stream(std::io::Cursor::new(bytes.clone()), identity(), None, None).await;
         let IndexOutcome::Built(plain) = plain else {
             panic!("{plain:?}");
         };
@@ -1061,8 +1050,7 @@ mod tests {
         // duplicate SPS array. The ordinary fixture pipe has already removed
         // in-band sets, so there is no hidden PPS from which to "succeed".
         replace_hvcc_array_type(&mut bytes, 34, 33);
-        let outcome =
-            index_stream(std::io::Cursor::new(bytes), identity(), None, None).await;
+        let outcome = index_stream(std::io::Cursor::new(bytes), identity(), None, None).await;
         let IndexOutcome::Unsupported(reason) = outcome else {
             panic!("an incomplete emitted hvcC must not be indexed: {outcome:?}");
         };
@@ -1175,13 +1163,8 @@ mod tests {
     #[tokio::test]
     async fn a_pipe_that_stops_short_of_the_probed_duration_is_truncated() {
         let bytes = index_pipe_bytes("closed-gop");
-        let IndexOutcome::Built(full) = index_stream(
-            std::io::Cursor::new(bytes.clone()),
-            identity(),
-            None,
-            None,
-        )
-        .await
+        let IndexOutcome::Built(full) =
+            index_stream(std::io::Cursor::new(bytes.clone()), identity(), None, None).await
         else {
             panic!("the full pipe indexes");
         };

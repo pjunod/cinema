@@ -749,7 +749,10 @@ mod tests {
             assert_eq!(units.len(), 2, "width {width}: the sample still frames");
             assert_eq!(declared, units[0].len(), "width {width}");
             assert!(declared < rpu_bytes().len(), "width {width}: it shrank");
-            assert_eq!(units[1], tail, "width {width}: and the unit after it is intact");
+            assert_eq!(
+                units[1], tail,
+                "width {width}: and the unit after it is intact"
+            );
         }
     }
 

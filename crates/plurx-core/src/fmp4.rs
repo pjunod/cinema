@@ -1055,8 +1055,9 @@ where
     let new = u32::try_from(old + total)
         .map_err(|_| Fmp4Error::Unsupported("a corrected mdat size does not fit".into()))?;
     writes.push((header - 8, new));
-    let payload_end = usize::try_from(fragment.mdat_payload.end as i64 + total)
-        .map_err(|_| Fmp4Error::Unsupported("a corrected mdat payload range does not fit".into()))?;
+    let payload_end = usize::try_from(fragment.mdat_payload.end as i64 + total).map_err(|_| {
+        Fmp4Error::Unsupported("a corrected mdat payload range does not fit".into())
+    })?;
 
     for (field, _) in &writes {
         if field.saturating_add(4) > first_edit {
@@ -4639,8 +4640,7 @@ mod tests {
             if track.track_id == video && track.runs[0].samples.len() >= 2 {
                 let run = track.runs[0].clone();
                 let split = run.samples.len() / 2;
-                let head_bytes: usize =
-                    run.samples[..split].iter().map(|s| s.size as usize).sum();
+                let head_bytes: usize = run.samples[..split].iter().map(|s| s.size as usize).sum();
                 let mut tail = run.clone();
                 tail.data_offset = run.data_offset + head_bytes;
                 tail.samples = run.samples[split..].to_vec();

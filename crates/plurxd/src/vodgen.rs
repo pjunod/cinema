@@ -739,8 +739,7 @@ mod tests {
         let feed = testfixtures::with_dolby_vision_rpus(&pipe("clean-cra"));
         let record = plurx_core::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1)
             .expect("a describable record");
-        let indexed =
-            testfixtures::with_dolby_vision_rpus(&index_pipe_bytes("clean-cra"));
+        let indexed = testfixtures::with_dolby_vision_rpus(&index_pipe_bytes("clean-cra"));
         let index = match index_stream(
             std::io::Cursor::new(indexed),
             SourceIdentity::new(1, 1, "fingerprint+p81"),
