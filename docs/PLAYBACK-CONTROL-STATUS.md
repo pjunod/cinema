@@ -26,7 +26,7 @@ one is deleted.
 |---|---|---|---|
 | 1-4 | protocol, transport, hold/resume barriers | — | merged |
 | 5 | delete detached recovery loops | — | merged as #663 |
-| 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) | wire complete; **no client acts on an action yet** |
+| 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **complete in source on all three clients**; the deletions wait on a fleet run |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | both halves written; the spike **needs hardware**, the store half is ready to build |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | separate track |
@@ -43,15 +43,24 @@ merge target: two client PRs in flight means the second always fails.
 |---|---|---|---|
 | docs | status page, §7.4 re-verification, Apple/Android recon, ruling D1 | [#705](https://github.com/pjunod/plurx/pull/705) | merged |
 | M5a | web: `persistentWait` asks the server before deciding | [#706](https://github.com/pjunod/plurx/pull/706) | merged |
-| M5.5 spike | the three-platform measurement procedure, ready to run | [#707](https://github.com/pjunod/plurx/pull/707) | merged; **needs a hardware run** |
-| M5d | Apple: the return path, and the verdict that outlives its reporter | [#709](https://github.com/pjunod/plurx/pull/709) | merged |
+| M5.5 spike | the three-platform measurement procedure | [#707](https://github.com/pjunod/plurx/pull/707) | merged; **needs a hardware run** |
+| M5d | Apple: the return path, and a verdict that outlives its reporter | [#709](https://github.com/pjunod/plurx/pull/709) | merged |
 | M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | merged |
 | M5b | web: the truncated-stream owner defers too | [#712](https://github.com/pjunod/plurx/pull/712) | merged |
 | M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | merged |
-| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | merged |
+| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | merged; **ready to build** |
 | M5e | Apple: the stall funnel asks before it decides | [#715](https://github.com/pjunod/plurx/pull/715) | merged |
 | web bound | ruling D3 applied to the web ask | [#717](https://github.com/pjunod/plurx/pull/717) | merged |
-| M5g | Android: the stall owner asks before it decides | [#718](https://github.com/pjunod/plurx/pull/718) | in review |
+| M5g | Android: the stall owner asks before it decides | [#718](https://github.com/pjunod/plurx/pull/718) | merged |
+| ask exits | Apple: read the answer slot at every exit | [#719](https://github.com/pjunod/plurx/pull/719) | merged |
+| acceptance | what a fleet run has to show | — | this change |
+
+**What is left in M5, and what each is waiting for.** M5c and M5h — deleting
+the web and mobile budgets — are the only remaining slices, and both are
+gated on [M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any
+code. Two smaller asks are buildable now and deliberately were not bundled:
+Apple's `handleItemFailure` ladder and Android's `onPlayerError`, each of
+which short-circuits a three-rung compatibility walk on a `terminal`.
 
 ## The gate that blocks every deletion, and what it does not block
 
