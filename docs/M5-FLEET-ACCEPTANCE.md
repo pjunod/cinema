@@ -3,7 +3,7 @@
 **Status:** ready to run · needs the operator's fleet, not a branch ·
 **Gates:** M5c and M5h (every deletion in
 [M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md)
-§7) · **Written:** 2026-08-31 · **Baseline:** `main` at `c571a50d`
+§7) · **Written:** 2026-08-31 · **Baseline:** current `main` — see §3
 
 Companion to [PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md) (where
 the work is) — this is *the one thing standing between M5 being written and
@@ -22,8 +22,8 @@ client build carrying it has ever run on hardware.
 |---|---|---|
 | server (emits the actions) | yes | three nodes on `v0.2.8-106-g55abad8f`, nynuc on a later untagged build |
 | web (served by the node) | yes | **whatever those nodes serve** — a server deploy ships the web client with it |
-| Apple | build **101** | build 99 (installed 2026-08-31; no exchange) |
-| Android | versionCode **57** | 56 (installed 2026-08-31; no exchange) |
+| Apple | whatever `project.yml` says on the commit you deploy | build 99 (installed 2026-08-31; no exchange) |
+| Android | whatever `build.gradle.kts` says on it | 56 (installed 2026-08-31; no exchange) |
 
 The web row is the useful one: **deploying the server deploys the web client**,
 so one action gets a full-vocabulary client onto the fleet without touching a
@@ -63,13 +63,30 @@ a dead player.
 
 Two independent halves; the first is cheap and proves most of the protocol.
 
-**Server, which also ships the web client.** `main` at `c571a50d`, to all four
-nodes, `serial: 1` with each node's `readyz` passing before the next is
-touched — that is the cluster quorum boundary and it is not optional. Deploy
-after the tag exists, or each node stamps itself `v0.2.8-N-g…` instead of the
-release.
+**Server, which also ships the web client.** Current `main`, to all four nodes,
+`serial: 1` with each node's `readyz` passing before the next is touched — that
+is the cluster quorum boundary and it is not optional. Deploy after the tag
+exists, or each node stamps itself `v0.2.8-N-g…` instead of the release.
 
-**Mobile.** Apple build 101 and Android versionCode 57, to the named roster:
+**Which commit, and which builds.** Read them; do not read them off this page.
+This document named a specific sha and a specific pair of build numbers twice,
+and both were stale within a day both times — the 2026-08-31 run shipped Apple
+99 / Android 56 against a sha that three client slices had already moved past.
+The commit is whatever `main` is when you start, and the builds are whatever
+that commit carries:
+
+```bash
+git fetch origin main && git checkout origin/main
+git rev-parse --short=8 HEAD                                    # the sha to deploy
+grep CURRENT_PROJECT_VERSION clients/apple/project.yml          # the Apple build
+grep versionCode clients/android/app/build.gradle.kts           # the Android build
+```
+
+A mobile build number that does not match its commit is the one failure mode
+this run cannot recover from: the metric cannot tell you *which* client
+answered, so an old client's exchange reads as the new one's.
+
+**Mobile.** Those two builds, to the named roster:
 Pixel 11 Pro XL · Motorola razr ultra 2025 · Xiaomi 25019PNF3C, plus the TCL
 9445X when it is online, and whatever `xcrun devicectl list devices` reports.
 `scripts/ship-physical` is the path that works when the Ansible controller
