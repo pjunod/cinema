@@ -110,6 +110,286 @@ impl SourceIdentity {
     }
 }
 
+// ---------------------------------------------------------------------------
+// timeline annotations
+// ---------------------------------------------------------------------------
+
+/// Semantic regions of a media timeline that a client may offer to skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationKind {
+    Intro,
+    Recap,
+    Credits,
+    Preview,
+}
+
+impl AnnotationKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "intro" => Some(Self::Intro),
+            "recap" => Some(Self::Recap),
+            "credits" => Some(Self::Credits),
+            "preview" => Some(Self::Preview),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Intro => "intro",
+            Self::Recap => "recap",
+            Self::Credits => "credits",
+            Self::Preview => "preview",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Intro => "Skip Intro",
+            Self::Recap => "Skip Recap",
+            Self::Credits => "Skip Credits",
+            Self::Preview => "Skip Preview",
+        }
+    }
+}
+
+/// Why an annotation exists. The order is the conflict-resolution rank used
+/// when overlapping annotations of one kind are normalized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationProvenance {
+    Estimated,
+    Detected,
+    Authored,
+    Manual,
+}
+
+impl AnnotationProvenance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Estimated => "estimated",
+            Self::Detected => "detected",
+            Self::Authored => "authored",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// One validated semantic boundary.
+///
+/// Ticks are authoritative. Milliseconds are stored as a convenience for the
+/// shipped clients and must be the exact integer projection of those ticks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineAnnotation {
+    pub kind: AnnotationKind,
+    pub start_ticks: i64,
+    pub end_ticks: i64,
+    pub timescale: u32,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub provenance: AnnotationProvenance,
+    pub confidence_millis: u16,
+    pub detector_version: String,
+    pub manual_override_revision: Option<u64>,
+}
+
+/// The replicated semantic component of one content-analysis generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineAnnotationSet {
+    pub source_identity: SourceIdentity,
+    pub generation_id: String,
+    pub version: u32,
+    pub annotations: Vec<TimelineAnnotation>,
+}
+
+pub const MAX_TIMELINE_ANNOTATIONS: usize = 32;
+pub const MAX_TIMELINE_IDENTIFIER_BYTES: usize = 128;
+pub const MAX_TIMELINE_ANNOTATIONS_JSON_BYTES: usize = 64 * 1_024;
+
+impl TimelineAnnotationSet {
+    /// Validate replicated values and merge overlapping annotations of the
+    /// same kind. This is deliberately called by each backend at the write
+    /// boundary rather than trusting every producer to remember the rules.
+    pub fn validate_and_normalize(mut self, duration_ms: i64) -> Result<Self, String> {
+        if duration_ms <= 0 {
+            return Err("timeline annotations require a positive duration".to_owned());
+        }
+        if self.generation_id.trim().is_empty() {
+            return Err("timeline annotation generation_id is empty".to_owned());
+        }
+        if self.generation_id.len() > MAX_TIMELINE_IDENTIFIER_BYTES {
+            return Err("timeline annotation generation_id is too long".to_owned());
+        }
+        if self.source_identity.argv_fingerprint.trim().is_empty()
+            || self.source_identity.argv_fingerprint.len() > MAX_TIMELINE_IDENTIFIER_BYTES
+        {
+            return Err("timeline annotation source fingerprint is invalid".to_owned());
+        }
+        if self.version == 0 {
+            return Err("timeline annotation version must be positive".to_owned());
+        }
+        if self.annotations.len() > MAX_TIMELINE_ANNOTATIONS {
+            return Err(format!(
+                "timeline annotation count exceeds {MAX_TIMELINE_ANNOTATIONS}"
+            ));
+        }
+        for annotation in &self.annotations {
+            validate_annotation(annotation, duration_ms)?;
+        }
+
+        self.annotations.sort_by(|left, right| {
+            left.kind
+                .cmp(&right.kind)
+                .then_with(|| {
+                    compare_ticks(
+                        left.start_ticks,
+                        left.timescale,
+                        right.start_ticks,
+                        right.timescale,
+                    )
+                })
+                .then_with(|| {
+                    compare_ticks(
+                        left.end_ticks,
+                        left.timescale,
+                        right.end_ticks,
+                        right.timescale,
+                    )
+                })
+        });
+        let mut normalized: Vec<TimelineAnnotation> = Vec::with_capacity(self.annotations.len());
+        for annotation in std::mem::take(&mut self.annotations) {
+            let Some(previous) = normalized.last_mut() else {
+                normalized.push(annotation);
+                continue;
+            };
+            if previous.kind != annotation.kind
+                || compare_ticks(
+                    previous.end_ticks,
+                    previous.timescale,
+                    annotation.start_ticks,
+                    annotation.timescale,
+                ) != std::cmp::Ordering::Greater
+            {
+                normalized.push(annotation);
+                continue;
+            }
+
+            let same_evidence = previous.provenance == annotation.provenance
+                && previous.confidence_millis == annotation.confidence_millis
+                && previous.detector_version == annotation.detector_version
+                && previous.manual_override_revision == annotation.manual_override_revision;
+            if same_evidence {
+                let timescale = common_timescale(previous.timescale, annotation.timescale)
+                    .ok_or_else(|| "timeline annotation timescales cannot be merged".to_owned())?;
+                let previous_factor = i64::from(timescale / previous.timescale);
+                let annotation_factor = i64::from(timescale / annotation.timescale);
+                let previous_start = previous
+                    .start_ticks
+                    .checked_mul(previous_factor)
+                    .ok_or_else(|| "timeline annotation start tick overflow".to_owned())?;
+                let previous_end = previous
+                    .end_ticks
+                    .checked_mul(previous_factor)
+                    .ok_or_else(|| "timeline annotation end tick overflow".to_owned())?;
+                let annotation_start = annotation
+                    .start_ticks
+                    .checked_mul(annotation_factor)
+                    .ok_or_else(|| "timeline annotation start tick overflow".to_owned())?;
+                let annotation_end = annotation
+                    .end_ticks
+                    .checked_mul(annotation_factor)
+                    .ok_or_else(|| "timeline annotation end tick overflow".to_owned())?;
+                previous.timescale = timescale;
+                previous.start_ticks = previous_start.min(annotation_start);
+                previous.end_ticks = previous_end.max(annotation_end);
+                previous.start_ms = ticks_to_millis(previous.start_ticks, timescale);
+                previous.end_ms = ticks_to_millis(previous.end_ticks, timescale);
+            } else if annotation.provenance > previous.provenance
+                || (annotation.provenance == previous.provenance
+                    && annotation.confidence_millis > previous.confidence_millis)
+            {
+                *previous = annotation;
+            }
+        }
+        self.annotations = normalized;
+        for annotation in &self.annotations {
+            validate_annotation(annotation, duration_ms)?;
+        }
+        Ok(self)
+    }
+}
+
+fn compare_ticks(
+    left_ticks: i64,
+    left_timescale: u32,
+    right_ticks: i64,
+    right_timescale: u32,
+) -> std::cmp::Ordering {
+    (i128::from(left_ticks) * i128::from(right_timescale))
+        .cmp(&(i128::from(right_ticks) * i128::from(left_timescale)))
+}
+
+fn common_timescale(left: u32, right: u32) -> Option<u32> {
+    fn gcd(mut left: u32, mut right: u32) -> u32 {
+        while right != 0 {
+            (left, right) = (right, left % right);
+        }
+        left
+    }
+
+    left.checked_div(gcd(left, right))?.checked_mul(right)
+}
+
+fn ticks_to_millis(ticks: i64, timescale: u32) -> i64 {
+    ticks
+        .saturating_mul(1_000)
+        .saturating_div(i64::from(timescale))
+}
+
+fn validate_annotation(annotation: &TimelineAnnotation, duration_ms: i64) -> Result<(), String> {
+    if annotation.timescale == 0 {
+        return Err("timeline annotation timescale must be positive".to_owned());
+    }
+    if annotation.start_ticks < 0 || annotation.start_ticks >= annotation.end_ticks {
+        return Err("timeline annotation must have start_ticks < end_ticks".to_owned());
+    }
+    if annotation.start_ms < 0
+        || annotation.start_ms >= annotation.end_ms
+        || annotation.end_ms > duration_ms
+    {
+        return Err(format!(
+            "timeline annotation must satisfy 0 <= start < end <= {duration_ms}ms"
+        ));
+    }
+    if ticks_to_millis(annotation.start_ticks, annotation.timescale) != annotation.start_ms
+        || ticks_to_millis(annotation.end_ticks, annotation.timescale) != annotation.end_ms
+    {
+        return Err("timeline annotation milliseconds do not match its authoritative ticks".into());
+    }
+    if annotation.confidence_millis > 1_000 {
+        return Err("timeline annotation confidence must be in 0..=1000".to_owned());
+    }
+    if annotation.detector_version.trim().is_empty() {
+        return Err("timeline annotation detector_version is empty".to_owned());
+    }
+    if annotation.detector_version.len() > MAX_TIMELINE_IDENTIFIER_BYTES {
+        return Err("timeline annotation detector_version is too long".to_owned());
+    }
+    match (annotation.provenance, annotation.manual_override_revision) {
+        (AnnotationProvenance::Manual, Some(revision)) if revision > 0 => {}
+        (AnnotationProvenance::Manual, _) => {
+            return Err("manual annotation requires a positive override revision".to_owned())
+        }
+        (_, Some(_)) => {
+            return Err("only a manual annotation may carry an override revision".to_owned())
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// A stable fingerprint of the arguments that decide the video bytes.
 ///
 /// Deliberately not a hash of the whole argv: the audio branch, pacing, and
@@ -1176,5 +1456,148 @@ mod tests {
         assert!(plan.is_empty());
         assert_eq!(plan.target_duration, 0);
         assert!(!index.usable_for(&identity()));
+    }
+
+    fn annotation(
+        provenance: AnnotationProvenance,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> TimelineAnnotation {
+        TimelineAnnotation {
+            kind: AnnotationKind::Credits,
+            start_ticks: start_ms,
+            end_ticks: end_ms,
+            timescale: 1_000,
+            start_ms,
+            end_ms,
+            provenance,
+            confidence_millis: 900,
+            detector_version: "chapters-v1".to_owned(),
+            manual_override_revision: (provenance == AnnotationProvenance::Manual).then_some(1),
+        }
+    }
+
+    #[test]
+    fn annotation_sets_reject_inconsistent_ticks_and_out_of_range_confidence() {
+        let mut invalid_ticks = annotation(AnnotationProvenance::Authored, 10, 20);
+        invalid_ticks.start_ticks = 9;
+        let set = TimelineAnnotationSet {
+            source_identity: identity(),
+            generation_id: "generation".to_owned(),
+            version: 1,
+            annotations: vec![invalid_ticks],
+        };
+        assert!(set.clone().validate_and_normalize(100).is_err());
+
+        let mut invalid_confidence = annotation(AnnotationProvenance::Authored, 10, 20);
+        invalid_confidence.confidence_millis = 1_001;
+        let mut set = set;
+        set.annotations = vec![invalid_confidence];
+        assert!(set.validate_and_normalize(100).is_err());
+    }
+
+    #[test]
+    fn annotation_sets_normalize_same_kind_overlaps_by_evidence_rank() {
+        let set = TimelineAnnotationSet {
+            source_identity: identity(),
+            generation_id: "generation".to_owned(),
+            version: 1,
+            annotations: vec![
+                annotation(AnnotationProvenance::Estimated, 80, 100),
+                annotation(AnnotationProvenance::Authored, 70, 90),
+            ],
+        }
+        .validate_and_normalize(100)
+        .expect("valid annotation set");
+        assert_eq!(set.annotations.len(), 1);
+        assert_eq!(
+            set.annotations[0].provenance,
+            AnnotationProvenance::Authored
+        );
+        assert_eq!(
+            (set.annotations[0].start_ms, set.annotations[0].end_ms),
+            (70, 90)
+        );
+        assert_eq!(
+            (set.annotations[0].start_ticks, set.annotations[0].end_ticks),
+            (70, 90)
+        );
+    }
+
+    #[test]
+    fn annotation_sets_do_not_merge_adjacent_or_promote_lower_evidence_extensions() {
+        let set = TimelineAnnotationSet {
+            source_identity: identity(),
+            generation_id: "generation".to_owned(),
+            version: 1,
+            annotations: vec![
+                annotation(AnnotationProvenance::Authored, 0, 20),
+                annotation(AnnotationProvenance::Estimated, 15, 60),
+                annotation(AnnotationProvenance::Authored, 20, 30),
+            ],
+        }
+        .validate_and_normalize(100)
+        .expect("valid annotation set");
+        assert_eq!(set.annotations.len(), 2);
+        assert_eq!(
+            (set.annotations[0].start_ms, set.annotations[0].end_ms),
+            (0, 20)
+        );
+        assert_eq!(
+            (set.annotations[1].start_ms, set.annotations[1].end_ms),
+            (20, 30)
+        );
+        assert!(set
+            .annotations
+            .iter()
+            .all(|annotation| annotation.provenance == AnnotationProvenance::Authored));
+    }
+
+    #[test]
+    fn annotation_overlap_merge_preserves_a_common_authoritative_tick_scale() {
+        let mut first = annotation(AnnotationProvenance::Authored, 41, 125);
+        first.start_ticks = 1;
+        first.end_ticks = 3;
+        first.timescale = 24;
+        let mut second = annotation(AnnotationProvenance::Authored, 83, 166);
+        second.start_ticks = 4;
+        second.end_ticks = 8;
+        second.timescale = 48;
+        let set = TimelineAnnotationSet {
+            source_identity: identity(),
+            generation_id: "generation".to_owned(),
+            version: 1,
+            annotations: vec![second, first],
+        }
+        .validate_and_normalize(200)
+        .expect("valid mixed-timescale annotation set");
+        assert_eq!(set.annotations.len(), 1);
+        assert_eq!(set.annotations[0].timescale, 48);
+        assert_eq!(set.annotations[0].start_ticks, 2);
+        assert_eq!(set.annotations[0].end_ticks, 8);
+        assert_eq!(set.annotations[0].start_ms, 41);
+        assert_eq!(set.annotations[0].end_ms, 166);
+    }
+
+    #[test]
+    fn annotation_sets_bound_replicated_counts_and_identifiers() {
+        let mut too_many = TimelineAnnotationSet {
+            source_identity: identity(),
+            generation_id: "generation".to_owned(),
+            version: 1,
+            annotations: vec![
+                annotation(AnnotationProvenance::Authored, 0, 1);
+                MAX_TIMELINE_ANNOTATIONS + 1
+            ],
+        };
+        assert!(too_many.clone().validate_and_normalize(100).is_err());
+
+        too_many.annotations.truncate(1);
+        too_many.generation_id = "g".repeat(MAX_TIMELINE_IDENTIFIER_BYTES + 1);
+        assert!(too_many.clone().validate_and_normalize(100).is_err());
+
+        too_many.generation_id = "generation".to_owned();
+        too_many.annotations[0].detector_version = "d".repeat(MAX_TIMELINE_IDENTIFIER_BYTES + 1);
+        assert!(too_many.validate_and_normalize(100).is_err());
     }
 }

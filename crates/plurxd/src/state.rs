@@ -24,10 +24,11 @@ use plurx_core::metadata::{self, AniListClient, EnrichReport, TmdbClient};
 use plurx_core::scan::{self, PlacedFile, ScanProgress, ScanReport, TargetError, TargetedScan};
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
-    cluster_fragment_index_blob_sha256, cluster_fragment_index_key,
-    encode_cluster_fragment_index_blob, keys, AnalysisRequest, ArtworkRepairFence, CatalogueReader,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation, NewAnalysisRequest,
-    NewClusterFragmentIndexJob, PrometheusStoreSnapshot, PublicationStore, Store,
+    cluster_fragment_index_blob_sha256, cluster_fragment_index_generation_key,
+    cluster_fragment_index_key, encode_cluster_fragment_index_blob, keys, AnalysisRequest,
+    ArtworkRepairFence, CatalogueReader, ClusterFragmentIndexArtifact,
+    ClusterFragmentIndexLocation, NewAnalysisRequest, NewClusterFragmentIndexJob,
+    PrometheusStoreSnapshot, PublicationStore, Store,
 };
 use plurx_core::transcode::EncoderCaps;
 use serde::Serialize;
@@ -141,7 +142,6 @@ pub struct Dirs {
 
 const STORE_METRICS_FRESHNESS_SECS: u64 = 120;
 
-#[derive(Default)]
 struct StoreMetricsAtomics {
     sequence: AtomicU64,
     published: AtomicBool,
@@ -162,6 +162,40 @@ struct StoreMetricsAtomics {
     outbox_pending: AtomicI64,
     outbox_ok: AtomicI64,
     outbox_failed: AtomicI64,
+    analysis_queue_depth: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
+    analysis_queue_oldest_age_seconds: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
+    analysis_lifecycle_counts: [AtomicI64; plurx_core::store::ANALYSIS_LIFECYCLE_METRIC_SLOTS],
+    analysis_marker_counts: [AtomicI64; plurx_core::store::ANALYSIS_MARKER_METRIC_SLOTS],
+}
+
+impl Default for StoreMetricsAtomics {
+    fn default() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            published: AtomicBool::new(false),
+            sampled_elapsed: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            libraries: AtomicI64::new(0),
+            users: AtomicI64::new(0),
+            queued: AtomicI64::new(0),
+            preparing: AtomicI64::new(0),
+            ready: AtomicI64::new(0),
+            failed: AtomicI64::new(0),
+            queued_bytes: AtomicI64::new(0),
+            preparing_bytes: AtomicI64::new(0),
+            ready_bytes: AtomicI64::new(0),
+            failed_bytes: AtomicI64::new(0),
+            active_leases: AtomicI64::new(0),
+            pinned_bytes: AtomicI64::new(0),
+            outbox_pending: AtomicI64::new(0),
+            outbox_ok: AtomicI64::new(0),
+            outbox_failed: AtomicI64::new(0),
+            analysis_queue_depth: std::array::from_fn(|_| AtomicI64::new(0)),
+            analysis_queue_oldest_age_seconds: std::array::from_fn(|_| AtomicI64::new(0)),
+            analysis_lifecycle_counts: std::array::from_fn(|_| AtomicI64::new(0)),
+            analysis_marker_counts: std::array::from_fn(|_| AtomicI64::new(0)),
+        }
+    }
 }
 
 /// Lock-free view consumed by the Prometheus handler.
@@ -229,6 +263,20 @@ impl StoreMetricsCache {
                     self.inner.outbox_ok.load(Ordering::Relaxed),
                     self.inner.outbox_failed.load(Ordering::Relaxed),
                 ),
+                analysis: plurx_core::store::AnalysisStoreMetrics {
+                    queue_depth: std::array::from_fn(|slot| {
+                        self.inner.analysis_queue_depth[slot].load(Ordering::Relaxed)
+                    }),
+                    queue_oldest_age_seconds: std::array::from_fn(|slot| {
+                        self.inner.analysis_queue_oldest_age_seconds[slot].load(Ordering::Relaxed)
+                    }),
+                    lifecycle_counts: std::array::from_fn(|slot| {
+                        self.inner.analysis_lifecycle_counts[slot].load(Ordering::Relaxed)
+                    }),
+                    marker_counts: std::array::from_fn(|slot| {
+                        self.inner.analysis_marker_counts[slot].load(Ordering::Relaxed)
+                    }),
+                },
             };
             let after = self.inner.sequence.load(Ordering::Acquire);
             if before == after {
@@ -309,6 +357,38 @@ impl StoreMetricsCache {
         self.inner
             .outbox_failed
             .store(sample.watched_outbox.2, Ordering::Relaxed);
+        for (target, value) in self
+            .inner
+            .analysis_queue_depth
+            .iter()
+            .zip(sample.analysis.queue_depth)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
+        for (target, value) in self
+            .inner
+            .analysis_queue_oldest_age_seconds
+            .iter()
+            .zip(sample.analysis.queue_oldest_age_seconds)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
+        for (target, value) in self
+            .inner
+            .analysis_lifecycle_counts
+            .iter()
+            .zip(sample.analysis.lifecycle_counts)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
+        for (target, value) in self
+            .inner
+            .analysis_marker_counts
+            .iter()
+            .zip(sample.analysis.marker_counts)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
         self.inner.sampled_elapsed.store(elapsed, Ordering::Relaxed);
         self.inner.published.store(true, Ordering::Relaxed);
         self.inner
@@ -862,6 +942,12 @@ pub struct JobManager {
     /// Throttle bounded, replicated analysis-history pruning so an idle queue
     /// does not produce a Raft write on every scheduler tick.
     last_analysis_prune_ms: AtomicI64,
+    /// High-frequency worker progress is deliberately node-local. Replicating
+    /// every fragment would turn one long media read into sustained Raft load;
+    /// the bounded peer Activity snapshot carries these rows to an ingress.
+    analysis_progress: std::sync::Mutex<HashMap<(String, String), AnalysisProgress>>,
+    analysis_progress_epoch: AtomicU64,
+    analysis_metrics: Arc<AnalysisRuntimeMetrics>,
     /// Which title the pass is on, for the activity feed.
     ///
     /// The flag above answers "may another pass start"; this answers "what is
@@ -917,6 +1003,285 @@ pub struct ProducingNow {
     /// 1-based position within this pass, and how many it means to attempt.
     pub index: usize,
     pub total: usize,
+}
+
+const MAX_ANALYSIS_PROGRESS: usize = 64;
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AnalysisProgress {
+    pub job_id: String,
+    pub file_id: i64,
+    pub item_id: i64,
+    pub title: String,
+    pub component: String,
+    pub stage: String,
+    pub bytes_read: u64,
+    pub total_bytes: u64,
+    pub media_ms_examined: i64,
+    pub total_media_ms: i64,
+    pub fragments_indexed: usize,
+    pub started_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub elapsed_ms: i64,
+    pub throughput_bps: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_ms: Option<i64>,
+    #[serde(skip)]
+    registry_epoch: u64,
+}
+
+#[cfg(test)]
+impl AnalysisProgress {
+    pub(crate) fn test_row(job_id: &str, title: &str) -> Self {
+        Self {
+            job_id: job_id.to_owned(),
+            file_id: 1,
+            item_id: 1,
+            title: title.to_owned(),
+            component: "fragment_index".to_owned(),
+            stage: "fragment_index".to_owned(),
+            bytes_read: 1,
+            total_bytes: 2,
+            media_ms_examined: 1,
+            total_media_ms: 2,
+            fragments_indexed: 1,
+            started_at_ms: 1,
+            updated_at_ms: 1,
+            elapsed_ms: 1,
+            throughput_bps: 1,
+            eta_ms: Some(1),
+            registry_epoch: 0,
+        }
+    }
+}
+
+const ANALYSIS_STAGES: [&str; 6] = [
+    "probing",
+    "fragment_index",
+    "fingerprints",
+    "marker_correlation",
+    "persisting",
+    "verifying",
+];
+const ANALYSIS_BYTES_BOUNDS: [u64; 8] = [
+    1 << 20,
+    8 << 20,
+    32 << 20,
+    128 << 20,
+    512 << 20,
+    1 << 30,
+    4 << 30,
+    16 << 30,
+];
+const ANALYSIS_SECONDS_BOUNDS: [u64; 8] = [1, 5, 15, 30, 60, 300, 900, 1_800];
+const ANALYSIS_THROUGHPUT_BOUNDS: [u64; 8] = [
+    128 << 10,
+    512 << 10,
+    1 << 20,
+    4 << 20,
+    16 << 20,
+    64 << 20,
+    256 << 20,
+    1 << 30,
+];
+
+struct AnalysisHistogram {
+    buckets: [AtomicU64; 9],
+    count: AtomicU64,
+    sum: AtomicU64,
+}
+
+impl Default for AnalysisHistogram {
+    fn default() -> Self {
+        Self {
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            count: AtomicU64::new(0),
+            sum: AtomicU64::new(0),
+        }
+    }
+}
+
+impl AnalysisHistogram {
+    fn record(&self, value: u64, bounds: &[u64; 8]) {
+        let slot = bounds
+            .iter()
+            .position(|bound| value <= *bound)
+            .unwrap_or(bounds.len());
+        self.buckets[slot].fetch_add(1, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum.fetch_add(value, Ordering::Relaxed);
+    }
+
+    fn render(&self, out: &mut String, name: &str, help: &str, bounds: &[u64; 8]) {
+        out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} histogram\n"));
+        let mut cumulative = 0;
+        for (slot, bound) in bounds.iter().enumerate() {
+            cumulative += self.buckets[slot].load(Ordering::Relaxed);
+            out.push_str(&format!("{name}_bucket{{le=\"{bound}\"}} {cumulative}\n"));
+        }
+        cumulative += self.buckets[bounds.len()].load(Ordering::Relaxed);
+        out.push_str(&format!(
+            "{name}_bucket{{le=\"+Inf\"}} {cumulative}\n{name}_sum {}\n{name}_count {}\n",
+            self.sum.load(Ordering::Relaxed),
+            self.count.load(Ordering::Relaxed),
+        ));
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct AnalysisRuntimeMetrics {
+    current_by_stage: [AtomicU64; ANALYSIS_STAGES.len()],
+    bytes: AnalysisHistogram,
+    media_seconds: AnalysisHistogram,
+    wall_seconds: AnalysisHistogram,
+    throughput: AnalysisHistogram,
+    publications: [[AtomicU64; 2]; 2],
+    correlations: [AtomicU64; 3],
+}
+
+impl AnalysisRuntimeMetrics {
+    fn stage_index(stage: &str) -> usize {
+        let normalized = match stage {
+            "source_probe" => "probing",
+            "hashing" => "fingerprints",
+            "staged" | "publishing" => "verifying",
+            other => other,
+        };
+        ANALYSIS_STAGES
+            .iter()
+            .position(|candidate| *candidate == normalized)
+            .unwrap_or(ANALYSIS_STAGES.len() - 1)
+    }
+
+    fn start(&self, stage: &str) {
+        self.current_by_stage[Self::stage_index(stage)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn transition(&self, from: &str, to: &str) {
+        let from = Self::stage_index(from);
+        let to = Self::stage_index(to);
+        if from != to {
+            self.current_by_stage[from].fetch_sub(1, Ordering::Relaxed);
+            self.current_by_stage[to].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn finish(&self, progress: &AnalysisProgress) {
+        self.current_by_stage[Self::stage_index(&progress.stage)].fetch_sub(1, Ordering::Relaxed);
+        let wall_seconds = u64::try_from(clock_ms().saturating_sub(progress.started_at_ms))
+            .unwrap_or_default()
+            / 1_000;
+        let media_seconds =
+            u64::try_from(progress.media_ms_examined.max(0)).unwrap_or_default() / 1_000;
+        let throughput = progress
+            .bytes_read
+            .checked_div(wall_seconds)
+            .unwrap_or(progress.bytes_read);
+        self.bytes
+            .record(progress.bytes_read, &ANALYSIS_BYTES_BOUNDS);
+        self.media_seconds
+            .record(media_seconds, &ANALYSIS_SECONDS_BOUNDS);
+        self.wall_seconds
+            .record(wall_seconds, &ANALYSIS_SECONDS_BOUNDS);
+        self.throughput
+            .record(throughput, &ANALYSIS_THROUGHPUT_BOUNDS);
+    }
+
+    fn discard(&self, progress: &AnalysisProgress) {
+        self.current_by_stage[Self::stage_index(&progress.stage)].fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn publication(&self, component: &str, replacement: bool) {
+        let component = usize::from(component == "skip_markers");
+        self.publications[component][usize::from(replacement)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn prometheus(&self, owner_node: &str) -> String {
+        let owner_node = owner_node
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n");
+        let mut out = String::new();
+        self.bytes.render(
+            &mut out,
+            "plurx_analysis_indexing_bytes",
+            "Bytes read by completed analysis work.",
+            &ANALYSIS_BYTES_BOUNDS,
+        );
+        self.media_seconds.render(
+            &mut out,
+            "plurx_analysis_media_seconds",
+            "Media time examined by completed analysis work.",
+            &ANALYSIS_SECONDS_BOUNDS,
+        );
+        self.wall_seconds.render(
+            &mut out,
+            "plurx_analysis_wall_seconds",
+            "Wall time consumed by completed analysis work.",
+            &ANALYSIS_SECONDS_BOUNDS,
+        );
+        self.throughput.render(
+            &mut out,
+            "plurx_analysis_throughput_bytes_per_second",
+            "Read throughput of completed analysis work.",
+            &ANALYSIS_THROUGHPUT_BOUNDS,
+        );
+        out.push_str(
+            "# HELP plurx_analysis_current_jobs Current node-local analysis work by stage and owner.\n\
+             # TYPE plurx_analysis_current_jobs gauge\n",
+        );
+        for (stage, value) in ANALYSIS_STAGES.iter().zip(&self.current_by_stage) {
+            out.push_str(&format!(
+                "plurx_analysis_current_jobs{{stage=\"{stage}\",owner_node=\"{owner_node}\"}} {}\n",
+                value.load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str(
+            "# HELP plurx_analysis_artifact_publications_total Validated analysis artifact publications and replacements.\n\
+             # TYPE plurx_analysis_artifact_publications_total counter\n",
+        );
+        for (component_index, component) in ["fragment_index", "skip_markers"].iter().enumerate() {
+            let version = if component_index == 0 {
+                plurx_core::segplan::SEGPLAN_VERSION.to_string()
+            } else {
+                crate::http::stream::CHAPTER_ANNOTATION_VERSION.to_owned()
+            };
+            for (operation_index, operation) in ["publication", "replacement"].iter().enumerate() {
+                out.push_str(&format!(
+                    "plurx_analysis_artifact_publications_total{{component=\"{component}\",operation=\"{operation}\",version=\"{version}\"}} {}\n",
+                    self.publications[component_index][operation_index].load(Ordering::Relaxed)
+                ));
+            }
+        }
+        out.push_str(
+            "# HELP plurx_analysis_correlation_total Series marker-correlation outcomes.\n\
+             # TYPE plurx_analysis_correlation_total counter\n",
+        );
+        for (outcome, value) in ["candidate", "accepted", "rejected_ambiguous"]
+            .iter()
+            .zip(&self.correlations)
+        {
+            out.push_str(&format!(
+                "plurx_analysis_correlation_total{{outcome=\"{outcome}\"}} {}\n",
+                value.load(Ordering::Relaxed)
+            ));
+        }
+        out
+    }
+}
+
+struct AnalysisProgressGuard {
+    jobs: Arc<JobManager>,
+    job_id: String,
+    target_node_id: String,
+    registry_epoch: u64,
+}
+
+impl Drop for AnalysisProgressGuard {
+    fn drop(&mut self) {
+        self.jobs
+            .remove_analysis_progress(&self.job_id, &self.target_node_id, self.registry_epoch);
+    }
 }
 
 /// Clears [`JobManager::backfilling_genres`] however the pass ends, panic
@@ -1016,12 +1381,60 @@ fn setting_enabled(value: Option<String>) -> bool {
     })
 }
 
-async fn wait_for_media_busy(transcode: &TranscodeManager) {
-    loop {
-        if !transcode.pretranscode_worker_idle() {
-            return;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AnalysisRetryPolicy {
+    lease_ms: i64,
+    backoff_base_ms: i64,
+    backoff_max_ms: i64,
+}
+
+#[derive(Clone)]
+struct ClusterFragmentIndexWorker {
+    engine_sha256: String,
+    cache_root: PathBuf,
+    have_dovi: bool,
+    retry_policy: AnalysisRetryPolicy,
+}
+
+impl AnalysisRetryPolicy {
+    fn from_settings(settings: &BTreeMap<String, String>) -> Self {
+        let lease_ms = plurx_core::store::bounded_analysis_lease_secs(
+            settings.get(keys::ANALYSIS_LEASE_SECS).map(String::as_str),
+        )
+        .saturating_mul(1_000);
+        let backoff_base_ms = plurx_core::store::bounded_analysis_backoff_base_secs(
+            settings
+                .get(keys::ANALYSIS_BACKOFF_BASE_SECS)
+                .map(String::as_str),
+        )
+        .saturating_mul(1_000);
+        let backoff_max_ms = plurx_core::store::bounded_analysis_backoff_max_secs(
+            settings
+                .get(keys::ANALYSIS_BACKOFF_MAX_SECS)
+                .map(String::as_str),
+        )
+        .saturating_mul(1_000)
+        .max(backoff_base_ms);
+        Self {
+            lease_ms,
+            backoff_base_ms,
+            backoff_max_ms,
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    fn renew_every(self) -> Duration {
+        Duration::from_millis(u64::try_from((self.lease_ms / 3).max(1_000)).unwrap_or(1_000))
+    }
+
+    /// Stable jitter keeps peers from synchronizing while preserving an
+    /// operator-visible next-attempt timestamp across process restarts.
+    fn backoff_ms(self, identity: &str, attempt: i64) -> i64 {
+        plurx_core::store::analysis_backoff_ms(
+            identity,
+            attempt,
+            self.backoff_base_ms,
+            self.backoff_max_ms,
+        )
     }
 }
 
@@ -1033,10 +1446,27 @@ enum AnalysisResolutionError {
     /// control-plane failures do.
     Retry {
         code: &'static str,
-        delay_ms: i64,
         charge_attempt: bool,
     },
     Terminal(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FragmentSourceReadFailure {
+    Stale,
+    Transient,
+}
+
+fn classify_fragment_source_read(
+    result: Result<Option<MediaFile>, StoreError>,
+    source_size: i64,
+    source_mtime: i64,
+) -> Result<MediaFile, FragmentSourceReadFailure> {
+    match result {
+        Ok(Some(file)) if file.size == source_size && file.mtime == source_mtime => Ok(file),
+        Ok(_) => Err(FragmentSourceReadFailure::Stale),
+        Err(_) => Err(FragmentSourceReadFailure::Transient),
+    }
 }
 
 /// Clears [`JobManager::indexing`] however the pass ends, including the ways a
@@ -1214,6 +1644,10 @@ pub(crate) fn clock_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(i64::MAX)
+}
+
+pub(crate) async fn wait_analysis_deadline(duration: Duration) {
+    tokio::time::sleep(duration).await;
 }
 
 /// Read the probe once and ask [`crate::fragindex::video_identities`] which
@@ -1462,6 +1896,9 @@ impl JobManager {
             indexing: std::sync::atomic::AtomicBool::new(false),
             cluster_index_working: std::sync::atomic::AtomicBool::new(false),
             last_analysis_prune_ms: AtomicI64::new(0),
+            analysis_progress: std::sync::Mutex::new(HashMap::new()),
+            analysis_progress_epoch: AtomicU64::new(0),
+            analysis_metrics: Arc::new(AnalysisRuntimeMetrics::default()),
             now_producing: Mutex::new(None),
             stop_producing: std::sync::atomic::AtomicBool::new(false),
             pretranscode_refusals: Mutex::new(HashMap::new()),
@@ -1509,7 +1946,17 @@ impl JobManager {
         &self,
         file_id: i64,
         force_rebuild: bool,
+        component: &str,
+        trigger: &str,
     ) -> Result<(AnalysisRequest, bool), StoreError> {
+        if !matches!(component, "fragment_index" | "skip_markers") {
+            return Err(StoreError::Task(
+                "unsupported analysis component".to_owned(),
+            ));
+        }
+        if !matches!(trigger, "admin" | "background") {
+            return Err(StoreError::Task("unsupported analysis trigger".to_owned()));
+        }
         let file = self
             .store
             .get_file(file_id)
@@ -1517,6 +1964,23 @@ impl JobManager {
             .ok_or_else(|| StoreError::Task("analysis file does not exist".to_owned()))?;
         let now = clock_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
+        let pipeline_version = if component == "fragment_index" {
+            crate::ffmpeg::fragment_index_engine_digest().await
+        } else {
+            crate::http::stream::CHAPTER_ANNOTATION_VERSION.to_owned()
+        };
+        let requested_generation = if force_rebuild {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            plurx_core::segplan::argv_fingerprint(&[
+                "analysis-request".to_owned(),
+                file.id.to_string(),
+                file.size.to_string(),
+                file.mtime.to_string(),
+                component.to_owned(),
+                pipeline_version.clone(),
+            ])
+        };
         let request = self
             .store
             .enqueue_analysis_request(&NewAnalysisRequest {
@@ -1524,9 +1988,17 @@ impl JobManager {
                 file_id: file.id,
                 source_size: file.size,
                 source_mtime: file.mtime,
-                component: "fragment_index".to_owned(),
+                component: component.to_owned(),
+                pipeline_version,
+                requested_generation,
+                priority: if force_rebuild { "forced" } else { "normal" }.to_owned(),
+                trigger: trigger.to_owned(),
                 force_rebuild,
-                target_node_id: self.coordinator.node_id().to_owned(),
+                target_node_id: if component == "skip_markers" {
+                    String::new()
+                } else {
+                    self.coordinator.node_id().to_owned()
+                },
                 not_before_ms: now,
                 created_at_ms: now,
             })
@@ -1537,6 +2009,187 @@ impl JobManager {
 
     pub async fn analysis_queue_enabled(&self) -> bool {
         self.cluster_fragment_index_enabled().await
+    }
+
+    fn start_analysis_progress(
+        self: &Arc<Self>,
+        identity: (&str, &str),
+        file_id: i64,
+        component: &str,
+        stage: &str,
+        total_bytes: u64,
+        total_media_ms: i64,
+    ) -> AnalysisProgressGuard {
+        let (job_id, target_node_id) = identity;
+        let now = clock_ms();
+        let registry_epoch = self
+            .analysis_progress_epoch
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let progress_key = (job_id.to_owned(), target_node_id.to_owned());
+        if progress.len() >= MAX_ANALYSIS_PROGRESS && !progress.contains_key(&progress_key) {
+            if let Some(oldest) = progress
+                .iter()
+                .min_by_key(|(_, value)| (value.updated_at_ms, value.started_at_ms))
+                .map(|(key, _)| key.clone())
+            {
+                if let Some(value) = progress.remove(&oldest) {
+                    self.analysis_metrics.discard(&value);
+                }
+            }
+        }
+        let replaced = progress.insert(
+            progress_key,
+            AnalysisProgress {
+                job_id: job_id.to_owned(),
+                file_id,
+                item_id: 0,
+                title: String::new(),
+                component: component.to_owned(),
+                stage: stage.to_owned(),
+                bytes_read: 0,
+                total_bytes,
+                media_ms_examined: 0,
+                total_media_ms: total_media_ms.max(0),
+                fragments_indexed: 0,
+                started_at_ms: now,
+                updated_at_ms: now,
+                elapsed_ms: 0,
+                throughput_bps: 0,
+                eta_ms: None,
+                registry_epoch,
+            },
+        );
+        if let Some(value) = replaced {
+            self.analysis_metrics.discard(&value);
+        }
+        self.analysis_metrics.start(stage);
+        AnalysisProgressGuard {
+            jobs: Arc::clone(self),
+            job_id: job_id.to_owned(),
+            target_node_id: target_node_id.to_owned(),
+            registry_epoch,
+        }
+    }
+
+    fn update_analysis_progress(
+        &self,
+        job_id: &str,
+        target_node_id: &str,
+        stage: &str,
+        bytes_read: u64,
+        media_ms_examined: i64,
+        fragments_indexed: usize,
+    ) {
+        let now = clock_ms();
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) else {
+            return;
+        };
+        self.analysis_metrics.transition(&value.stage, stage);
+        value.stage = stage.to_owned();
+        value.bytes_read = if value.total_bytes > 0 {
+            bytes_read.min(value.total_bytes)
+        } else {
+            bytes_read
+        };
+        value.media_ms_examined = if value.total_media_ms > 0 {
+            media_ms_examined.max(0).min(value.total_media_ms)
+        } else {
+            media_ms_examined.max(0)
+        };
+        value.fragments_indexed = fragments_indexed;
+        value.updated_at_ms = now;
+    }
+
+    fn set_analysis_progress_totals(
+        &self,
+        job_id: &str,
+        target_node_id: &str,
+        total_bytes: u64,
+        total_media_ms: i64,
+    ) {
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) else {
+            return;
+        };
+        value.total_bytes = total_bytes;
+        value.total_media_ms = total_media_ms.max(0);
+        value.updated_at_ms = clock_ms();
+    }
+
+    fn remove_analysis_progress(&self, job_id: &str, target_node_id: &str, registry_epoch: u64) {
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if progress
+            .get(&(job_id.to_owned(), target_node_id.to_owned()))
+            .is_some_and(|value| value.registry_epoch == registry_epoch)
+        {
+            if let Some(value) = progress.remove(&(job_id.to_owned(), target_node_id.to_owned())) {
+                self.analysis_metrics.finish(&value);
+            }
+        }
+    }
+
+    pub(crate) fn analysis_metrics_handle(&self) -> Arc<AnalysisRuntimeMetrics> {
+        Arc::clone(&self.analysis_metrics)
+    }
+
+    pub fn analysis_progress_snapshot(&self) -> Vec<AnalysisProgress> {
+        let now = clock_ms();
+        let mut values = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for value in &mut values {
+            value.elapsed_ms = now.saturating_sub(value.started_at_ms).max(0);
+            value.throughput_bps = if value.elapsed_ms > 0 {
+                value
+                    .bytes_read
+                    .saturating_mul(1_000)
+                    .saturating_div(u64::try_from(value.elapsed_ms).unwrap_or(u64::MAX))
+            } else {
+                0
+            };
+            value.eta_ms = if value.bytes_read > 0
+                && value.total_bytes > value.bytes_read
+                && value.throughput_bps > 0
+            {
+                Some(
+                    value
+                        .total_bytes
+                        .saturating_sub(value.bytes_read)
+                        .saturating_mul(1_000)
+                        .saturating_div(value.throughput_bps)
+                        .min(i64::MAX as u64) as i64,
+                )
+            } else {
+                None
+            };
+        }
+        values.sort_by(|left, right| {
+            right
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then(left.job_id.cmp(&right.job_id))
+        });
+        values.truncate(MAX_ANALYSIS_PROGRESS);
+        values
     }
 
     /// Publish (or clear) the title the pass is on. The pass owns this; it is
@@ -3773,14 +4426,12 @@ impl JobManager {
         permit_lost: &tokio_util::sync::CancellationToken,
     ) {
         let node_id = self.coordinator.node_id().to_owned();
-        let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
             tracing::warn!(
                 "cluster fragment indexing requires a daemon restart after engine change"
             );
             return;
         }
-        let have_dovi = transcode.dv_strippable();
         let cache_root = crate::fragment_index_cluster::cache_root(transcode.runtime_cache_dir());
         const RETAIN_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
         let prune_before = clock_ms().saturating_sub(RETAIN_MS);
@@ -3839,7 +4490,6 @@ impl JobManager {
         let deadline = std::time::Instant::now() + INDEX_WINDOW;
         let mut attempted = 0_usize;
         let mut enqueued = 0_usize;
-        let mut hydrated = 0_usize;
         let mut last_examined = None;
 
         for (examined, (file_id, _)) in paths.into_iter().enumerate() {
@@ -3860,162 +4510,15 @@ impl JobManager {
             if !crate::copyseg::supports(file.video_codec.as_deref()) {
                 continue;
             }
-            let videos = match fragment_index_video_identities(
-                self.store.as_ref(),
-                &file,
-                have_dovi,
-            )
-            .await
-            {
-                Ok(videos) => videos,
-                Err(error) => {
-                    tracing::warn!(file_id, %error, "reading probe for cluster fragment index");
-                    continue;
-                }
-            };
-            // Counted per file rather than per identity, unlike the
-            // single-node pass: what this loop actually spends is the source
-            // attestation below, which hashes the file once however many
-            // pipelines are then queued against that one hash.
             attempted += 1;
-            let object_version = match crate::fragment_index_cluster::inspect_source(&file).await {
-                Ok(version) => version,
-                Err(error) => {
-                    tracing::debug!(file_id, %error, "cluster index source is not readable here");
-                    continue;
-                }
-            };
-            let memo = self
-                .store
-                .fragment_index_source(&node_id, file_id, &object_version)
-                .await
-                .ok()
-                .flatten();
-            let attested = match tokio::select! {
-                result = crate::fragment_index_cluster::attest_source(
-                    &node_id,
-                    &file,
-                    memo.as_ref(),
-                ) => result,
-                () = wait_for_media_busy(transcode.as_ref()) => {
-                    Err("foreground playback preempted source attestation".to_owned())
-                }
-                () = permit_lost.cancelled() => {
-                    Err("cluster media-read permit was lost".to_owned())
-                }
-                () = tokio::time::sleep(INDEX_WINDOW) => {
-                    Err("source attestation exceeded the per-file deadline".to_owned())
-                }
-            } {
-                Ok(attested) => attested,
-                Err(error) => {
-                    tracing::warn!(file_id, %error, "source attestation failed");
-                    if !transcode.pretranscode_worker_idle() {
-                        break;
-                    }
-                    continue;
-                }
-            };
-            if let Err(error) = self
-                .store
-                .record_fragment_index_source(&attested.observation)
+            match self
+                .request_file_analysis(file_id, false, "fragment_index", "background")
                 .await
             {
-                tracing::warn!(file_id, %error, "recording source attestation failed");
-                continue;
-            }
-            // One attestation, one cluster job per pipeline. The content
-            // address already admits several pipelines per source, so this
-            // needs nothing from the cluster schema — only that the enqueue
-            // loop stops emitting a single one.
-            //
-            // Like the single-node pass, this runs the whole set for a file it
-            // has started rather than re-checking the pass bounds inside: the
-            // cursor is stamped per file and resumed strictly after, so a
-            // break here would defer the rest of the set by a full library
-            // wrap. What it spends is bounded — a cache-key lookup and either
-            // an enqueue or a hydrate, against an attestation that has already
-            // happened — and every enqueue is idempotent on the cache key.
-            for video in &videos {
-                let video = *video;
-                let pipeline_sha256 =
-                    crate::fragment_index_cluster::pipeline_digest(&file, &engine_sha256, video);
-                let Some(cache_key) = cluster_fragment_index_key(
-                    &attested.observation.source_sha256,
-                    &pipeline_sha256,
-                ) else {
-                    continue;
-                };
-                let now = clock_ms();
-                let job = NewClusterFragmentIndexJob {
-                    cache_key: cache_key.clone(),
-                    file_id,
-                    source_size: file.size,
-                    source_mtime: file.mtime,
-                    source_sha256: attested.observation.source_sha256.clone(),
-                    pipeline_sha256: pipeline_sha256.clone(),
-                    not_before_ms: now,
-                    created_at_ms: now,
-                };
-                // A successful local attestation proves that an earlier mount
-                // or path refusal for this exact content/pipeline is no longer
-                // true.
-                self.fragment_index_refusals.lock().await.remove(&cache_key);
-                match self.store.cluster_fragment_index_artifact(&cache_key).await {
-                    Ok(Some(artifact)) => match crate::fragment_index_cluster::hydrate(
-                        self.store.as_ref(),
-                        self.membership.as_ref(),
-                        &node_id,
-                        &cache_root,
-                        &artifact,
-                    )
-                    .await
-                    {
-                        Ok(Some(mut index)) => {
-                            // The content-addressed v2 blob deliberately
-                            // carries a neutral source identity. The v1 bridge
-                            // is file keyed, so bind only this local copy to
-                            // the consuming file.
-                            index.source = crate::fragindex::identity_for(&file, video);
-                            if let Err(error) = self.store.put_fragment_index(file_id, &index).await
-                            {
-                                tracing::warn!(
-                                    file_id,
-                                    %error,
-                                    "installing hydrated fragment index"
-                                );
-                            } else {
-                                hydrated += 1;
-                            }
-                        }
-                        Ok(None) => match self.store.requeue_cluster_fragment_index(&job).await {
-                            Ok(true) => enqueued += 1,
-                            Ok(false) => {}
-                            Err(error) => tracing::warn!(
-                                file_id,
-                                cache_key,
-                                %error,
-                                "queueing fragment-index holder repair"
-                            ),
-                        },
-                        Err(error) => tracing::warn!(
-                            file_id,
-                            cache_key,
-                            %error,
-                            "hydrating a cluster fragment index"
-                        ),
-                    },
-                    Ok(None) => match self.store.enqueue_cluster_fragment_index(&job).await {
-                        Ok(true) => enqueued += 1,
-                        Ok(false) => {}
-                        Err(error) => tracing::warn!(
-                            file_id,
-                            cache_key,
-                            %error,
-                            "queueing a cluster fragment index"
-                        ),
-                    },
-                    Err(error) => tracing::warn!(file_id, %error, "reading cluster index catalog"),
+                Ok((_, false)) => enqueued += 1,
+                Ok((_, true)) => {}
+                Err(error) => {
+                    tracing::warn!(file_id, %error, "queueing background fragment analysis");
                 }
             }
         }
@@ -4035,7 +4538,6 @@ impl JobManager {
             tracing::info!(
                 attempted,
                 enqueued,
-                hydrated,
                 "cluster fragment-index discovery pass finished"
             );
         }
@@ -4051,11 +4553,10 @@ impl JobManager {
             return;
         }
         let _guard = ClusterIndexWorkingGuard(Arc::clone(&self));
-        if !self.may_run_cluster_jobs().await
-            || !crate::ffmpeg::fragment_index_engine_is_current().await
-        {
+        if !self.may_run_cluster_jobs().await {
             return;
         }
+        let fragment_engine_current = crate::ffmpeg::fragment_index_engine_is_current().await;
 
         let now = clock_ms();
         if let Err(error) = self.store.settle_analysis_requests(now).await {
@@ -4086,6 +4587,10 @@ impl JobManager {
             }
         }
         self.resolve_analysis_requests(Arc::clone(&transcode)).await;
+
+        if !fragment_engine_current {
+            return;
+        }
 
         let mut slots = tokio::task::JoinSet::new();
         for slot in 0..GLOBAL_SLOTS {
@@ -4127,14 +4632,13 @@ impl JobManager {
 
     async fn resolve_analysis_requests(self: &Arc<Self>, transcode: Arc<TranscodeManager>) {
         const MAX_REQUESTS_PER_PASS: usize = 2;
-        const CLAIM_TTL_MS: i64 = 60_000;
-        const RENEW_EVERY: Duration = Duration::from_secs(20);
         const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
         if !self.cluster_fragment_index_enabled().await || !transcode.pretranscode_worker_idle() {
             return;
         }
         let node_id = self.coordinator.node_id().to_owned();
+        let retry_policy = self.analysis_retry_policy().await;
         let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
         let have_dovi = transcode.dv_strippable();
         for _ in 0..MAX_REQUESTS_PER_PASS {
@@ -4145,7 +4649,7 @@ impl JobManager {
             let now = clock_ms();
             let request = match self
                 .store
-                .claim_analysis_request(&node_id, now, now.saturating_add(CLAIM_TTL_MS))
+                .claim_analysis_request(&node_id, now, now.saturating_add(retry_policy.lease_ms))
                 .await
             {
                 Ok(Some(request)) => request,
@@ -4155,6 +4659,14 @@ impl JobManager {
                     break;
                 }
             };
+            let _progress = self.start_analysis_progress(
+                (&request.request_id, &request.target_node_id),
+                request.file_id,
+                &request.component,
+                "probing",
+                request.source_size.max(0) as u64,
+                0,
+            );
 
             let stop = tokio_util::sync::CancellationToken::new();
             let lost = tokio_util::sync::CancellationToken::new();
@@ -4165,8 +4677,10 @@ impl JobManager {
                 let stop = stop.clone();
                 let lost = lost.clone();
                 let fence = request.fence;
+                let renew_every = retry_policy.renew_every();
+                let lease_ms = retry_policy.lease_ms;
                 tokio::spawn(async move {
-                    let mut interval = tokio::time::interval(RENEW_EVERY);
+                    let mut interval = tokio::time::interval(renew_every);
                     loop {
                         tokio::select! {
                             () = stop.cancelled() => break,
@@ -4177,7 +4691,7 @@ impl JobManager {
                                     &node_id,
                                     fence,
                                     now,
-                                    now.saturating_add(CLAIM_TTL_MS),
+                                    now.saturating_add(lease_ms),
                                 ).await {
                                     Ok(true) => {}
                                     Ok(false) | Err(_) => {
@@ -4208,10 +4722,11 @@ impl JobManager {
                     AnalysisResolutionError::ClaimLost => {}
                     AnalysisResolutionError::Retry {
                         code,
-                        delay_ms,
                         charge_attempt,
                     } => {
-                        if let Err(error) = self
+                        let delay_ms =
+                            retry_policy.backoff_ms(&request.request_id, request.attempts.max(1));
+                        match self
                             .store
                             .retry_analysis_request(
                                 &request,
@@ -4222,15 +4737,27 @@ impl JobManager {
                             )
                             .await
                         {
-                            tracing::warn!(
+                            Ok(true) => {
+                                let _ = self
+                                    .store
+                                    .record_analysis_request_phase(
+                                        &request,
+                                        "retry_wait",
+                                        Some(code),
+                                        now,
+                                    )
+                                    .await;
+                            }
+                            Ok(false) => {}
+                            Err(error) => tracing::warn!(
                                 request_id = request.request_id,
                                 %error,
                                 "queueing an analysis request retry"
-                            );
+                            ),
                         }
                     }
                     AnalysisResolutionError::Terminal(code) => {
-                        if let Err(error) = self
+                        match self
                             .store
                             .fail_analysis_request(
                                 &request.request_id,
@@ -4241,11 +4768,23 @@ impl JobManager {
                             )
                             .await
                         {
-                            tracing::warn!(
+                            Ok(true) => {
+                                let _ = self
+                                    .store
+                                    .record_analysis_request_phase(
+                                        &request,
+                                        "failed",
+                                        Some(code),
+                                        now,
+                                    )
+                                    .await;
+                            }
+                            Ok(false) => {}
+                            Err(error) => tracing::warn!(
                                 request_id = request.request_id,
                                 %error,
                                 "failing an analysis request"
-                            );
+                            ),
                         }
                     }
                 }
@@ -4266,6 +4805,14 @@ impl JobManager {
         lost: &tokio_util::sync::CancellationToken,
         attest_timeout: Duration,
     ) -> Result<(), AnalysisResolutionError> {
+        if !self
+            .store
+            .record_analysis_request_phase(request, "source_probe", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
         let file = match self.store.get_file(request.file_id).await {
             Ok(Some(file))
                 if file.size == request.source_size && file.mtime == request.source_mtime =>
@@ -4276,23 +4823,137 @@ impl JobManager {
             Err(_) => {
                 return Err(AnalysisResolutionError::Retry {
                     code: "source_catalog_read_failed",
-                    delay_ms: 10_000,
                     charge_attempt: true,
                 })
             }
         };
+        self.set_analysis_progress_totals(
+            &request.request_id,
+            &request.target_node_id,
+            file.size.max(0) as u64,
+            file.duration_ms.unwrap_or_default(),
+        );
+        if request.component == "skip_markers" {
+            if request.pipeline_version != crate::http::stream::CHAPTER_ANNOTATION_VERSION {
+                return Err(AnalysisResolutionError::Terminal(
+                    "pipeline_version_unavailable",
+                ));
+            }
+            let stored = self
+                .store
+                .get_file_probe_chapters_json(file.id)
+                .await
+                .map_err(|_| AnalysisResolutionError::Retry {
+                    code: "source_catalog_read_failed",
+                    charge_attempt: true,
+                })?;
+            let stored_chapters = match stored.as_deref() {
+                Some(raw) => Some(
+                    crate::http::stream::bounded_chapter_array(raw)
+                        .map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?,
+                ),
+                None => None,
+            };
+            let chapters = match stored_chapters {
+                Some(chapters) => chapters,
+                None => {
+                    let chapters = match crate::http::stream::probe_chapters_until(
+                        &file.path,
+                        lost,
+                        attest_timeout,
+                    )
+                    .await
+                    {
+                        Ok(chapters) => chapters,
+                        Err(crate::http::stream::ChapterProbeFailure::Cancelled) => {
+                            return Err(AnalysisResolutionError::ClaimLost)
+                        }
+                        Err(crate::http::stream::ChapterProbeFailure::Timeout) => {
+                            return Err(AnalysisResolutionError::Retry {
+                                code: "source_probe_timeout",
+                                charge_attempt: true,
+                            })
+                        }
+                        Err(crate::http::stream::ChapterProbeFailure::Failed) => {
+                            return Err(AnalysisResolutionError::Retry {
+                                code: "source_unavailable",
+                                charge_attempt: true,
+                            })
+                        }
+                    };
+                    if let Ok(json) = serde_json::to_string(&chapters) {
+                        let _ = self.store.merge_file_probe_chapters(file.id, &json).await;
+                    }
+                    chapters
+                }
+            };
+            if lost.is_cancelled() {
+                return Err(AnalysisResolutionError::ClaimLost);
+            }
+            let duration_ms = file
+                .duration_ms
+                .filter(|duration| *duration > 0)
+                .ok_or(AnalysisResolutionError::Terminal("source_duration_missing"))?;
+            let source = crate::http::stream::annotation_source_identity(&file);
+            let markers = crate::http::stream::markers_from_chapters(&chapters, Some(duration_ms));
+            self.update_analysis_progress(
+                &request.request_id,
+                &request.target_node_id,
+                "persisting",
+                file.size.max(0) as u64,
+                duration_ms,
+                0,
+            );
+            let mut set = crate::http::stream::annotation_set_from_markers(source, &markers);
+            set.generation_id = request.requested_generation.clone();
+            if !self
+                .store
+                .record_analysis_request_phase(request, "publishing", None, clock_ms())
+                .await
+                .unwrap_or(false)
+            {
+                return Err(AnalysisResolutionError::ClaimLost);
+            }
+            let published = self
+                .store
+                .publish_timeline_annotation_set_for_request(request, duration_ms, &set, clock_ms())
+                .await
+                .map_err(|_| AnalysisResolutionError::Retry {
+                    code: "queue_write_failed",
+                    charge_attempt: true,
+                })?;
+            if !published {
+                return Err(AnalysisResolutionError::ClaimLost);
+            }
+            self.analysis_metrics
+                .publication("skip_markers", request.force_rebuild);
+            let _ = self
+                .store
+                .record_analysis_request_phase(request, "published", None, clock_ms())
+                .await;
+            return Ok(());
+        }
+        if !crate::ffmpeg::fragment_index_engine_is_current().await {
+            return Err(AnalysisResolutionError::Retry {
+                code: "pipeline_version_unavailable",
+                charge_attempt: false,
+            });
+        }
+        if request.pipeline_version != engine_sha256 {
+            return Err(AnalysisResolutionError::Terminal(
+                "pipeline_version_unavailable",
+            ));
+        }
         let video = fragment_index_requested_video_options(self.store.as_ref(), &file, have_dovi)
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
                 code: "source_catalog_read_failed",
-                delay_ms: 10_000,
                 charge_attempt: true,
             })?;
         let object_version = crate::fragment_index_cluster::inspect_source(&file)
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
                 code: "source_unavailable",
-                delay_ms: 30_000,
                 charge_attempt: true,
             })?;
         let memo = self
@@ -4301,14 +4962,28 @@ impl JobManager {
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
                 code: "source_catalog_read_failed",
-                delay_ms: 10_000,
                 charge_attempt: true,
             })?;
+        if !self
+            .store
+            .record_analysis_request_phase(request, "hashing", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        self.update_analysis_progress(
+            &request.request_id,
+            &request.target_node_id,
+            "verifying",
+            0,
+            0,
+            0,
+        );
         let attested = tokio::select! {
             result = crate::fragment_index_cluster::attest_source(node_id, &file, memo.as_ref()) => {
                 result.map_err(|_| AnalysisResolutionError::Retry {
                     code: "source_attestation_failed",
-                    delay_ms: 30_000,
                     charge_attempt: true,
                 })?
             }
@@ -4318,14 +4993,12 @@ impl JobManager {
                 }
                 return Err(AnalysisResolutionError::Retry {
                     code: "foreground_preempted",
-                    delay_ms: 5_000,
                     charge_attempt: false,
                 });
             }
-            () = tokio::time::sleep(attest_timeout) => {
+            () = wait_analysis_deadline(attest_timeout) => {
                 return Err(AnalysisResolutionError::Retry {
                     code: "source_attestation_timeout",
-                    delay_ms: 30_000,
                     charge_attempt: true,
                 });
             }
@@ -4336,7 +5009,6 @@ impl JobManager {
         if !transcode.pretranscode_worker_idle() || !self.cluster_fragment_index_enabled().await {
             return Err(AnalysisResolutionError::Retry {
                 code: "foreground_preempted",
-                delay_ms: 5_000,
                 charge_attempt: false,
             });
         }
@@ -4345,14 +5017,38 @@ impl JobManager {
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
                 code: "source_record_failed",
-                delay_ms: 10_000,
                 charge_attempt: true,
             })?;
         let pipeline_sha256 =
             crate::fragment_index_cluster::pipeline_digest(&file, engine_sha256, video);
-        let cache_key =
-            cluster_fragment_index_key(&attested.observation.source_sha256, &pipeline_sha256)
-                .ok_or(AnalysisResolutionError::Terminal("invalid_cache_identity"))?;
+        let logical_cache_key = cluster_fragment_index_key(
+            file.id,
+            file.size,
+            file.mtime,
+            &attested.observation.source_sha256,
+            &pipeline_sha256,
+        )
+        .ok_or(AnalysisResolutionError::Terminal("invalid_cache_identity"))?;
+        let cache_key = if request.force_rebuild {
+            cluster_fragment_index_generation_key(
+                file.id,
+                file.size,
+                file.mtime,
+                &attested.observation.source_sha256,
+                &pipeline_sha256,
+                &request.requested_generation,
+            )
+            .ok_or(AnalysisResolutionError::Terminal("invalid_cache_identity"))?
+        } else {
+            self.store
+                .cluster_fragment_index_current_generation(&logical_cache_key)
+                .await
+                .map_err(|_| AnalysisResolutionError::Retry {
+                    code: "source_catalog_read_failed",
+                    charge_attempt: true,
+                })?
+                .unwrap_or(logical_cache_key)
+        };
         let now = clock_ms();
         let job = NewClusterFragmentIndexJob {
             cache_key: cache_key.clone(),
@@ -4361,9 +5057,33 @@ impl JobManager {
             source_mtime: file.mtime,
             source_sha256: attested.observation.source_sha256,
             pipeline_sha256,
+            priority: request.priority.clone(),
+            trigger: request.trigger.clone(),
+            target_node_id: request.target_node_id.clone(),
             not_before_ms: now,
             created_at_ms: now,
         };
+        // Artifact hydration cannot settle the target-specific structural job
+        // under its request fence. Submit one ordinary worker instead of
+        // hydrating and then redundantly rebuilding (or, worse, reporting a
+        // failed request after valid target coverage was already installed).
+        self.update_analysis_progress(
+            &request.request_id,
+            &request.target_node_id,
+            "persisting",
+            file.size.max(0) as u64,
+            file.duration_ms.unwrap_or_default(),
+            0,
+        );
+
+        if !self
+            .store
+            .record_analysis_request_phase(request, "staged", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
 
         let accepted = self
             .store
@@ -4371,7 +5091,6 @@ impl JobManager {
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
                 code: "queue_write_failed",
-                delay_ms: 10_000,
                 charge_attempt: true,
             })?;
         if !accepted {
@@ -4380,7 +5099,6 @@ impl JobManager {
             }
             return Err(AnalysisResolutionError::Retry {
                 code: "queue_full_or_busy",
-                delay_ms: 15_000,
                 charge_attempt: false,
             });
         }
@@ -4394,13 +5112,15 @@ impl JobManager {
         permit_lost: tokio_util::sync::CancellationToken,
     ) -> usize {
         const MAX_JOBS_PER_SLOT: usize = 4;
-        const CLAIM_TTL_MS: i64 = 60_000;
         const MAX_REFUSALS: usize = 4_096;
 
         let node_id = self.coordinator.node_id().to_owned();
-        let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
-        let cache_root = crate::fragment_index_cluster::cache_root(transcode.runtime_cache_dir());
-        let have_dovi = transcode.dv_strippable();
+        let worker = ClusterFragmentIndexWorker {
+            engine_sha256: crate::ffmpeg::fragment_index_engine_digest().await,
+            cache_root: crate::fragment_index_cluster::cache_root(transcode.runtime_cache_dir()),
+            have_dovi: transcode.dv_strippable(),
+            retry_policy: self.analysis_retry_policy().await,
+        };
         let mut built = 0_usize;
         for _ in 0..MAX_JOBS_PER_SLOT {
             if permit_lost.is_cancelled()
@@ -4426,7 +5146,7 @@ impl JobManager {
                     &node_id,
                     &excluded,
                     now,
-                    now.saturating_add(CLAIM_TTL_MS),
+                    now.saturating_add(worker.retry_policy.lease_ms),
                 )
                 .await
             {
@@ -4441,9 +5161,7 @@ impl JobManager {
                 .run_cluster_fragment_index_job(
                     Arc::clone(&transcode),
                     job,
-                    engine_sha256.clone(),
-                    cache_root.clone(),
-                    have_dovi,
+                    worker.clone(),
                     permit_lost.clone(),
                 )
                 .await
@@ -4460,6 +5178,11 @@ impl JobManager {
             .await
             .ok()
             .is_some_and(setting_enabled)
+    }
+
+    async fn analysis_retry_policy(&self) -> AnalysisRetryPolicy {
+        let settings = self.store.settings_snapshot().await.unwrap_or_default();
+        AnalysisRetryPolicy::from_settings(&settings)
     }
 
     async fn wait_for_cluster_fragment_index_stop(
@@ -4503,33 +5226,42 @@ impl JobManager {
         self: Arc<Self>,
         transcode: Arc<TranscodeManager>,
         job: plurx_core::store::ClusterFragmentIndexJob,
-        engine_sha256: String,
-        cache_root: PathBuf,
-        have_dovi: bool,
+        worker: ClusterFragmentIndexWorker,
         permit_lost: tokio_util::sync::CancellationToken,
     ) -> bool {
-        const RENEW_EVERY: Duration = Duration::from_secs(20);
-        const CLAIM_TTL_MS: i64 = 60_000;
-        const RETRY_MS: i64 = 5 * 60_000;
         // Long enough for a node to walk the entire enforced 4,096-job active
         // queue at eight refusals per minute. Discovery removes an exclusion
         // immediately when the exact source becomes readable again.
         const LOCAL_REFUSAL_MS: i64 = 24 * 60 * 60_000;
         const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-        const PREEMPT_RETRY_MS: i64 = 5_000;
 
+        let _progress = self.start_analysis_progress(
+            (&job.cache_key, &job.target_node_id),
+            job.file_id,
+            "fragment_index",
+            "verifying",
+            job.source_size.max(0) as u64,
+            0,
+        );
         let node_id = self.coordinator.node_id().to_owned();
         let stop = tokio_util::sync::CancellationToken::new();
         let lost = tokio_util::sync::CancellationToken::new();
+        let retry_identity = format!("{}:{}", job.cache_key, job.target_node_id);
+        let retry_ms = worker
+            .retry_policy
+            .backoff_ms(&retry_identity, job.attempts.max(1));
         let heartbeat = {
             let store = Arc::clone(&self.store);
             let cache_key = job.cache_key.clone();
+            let target_node_id = job.target_node_id.clone();
             let node_id = node_id.clone();
             let stop = stop.clone();
             let lost = lost.clone();
             let fence = job.fence;
+            let renew_every = worker.retry_policy.renew_every();
+            let lease_ms = worker.retry_policy.lease_ms;
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(RENEW_EVERY);
+                let mut interval = tokio::time::interval(renew_every);
                 loop {
                     tokio::select! {
                         _ = stop.cancelled() => break,
@@ -4537,10 +5269,11 @@ impl JobManager {
                             let now = clock_ms();
                             match store.renew_cluster_fragment_index(
                                 &cache_key,
+                                &target_node_id,
                                 &node_id,
                                 fence,
                                 now,
-                                now.saturating_add(CLAIM_TTL_MS),
+                                now.saturating_add(lease_ms),
                             ).await {
                                 Ok(true) => {}
                                 Ok(false) | Err(_) => {
@@ -4559,29 +5292,47 @@ impl JobManager {
                 stop.cancel();
                 let _ = heartbeat.await;
             };
-        let file = match self.store.get_file(job.file_id).await {
-            Ok(Some(file)) if file.size == job.source_size && file.mtime == job.source_mtime => {
-                file
-            }
-            _ => {
+        let file = match classify_fragment_source_read(
+            self.store.get_file(job.file_id).await,
+            job.source_size,
+            job.source_mtime,
+        ) {
+            Ok(file) => file,
+            Err(failure) => {
                 let now = clock_ms();
+                let (code, retryable) = match failure {
+                    FragmentSourceReadFailure::Stale => ("source_superseded", false),
+                    FragmentSourceReadFailure::Transient => ("source_catalog_read_failed", true),
+                };
                 let _ = self
                     .store
                     .fail_cluster_fragment_index(
                         &job.cache_key,
+                        &job.target_node_id,
                         &node_id,
                         job.fence,
-                        "source_superseded",
+                        code,
+                        retryable,
                         now,
-                        now.saturating_add(RETRY_MS),
+                        now.saturating_add(retry_ms),
                     )
                     .await;
                 finish_heartbeat(stop, heartbeat).await;
                 return false;
             }
         };
-        let videos = match fragment_index_video_identities(self.store.as_ref(), &file, have_dovi)
-            .await
+        self.set_analysis_progress_totals(
+            &job.cache_key,
+            &job.target_node_id,
+            file.size.max(0) as u64,
+            file.duration_ms.unwrap_or_default(),
+        );
+        let videos = match fragment_index_video_identities(
+            self.store.as_ref(),
+            &file,
+            worker.have_dovi,
+        )
+        .await
         {
             Ok(videos) => videos,
             Err(error) => {
@@ -4589,12 +5340,15 @@ impl JobManager {
                 let now = clock_ms();
                 let _ = self
                     .store
-                    .yield_cluster_fragment_index(
+                    .fail_cluster_fragment_index(
                         &job.cache_key,
+                        &job.target_node_id,
                         &node_id,
                         job.fence,
+                        "source_catalog_read_failed",
+                        true,
                         now,
-                        now.saturating_add(RETRY_MS),
+                        now.saturating_add(retry_ms),
                     )
                     .await;
                 finish_heartbeat(stop, heartbeat).await;
@@ -4606,15 +5360,38 @@ impl JobManager {
             Err(error) => {
                 tracing::debug!(file_id = file.id, %error, "claimed index source is not local");
                 let now = clock_ms();
-                self.remember_fragment_index_refusal(
-                    &job.cache_key,
-                    now.saturating_add(LOCAL_REFUSAL_MS),
-                )
-                .await;
-                let _ = self
-                    .store
-                    .yield_cluster_fragment_index(&job.cache_key, &node_id, job.fence, now, now)
+                if job.target_node_id.is_empty() {
+                    self.remember_fragment_index_refusal(
+                        &job.cache_key,
+                        now.saturating_add(LOCAL_REFUSAL_MS),
+                    )
                     .await;
+                    let _ = self
+                        .store
+                        .yield_cluster_fragment_index(
+                            &job.cache_key,
+                            &job.target_node_id,
+                            &node_id,
+                            job.fence,
+                            now,
+                            now,
+                        )
+                        .await;
+                } else {
+                    let _ = self
+                        .store
+                        .fail_cluster_fragment_index(
+                            &job.cache_key,
+                            &job.target_node_id,
+                            &node_id,
+                            job.fence,
+                            "source_unavailable",
+                            true,
+                            now,
+                            now.saturating_add(retry_ms),
+                        )
+                        .await;
+                }
                 finish_heartbeat(stop, heartbeat).await;
                 return false;
             }
@@ -4645,10 +5422,11 @@ impl JobManager {
                 .store
                 .yield_cluster_fragment_index(
                     &job.cache_key,
+                    &job.target_node_id,
                     &node_id,
                     job.fence,
                     now,
-                    now.saturating_add(PREEMPT_RETRY_MS),
+                    now.saturating_add(retry_ms),
                 )
                 .await;
             finish_heartbeat(stop, heartbeat).await;
@@ -4658,15 +5436,38 @@ impl JobManager {
             Ok(attested) if attested.observation.source_sha256 == job.source_sha256 => attested,
             Ok(_) | Err(_) => {
                 let now = clock_ms();
-                self.remember_fragment_index_refusal(
-                    &job.cache_key,
-                    now.saturating_add(LOCAL_REFUSAL_MS),
-                )
-                .await;
-                let _ = self
-                    .store
-                    .yield_cluster_fragment_index(&job.cache_key, &node_id, job.fence, now, now)
+                if job.target_node_id.is_empty() {
+                    self.remember_fragment_index_refusal(
+                        &job.cache_key,
+                        now.saturating_add(LOCAL_REFUSAL_MS),
+                    )
                     .await;
+                    let _ = self
+                        .store
+                        .yield_cluster_fragment_index(
+                            &job.cache_key,
+                            &job.target_node_id,
+                            &node_id,
+                            job.fence,
+                            now,
+                            now,
+                        )
+                        .await;
+                } else {
+                    let _ = self
+                        .store
+                        .fail_cluster_fragment_index(
+                            &job.cache_key,
+                            &job.target_node_id,
+                            &node_id,
+                            job.fence,
+                            "source_attestation_failed",
+                            true,
+                            now,
+                            now.saturating_add(retry_ms),
+                        )
+                        .await;
+                }
                 finish_heartbeat(stop, heartbeat).await;
                 return false;
             }
@@ -4681,7 +5482,7 @@ impl JobManager {
         // whose pipeline this build no longer emits is superseded exactly as
         // it was when there was only ever one identity to compare.
         let Some(video) = videos.into_iter().find(|video| {
-            crate::fragment_index_cluster::pipeline_digest(&file, &engine_sha256, *video)
+            crate::fragment_index_cluster::pipeline_digest(&file, &worker.engine_sha256, *video)
                 == job.pipeline_sha256
         }) else {
             let now = clock_ms();
@@ -4689,24 +5490,39 @@ impl JobManager {
                 .store
                 .fail_cluster_fragment_index(
                     &job.cache_key,
+                    &job.target_node_id,
                     &node_id,
                     job.fence,
                     "pipeline_superseded",
+                    false,
                     now,
-                    now.saturating_add(RETRY_MS),
+                    now.saturating_add(retry_ms),
                 )
                 .await;
             finish_heartbeat(stop, heartbeat).await;
             return false;
         };
 
+        let progress_jobs = Arc::clone(&self);
+        let progress_key = job.cache_key.clone();
+        let progress_target = job.target_node_id.clone();
         let (outcome, preempted) = tokio::select! {
-            outcome = crate::fragindex::build_from_attested_file(
+            outcome = crate::fragindex::build_from_attested_file_with_progress(
                 &file,
                 &attested.handle,
                 video,
                 transcode.runtime_cache_dir(),
                 index_file_budget(file.duration_ms),
+                move |bytes_read, media_ms, fragments| {
+                    progress_jobs.update_analysis_progress(
+                        &progress_key,
+                        &progress_target,
+                        "fragment_index",
+                        bytes_read,
+                        media_ms,
+                        fragments,
+                    );
+                },
             ) => (Some(outcome), false),
             () = lost.cancelled() => (None, false),
             () = self.wait_for_cluster_fragment_index_stop(
@@ -4720,10 +5536,11 @@ impl JobManager {
                 .store
                 .yield_cluster_fragment_index(
                     &job.cache_key,
+                    &job.target_node_id,
                     &node_id,
                     job.fence,
                     now,
-                    now.saturating_add(PREEMPT_RETRY_MS),
+                    now.saturating_add(retry_ms),
                 )
                 .await;
         }
@@ -4740,11 +5557,13 @@ impl JobManager {
                     .store
                     .fail_cluster_fragment_index(
                         &job.cache_key,
+                        &job.target_node_id,
                         &node_id,
                         job.fence,
                         "truncated",
+                        false,
                         now,
-                        now.saturating_add(RETRY_MS),
+                        now.saturating_add(retry_ms),
                     )
                     .await;
                 finish_heartbeat(stop, heartbeat).await;
@@ -4757,17 +5576,27 @@ impl JobManager {
                     .store
                     .fail_cluster_fragment_index(
                         &job.cache_key,
+                        &job.target_node_id,
                         &node_id,
                         job.fence,
                         "unsupported",
+                        false,
                         now,
-                        now.saturating_add(RETRY_MS),
+                        now.saturating_add(retry_ms),
                     )
                     .await;
                 finish_heartbeat(stop, heartbeat).await;
                 return false;
             }
         };
+        self.update_analysis_progress(
+            &job.cache_key,
+            &job.target_node_id,
+            "persisting",
+            file.size.max(0) as u64,
+            file.duration_ms.unwrap_or_default(),
+            index.rows.len(),
+        );
         if !crate::fragment_index_cluster::source_still_matches(
             &attested.handle,
             &attested.observation,
@@ -4779,11 +5608,13 @@ impl JobManager {
                 .store
                 .fail_cluster_fragment_index(
                     &job.cache_key,
+                    &job.target_node_id,
                     &node_id,
                     job.fence,
                     "source_changed",
+                    false,
                     now,
-                    now.saturating_add(RETRY_MS),
+                    now.saturating_add(retry_ms),
                 )
                 .await;
             finish_heartbeat(stop, heartbeat).await;
@@ -4802,11 +5633,13 @@ impl JobManager {
                 .store
                 .fail_cluster_fragment_index(
                     &job.cache_key,
+                    &job.target_node_id,
                     &node_id,
                     job.fence,
                     "source_superseded",
+                    false,
                     now,
-                    now.saturating_add(RETRY_MS),
+                    now.saturating_add(retry_ms),
                 )
                 .await;
             finish_heartbeat(stop, heartbeat).await;
@@ -4825,11 +5658,13 @@ impl JobManager {
                     .store
                     .fail_cluster_fragment_index(
                         &job.cache_key,
+                        &job.target_node_id,
                         &node_id,
                         job.fence,
                         "encode_failed",
+                        false,
                         now,
-                        now.saturating_add(RETRY_MS),
+                        now.saturating_add(retry_ms),
                     )
                     .await;
                 finish_heartbeat(stop, heartbeat).await;
@@ -4860,17 +5695,19 @@ impl JobManager {
                 .store
                 .yield_cluster_fragment_index(
                     &job.cache_key,
+                    &job.target_node_id,
                     &node_id,
                     job.fence,
                     now,
-                    now.saturating_add(PREEMPT_RETRY_MS),
+                    now.saturating_add(retry_ms),
                 )
                 .await;
             finish_heartbeat(stop, heartbeat).await;
             return false;
         }
         if let Err(error) =
-            crate::fragment_index_cluster::install_local_blob(&cache_root, &artifact, &blob).await
+            crate::fragment_index_cluster::install_local_blob(&worker.cache_root, &artifact, &blob)
+                .await
         {
             tracing::warn!(file_id = file.id, %error, "publishing local fragment-index blob");
             let now = clock_ms();
@@ -4878,11 +5715,13 @@ impl JobManager {
                 .store
                 .fail_cluster_fragment_index(
                     &job.cache_key,
+                    &job.target_node_id,
                     &node_id,
                     job.fence,
                     "local_publish_failed",
+                    true,
                     now,
-                    now.saturating_add(RETRY_MS),
+                    now.saturating_add(retry_ms),
                 )
                 .await;
             finish_heartbeat(stop, heartbeat).await;
@@ -4899,10 +5738,11 @@ impl JobManager {
                 .store
                 .yield_cluster_fragment_index(
                     &job.cache_key,
+                    &job.target_node_id,
                     &node_id,
                     job.fence,
                     now,
-                    now.saturating_add(PREEMPT_RETRY_MS),
+                    now.saturating_add(retry_ms),
                 )
                 .await;
             finish_heartbeat(stop, heartbeat).await;
@@ -4925,6 +5765,8 @@ impl JobManager {
                 if let Err(error) = self.store.put_fragment_index(file.id, &index).await {
                     tracing::warn!(file_id = file.id, %error, "installing built fragment index");
                 }
+                self.analysis_metrics
+                    .publication("fragment_index", job.priority == "forced");
                 true
             }
             Ok(false) => false,
@@ -5531,6 +6373,22 @@ fn error_status(message: &str) -> ScanStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_fragment_source_reads_are_retryable_not_stale() {
+        assert!(matches!(
+            classify_fragment_source_read(
+                Err(StoreError::Database("temporary authority read".to_owned())),
+                10,
+                20,
+            ),
+            Err(FragmentSourceReadFailure::Transient)
+        ));
+        assert!(matches!(
+            classify_fragment_source_read(Ok(None), 10, 20),
+            Err(FragmentSourceReadFailure::Stale)
+        ));
+    }
     use plurx_core::domain::{ItemKind, NewItem, NewLibrary, PlaybackEventQuery};
     use plurx_core::store::{
         LibraryStore, MediaStore, PlaybackTelemetryStore, SettingsStore, SqliteStore,
@@ -5556,6 +6414,12 @@ mod tests {
                 pinned_bytes: value,
             },
             watched_outbox: (value, value, value),
+            analysis: plurx_core::store::AnalysisStoreMetrics {
+                queue_depth: [value; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
+                queue_oldest_age_seconds: [value; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
+                lifecycle_counts: [value; plurx_core::store::ANALYSIS_LIFECYCLE_METRIC_SLOTS],
+                marker_counts: [value; plurx_core::store::ANALYSIS_MARKER_METRIC_SLOTS],
+            },
         }
     }
 
@@ -5645,6 +6509,109 @@ mod tests {
 
     fn manager(store: Arc<dyn Store>, artwork: &std::path::Path) -> Arc<JobManager> {
         Arc::new(JobManager::new(store, artwork.to_path_buf()))
+    }
+
+    #[test]
+    fn analysis_backoff_is_stable_exponential_jitter_with_a_cap() {
+        let policy = AnalysisRetryPolicy::from_settings(&BTreeMap::new());
+        assert_eq!(
+            policy.lease_ms,
+            plurx_core::store::DEFAULT_ANALYSIS_LEASE_SECS * 1_000
+        );
+        let first = policy.backoff_ms("request-a", 1);
+        assert_eq!(first, policy.backoff_ms("request-a", 1));
+        assert!((3_750..=6_250).contains(&first));
+        let later = policy.backoff_ms("request-a", 6);
+        assert!(later >= first);
+        assert!(later <= policy.backoff_max_ms);
+        assert_eq!(
+            policy.backoff_ms("request-a", 60),
+            policy.backoff_max_ms,
+            "a large attempt cannot overflow or exceed the configured ceiling"
+        );
+    }
+
+    #[test]
+    fn analysis_progress_registry_is_bounded_and_removes_completed_work() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = crate::test_tempdir().expect("artwork");
+        let jobs = manager(store, artwork.path());
+        let mut guards = Vec::new();
+        for index in 0..(MAX_ANALYSIS_PROGRESS + 8) {
+            guards.push(jobs.start_analysis_progress(
+                (&format!("job-{index:03}"), ""),
+                index as i64,
+                "fragment_index",
+                "probing",
+                1_000,
+                2_000,
+            ));
+        }
+        assert_eq!(
+            jobs.analysis_progress_snapshot().len(),
+            MAX_ANALYSIS_PROGRESS
+        );
+        let newest = format!("job-{:03}", MAX_ANALYSIS_PROGRESS + 7);
+        jobs.update_analysis_progress(&newest, "", "fragment_index", 500, 1_000, 12);
+        let row = jobs
+            .analysis_progress_snapshot()
+            .into_iter()
+            .find(|row| row.job_id == newest)
+            .expect("newest progress retained");
+        assert_eq!(row.stage, "fragment_index");
+        assert_eq!(row.fragments_indexed, 12);
+        drop(guards);
+        assert!(jobs.analysis_progress_snapshot().is_empty());
+        assert!(jobs
+            .analysis_metrics
+            .current_by_stage
+            .iter()
+            .all(|value| value.load(Ordering::Relaxed) == 0));
+
+        let old =
+            jobs.start_analysis_progress(("same-job", ""), 1, "skip_markers", "probing", 1, 1);
+        let current =
+            jobs.start_analysis_progress(("same-job", ""), 1, "skip_markers", "persisting", 1, 1);
+        drop(old);
+        assert_eq!(jobs.analysis_progress_snapshot()[0].stage, "persisting");
+        drop(current);
+        assert!(jobs.analysis_progress_snapshot().is_empty());
+        assert!(jobs
+            .analysis_metrics
+            .current_by_stage
+            .iter()
+            .all(|value| value.load(Ordering::Relaxed) == 0));
+
+        let generic = jobs.start_analysis_progress(
+            ("shared-cache", ""),
+            1,
+            "fragment_index",
+            "verifying",
+            1,
+            1,
+        );
+        let targeted = jobs.start_analysis_progress(
+            ("shared-cache", "node-a"),
+            1,
+            "fragment_index",
+            "fragment_index",
+            1,
+            1,
+        );
+        let snapshot = jobs.analysis_progress_snapshot();
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.iter().any(|row| row.stage == "verifying"));
+        assert!(snapshot.iter().any(|row| row.stage == "fragment_index"));
+        drop(generic);
+        assert_eq!(jobs.analysis_progress_snapshot().len(), 1);
+        assert_eq!(jobs.analysis_progress_snapshot()[0].stage, "fragment_index");
+        drop(targeted);
+        assert!(jobs.analysis_progress_snapshot().is_empty());
+        assert!(jobs
+            .analysis_metrics
+            .current_by_stage
+            .iter()
+            .all(|value| value.load(Ordering::Relaxed) == 0));
     }
 
     fn manager_with_tmdb(

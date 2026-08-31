@@ -23,6 +23,7 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use plurx_core::domain::MediaFile;
@@ -44,6 +45,9 @@ type SourceFd = i32;
 /// `read` rather than holding a large buffer.
 const READ_CHUNK: usize = 256 * 1024;
 
+type IndexProgress = dyn Fn(u64, i64, usize) + Send + Sync;
+type SharedIndexProgress = Arc<IndexProgress>;
+
 /// How an index build ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndexOutcome {
@@ -63,16 +67,28 @@ pub enum IndexOutcome {
 /// Generic over the source for the same reason [`crate::copyseg::run`] is:
 /// everything between the pipe and the index is worth testing and none of it
 /// needs a real child process to be worth testing.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn index_stream<R: AsyncRead + Unpin>(
+    src: R,
+    identity: SourceIdentity,
+    expected_ms: Option<i64>,
+) -> IndexOutcome {
+    index_stream_with_progress(src, identity, expected_ms, None).await
+}
+
+async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     mut src: R,
     identity: SourceIdentity,
     expected_ms: Option<i64>,
+    progress: Option<&IndexProgress>,
 ) -> IndexOutcome {
     let mut reader = FragmentReader::new();
     let mut init: Option<Init> = None;
     let mut init_sha = String::new();
     let mut timescale: u32 = 0;
     let mut rows: Vec<IndexRow> = Vec::new();
+    let mut bytes_read = 0_u64;
+    let mut covered_ticks = 0_u64;
     // The promotion inputs the whole film's generations will share, taken from
     // the first clean fragment, plus whether every later clean fragment agrees
     // with it. Both are plan §2.2's ruling: capture once, check continuously,
@@ -92,6 +108,7 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
                 }
             }
         };
+        bytes_read = bytes_read.saturating_add(read as u64);
         reader.push(&buf[..read]);
 
         loop {
@@ -155,6 +172,7 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
                     };
                     let dts = track.base_decode_time;
                     let duration = fragment.video_duration(init);
+                    covered_ticks = covered_ticks.saturating_add(duration);
                     let bytes = u32::try_from(fragment.len()).unwrap_or(u32::MAX);
                     // The landing matcher's quantity. Container overhead is
                     // excluded deliberately: a production generation carries
@@ -199,6 +217,17 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
                 // the strongest evidence the pass was complete.
                 Unit::Trailer => {}
             }
+        }
+        if let Some(progress) = progress {
+            let media_ms = if timescale > 0 {
+                covered_ticks
+                    .saturating_mul(1_000)
+                    .saturating_div(u64::from(timescale))
+                    .min(i64::MAX as u64) as i64
+            } else {
+                0
+            };
+            progress(bytes_read, media_ms, rows.len());
         }
     }
 
@@ -336,12 +365,13 @@ pub async fn build(
     budget: Duration,
 ) -> IndexOutcome {
     let args = transcode::copy_index_pipe_args(file, video);
-    build_with_args(file, args, None, video, runtime_cache, budget).await
+    build_with_args(file, args, None, video, runtime_cache, budget, None).await
 }
 
 /// Build from the exact file descriptor whose complete digest was observed.
 /// The parent retains ownership; the child receives a duplicate as fd 3.
 #[cfg(unix)]
+#[allow(dead_code)]
 pub async fn build_from_attested_file(
     file: &MediaFile,
     source: &std::fs::File,
@@ -359,11 +389,40 @@ pub async fn build_from_attested_file(
         video,
         runtime_cache,
         budget,
+        None,
+    )
+    .await
+}
+
+#[cfg(unix)]
+pub async fn build_from_attested_file_with_progress<F>(
+    file: &MediaFile,
+    source: &std::fs::File,
+    video: transcode::CopyVideoOptions,
+    runtime_cache: &Path,
+    budget: Duration,
+    progress: F,
+) -> IndexOutcome
+where
+    F: Fn(u64, i64, usize) + Send + Sync + 'static,
+{
+    use std::os::fd::AsRawFd;
+
+    let args = transcode::copy_index_pipe_args_with_input(file, "/dev/fd/3", video);
+    build_with_args(
+        file,
+        args,
+        Some(source.as_raw_fd()),
+        video,
+        runtime_cache,
+        budget,
+        Some(Arc::new(progress)),
     )
     .await
 }
 
 #[cfg(not(unix))]
+#[allow(dead_code)]
 pub async fn build_from_attested_file(
     file: &MediaFile,
     _source: &std::fs::File,
@@ -374,6 +433,31 @@ pub async fn build_from_attested_file(
     build(file, video, runtime_cache, budget).await
 }
 
+#[cfg(not(unix))]
+pub async fn build_from_attested_file_with_progress<F>(
+    file: &MediaFile,
+    _source: &std::fs::File,
+    video: transcode::CopyVideoOptions,
+    runtime_cache: &Path,
+    budget: Duration,
+    progress: F,
+) -> IndexOutcome
+where
+    F: Fn(u64, i64, usize) + Send + Sync + 'static,
+{
+    let args = transcode::copy_index_pipe_args(file, video);
+    build_with_args(
+        file,
+        args,
+        None,
+        video,
+        runtime_cache,
+        budget,
+        Some(Arc::new(progress)),
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn build_with_args(
     file: &MediaFile,
@@ -382,6 +466,7 @@ async fn build_with_args(
     video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
+    progress: Option<SharedIndexProgress>,
 ) -> IndexOutcome {
     let identity = identity_for(file, video);
     // The probe's duration, carried in so a short read is caught. Passed in
@@ -449,14 +534,18 @@ async fn build_with_args(
         });
     }
 
-    let outcome =
-        match tokio::time::timeout(budget, index_stream(stdout, identity, expected_ms)).await {
-            Ok(outcome) => outcome,
-            Err(_) => IndexOutcome::Truncated {
-                reason: format!("exceeded the {}s index budget", budget.as_secs()),
-                rows: 0,
-            },
-        };
+    let outcome = match tokio::time::timeout(
+        budget,
+        index_stream_with_progress(stdout, identity, expected_ms, progress.as_deref()),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => IndexOutcome::Truncated {
+            reason: format!("exceeded the {}s index budget", budget.as_secs()),
+            rows: 0,
+        },
+    };
     let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     let outcome = match (outcome, status) {
         (IndexOutcome::Built(_), Ok(Ok(status))) if !status.success() => IndexOutcome::Truncated {

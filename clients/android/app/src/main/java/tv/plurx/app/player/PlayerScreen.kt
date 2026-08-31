@@ -690,11 +690,46 @@ private fun PlayerContent(
     }
     var lastInteraction by remember { mutableLongStateOf(0L) }
     var lastAutoSkipped by remember(plan) { mutableLongStateOf(-1L) }
+    var lastMarkerSkipEndMs by remember(plan) { mutableLongStateOf(-1L) }
+    val markerOfferLedger = remember(controller, plan) { MarkerOfferLedger() }
+    val markerOfferGeneration = remember(controller, plan) {
+        java.util.UUID.randomUUID().toString()
+    }
     var findingNext by remember { mutableStateOf(false) }
 
     fun poke() {
         controlsVisible = true
         lastInteraction += 1
+    }
+
+    fun recordMarkerEvent(event: String, detail: String, message: String) {
+        postPlaybackClientLog(
+            scope,
+            PlaybackClientLog(
+                level = "info",
+                event = event,
+                message = message,
+                method = plan.mode,
+                fileId = plan.fileId,
+                detail = detail,
+                ua = "Android Media3",
+            ),
+        )
+    }
+
+    fun seekWithMarkerUndo(targetMs: Long) {
+        if (lastMarkerSkipEndMs > 0 &&
+            targetMs < lastMarkerSkipEndMs - 1_000 &&
+            controller.realPosition() >= lastMarkerSkipEndMs - 1_000
+        ) {
+            recordMarkerEvent(
+                "marker_seek_back",
+                "undo",
+                "viewer sought behind the last marker destination",
+            )
+            lastMarkerSkipEndMs = -1
+        }
+        controller.seekTo(targetMs)
     }
 
     fun nudgeHiddenSeek(deltaMs: Long) {
@@ -888,10 +923,30 @@ private fun PlayerContent(
     }
 
     val activeMarker = plan.markers.firstOrNull { positionMs in it.start_ms until it.end_ms }
-    LaunchedEffect(activeMarker?.start_ms, preferences.autoSkip) {
-        if (preferences.autoSkip && activeMarker != null && activeMarker.start_ms != lastAutoSkipped) {
-            lastAutoSkipped = activeMarker.start_ms
-            controller.seekTo(activeMarker.end_ms)
+    LaunchedEffect(
+        activeMarker?.kind,
+        activeMarker?.start_ms,
+        activeMarker?.isAutoSkipEligible,
+        isInPip,
+        scrubbing,
+        preferences.autoSkip,
+    ) {
+        val marker = activeMarker ?: return@LaunchedEffect
+        val automatic = preferences.autoSkip && marker.isAutoSkipEligible
+        if (!isInPip && !scrubbing && !automatic &&
+            markerOfferLedger.shouldReport(markerOfferGeneration, marker.kind, marker.start_ms)
+        ) {
+            recordMarkerEvent("marker_offer", marker.kind, "playback marker offered")
+        }
+    }
+    LaunchedEffect(activeMarker?.start_ms, activeMarker?.isAutoSkipEligible, preferences.autoSkip) {
+        val marker = activeMarker
+        if (preferences.autoSkip && marker?.isAutoSkipEligible == true && marker.start_ms != lastAutoSkipped) {
+            lastAutoSkipped = marker.start_ms
+            recordMarkerEvent("marker_automatic_skip", marker.kind, "playback marker skipped")
+            recordMarkerEvent("marker_prewarm", "miss", "skip destination was not prewarmed")
+            lastMarkerSkipEndMs = marker.end_ms
+            seekWithMarkerUndo(marker.end_ms)
         }
     }
 
@@ -939,10 +994,10 @@ private fun PlayerContent(
                         }
                     }
                     KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                        controller.seekTo(controller.realPosition() - 10_000); poke(); true
+                        seekWithMarkerUndo(controller.realPosition() - 10_000); poke(); true
                     }
                     KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                        controller.seekTo(controller.realPosition() + 10_000); poke(); true
+                        seekWithMarkerUndo(controller.realPosition() + 10_000); poke(); true
                     }
                     KeyEvent.KEYCODE_DPAD_LEFT,
                     KeyEvent.KEYCODE_DPAD_RIGHT,
@@ -1008,9 +1063,17 @@ private fun PlayerContent(
             }
         }
 
-        if (!isInPip && activeMarker != null && !scrubbing && !preferences.autoSkip) {
+        if (!isInPip && activeMarker != null && !scrubbing &&
+            !(preferences.autoSkip && activeMarker.isAutoSkipEligible)
+        ) {
             TvButton(
-                onClick = { controller.seekTo(activeMarker.end_ms); poke() },
+                onClick = {
+                    recordMarkerEvent("marker_manual_skip", activeMarker.kind, "playback marker skipped")
+                    recordMarkerEvent("marker_prewarm", "miss", "skip destination was not prewarmed")
+                    lastMarkerSkipEndMs = activeMarker.end_ms
+                    seekWithMarkerUndo(activeMarker.end_ms)
+                    poke()
+                },
                 modifier = Modifier.align(Alignment.BottomEnd).padding(end = 28.dp, bottom = 112.dp),
             ) { Text(activeMarker.displayLabel, fontWeight = FontWeight.SemiBold) }
         }
@@ -1041,11 +1104,11 @@ private fun PlayerContent(
                 onTransportHeight = { transportHeightPx = it },
                 onBack = onExit,
                 onPlayPause = { controller.playPause(); poke() },
-                onSeekBack = { controller.seekTo(controller.realPosition() - 10_000); poke() },
-                onSeekForward = { controller.seekTo(controller.realPosition() + 10_000); poke() },
+                onSeekBack = { seekWithMarkerUndo(controller.realPosition() - 10_000); poke() },
+                onSeekForward = { seekWithMarkerUndo(controller.realPosition() + 10_000); poke() },
                 onScrubStart = { scrubbing = true; scrubPreview = positionMs },
                 onScrub = { scrubPreview = it },
-                onScrubEnd = { controller.seekTo(scrubPreview); scrubbing = false; poke() },
+                onScrubEnd = { seekWithMarkerUndo(scrubPreview); scrubbing = false; poke() },
                 onTracks = { panel = PlayerPanel.Tracks },
                 onSettings = { panel = PlayerPanel.Settings },
                 onInfo = {

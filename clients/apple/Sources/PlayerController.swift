@@ -41,6 +41,30 @@ private struct ApplePlaybackFailureLog: Encodable {
     }
 }
 
+private struct AppleMarkerPlaybackLog: Encodable {
+    let level = "info"
+    let event: String
+    let message: String
+    let method: String
+    let title: String
+    let fileId: Int
+    let detail: String
+    let ua = "Apple AVPlayer"
+
+    enum CodingKeys: String, CodingKey {
+        case level, event, message, method, title, detail, ua
+        case fileId = "file_id"
+    }
+}
+
+struct MarkerOfferLedger {
+    private var offered: Set<String> = []
+
+    mutating func shouldReport(generation: String, marker: Marker) -> Bool {
+        offered.insert("\(generation):\(marker.kind):\(marker.startMs)").inserted
+    }
+}
+
 /// A repeated end notification at one early media boundary is a terminal
 /// playback failure even though AVPlayer reports no NSError. Give it its own
 /// event so server logs do not mislabel a playlist/timestamp failure as a
@@ -1498,6 +1522,8 @@ final class PlayerController: ObservableObject {
     /// telemetry needs the opposite so the stalled predecessor and recovered
     /// successor never collapse into one attempt.
     private var playbackAttemptId = UUID().uuidString
+    private var lastMarkerSkipEndMs: Int?
+    private var markerOfferLedger = MarkerOfferLedger()
     private var pgsOverlayTrackIndex: Int?
     private var pgsOverlayManifest: PGSOverlayManifest?
     private var pgsOverlayPrepareTask: Task<Void, Never>?
@@ -1973,10 +1999,43 @@ final class PlayerController: ObservableObject {
 
     func skipActiveMarker() {
         guard let marker = activeMarker else { return }
+        reportMarkerEvent(
+            "marker_manual_skip",
+            detail: marker.kind,
+            message: "playback marker skipped"
+        )
+        reportMarkerEvent(
+            "marker_prewarm",
+            detail: "miss",
+            message: "skip destination was not prewarmed"
+        )
+        lastMarkerSkipEndMs = marker.endMs
         seek(toMs: marker.endMs)
     }
 
+    func reportMarkerOffer(_ marker: Marker) {
+        guard markerOfferLedger.shouldReport(
+            generation: playbackAttemptId,
+            marker: marker
+        ) else { return }
+        reportMarkerEvent(
+            "marker_offer",
+            detail: marker.kind,
+            message: "playback marker offered"
+        )
+    }
+
     func seek(toMs requested: Int) {
+        if let markerEnd = lastMarkerSkipEndMs,
+           requested < markerEnd - 1_000,
+           currentMs >= markerEnd - 1_000 {
+            reportMarkerEvent(
+                "marker_seek_back",
+                detail: "undo",
+                message: "viewer sought behind the last marker destination"
+            )
+            lastMarkerSkipEndMs = nil
+        }
         let request = seekState.absolute(requested, durationMs: knownDurationMs)
         issueSeek(to: request.target, generation: request.generation)
     }
@@ -4226,6 +4285,17 @@ final class PlayerController: ObservableObject {
         Task {
             _ = try? await URLSession.shared.data(for: request)
         }
+    }
+
+    private func reportMarkerEvent(_ event: String, detail: String, message: String) {
+        postClientLog(AppleMarkerPlaybackLog(
+            event: event,
+            message: message,
+            method: clientLogMethod,
+            title: title,
+            fileId: fileId,
+            detail: detail
+        ))
     }
 
     /// `ladderStep` names the recovery this failure bought, so a device log

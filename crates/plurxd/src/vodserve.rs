@@ -969,6 +969,17 @@ pub struct VodServe {
     shared: Arc<Shared>,
 }
 
+fn repair_job_for_artifact(
+    mut repair: plurx_core::store::NewClusterFragmentIndexJob,
+    artifact: &plurx_core::store::ClusterFragmentIndexArtifact,
+) -> plurx_core::store::NewClusterFragmentIndexJob {
+    // Serving resolves a logical key through the durable head. Repair must
+    // rebuild that resolved immutable generation, not the pre-resolution
+    // logical key, or the head would continue pointing at an unavailable blob.
+    repair.cache_key.clone_from(&artifact.cache_key);
+    repair
+}
+
 impl VodServe {
     /// `base` is the renditions root directory (created lazily).
     pub fn new(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
@@ -1217,9 +1228,14 @@ impl VodServe {
             .ok_or_else(|| "this node has not attested the current source object".to_owned())?;
         let engine = crate::ffmpeg::fragment_index_engine_digest().await;
         let pipeline = crate::fragment_index_cluster::pipeline_digest(file, &engine, video);
-        let cache_key =
-            plurx_core::store::cluster_fragment_index_key(&observation.source_sha256, &pipeline)
-                .ok_or_else(|| "source attestation contained an invalid digest".to_owned())?;
+        let cache_key = plurx_core::store::cluster_fragment_index_key(
+            file.id,
+            file.size,
+            file.mtime,
+            &observation.source_sha256,
+            &pipeline,
+        )
+        .ok_or_else(|| "source attestation contained an invalid digest".to_owned())?;
         let now = crate::fragment_index_cluster::unix_ms();
         let repair = plurx_core::store::NewClusterFragmentIndexJob {
             cache_key: cache_key.clone(),
@@ -1228,6 +1244,9 @@ impl VodServe {
             source_mtime: file.mtime,
             source_sha256: observation.source_sha256.clone(),
             pipeline_sha256: pipeline.clone(),
+            priority: "foreground".to_owned(),
+            trigger: "foreground".to_owned(),
+            target_node_id: node_id.to_owned(),
             not_before_ms: now,
             created_at_ms: now,
         };
@@ -1264,6 +1283,7 @@ impl VodServe {
         )
         .await?;
         let Some(index) = index else {
+            let repair = repair_job_for_artifact(repair, &artifact);
             let _ = self
                 .shared
                 .store
@@ -5030,6 +5050,43 @@ mod tests {
             block_budget: Duration::from_secs(30),
             materialize_budget: Duration::from_secs(30),
         }
+    }
+
+    #[test]
+    fn forced_generation_holder_repair_targets_the_resolved_artifact() {
+        let logical_key = "a".repeat(64);
+        let generation_key = "b".repeat(64);
+        let repair = plurx_core::store::NewClusterFragmentIndexJob {
+            cache_key: logical_key,
+            file_id: 1,
+            source_size: 10,
+            source_mtime: 20,
+            source_sha256: "c".repeat(64),
+            pipeline_sha256: "d".repeat(64),
+            priority: "foreground".to_owned(),
+            trigger: "foreground".to_owned(),
+            target_node_id: "node-a".to_owned(),
+            not_before_ms: 30,
+            created_at_ms: 30,
+        };
+        let artifact = plurx_core::store::ClusterFragmentIndexArtifact {
+            cache_key: generation_key.clone(),
+            file_id: 1,
+            source_size: 10,
+            source_mtime: 20,
+            source_sha256: repair.source_sha256.clone(),
+            pipeline_sha256: repair.pipeline_sha256.clone(),
+            blob_sha256: "e".repeat(64),
+            bytes: 40,
+            built_by_node_id: "node-a".to_owned(),
+            built_at_ms: 30,
+        };
+
+        let resolved = repair_job_for_artifact(repair, &artifact);
+
+        assert_eq!(resolved.cache_key, generation_key);
+        assert_eq!(resolved.source_sha256, artifact.source_sha256);
+        assert_eq!(resolved.pipeline_sha256, artifact.pipeline_sha256);
     }
 
     /// A store holding the fixture's real fragment index, built by the real

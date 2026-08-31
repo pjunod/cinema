@@ -26,7 +26,12 @@ pub const PATH: &str = "/_internal/v1/activity-snapshot";
 #[allow(dead_code)] // aggregation child #326 calls the pre-wired client
 pub const TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+// A saturated delivery list must not erase every analysis row from a peer's
+// Activity snapshot. Reserve one quarter of the shared wire budget whenever
+// progress exists; unused space remains available when it does not.
+const ANALYSIS_RESPONSE_RESERVE_BYTES: usize = MAX_RESPONSE_BYTES / 4;
 const MAX_DELIVERIES: usize = 512;
+const MAX_ANALYSIS_PROGRESS: usize = 64;
 const MAX_NODE_ID_BYTES: usize = 256;
 const MAX_USER_BYTES: usize = 256;
 const MAX_TITLE_BYTES: usize = 2 * 1024;
@@ -36,6 +41,8 @@ const PEER_CONCURRENCY: usize = 8;
 pub struct ActivitySnapshot {
     pub node_id: String,
     pub deliveries: Vec<ActivityDelivery>,
+    #[serde(default)]
+    pub analysis: Vec<crate::state::AnalysisProgress>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -209,10 +216,18 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
         && !snapshot.node_id.is_empty()
         && snapshot.node_id.len() <= MAX_NODE_ID_BYTES
         && snapshot.deliveries.len() <= MAX_DELIVERIES
+        && snapshot.analysis.len() <= MAX_ANALYSIS_PROGRESS
         && snapshot.deliveries.iter().all(|delivery| {
             delivery.method.len() <= 32
                 && delivery.user.len() <= MAX_USER_BYTES
                 && delivery.title.len() <= MAX_TITLE_BYTES
+        })
+        && snapshot.analysis.iter().all(|progress| {
+            !progress.job_id.is_empty()
+                && progress.job_id.len() <= 128
+                && progress.component.len() <= 32
+                && progress.stage.len() <= 32
+                && progress.title.len() <= MAX_TITLE_BYTES
         })
 }
 
@@ -344,7 +359,22 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             .then(left.file_id.cmp(&right.file_id))
             .then(left.user.cmp(&right.user))
     });
-    bounded_snapshot(state.node_id.clone(), deliveries)
+    let mut analysis = state.jobs.analysis_progress_snapshot();
+    let labels = state
+        .store
+        .analysis_file_labels((MAX_ANALYSIS_PROGRESS * 2) as i64)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|label| (label.file_id, (label.item_id, label.title)))
+        .collect::<HashMap<_, _>>();
+    for progress in &mut analysis {
+        if let Some((item_id, title)) = labels.get(&progress.file_id) {
+            progress.item_id = *item_id;
+            progress.title = bounded_text(title.clone(), MAX_TITLE_BYTES);
+        }
+    }
+    bounded_snapshot(state.node_id.clone(), deliveries, analysis)
 }
 
 #[derive(Debug)]
@@ -420,26 +450,48 @@ where
 /// Keep the producer and consumer on the same exact wire budget. Serializing
 /// each candidate accounts for JSON escaping without repeatedly encoding the
 /// whole response, and preserves the newest-first ordering above.
-fn bounded_snapshot(node_id: String, deliveries: Vec<ActivityDelivery>) -> ActivitySnapshot {
+fn bounded_snapshot(
+    node_id: String,
+    deliveries: Vec<ActivityDelivery>,
+    analysis: Vec<crate::state::AnalysisProgress>,
+) -> ActivitySnapshot {
     let node_id = bounded_text(node_id, MAX_NODE_ID_BYTES);
     let mut snapshot = ActivitySnapshot {
         node_id,
         deliveries: Vec::new(),
+        analysis: Vec::new(),
     };
     let mut encoded_bytes = serde_json::to_vec(&snapshot)
         .map(|encoded| encoded.len())
         .unwrap_or(MAX_RESPONSE_BYTES);
+    let delivery_budget = if analysis.is_empty() {
+        MAX_RESPONSE_BYTES
+    } else {
+        MAX_RESPONSE_BYTES.saturating_sub(ANALYSIS_RESPONSE_RESERVE_BYTES)
+    };
     for delivery in deliveries.into_iter().take(MAX_DELIVERIES) {
         let Ok(encoded) = serde_json::to_vec(&delivery) else {
             continue;
         };
         let separator = usize::from(!snapshot.deliveries.is_empty());
         let added = encoded.len().saturating_add(separator);
-        if encoded_bytes.saturating_add(added) > MAX_RESPONSE_BYTES {
+        if encoded_bytes.saturating_add(added) > delivery_budget {
             continue;
         }
         encoded_bytes += added;
         snapshot.deliveries.push(delivery);
+    }
+    for progress in analysis.into_iter().take(MAX_ANALYSIS_PROGRESS) {
+        let Ok(encoded) = serde_json::to_vec(&progress) else {
+            continue;
+        };
+        let separator = usize::from(!snapshot.analysis.is_empty());
+        let added = encoded.len().saturating_add(separator);
+        if encoded_bytes.saturating_add(added) > MAX_RESPONSE_BYTES {
+            continue;
+        }
+        encoded_bytes += added;
+        snapshot.analysis.push(progress);
     }
     snapshot
 }
@@ -549,6 +601,7 @@ mod tests {
         let snapshot = ActivitySnapshot {
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
+            analysis: Vec::new(),
         };
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
         assert!(!snapshot_is_bounded(&snapshot, "node-c"));
@@ -568,10 +621,42 @@ mod tests {
             delivered_bytes: Some(i64::MAX),
             delivered_bps: Some(i64::MAX),
         };
-        let snapshot = bounded_snapshot("node-b".to_owned(), vec![delivery; MAX_DELIVERIES]);
+        let snapshot = bounded_snapshot(
+            "node-b".to_owned(),
+            vec![delivery; MAX_DELIVERIES],
+            Vec::new(),
+        );
         let encoded = serde_json::to_vec(&snapshot).expect("bounded snapshot serializes");
         assert!(encoded.len() <= MAX_RESPONSE_BYTES);
         assert!(snapshot.deliveries.len() < MAX_DELIVERIES);
+        assert!(snapshot_is_bounded(&snapshot, "node-b"));
+    }
+
+    #[test]
+    fn saturated_deliveries_preserve_analysis_progress_within_the_wire_budget() {
+        let delivery = ActivityDelivery {
+            method: "x".repeat(32),
+            presentation: Some("live-recovery".to_owned()),
+            user: "\0".repeat(MAX_USER_BYTES),
+            file_id: i64::MAX,
+            item_id: i64::MAX,
+            title: "\0".repeat(MAX_TITLE_BYTES),
+            started_unix: i64::MAX,
+            idle_seconds: u64::MAX,
+            delivered_bytes: Some(i64::MAX),
+            delivered_bps: Some(i64::MAX),
+        };
+        let progress =
+            crate::state::AnalysisProgress::test_row("shared-cache", &"\0".repeat(MAX_TITLE_BYTES));
+        let snapshot = bounded_snapshot(
+            "node-b".to_owned(),
+            vec![delivery; MAX_DELIVERIES],
+            vec![progress],
+        );
+        let encoded = serde_json::to_vec(&snapshot).expect("bounded snapshot serializes");
+        assert!(encoded.len() <= MAX_RESPONSE_BYTES);
+        assert!(!snapshot.deliveries.is_empty());
+        assert_eq!(snapshot.analysis.len(), 1);
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
     }
 

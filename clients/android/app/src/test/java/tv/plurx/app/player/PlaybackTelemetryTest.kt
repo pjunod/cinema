@@ -6,6 +6,7 @@ import okio.Buffer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import tv.plurx.app.data.Net
 
@@ -185,6 +186,16 @@ class PlaybackTelemetryTest {
         assertFalse(json.containsKey("session"))
         assertFalse(body.contains("Bearer "))
         assertNull(request.header("Authorization"))
+    }
+
+    @Test
+    fun markerOffersAreReportedOncePerPlaybackGenerationAndBoundary() {
+        val ledger = MarkerOfferLedger()
+
+        assertTrue(ledger.shouldReport("generation-a", "intro", 1_000))
+        assertFalse(ledger.shouldReport("generation-a", "intro", 1_000))
+        assertTrue(ledger.shouldReport("generation-b", "intro", 1_000))
+        assertTrue(ledger.shouldReport("generation-b", "credits", 80_000))
     }
 
     @Test
