@@ -269,15 +269,18 @@ final class PlaybackControlSession {
         var deadline = startedAt + bound
         let hardDeadline = startedAt + cap
         var extended = false
+        // Both conditions, not just the floor. `adoptNewOwner` resets the
+        // reporter's sequence on a 409, so a floor read after one can sit
+        // BELOW an answer already in the slot from before this ask — and an
+        // answer that arrived before the ask cannot be its answer.
+        func settled() -> ControlAction? {
+            guard answers.count() > seenAtStart,
+                  let answer = answers.answer(atOrAfter: floor)
+            else { return nil }
+            return answer.action
+        }
         while ProcessInfo.processInfo.systemUptime < deadline {
-            // Both conditions, not just the floor. `adoptNewOwner` resets the
-            // reporter's sequence on a 409, so a floor read after one can sit
-            // BELOW an answer already in the slot from before this ask — and
-            // an answer that arrived before the ask cannot be its answer.
-            if answers.count() > seenAtStart,
-               let answer = answers.answer(atOrAfter: floor) {
-                return answer.action
-            }
+            if let answer = settled() { return answer }
             let count = answers.count()
             if count > seen {
                 seen = count
@@ -294,11 +297,21 @@ final class PlaybackControlSession {
             try? await Task.sleep(nanoseconds: PlaybackControlSession.askPollNanoseconds)
             // A reporter that went away or stopped mid-ask will never exchange
             // again, so waiting out the rest of the bound would add it to a
-            // stall for nothing.
-            guard let current = self.reporter else { return nil }
-            if await current.stopped { return nil }
+            // stall for nothing — but read the slot one more time first.
+            //
+            // A terminal verdict is answered and then stops the reporter in the
+            // same instant. Bailing on `stopped` without re-reading discards
+            // the one verdict this ask most needed to see, and the client falls
+            // through to its own guess for the exact case where the server was
+            // certain. The Android mirror's terminal test caught this.
+            guard let current = self.reporter else {
+                return settled()
+            }
+            if await current.stopped {
+                return settled()
+            }
         }
-        return nil
+        return settled()
     }
 
     /// How often the ask looks. Short enough that it costs a stalled viewer
