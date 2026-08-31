@@ -191,6 +191,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         super::MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA,
         MEDIA_SESSION_TERMINAL_ACKS_SCHEMA,
         MEDIA_SESSION_TERMINAL_ACKS_EXPIRY_INDEX,
+        super::MEDIA_SESSION_PREPARATIONS_SCHEMA,
     ] {
         validate_sql(sql)?;
         for result in timeout_store(client.batch(sql)).await? {
@@ -258,6 +259,44 @@ impl From<&mut Row<'_>> for PointerRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self(row.get("current_incarnation_id"))
     }
+}
+
+struct StagedRow(crate::domain::MediaSessionStagedGeneration);
+
+impl From<&mut Row<'_>> for StagedRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(crate::domain::MediaSessionStagedGeneration {
+            user_id: row.get("user_id"),
+            playback_id: row.get("playback_id"),
+            staged_incarnation_id: row.get("staged_incarnation_id"),
+            expected_predecessor_incarnation_id: row.get("expected_predecessor_incarnation_id"),
+            deadline_ms: row.get("deadline_ms"),
+            created_at_ms: row.get("created_at_ms"),
+            updated_at_ms: row.get("updated_at_ms"),
+        })
+    }
+}
+
+const STAGED_COLS: &str = "user_id, playback_id, staged_incarnation_id,
+    expected_predecessor_incarnation_id, deadline_ms, created_at_ms, updated_at_ms";
+
+async fn staged_row(
+    store: &HiqliteAuthStore,
+    user_id: i64,
+    playback_id: &str,
+) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError> {
+    let sql = format!(
+        "SELECT {STAGED_COLS} FROM media_session_preparations
+          WHERE user_id = $1 AND playback_id = $2"
+    );
+    validate_sql(&sql)?;
+    Ok(store
+        .client()
+        .query_consistent_map::<StagedRow, _>(sql, params!(user_id, playback_id))
+        .await?
+        .into_iter()
+        .next()
+        .map(|row| row.0))
 }
 
 struct PendingMaintenanceRow(i64);
@@ -390,6 +429,55 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
 /// publication, and update coordinates are deliberately absent: those are
 /// monotone durable state which a replay must return, never restore from its
 /// original input.
+fn validate_preparation(
+    preparation: &crate::domain::MediaSessionPreparation,
+) -> Result<(), StoreError> {
+    let valid = valid_uuid(&preparation.incarnation_id)
+        && valid_uuid(&preparation.session_id)
+        && valid_uuid(&preparation.expected_predecessor_incarnation_id)
+        // A successor staged against itself is not a successor, and the
+        // pointer guard would pass for it because the pointer would name it.
+        && preparation.expected_predecessor_incarnation_id != preparation.incarnation_id
+        && preparation.user_id > 0
+        && !preparation.playback_id.is_empty()
+        && preparation.playback_id.len() <= 128
+        && valid_fingerprint(&preparation.request_fingerprint)
+        && !preparation.owner_node_id.is_empty()
+        && preparation.owner_node_id.len() <= 256
+        && preparation.recipe_json.len() <= 32 * 1024
+        && preparation.response_json.len() <= 64 * 1024
+        && (0..=MAX_MEDIA_MILLIS).contains(&preparation.media_origin_ms)
+        && preparation.now_ms > 0
+        && preparation.deadline_ms > preparation.now_ms;
+    if valid {
+        Ok(())
+    } else {
+        Err(StoreError::Task(
+            "invalid media-session preparation".to_owned(),
+        ))
+    }
+}
+
+/// Exact immutable identity for a preparation replay.
+///
+/// Progress and lease coordinates are deliberately absent for the same reason
+/// they are absent from [`activation_route_matches`]: they are monotone
+/// durable state a replay must read back, never restore from its input.
+fn preparation_route_matches(
+    route: &MediaSessionRoute,
+    preparation: &crate::domain::MediaSessionPreparation,
+) -> bool {
+    route.session_id == preparation.session_id
+        && route.user_id == preparation.user_id
+        && route.playback_id == preparation.playback_id
+        && route.request_fingerprint == preparation.request_fingerprint
+        && route.owner_node_id == preparation.owner_node_id
+        && route.state == "active"
+        // The sentinel is what keeps a staged row out of takeover inventory,
+        // so a replay that finds it armed is not looking at a staged row.
+        && route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
+}
+
 fn activation_route_matches(
     route: &MediaSessionRoute,
     activation: &MediaSessionActivation,
@@ -1051,6 +1139,408 @@ impl MediaSessionStore for HiqliteAuthStore {
                 None => None,
             };
         Ok(Some(MediaSessionActivationOutcome { route, predecessor }))
+    }
+
+    async fn prepare_media_session(
+        &self,
+        preparation: &crate::domain::MediaSessionPreparation,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        validate_preparation(preparation)?;
+        // Replay by exact identity, before anything is attempted. The ledger's
+        // primary key would otherwise turn an owner's retry into "you already
+        // have one".
+        if let Some(existing) =
+            staged_row(self, preparation.user_id, &preparation.playback_id).await?
+        {
+            if existing.staged_incarnation_id != preparation.incarnation_id
+                || existing.expected_predecessor_incarnation_id
+                    != preparation.expected_predecessor_incarnation_id
+            {
+                return Ok(None);
+            }
+            return Ok(
+                route_by(self, "incarnation_id", &preparation.incarnation_id)
+                    .await?
+                    .filter(|route| preparation_route_matches(route, preparation)),
+            );
+        }
+        // Every precondition is inlined into each statement's WHERE, because
+        // `txn` takes a fixed statement list and cannot read, branch or
+        // RETURNING. The pointer identity, the ledger's emptiness and all
+        // three admission bounds therefore appear inside the INSERT itself.
+        let statements: Vec<(&str, hiqlite::Params)> = vec![
+            (
+                "INSERT INTO media_sessions
+                    (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
+                     owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
+                     response_json, produced_playable_through_ms, fetched_through_ms,
+                     media_origin_ms, media_sequence, discontinuity_sequence,
+                     publication_ready_at_ms, updated_at_ms)
+                 SELECT $1, $2, $3, $4, $5, $6, 1, $7, 'active', $8, $9, 0, 0, $10, 0, 0, $11, $12
+                  WHERE EXISTS (SELECT 1 FROM media_playback_pointers
+                      WHERE user_id = $3 AND playback_id = $4
+                        AND current_incarnation_id = $13)
+                    AND NOT EXISTS (SELECT 1 FROM media_session_preparations
+                      WHERE user_id = $3 AND playback_id = $4)
+                    AND NOT EXISTS (SELECT 1 FROM media_session_preparations
+                      WHERE staged_incarnation_id = $1)
+                    AND (SELECT COUNT(*) FROM media_sessions
+                          WHERE user_id = $3 AND state IN ('starting', 'active')
+                            AND lease_expires_at_ms > $12 AND incarnation_id != $1
+                            AND incarnation_id != COALESCE((
+                              SELECT current_incarnation_id FROM media_playback_pointers
+                               WHERE user_id = $3 AND playback_id = $4), '')) < $14
+                    AND (SELECT COUNT(*) FROM media_sessions
+                          WHERE user_id = $3 AND incarnation_id != $1) < $15
+                    AND (SELECT COUNT(*) FROM media_sessions
+                          WHERE owner_node_id = $6 AND state = 'active'
+                            AND lease_expires_at_ms > $12 AND incarnation_id != $1) < $16",
+                params!(
+                    preparation.incarnation_id.as_str(),
+                    preparation.session_id.as_str(),
+                    preparation.user_id,
+                    preparation.playback_id.as_str(),
+                    preparation.request_fingerprint.as_str(),
+                    preparation.owner_node_id.as_str(),
+                    preparation.deadline_ms,
+                    preparation.recipe_json.as_str(),
+                    preparation.response_json.as_str(),
+                    preparation.media_origin_ms,
+                    MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    preparation.now_ms,
+                    preparation.expected_predecessor_incarnation_id.as_str(),
+                    MAX_CURRENT_PER_USER,
+                    MAX_SESSION_ROWS_PER_USER,
+                    MAX_OWNED
+                ),
+            ),
+            (
+                // Guarded on the row above having landed, so the ledger can
+                // never name an incarnation that does not exist.
+                "INSERT INTO media_session_preparations
+                    (user_id, playback_id, staged_incarnation_id,
+                     expected_predecessor_incarnation_id, deadline_ms,
+                     created_at_ms, updated_at_ms)
+                 SELECT $1, $2, $3, $4, $5, $6, $6 WHERE EXISTS (
+                   SELECT 1 FROM media_sessions
+                    WHERE incarnation_id = $3 AND session_id = $7
+                      AND user_id = $1 AND playback_id = $2
+                      AND owner_node_id = $8 AND state = 'active'
+                      AND publication_ready_at_ms = $9)",
+                params!(
+                    preparation.user_id,
+                    preparation.playback_id.as_str(),
+                    preparation.incarnation_id.as_str(),
+                    preparation.expected_predecessor_incarnation_id.as_str(),
+                    preparation.deadline_ms,
+                    preparation.now_ms,
+                    preparation.session_id.as_str(),
+                    preparation.owner_node_id.as_str(),
+                    MEDIA_SESSION_PUBLICATION_BLOCKED
+                ),
+            ),
+        ];
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        let changed = self
+            .client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        if changed.first().copied() != Some(1) || changed.get(1).copied() != Some(1) {
+            return Ok(None);
+        }
+        // The exact post-commit projection. `route_by` alone would accept a
+        // row an unrelated writer produced, so the ledger is re-read too and
+        // both have to agree on the same successor.
+        let route = route_by(self, "incarnation_id", &preparation.incarnation_id)
+            .await?
+            .filter(|route| preparation_route_matches(route, preparation));
+        let Some(route) = route else {
+            return Ok(None);
+        };
+        let staged = staged_row(self, preparation.user_id, &preparation.playback_id).await?;
+        if staged.map(|staged| staged.staged_incarnation_id).as_deref()
+            != Some(preparation.incarnation_id.as_str())
+        {
+            return Ok(None);
+        }
+        Ok(Some(route))
+    }
+
+    async fn staged_media_session_for_playback(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError> {
+        if user_id <= 0 || playback_id.is_empty() || playback_id.len() > 128 {
+            return Err(StoreError::Task(
+                "invalid staged media-session lookup".to_owned(),
+            ));
+        }
+        staged_row(self, user_id, playback_id).await
+    }
+
+    async fn commit_media_session_preparation(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError> {
+        if user_id <= 0
+            || playback_id.is_empty()
+            || playback_id.len() > 128
+            || !valid_uuid(staged_incarnation_id)
+            || now_ms <= 0
+        {
+            return Err(StoreError::Task(
+                "invalid media-session preparation commit".to_owned(),
+            ));
+        }
+        let Some(staged) = staged_row(self, user_id, playback_id).await? else {
+            // No ledger row. Either it was never staged, or an earlier commit
+            // already consumed it — and the pointer is the discriminator: if
+            // it names this incarnation, this exact commit already happened.
+            let route = route_by(self, "incarnation_id", staged_incarnation_id).await?;
+            let pointer = self
+                .client()
+                .query_consistent_map::<PointerRow, _>(
+                    "SELECT current_incarnation_id FROM media_playback_pointers
+                      WHERE user_id = $1 AND playback_id = $2",
+                    params!(user_id, playback_id),
+                )
+                .await?
+                .into_iter()
+                .next()
+                .map(|row| row.0);
+            if pointer.as_deref() != Some(staged_incarnation_id) {
+                return Ok(None);
+            }
+            return Ok(
+                route.map(|route| crate::domain::MediaSessionPreparationCommit {
+                    route,
+                    predecessor: None,
+                }),
+            );
+        };
+        if staged.staged_incarnation_id != staged_incarnation_id {
+            return Ok(None);
+        }
+        let predecessor_incarnation = staged.expected_predecessor_incarnation_id.clone();
+        let lease_resource = format!("session:{predecessor_incarnation}");
+        // The pointer advance and the predecessor's retirement in one
+        // transaction, both fenced on the exact recorded predecessor. Nothing
+        // here reads the pointer to decide what to reap; a pointer that no
+        // longer names the predecessor simply fails every guard, and the
+        // abort branch below is what turns that into the right outcome.
+        let statements: Vec<(&str, hiqlite::Params)> = vec![
+            (
+                "UPDATE media_playback_pointers
+                    SET current_incarnation_id = $1, updated_at_ms = $2
+                  WHERE user_id = $3 AND playback_id = $4
+                    AND current_incarnation_id = $5
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $1 AND user_id = $3 AND playback_id = $4
+                        AND state = 'active')",
+                params!(
+                    staged.staged_incarnation_id.as_str(),
+                    now_ms,
+                    user_id,
+                    playback_id,
+                    predecessor_incarnation.as_str()
+                ),
+            ),
+            (
+                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded',
+                        lease_expires_at_ms = $1, publication_ready_at_ms = $2, updated_at_ms = $1
+                  WHERE incarnation_id = $3 AND state != 'ended'
+                    AND EXISTS (SELECT 1 FROM media_playback_pointers
+                      WHERE user_id = $4 AND playback_id = $5
+                        AND current_incarnation_id = $6)",
+                params!(
+                    now_ms,
+                    MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    predecessor_incarnation.as_str(),
+                    user_id,
+                    playback_id,
+                    staged.staged_incarnation_id.as_str()
+                ),
+            ),
+            (
+                "DELETE FROM cache_consumer_pins
+                  WHERE consumer_kind = 'media_session' AND consumer_id = $1
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)",
+                params!(predecessor_incarnation.as_str(), now_ms),
+            ),
+            (
+                "UPDATE job_leases
+                    SET expires_at_ms = CASE
+                          WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
+                        revision = revision + 1, updated_at_ms = $1
+                  WHERE resource = $2 AND revision < 9223372036854775807
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)",
+                params!(
+                    now_ms,
+                    lease_resource.as_str(),
+                    predecessor_incarnation.as_str()
+                ),
+            ),
+            (
+                "DELETE FROM media_session_preparations
+                  WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3
+                    AND EXISTS (SELECT 1 FROM media_playback_pointers
+                      WHERE user_id = $1 AND playback_id = $2
+                        AND current_incarnation_id = $3)",
+                params!(user_id, playback_id, staged.staged_incarnation_id.as_str()),
+            ),
+        ];
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        let statement_count = statements.len();
+        let changed = self
+            .client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        let fresh_commit = changed.first().copied() == Some(1);
+        // An all-zero replicated transaction is ambiguous between "I lost
+        // every precondition" and "I am an exact replay", so the exact
+        // post-commit projection below is the discriminator — never
+        // rows_affected on its own.
+        let transaction_replay =
+            changed.len() == statement_count && changed.iter().all(|affected| *affected == 0);
+        if !fresh_commit && !transaction_replay {
+            return Ok(None);
+        }
+        let pointer = self
+            .client()
+            .query_consistent_map::<PointerRow, _>(
+                "SELECT current_incarnation_id FROM media_playback_pointers
+                  WHERE user_id = $1 AND playback_id = $2",
+                params!(user_id, playback_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0);
+        if pointer.as_deref() != Some(staged.staged_incarnation_id.as_str()) {
+            // The pointer moved: a newer player generation is current. Abort
+            // the staged successor rather than reap that generation — this is
+            // the clause the whole predecessor-recording design exists for.
+            self.abort_media_session_preparation(
+                user_id,
+                playback_id,
+                &staged.staged_incarnation_id,
+                now_ms,
+            )
+            .await?;
+            return Ok(None);
+        }
+        let route = route_by(self, "incarnation_id", &staged.staged_incarnation_id)
+            .await?
+            .filter(|route| route.state == "active");
+        let Some(route) = route else {
+            return Ok(None);
+        };
+        let predecessor = route_by(self, "incarnation_id", &predecessor_incarnation).await?;
+        Ok(Some(crate::domain::MediaSessionPreparationCommit {
+            route,
+            predecessor,
+        }))
+    }
+
+    async fn abort_media_session_preparation(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        if user_id <= 0
+            || playback_id.is_empty()
+            || playback_id.len() > 128
+            || !valid_uuid(staged_incarnation_id)
+            || now_ms <= 0
+        {
+            return Err(StoreError::Task(
+                "invalid media-session preparation abort".to_owned(),
+            ));
+        }
+        let lease_resource = format!("session:{staged_incarnation_id}");
+        // Ledger-scoped in every statement, which is the safety property:
+        // without a ledger row naming it, this cannot end an incarnation. An
+        // abort aimed at a successor that already committed ends nothing.
+        let statements: Vec<(&str, hiqlite::Params)> = vec![
+            (
+                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced',
+                        lease_expires_at_ms = $1, updated_at_ms = $1
+                  WHERE incarnation_id = $2 AND state != 'ended'
+                    AND EXISTS (SELECT 1 FROM media_session_preparations
+                      WHERE user_id = $3 AND playback_id = $4
+                        AND staged_incarnation_id = $2)",
+                params!(now_ms, staged_incarnation_id, user_id, playback_id),
+            ),
+            (
+                "DELETE FROM cache_consumer_pins
+                  WHERE consumer_kind = 'media_session' AND consumer_id = $1
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)",
+                params!(staged_incarnation_id, now_ms),
+            ),
+            (
+                "UPDATE job_leases
+                    SET expires_at_ms = CASE
+                          WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
+                        revision = revision + 1, updated_at_ms = $1
+                  WHERE resource = $2 AND revision < 9223372036854775807
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)",
+                params!(now_ms, lease_resource.as_str(), staged_incarnation_id),
+            ),
+            (
+                "DELETE FROM media_session_preparations
+                  WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3",
+                params!(user_id, playback_id, staged_incarnation_id),
+            ),
+        ];
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        self.client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        // The projection, not the row counts: an abort that finds the staged
+        // row already ended and its ledger row already gone is an idempotent
+        // replay and must read the same as the first one.
+        if staged_row(self, user_id, playback_id)
+            .await?
+            .is_some_and(|staged| staged.staged_incarnation_id == staged_incarnation_id)
+        {
+            return Ok(None);
+        }
+        // The same predicate the SQLite twin uses, and it has to be: this
+        // reports success only for a row that is ended, carries the abort's
+        // own terminal cause, and belongs to the playback the caller named.
+        Ok(route_by(self, "incarnation_id", staged_incarnation_id)
+            .await?
+            .filter(|route| {
+                route.state == "ended"
+                    && route.terminal_reason.as_deref() == Some("replaced")
+                    && route.user_id == user_id
+                    && route.playback_id == playback_id
+            }))
     }
 
     async fn settle_media_session_activation(

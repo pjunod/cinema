@@ -419,6 +419,10 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "end_media_session",
     "maintain_media_sessions",
     "owned_media_sessions",
+    "prepare_media_session",
+    "staged_media_session_for_playback",
+    "commit_media_session_preparation",
+    "abort_media_session_preparation",
 ];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "put_setting_fenced",
@@ -504,6 +508,494 @@ async fn confirm_media_activation(
         .await
         .unwrap_or_else(|error| panic!("{backend}: confirm media activation: {error}"))
         .unwrap_or_else(|| panic!("{backend}: media activation confirmation must win"))
+}
+
+/// Establish one current session for a playback, and return its activation.
+async fn current_media_session(
+    store: &dyn Store,
+    user_id: i64,
+    playback_id: &str,
+    incarnation_id: &str,
+    session_id: &str,
+    backend: &str,
+) -> MediaSessionActivation {
+    let activation = MediaSessionActivation {
+        incarnation_id: incarnation_id.to_owned(),
+        session_id: session_id.to_owned(),
+        user_id,
+        playback_id: playback_id.to_owned(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: None,
+        request_fingerprint: "a".repeat(64),
+        owner_node_id: "staged-node".to_owned(),
+        recipe_json: "{}".to_owned(),
+        response_json: r#"{"session":"current"}"#.to_owned(),
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: 1_000,
+        lease_expires_at_ms: 900_000,
+    };
+    store
+        .activate_media_session(&activation)
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: activate current session: {error}"))
+        .unwrap_or_else(|| panic!("{backend}: current activation must win"));
+    activation
+}
+
+fn staged_preparation(
+    user_id: i64,
+    playback_id: &str,
+    incarnation_id: &str,
+    session_id: &str,
+    predecessor: &str,
+) -> plurx_core::domain::MediaSessionPreparation {
+    plurx_core::domain::MediaSessionPreparation {
+        incarnation_id: incarnation_id.to_owned(),
+        session_id: session_id.to_owned(),
+        user_id,
+        playback_id: playback_id.to_owned(),
+        expected_predecessor_incarnation_id: predecessor.to_owned(),
+        request_fingerprint: "b".repeat(64),
+        owner_node_id: "staged-node".to_owned(),
+        recipe_json: "{}".to_owned(),
+        response_json: r#"{"session":"staged"}"#.to_owned(),
+        media_origin_ms: 0,
+        now_ms: 2_000,
+        deadline_ms: 800_000,
+    }
+}
+
+/// Acceptance 1, 2, 3 and 4 — everything a prepare must leave alone.
+///
+/// These are one test because they are one claim: a staged successor exists
+/// and changes nothing. Splitting them would let three of the four keep
+/// passing while the interesting one rotted.
+#[tokio::test]
+async fn media_session_prepare_stages_a_successor_that_changes_nothing() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-prepare-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-prepare user: {error}"));
+        let playback = "staged-prepare-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000f101";
+        let current = current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000f102",
+            backend,
+        )
+        .await;
+        let before = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route before prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the predecessor must be current"));
+
+        let staged = "00000000-0000-4000-8000-00000000f103";
+        let preparation = staged_preparation(
+            user.id,
+            playback,
+            staged,
+            "00000000-0000-4000-8000-00000000f104",
+            predecessor,
+        );
+        let route = store
+            .prepare_media_session(&preparation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: prepare must win against the exact pointer"));
+        assert_eq!(route.incarnation_id, staged, "{backend}");
+        assert_eq!(
+            route.publication_ready_at_ms, MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}: a staged row stays at the publication sentinel, which \
+             is what keeps it out of takeover inventory"
+        );
+
+        // 1. The predecessor is still current, still active, still untouched.
+        // 2. The same lookup gives the same answer with a staged row present.
+        let after = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route after prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the predecessor must still be current"));
+        assert_eq!(
+            after, before,
+            "{backend}: a staged successor must change the current-session \
+             lookup by exactly nothing"
+        );
+        assert_eq!(after.state, "active", "{backend}");
+        assert_eq!(after.terminal_reason, None, "{backend}");
+
+        // 3. Neither the supersession reap nor a pointer advance ran. The
+        //    second half is the assertion that catches a prepare built on
+        //    `activate_media_session`, which advances the pointer
+        //    unconditionally.
+        assert_eq!(
+            after.updated_at_ms, before.updated_at_ms,
+            "{backend}: prepare must not touch the predecessor's row at all"
+        );
+
+        // 4. One staged successor per playback.
+        let second = staged_preparation(
+            user.id,
+            playback,
+            "00000000-0000-4000-8000-00000000f105",
+            "00000000-0000-4000-8000-00000000f106",
+            predecessor,
+        );
+        assert!(
+            store
+                .prepare_media_session(&second)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: second prepare: {error}"))
+                .is_none(),
+            "{backend}: a second prepare is refused, not silently accepted"
+        );
+
+        // An exact replay is not a second prepare.
+        let replay = store
+            .prepare_media_session(&preparation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare replay: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: an exact replay must read back"));
+        assert_eq!(replay.incarnation_id, staged, "{backend}");
+
+        let ledger = store
+            .staged_media_session_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: staged lookup: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the ledger must remember it"));
+        assert_eq!(ledger.staged_incarnation_id, staged, "{backend}");
+        assert_eq!(
+            ledger.expected_predecessor_incarnation_id, predecessor,
+            "{backend}: the predecessor is recorded at prepare time, which is \
+             what commit fences on"
+        );
+        let _ = current;
+    })
+    .await;
+}
+
+/// Acceptance 5 — commit advances the exact expected pointer, once.
+#[tokio::test]
+async fn media_session_commit_advances_the_exact_expected_pointer_once() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-commit-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-commit user: {error}"));
+        let playback = "staged-commit-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000f201";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000f202",
+            backend,
+        )
+        .await;
+        let staged = "00000000-0000-4000-8000-00000000f203";
+        let preparation = staged_preparation(
+            user.id,
+            playback,
+            staged,
+            "00000000-0000-4000-8000-00000000f204",
+            predecessor,
+        );
+        store
+            .prepare_media_session(&preparation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: prepare must win"));
+
+        let commit = store
+            .commit_media_session_preparation(user.id, playback, staged, 3_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: commit: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: commit must win"));
+        assert_eq!(commit.route.incarnation_id, staged, "{backend}");
+        assert_eq!(commit.route.state, "active", "{backend}");
+        let predecessor_route = commit
+            .predecessor
+            .unwrap_or_else(|| panic!("{backend}: commit reports the retired predecessor"));
+        assert_eq!(predecessor_route.state, "ended", "{backend}");
+        assert_eq!(
+            predecessor_route.terminal_reason.as_deref(),
+            Some("superseded"),
+            "{backend}: the same retirement an activation performs, against an \
+             exact named incarnation rather than whatever the pointer held"
+        );
+
+        let current = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route after commit: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the successor is current now"));
+        assert_eq!(current.incarnation_id, staged, "{backend}");
+        assert!(
+            store
+                .staged_media_session_for_playback(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: staged after commit: {error}"))
+                .is_none(),
+            "{backend}: a committed preparation leaves no ledger row"
+        );
+
+        // Once. A replay reads the same rather than reaping a second time.
+        let replay = store
+            .commit_media_session_preparation(user.id, playback, staged, 4_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: commit replay: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a replay reads back the committed route"));
+        assert_eq!(replay.route.incarnation_id, staged, "{backend}");
+        assert_eq!(
+            replay.route.updated_at_ms, current.updated_at_ms,
+            "{backend}: a replay must not touch the row it reads back"
+        );
+    })
+    .await;
+}
+
+/// Acceptance 5's second clause, which the plan singles out: a commit whose
+/// expected predecessor is stale **aborts the staged generation rather than
+/// reaping a newer player generation**.
+///
+/// This is the whole reason the predecessor is recorded at prepare time
+/// instead of re-read here. A commit that read the pointer fresh would reap
+/// whatever it found, and would look entirely correct doing it.
+#[tokio::test]
+async fn media_session_commit_against_a_moved_pointer_aborts_the_successor() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-stale-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-stale user: {error}"));
+        let playback = "staged-stale-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000f301";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000f302",
+            backend,
+        )
+        .await;
+        let staged = "00000000-0000-4000-8000-00000000f303";
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                staged,
+                "00000000-0000-4000-8000-00000000f304",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: prepare must win"));
+
+        // A newer player generation arrives the ordinary way and becomes
+        // current. The staged successor is now stale.
+        let newer = "00000000-0000-4000-8000-00000000f305";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            newer,
+            "00000000-0000-4000-8000-00000000f306",
+            backend,
+        )
+        .await;
+
+        assert!(
+            store
+                .commit_media_session_preparation(user.id, playback, staged, 5_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale commit: {error}"))
+                .is_none(),
+            "{backend}: a commit whose expected predecessor is stale loses"
+        );
+        let current = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route after stale commit: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the newer generation is still current"));
+        assert_eq!(
+            current.incarnation_id, newer,
+            "{backend}: the newer player generation must survive, and this is \
+             the assertion the whole design exists for"
+        );
+        assert_eq!(current.state, "active", "{backend}");
+        let staged_route = store
+            .media_session_route_by_incarnation(staged)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: staged route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the staged row is still readable"));
+        assert_eq!(
+            staged_route.state, "ended",
+            "{backend}: the staged successor aborts itself"
+        );
+        assert!(
+            store
+                .staged_media_session_for_playback(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: staged after stale commit: {error}"))
+                .is_none(),
+            "{backend}: and releases the one-per-playback slot"
+        );
+    })
+    .await;
+}
+
+/// Acceptance 6 — abort removes only the staged successor.
+#[tokio::test]
+async fn media_session_abort_removes_only_the_staged_successor() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-abort-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-abort user: {error}"));
+        let playback = "staged-abort-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000f401";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000f402",
+            backend,
+        )
+        .await;
+        let before = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route before abort: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: predecessor current"));
+        let staged = "00000000-0000-4000-8000-00000000f403";
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                staged,
+                "00000000-0000-4000-8000-00000000f404",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: prepare must win"));
+
+        let aborted = store
+            .abort_media_session_preparation(user.id, playback, staged, 6_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: abort: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: abort must win"));
+        assert_eq!(aborted.state, "ended", "{backend}");
+        assert_eq!(
+            aborted.terminal_reason.as_deref(),
+            Some("replaced"),
+            "{backend}: `replaced` rather than a new enum value — widening the \
+             CHECK on SQLite is a table rebuild, and an abandoned successor \
+             really was replaced, by the predecessor it never displaced"
+        );
+        let after = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route after abort: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the current stream stays authoritative"));
+        assert_eq!(after, before, "{backend}: the current stream is untouched");
+
+        // Idempotent, and it releases the slot so a later prepare can run.
+        assert!(
+            store
+                .abort_media_session_preparation(user.id, playback, staged, 7_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: abort replay: {error}"))
+                .is_some_and(|route| route.state == "ended"),
+            "{backend}: an abort replay reads the same as the first"
+        );
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                "00000000-0000-4000-8000-00000000f405",
+                "00000000-0000-4000-8000-00000000f406",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare after abort: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the slot is free again"));
+    })
+    .await;
+}
+
+/// Acceptance 7 — the owner died mid-preparation and nothing ever aborts it.
+///
+/// Maintenance is the backstop for exactly this, and it is a backstop rather
+/// than a second clock: the staged row's `lease_expires_at_ms` *is* the
+/// preparation deadline, so the retirement sweep that ends any overdue active
+/// session ends this one too, and the ledger reaper then releases the slot.
+#[tokio::test]
+async fn media_session_maintenance_reaps_an_abandoned_preparation() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-orphan-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-orphan user: {error}"));
+        let playback = "staged-orphan-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000f501";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000f502",
+            backend,
+        )
+        .await;
+        let staged = "00000000-0000-4000-8000-00000000f503";
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                staged,
+                "00000000-0000-4000-8000-00000000f504",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: prepare must win"));
+
+        // Far past the staged row's deadline and the takeover recovery window,
+        // but still inside the predecessor's own lease.
+        store
+            .maintain_media_sessions(880_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: maintenance: {error}"));
+
+        assert!(
+            store
+                .staged_media_session_for_playback(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: staged after maintenance: {error}"))
+                .is_none(),
+            "{backend}: an abandoned preparation must not hold the \
+             one-per-playback slot forever"
+        );
+        let current = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route after maintenance: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the current stream survives"));
+        assert_eq!(current.incarnation_id, predecessor, "{backend}");
+        assert_eq!(current.state, "active", "{backend}");
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -10587,7 +11079,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 244, "review the Store method count");
+    assert_eq!(declared.len(), 248, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

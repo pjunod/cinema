@@ -87,6 +87,33 @@ ALTER TABLE files ADD COLUMN dv_bl_compat_id INTEGER;
 ALTER TABLE files ADD COLUMN dv_el_present INTEGER;
 ALTER TABLE files ADD COLUMN dv_rpu_present INTEGER;";
 
+/// The staged-generation ledger, shared verbatim by both backends.
+///
+/// One statement, because SQLite's append-only migration list keeps one
+/// element per schema version and Hiqlite's `install_schema` keeps one per
+/// table. Both spellings have to stay identical or a replicated import will
+/// disagree with the node it imported from.
+///
+/// There is no `state` column and no lifecycle here. A preparation row exists
+/// while a staged successor exists; the successor's own `media_sessions` row
+/// carries its state, its owner and its lease, exactly like any other. This
+/// table answers only the three questions `media_sessions` cannot: which row
+/// is staged, which predecessor it was staged against, and when it stops
+/// being a candidate.
+pub(crate) const MEDIA_SESSION_PREPARATIONS_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS media_session_preparations (
+        user_id                            INTEGER NOT NULL,
+        playback_id                        TEXT NOT NULL
+            CHECK (length(playback_id) BETWEEN 1 AND 128),
+        staged_incarnation_id              TEXT NOT NULL UNIQUE,
+        expected_predecessor_incarnation_id TEXT NOT NULL
+            CHECK (length(expected_predecessor_incarnation_id) BETWEEN 1 AND 128),
+        deadline_ms                        INTEGER NOT NULL,
+        created_at_ms                      INTEGER NOT NULL,
+        updated_at_ms                      INTEGER NOT NULL,
+        PRIMARY KEY (user_id, playback_id)
+    ) STRICT;";
+
 const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au
     AFTER UPDATE OF publication_ready_at_ms ON media_sessions
@@ -2167,6 +2194,78 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         &self,
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
+
+    /// Stage a successor that exists without being current.
+    ///
+    /// `Ok(None)` means the CAS lost, and there are exactly three ways to lose
+    /// it: the playback pointer does not name
+    /// `expected_predecessor_incarnation_id`, a staged successor already
+    /// exists for this playback, or the user is at an admission bound. `Err`
+    /// is malformed input and real database faults. Callers never see a bool.
+    ///
+    /// What it must not do, and what the acceptance tests assert it does not:
+    /// run the supersession reap, and move
+    /// `media_playback_pointers.updated_at_ms`. Both are things
+    /// [`Self::activate_media_session`] does unconditionally, which is why a
+    /// preparation cannot be built on it.
+    ///
+    /// A staged successor counts against the per-user admission cap for the
+    /// whole preparation window. That is deliberate rather than incidental: a
+    /// prepared successor holds a real encoder slot, and a preparation that
+    /// did not count would let a heavy user hold twice the sessions the cap
+    /// names by keeping one staged forever. The cost is that preparing halves
+    /// a saturated user's headroom, which is the honest price of the resource.
+    async fn prepare_media_session(
+        &self,
+        preparation: &crate::domain::MediaSessionPreparation,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// The staged successor for one playback, if there is one.
+    async fn staged_media_session_for_playback(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError>;
+
+    /// Make the staged successor current, in one durable mutation.
+    ///
+    /// Advances the pointer from the preparation's recorded predecessor to the
+    /// staged incarnation, retires that exact predecessor, and clears the
+    /// ledger row.
+    ///
+    /// `Ok(None)` when the pointer no longer names the recorded predecessor.
+    /// That case is the whole reason the predecessor is recorded at
+    /// preparation time rather than re-read here: a pointer that moved means a
+    /// newer player generation exists, and the correct outcome is to **abort
+    /// the staged generation, not reap the newer one**. A commit that read the
+    /// pointer fresh would do the opposite and would look correct doing it.
+    async fn commit_media_session_preparation(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError>;
+
+    /// Discard the staged successor and leave the current stream authoritative.
+    ///
+    /// Ends the staged row as `replaced` and clears the ledger row. `replaced`
+    /// rather than a new `terminal_reason` value: the CHECK constraint is an
+    /// enum and widening it on SQLite is a table rebuild, and an abandoned
+    /// successor really was replaced — by the predecessor it never displaced.
+    ///
+    /// The outcome is a re-read plus a predicate, never `rows_affected`: an
+    /// owner retrying an abort after a crash reads back the same ended route
+    /// rather than a spurious loss. `Ok(None)` means the named incarnation is
+    /// not an aborted successor of this playback — it was never staged, or it
+    /// committed and is now current.
+    async fn abort_media_session_preparation(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
     async fn settle_media_session_activation(
         &self,

@@ -944,6 +944,75 @@ pub struct MediaSessionActivation {
     pub lease_expires_at_ms: i64,
 }
 
+/// Inputs for staging a successor that exists without being current.
+///
+/// Deliberately not a flag on [`MediaSessionActivation`]. Activation
+/// unconditionally reaps whatever the playback pointer names and advances the
+/// pointer to itself; a preparation does neither, and the two backends already
+/// disagree about what that reap may touch (the replicated one refuses
+/// anything but the named predecessor, SQLite does not). A flag would inherit
+/// that disagreement under exactly the concurrency it exists to survive.
+///
+/// The staged row is an ordinary `active` `media_sessions` row in every
+/// respect but two: it holds no pointer, which is what keeps it invisible to
+/// the one query that decides what is current, and it stays at
+/// [`MEDIA_SESSION_PUBLICATION_BLOCKED`], which is what keeps it invisible to
+/// takeover inventory. Both are properties of the row, not of a mode flag —
+/// the sentinel already means *not publishable*, and a staged successor wants
+/// exactly that until it commits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct MediaSessionPreparation {
+    /// The successor being staged. Minted like any other incarnation.
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub user_id: i64,
+    pub playback_id: String,
+    /// The incarnation the playback pointer must name right now, and the one
+    /// commit will advance away from. Never optional: a preparation with no
+    /// predecessor is a start, and a start is an activation.
+    pub expected_predecessor_incarnation_id: String,
+    pub request_fingerprint: String,
+    pub owner_node_id: String,
+    pub recipe_json: String,
+    pub response_json: String,
+    /// Exact source position represented by session-relative zero.
+    pub media_origin_ms: i64,
+    pub now_ms: i64,
+    /// When the preparation stops being a candidate.
+    ///
+    /// One clock, deliberately. This is written to the staged row's
+    /// `lease_expires_at_ms` as well as to the preparation ledger, so
+    /// `maintain_media_sessions` is the backstop for an owner that died
+    /// holding a staged successor rather than a second authority racing the
+    /// first. Two clocks over one row is how a staged generation ends up half
+    /// reaped.
+    pub deadline_ms: i64,
+}
+
+/// One staged successor, as the ledger remembers it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct MediaSessionStagedGeneration {
+    pub user_id: i64,
+    pub playback_id: String,
+    pub staged_incarnation_id: String,
+    pub expected_predecessor_incarnation_id: String,
+    pub deadline_ms: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+/// What a committed preparation leaves behind.
+///
+/// The successor is now current and the predecessor is `ended` with
+/// `terminal_reason = 'superseded'` — the same retirement an ordinary
+/// activation performs, reached by a different route and against an exact
+/// named predecessor rather than whatever the pointer happened to hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionPreparationCommit {
+    pub route: MediaSessionRoute,
+    pub predecessor: Option<MediaSessionRoute>,
+}
+
 /// Persisted sentinel for a committed successor whose safety boundary has not
 /// yet been based on replicated commit observation.
 pub const MEDIA_SESSION_PUBLICATION_BLOCKED: i64 = i64::MAX;
