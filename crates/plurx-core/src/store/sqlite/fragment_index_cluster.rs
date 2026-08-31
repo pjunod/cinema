@@ -1,18 +1,22 @@
 use async_trait::async_trait;
-use rusqlite::{params, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use super::SqliteStore;
 use crate::error::StoreError;
+use crate::store::fragment_index_cluster::{
+    bounded_analysis_backoff_base_secs, bounded_analysis_backoff_max_secs,
+    bounded_analysis_max_attempts,
+};
 use crate::store::fragment_index_cluster::{ANALYSIS_CANONICAL_CTE, ANALYSIS_SUMMARY_CTE};
 use crate::store::{
-    cluster_fragment_index_key, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
-    AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest,
-    AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
-    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob,
+    cluster_fragment_index_generation_key, cluster_fragment_index_key, AnalysisAttempt,
+    AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryPage,
+    AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest, AnalysisStatusSummary,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
+    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
+    NewClusterFragmentIndexJob,
 };
 
-const MAX_ATTEMPTS: i64 = 5;
 const MAX_ACTIVE_JOBS: i64 = 4_096;
 const MAX_ERROR_CODE_BYTES: usize = 64;
 const MAX_LOCAL_EXCLUSIONS: usize = MAX_ACTIVE_JOBS as usize;
@@ -20,9 +24,44 @@ const CLAIM_SCAN_LIMIT: i64 = MAX_ACTIVE_JOBS;
 const QUEUE_ELIGIBILITY_MS: i64 = 6 * 60 * 60 * 1_000;
 const MAX_ANALYSIS_REQUESTS: i64 = 4_096;
 const MAX_LIST_ROWS: i64 = 500;
+const MAX_ATTEMPT_HISTORY_PER_REQUEST: i64 = 64;
+
+fn configured_max_attempts(conn: &Connection) -> rusqlite::Result<i64> {
+    let raw = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![crate::store::keys::ANALYSIS_MAX_ATTEMPTS],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(bounded_analysis_max_attempts(raw.as_deref()))
+}
+
+fn configured_backoff_base_ms(conn: &Connection) -> rusqlite::Result<i64> {
+    let raw = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![crate::store::keys::ANALYSIS_BACKOFF_BASE_SECS],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(bounded_analysis_backoff_base_secs(raw.as_deref()).saturating_mul(1_000))
+}
+
+fn configured_backoff_max_ms(conn: &Connection) -> rusqlite::Result<i64> {
+    let raw = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![crate::store::keys::ANALYSIS_BACKOFF_MAX_SECS],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(bounded_analysis_backoff_max_secs(raw.as_deref()).saturating_mul(1_000))
+}
 
 const JOB_COLS: &str = "cache_key, file_id, source_size, source_mtime, source_sha256,
-    pipeline_sha256, state, COALESCE(owner_node_id, ''), fence,
+    pipeline_sha256, priority, trigger, target_node_id,
+    state, COALESCE(owner_node_id, ''), fence,
     COALESCE(lease_expires_ms, 0), attempts, not_before_ms, created_at_ms, updated_at_ms,
     COALESCE(last_error_code, '')";
 
@@ -34,28 +73,34 @@ fn job_from_row(row: &Row<'_>) -> rusqlite::Result<ClusterFragmentIndexJob> {
         source_mtime: row.get(3)?,
         source_sha256: row.get(4)?,
         pipeline_sha256: row.get(5)?,
-        state: row.get(6)?,
-        owner_node_id: row.get(7)?,
-        fence: row.get(8)?,
-        lease_expires_ms: row.get(9)?,
-        attempts: row.get(10)?,
-        not_before_ms: row.get(11)?,
-        created_at_ms: row.get(12)?,
-        updated_at_ms: row.get(13)?,
-        last_error_code: row.get(14)?,
+        priority: row.get(6)?,
+        trigger: row.get(7)?,
+        target_node_id: row.get(8)?,
+        state: row.get(9)?,
+        owner_node_id: row.get(10)?,
+        fence: row.get(11)?,
+        lease_expires_ms: row.get(12)?,
+        attempts: row.get(13)?,
+        not_before_ms: row.get(14)?,
+        created_at_ms: row.get(15)?,
+        updated_at_ms: row.get(16)?,
+        last_error_code: row.get(17)?,
     })
 }
 
 const REQUEST_COLS: &str = "request_id, file_id, source_size, source_mtime, component,
-    force_rebuild, target_node_id, state, COALESCE(owner_node_id, ''), fence,
+    pipeline_version, requested_generation, expected_predecessor_generation,
+    priority, trigger, force_rebuild,
+    target_node_id, state, COALESCE(owner_node_id, ''), fence,
     COALESCE(lease_expires_ms, 0), attempts, not_before_ms,
     COALESCE(result_cache_key, ''), COALESCE(last_error_code, ''),
-    created_at_ms, updated_at_ms";
+    cancel_requested, created_at_ms, updated_at_ms";
 
 const HISTORY_COLS: &str = "row_key, request_id, job_id, file_id, item_id, title,
     component, force_rebuild, target_node_id, request_state, job_state, state, disposition,
     action, owner_node_id, claim_epoch, lease_expires_ms, attempts, not_before_ms, request_error_code,
-    job_error_code, created_at_ms, updated_at_ms, pipeline_version, source_size";
+    job_error_code, created_at_ms, updated_at_ms, pipeline_version, requested_generation,
+    priority, trigger, cancel_requested, phase, source_size";
 
 const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.request_id, '') AS request_id, COALESCE(page.job_id, '') AS job_id,
@@ -75,6 +120,10 @@ const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.created_at_ms, 0) AS created_at_ms,
     COALESCE(page.updated_at_ms, 0) AS updated_at_ms,
     COALESCE(page.pipeline_version, '') AS pipeline_version,
+    COALESCE(page.requested_generation, '') AS requested_generation,
+    COALESCE(page.priority, '') AS priority, COALESCE(page.trigger, '') AS trigger,
+    COALESCE(page.cancel_requested, 0) AS cancel_requested,
+    COALESCE(page.phase, '') AS phase,
     COALESCE(page.source_size, 0) AS source_size";
 
 fn request_from_row(row: &Row<'_>) -> rusqlite::Result<AnalysisRequest> {
@@ -84,19 +133,55 @@ fn request_from_row(row: &Row<'_>) -> rusqlite::Result<AnalysisRequest> {
         source_size: row.get(2)?,
         source_mtime: row.get(3)?,
         component: row.get(4)?,
-        force_rebuild: row.get::<_, i64>(5)? != 0,
-        target_node_id: row.get(6)?,
-        state: row.get(7)?,
-        owner_node_id: row.get(8)?,
-        fence: row.get(9)?,
-        lease_expires_ms: row.get(10)?,
-        attempts: row.get(11)?,
-        not_before_ms: row.get(12)?,
-        result_cache_key: row.get(13)?,
-        last_error_code: row.get(14)?,
-        created_at_ms: row.get(15)?,
-        updated_at_ms: row.get(16)?,
+        pipeline_version: row.get(5)?,
+        requested_generation: row.get(6)?,
+        expected_predecessor_generation: row.get(7)?,
+        priority: row.get(8)?,
+        trigger: row.get(9)?,
+        force_rebuild: row.get::<_, i64>(10)? != 0,
+        target_node_id: row.get(11)?,
+        state: row.get(12)?,
+        owner_node_id: row.get(13)?,
+        fence: row.get(14)?,
+        lease_expires_ms: row.get(15)?,
+        attempts: row.get(16)?,
+        not_before_ms: row.get(17)?,
+        result_cache_key: row.get(18)?,
+        last_error_code: row.get(19)?,
+        cancel_requested: row.get::<_, i64>(20)? != 0,
+        created_at_ms: row.get(21)?,
+        updated_at_ms: row.get(22)?,
     })
+}
+
+fn attempt_from_row(row: &Row<'_>) -> rusqlite::Result<AnalysisAttempt> {
+    Ok(AnalysisAttempt {
+        request_id: row.get(0)?,
+        attempt: row.get(1)?,
+        claim_node_id: row.get(2)?,
+        claim_epoch: row.get(3)?,
+        claim_expires_at_ms: row.get(4)?,
+        phase: row.get(5)?,
+        started_at_ms: row.get(6)?,
+        phase_updated_at_ms: row.get(7)?,
+        terminal_code: row.get(8)?,
+    })
+}
+
+fn valid_analysis_phase(phase: &str) -> bool {
+    matches!(
+        phase,
+        "claimed"
+            | "source_probe"
+            | "hashing"
+            | "staged"
+            | "publishing"
+            | "retry_wait"
+            | "published"
+            | "failed"
+            | "canceled"
+            | "stale"
+    )
 }
 
 fn history_from_row(
@@ -127,14 +212,19 @@ fn history_from_row(
         created_at_ms: row.get(21)?,
         updated_at_ms: row.get(22)?,
         pipeline_version: row.get(23)?,
-        source_size: row.get(24)?,
+        requested_generation: row.get(24)?,
+        priority: row.get(25)?,
+        trigger: row.get(26)?,
+        cancel_requested: row.get::<_, i64>(27)? != 0,
+        phase: row.get(28)?,
+        source_size: row.get(29)?,
     };
     let cursor = AnalysisHistoryCursor {
-        sort_rank: row.get(25)?,
+        sort_rank: row.get(30)?,
         updated_at_ms: history.updated_at_ms,
         row_key: history.row_key.clone(),
     };
-    Ok((history, cursor, row.get(26)?))
+    Ok((history, cursor, row.get(31)?))
 }
 
 fn analysis_filter_code(filter: AnalysisHistoryFilter) -> i64 {
@@ -195,6 +285,9 @@ fn valid_job(job: &NewClusterFragmentIndexJob) -> bool {
         && job.source_size >= 0
         && valid_hex_digest(&job.source_sha256)
         && valid_hex_digest(&job.pipeline_sha256)
+        && matches!(job.priority.as_str(), "normal" | "forced" | "foreground")
+        && matches!(job.trigger.as_str(), "admin" | "background" | "foreground")
+        && job.target_node_id.len() <= 128
 }
 
 fn valid_request(request: &NewAnalysisRequest) -> bool {
@@ -206,6 +299,13 @@ fn valid_request(request: &NewAnalysisRequest) -> bool {
             request.component.as_str(),
             "fragment_index" | "skip_markers"
         )
+        && !request.pipeline_version.is_empty()
+        && request.pipeline_version.len() <= 128
+        && !request.requested_generation.is_empty()
+        && request.requested_generation.len() <= 128
+        && matches!(request.priority.as_str(), "normal" | "forced")
+        && matches!(request.trigger.as_str(), "admin" | "background")
+        && (request.force_rebuild == (request.priority == "forced"))
         && request.target_node_id.len() <= 128
         && ((request.component == "skip_markers" && request.target_node_id.is_empty())
             || (request.component == "fragment_index" && !request.target_node_id.is_empty()))
@@ -221,20 +321,53 @@ impl ClusterFragmentIndexStore for SqliteStore {
             return Err(StoreError::Task("invalid analysis request".to_owned()));
         }
         let request = request.clone();
+        let semantic_fingerprint = crate::segplan::argv_fingerprint(&[
+            "timeline-annotations".to_owned(),
+            request.pipeline_version.clone(),
+        ]);
         self.with_conn(move |conn| {
             let transaction = conn.unchecked_transaction()?;
             transaction.execute(
                 "INSERT INTO analysis_requests
                     (request_id, file_id, source_size, source_mtime, component,
+                     pipeline_version, requested_generation, expected_predecessor_generation,
+                     priority, trigger,
                      force_rebuild, target_node_id, state, owner_node_id, fence,
                      lease_expires_ms, attempts, not_before_ms, result_cache_key,
-                     last_error_code, created_at_ms, updated_at_ms)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', NULL, 0,
-                        NULL, 0, ?8, NULL, NULL, ?9, ?9
+                     last_error_code, cancel_requested, created_at_ms, updated_at_ms)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                        CASE WHEN ?5 = 'skip_markers' THEN COALESCE((
+                          SELECT generation_id FROM timeline_annotation_sets
+                           WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
+                        ), '') ELSE '' END,
+                        ?8, ?9, ?10, ?11,
+                        CASE WHEN ?10 = 0 AND ?5 = 'skip_markers' AND EXISTS (
+                          SELECT 1 FROM timeline_annotation_sets
+                           WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
+                             AND argv_fingerprint = ?12 AND publication_priority = 'forced'
+                        ) THEN 'ready' ELSE 'queued' END,
+                        NULL, 0, NULL, 0, ?13,
+                        CASE WHEN ?10 = 0 AND ?5 = 'skip_markers' THEN (
+                          SELECT generation_id FROM timeline_annotation_sets
+                           WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
+                             AND argv_fingerprint = ?12 AND publication_priority = 'forced'
+                        ) ELSE NULL END,
+                        NULL, 0, ?14, ?14
                   WHERE EXISTS (SELECT 1 FROM files
                                  WHERE id = ?2 AND size = ?3 AND mtime = ?4)
                     AND (SELECT COUNT(*) FROM analysis_requests
-                          WHERE state IN ('queued', 'running', 'submitted')) < ?10
+                          WHERE state IN ('queued', 'running', 'submitted')) < ?15
+                    AND (?10 = 1 OR (
+                      NOT EXISTS (SELECT 1 FROM analysis_requests
+                        WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
+                          AND component = ?5 AND force_rebuild = 1
+                          AND target_node_id = ?11
+                          AND state IN ('queued', 'running', 'submitted', 'ready'))
+                      AND NOT EXISTS (SELECT 1 FROM analysis_requests
+                        WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
+                          AND component = ?5 AND pipeline_version = ?6
+                          AND requested_generation = ?7 AND target_node_id = ?11)
+                    ))
                  ON CONFLICT DO NOTHING",
                 params![
                     request.request_id,
@@ -242,28 +375,124 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     request.source_size,
                     request.source_mtime,
                     request.component,
+                    request.pipeline_version,
+                    request.requested_generation,
+                    request.priority,
+                    request.trigger,
                     if request.force_rebuild { 1_i64 } else { 0_i64 },
                     request.target_node_id,
+                    semantic_fingerprint,
                     request.not_before_ms,
                     request.created_at_ms,
                     MAX_ANALYSIS_REQUESTS,
                 ],
             )?;
+            if request.force_rebuild {
+                transaction.execute(
+                    "UPDATE analysis_attempts
+                        SET phase = 'canceled', phase_updated_at_ms = ?1,
+                            terminal_code = 'publication_superseded'
+                      WHERE (request_id, claim_epoch) IN (
+                        SELECT older.request_id, older.fence FROM analysis_requests older
+                         WHERE older.file_id = ?2 AND older.source_size = ?3
+                           AND older.source_mtime = ?4 AND older.component = ?5
+                           AND older.pipeline_version = ?6 AND older.force_rebuild = 0
+                           AND older.state IN ('queued','running','submitted')
+                           AND EXISTS (SELECT 1 FROM analysis_requests successor
+                             WHERE successor.request_id = ?7 AND successor.force_rebuild = 1))",
+                    params![
+                        request.created_at_ms,
+                        request.file_id,
+                        request.source_size,
+                        request.source_mtime,
+                        request.component,
+                        request.pipeline_version,
+                        request.request_id,
+                    ],
+                )?;
+                transaction.execute(
+                    "UPDATE analysis_requests
+                        SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+                            fence = fence + 1, cancel_requested = 1,
+                            last_error_code = 'publication_superseded', updated_at_ms = ?1
+                      WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
+                        AND component = ?5 AND pipeline_version = ?6
+                        AND force_rebuild = 0 AND state IN ('queued','running','submitted')
+                        AND EXISTS (SELECT 1 FROM analysis_requests successor
+                          WHERE successor.request_id = ?7 AND successor.force_rebuild = 1)",
+                    params![
+                        request.created_at_ms,
+                        request.file_id,
+                        request.source_size,
+                        request.source_mtime,
+                        request.component,
+                        request.pipeline_version,
+                        request.request_id,
+                    ],
+                )?;
+                transaction.execute(
+                    "UPDATE cluster_fragment_index_jobs
+                        SET state = 'cancelled', owner_node_id = NULL,
+                            lease_expires_ms = NULL, fence = fence + 1,
+                            last_error_code = 'publication_superseded', updated_at_ms = ?1
+                      WHERE state IN ('queued','running')
+                        AND (cache_key, target_node_id) IN (
+                          SELECT older.result_cache_key, older.target_node_id
+                            FROM analysis_requests older
+                           WHERE older.file_id = ?2 AND older.source_size = ?3
+                             AND older.source_mtime = ?4 AND older.component = ?5
+                             AND older.pipeline_version = ?6 AND older.force_rebuild = 0
+                             AND older.state = 'cancelled'
+                             AND older.last_error_code = 'publication_superseded'
+                             AND older.updated_at_ms = ?1)
+                        AND NOT EXISTS (SELECT 1 FROM analysis_requests active
+                          WHERE active.result_cache_key = cluster_fragment_index_jobs.cache_key
+                            AND active.target_node_id = cluster_fragment_index_jobs.target_node_id
+                            AND active.state IN ('queued','running','submitted'))",
+                    params![
+                        request.created_at_ms,
+                        request.file_id,
+                        request.source_size,
+                        request.source_mtime,
+                        request.component,
+                        request.pipeline_version,
+                    ],
+                )?;
+            }
             let active = transaction
                 .query_row(
                     &format!(
                         "SELECT {REQUEST_COLS} FROM analysis_requests
                           WHERE file_id = ?1 AND source_size = ?2 AND source_mtime = ?3
-                            AND component = ?4 AND target_node_id = ?5
-                            AND state IN ('queued', 'running', 'submitted')
-                          ORDER BY created_at_ms, request_id LIMIT 1"
+                            AND component = ?4
+                            AND ((pipeline_version = ?5 AND requested_generation = ?6
+                                  AND target_node_id = ?7)
+                              OR (force_rebuild = 1 AND pipeline_version = ?5
+                                AND target_node_id = ?7
+                                AND (state IN ('queued', 'running', 'submitted')
+                                  OR (?9 = 0 AND state = 'ready'))))
+                            AND (request_id = ?8
+                              OR state IN ('queued', 'running', 'submitted')
+                              OR (?9 = 0 AND requested_generation = ?6)
+                              OR (?9 = 0 AND force_rebuild = 1 AND state = 'ready'
+                                AND pipeline_version = ?5 AND target_node_id = ?7))
+                          ORDER BY CASE WHEN request_id = ?8 THEN 0
+                              WHEN force_rebuild = 1
+                                AND state IN ('queued', 'running', 'submitted') THEN 1
+                              WHEN state IN ('queued', 'running', 'submitted') THEN 2
+                              ELSE 3 END,
+                            created_at_ms DESC, request_id DESC LIMIT 1"
                     ),
                     params![
                         request.file_id,
                         request.source_size,
                         request.source_mtime,
                         request.component,
-                        request.target_node_id
+                        request.pipeline_version,
+                        request.requested_generation,
+                        request.target_node_id,
+                        request.request_id,
+                        if request.force_rebuild { 1_i64 } else { 0_i64 },
                     ],
                     request_from_row,
                 )
@@ -289,15 +518,48 @@ impl ClusterFragmentIndexStore for SqliteStore {
         }
         let node_id = node_id.to_owned();
         self.with_conn(move |conn| {
+            let max_attempts = configured_max_attempts(conn)?;
+            let backoff_base_ms = configured_backoff_base_ms(conn)?;
+            let backoff_max_ms = configured_backoff_max_ms(conn)?.max(backoff_base_ms);
             let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "UPDATE analysis_attempts
+                    SET phase = 'retry_wait', phase_updated_at_ms = ?1,
+                        terminal_code = 'lease_expired'
+                  WHERE (request_id, claim_epoch) IN (
+                    SELECT request_id, fence FROM analysis_requests
+                     WHERE state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1)",
+                params![now_ms],
+            )?;
+            transaction.execute(
+                "UPDATE analysis_requests
+                    SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                        not_before_ms = ?1 + MIN(MAX(1000,
+                          (?2 * (1 << MIN(MAX(attempts - 1, 0), 30)) *
+                           (75 + (ABS(length(request_id) * 17
+                             + unicode(substr(request_id, 1, 1)) * 31
+                             + unicode(substr(request_id, -1, 1)) * 13
+                             + attempts * 7) % 51))) / 100), ?3),
+                        last_error_code = 'lease_expired',
+                        updated_at_ms = ?1
+                  WHERE state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1",
+                params![now_ms, backoff_base_ms, backoff_max_ms],
+            )?;
+            transaction.execute(
+                "UPDATE analysis_attempts
+                    SET phase = 'failed', phase_updated_at_ms = ?1,
+                        terminal_code = 'attempt_limit'
+                  WHERE (request_id, claim_epoch) IN (
+                    SELECT request_id, fence FROM analysis_requests
+                     WHERE attempts >= ?2 AND state = 'queued' AND not_before_ms <= ?1)",
+                params![now_ms, max_attempts],
+            )?;
             transaction.execute(
                 "UPDATE analysis_requests
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         last_error_code = 'attempt_limit', updated_at_ms = ?1
-                  WHERE attempts >= ?2 AND (
-                    (state = 'queued' AND not_before_ms <= ?1)
-                    OR (state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1))",
-                params![now_ms, MAX_ATTEMPTS],
+                  WHERE attempts >= ?2 AND state = 'queued' AND not_before_ms <= ?1",
+                params![now_ms, max_attempts],
             )?;
             let candidate = transaction
                 .query_row(
@@ -306,11 +568,17 @@ impl ClusterFragmentIndexStore for SqliteStore {
                           WHERE (target_node_id = ?1
                               OR (component = 'skip_markers' AND target_node_id = ''))
                             AND attempts < ?2
-                            AND ((state = 'queued' AND not_before_ms <= ?3)
-                              OR (state = 'running' AND lease_expires_ms <= ?3))
-                          ORDER BY created_at_ms, request_id LIMIT 1"
+                            AND state = 'queued' AND not_before_ms <= ?3
+                          ORDER BY created_at_ms - CASE WHEN priority = 'forced'
+                                     THEN ?4 ELSE 0 END,
+                                   created_at_ms, request_id LIMIT 1"
                     ),
-                    params![node_id, MAX_ATTEMPTS, now_ms],
+                    params![
+                        node_id,
+                        max_attempts,
+                        now_ms,
+                        super::super::fragment_index_cluster::ANALYSIS_FORCED_PRIORITY_BOOST_MS
+                    ],
                     request_from_row,
                 )
                 .optional()?;
@@ -324,8 +592,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         lease_expires_ms = ?2, attempts = attempts + 1,
                         last_error_code = NULL, updated_at_ms = ?3
                   WHERE request_id = ?4 AND fence = ?5
-                    AND ((state = 'queued' AND not_before_ms <= ?3)
-                      OR (state = 'running' AND lease_expires_ms <= ?3))",
+                    AND state = 'queued' AND not_before_ms <= ?3",
                 params![
                     node_id,
                     lease_expires_ms,
@@ -345,6 +612,28 @@ impl ClusterFragmentIndexStore for SqliteStore {
             candidate.attempts += 1;
             candidate.updated_at_ms = now_ms;
             candidate.last_error_code.clear();
+            transaction.execute(
+                "INSERT INTO analysis_attempts
+                    (request_id, attempt, claim_node_id, claim_epoch,
+                     claim_expires_at_ms, phase, started_at_ms,
+                     phase_updated_at_ms, terminal_code)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'claimed', ?6, ?6, NULL)",
+                params![
+                    candidate.request_id,
+                    candidate.attempts,
+                    candidate.owner_node_id,
+                    candidate.fence,
+                    candidate.lease_expires_ms,
+                    now_ms,
+                ],
+            )?;
+            transaction.execute(
+                "DELETE FROM analysis_attempts
+                  WHERE request_id = ?1 AND claim_epoch NOT IN (
+                    SELECT claim_epoch FROM analysis_attempts
+                     WHERE request_id = ?1 ORDER BY claim_epoch DESC LIMIT ?2)",
+                params![candidate.request_id, MAX_ATTEMPT_HISTORY_PER_REQUEST],
+            )?;
             transaction.commit()?;
             Ok(Some(candidate))
         })
@@ -362,12 +651,84 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let request_id = request_id.to_owned();
         let node_id = node_id.to_owned();
         self.with_conn(move |conn| {
-            Ok(conn.execute(
+            let transaction = conn.unchecked_transaction()?;
+            let changed = transaction.execute(
                 "UPDATE analysis_requests SET lease_expires_ms = ?1, updated_at_ms = ?2
                   WHERE request_id = ?3 AND state = 'running' AND owner_node_id = ?4
                     AND fence = ?5 AND lease_expires_ms > ?2 AND ?1 > ?2",
                 params![lease_expires_ms, now_ms, request_id, node_id, fence],
+            )?;
+            if changed == 1 {
+                transaction.execute(
+                    "UPDATE analysis_attempts
+                        SET claim_expires_at_ms = ?1, phase_updated_at_ms = ?2
+                      WHERE request_id = ?3 AND claim_epoch = ?4",
+                    params![lease_expires_ms, now_ms, request_id, fence],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn record_analysis_request_phase(
+        &self,
+        request: &AnalysisRequest,
+        phase: &str,
+        terminal_code: Option<&str>,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if !valid_analysis_phase(phase)
+            || terminal_code
+                .is_some_and(|code| code.is_empty() || code.len() > MAX_ERROR_CODE_BYTES)
+        {
+            return Err(StoreError::Task("invalid analysis phase".to_owned()));
+        }
+        let request = request.clone();
+        let phase = phase.to_owned();
+        let terminal_code = terminal_code.map(str::to_owned);
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE analysis_attempts
+                    SET phase = ?1, phase_updated_at_ms = ?2, terminal_code = ?3
+                  WHERE request_id = ?4 AND attempt = ?5 AND claim_epoch = ?6
+                    AND claim_node_id = ?7
+                    AND EXISTS (SELECT 1 FROM analysis_requests
+                          WHERE request_id = ?4 AND state = 'running'
+                            AND owner_node_id = ?7 AND fence = ?6
+                            AND attempts = ?5 AND lease_expires_ms > ?2)",
+                params![
+                    phase,
+                    now_ms,
+                    terminal_code,
+                    request.request_id,
+                    request.attempts,
+                    request.fence,
+                    request.owner_node_id,
+                ],
             )? == 1)
+        })
+        .await
+    }
+
+    async fn analysis_attempts(
+        &self,
+        request_id: &str,
+        limit: i64,
+    ) -> Result<Vec<AnalysisAttempt>, StoreError> {
+        let request_id = request_id.to_owned();
+        let limit = limit.clamp(1, 100);
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT request_id, attempt, claim_node_id, claim_epoch,
+                        claim_expires_at_ms, phase, started_at_ms,
+                        phase_updated_at_ms, COALESCE(terminal_code, '')
+                   FROM analysis_attempts WHERE request_id = ?1
+                  ORDER BY claim_epoch DESC LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![request_id, limit], attempt_from_row)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
         .await
     }
@@ -384,46 +745,82 @@ impl ClusterFragmentIndexStore for SqliteStore {
             || request.file_id != job.file_id
             || request.source_size != job.source_size
             || request.source_mtime != job.source_mtime
+            || request.priority != job.priority
+            || request.trigger != job.trigger
+            || request.target_node_id != job.target_node_id
         {
             return Err(StoreError::Task("invalid analysis submission".to_owned()));
+        }
+        let logical_cache_key = cluster_fragment_index_key(
+            job.file_id,
+            job.source_size,
+            job.source_mtime,
+            &job.source_sha256,
+            &job.pipeline_sha256,
+        )
+        .ok_or_else(|| StoreError::Task("invalid analysis logical cache key".to_owned()))?;
+        if request.force_rebuild {
+            let expected_cache_key = cluster_fragment_index_generation_key(
+                job.file_id,
+                job.source_size,
+                job.source_mtime,
+                &job.source_sha256,
+                &job.pipeline_sha256,
+                &request.requested_generation,
+            )
+            .ok_or_else(|| StoreError::Task("invalid analysis generation key".to_owned()))?;
+            if job.cache_key != expected_cache_key {
+                return Err(StoreError::Task(
+                    "analysis submission cache identity mismatch".to_owned(),
+                ));
+            }
         }
         let request = request.clone();
         let job = job.clone();
         self.with_conn(move |conn| {
+            let max_attempts = configured_max_attempts(conn)?;
             let transaction = conn.unchecked_transaction()?;
             let changed = transaction.execute(
                 "UPDATE analysis_requests
                     SET state = 'submitted', owner_node_id = NULL, lease_expires_ms = NULL,
-                        result_cache_key = ?1, last_error_code = NULL, updated_at_ms = ?2
+                        result_cache_key = ?1,
+                        expected_predecessor_generation = COALESCE((
+                          SELECT generation_cache_key FROM cluster_fragment_index_heads
+                           WHERE logical_cache_key = ?12
+                        ), ''),
+                        last_error_code = NULL, updated_at_ms = ?2
                   WHERE request_id = ?3 AND state = 'running' AND owner_node_id = ?4
                     AND fence = ?5 AND lease_expires_ms > ?2
                     AND file_id = ?6 AND source_size = ?7 AND source_mtime = ?8
                     AND EXISTS (SELECT 1 FROM files
                           WHERE id = ?6 AND size = ?7 AND mtime = ?8)
+                    AND (?9 = 1 OR ?1 = COALESCE((
+                      SELECT generation_cache_key FROM cluster_fragment_index_heads
+                       WHERE logical_cache_key = ?12), ?12))
                     AND (
                       (?9 = 1
                         AND (SELECT COUNT(*) FROM cluster_fragment_index_jobs
                               WHERE state IN ('queued', 'running')) < ?10
                         AND (NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                                          WHERE cache_key = ?1)
+                                          WHERE cache_key = ?1 AND target_node_id = ?13)
                           OR EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                                      WHERE cache_key = ?1
+                                      WHERE cache_key = ?1 AND target_node_id = ?13
                                         AND state IN ('ready', 'failed', 'cancelled'))))
                       OR
                       (?9 = 0 AND (
                         EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                                 WHERE cache_key = ?1
+                                 WHERE cache_key = ?1 AND target_node_id = ?13
                                    AND state IN ('queued', 'running', 'ready'))
                         OR ((SELECT COUNT(*) FROM cluster_fragment_index_jobs
                                 WHERE state IN ('queued', 'running')) < ?10
                           AND (NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                                            WHERE cache_key = ?1)
+                                            WHERE cache_key = ?1 AND target_node_id = ?13)
                             OR EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                                        WHERE cache_key = ?1 AND (
+                                        WHERE cache_key = ?1 AND target_node_id = ?13 AND (
                                           state = 'cancelled'
-                                          OR (state = 'failed' AND (
-                                            last_error_code = 'queue_expired'
-                                            OR (attempts < ?11 AND not_before_ms <= ?2))))))))))",
+                                          OR (state = 'failed'
+                                            AND last_error_code = 'queue_expired'
+                                            AND attempts <= ?11))))))))",
                 params![
                     job.cache_key,
                     now_ms,
@@ -435,7 +832,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     job.source_mtime,
                     if request.force_rebuild { 1_i64 } else { 0_i64 },
                     MAX_ACTIVE_JOBS,
-                    MAX_ATTEMPTS,
+                    max_attempts,
+                    logical_cache_key,
+                    job.target_node_id,
                 ],
             )?;
             if changed != 1 {
@@ -445,18 +844,20 @@ impl ClusterFragmentIndexStore for SqliteStore {
             transaction.execute(
                 "INSERT INTO cluster_fragment_index_jobs
                     (cache_key, file_id, source_size, source_mtime, source_sha256,
-                     pipeline_sha256, state, owner_node_id, fence, lease_expires_ms,
+                     pipeline_sha256, priority, trigger, target_node_id,
+                     state, owner_node_id, fence, lease_expires_ms,
                      attempts, not_before_ms, created_at_ms, updated_at_ms, last_error_code)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'queued', NULL, 0, NULL, 0,
-                        ?7, ?8, ?8, NULL
-                 ON CONFLICT(cache_key) DO UPDATE SET
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                        'queued', NULL, 0, NULL, 0, ?10, ?11, ?11, NULL
+                 ON CONFLICT(cache_key, target_node_id) DO UPDATE SET
                     file_id = excluded.file_id, source_size = excluded.source_size,
                     source_mtime = excluded.source_mtime,
                     source_sha256 = excluded.source_sha256,
                     pipeline_sha256 = excluded.pipeline_sha256,
+                    priority = excluded.priority, trigger = excluded.trigger,
                     state = 'queued',
                     owner_node_id = NULL, lease_expires_ms = NULL,
-                    attempts = CASE WHEN ?9 = 1 THEN 0
+                    attempts = CASE WHEN ?12 = 1 THEN 0
                       WHEN cluster_fragment_index_jobs.state = 'cancelled'
                         OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
@@ -464,14 +865,13 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     not_before_ms = excluded.not_before_ms,
                     created_at_ms = excluded.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms, last_error_code = NULL
-                  WHERE (?9 = 1 AND cluster_fragment_index_jobs.state
+                  WHERE (?12 = 1 AND cluster_fragment_index_jobs.state
                                       IN ('ready', 'failed', 'cancelled'))
-                     OR (?9 = 0 AND (
+                     OR (?12 = 0 AND (
                        cluster_fragment_index_jobs.state = 'cancelled'
                        OR (cluster_fragment_index_jobs.state = 'failed'
-                         AND (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                           OR (cluster_fragment_index_jobs.attempts < ?10
-                             AND cluster_fragment_index_jobs.not_before_ms <= ?8)))))",
+                         AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                         AND cluster_fragment_index_jobs.attempts <= ?13)))",
                 params![
                     job.cache_key,
                     job.file_id,
@@ -479,16 +879,20 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     job.source_mtime,
                     job.source_sha256,
                     job.pipeline_sha256,
+                    job.priority,
+                    job.trigger,
+                    job.target_node_id,
                     job.not_before_ms,
                     job.created_at_ms,
                     if request.force_rebuild { 1_i64 } else { 0_i64 },
-                    MAX_ATTEMPTS,
+                    max_attempts,
                 ],
             )?;
             let handed_off = transaction.query_row(
                 "SELECT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                  WHERE cache_key = ?1 AND state IN ('queued', 'running', 'ready'))",
-                params![job.cache_key],
+                  WHERE cache_key = ?1 AND target_node_id = ?2
+                    AND state IN ('queued', 'running', 'ready'))",
+                params![job.cache_key, job.target_node_id],
                 |row| row.get::<_, i64>(0),
             )? == 1;
             if !handed_off {
@@ -496,6 +900,34 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     "analysis handoff transaction did not produce a worker job".to_owned(),
                 ));
             }
+            // A pre-head-schema logical artifact is still valid content. Its
+            // first request lazily installs the serving pointer only after
+            // verifying both the ready job and immutable artifact exist.
+            transaction.execute(
+                "INSERT INTO cluster_fragment_index_heads
+                    (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+                 SELECT ?1, ?2, ?3, ?4
+                  WHERE ?1 = ?2
+                    AND EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
+                          WHERE cache_key = ?2 AND target_node_id = ?5 AND state = 'ready')
+                    AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
+                          WHERE cache_key = ?2)
+                 ON CONFLICT(logical_cache_key) DO NOTHING",
+                params![
+                    logical_cache_key,
+                    job.cache_key,
+                    request.request_id,
+                    now_ms,
+                    job.target_node_id
+                ],
+            )?;
+            transaction.execute(
+                "UPDATE analysis_attempts
+                    SET phase = 'staged', phase_updated_at_ms = ?1,
+                        terminal_code = NULL
+                  WHERE request_id = ?2 AND claim_epoch = ?3",
+                params![now_ms, request.request_id, request.fence],
+            )?;
             transaction.commit()?;
             Ok(true)
         })
@@ -521,7 +953,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let request = request.clone();
         let error_code = error_code.to_owned();
         self.with_conn(move |conn| {
-            Ok(conn.execute(
+            let transaction = conn.unchecked_transaction()?;
+            let changed = transaction.execute(
                 "UPDATE analysis_requests
                     SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                         attempts = CASE WHEN ?1 = 0 AND attempts > 0
@@ -538,7 +971,18 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     request.owner_node_id,
                     request.fence
                 ],
-            )? == 1)
+            )?;
+            if changed == 1 {
+                transaction.execute(
+                    "UPDATE analysis_attempts
+                        SET phase = 'retry_wait', phase_updated_at_ms = ?1,
+                            terminal_code = ?2
+                      WHERE request_id = ?3 AND claim_epoch = ?4",
+                    params![now_ms, error_code, request.request_id, request.fence],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(changed == 1)
         })
         .await
     }
@@ -558,39 +1002,133 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let node_id = node_id.to_owned();
         let error_code = error_code.to_owned();
         self.with_conn(move |conn| {
-            Ok(conn.execute(
+            let transaction = conn.unchecked_transaction()?;
+            let changed = transaction.execute(
                 "UPDATE analysis_requests
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         last_error_code = ?1, updated_at_ms = ?2
                   WHERE request_id = ?3 AND state = 'running' AND owner_node_id = ?4
                     AND fence = ?5 AND lease_expires_ms > ?2",
                 params![error_code, now_ms, request_id, node_id, fence],
-            )? == 1)
+            )?;
+            if changed == 1 {
+                transaction.execute(
+                    "UPDATE analysis_attempts
+                        SET phase = 'failed', phase_updated_at_ms = ?1,
+                            terminal_code = ?2
+                      WHERE request_id = ?3 AND claim_epoch = ?4",
+                    params![now_ms, error_code, request_id, fence],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(changed == 1)
         })
         .await
     }
 
     async fn settle_analysis_requests(&self, now_ms: i64) -> Result<u64, StoreError> {
         self.with_conn(move |conn| {
-            let changed = conn.execute(
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "UPDATE analysis_attempts
+                    SET phase = COALESCE((SELECT CASE job.state
+                            WHEN 'ready' THEN CASE WHEN EXISTS (
+                              SELECT 1 FROM cluster_fragment_index_heads head
+                               WHERE head.generation_cache_key = request.result_cache_key
+                            ) AND EXISTS (
+                              SELECT 1 FROM cluster_fragment_index_locations location
+                               WHERE location.cache_key = request.result_cache_key
+                                 AND location.node_id = request.target_node_id
+                            ) THEN 'published' WHEN NOT EXISTS (
+                              SELECT 1 FROM cluster_fragment_index_heads head
+                               WHERE head.generation_cache_key = request.result_cache_key
+                            ) THEN 'failed' ELSE 'retry_wait' END
+                            WHEN 'failed' THEN 'failed'
+                            WHEN 'cancelled' THEN 'canceled' END
+                          FROM analysis_requests request
+                          JOIN cluster_fragment_index_jobs job
+                            ON job.cache_key = request.result_cache_key
+                           AND job.target_node_id = request.target_node_id
+                         WHERE request.request_id = analysis_attempts.request_id), phase),
+                        terminal_code = (SELECT CASE WHEN job.state = 'ready' AND NOT EXISTS (
+                              SELECT 1 FROM cluster_fragment_index_heads head
+                               WHERE head.generation_cache_key = request.result_cache_key
+                            ) THEN 'publication_superseded' WHEN job.state = 'ready' AND NOT EXISTS (
+                              SELECT 1 FROM cluster_fragment_index_locations location
+                               WHERE location.cache_key = request.result_cache_key
+                                 AND location.node_id = request.target_node_id
+                            ) THEN 'target_coverage_missing' ELSE job.last_error_code END
+                          FROM analysis_requests request
+                          JOIN cluster_fragment_index_jobs job
+                            ON job.cache_key = request.result_cache_key
+                           AND job.target_node_id = request.target_node_id
+                         WHERE request.request_id = analysis_attempts.request_id),
+                        phase_updated_at_ms = ?1
+                  WHERE (request_id, claim_epoch) IN (
+                    SELECT request.request_id, request.fence
+                      FROM analysis_requests request
+                      JOIN cluster_fragment_index_jobs job
+                        ON job.cache_key = request.result_cache_key
+                       AND job.target_node_id = request.target_node_id
+                     WHERE request.state = 'submitted'
+                       AND job.state IN ('ready', 'failed', 'cancelled'))",
+                params![now_ms],
+            )?;
+            let changed = transaction.execute(
                 "UPDATE analysis_requests
                     SET state = COALESCE((SELECT CASE job.state
-                            WHEN 'ready' THEN 'ready'
+                            WHEN 'ready' THEN CASE WHEN EXISTS (
+                              SELECT 1 FROM cluster_fragment_index_heads head
+                               WHERE head.generation_cache_key = analysis_requests.result_cache_key
+                            ) AND EXISTS (
+                              SELECT 1 FROM cluster_fragment_index_locations location
+                               WHERE location.cache_key = analysis_requests.result_cache_key
+                                 AND location.node_id = analysis_requests.target_node_id
+                            ) THEN 'ready' WHEN NOT EXISTS (
+                              SELECT 1 FROM cluster_fragment_index_heads head
+                               WHERE head.generation_cache_key = analysis_requests.result_cache_key
+                            ) THEN 'failed' ELSE 'queued' END
                             WHEN 'failed' THEN 'failed'
                             WHEN 'cancelled' THEN 'cancelled'
                             ELSE analysis_requests.state END
                           FROM cluster_fragment_index_jobs job
-                         WHERE job.cache_key = analysis_requests.result_cache_key), state),
-                        last_error_code = (SELECT job.last_error_code
+                         WHERE job.cache_key = analysis_requests.result_cache_key
+                           AND job.target_node_id = analysis_requests.target_node_id), state),
+                        owner_node_id = CASE WHEN EXISTS (SELECT 1 FROM cluster_fragment_index_jobs job
+                          WHERE job.cache_key = analysis_requests.result_cache_key
+                            AND job.target_node_id = analysis_requests.target_node_id
+                            AND job.state = 'ready')
+                          THEN NULL ELSE owner_node_id END,
+                        lease_expires_ms = CASE WHEN EXISTS (SELECT 1 FROM cluster_fragment_index_jobs job
+                          WHERE job.cache_key = analysis_requests.result_cache_key
+                            AND job.target_node_id = analysis_requests.target_node_id
+                            AND job.state = 'ready')
+                          THEN NULL ELSE lease_expires_ms END,
+                        not_before_ms = CASE WHEN EXISTS (SELECT 1 FROM cluster_fragment_index_jobs job
+                          WHERE job.cache_key = analysis_requests.result_cache_key
+                            AND job.target_node_id = analysis_requests.target_node_id
+                            AND job.state = 'ready')
+                          THEN ?1 + 1000 ELSE not_before_ms END,
+                        last_error_code = (SELECT CASE WHEN job.state = 'ready' AND NOT EXISTS (
+                              SELECT 1 FROM cluster_fragment_index_heads head
+                               WHERE head.generation_cache_key = analysis_requests.result_cache_key
+                            ) THEN 'publication_superseded' WHEN job.state = 'ready' AND NOT EXISTS (
+                              SELECT 1 FROM cluster_fragment_index_locations location
+                               WHERE location.cache_key = analysis_requests.result_cache_key
+                                 AND location.node_id = analysis_requests.target_node_id
+                            ) THEN 'target_coverage_missing' ELSE job.last_error_code END
                           FROM cluster_fragment_index_jobs job
-                         WHERE job.cache_key = analysis_requests.result_cache_key),
+                         WHERE job.cache_key = analysis_requests.result_cache_key
+                           AND job.target_node_id = analysis_requests.target_node_id),
                         updated_at_ms = ?1
                   WHERE state = 'submitted'
                     AND EXISTS (SELECT 1 FROM cluster_fragment_index_jobs job
                          WHERE job.cache_key = analysis_requests.result_cache_key
+                           AND job.target_node_id = analysis_requests.target_node_id
                            AND job.state IN ('ready', 'failed', 'cancelled'))",
                 params![now_ms],
             )?;
+            transaction.commit()?;
             Ok(changed as u64)
         })
         .await
@@ -605,16 +1143,31 @@ impl ClusterFragmentIndexStore for SqliteStore {
         self.with_conn(move |conn| {
             let changed = conn.execute(
                 "WITH ranked AS (
-                   SELECT request_id, updated_at_ms,
+                   SELECT request_id, updated_at_ms, file_id, source_size, source_mtime,
+                          force_rebuild,
                           ROW_NUMBER() OVER (
                             PARTITION BY file_id, component, target_node_id
-                            ORDER BY updated_at_ms DESC, request_id DESC) AS generation_rank
+                            ORDER BY updated_at_ms DESC, request_id DESC) AS generation_rank,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY file_id, component, target_node_id, force_rebuild
+                            ORDER BY updated_at_ms DESC, request_id DESC) AS priority_generation_rank,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY file_id, source_size, source_mtime, component,
+                                         pipeline_version, requested_generation,
+                                         target_node_id, force_rebuild
+                            ORDER BY updated_at_ms DESC, request_id DESC) AS identity_rank
                      FROM analysis_requests
                     WHERE state IN ('ready', 'failed', 'cancelled')
                  )
                  DELETE FROM analysis_requests WHERE request_id IN (
                    SELECT request_id FROM ranked
-                    WHERE updated_at_ms < ?1 OR generation_rank > 20
+                    WHERE (updated_at_ms < ?1 OR generation_rank > 20)
+                      AND (force_rebuild = 1 OR identity_rank > 1
+                        OR priority_generation_rank > 1
+                        OR NOT EXISTS (SELECT 1 FROM files
+                             WHERE files.id = ranked.file_id
+                               AND files.size = ranked.source_size
+                               AND files.mtime = ranked.source_mtime))
                     ORDER BY updated_at_ms, request_id LIMIT ?2)",
                 params![older_than_ms, limit],
             )?;
@@ -669,29 +1222,56 @@ impl ClusterFragmentIndexStore for SqliteStore {
     async fn retry_analysis_request_admin(
         &self,
         request_id: &str,
+        requested_generation: &str,
         now_ms: i64,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
+        if requested_generation.is_empty() || requested_generation.len() > 128 {
+            return Err(StoreError::Task(
+                "invalid requested analysis generation".to_owned(),
+            ));
+        }
         let request_id = request_id.to_owned();
+        let requested_generation = requested_generation.to_owned();
         self.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE analysis_requests
-                    SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
-                        result_cache_key = NULL, last_error_code = NULL,
-                        not_before_ms = ?1, updated_at_ms = ?1
-                  WHERE request_id = ?2 AND state IN ('failed', 'cancelled')
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "INSERT INTO analysis_requests
+                    (request_id, file_id, source_size, source_mtime, component,
+                     pipeline_version, requested_generation,
+                     expected_predecessor_generation, priority, trigger,
+                     force_rebuild, target_node_id, state, owner_node_id, fence,
+                     lease_expires_ms, attempts, not_before_ms, result_cache_key,
+                     last_error_code, cancel_requested, created_at_ms, updated_at_ms)
+                 SELECT ?1, original.file_id, original.source_size, original.source_mtime,
+                        original.component, original.pipeline_version, ?1,
+                        CASE WHEN original.component = 'skip_markers' THEN COALESCE((
+                          SELECT generation_id FROM timeline_annotation_sets
+                           WHERE file_id = original.file_id
+                             AND source_size = original.source_size
+                             AND source_mtime = original.source_mtime
+                        ), '') ELSE original.expected_predecessor_generation END,
+                        'forced', 'admin', 1,
+                        original.target_node_id, 'queued', NULL, 0, NULL, 0,
+                        ?2, NULL, NULL, 0, ?2, ?2
+                   FROM analysis_requests original
+                  WHERE original.request_id = ?3
+                    AND original.state IN ('failed', 'cancelled')
                     AND EXISTS (SELECT 1 FROM files
-                          WHERE id = analysis_requests.file_id
-                            AND size = analysis_requests.source_size
-                            AND mtime = analysis_requests.source_mtime)",
-                params![now_ms, request_id],
+                          WHERE id = original.file_id
+                            AND size = original.source_size
+                            AND mtime = original.source_mtime)
+                 ON CONFLICT DO NOTHING",
+                params![requested_generation, now_ms, request_id],
             )?;
-            conn.query_row(
-                &format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"),
-                params![request_id],
-                request_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
+            let request = transaction
+                .query_row(
+                    &format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"),
+                    params![requested_generation],
+                    request_from_row,
+                )
+                .optional()?;
+            transaction.commit()?;
+            Ok(request)
         })
         .await
     }
@@ -703,21 +1283,52 @@ impl ClusterFragmentIndexStore for SqliteStore {
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         let request_id = request_id.to_owned();
         self.with_conn(move |conn| {
-            conn.execute(
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "UPDATE analysis_attempts
+                    SET phase = 'canceled', phase_updated_at_ms = ?1,
+                        terminal_code = 'admin_cancelled'
+                  WHERE (request_id, claim_epoch) = (
+                    SELECT request_id, fence FROM analysis_requests
+                     WHERE request_id = ?2 AND state IN ('running', 'submitted'))",
+                params![now_ms, request_id],
+            )?;
+            transaction.execute(
                 "UPDATE analysis_requests
                     SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
-                        fence = fence + 1, last_error_code = 'admin_cancelled',
+                        fence = fence + 1, cancel_requested = 1,
+                        last_error_code = 'admin_cancelled',
                         updated_at_ms = ?1
                   WHERE request_id = ?2 AND state IN ('queued', 'running', 'submitted')",
                 params![now_ms, request_id],
             )?;
-            conn.query_row(
-                &format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"),
-                params![request_id],
-                request_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
+            transaction.execute(
+                "UPDATE cluster_fragment_index_jobs
+                    SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+                        fence = fence + 1, last_error_code = 'admin_cancelled',
+                        updated_at_ms = ?1
+                  WHERE state IN ('queued', 'running')
+                    AND cache_key = (SELECT result_cache_key FROM analysis_requests
+                                      WHERE request_id = ?2)
+                    AND target_node_id = (SELECT target_node_id FROM analysis_requests
+                                           WHERE request_id = ?2)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM analysis_requests other
+                       WHERE other.request_id <> ?2
+                         AND other.result_cache_key = cluster_fragment_index_jobs.cache_key
+                         AND other.target_node_id = cluster_fragment_index_jobs.target_node_id
+                         AND other.state IN ('queued', 'running', 'submitted'))",
+                params![now_ms, request_id],
+            )?;
+            let request = transaction
+                .query_row(
+                    &format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"),
+                    params![request_id],
+                    request_from_row,
+                )
+                .optional()?;
+            transaction.commit()?;
+            Ok(request)
         })
         .await
     }
@@ -740,7 +1351,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let request = request.clone();
         let result_key = result_key.to_owned();
         self.with_conn(move |conn| {
-            Ok(conn.execute(
+            let transaction = conn.unchecked_transaction()?;
+            let changed = transaction.execute(
                 "UPDATE analysis_requests
                     SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
                         result_cache_key = ?1, last_error_code = NULL, updated_at_ms = ?2
@@ -759,7 +1371,18 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     request.source_size,
                     request.source_mtime,
                 ],
-            )? == 1)
+            )?;
+            if changed == 1 {
+                transaction.execute(
+                    "UPDATE analysis_attempts
+                        SET phase = 'published', phase_updated_at_ms = ?1,
+                            terminal_code = NULL
+                      WHERE request_id = ?2 AND claim_epoch = ?3",
+                    params![now_ms, request.request_id, request.fence],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(changed == 1)
         })
         .await
     }
@@ -779,6 +1402,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let set = crate::store::timeline_annotations::validated(set, duration_ms)?;
         if set.source_identity.size != u64::try_from(request.source_size).unwrap_or(u64::MAX)
             || set.source_identity.mtime_ms != request.source_mtime
+            || set.generation_id != request.requested_generation
         {
             return Err(StoreError::Task(
                 "timeline analysis source identity does not match its request".to_owned(),
@@ -798,6 +1422,23 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     AND state = 'running' AND owner_node_id = ?4
                     AND fence = ?5 AND lease_expires_ms > ?2
                     AND file_id = ?6 AND source_size = ?7 AND source_mtime = ?8
+                    AND requested_generation = ?1
+                    AND expected_predecessor_generation = COALESCE((
+                      SELECT generation_id FROM timeline_annotation_sets
+                       WHERE file_id = ?6 AND source_size = ?7 AND source_mtime = ?8
+                    ), '')
+                    AND (force_rebuild = 1 OR COALESCE((
+                      SELECT publication_priority FROM timeline_annotation_sets
+                       WHERE file_id = ?6 AND source_size = ?7 AND source_mtime = ?8
+                    ), 'normal') <> 'forced')
+                    AND NOT EXISTS (
+                      SELECT 1 FROM analysis_requests newer
+                       WHERE newer.file_id = ?6 AND newer.source_size = ?7
+                         AND newer.source_mtime = ?8 AND newer.component = 'skip_markers'
+                         AND (newer.created_at_ms > analysis_requests.created_at_ms
+                           OR (newer.created_at_ms = analysis_requests.created_at_ms
+                             AND newer.request_id > analysis_requests.request_id))
+                         AND newer.state IN ('queued','running','submitted','ready'))
                     AND EXISTS (SELECT 1 FROM files
                           WHERE id = ?6 AND size = ?7 AND mtime = ?8)",
                 params![
@@ -817,8 +1458,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
             transaction.execute(
                 "INSERT INTO timeline_annotation_sets
                     (file_id, source_size, source_mtime, argv_fingerprint,
-                     generation_id, version, annotations_json, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     generation_id, version, annotations_json, updated_at_ms,
+                     publication_priority)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(file_id) DO UPDATE SET
                     source_size = excluded.source_size,
                     source_mtime = excluded.source_mtime,
@@ -826,7 +1468,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     generation_id = excluded.generation_id,
                     version = excluded.version,
                     annotations_json = excluded.annotations_json,
-                    updated_at_ms = excluded.updated_at_ms",
+                    updated_at_ms = excluded.updated_at_ms,
+                    publication_priority = excluded.publication_priority",
                 params![
                     request.file_id,
                     request.source_size,
@@ -836,7 +1479,19 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     i64::from(set.version),
                     annotations_json,
                     now_ms,
+                    if request.force_rebuild {
+                        "forced"
+                    } else {
+                        "normal"
+                    },
                 ],
+            )?;
+            transaction.execute(
+                "UPDATE analysis_attempts
+                    SET phase = 'published', phase_updated_at_ms = ?1,
+                        terminal_code = NULL
+                  WHERE request_id = ?2 AND claim_epoch = ?3",
+                params![now_ms, request.request_id, request.fence],
             )?;
             transaction.commit()?;
             Ok(true)
@@ -1020,13 +1675,33 @@ impl ClusterFragmentIndexStore for SqliteStore {
     async fn cluster_fragment_index_job(
         &self,
         cache_key: &str,
+        target_node_id: &str,
     ) -> Result<Option<ClusterFragmentIndexJob>, StoreError> {
         let cache_key = cache_key.to_owned();
+        let target_node_id = target_node_id.to_owned();
         self.with_read(move |conn| {
             conn.query_row(
-                &format!("SELECT {JOB_COLS} FROM cluster_fragment_index_jobs WHERE cache_key = ?1"),
-                params![cache_key],
+                &format!("SELECT {JOB_COLS} FROM cluster_fragment_index_jobs WHERE cache_key = ?1 AND target_node_id = ?2"),
+                params![cache_key, target_node_id],
                 job_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn cluster_fragment_index_current_generation(
+        &self,
+        logical_cache_key: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let logical_cache_key = logical_cache_key.to_owned();
+        self.with_read(move |conn| {
+            conn.query_row(
+                "SELECT generation_cache_key FROM cluster_fragment_index_heads
+                  WHERE logical_cache_key = ?1",
+                params![logical_cache_key],
+                |row| row.get(0),
             )
             .optional()
             .map_err(Into::into)
@@ -1120,7 +1795,10 @@ impl ClusterFragmentIndexStore for SqliteStore {
             conn.query_row(
                 "SELECT cache_key, file_id, source_size, source_mtime, source_sha256,
                         pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms
-                   FROM cluster_fragment_index_artifacts WHERE cache_key = ?1",
+                   FROM cluster_fragment_index_artifacts WHERE cache_key = COALESCE((
+                     SELECT generation_cache_key FROM cluster_fragment_index_heads
+                      WHERE logical_cache_key = ?1
+                   ), ?1)",
                 params![cache_key],
                 artifact_from_row,
             )
@@ -1142,40 +1820,54 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let job = job.clone();
         let eligibility_cutoff = job.created_at_ms.saturating_sub(QUEUE_ELIGIBILITY_MS);
         self.with_conn(move |conn| {
+            let max_attempts = configured_max_attempts(conn)?;
             conn.execute(
                 "UPDATE cluster_fragment_index_jobs
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
-                        last_error_code = 'queue_expired'
+                        last_error_code = CASE WHEN state = 'running'
+                          THEN 'attempt_limit' ELSE 'queue_expired' END
                   WHERE (state = 'queued' AND created_at_ms < ?2)
                      OR (state = 'running' AND attempts >= ?3
                        AND COALESCE(lease_expires_ms, 0) <= ?1)",
-                params![job.created_at_ms, eligibility_cutoff, MAX_ATTEMPTS],
+                params![job.created_at_ms, eligibility_cutoff, max_attempts],
             )?;
             let changed = conn.execute(
                 "INSERT INTO cluster_fragment_index_jobs
                     (cache_key, file_id, source_size, source_mtime, source_sha256,
-                     pipeline_sha256, state, owner_node_id, fence, lease_expires_ms,
+                     pipeline_sha256, priority, trigger, target_node_id,
+                     state, owner_node_id, fence, lease_expires_ms,
                      attempts, not_before_ms, created_at_ms, updated_at_ms)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'queued', NULL, 0, NULL, 0, ?7, ?8, ?8
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                        'queued', NULL, 0, NULL, 0, ?10, ?11, ?11
                   WHERE EXISTS (SELECT 1 FROM files
                                  WHERE id = ?2 AND size = ?3 AND mtime = ?4)
                     AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
                                      WHERE cache_key = ?1)
                     AND (SELECT COUNT(*) FROM cluster_fragment_index_jobs
-                          WHERE state IN ('queued', 'running')) < ?9
-                 ON CONFLICT(cache_key) DO UPDATE SET
+                          WHERE state IN ('queued', 'running')) < ?12
+                 ON CONFLICT(cache_key, target_node_id) DO UPDATE SET
                     file_id = excluded.file_id, source_size = excluded.source_size,
                     source_mtime = excluded.source_mtime,
                     source_sha256 = excluded.source_sha256,
                     pipeline_sha256 = excluded.pipeline_sha256,
+                    priority = CASE
+                        WHEN cluster_fragment_index_jobs.priority IN ('forced','foreground')
+                        THEN cluster_fragment_index_jobs.priority
+                        ELSE excluded.priority END,
+                    trigger = CASE
+                        WHEN excluded.priority = 'foreground' THEN 'foreground'
+                        ELSE excluded.trigger END,
                     state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                     attempts = CASE
                         WHEN cluster_fragment_index_jobs.state = 'cancelled'
                           OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                           OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                         ELSE cluster_fragment_index_jobs.attempts END,
-                    not_before_ms = excluded.not_before_ms,
+                    not_before_ms = CASE
+                        WHEN cluster_fragment_index_jobs.state = 'queued'
+                        THEN MIN(cluster_fragment_index_jobs.not_before_ms, excluded.not_before_ms)
+                        ELSE excluded.not_before_ms END,
                     created_at_ms = CASE
                         WHEN cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         THEN excluded.created_at_ms
@@ -1184,10 +1876,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     last_error_code = NULL
                   WHERE cluster_fragment_index_jobs.state = 'cancelled'
                      OR (cluster_fragment_index_jobs.state = 'failed'
-                       AND cluster_fragment_index_jobs.last_error_code = 'queue_expired')
-                     OR (cluster_fragment_index_jobs.state = 'failed'
-                       AND cluster_fragment_index_jobs.attempts < ?10
-                       AND cluster_fragment_index_jobs.not_before_ms <= excluded.created_at_ms)",
+                       AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                       AND cluster_fragment_index_jobs.attempts <= ?13)
+                     OR (cluster_fragment_index_jobs.state = 'queued'
+                       AND cluster_fragment_index_jobs.priority = 'normal'
+                       AND excluded.priority = 'foreground')",
                 params![
                     job.cache_key,
                     job.file_id,
@@ -1195,10 +1888,13 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     job.source_mtime,
                     job.source_sha256,
                     job.pipeline_sha256,
+                    job.priority,
+                    job.trigger,
+                    job.target_node_id,
                     job.not_before_ms,
                     job.created_at_ms,
                     MAX_ACTIVE_JOBS,
-                    MAX_ATTEMPTS,
+                    max_attempts,
                 ],
             )?;
             Ok(changed == 1)
@@ -1229,31 +1925,57 @@ impl ClusterFragmentIndexStore for SqliteStore {
             .cloned()
             .collect::<std::collections::HashSet<_>>();
         self.with_conn(move |conn| {
+            let max_attempts = configured_max_attempts(conn)?;
+            let backoff_base_ms = configured_backoff_base_ms(conn)?;
+            let backoff_max_ms = configured_backoff_max_ms(conn)?.max(backoff_base_ms);
             let transaction = conn.unchecked_transaction()?;
             transaction.execute(
                 "UPDATE cluster_fragment_index_jobs
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
-                        last_error_code = 'queue_expired'
+                        last_error_code = CASE WHEN state = 'running'
+                          THEN 'attempt_limit' ELSE 'queue_expired' END
                   WHERE (state = 'queued' AND created_at_ms < ?2)
                      OR (state = 'running' AND attempts >= ?3
                        AND COALESCE(lease_expires_ms, 0) <= ?1)",
                 params![
                     now_ms,
                     now_ms.saturating_sub(QUEUE_ELIGIBILITY_MS),
-                    MAX_ATTEMPTS
+                    max_attempts
                 ],
+            )?;
+            transaction.execute(
+                "UPDATE cluster_fragment_index_jobs
+                    SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                        not_before_ms = ?1 + MIN(MAX(1000,
+                          (?2 * (1 << MIN(MAX(attempts - 1, 0), 30)) *
+                           (75 + (ABS(length(cache_key || ':' || target_node_id) * 17
+                             + unicode(substr(cache_key || ':' || target_node_id, 1, 1)) * 31
+                             + unicode(substr(cache_key || ':' || target_node_id, -1, 1)) * 13
+                             + attempts * 7) % 51))) / 100), ?3),
+                        last_error_code = 'lease_expired', updated_at_ms = ?1
+                  WHERE state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1
+                    AND attempts < ?4",
+                params![now_ms, backoff_base_ms, backoff_max_ms, max_attempts],
             )?;
             let candidates = {
                 let mut statement = transaction.prepare(&format!(
-                    "SELECT {JOB_COLS} FROM cluster_fragment_index_jobs
-                          WHERE ((state = 'queued' AND not_before_ms <= ?1)
-                              OR (state = 'running' AND lease_expires_ms <= ?1))
+                    "SELECT {JOB_COLS} FROM cluster_fragment_index_jobs job
+                          WHERE state = 'queued' AND not_before_ms <= ?1
                             AND attempts < ?2 AND fence < 9223372036854775807
-                          ORDER BY created_at_ms, cache_key LIMIT ?3"
+                            AND (target_node_id = '' OR target_node_id = ?5)
+                          ORDER BY job.created_at_ms - CASE
+                              WHEN job.priority IN ('forced','foreground') THEN ?4 ELSE 0 END,
+                            job.created_at_ms, job.cache_key, job.target_node_id LIMIT ?3"
                 ))?;
                 let rows = statement.query_map(
-                    params![now_ms, MAX_ATTEMPTS, CLAIM_SCAN_LIMIT],
+                    params![
+                        now_ms,
+                        max_attempts,
+                        CLAIM_SCAN_LIMIT,
+                        super::super::fragment_index_cluster::ANALYSIS_FORCED_PRIORITY_BOOST_MS,
+                        node_id
+                    ],
                     job_from_row,
                 )?;
                 rows.collect::<Result<Vec<_>, _>>()?
@@ -1270,15 +1992,16 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     SET state = 'running', owner_node_id = ?1, fence = fence + 1,
                         lease_expires_ms = ?2, attempts = attempts + 1,
                         last_error_code = NULL, updated_at_ms = ?3
-                  WHERE cache_key = ?4 AND fence = ?5
-                    AND ((state = 'queued' AND not_before_ms <= ?3)
-                      OR (state = 'running' AND lease_expires_ms <= ?3))",
+                  WHERE cache_key = ?4 AND fence = ?5 AND target_node_id = ?6
+                    AND state = 'queued' AND not_before_ms <= ?3
+                    AND (target_node_id = '' OR target_node_id = ?1)",
                 params![
                     node_id,
                     lease_expires_ms,
                     now_ms,
                     candidate.cache_key,
-                    candidate.fence
+                    candidate.fence,
+                    candidate.target_node_id
                 ],
             )?;
             if changed != 1 {
@@ -1311,39 +2034,53 @@ impl ClusterFragmentIndexStore for SqliteStore {
             .created_at_ms
             .saturating_sub(QUEUE_ELIGIBILITY_MS);
         self.with_conn(move |conn| {
+            let max_attempts = configured_max_attempts(conn)?;
             conn.execute(
                 "UPDATE cluster_fragment_index_jobs
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
-                        last_error_code = 'queue_expired'
+                        last_error_code = CASE WHEN state = 'running'
+                          THEN 'attempt_limit' ELSE 'queue_expired' END
                   WHERE (state = 'queued' AND created_at_ms < ?2)
                      OR (state = 'running' AND attempts >= ?3
                        AND COALESCE(lease_expires_ms, 0) <= ?1)",
-                params![replacement.created_at_ms, eligibility_cutoff, MAX_ATTEMPTS],
+                params![replacement.created_at_ms, eligibility_cutoff, max_attempts],
             )?;
             Ok(conn.execute(
-                "UPDATE cluster_fragment_index_jobs
-                    SET file_id = ?2, source_size = ?3, source_mtime = ?4,
-                        source_sha256 = ?5, pipeline_sha256 = ?6,
-                        state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
-                        attempts = CASE
-                          WHEN state = 'ready' OR last_error_code = 'queue_expired'
-                            OR file_id <> ?2 THEN 0
-                          ELSE attempts END,
-                        not_before_ms = ?7, created_at_ms = ?8, updated_at_ms = ?8,
-                        last_error_code = 'holders_unavailable'
-                  WHERE cache_key = ?1
-                    AND (state = 'ready'
-                      OR (state = 'failed' AND last_error_code = 'queue_expired')
-                      OR (state = 'failed'
-                      AND attempts < ?9 AND not_before_ms <= ?8))
-                    AND (SELECT COUNT(*) FROM cluster_fragment_index_jobs
-                          WHERE state IN ('queued', 'running')) < ?10
+                "INSERT INTO cluster_fragment_index_jobs
+                    (cache_key, file_id, source_size, source_mtime, source_sha256,
+                     pipeline_sha256, priority, trigger, target_node_id, state,
+                     owner_node_id, fence, lease_expires_ms, attempts, not_before_ms,
+                     created_at_ms, updated_at_ms, last_error_code)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued',
+                        NULL, 0, NULL, 0, ?10, ?11, ?11, 'holders_unavailable'
+                  WHERE (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                          WHERE state IN ('queued', 'running')) < ?13
                     AND EXISTS (SELECT 1 FROM files
                       WHERE id = ?2 AND size = ?3 AND mtime = ?4)
                     AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
                       WHERE cache_key = ?1 AND source_size = ?3
-                        AND source_sha256 = ?5 AND pipeline_sha256 = ?6)",
+                        AND source_sha256 = ?5 AND pipeline_sha256 = ?6)
+                 ON CONFLICT(cache_key, target_node_id) DO UPDATE SET
+                    file_id = excluded.file_id, source_size = excluded.source_size,
+                    source_mtime = excluded.source_mtime,
+                    source_sha256 = excluded.source_sha256,
+                    pipeline_sha256 = excluded.pipeline_sha256,
+                    priority = excluded.priority, trigger = excluded.trigger,
+                    state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                    attempts = CASE
+                      WHEN cluster_fragment_index_jobs.state = 'ready'
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                        OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
+                      ELSE cluster_fragment_index_jobs.attempts END,
+                    not_before_ms = excluded.not_before_ms,
+                    created_at_ms = excluded.created_at_ms,
+                    updated_at_ms = excluded.updated_at_ms,
+                    last_error_code = 'holders_unavailable'
+                  WHERE cluster_fragment_index_jobs.state = 'ready'
+                     OR (cluster_fragment_index_jobs.state = 'failed'
+                       AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                       AND cluster_fragment_index_jobs.attempts <= ?12)",
                 params![
                     replacement.cache_key,
                     replacement.file_id,
@@ -1351,9 +2088,12 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     replacement.source_mtime,
                     replacement.source_sha256,
                     replacement.pipeline_sha256,
+                    replacement.priority,
+                    replacement.trigger,
+                    replacement.target_node_id,
                     replacement.not_before_ms,
                     replacement.created_at_ms,
-                    MAX_ATTEMPTS,
+                    max_attempts,
                     MAX_ACTIVE_JOBS,
                 ],
             )? == 1)
@@ -1364,20 +2104,30 @@ impl ClusterFragmentIndexStore for SqliteStore {
     async fn renew_cluster_fragment_index(
         &self,
         cache_key: &str,
+        target_node_id: &str,
         node_id: &str,
         fence: i64,
         now_ms: i64,
         lease_expires_ms: i64,
     ) -> Result<bool, StoreError> {
         let cache_key = cache_key.to_owned();
+        let target_node_id = target_node_id.to_owned();
         let node_id = node_id.to_owned();
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 "UPDATE cluster_fragment_index_jobs
                     SET lease_expires_ms = ?1, updated_at_ms = ?2
-                  WHERE cache_key = ?3 AND state = 'running' AND owner_node_id = ?4
+                  WHERE cache_key = ?3 AND target_node_id = ?6
+                    AND state = 'running' AND owner_node_id = ?4
                     AND fence = ?5 AND lease_expires_ms > ?2 AND ?1 > ?2",
-                params![lease_expires_ms, now_ms, cache_key, node_id, fence],
+                params![
+                    lease_expires_ms,
+                    now_ms,
+                    cache_key,
+                    node_id,
+                    fence,
+                    target_node_id
+                ],
             )? == 1)
         })
         .await
@@ -1386,12 +2136,14 @@ impl ClusterFragmentIndexStore for SqliteStore {
     async fn yield_cluster_fragment_index(
         &self,
         cache_key: &str,
+        target_node_id: &str,
         node_id: &str,
         fence: i64,
         now_ms: i64,
         retry_at_ms: i64,
     ) -> Result<bool, StoreError> {
         let cache_key = cache_key.to_owned();
+        let target_node_id = target_node_id.to_owned();
         let node_id = node_id.to_owned();
         self.with_conn(move |conn| {
             Ok(conn.execute(
@@ -1399,9 +2151,17 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                         attempts = MAX(attempts - 1, 0), not_before_ms = ?1,
                         last_error_code = 'node_local_refusal', updated_at_ms = ?2
-                  WHERE cache_key = ?3 AND state = 'running' AND owner_node_id = ?4
+                  WHERE cache_key = ?3 AND target_node_id = ?6
+                    AND state = 'running' AND owner_node_id = ?4
                     AND fence = ?5 AND lease_expires_ms > ?2",
-                params![retry_at_ms, now_ms, cache_key, node_id, fence],
+                params![
+                    retry_at_ms,
+                    now_ms,
+                    cache_key,
+                    node_id,
+                    fence,
+                    target_node_id
+                ],
             )? == 1)
         })
         .await
@@ -1420,9 +2180,6 @@ impl ClusterFragmentIndexStore for SqliteStore {
             || artifact.source_mtime != job.source_mtime
             || artifact.source_sha256 != job.source_sha256
             || artifact.pipeline_sha256 != job.pipeline_sha256
-            || cluster_fragment_index_key(&artifact.source_sha256, &artifact.pipeline_sha256)
-                .as_deref()
-                != Some(job.cache_key.as_str())
             || location.cache_key != job.cache_key
             || artifact.built_by_node_id != job.owner_node_id
             || location.node_id != job.owner_node_id
@@ -1437,14 +2194,32 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let job = job.clone();
         let artifact = artifact.clone();
         let location = location.clone();
+        let logical_cache_key = cluster_fragment_index_key(
+            artifact.file_id,
+            artifact.source_size,
+            artifact.source_mtime,
+            &artifact.source_sha256,
+            &artifact.pipeline_sha256,
+        )
+        .ok_or_else(|| StoreError::Task("invalid fragment-index logical key".to_owned()))?;
         self.with_conn(move |conn| {
             let transaction = conn.unchecked_transaction()?;
             let current: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM cluster_fragment_index_jobs
-                  WHERE cache_key = ?1 AND state = 'running' AND owner_node_id = ?2
+                  WHERE cache_key = ?1 AND target_node_id = ?11
+                    AND state = 'running' AND owner_node_id = ?2
                     AND fence = ?3 AND lease_expires_ms > ?4
                     AND file_id = ?5 AND source_size = ?6 AND source_mtime = ?7
-                    AND source_sha256 = ?8 AND pipeline_sha256 = ?9)",
+                    AND source_sha256 = ?8 AND pipeline_sha256 = ?9
+                    AND EXISTS (SELECT 1 FROM files current_file
+                      WHERE current_file.id = ?5 AND current_file.size = ?6
+                        AND current_file.mtime = ?7)
+                    AND (?10 = ?1 OR EXISTS (
+                      SELECT 1 FROM analysis_requests
+                       WHERE component = 'fragment_index' AND state = 'submitted'
+                         AND result_cache_key = ?1 AND target_node_id = ?11) OR EXISTS (
+                      SELECT 1 FROM cluster_fragment_index_heads
+                       WHERE logical_cache_key = ?10 AND generation_cache_key = ?1)))",
                 params![
                     job.cache_key,
                     job.owner_node_id,
@@ -1454,7 +2229,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     job.source_size,
                     job.source_mtime,
                     job.source_sha256,
-                    job.pipeline_sha256
+                    job.pipeline_sha256,
+                    logical_cache_key,
+                    job.target_node_id,
                 ],
                 |row| row.get(0),
             )?;
@@ -1514,13 +2291,59 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     location.last_seen_at_ms,
                 ],
             )?;
+            transaction.execute(
+                "INSERT INTO cluster_fragment_index_heads
+                    (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+                 SELECT ?1, ?2, request_id, ?3 FROM analysis_requests
+                  WHERE component = 'fragment_index' AND state = 'submitted'
+                    AND result_cache_key = ?2
+                    AND target_node_id = ?4
+                    AND (force_rebuild = 1 OR expected_predecessor_generation = '')
+                    AND expected_predecessor_generation = COALESCE((
+                      SELECT generation_cache_key FROM cluster_fragment_index_heads
+                       WHERE logical_cache_key = ?1
+                    ), '')
+                    AND NOT EXISTS (
+                      SELECT 1 FROM analysis_requests newer
+                       WHERE newer.file_id = analysis_requests.file_id
+                         AND newer.source_size = analysis_requests.source_size
+                         AND newer.source_mtime = analysis_requests.source_mtime
+                         AND newer.component = 'fragment_index'
+                         AND newer.target_node_id = analysis_requests.target_node_id
+                         AND (newer.created_at_ms > analysis_requests.created_at_ms
+                           OR (newer.created_at_ms = analysis_requests.created_at_ms
+                             AND newer.request_id > analysis_requests.request_id))
+                         AND newer.state IN ('queued','running','submitted','ready'))
+                 ON CONFLICT(logical_cache_key) DO UPDATE SET
+                    generation_cache_key = excluded.generation_cache_key,
+                    request_id = excluded.request_id,
+                    updated_at_ms = excluded.updated_at_ms
+                  WHERE cluster_fragment_index_heads.generation_cache_key = (
+                    SELECT expected_predecessor_generation FROM analysis_requests
+                     WHERE request_id = excluded.request_id)",
+                params![logical_cache_key, job.cache_key, now_ms, job.target_node_id],
+            )?;
+            transaction.execute(
+                "INSERT INTO cluster_fragment_index_heads
+                    (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+                 SELECT ?1, ?2, '', ?3 WHERE ?1 = ?2
+                 ON CONFLICT(logical_cache_key) DO NOTHING",
+                params![logical_cache_key, job.cache_key, now_ms],
+            )?;
             let changed = transaction.execute(
                 "UPDATE cluster_fragment_index_jobs
                     SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
                         last_error_code = NULL, updated_at_ms = ?1
-                  WHERE cache_key = ?2 AND state = 'running' AND owner_node_id = ?3
+                  WHERE cache_key = ?2 AND target_node_id = ?5
+                    AND state = 'running' AND owner_node_id = ?3
                     AND fence = ?4 AND lease_expires_ms > ?1",
-                params![now_ms, job.cache_key, job.owner_node_id, job.fence],
+                params![
+                    now_ms,
+                    job.cache_key,
+                    job.owner_node_id,
+                    job.fence,
+                    job.target_node_id
+                ],
             )?;
             transaction.commit()?;
             Ok(changed == 1)
@@ -1531,28 +2354,50 @@ impl ClusterFragmentIndexStore for SqliteStore {
     async fn fail_cluster_fragment_index(
         &self,
         cache_key: &str,
+        target_node_id: &str,
         node_id: &str,
         fence: i64,
         error_code: &str,
+        retryable: bool,
         now_ms: i64,
         retry_at_ms: i64,
     ) -> Result<bool, StoreError> {
-        if error_code.is_empty() || error_code.len() > MAX_ERROR_CODE_BYTES {
+        if error_code.is_empty()
+            || error_code.len() > MAX_ERROR_CODE_BYTES
+            || (retryable && retry_at_ms <= now_ms)
+        {
             return Err(StoreError::Task(
                 "invalid fragment-index failure code".to_owned(),
             ));
         }
         let cache_key = cache_key.to_owned();
+        let target_node_id = target_node_id.to_owned();
         let node_id = node_id.to_owned();
         let error_code = error_code.to_owned();
         self.with_conn(move |conn| {
+            let max_attempts = configured_max_attempts(conn)?;
             Ok(conn.execute(
                 "UPDATE cluster_fragment_index_jobs
-                    SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
-                        last_error_code = ?1, not_before_ms = ?2, updated_at_ms = ?3
-                  WHERE cache_key = ?4 AND state = 'running' AND owner_node_id = ?5
+                    SET state = CASE WHEN ?7 = 1 AND attempts < ?8
+                              THEN 'queued' ELSE 'failed' END,
+                        owner_node_id = NULL, lease_expires_ms = NULL,
+                        last_error_code = CASE WHEN ?7 = 1 AND attempts >= ?8
+                              THEN 'attempt_limit' ELSE ?1 END,
+                        not_before_ms = ?2, updated_at_ms = ?3
+                  WHERE cache_key = ?4 AND target_node_id = ?9
+                    AND state = 'running' AND owner_node_id = ?5
                     AND fence = ?6 AND lease_expires_ms > ?3",
-                params![error_code, retry_at_ms, now_ms, cache_key, node_id, fence],
+                params![
+                    error_code,
+                    retry_at_ms,
+                    now_ms,
+                    cache_key,
+                    node_id,
+                    fence,
+                    if retryable { 1_i64 } else { 0_i64 },
+                    max_attempts,
+                    target_node_id,
+                ],
             )? == 1)
         })
         .await
@@ -1649,6 +2494,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
         }
         self.with_conn(move |conn| {
             let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "DELETE FROM cluster_fragment_index_locations
+                  WHERE last_seen_at_ms < ?1",
+                params![older_than_ms],
+            )?;
             let candidates = {
                 let mut statement = transaction.prepare(
                     "SELECT j.cache_key
@@ -1656,15 +2506,40 @@ impl ClusterFragmentIndexStore for SqliteStore {
                       WHERE j.state IN ('ready', 'failed', 'cancelled')
                         AND j.updated_at_ms < ?1
                         AND NOT EXISTS (
+                          SELECT 1 FROM cluster_fragment_index_jobs active_job
+                           WHERE active_job.cache_key = j.cache_key
+                             AND (active_job.state IN ('queued', 'running')
+                               OR active_job.updated_at_ms >= ?1))
+                        AND NOT EXISTS (
+                          SELECT 1 FROM analysis_requests active_request
+                           WHERE active_request.result_cache_key = j.cache_key
+                             AND active_request.state IN ('queued', 'running', 'submitted'))
+                        AND NOT EXISTS (
                           SELECT 1 FROM cluster_fragment_index_locations l
                            WHERE l.cache_key = j.cache_key AND l.last_seen_at_ms >= ?1)
-                      ORDER BY j.updated_at_ms, j.cache_key LIMIT ?2",
+                      GROUP BY j.cache_key
+                      ORDER BY MIN(j.updated_at_ms), j.cache_key LIMIT ?2",
                 )?;
                 let rows = statement.query_map(params![older_than_ms, limit], |row| row.get(0))?;
                 rows.collect::<Result<Vec<String>, _>>()?
             };
             let mut pruned_artifacts = Vec::new();
             for cache_key in candidates {
+                transaction.execute(
+                    "DELETE FROM cluster_fragment_index_heads
+                      WHERE generation_cache_key = ?1
+                        AND EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
+                          WHERE cache_key = ?1 AND updated_at_ms < ?2)
+                        AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
+                          WHERE cache_key = ?1 AND (state IN ('queued', 'running')
+                            OR updated_at_ms >= ?2))
+                        AND NOT EXISTS (SELECT 1 FROM analysis_requests
+                          WHERE result_cache_key = ?1
+                            AND state IN ('queued', 'running', 'submitted'))
+                        AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations
+                          WHERE cache_key = ?1 AND last_seen_at_ms >= ?2)",
+                    params![cache_key, older_than_ms],
+                )?;
                 let artifact = transaction.execute(
                     "DELETE FROM cluster_fragment_index_artifacts
                       WHERE cache_key = ?1
@@ -1672,8 +2547,16 @@ impl ClusterFragmentIndexStore for SqliteStore {
                           WHERE cache_key = ?1
                             AND state IN ('ready', 'failed', 'cancelled')
                             AND updated_at_ms < ?2)
+                        AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
+                          WHERE cache_key = ?1 AND (state IN ('queued', 'running')
+                            OR updated_at_ms >= ?2))
+                        AND NOT EXISTS (SELECT 1 FROM analysis_requests
+                          WHERE result_cache_key = ?1
+                            AND state IN ('queued', 'running', 'submitted'))
                         AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations
-                          WHERE cache_key = ?1 AND last_seen_at_ms >= ?2)",
+                          WHERE cache_key = ?1 AND last_seen_at_ms >= ?2)
+                        AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_heads
+                          WHERE generation_cache_key = ?1)",
                     params![cache_key, older_than_ms],
                 )?;
                 transaction.execute(
@@ -1686,7 +2569,16 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 transaction.execute(
                     "DELETE FROM cluster_fragment_index_jobs
                       WHERE cache_key = ?1
-                        AND state IN ('ready', 'failed', 'cancelled')
+                        AND (state IN ('ready', 'cancelled') OR (
+                          state = 'failed' AND (
+                            NOT EXISTS (SELECT 1 FROM files current_file
+                              WHERE current_file.id = cluster_fragment_index_jobs.file_id
+                                AND current_file.size = cluster_fragment_index_jobs.source_size
+                                AND current_file.mtime = cluster_fragment_index_jobs.source_mtime)
+                            OR EXISTS (SELECT 1 FROM analysis_requests request
+                              WHERE request.result_cache_key = cluster_fragment_index_jobs.cache_key
+                                AND request.target_node_id = cluster_fragment_index_jobs.target_node_id
+                                AND request.force_rebuild = 1))))
                         AND updated_at_ms < ?2
                         AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
                                          WHERE cache_key = ?1)
@@ -1710,6 +2602,10 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::store::fragment_index_cluster::{
+        analysis_backoff_ms, cluster_fragment_index_generation_key,
+    };
+    use crate::store::SettingsStore;
 
     async fn seed_files(store: &SqliteStore) {
         store
@@ -1738,13 +2634,22 @@ mod tests {
         let source_sha256 = "a".repeat(64);
         let pipeline_sha256 = "b".repeat(64);
         NewClusterFragmentIndexJob {
-            cache_key: cluster_fragment_index_key(&source_sha256, &pipeline_sha256)
-                .expect("valid key"),
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                100,
+                source_mtime,
+                &source_sha256,
+                &pipeline_sha256,
+            )
+            .expect("valid key"),
             file_id,
             source_size: 100,
             source_mtime,
             source_sha256,
             pipeline_sha256,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: String::new(),
             not_before_ms: created_at_ms,
             created_at_ms,
         }
@@ -1757,6 +2662,14 @@ mod tests {
             source_size: 100,
             source_mtime: 10,
             component: "fragment_index".to_owned(),
+            pipeline_version: "test-pipeline".to_owned(),
+            requested_generation: if force_rebuild {
+                format!("generation-{id}")
+            } else {
+                "test-generation".to_owned()
+            },
+            priority: if force_rebuild { "forced" } else { "normal" }.to_owned(),
+            trigger: "admin".to_owned(),
             force_rebuild,
             target_node_id: "node-a".to_owned(),
             not_before_ms: created_at_ms,
@@ -1768,17 +2681,17 @@ mod tests {
     async fn analysis_history_is_canonical_paginated_and_classified() {
         let store = SqliteStore::open_in_memory().expect("store");
         seed_files(&store).await;
-        let cache_key =
-            cluster_fragment_index_key(&"a".repeat(64), &"b".repeat(64)).expect("valid cache key");
+        let cache_key = cluster_fragment_index_key(1, 100, 10, &"a".repeat(64), &"b".repeat(64))
+            .expect("valid cache key");
         let seeded_key = cache_key.clone();
         store
             .with_conn(move |conn| {
                 conn.execute(
                     "INSERT INTO cluster_fragment_index_jobs
                       (cache_key, file_id, source_size, source_mtime, source_sha256,
-                       pipeline_sha256, state, fence, attempts, not_before_ms,
+                       pipeline_sha256, target_node_id, state, fence, attempts, not_before_ms,
                        last_error_code, created_at_ms, updated_at_ms)
-                     VALUES (?1, 1, 100, 10, ?2, ?3, 'failed', 1, 1, 0,
+                     VALUES (?1, 1, 100, 10, ?2, ?3, 'node-a', 'failed', 1, 1, 0,
                              'source_unavailable', 10, 20)",
                     params![seeded_key, "a".repeat(64), "b".repeat(64)],
                 )?;
@@ -2008,7 +2921,10 @@ mod tests {
             .await
             .expect("claim")
             .expect("request claim");
-        let job = job(1, 10, 11);
+        let mut job = job(1, 10, 11);
+        job.target_node_id = claimed.target_node_id.clone();
+        job.priority = claimed.priority.clone();
+        job.trigger = claimed.trigger.clone();
         assert!(store
             .submit_fragment_index_analysis(&claimed, &job, 12)
             .await
@@ -2017,8 +2933,29 @@ mod tests {
         store
             .with_conn(move |conn| {
                 conn.execute(
+                    "INSERT INTO cluster_fragment_index_artifacts
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms)
+                     SELECT cache_key, file_id, source_size, source_mtime, source_sha256,
+                            pipeline_sha256, ?2, 10, 'node-a', 13
+                       FROM cluster_fragment_index_jobs WHERE cache_key = ?1",
+                    params![cache_key, "c".repeat(64)],
+                )?;
+                conn.execute(
                     "UPDATE cluster_fragment_index_jobs SET state = 'ready', updated_at_ms = 13
                       WHERE cache_key = ?1",
+                    params![cache_key],
+                )?;
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_locations
+                      (cache_key, node_id, bytes, verified_at_ms, last_seen_at_ms)
+                     VALUES (?1, 'node-a', 10, 13, 13)",
+                    params![cache_key],
+                )?;
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_heads
+                      (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+                     VALUES (?1, ?1, 'request-1', 13)",
                     params![cache_key],
                 )?;
                 Ok(())
@@ -2092,6 +3029,18 @@ mod tests {
             .await
             .expect("claim forced request")
             .expect("forced request claim");
+        successor.cache_key = cluster_fragment_index_generation_key(
+            successor.file_id,
+            successor.source_size,
+            successor.source_mtime,
+            &successor.source_sha256,
+            &successor.pipeline_sha256,
+            &claimed.requested_generation,
+        )
+        .expect("forced generation key");
+        successor.target_node_id = claimed.target_node_id.clone();
+        successor.priority = claimed.priority.clone();
+        successor.trigger = claimed.trigger.clone();
         assert!(store
             .submit_fragment_index_analysis(&claimed, &successor, 21)
             .await
@@ -2102,7 +3051,7 @@ mod tests {
             .expect("read serving artifact")
             .is_some());
         let reopened = store
-            .cluster_fragment_index_job(&job.cache_key)
+            .cluster_fragment_index_job(&successor.cache_key, &successor.target_node_id)
             .await
             .expect("read reopened job")
             .expect("job");
@@ -2127,16 +3076,35 @@ mod tests {
             .claim_analysis_request("node-a", 20, 1_020)
             .await
             .expect("replacement claim")
+            .map(|_| panic!("expired lease must enter retry wait"));
+        assert!(current.is_none());
+        let retry_at = 20 + analysis_backoff_ms("request-1", 1, 5_000, 300_000);
+        let current = store
+            .claim_analysis_request("node-a", retry_at, retry_at + 1_000)
+            .await
+            .expect("replacement claim after retry wait")
             .expect("replacement owner");
         assert!(current.fence > stale.fence);
 
-        let job = job(1, 10, 21);
+        let mut job = job(1, 10, 21);
+        job.target_node_id = stale.target_node_id.clone();
+        job.priority = stale.priority.clone();
+        job.trigger = stale.trigger.clone();
+        job.cache_key = cluster_fragment_index_generation_key(
+            job.file_id,
+            job.source_size,
+            job.source_mtime,
+            &job.source_sha256,
+            &job.pipeline_sha256,
+            &stale.requested_generation,
+        )
+        .expect("forced stale generation key");
         assert!(!store
             .submit_fragment_index_analysis(&stale, &job, 21)
             .await
             .expect("stale handoff is a fenced no-op"));
         assert!(store
-            .cluster_fragment_index_job(&job.cache_key)
+            .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
             .await
             .expect("read worker job")
             .is_none());
@@ -2183,6 +3151,15 @@ mod tests {
             .enqueue_analysis_request(&request("old-source", false, 10))
             .await
             .expect("enqueue old source");
+        let old_claim = store
+            .claim_analysis_request("node-a", 10, 1_010)
+            .await
+            .expect("claim old source")
+            .expect("old source claim");
+        assert!(store
+            .record_analysis_request_phase(&old_claim, "hashing", None, 11)
+            .await
+            .expect("record old source phase"));
         store
             .with_conn(|conn| {
                 conn.execute("UPDATE files SET size = 200, mtime = 30 WHERE id = 1", [])?;
@@ -2206,10 +3183,55 @@ mod tests {
             .expect("old generation");
         assert_eq!(old.state, "cancelled");
         assert_eq!(old.last_error_code, "source_superseded");
+        let attempts = store
+            .analysis_attempts("old-source", 10)
+            .await
+            .expect("old source attempts");
+        assert_eq!(attempts[0].phase, "stale");
+        assert_eq!(attempts[0].terminal_code, "source_superseded");
     }
 
     #[tokio::test]
-    async fn ready_content_is_reused_after_the_scanner_generation_changes() {
+    async fn source_deletion_terminalizes_the_live_attempt_before_cascade() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        store
+            .enqueue_analysis_request(&request("deleted-source", false, 10))
+            .await
+            .expect("enqueue source");
+        let claim = store
+            .claim_analysis_request("node-a", 10, 1_010)
+            .await
+            .expect("claim source")
+            .expect("source claim");
+        assert!(store
+            .record_analysis_request_phase(&claim, "hashing", None, 11)
+            .await
+            .expect("record source phase"));
+        store
+            .with_conn(|conn| {
+                conn.execute("DELETE FROM files WHERE id = 1", [])?;
+                Ok(())
+            })
+            .await
+            .expect("delete source");
+        let request = store
+            .analysis_request("deleted-source")
+            .await
+            .expect("read request")
+            .expect("retained request");
+        assert_eq!(request.state, "cancelled");
+        assert_eq!(request.last_error_code, "source_deleted");
+        let attempts = store
+            .analysis_attempts("deleted-source", 10)
+            .await
+            .expect("deleted source attempts");
+        assert_eq!(attempts[0].phase, "canceled");
+        assert_eq!(attempts[0].terminal_code, "source_deleted");
+    }
+
+    #[tokio::test]
+    async fn scanner_generation_change_does_not_reuse_old_source_identity() {
         let store = SqliteStore::open_in_memory().expect("store");
         seed_files(&store).await;
         let ready = job(1, 10, 10);
@@ -2265,21 +3287,32 @@ mod tests {
             .expect("replacement claim");
         let mut replacement_job = ready.clone();
         replacement_job.source_mtime = 30;
+        replacement_job.cache_key = cluster_fragment_index_key(
+            replacement_job.file_id,
+            replacement_job.source_size,
+            replacement_job.source_mtime,
+            &replacement_job.source_sha256,
+            &replacement_job.pipeline_sha256,
+        )
+        .expect("replacement source identity");
+        replacement_job.target_node_id = claimed.target_node_id.clone();
+        replacement_job.priority = claimed.priority.clone();
+        replacement_job.trigger = claimed.trigger.clone();
         replacement_job.created_at_ms = 31;
         replacement_job.not_before_ms = 31;
         assert!(store
             .submit_fragment_index_analysis(&claimed, &replacement_job, 31)
             .await
-            .expect("join ready content identity"));
+            .expect("submit replacement source identity"));
         assert_eq!(
             store
                 .settle_analysis_requests(32)
                 .await
                 .expect("settle replacement"),
-            1
+            0
         );
         let requests = store.analysis_requests(10).await.expect("list requests");
-        assert_eq!(requests[0].state, "ready");
+        assert_eq!(requests[0].state, "submitted");
         assert!(store
             .cluster_fragment_index_artifact(&ready.cache_key)
             .await
@@ -2288,7 +3321,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_content_rebind_queues_repair_resets_age_and_retains_artifact() {
+    async fn byte_identical_files_queue_independent_structural_work() {
         let store = SqliteStore::open_in_memory().expect("store");
         seed_files(&store).await;
         let old = job(1, 10, 1);
@@ -2344,6 +3377,17 @@ mod tests {
         let mut rebound = old.clone();
         rebound.file_id = 2;
         rebound.source_mtime = 20;
+        rebound.cache_key = cluster_fragment_index_key(
+            rebound.file_id,
+            rebound.source_size,
+            rebound.source_mtime,
+            &rebound.source_sha256,
+            &rebound.pipeline_sha256,
+        )
+        .expect("independent file identity");
+        rebound.target_node_id = claimed.target_node_id.clone();
+        rebound.priority = claimed.priority.clone();
+        rebound.trigger = claimed.trigger.clone();
         rebound.created_at_ms = 30_000_002;
         rebound.not_before_ms = 30_000_002;
         assert!(store
@@ -2351,7 +3395,7 @@ mod tests {
             .await
             .expect("rebind cancelled content"));
         let job = store
-            .cluster_fragment_index_job(&rebound.cache_key)
+            .cluster_fragment_index_job(&rebound.cache_key, &rebound.target_node_id)
             .await
             .expect("read rebound job")
             .expect("rebound job");
@@ -2359,7 +3403,7 @@ mod tests {
         assert_eq!(job.file_id, 2);
         assert_eq!(job.created_at_ms, 30_000_002);
         assert!(store
-            .cluster_fragment_index_artifact(&rebound.cache_key)
+            .cluster_fragment_index_artifact(&old.cache_key)
             .await
             .expect("read retained artifact")
             .is_some());
@@ -2370,11 +3414,15 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("store");
         seed_files(&store).await;
         store
+            .put_setting(crate::store::keys::ANALYSIS_MAX_ATTEMPTS, "2")
+            .await
+            .expect("configure attempt budget");
+        store
             .enqueue_analysis_request(&request("attempts", false, 10))
             .await
             .expect("enqueue request");
         let mut now = 10;
-        for expected_attempt in 1..=MAX_ATTEMPTS {
+        for expected_attempt in 1..=2 {
             let claimed = store
                 .claim_analysis_request("node-a", now, now + 1_000)
                 .await
@@ -2400,7 +3448,7 @@ mod tests {
             .is_none());
         let requests = store.analysis_requests(10).await.expect("list requests");
         assert_eq!(requests[0].state, "failed");
-        assert_eq!(requests[0].attempts, MAX_ATTEMPTS);
+        assert_eq!(requests[0].attempts, 2);
         assert_eq!(requests[0].last_error_code, "attempt_limit");
     }
 
@@ -2441,7 +3489,11 @@ mod tests {
                 .prune_analysis_requests(100, 100)
                 .await
                 .expect("prune by age"),
-            20
+            19
+        );
+        assert_eq!(
+            store.analysis_requests(100).await.expect("history").len(),
+            1
         );
     }
 
@@ -2530,11 +3582,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn published_artifact_repairs_through_a_surviving_duplicate() {
+    async fn byte_identical_replacement_publishes_an_independent_artifact() {
         let store = SqliteStore::open_in_memory().expect("store");
         seed_files(&store).await;
         let original = job(1, 10, 10);
-        let key = original.cache_key.clone();
+        let original_key = original.cache_key.clone();
         let seeded = original.clone();
         store
             .with_conn(move |conn| {
@@ -2576,9 +3628,9 @@ mod tests {
 
         let replacement = job(2, 20, 20);
         assert!(store
-            .requeue_cluster_fragment_index(&replacement)
+            .enqueue_cluster_fragment_index(&replacement)
             .await
-            .expect("requeue replacement"));
+            .expect("enqueue replacement"));
         let claimed = store
             .claim_cluster_fragment_index("node-b", &[], 20, 1_020)
             .await
@@ -2587,7 +3639,7 @@ mod tests {
         assert_eq!(claimed.file_id, 2);
 
         let rebuilt = ClusterFragmentIndexArtifact {
-            cache_key: key.clone(),
+            cache_key: replacement.cache_key.clone(),
             file_id: 2,
             source_size: 100,
             source_mtime: 20,
@@ -2599,7 +3651,7 @@ mod tests {
             built_at_ms: 21,
         };
         let location = ClusterFragmentIndexLocation {
-            cache_key: key.clone(),
+            cache_key: replacement.cache_key.clone(),
             node_id: "node-b".to_owned(),
             bytes: 10,
             verified_at_ms: 21,
@@ -2611,7 +3663,7 @@ mod tests {
             .expect("complete repair"));
         assert_eq!(
             store
-                .cluster_fragment_index_artifact(&key)
+                .cluster_fragment_index_artifact(&replacement.cache_key)
                 .await
                 .expect("artifact")
                 .expect("published artifact")
@@ -2620,7 +3672,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .cluster_fragment_index_locations(&key)
+                .cluster_fragment_index_locations(&replacement.cache_key)
                 .await
                 .expect("locations")
                 .into_iter()
@@ -2628,6 +3680,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["node-b".to_owned()]
         );
+        assert!(store
+            .cluster_fragment_index_artifact(&original_key)
+            .await
+            .expect("original artifact")
+            .is_some());
     }
 
     #[tokio::test]
@@ -2697,9 +3754,14 @@ mod tests {
         let first = job(1, 10, 10);
         let mut second = job(2, 20, 20);
         second.source_sha256 = "c".repeat(64);
-        second.cache_key =
-            cluster_fragment_index_key(&second.source_sha256, &second.pipeline_sha256)
-                .expect("second key");
+        second.cache_key = cluster_fragment_index_key(
+            second.file_id,
+            second.source_size,
+            second.source_mtime,
+            &second.source_sha256,
+            &second.pipeline_sha256,
+        )
+        .expect("second key");
         assert!(store
             .enqueue_cluster_fragment_index(&first)
             .await
@@ -2731,9 +3793,14 @@ mod tests {
         for sequence in 1_i64..=130 {
             let mut candidate = job(1, 10, sequence);
             candidate.source_sha256 = format!("{sequence:064x}");
-            candidate.cache_key =
-                cluster_fragment_index_key(&candidate.source_sha256, &candidate.pipeline_sha256)
-                    .expect("candidate key");
+            candidate.cache_key = cluster_fragment_index_key(
+                candidate.file_id,
+                candidate.source_size,
+                candidate.source_mtime,
+                &candidate.source_sha256,
+                &candidate.pipeline_sha256,
+            )
+            .expect("candidate key");
             assert!(store
                 .enqueue_cluster_fragment_index(&candidate)
                 .await
@@ -2775,7 +3842,11 @@ mod tests {
                         if crashed { "running" } else { "queued" },
                         crashed.then_some("lost-node"),
                         crashed.then_some(1_i64),
-                        if crashed { MAX_ATTEMPTS } else { 0 },
+                        if crashed {
+                            crate::store::fragment_index_cluster::DEFAULT_ANALYSIS_MAX_ATTEMPTS
+                        } else {
+                            0
+                        },
                     ])?;
                 }
                 Ok(())
@@ -2787,9 +3858,14 @@ mod tests {
         let mut readable = job(2, 20, now);
         readable.source_sha256 = "f".repeat(64);
         readable.pipeline_sha256 = "e".repeat(64);
-        readable.cache_key =
-            cluster_fragment_index_key(&readable.source_sha256, &readable.pipeline_sha256)
-                .expect("readable key");
+        readable.cache_key = cluster_fragment_index_key(
+            readable.file_id,
+            readable.source_size,
+            readable.source_mtime,
+            &readable.source_sha256,
+            &readable.pipeline_sha256,
+        )
+        .expect("readable key");
         assert!(store
             .enqueue_cluster_fragment_index(&readable)
             .await
@@ -2809,9 +3885,14 @@ mod tests {
         let mut repair = job(2, 20, 100);
         repair.source_sha256 = "f".repeat(64);
         repair.pipeline_sha256 = "e".repeat(64);
-        repair.cache_key =
-            cluster_fragment_index_key(&repair.source_sha256, &repair.pipeline_sha256)
-                .expect("repair key");
+        repair.cache_key = cluster_fragment_index_key(
+            repair.file_id,
+            repair.source_size,
+            repair.source_mtime,
+            &repair.source_sha256,
+            &repair.pipeline_sha256,
+        )
+        .expect("repair key");
         let seeded_repair = repair.clone();
         store
             .with_conn(move |conn| {
@@ -2821,7 +3902,7 @@ mod tests {
                        pipeline_sha256, state, fence, attempts, not_before_ms,
                        created_at_ms, updated_at_ms, last_error_code)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'failed', 1, 1, 1, 1, 1,
-                       'holder_read_failed')",
+                       'queue_expired')",
                     params![
                         seeded_repair.cache_key,
                         seeded_repair.file_id,
@@ -2908,9 +3989,14 @@ mod tests {
         let mut current = job(2, 20, 10);
         current.source_sha256 = "c".repeat(64);
         current.pipeline_sha256 = "d".repeat(64);
-        current.cache_key =
-            cluster_fragment_index_key(&current.source_sha256, &current.pipeline_sha256)
-                .expect("current key");
+        current.cache_key = cluster_fragment_index_key(
+            current.file_id,
+            current.source_size,
+            current.source_mtime,
+            &current.source_sha256,
+            &current.pipeline_sha256,
+        )
+        .expect("current key");
         let stale_key = stale.cache_key.clone();
         let current_key = current.cache_key.clone();
         let stale_seed = stale.clone();

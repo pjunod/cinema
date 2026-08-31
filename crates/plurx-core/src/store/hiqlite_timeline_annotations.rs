@@ -118,8 +118,9 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
         self.execute(
             "INSERT INTO timeline_annotation_sets
                 (file_id, source_size, source_mtime, argv_fingerprint,
-                 generation_id, version, annotations_json, updated_at_ms)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 generation_id, version, annotations_json, updated_at_ms,
+                 publication_priority)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'normal')
              ON CONFLICT(file_id) DO UPDATE SET
                 source_size = excluded.source_size,
                 source_mtime = excluded.source_mtime,
@@ -127,7 +128,8 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
                 generation_id = excluded.generation_id,
                 version = excluded.version,
                 annotations_json = excluded.annotations_json,
-                updated_at_ms = excluded.updated_at_ms",
+                updated_at_ms = excluded.updated_at_ms,
+                publication_priority = 'normal'",
             params!(
                 file_id,
                 source_size,
@@ -186,14 +188,9 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
                         revision, generation_id
                    FROM timeline_manual_overrides
                   WHERE file_id = $1 AND source_size = $2
-                    AND source_mtime = $3 AND argv_fingerprint = $4
+                    AND source_mtime = $3
                   ORDER BY updated_at_ms, kind",
-                params!(
-                    file_id,
-                    source_size,
-                    source.mtime_ms,
-                    source.argv_fingerprint.clone()
-                ),
+                params!(file_id, source_size, source.mtime_ms),
             )
             .await?;
         for row in manual {
@@ -230,6 +227,60 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
             version,
             annotations,
         }))
+    }
+
+    async fn put_timeline_annotation_set_if_missing(
+        &self,
+        file_id: i64,
+        duration_ms: i64,
+        set: &TimelineAnnotationSet,
+    ) -> Result<bool, StoreError> {
+        let set = super::timeline_annotations::validated(set, duration_ms)?;
+        let source_size = i64::try_from(set.source_identity.size)
+            .map_err(|_| StoreError::Database("source size exceeds SQLite INTEGER".to_owned()))?;
+        let annotations_json = serde_json::to_string(&set.annotations).map_err(|error| {
+            StoreError::Database(format!("encode timeline annotations: {error}"))
+        })?;
+        Ok(self
+            .execute(
+                "INSERT INTO timeline_annotation_sets
+                    (file_id, source_size, source_mtime, argv_fingerprint,
+                     generation_id, version, annotations_json, updated_at_ms,
+                     publication_priority)
+                 SELECT $1, $2, $3, $4, $5, $6, $7, $8, 'normal'
+                  WHERE EXISTS (SELECT 1 FROM files
+                                 WHERE id = $1 AND size = $2 AND mtime = $3)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM analysis_requests
+                       WHERE file_id = $1 AND source_size = $2 AND source_mtime = $3
+                         AND component = 'skip_markers'
+                         AND state IN ('queued', 'running', 'submitted')
+                    )
+                 ON CONFLICT(file_id) DO UPDATE SET
+                    source_size = excluded.source_size,
+                    source_mtime = excluded.source_mtime,
+                    argv_fingerprint = excluded.argv_fingerprint,
+                    generation_id = excluded.generation_id,
+                    version = excluded.version,
+                    annotations_json = excluded.annotations_json,
+                    updated_at_ms = excluded.updated_at_ms,
+                    publication_priority = 'normal'
+                  WHERE timeline_annotation_sets.source_size <> excluded.source_size
+                     OR timeline_annotation_sets.source_mtime <> excluded.source_mtime
+                     OR timeline_annotation_sets.argv_fingerprint <> excluded.argv_fingerprint",
+                params!(
+                    file_id,
+                    source_size,
+                    set.source_identity.mtime_ms,
+                    set.source_identity.argv_fingerprint,
+                    set.generation_id,
+                    i64::from(set.version),
+                    annotations_json,
+                    self.now()?
+                ),
+            )
+            .await?
+            == 1)
     }
 
     async fn forget_timeline_annotation_set(&self, file_id: i64) -> Result<bool, StoreError> {
@@ -269,14 +320,13 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
         })?;
         let source_size = i64::try_from(source.size)
             .map_err(|_| StoreError::Database("source size exceeds SQLite INTEGER".to_owned()))?;
-        let row = self
-            .client()
-            .execute_returning_map_one::<_, RevisionRow>(
-                "INSERT INTO timeline_manual_overrides
+        let sql = "INSERT INTO timeline_manual_overrides
                     (file_id, kind, source_size, source_mtime, argv_fingerprint,
                      start_ticks, end_ticks, timescale, start_ms, end_ms,
                      revision, generation_id, updated_at_ms)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12)
+                 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12
+                  WHERE EXISTS (SELECT 1 FROM files
+                                 WHERE id = $1 AND size = $3 AND mtime = $4)
                  ON CONFLICT(file_id, kind) DO UPDATE SET
                     source_size = excluded.source_size,
                     source_mtime = excluded.source_mtime,
@@ -289,7 +339,12 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
                     revision = timeline_manual_overrides.revision + 1,
                     generation_id = excluded.generation_id,
                     updated_at_ms = excluded.updated_at_ms
-                 RETURNING revision",
+                 RETURNING revision";
+        validate_sql(sql)?;
+        let row = self
+            .client()
+            .execute_returning_map::<_, RevisionRow>(
+                sql,
                 params!(
                     file_id,
                     annotation.kind.as_str(),
@@ -305,7 +360,14 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
                     self.now()?
                 ),
             )
-            .await?;
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::Task("timeline annotation source changed".to_owned()))?;
         u64::try_from(row.0)
             .map_err(|_| StoreError::Database("invalid manual annotation revision".to_owned()))
     }
@@ -325,14 +387,12 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
             .execute(
                 "DELETE FROM timeline_manual_overrides
                   WHERE file_id = $1 AND kind = $2 AND source_size = $3
-                    AND source_mtime = $4 AND argv_fingerprint = $5
-                    AND revision = $6",
+                    AND source_mtime = $4 AND revision = $5",
                 params!(
                     file_id,
                     kind.as_str(),
                     source_size,
                     source.mtime_ms,
-                    source.argv_fingerprint.clone(),
                     i64::try_from(expected_revision).unwrap_or(i64::MAX)
                 ),
             )

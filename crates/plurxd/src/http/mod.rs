@@ -3362,6 +3362,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn analysis_retry_settings_are_bounded_and_publish_atomically() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["analysis_max_attempts"], 5);
+        assert_eq!(initial["analysis_lease_secs"], 60);
+        assert_eq!(initial["analysis_backoff_base_secs"], 5);
+        assert_eq!(initial["analysis_backoff_max_secs"], 300);
+
+        let (status, updated) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "analysis_max_attempts": 3,
+                    "analysis_lease_secs": 90,
+                    "analysis_backoff_base_secs": 7,
+                    "analysis_backoff_max_secs": 77
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        assert_eq!(updated["analysis_max_attempts"], 3);
+        assert_eq!(updated["analysis_lease_secs"], 90);
+        assert_eq!(updated["analysis_backoff_base_secs"], 7);
+        assert_eq!(updated["analysis_backoff_max_secs"], 77);
+
+        let (status, invalid) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "analysis_backoff_base_secs": 100,
+                    "analysis_backoff_max_secs": 50
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+        assert_eq!(
+            state
+                .store
+                .get_setting_pair(
+                    plurx_core::store::keys::ANALYSIS_BACKOFF_BASE_SECS,
+                    plurx_core::store::keys::ANALYSIS_BACKOFF_MAX_SECS,
+                )
+                .await
+                .expect("retry settings"),
+            (Some("7".to_owned()), Some("77".to_owned())),
+            "an invalid pair cannot partially replace the durable policy"
+        );
+    }
+
+    #[tokio::test]
     async fn an_unknown_request_id_is_a_404() {
         let app = test_app();
         let admin = setup_admin(&app).await;
@@ -4265,7 +4323,7 @@ mod tests {
                 rows = body;
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
         let row = rows
             .as_array()
@@ -8431,6 +8489,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{retried}");
         assert_eq!(retried["state"], "queued");
+        assert_ne!(
+            retried["request_id"], requested["request_id"],
+            "an explicit retry is a successor generation, not a mutation of its tombstone"
+        );
         // Manual semantic boundaries are a separate, revision-fenced admin
         // action. A rebuild cannot implicitly opt into discarding one.
         let manual_url = format!("/api/v1/files/{}/timeline-annotations/credits", s.file);
@@ -8491,6 +8553,16 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert_eq!(marker_status["state"], "published", "{marker_status}");
+        let marker_offers = || {
+            crate::telemetry::prometheus()
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("plurx_playback_marker_actions_total{action=\"offer\"} ")
+                })
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("marker offer metric")
+        };
+        let offers_before_decision = marker_offers();
         let (status, decision) = call(
             &app,
             get(
@@ -8503,6 +8575,11 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{decision}");
+        assert_eq!(
+            marker_offers(),
+            offers_before_decision,
+            "returning a marker decision is not a user-visible offer"
+        );
         let credits = decision["markers"]
             .as_array()
             .expect("markers")
@@ -8512,6 +8589,32 @@ mod tests {
         assert_eq!(credits["start_ms"], 8_500_000);
         assert_eq!(credits["provenance"], "manual");
         assert_eq!(credits["confidence"], 1_000);
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    "/api/v1/client-log",
+                    Some(&admin),
+                    json!({
+                        "level": "info",
+                        "event": "marker_offer",
+                        "message": "playback marker offered",
+                        "detail": "credits",
+                        "ua": "contract client"
+                    }),
+                ),
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        for _ in 0..50 {
+            if marker_offers() == offers_before_decision + 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(marker_offers(), offers_before_decision + 1);
         state
             .refresh_store_metrics()
             .await
@@ -8831,6 +8934,63 @@ mod tests {
             .0,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn analysis_job_retry_refuses_a_changed_source_revision() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("enable analysis queue");
+        let (status, requested) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/analysis", seeded.file),
+                Some(&admin),
+                json!({ "force": false, "components": ["fragment_index"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{requested}");
+        let job_url = format!(
+            "/api/v1/analysis/jobs/{}",
+            requested["request_id"].as_str().expect("request id")
+        );
+        assert_eq!(
+            call(&app, delete(&job_url, Some(&admin))).await.0,
+            StatusCode::OK
+        );
+
+        let current = state
+            .store
+            .get_file(seeded.file)
+            .await
+            .expect("read source")
+            .expect("source");
+        assert_eq!(
+            state
+                .store
+                .upsert_file(
+                    current.item_id,
+                    &current.path.to_string_lossy(),
+                    current.size + 1,
+                    current.mtime + 1,
+                    &plurx_core::domain::ProbeResult::default(),
+                )
+                .await
+                .expect("replace source revision"),
+            seeded.file
+        );
+        let (status, conflict) = call(
+            &app,
+            post(&format!("{job_url}/retry"), Some(&admin), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
     }
 
     #[tokio::test]

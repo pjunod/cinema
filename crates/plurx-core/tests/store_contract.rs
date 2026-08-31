@@ -54,10 +54,13 @@ use plurx_core::segplan::{
     SEGPLAN_VERSION,
 };
 use plurx_core::store::{
-    cluster_fragment_index_key, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery,
-    ArtworkRepairFence, ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation, LibraryStore,
-    MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
-    ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store,
+    analysis_backoff_ms, cluster_fragment_index_generation_key, cluster_fragment_index_key,
+    AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery, ArtworkRepairFence,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation, LibraryStore, MediaStore,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
+    ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store, ANALYSIS_LIFECYCLE_METRICS,
+    ANALYSIS_METRIC_COMPONENTS, ANALYSIS_METRIC_PRIORITIES, ANALYSIS_METRIC_STATES,
+    ANALYSIS_METRIC_TRIGGERS,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
@@ -238,6 +241,7 @@ const MEDIA_METHODS: &[&str] = &[
     "files_missing_dolby_vision",
     "set_file_dolby_vision",
     "get_file_probe_json",
+    "get_file_probe_chapters_json",
     "merge_file_probe_chapters",
     "files_missing_probe",
     "library_file_paths",
@@ -393,6 +397,7 @@ const RENDITION_PLAN_METHODS: &[&str] = &[
 ];
 const TIMELINE_ANNOTATION_METHODS: &[&str] = &[
     "put_timeline_annotation_set",
+    "put_timeline_annotation_set_if_missing",
     "timeline_annotation_set",
     "forget_timeline_annotation_set",
     "set_manual_timeline_annotation",
@@ -493,6 +498,36 @@ where
             .expect("reset replicated contract state");
         contract(Arc::new(store), "hiqlite-3-voter").await;
     }
+}
+
+fn analysis_queue_slot(component: &str, state: &str, priority: &str, trigger: &str) -> usize {
+    let component = ANALYSIS_METRIC_COMPONENTS
+        .iter()
+        .position(|value| *value == component)
+        .expect("analysis metric component");
+    let state = ANALYSIS_METRIC_STATES
+        .iter()
+        .position(|value| *value == state)
+        .expect("analysis metric state");
+    let priority = ANALYSIS_METRIC_PRIORITIES
+        .iter()
+        .position(|value| *value == priority)
+        .expect("analysis metric priority");
+    let trigger = ANALYSIS_METRIC_TRIGGERS
+        .iter()
+        .position(|value| *value == trigger)
+        .expect("analysis metric trigger");
+    ((component * ANALYSIS_METRIC_STATES.len() + state) * ANALYSIS_METRIC_PRIORITIES.len()
+        + priority)
+        * ANALYSIS_METRIC_TRIGGERS.len()
+        + trigger
+}
+
+fn analysis_lifecycle_slot(event: &str, reason: &str) -> usize {
+    ANALYSIS_LIFECYCLE_METRICS
+        .iter()
+        .position(|value| *value == (event, reason))
+        .expect("analysis lifecycle metric")
 }
 
 async fn confirm_media_activation(
@@ -1214,6 +1249,72 @@ async fn prometheus_store_snapshot_is_one_backend_neutral_aggregate() {
         assert_eq!(snapshot.offline.ready, 0, "{backend}");
         assert_eq!(snapshot.offline.failed, 0, "{backend}");
         assert_eq!(snapshot.watched_outbox, (1, 0, 0), "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn stored_chapter_projection_does_not_materialize_unrelated_probe_metadata() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("Chapter projection {backend}"),
+                kind: LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create chapter library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Large outer probe".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create chapter item: {error}"));
+        let raw = serde_json::json!({
+            "format": {"tags": {"padding": "x".repeat(300 * 1_024)}},
+            "streams": [],
+            "chapters": [{
+                "start_time": "0",
+                "end_time": "60",
+                "tags": {"title": "Intro"},
+            }],
+        })
+        .to_string();
+        assert!(raw.len() > 256 * 1_024);
+        let file_id = store
+            .upsert_file(
+                item,
+                &format!("/{backend}/large-outer-probe.mkv"),
+                10_000,
+                1,
+                &ProbeResult {
+                    duration_ms: Some(600_000),
+                    raw_json: Some(raw),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: store large probe: {error}"));
+        let chapters = store
+            .get_file_probe_chapters_json(file_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: project chapters: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: projected chapter array"));
+        assert!(chapters.len() < 1_024, "backend {backend}");
+        assert_eq!(
+            serde_json::from_str::<Vec<serde_json::Value>>(&chapters)
+                .expect("projected chapter json")
+                .len(),
+            1,
+            "backend {backend}"
+        );
     })
     .await;
 }
@@ -8141,6 +8242,10 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             source_size: 100,
             source_mtime: 10,
             component: "fragment_index".to_owned(),
+            pipeline_version: "legacy-fragment-index".to_owned(),
+            requested_generation: "legacy-generation".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
             force_rebuild: false,
             target_node_id: "node-a".to_owned(),
             not_before_ms: 2,
@@ -8158,6 +8263,10 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             source_size: 100,
             source_mtime: 10,
             component: "fragment_index".to_owned(),
+            pipeline_version: "pipeline-v1".to_owned(),
+            requested_generation: "analysis-generation-v1".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
             force_rebuild: false,
             target_node_id: "node-a".to_owned(),
             not_before_ms: 10,
@@ -8170,35 +8279,44 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
         .await
         .expect("claim stale owner")
         .expect("stale owner");
-    let current = store
+    assert!(store
         .claim_analysis_request("node-a", 20, 1_020)
         .await
         .expect("reclaim request")
+        .is_none());
+    let retry_at = 20 + analysis_backoff_ms("analysis-request", 1, 5_000, 300_000);
+    let current = store
+        .claim_analysis_request("node-a", retry_at, retry_at + 1_000)
+        .await
+        .expect("reclaim request after retry wait")
         .expect("current owner");
     let source_sha256 = "a".repeat(64);
     let pipeline_sha256 = "b".repeat(64);
     let job = NewClusterFragmentIndexJob {
-        cache_key: cluster_fragment_index_key(&source_sha256, &pipeline_sha256)
+        cache_key: cluster_fragment_index_key(1, 100, 10, &source_sha256, &pipeline_sha256)
             .expect("content key"),
         file_id: 1,
         source_size: 100,
         source_mtime: 10,
         source_sha256,
         pipeline_sha256,
+        priority: "normal".to_owned(),
+        trigger: "admin".to_owned(),
+        target_node_id: "node-a".to_owned(),
         not_before_ms: 21,
         created_at_ms: 21,
     };
     assert!(!store
-        .submit_fragment_index_analysis(&stale, &job, 21)
+        .submit_fragment_index_analysis(&stale, &job, retry_at + 1)
         .await
         .expect("stale handoff"));
     assert!(store
-        .cluster_fragment_index_job(&job.cache_key)
+        .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
         .await
         .expect("read stale job")
         .is_none());
     assert!(store
-        .submit_fragment_index_analysis(&current, &job, 21)
+        .submit_fragment_index_analysis(&current, &job, retry_at + 1)
         .await
         .expect("current handoff"));
     let submitted = store.analysis_requests(10).await.expect("list requests");
@@ -8206,7 +8324,10 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
     assert_eq!(submitted[0].result_cache_key, job.cache_key);
     assert_eq!(
         store
-            .cluster_fragment_index_job(&submitted[0].result_cache_key)
+            .cluster_fragment_index_job(
+                &submitted[0].result_cache_key,
+                &submitted[0].target_node_id,
+            )
             .await
             .expect("read committed job")
             .expect("worker job")
@@ -8235,6 +8356,12 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
                 ),
             ),
             (
+                "INSERT INTO cluster_fragment_index_locations
+                  (cache_key, node_id, bytes, verified_at_ms, last_seen_at_ms)
+                 VALUES ($1, 'node-a', 10, 22, 22)",
+                hiqlite::params!(&job.cache_key),
+            ),
+            (
                 "UPDATE files SET mtime = 20 WHERE id = 1",
                 hiqlite::params!(),
             ),
@@ -8256,6 +8383,10 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             source_size: 100,
             source_mtime: 20,
             component: "fragment_index".to_owned(),
+            pipeline_version: "pipeline-v1".to_owned(),
+            requested_generation: "replacement-generation-v1".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
             force_rebuild: false,
             target_node_id: "node-a".to_owned(),
             not_before_ms: 30,
@@ -8270,18 +8401,26 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
         .expect("replacement owner");
     let mut replacement_job = job.clone();
     replacement_job.source_mtime = 20;
+    replacement_job.cache_key = cluster_fragment_index_key(
+        replacement_job.file_id,
+        replacement_job.source_size,
+        replacement_job.source_mtime,
+        &replacement_job.source_sha256,
+        &replacement_job.pipeline_sha256,
+    )
+    .expect("replacement source identity");
     replacement_job.not_before_ms = 31;
     replacement_job.created_at_ms = 31;
     assert!(store
         .submit_fragment_index_analysis(&replacement_claim, &replacement_job, 31)
         .await
-        .expect("join ready artifact after scanner replacement"));
+        .expect("submit replacement source identity"));
     assert_eq!(
         store
             .settle_analysis_requests(32)
             .await
             .expect("settle replacement request"),
-        1
+        0
     );
 
     store
@@ -8291,6 +8430,10 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             source_size: 100,
             source_mtime: 20,
             component: "fragment_index".to_owned(),
+            pipeline_version: "pipeline-v1".to_owned(),
+            requested_generation: "forced-generation-v1".to_owned(),
+            priority: "forced".to_owned(),
+            trigger: "admin".to_owned(),
             force_rebuild: true,
             target_node_id: "node-a".to_owned(),
             not_before_ms: 40,
@@ -8304,6 +8447,16 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
         .expect("claim forced rebuild")
         .expect("forced owner");
     let mut forced_job = replacement_job.clone();
+    forced_job.cache_key = cluster_fragment_index_generation_key(
+        forced_job.file_id,
+        forced_job.source_size,
+        forced_job.source_mtime,
+        &forced_job.source_sha256,
+        &forced_job.pipeline_sha256,
+        &force_claim.requested_generation,
+    )
+    .expect("forced generation identity");
+    forced_job.priority = force_claim.priority.clone();
     forced_job.not_before_ms = 41;
     forced_job.created_at_ms = 41;
     assert!(store
@@ -8312,7 +8465,7 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
         .expect("force reopen ready job"));
     assert_eq!(
         store
-            .cluster_fragment_index_job(&job.cache_key)
+            .cluster_fragment_index_job(&forced_job.cache_key, &forced_job.target_node_id)
             .await
             .expect("read forced worker")
             .expect("forced worker")
@@ -8339,7 +8492,7 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             "UPDATE cluster_fragment_index_jobs
                 SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
                     updated_at_ms = 42 WHERE cache_key = $1",
-            hiqlite::params!(&job.cache_key),
+            hiqlite::params!(&forced_job.cache_key),
         )
         .await
         .expect("finish forced worker before stale replay");
@@ -8348,7 +8501,7 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
         .await
         .expect("replay accepted forced handoff"));
     let after_replay = store
-        .cluster_fragment_index_job(&job.cache_key)
+        .cluster_fragment_index_job(&forced_job.cache_key, &forced_job.target_node_id)
         .await
         .expect("read worker after stale replay")
         .expect("worker after stale replay");
@@ -8359,7 +8512,7 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
         .execute(
             "UPDATE cluster_fragment_index_jobs
                 SET state = 'queued', updated_at_ms = 43 WHERE cache_key = $1",
-            hiqlite::params!(&job.cache_key),
+            hiqlite::params!(&forced_job.cache_key),
         )
         .await
         .expect("restore queued source-replacement fixture");
@@ -8385,6 +8538,10 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             source_size: 100,
             source_mtime: 30,
             component: "fragment_index".to_owned(),
+            pipeline_version: "pipeline-v1".to_owned(),
+            requested_generation: "rebind-generation-v1".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
             force_rebuild: false,
             target_node_id: "node-a".to_owned(),
             not_before_ms: 50,
@@ -8400,6 +8557,14 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
     let mut rebound_job = job.clone();
     rebound_job.file_id = 2;
     rebound_job.source_mtime = 30;
+    rebound_job.cache_key = cluster_fragment_index_key(
+        rebound_job.file_id,
+        rebound_job.source_size,
+        rebound_job.source_mtime,
+        &rebound_job.source_sha256,
+        &rebound_job.pipeline_sha256,
+    )
+    .expect("rebound source identity");
     rebound_job.not_before_ms = 51;
     rebound_job.created_at_ms = 51;
     assert!(store
@@ -8407,7 +8572,7 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
         .await
         .expect("rebind cancelled content"));
     let rebound = store
-        .cluster_fragment_index_job(&job.cache_key)
+        .cluster_fragment_index_job(&rebound_job.cache_key, &rebound_job.target_node_id)
         .await
         .expect("read rebound worker")
         .expect("rebound worker");
@@ -9196,7 +9361,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 32);
+    assert_eq!(report.tables.len(), 35);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -10623,7 +10788,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 249, "review the Store method count");
+    assert_eq!(declared.len(), 251, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -10999,14 +11164,19 @@ async fn analysis_history_contract_runs_through_dyn_store() {
         let (_, file_id) = seed_file(&store, "analysis-history").await;
         let source_sha256 = "a".repeat(64);
         let pipeline_sha256 = "b".repeat(64);
-        let cache_key = cluster_fragment_index_key(&source_sha256, &pipeline_sha256)
-            .expect("analysis history cache key");
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("analysis history cache key");
         let request = NewAnalysisRequest {
             request_id: "analysis-history-old".to_owned(),
             file_id,
             source_size: 10_000,
             source_mtime: 1,
             component: "fragment_index".to_owned(),
+            pipeline_version: pipeline_sha256.clone(),
+            requested_generation: "history-generation-old".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
             force_rebuild: false,
             target_node_id: "analysis-node".to_owned(),
             not_before_ms: 10,
@@ -11028,6 +11198,9 @@ async fn analysis_history_contract_runs_through_dyn_store() {
             source_mtime: 1,
             source_sha256: source_sha256.clone(),
             pipeline_sha256: pipeline_sha256.clone(),
+            priority: claimed.priority.clone(),
+            trigger: claimed.trigger.clone(),
+            target_node_id: claimed.target_node_id.clone(),
             not_before_ms: 11,
             created_at_ms: 11,
         };
@@ -11081,6 +11254,8 @@ async fn analysis_history_contract_runs_through_dyn_store() {
         let mut replacement = request.clone();
         replacement.request_id = "analysis-history-new".to_owned();
         replacement.force_rebuild = true;
+        replacement.priority = "forced".to_owned();
+        replacement.requested_generation = "history-generation-new".to_owned();
         replacement.not_before_ms = 20;
         replacement.created_at_ms = 20;
         store
@@ -11093,6 +11268,17 @@ async fn analysis_history_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: claim new generation: {error}"))
             .unwrap_or_else(|| panic!("{backend}: new generation claim"));
         let mut reopened = job.clone();
+        reopened.cache_key = cluster_fragment_index_generation_key(
+            file_id,
+            10_000,
+            1,
+            &reopened.source_sha256,
+            &reopened.pipeline_sha256,
+            &replacement_claim.requested_generation,
+        )
+        .expect("replacement generation key");
+        reopened.priority = replacement_claim.priority.clone();
+        reopened.trigger = replacement_claim.trigger.clone();
         reopened.not_before_ms = 21;
         reopened.created_at_ms = 21;
         assert!(
@@ -11125,10 +11311,10 @@ async fn analysis_history_contract_runs_through_dyn_store() {
             .iter()
             .find(|row| row.request_id == "analysis-history-new")
             .unwrap_or_else(|| panic!("{backend}: retained new generation"));
-        assert!(old.job_id.is_empty(), "backend {backend}: old mutable job");
+        assert_eq!(old.job_id, cache_key, "backend {backend}");
         assert_eq!(old.state, "ready", "backend {backend}");
         assert_eq!(old.action, "rebuild", "backend {backend}");
-        assert_eq!(new.job_id, cache_key, "backend {backend}");
+        assert_eq!(new.job_id, reopened.cache_key, "backend {backend}");
         assert_eq!(new.state, "queued", "backend {backend}");
         assert_eq!(new.action, "none", "backend {backend}");
 
@@ -11211,6 +11397,26 @@ async fn timeline_annotation_contract_runs_through_dyn_store() {
             "backend {backend}"
         );
 
+        let mut fallback = set.clone();
+        fallback.generation_id = "request-path-fallback".to_owned();
+        fallback.annotations[0].start_ms = 500_000;
+        fallback.annotations[0].start_ticks = 500_000;
+        assert!(
+            !store
+                .put_timeline_annotation_set_if_missing(file_id, 600_000, &fallback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: fallback CAS: {error}")),
+            "backend {backend}: a request-path fallback cannot overwrite the worker generation"
+        );
+        assert_eq!(
+            store
+                .timeline_annotation_set(file_id, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read winner after fallback: {error}")),
+            Some(set.clone()),
+            "backend {backend}"
+        );
+
         let changed = SourceIdentity::new(10_000, 2, "chapters-v1");
         assert_eq!(
             store
@@ -11264,6 +11470,20 @@ async fn timeline_annotation_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: set manual annotation: {error}")),
             1,
             "backend {backend}"
+        );
+
+        let detector_upgrade = SourceIdentity::new(10_000, 1, "chapters-v2");
+        let composed_after_upgrade = store
+            .timeline_annotation_set(file_id, &detector_upgrade)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{backend}: read manual after detector upgrade: {error}")
+            })
+            .unwrap_or_else(|| panic!("{backend}: manual survives detector upgrade"));
+        assert_eq!(
+            composed_after_upgrade.annotations,
+            vec![manual.clone()],
+            "backend {backend}: manual evidence is fenced by source bytes, not detector version"
         );
 
         // This is the forced-rebuild shape: replace the automatic generation.
@@ -11320,6 +11540,72 @@ async fn timeline_annotation_contract_runs_through_dyn_store() {
             Some(rebuilt),
             "backend {backend}: discarding manual reveals the automatic generation"
         );
+
+        let writer_count = 8_u64;
+        let barrier = Arc::new(tokio::sync::Barrier::new(writer_count as usize));
+        let mut writers = tokio::task::JoinSet::new();
+        for writer in 0..writer_count {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let identity = identity.clone();
+            let manual = manual.clone();
+            writers.spawn(async move {
+                barrier.wait().await;
+                store
+                    .set_manual_timeline_annotation(
+                        file_id,
+                        600_000,
+                        &identity,
+                        &manual,
+                        &format!("concurrent-manual-generation-{writer}"),
+                    )
+                    .await
+            });
+        }
+        let mut revisions = Vec::new();
+        while let Some(result) = writers.join_next().await {
+            revisions.push(
+                result
+                    .unwrap_or_else(|error| panic!("{backend}: join manual writer: {error}"))
+                    .unwrap_or_else(|error| panic!("{backend}: concurrent manual writer: {error}")),
+            );
+        }
+        revisions.sort_unstable();
+        assert_eq!(
+            revisions,
+            (1..=writer_count).collect::<Vec<_>>(),
+            "backend {backend}: every concurrent writer receives its own committed revision"
+        );
+        for stale_revision in revisions.iter().copied().take(revisions.len() - 1) {
+            assert!(
+                !store
+                    .discard_manual_timeline_annotation(
+                        file_id,
+                        &identity,
+                        AnnotationKind::Credits,
+                        stale_revision,
+                    )
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{backend}: reject concurrent stale discard: {error}")
+                    }),
+                "backend {backend}: a writer must not receive a newer writer's revision"
+            );
+        }
+        assert!(
+            store
+                .discard_manual_timeline_annotation(
+                    file_id,
+                    &identity,
+                    AnnotationKind::Credits,
+                    writer_count,
+                )
+                .await
+                .unwrap_or_else(|error| panic!(
+                    "{backend}: discard latest concurrent write: {error}"
+                )),
+            "backend {backend}"
+        );
         assert!(
             store
                 .forget_timeline_annotation_set(file_id)
@@ -11333,6 +11619,53 @@ async fn timeline_annotation_contract_runs_through_dyn_store() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: read forgotten annotation set: {error}"))
                 .is_none(),
+            "backend {backend}"
+        );
+
+        store
+            .put_timeline_annotation_set(file_id, 600_000, &set)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: restore old-source set: {error}"));
+        let old_file = store
+            .get_file(file_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read old annotation source: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: old annotation source"));
+        store
+            .upsert_file(
+                old_file.item_id,
+                &old_file.path.to_string_lossy(),
+                old_file.size + 1,
+                old_file.mtime + 1,
+                &ProbeResult {
+                    duration_ms: old_file.duration_ms,
+                    container: old_file.container.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replace annotation source: {error}"));
+        let replacement_identity =
+            SourceIdentity::new(10_001, 2, identity.argv_fingerprint.clone());
+        let replacement = TimelineAnnotationSet {
+            source_identity: replacement_identity.clone(),
+            generation_id: "replacement-source-fallback".to_owned(),
+            version: 1,
+            annotations: Vec::new(),
+        };
+        assert!(
+            store
+                .put_timeline_annotation_set_if_missing(file_id, 600_000, &replacement)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replace stale fallback row: {error}")),
+            "backend {backend}: a stale source row must not block the replacement fallback"
+        );
+        assert_eq!(
+            store
+                .timeline_annotation_set(file_id, &replacement_identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read replacement fallback: {error}")),
+            Some(replacement),
             "backend {backend}"
         );
     })
@@ -11351,6 +11684,10 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
                 source_size: 10_000,
                 source_mtime: 1,
                 component: "fragment_index".to_owned(),
+                pipeline_version: "analysis-pipeline-v1".to_owned(),
+                requested_generation: "analysis-admin-generation".to_owned(),
+                priority: "normal".to_owned(),
+                trigger: "admin".to_owned(),
                 force_rebuild: false,
                 target_node_id: "analysis-node".to_owned(),
                 not_before_ms: 10,
@@ -11378,17 +11715,18 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
         );
 
         let retried = store
-            .retry_analysis_request_admin(&request_id, 12)
+            .retry_analysis_request_admin(&request_id, "admin-retry-generation", 12)
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry canceled analysis: {error}"))
             .unwrap_or_else(|| panic!("{backend}: retried request remains visible"));
         assert_eq!(retried.state, "queued", "backend {backend}");
+        assert_ne!(retried.request_id, request_id, "backend {backend}");
         let current = store
             .claim_analysis_request("analysis-node", 12, 30)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim analysis request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: replacement analysis claim"));
-        assert!(current.fence > stale.fence, "backend {backend}");
+        assert_eq!(current.request_id, retried.request_id, "backend {backend}");
         assert!(
             !store
                 .complete_analysis_request(&stale, "generation-stale", 13)
@@ -11404,7 +11742,7 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             "backend {backend}"
         );
         let ready = store
-            .analysis_request(&request_id)
+            .analysis_request(&retried.request_id)
             .await
             .unwrap_or_else(|error| panic!("{backend}: read published request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: published request"));
@@ -11414,7 +11752,7 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             "backend {backend}"
         );
         let still_ready = store
-            .cancel_analysis_request_admin(&request_id, 14)
+            .cancel_analysis_request_admin(&retried.request_id, 14)
             .await
             .unwrap_or_else(|error| panic!("{backend}: cancel published request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: published request remains visible"));
@@ -11431,6 +11769,10 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             source_size: 10_000,
             source_mtime: 1,
             component: "skip_markers".to_owned(),
+            pipeline_version: "chapter-classifier-v1".to_owned(),
+            requested_generation: "semantic-generation-v1".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
             force_rebuild: false,
             // Empty means cluster-owned semantic work. It is intentionally not
             // pinned to whichever ingress accepted the request.
@@ -11457,16 +11799,71 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim semantic request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: first semantic claim"));
-        let successor = store
-            .claim_analysis_request("analysis-node-b", 30, 50)
+        let attempts = store
+            .analysis_attempts(&semantic_request_id, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list claimed attempt: {error}"));
+        assert_eq!(attempts[0].phase, "claimed", "backend {backend}");
+        assert!(
+            store
+                .claim_analysis_request("analysis-node-b", 30, 50)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reclaim semantic request: {error}"))
+                .is_none(),
+            "backend {backend}: expired claim enters retry wait"
+        );
+        let attempts = store
+            .analysis_attempts(&semantic_request_id, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list expired attempt: {error}"));
+        assert_eq!(attempts[0].phase, "retry_wait", "backend {backend}");
+        assert_eq!(
+            attempts[0].terminal_code, "lease_expired",
+            "backend {backend}"
+        );
+        let first_retry_at = 30 + analysis_backoff_ms(&semantic_request_id, 1, 5_000, 300_000);
+        assert!(store
+            .claim_analysis_request("analysis-node-b", first_retry_at - 1, first_retry_at + 9)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: early semantic retry: {error}"))
+            .is_none());
+        let second = store
+            .claim_analysis_request("analysis-node-b", first_retry_at, first_retry_at + 10)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim semantic request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: second semantic claim"));
+        assert!(second.fence > expired.fence, "backend {backend}");
+        let second_expiry = first_retry_at + 10;
+        assert!(store
+            .claim_analysis_request("analysis-node-c", second_expiry, second_expiry + 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: expire second semantic claim: {error}"))
+            .is_none());
+        let second_retry_at =
+            second_expiry + analysis_backoff_ms(&semantic_request_id, 2, 5_000, 300_000);
+        let successor = store
+            .claim_analysis_request("analysis-node-c", second_retry_at, second_retry_at + 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second semantic retry: {error}"))
             .unwrap_or_else(|| panic!("{backend}: successor semantic claim"));
-        assert!(successor.fence > expired.fence, "backend {backend}");
+        assert!(successor.fence > second.fence, "backend {backend}");
         let identity = SourceIdentity::new(10_000, 1, "chapter-classifier-v1");
+        let fallback = TimelineAnnotationSet {
+            source_identity: identity.clone(),
+            generation_id: "fallback-after-claim".to_owned(),
+            version: 1,
+            annotations: Vec::new(),
+        };
+        assert!(
+            !store
+                .put_timeline_annotation_set_if_missing(file_id, 7_200_000, &fallback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: suppress racing fallback: {error}")),
+            "backend {backend}: fallback must yield to active semantic publication"
+        );
         let set = TimelineAnnotationSet {
             source_identity: identity.clone(),
-            generation_id: "semantic-generation".to_owned(),
+            generation_id: "semantic-generation-v1".to_owned(),
             version: 1,
             annotations: vec![TimelineAnnotation {
                 kind: AnnotationKind::Intro,
@@ -11483,24 +11880,1837 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
         };
         assert!(
             !store
-                .publish_timeline_annotation_set_for_request(&expired, 7_200_000, &set, 31,)
+                .publish_timeline_annotation_set_for_request(
+                    &expired,
+                    7_200_000,
+                    &set,
+                    second_retry_at + 1,
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale semantic publish: {error}")),
             "backend {backend}: an expired semantic owner cannot publish"
         );
         assert!(
             store
-                .publish_timeline_annotation_set_for_request(&successor, 7_200_000, &set, 31,)
+                .publish_timeline_annotation_set_for_request(
+                    &successor,
+                    7_200_000,
+                    &set,
+                    second_retry_at + 1,
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: current semantic publish: {error}")),
             "backend {backend}: current semantic owner publishes"
         );
+        let attempts = store
+            .analysis_attempts(&semantic_request_id, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list published attempts: {error}"));
+        assert_eq!(attempts.len(), 3, "backend {backend}");
+        assert_eq!(attempts[0].phase, "published", "backend {backend}");
         assert_eq!(
             store
                 .timeline_annotation_set(file_id, &identity)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: published semantic set: {error}")),
             Some(set),
+            "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, replaced_file_id) = seed_file(&store, "analysis-source-replaced").await;
+        let replaced = store
+            .get_file(replaced_file_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read replacement source: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: replacement source"));
+        let replaced_request_id = uuid::Uuid::new_v4().to_string();
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: replaced_request_id.clone(),
+                file_id: replaced_file_id,
+                source_size: replaced.size,
+                source_mtime: replaced.mtime,
+                component: "skip_markers".to_owned(),
+                pipeline_version: "chapter-classifier-v1".to_owned(),
+                requested_generation: "source-replaced-generation".to_owned(),
+                priority: "normal".to_owned(),
+                trigger: "admin".to_owned(),
+                force_rebuild: false,
+                target_node_id: String::new(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue replacement source: {error}"));
+        let replaced_claim = store
+            .claim_analysis_request("analysis-node", 10, 1_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim replacement source: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: replacement claim"));
+        assert!(store
+            .record_analysis_request_phase(&replaced_claim, "hashing", None, 11)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record replacement phase: {error}")));
+        store
+            .upsert_file(
+                replaced.item_id,
+                &replaced.path.to_string_lossy(),
+                replaced.size + 1,
+                replaced.mtime + 1,
+                &ProbeResult {
+                    duration_ms: replaced.duration_ms,
+                    container: replaced.container.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replace source: {error}"));
+        let attempts = store
+            .analysis_attempts(&replaced_request_id, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replaced attempts: {error}"));
+        assert_eq!(attempts[0].phase, "stale", "backend {backend}");
+        assert_eq!(
+            attempts[0].terminal_code, "source_superseded",
+            "backend {backend}"
+        );
+
+        let (_, deleted_file_id) = seed_file(&store, "analysis-source-deleted").await;
+        let deleted_request_id = uuid::Uuid::new_v4().to_string();
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: deleted_request_id.clone(),
+                file_id: deleted_file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "skip_markers".to_owned(),
+                pipeline_version: "chapter-classifier-v1".to_owned(),
+                requested_generation: "source-deleted-generation".to_owned(),
+                priority: "normal".to_owned(),
+                trigger: "admin".to_owned(),
+                force_rebuild: false,
+                target_node_id: String::new(),
+                not_before_ms: 20,
+                created_at_ms: 20,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue deleted source: {error}"));
+        let deleted_claim = store
+            .claim_analysis_request("analysis-node", 20, 1_020)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim deleted source: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: deleted claim"));
+        assert!(store
+            .record_analysis_request_phase(&deleted_claim, "hashing", None, 21)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record deleted phase: {error}")));
+        assert_eq!(
+            store
+                .delete_files(&[deleted_file_id])
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: delete source: {error}")),
+            1,
+            "backend {backend}"
+        );
+        let attempts = store
+            .analysis_attempts(&deleted_request_id, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: deleted attempts: {error}"));
+        assert_eq!(attempts[0].phase, "canceled", "backend {backend}");
+        assert_eq!(
+            attempts[0].terminal_code, "source_deleted",
+            "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn active_force_precedes_later_normal_requests_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-force-precedence").await;
+        for (index, component) in ["fragment_index", "skip_markers"].into_iter().enumerate() {
+            let pipeline = format!("{component}-pipeline-v1");
+            let forced_id = format!("force-precedence-{component}");
+            let forced = store
+                .enqueue_analysis_request(&NewAnalysisRequest {
+                    request_id: forced_id.clone(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    component: component.to_owned(),
+                    pipeline_version: pipeline.clone(),
+                    requested_generation: format!("forced-generation-{component}"),
+                    priority: "forced".to_owned(),
+                    trigger: "admin".to_owned(),
+                    force_rebuild: true,
+                    target_node_id: if component == "fragment_index" {
+                        "analysis-node".to_owned()
+                    } else {
+                        String::new()
+                    },
+                    not_before_ms: 10 + index as i64,
+                    created_at_ms: 10 + index as i64,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue forced {component}: {error}"));
+            let normal = store
+                .enqueue_analysis_request(&NewAnalysisRequest {
+                    request_id: format!("normal-after-force-{component}"),
+                    requested_generation: format!("normal-generation-{component}"),
+                    priority: "normal".to_owned(),
+                    trigger: "background".to_owned(),
+                    force_rebuild: false,
+                    not_before_ms: 20 + index as i64,
+                    created_at_ms: 20 + index as i64,
+                    ..NewAnalysisRequest {
+                        request_id: String::new(),
+                        file_id,
+                        source_size: 10_000,
+                        source_mtime: 1,
+                        component: component.to_owned(),
+                        pipeline_version: pipeline,
+                        requested_generation: String::new(),
+                        priority: String::new(),
+                        trigger: String::new(),
+                        force_rebuild: false,
+                        target_node_id: if component == "fragment_index" {
+                            "analysis-node".to_owned()
+                        } else {
+                            String::new()
+                        },
+                        not_before_ms: 0,
+                        created_at_ms: 0,
+                    }
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue normal {component}: {error}"));
+            assert_eq!(normal.request_id, forced.request_id, "backend {backend}");
+            assert!(normal.force_rebuild, "backend {backend}");
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_priority_ages_fairly_and_survives_worker_handoff_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, aged_file_id) = seed_file(&store, "analysis-priority-aged").await;
+        let (_, forced_file_id) = seed_file(&store, "analysis-priority-forced").await;
+        let (_, recent_file_id) = seed_file(&store, "analysis-priority-recent").await;
+        let specifications = [
+            ("aged", aged_file_id, "normal", false, 0_i64, 'a', 'b'),
+            (
+                "forced",
+                forced_file_id,
+                "forced",
+                true,
+                400_000_i64,
+                'c',
+                'd',
+            ),
+            (
+                "recent",
+                recent_file_id,
+                "normal",
+                false,
+                300_000_i64,
+                'e',
+                'f',
+            ),
+        ];
+        for (name, file_id, priority, force_rebuild, created_at_ms, _, pipeline_char) in
+            specifications
+        {
+            store
+                .enqueue_analysis_request(&NewAnalysisRequest {
+                    request_id: format!("priority-{name}"),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    component: "fragment_index".to_owned(),
+                    pipeline_version: pipeline_char.to_string().repeat(64),
+                    requested_generation: format!("priority-generation-{name}"),
+                    priority: priority.to_owned(),
+                    trigger: if force_rebuild { "admin" } else { "background" }.to_owned(),
+                    force_rebuild,
+                    target_node_id: "analysis-node".to_owned(),
+                    not_before_ms: created_at_ms,
+                    created_at_ms,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {name}: {error}"));
+        }
+
+        let mut staged_cache_keys = Vec::new();
+        for (index, expected_name) in ["aged", "forced", "recent"].into_iter().enumerate() {
+            let claim = store
+                .claim_analysis_request("analysis-node", 600_000, 700_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim {expected_name}: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: missing {expected_name} claim"));
+            assert_eq!(
+                claim.request_id,
+                format!("priority-{expected_name}"),
+                "{backend}: forced work gets a bounded head start, but aged background wins"
+            );
+            let (_, file_id, _, _, _, source_char, pipeline_char) = specifications
+                .iter()
+                .copied()
+                .find(|(name, ..)| *name == expected_name)
+                .expect("priority specification");
+            let source_sha256 = source_char.to_string().repeat(64);
+            let pipeline_sha256 = pipeline_char.to_string().repeat(64);
+            let cache_key = if claim.force_rebuild {
+                cluster_fragment_index_generation_key(
+                    file_id,
+                    10_000,
+                    1,
+                    &source_sha256,
+                    &pipeline_sha256,
+                    &claim.requested_generation,
+                )
+            } else {
+                cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+            }
+            .expect("priority cache key");
+            let job = NewClusterFragmentIndexJob {
+                cache_key: cache_key.clone(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                source_sha256,
+                pipeline_sha256,
+                priority: claim.priority.clone(),
+                trigger: claim.trigger.clone(),
+                target_node_id: claim.target_node_id.clone(),
+                not_before_ms: 600_001 + index as i64,
+                created_at_ms: 600_001 + index as i64,
+            };
+            assert!(
+                store
+                    .submit_fragment_index_analysis(&claim, &job, 600_001 + index as i64)
+                    .await
+                    .unwrap_or_else(|error| panic!(
+                        "{backend}: submit {expected_name} worker: {error}"
+                    )),
+                "{backend}: submit {expected_name} worker"
+            );
+            staged_cache_keys.push((expected_name, cache_key));
+        }
+
+        for expected_name in ["forced", "aged", "recent"] {
+            let expected_cache_key = staged_cache_keys
+                .iter()
+                .find(|(name, _)| *name == expected_name)
+                .map(|(_, cache_key)| cache_key)
+                .expect("staged priority cache key");
+            let worker = store
+                .claim_cluster_fragment_index("analysis-node", &[], 600_010, 700_010)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim {expected_name} worker: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: missing {expected_name} worker"));
+            assert_eq!(
+                &worker.cache_key, expected_cache_key,
+                "{backend}: request priority survives the structural worker handoff"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn foreground_demand_promotes_an_existing_structural_job_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-foreground-promotion").await;
+        let source_sha256 = "7".repeat(64);
+        let first_pipeline = "8".repeat(64);
+        let request = NewAnalysisRequest {
+            request_id: "analysis-foreground-promotion-request".to_owned(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: first_pipeline.clone(),
+            requested_generation: "analysis-foreground-promotion-generation".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            target_node_id: "analysis-node".to_owned(),
+            not_before_ms: 390,
+            created_at_ms: 390,
+        };
+        store
+            .enqueue_analysis_request(&request)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue promotion request: {error}"));
+        let request_claim = store
+            .claim_analysis_request("analysis-node", 390, 1_390)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim promotion request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: promotion request claim"));
+        let first = NewClusterFragmentIndexJob {
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                10_000,
+                1,
+                &source_sha256,
+                &first_pipeline,
+            )
+            .expect("foreground cache key"),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: first_pipeline,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: "analysis-node".to_owned(),
+            not_before_ms: 400,
+            created_at_ms: 400,
+        };
+        assert!(store
+            .submit_fragment_index_analysis(&request_claim, &first, 400)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: submit normal job: {error}")));
+
+        let foreground = NewClusterFragmentIndexJob {
+            priority: "foreground".to_owned(),
+            trigger: "foreground".to_owned(),
+            not_before_ms: 500,
+            created_at_ms: 500,
+            ..first.clone()
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&foreground)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: promote foreground job: {error}")));
+        let promoted = store
+            .cluster_fragment_index_job(&first.cache_key, &first.target_node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read promoted job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: promoted job"));
+        assert_eq!(promoted.priority, "foreground", "backend {backend}");
+        assert_eq!(promoted.trigger, "foreground", "backend {backend}");
+        assert_eq!(promoted.not_before_ms, 400, "backend {backend}");
+        assert_eq!(promoted.created_at_ms, 400, "backend {backend}");
+        let history = store
+            .analysis_history(&AnalysisHistoryQuery {
+                limit: 10,
+                cursor: None,
+                filter: AnalysisHistoryFilter::All,
+                search: String::new(),
+                states: Vec::new(),
+                now_ms: 500,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read promoted history: {error}"));
+        let promoted_history = history
+            .rows
+            .iter()
+            .find(|row| row.request_id == request.request_id)
+            .unwrap_or_else(|| panic!("{backend}: promoted request history"));
+        assert_eq!(promoted_history.priority, "foreground", "backend {backend}");
+        assert_eq!(promoted_history.trigger, "foreground", "backend {backend}");
+
+        let second_pipeline = "9".repeat(64);
+        let ordinary = NewClusterFragmentIndexJob {
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                10_000,
+                1,
+                &source_sha256,
+                &second_pipeline,
+            )
+            .expect("ordinary cache key"),
+            pipeline_sha256: second_pipeline,
+            not_before_ms: 300,
+            created_at_ms: 300,
+            ..first
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&ordinary)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue competing job: {error}")));
+        let claimed = store
+            .claim_cluster_fragment_index("analysis-node", &[], 600, 1_600)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim promoted job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: foreground claim"));
+        assert_eq!(
+            claimed.cache_key, foreground.cache_key,
+            "{backend}: foreground demand receives the bounded priority boost"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-attached-metrics").await;
+        let source_sha256 = "a".repeat(64);
+        let pipeline_sha256 = "b".repeat(64);
+        let request = NewAnalysisRequest {
+            request_id: "analysis-attached-metrics-request".to_owned(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: pipeline_sha256.clone(),
+            requested_generation: "analysis-attached-metrics-generation".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
+            force_rebuild: false,
+            target_node_id: "analysis-node".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        store
+            .enqueue_analysis_request(&request)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue metrics request: {error}"));
+        let request_claim = store
+            .claim_analysis_request("analysis-node", 10, 1_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim metrics request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: metrics request claim"));
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                10_000,
+                1,
+                &source_sha256,
+                &pipeline_sha256,
+            )
+            .expect("metrics cache key"),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
+            target_node_id: "analysis-node".to_owned(),
+            not_before_ms: 11,
+            created_at_ms: 11,
+        };
+        assert!(store
+            .submit_fragment_index_analysis(&request_claim, &job, 11)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: submit metrics worker: {error}")));
+
+        let queued = store
+            .prometheus_store_snapshot("analysis-node", 12)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: queued metrics: {error}"));
+        assert_eq!(
+            queued.analysis.queue_depth
+                [analysis_queue_slot("fragment_index", "queued", "normal", "admin")],
+            1,
+            "backend {backend}"
+        );
+        assert_eq!(
+            queued.analysis.queue_depth
+                [analysis_queue_slot("fragment_index", "staged", "normal", "admin")],
+            0,
+            "{backend}: the submitted request must not hide its queued worker"
+        );
+
+        let first_claim = store
+            .claim_cluster_fragment_index("analysis-node", &[], 12, 1_012)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim metrics worker: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: metrics worker claim"));
+        let claimed = store
+            .prometheus_store_snapshot("analysis-node", 13)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claimed metrics: {error}"));
+        assert_eq!(
+            claimed.analysis.queue_depth
+                [analysis_queue_slot("fragment_index", "claimed", "normal", "admin")],
+            1,
+            "backend {backend}"
+        );
+        assert!(
+            claimed.analysis.lifecycle_counts[analysis_lifecycle_slot("claim", "all")] >= 2,
+            "{backend}: both request resolution and structural work are retained claims"
+        );
+
+        assert!(store
+            .fail_cluster_fragment_index(
+                &first_claim.cache_key,
+                &first_claim.target_node_id,
+                &first_claim.owner_node_id,
+                first_claim.fence,
+                "source_unavailable",
+                true,
+                13,
+                14,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retry metrics worker: {error}")));
+        let retrying = store
+            .prometheus_store_snapshot("analysis-node", 13)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retry metrics: {error}"));
+        assert_eq!(
+            retrying.analysis.queue_depth
+                [analysis_queue_slot("fragment_index", "retry_wait", "normal", "admin")],
+            1,
+            "backend {backend}"
+        );
+        assert_eq!(
+            retrying.analysis.lifecycle_counts
+                [analysis_lifecycle_slot("retry", "source_unavailable")],
+            1,
+            "backend {backend}"
+        );
+
+        let current_claim = store
+            .claim_cluster_fragment_index("analysis-node", &[], 14, 1_014)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reclaim metrics worker: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reclaimed metrics worker"));
+        assert!(store
+            .fail_cluster_fragment_index(
+                &current_claim.cache_key,
+                &current_claim.target_node_id,
+                &current_claim.owner_node_id,
+                current_claim.fence,
+                "source_unavailable",
+                true,
+                15,
+                16,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second metrics retry: {error}")));
+        let twice_retrying = store
+            .prometheus_store_snapshot("analysis-node", 15)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second retry metrics: {error}"));
+        assert_eq!(
+            twice_retrying.analysis.lifecycle_counts
+                [analysis_lifecycle_slot("retry", "source_unavailable")],
+            2,
+            "{backend}: repeated retries are durable events"
+        );
+        let current_claim = store
+            .claim_cluster_fragment_index("analysis-node", &[], 16, 1_016)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second reclaim metrics worker: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: twice-reclaimed metrics worker"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: job.cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: job.source_sha256.clone(),
+            pipeline_sha256: job.pipeline_sha256.clone(),
+            blob_sha256: "c".repeat(64),
+            bytes: 128,
+            built_by_node_id: "analysis-node".to_owned(),
+            built_at_ms: 17,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key: job.cache_key.clone(),
+            node_id: "analysis-node".to_owned(),
+            bytes: 128,
+            verified_at_ms: 17,
+            last_seen_at_ms: 17,
+        };
+        assert!(store
+            .complete_cluster_fragment_index(&current_claim, &artifact, &location, 17)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish metrics worker: {error}")));
+        assert_eq!(
+            store
+                .settle_analysis_requests(18)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: settle metrics request: {error}")),
+            1,
+            "backend {backend}"
+        );
+        let published = store
+            .prometheus_store_snapshot("analysis-node", 19)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: published metrics: {error}"));
+        assert_eq!(
+            published.analysis.queue_depth
+                [analysis_queue_slot("fragment_index", "published", "normal", "admin")],
+            1,
+            "backend {backend}"
+        );
+        assert_eq!(
+            published.analysis.lifecycle_counts
+                [analysis_lifecycle_slot("publication", "validated")],
+            1,
+            "{backend}: one structural publication is counted once"
+        );
+        assert_eq!(
+            published.analysis.lifecycle_counts
+                [analysis_lifecycle_slot("retry", "source_unavailable")],
+            2,
+            "{backend}: publication cannot erase prior retries"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-terminal-identity").await;
+        let request = NewAnalysisRequest {
+            request_id: "terminal-analysis-request".to_owned(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "skip_markers".to_owned(),
+            pipeline_version: "chapter-classifier-v1".to_owned(),
+            requested_generation: "terminal-analysis-generation".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            target_node_id: String::new(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        store
+            .enqueue_analysis_request(&request)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue terminal request: {error}"));
+        let claim = store
+            .claim_analysis_request("analysis-node", 10, 1_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim terminal request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal request claim"));
+        assert!(store
+            .fail_analysis_request(
+                &claim.request_id,
+                &claim.owner_node_id,
+                claim.fence,
+                "stored_probe_invalid",
+                11,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail terminal request: {error}")));
+        assert_eq!(
+            store
+                .prune_analysis_requests(100, 100)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: prune terminal request: {error}")),
+            0,
+            "backend {backend}: current exact terminal identity is retained"
+        );
+        let mut duplicate = request.clone();
+        duplicate.request_id = "second-discovery-pass".to_owned();
+        duplicate.created_at_ms = 20;
+        duplicate.not_before_ms = 20;
+        let retained = store
+            .enqueue_analysis_request(&duplicate)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: repeat discovery: {error}"));
+        assert_eq!(retained.request_id, request.request_id, "backend {backend}");
+        assert_eq!(retained.state, "failed", "backend {backend}");
+
+        let retry = store
+            .retry_analysis_request_admin(
+                &request.request_id,
+                "admin-retry-terminal-generation",
+                21,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retry terminal identity: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retry successor"));
+        assert_ne!(retry.request_id, request.request_id, "backend {backend}");
+        assert!(retry.force_rebuild, "backend {backend}");
+        let retry_claim = store
+            .claim_analysis_request("analysis-node", 21, 1_021)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim terminal retry: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal retry claim"));
+        assert!(store
+            .fail_analysis_request(
+                &retry_claim.request_id,
+                &retry_claim.owner_node_id,
+                retry_claim.fence,
+                "stored_probe_invalid",
+                22,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail explicit retry: {error}")));
+        duplicate.request_id = "third-discovery-pass".to_owned();
+        duplicate.created_at_ms = 23;
+        duplicate.not_before_ms = 23;
+        let retained_after_retry = store
+            .enqueue_analysis_request(&duplicate)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: discovery after failed retry: {error}"));
+        assert_eq!(
+            retained_after_retry.request_id, request.request_id,
+            "backend {backend}: the explicit successor must not erase the terminal identity"
+        );
+        assert_eq!(retained_after_retry.state, "failed", "backend {backend}");
+
+        let source_sha256 = "a".repeat(64);
+        let pipeline_sha256 = "b".repeat(64);
+        let terminal_job = NewClusterFragmentIndexJob {
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                10_000,
+                1,
+                &source_sha256,
+                &pipeline_sha256,
+            )
+            .expect("terminal job key"),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: String::new(),
+            not_before_ms: 30,
+            created_at_ms: 30,
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&terminal_job)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue terminal worker: {error}")));
+        let terminal_claim = store
+            .claim_cluster_fragment_index("analysis-node", &[], 30, 1_030)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim terminal worker: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal worker claim"));
+        assert!(store
+            .fail_cluster_fragment_index(
+                &terminal_claim.cache_key,
+                &terminal_claim.target_node_id,
+                &terminal_claim.owner_node_id,
+                terminal_claim.fence,
+                "unsupported",
+                false,
+                31,
+                41,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail terminal worker: {error}")));
+        let mut repeated_job = terminal_job.clone();
+        repeated_job.not_before_ms = 100;
+        repeated_job.created_at_ms = 100;
+        assert!(
+            !store
+                .enqueue_cluster_fragment_index(&repeated_job)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: repeat terminal worker: {error}")),
+            "backend {backend}: deterministic worker failure is terminal"
+        );
+        assert_eq!(
+            store
+                .cluster_fragment_index_job(&terminal_job.cache_key, &terminal_job.target_node_id,)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read terminal worker: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: retained terminal worker"))
+                .state,
+            "failed",
+            "backend {backend}"
+        );
+
+        let transient_source = "c".repeat(64);
+        let transient_pipeline = "d".repeat(64);
+        let transient_job = NewClusterFragmentIndexJob {
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                10_000,
+                1,
+                &transient_source,
+                &transient_pipeline,
+            )
+            .expect("transient job key"),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: transient_source,
+            pipeline_sha256: transient_pipeline,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: String::new(),
+            not_before_ms: 110,
+            created_at_ms: 110,
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&transient_job)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue transient worker: {error}")));
+        let transient_claim = store
+            .claim_cluster_fragment_index("analysis-node", &[], 110, 1_110)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim transient worker: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: transient worker claim"));
+        assert!(store
+            .fail_cluster_fragment_index(
+                &transient_claim.cache_key,
+                &transient_claim.target_node_id,
+                &transient_claim.owner_node_id,
+                transient_claim.fence,
+                "local_publish_failed",
+                true,
+                111,
+                121,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retry transient worker: {error}")));
+        assert!(store
+            .claim_cluster_fragment_index("analysis-node", &[], 120, 1_120)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: early transient claim: {error}"))
+            .is_none());
+        assert_eq!(
+            store
+                .claim_cluster_fragment_index("analysis-node", &[], 121, 1_121)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: due transient claim: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: due transient worker"))
+                .cache_key,
+            transient_job.cache_key,
+            "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn expired_structural_analysis_lease_uses_stable_backoff_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-structural-lease-backoff").await;
+        let source_sha256 = "e".repeat(64);
+        let pipeline_sha256 = "f".repeat(64);
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                10_000,
+                1,
+                &source_sha256,
+                &pipeline_sha256,
+            )
+            .expect("structural lease job key"),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: String::new(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&job)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue structural lease job: {error}")));
+        let expired = store
+            .claim_cluster_fragment_index("analysis-node-a", &[], 10, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim structural lease job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: structural lease claim"));
+        assert!(store
+            .claim_cluster_fragment_index("analysis-node-b", &[], 20, 30)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: expire structural lease: {error}"))
+            .is_none());
+        let retry_seed = format!("{}:{}", job.cache_key, job.target_node_id);
+        let retry_at = 20 + analysis_backoff_ms(&retry_seed, 1, 5_000, 300_000);
+        let queued = store
+            .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read queued structural retry: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retained structural retry"));
+        assert_eq!(queued.state, "queued", "backend {backend}");
+        assert_eq!(queued.not_before_ms, retry_at, "backend {backend}");
+        assert!(store
+            .claim_cluster_fragment_index("analysis-node-b", &[], retry_at - 1, retry_at + 9,)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: early structural retry: {error}"))
+            .is_none());
+        let successor = store
+            .claim_cluster_fragment_index("analysis-node-b", &[], retry_at, retry_at + 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: due structural retry: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: successor structural claim"));
+        assert!(successor.fence > expired.fence, "backend {backend}");
+        assert_eq!(successor.attempts, 2, "backend {backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn exhausted_structural_lease_counts_loss_and_failure_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        store
+            .put_setting("analysis.max_attempts", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: set attempt limit: {error}"));
+        let (_, file_id) = seed_file(&store, "analysis-structural-exhausted-lease").await;
+        let source_sha256 = "1".repeat(64);
+        let pipeline_sha256 = "2".repeat(64);
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                10_000,
+                1,
+                &source_sha256,
+                &pipeline_sha256,
+            )
+            .expect("exhausted lease job key"),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: String::new(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&job)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue exhausted lease job: {error}")));
+        store
+            .claim_cluster_fragment_index("analysis-node-a", &[], 10, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim exhausted lease job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: exhausted lease claim"));
+        assert!(store
+            .claim_cluster_fragment_index("analysis-node-b", &[], 20, 30)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: expire exhausted lease: {error}"))
+            .is_none());
+
+        let failed = store
+            .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read exhausted lease job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: exhausted lease job retained"));
+        assert_eq!(failed.state, "failed", "backend {backend}");
+        assert_eq!(failed.last_error_code, "attempt_limit", "backend {backend}");
+        let metrics = store
+            .prometheus_store_snapshot("analysis-node-b", 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: exhausted lease metrics: {error}"));
+        assert_eq!(
+            metrics.analysis.lifecycle_counts
+                [analysis_lifecycle_slot("lease_loss", "lease_expired")],
+            1,
+            "backend {backend}"
+        );
+        assert_eq!(
+            metrics.analysis.lifecycle_counts[analysis_lifecycle_slot("failure", "attempt_limit")],
+            1,
+            "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn repair_requeue_cleanup_preserves_exhausted_lease_terminality_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        store
+            .put_setting("analysis.max_attempts", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: set repair attempt limit: {error}"));
+        let (_, file_id) = seed_file(&store, "analysis-repair-exhausted-cleanup").await;
+        let repair_source = "3".repeat(64);
+        let repair_pipeline = "4".repeat(64);
+        let repair = NewClusterFragmentIndexJob {
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                10_000,
+                1,
+                &repair_source,
+                &repair_pipeline,
+            )
+            .expect("repair cache key"),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: repair_source,
+            pipeline_sha256: repair_pipeline,
+            priority: "foreground".to_owned(),
+            trigger: "foreground".to_owned(),
+            target_node_id: String::new(),
+            not_before_ms: 1,
+            created_at_ms: 1,
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&repair)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue repair seed: {error}")));
+        let repair_claim = store
+            .claim_cluster_fragment_index("analysis-node-a", &[], 1, 5)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim repair seed: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: repair seed claim"));
+        let repair_artifact = ClusterFragmentIndexArtifact {
+            cache_key: repair.cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: repair.source_sha256.clone(),
+            pipeline_sha256: repair.pipeline_sha256.clone(),
+            blob_sha256: "7".repeat(64),
+            bytes: 128,
+            built_by_node_id: "analysis-node-a".to_owned(),
+            built_at_ms: 2,
+        };
+        let repair_location = ClusterFragmentIndexLocation {
+            cache_key: repair.cache_key.clone(),
+            node_id: "analysis-node-a".to_owned(),
+            bytes: 128,
+            verified_at_ms: 2,
+            last_seen_at_ms: 2,
+        };
+        assert!(store
+            .complete_cluster_fragment_index(&repair_claim, &repair_artifact, &repair_location, 2,)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish repair seed: {error}")));
+
+        let expired_source = "5".repeat(64);
+        let expired_pipeline = "6".repeat(64);
+        let expired = NewClusterFragmentIndexJob {
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                10_000,
+                1,
+                &expired_source,
+                &expired_pipeline,
+            )
+            .expect("expired repair cleanup key"),
+            source_sha256: expired_source,
+            pipeline_sha256: expired_pipeline,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+            ..repair.clone()
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&expired)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue cleanup victim: {error}")));
+        store
+            .claim_cluster_fragment_index("analysis-node-b", &[], 10, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim cleanup victim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: cleanup victim claim"));
+        let repair_requeue = NewClusterFragmentIndexJob {
+            not_before_ms: 20,
+            created_at_ms: 20,
+            ..repair
+        };
+        assert!(store
+            .requeue_cluster_fragment_index(&repair_requeue)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: requeue repair: {error}")));
+
+        let failed = store
+            .cluster_fragment_index_job(&expired.cache_key, &expired.target_node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read cleanup victim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: cleanup victim retained"));
+        assert_eq!(failed.state, "failed", "backend {backend}");
+        assert_eq!(failed.last_error_code, "attempt_limit", "backend {backend}");
+        assert!(
+            !store
+                .enqueue_cluster_fragment_index(&expired)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: retry cleanup victim: {error}")),
+            "{backend}: attempt-limit cleanup cannot be reopened as queue expiry"
+        );
+        let metrics = store
+            .prometheus_store_snapshot("analysis-node-b", 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: repair cleanup metrics: {error}"));
+        assert_eq!(
+            metrics.analysis.lifecycle_counts
+                [analysis_lifecycle_slot("lease_loss", "lease_expired")],
+            1,
+            "backend {backend}"
+        );
+        assert_eq!(
+            metrics.analysis.lifecycle_counts[analysis_lifecycle_slot("failure", "attempt_limit")],
+            1,
+            "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_admin_retry_resets_attempt_budget_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-retry-budget").await;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: request_id.clone(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: "analysis-pipeline-v1".to_owned(),
+                requested_generation: "attempt-budget-v1".to_owned(),
+                priority: "normal".to_owned(),
+                trigger: "admin".to_owned(),
+                force_rebuild: false,
+                target_node_id: "analysis-node".to_owned(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue retry budget request: {error}"));
+
+        let mut now = 10_i64;
+        for expected_attempt in 1..=5_i64 {
+            let claimed = store
+                .claim_analysis_request("analysis-node", now, now + 100)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim attempt: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: claim attempt {expected_attempt}"));
+            assert_eq!(claimed.attempts, expected_attempt, "backend {backend}");
+            assert!(
+                store
+                    .retry_analysis_request(&claimed, "source_unavailable", now, now + 1, true,)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: queue retry: {error}")),
+                "backend {backend}"
+            );
+            now += 1;
+        }
+        assert!(
+            store
+                .claim_analysis_request("analysis-node", now, now + 100)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: settle attempt limit: {error}"))
+                .is_none(),
+            "backend {backend}"
+        );
+        let failed = store
+            .analysis_request(&request_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read exhausted request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: exhausted request retained"));
+        assert_eq!(failed.state, "failed", "backend {backend}");
+        assert_eq!(failed.last_error_code, "attempt_limit", "backend {backend}");
+
+        let retried = store
+            .retry_analysis_request_admin(&request_id, "attempt-budget-v2", now + 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: admin retry: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retried request retained"));
+        assert_eq!(retried.attempts, 0, "backend {backend}");
+        let claimed = store
+            .claim_analysis_request("analysis-node", now + 1, now + 101)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim reset budget: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reset budget is claimable"));
+        assert_eq!(claimed.attempts, 1, "backend {backend}");
+        assert_eq!(
+            claimed.requested_generation, "attempt-budget-v2",
+            "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_admin_retry_queues_only_its_forced_generation_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-retry-single-worker").await;
+        let source_sha256 = "7".repeat(64);
+        let pipeline_sha256 = "8".repeat(64);
+        let logical_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("logical retry key");
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "analysis-retry-original".to_owned(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: pipeline_sha256.clone(),
+                requested_generation: "analysis-retry-original-generation".to_owned(),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: "analysis-node".to_owned(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue retry original: {error}"));
+        let request = store
+            .claim_analysis_request("analysis-node", 10, 1_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim retry original: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retry original request"));
+        let original_job = NewClusterFragmentIndexJob {
+            cache_key: logical_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: request.priority.clone(),
+            trigger: request.trigger.clone(),
+            target_node_id: request.target_node_id.clone(),
+            not_before_ms: 11,
+            created_at_ms: 11,
+        };
+        assert!(store
+            .submit_fragment_index_analysis(&request, &original_job, 11)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: submit retry original: {error}")));
+        let original_worker = store
+            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim retry original worker: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retry original worker"));
+        assert!(store
+            .fail_cluster_fragment_index(
+                &original_worker.cache_key,
+                &original_worker.target_node_id,
+                &original_worker.owner_node_id,
+                original_worker.fence,
+                "unsupported",
+                false,
+                12,
+                12,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail retry original worker: {error}")));
+        assert_eq!(
+            store
+                .settle_analysis_requests(13)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: settle retry original: {error}")),
+            1,
+            "{backend}"
+        );
+
+        let successor = store
+            .retry_analysis_request_admin(
+                &request.request_id,
+                "analysis-retry-forced-generation",
+                20,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create forced retry: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: forced retry successor"));
+        assert!(successor.force_rebuild, "{backend}");
+        assert_eq!(
+            store
+                .cluster_fragment_index_job(&logical_key, &original_job.target_node_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: original worker after retry: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: original worker retained"))
+                .state,
+            "failed",
+            "{backend}: retry must not orphan a requeued predecessor worker"
+        );
+        let successor_claim = store
+            .claim_analysis_request("analysis-node", 20, 1_020)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim forced retry: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: forced retry claim"));
+        let generation_key = cluster_fragment_index_generation_key(
+            file_id,
+            10_000,
+            1,
+            &source_sha256,
+            &pipeline_sha256,
+            &successor_claim.requested_generation,
+        )
+        .expect("forced retry generation key");
+        let generation_job = NewClusterFragmentIndexJob {
+            cache_key: generation_key.clone(),
+            priority: successor_claim.priority.clone(),
+            trigger: successor_claim.trigger.clone(),
+            target_node_id: successor_claim.target_node_id.clone(),
+            not_before_ms: 21,
+            created_at_ms: 21,
+            ..original_job
+        };
+        assert!(store
+            .submit_fragment_index_analysis(&successor_claim, &generation_job, 21)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: submit forced retry: {error}")));
+        assert_eq!(
+            store
+                .claim_cluster_fragment_index("analysis-node", &[], 21, 1_021)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim only retry worker: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: forced retry worker"))
+                .cache_key,
+            generation_key,
+            "{backend}: exactly the forced retry generation is runnable"
+        );
+        assert_eq!(
+            store
+                .cluster_fragment_index_job(&logical_key, &generation_job.target_node_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: final original worker: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: final original worker retained"))
+                .state,
+            "failed",
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_identity_and_submitted_cancellation_run_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-request-identity").await;
+        let base = NewAnalysisRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: "pipeline-v1".to_owned(),
+            requested_generation: "generation-v1".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
+            force_rebuild: false,
+            target_node_id: "analysis-node".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        let first = store
+            .enqueue_analysis_request(&base)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue base identity: {error}"));
+        let mut exact_duplicate = base.clone();
+        exact_duplicate.request_id = uuid::Uuid::new_v4().to_string();
+        let joined = store
+            .enqueue_analysis_request(&exact_duplicate)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: join exact identity: {error}"));
+        assert_eq!(joined.request_id, first.request_id, "backend {backend}");
+
+        let mut next_generation = base.clone();
+        next_generation.request_id = uuid::Uuid::new_v4().to_string();
+        next_generation.requested_generation = "generation-v2".to_owned();
+        next_generation.created_at_ms = 11;
+        next_generation.not_before_ms = 11;
+        let second = store
+            .enqueue_analysis_request(&next_generation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue next generation: {error}"));
+        assert_ne!(second.request_id, first.request_id, "backend {backend}");
+
+        let mut next_pipeline = base.clone();
+        next_pipeline.request_id = uuid::Uuid::new_v4().to_string();
+        next_pipeline.pipeline_version = "pipeline-v2".to_owned();
+        next_pipeline.requested_generation = "generation-pipeline-v2".to_owned();
+        next_pipeline.created_at_ms = 12;
+        next_pipeline.not_before_ms = 12;
+        let pipeline_request = store
+            .enqueue_analysis_request(&next_pipeline)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue next pipeline: {error}"));
+        assert_ne!(
+            pipeline_request.request_id, first.request_id,
+            "backend {backend}"
+        );
+
+        let source_sha256 = "d".repeat(64);
+        let pipeline_sha256 = "e".repeat(64);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("valid shared worker key");
+        let worker = NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            priority: base.priority.clone(),
+            trigger: base.trigger.clone(),
+            target_node_id: base.target_node_id.clone(),
+            not_before_ms: 20,
+            created_at_ms: 20,
+        };
+        let first_claim = store
+            .claim_analysis_request("analysis-node", 20, 1_020)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim first generation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: first generation claim"));
+        assert!(
+            store
+                .submit_fragment_index_analysis(&first_claim, &worker, 21)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: submit first generation: {error}")),
+            "backend {backend}"
+        );
+        let second_claim = store
+            .claim_analysis_request("analysis-node", 22, 1_022)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim second generation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: second generation claim"));
+        assert_eq!(
+            second_claim.request_id, second.request_id,
+            "backend {backend}"
+        );
+        assert!(
+            store
+                .submit_fragment_index_analysis(&second_claim, &worker, 23)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: submit second generation: {error}")),
+            "backend {backend}"
+        );
+
+        store
+            .cancel_analysis_request_admin(&first.request_id, 24)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: cancel first holder: {error}"));
+        assert_eq!(
+            store
+                .cluster_fragment_index_job(&cache_key, &worker.target_node_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read shared worker: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: shared worker retained"))
+                .state,
+            "queued",
+            "backend {backend}: another submitted holder keeps shared work alive"
+        );
+        store
+            .cancel_analysis_request_admin(&second.request_id, 25)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: cancel last holder: {error}"));
+        assert_eq!(
+            store
+                .cluster_fragment_index_job(&cache_key, &worker.target_node_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read canceled worker: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: canceled worker retained"))
+                .state,
+            "cancelled",
+            "backend {backend}: canceling the last holder fences the worker"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "forced-generation-repair").await;
+        let source_sha256 = "e".repeat(64);
+        let pipeline_sha256 = "f".repeat(64);
+        let logical_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("logical fragment key");
+
+        let normal_request = NewAnalysisRequest {
+            request_id: "repair-normal-request".to_owned(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: pipeline_sha256.clone(),
+            requested_generation: "repair-normal-generation".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
+            force_rebuild: false,
+            target_node_id: "analysis-node".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        store
+            .enqueue_analysis_request(&normal_request)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue normal generation: {error}"));
+        let normal_claim = store
+            .claim_analysis_request("analysis-node", 10, 1_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim normal generation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: normal generation claim"));
+        let normal_job = NewClusterFragmentIndexJob {
+            cache_key: logical_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: normal_claim.priority.clone(),
+            trigger: normal_claim.trigger.clone(),
+            target_node_id: normal_claim.target_node_id.clone(),
+            not_before_ms: 11,
+            created_at_ms: 11,
+        };
+        assert!(store
+            .submit_fragment_index_analysis(&normal_claim, &normal_job, 11)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: submit normal generation: {error}")));
+        let normal_worker = store
+            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim normal worker: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: normal worker"));
+        let normal_artifact = ClusterFragmentIndexArtifact {
+            cache_key: logical_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            blob_sha256: "1".repeat(64),
+            bytes: 128,
+            built_by_node_id: "analysis-node".to_owned(),
+            built_at_ms: 12,
+        };
+        let normal_location = ClusterFragmentIndexLocation {
+            cache_key: logical_key.clone(),
+            node_id: "analysis-node".to_owned(),
+            bytes: 128,
+            verified_at_ms: 12,
+            last_seen_at_ms: 12,
+        };
+        assert!(
+            store
+                .complete_cluster_fragment_index(
+                    &normal_worker,
+                    &normal_artifact,
+                    &normal_location,
+                    12,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: publish normal generation: {error}"))
+        );
+        assert_eq!(
+            store
+                .settle_analysis_requests(13)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: settle normal generation: {error}")),
+            1,
+            "backend {backend}"
+        );
+
+        let force_generation = "repair-force-generation";
+        let generation_key = cluster_fragment_index_generation_key(
+            file_id,
+            10_000,
+            1,
+            &source_sha256,
+            &pipeline_sha256,
+            force_generation,
+        )
+        .expect("forced fragment generation key");
+        let forced_request = NewAnalysisRequest {
+            request_id: "repair-forced-request".to_owned(),
+            requested_generation: force_generation.to_owned(),
+            priority: "forced".to_owned(),
+            force_rebuild: true,
+            not_before_ms: 20,
+            created_at_ms: 20,
+            ..normal_request
+        };
+        store
+            .enqueue_analysis_request(&forced_request)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue forced generation: {error}"));
+        let forced_claim = store
+            .claim_analysis_request("analysis-node", 20, 1_020)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim forced generation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: forced generation claim"));
+        let forced_job = NewClusterFragmentIndexJob {
+            cache_key: generation_key.clone(),
+            priority: forced_claim.priority.clone(),
+            trigger: forced_claim.trigger.clone(),
+            target_node_id: forced_claim.target_node_id.clone(),
+            not_before_ms: 21,
+            created_at_ms: 21,
+            ..normal_job
+        };
+        assert!(store
+            .submit_fragment_index_analysis(&forced_claim, &forced_job, 21)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: submit forced generation: {error}")));
+        let forced_worker = store
+            .claim_cluster_fragment_index("analysis-node", &[], 21, 30)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim forced worker: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: forced worker"));
+        assert!(store
+            .claim_cluster_fragment_index("analysis-node-next", &[], 30, 1_030)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: expire forced worker: {error}"))
+            .is_none());
+        let retry_at = 30 + analysis_backoff_ms(&generation_key, 1, 5_000, 300_000);
+        let current_forced_worker = store
+            .claim_cluster_fragment_index("analysis-node", &[], retry_at, retry_at + 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reclaim forced worker: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reclaimed forced worker"));
+        assert!(
+            current_forced_worker.fence > forced_worker.fence,
+            "{backend}"
+        );
+        let stale_artifact = ClusterFragmentIndexArtifact {
+            cache_key: generation_key.clone(),
+            blob_sha256: "2".repeat(64),
+            built_at_ms: retry_at,
+            ..normal_artifact
+        };
+        let stale_location = ClusterFragmentIndexLocation {
+            cache_key: generation_key.clone(),
+            verified_at_ms: retry_at,
+            last_seen_at_ms: retry_at,
+            ..normal_location
+        };
+        assert!(
+            !store
+                .complete_cluster_fragment_index(
+                    &forced_worker,
+                    &stale_artifact,
+                    &stale_location,
+                    retry_at,
+                )
+                .await
+                .unwrap_or_else(|error| panic!(
+                    "{backend}: stale forced completion result: {error}"
+                )),
+            "{backend}: an expired owner cannot publish"
+        );
+        assert!(
+            store
+                .cluster_fragment_index_artifact(&generation_key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale artifact lookup: {error}"))
+                .is_none(),
+            "{backend}: a stale owner cannot install an artifact"
+        );
+        assert!(
+            store
+                .cluster_fragment_index_locations(&generation_key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale location lookup: {error}"))
+                .is_empty(),
+            "{backend}: a stale owner cannot install a location"
+        );
+        assert_eq!(
+            store
+                .cluster_fragment_index_artifact(&logical_key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: head after stale completion: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: predecessor head retained"))
+                .cache_key,
+            logical_key,
+            "{backend}: a stale owner cannot move the serving head"
+        );
+        let forced_artifact = ClusterFragmentIndexArtifact {
+            built_by_node_id: "analysis-node".to_owned(),
+            built_at_ms: retry_at + 1,
+            ..stale_artifact
+        };
+        let forced_location = ClusterFragmentIndexLocation {
+            node_id: "analysis-node".to_owned(),
+            verified_at_ms: retry_at + 1,
+            last_seen_at_ms: retry_at + 1,
+            ..stale_location
+        };
+        assert!(store
+            .complete_cluster_fragment_index(
+                &current_forced_worker,
+                &forced_artifact,
+                &forced_location,
+                retry_at + 1,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish forced generation: {error}")));
+        assert_eq!(
+            store
+                .settle_analysis_requests(retry_at + 2)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: settle forced generation: {error}")),
+            1,
+            "backend {backend}"
+        );
+        assert_eq!(
+            store
+                .cluster_fragment_index_artifact(&logical_key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: resolve forced head: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: forced head artifact"))
+                .cache_key,
+            generation_key,
+            "backend {backend}"
+        );
+        assert!(store
+            .forget_cluster_fragment_index_location(&generation_key, "analysis-node")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: forget forced holder: {error}")));
+
+        let repair = NewClusterFragmentIndexJob {
+            cache_key: generation_key.clone(),
+            target_node_id: "repair-node".to_owned(),
+            not_before_ms: retry_at + 10,
+            created_at_ms: retry_at + 10,
+            ..forced_job
+        };
+        assert!(store
+            .requeue_cluster_fragment_index(&repair)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: requeue forced generation: {error}")));
+        let repair_claim = store
+            .claim_cluster_fragment_index("repair-node", &[], retry_at + 10, retry_at + 1_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim forced repair: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: forced repair claim"));
+        let rebuilt_artifact = ClusterFragmentIndexArtifact {
+            built_by_node_id: "repair-node".to_owned(),
+            built_at_ms: retry_at + 11,
+            ..forced_artifact
+        };
+        let rebuilt_location = ClusterFragmentIndexLocation {
+            node_id: "repair-node".to_owned(),
+            verified_at_ms: retry_at + 11,
+            last_seen_at_ms: retry_at + 11,
+            ..forced_location
+        };
+        assert!(store
+            .complete_cluster_fragment_index(
+                &repair_claim,
+                &rebuilt_artifact,
+                &rebuilt_location,
+                retry_at + 11,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete forced repair: {error}")));
+        assert_eq!(
+            store
+                .cluster_fragment_index_locations(&generation_key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: repaired holders: {error}"))[0]
+                .node_id,
+            "repair-node",
             "backend {backend}"
         );
     })

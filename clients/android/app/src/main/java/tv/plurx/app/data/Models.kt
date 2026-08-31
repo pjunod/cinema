@@ -429,9 +429,27 @@ data class Marker(
     val start_ms: Long,
     val end_ms: Long,
     val chapter: Boolean = true,
+    val provenance: String? = null,
+    val confidence: Int? = null,
+    val generation: String? = null,
+    val detector_version: String? = null,
 ) {
+    val isAutoSkipEligible: Boolean
+        get() = when (provenance) {
+            null -> chapter
+            "authored", "manual" -> true
+            else -> false
+        }
+
+    val isEstimated: Boolean
+        get() = when (provenance) {
+            null -> !chapter
+            "estimated" -> true
+            else -> false
+        }
+
     val displayLabel: String
-        get() = if (chapter) label else "$label (estimated)"
+        get() = if (isEstimated) "$label (estimated)" else label
 }
 
 /**

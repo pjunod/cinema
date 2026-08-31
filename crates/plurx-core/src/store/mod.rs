@@ -134,13 +134,18 @@ pub use self::hiqlite::{
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite_import::{SqliteImportReport, SqliteImportTableDigest};
 pub use fragment_index_cluster::{
-    cluster_fragment_index_blob_sha256, cluster_fragment_index_key,
+    analysis_backoff_ms, bounded_analysis_backoff_base_secs, bounded_analysis_backoff_max_secs,
+    bounded_analysis_lease_secs, bounded_analysis_max_attempts, cluster_fragment_index_blob_sha256,
+    cluster_fragment_index_generation_key, cluster_fragment_index_key,
     cluster_fragment_index_pipeline_digest, decode_cluster_fragment_index_blob,
-    encode_cluster_fragment_index_blob, AnalysisFileLabel, AnalysisHistoryCursor,
+    encode_cluster_fragment_index_blob, AnalysisAttempt, AnalysisFileLabel, AnalysisHistoryCursor,
     AnalysisHistoryFilter, AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow,
     AnalysisRequest, AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
     ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+    DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
+    MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS,
+    MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -200,27 +205,57 @@ pub const ANALYSIS_METRIC_STATES: [&str; 8] = [
     "canceled",
     "stale",
 ];
-pub const ANALYSIS_METRIC_PRIORITIES: [&str; 2] = ["normal", "forced"];
+pub const ANALYSIS_METRIC_PRIORITIES: [&str; 3] = ["normal", "forced", "foreground"];
+pub const ANALYSIS_METRIC_TRIGGERS: [&str; 3] = ["admin", "background", "foreground"];
 pub const ANALYSIS_MARKER_KINDS: [&str; 4] = ["intro", "recap", "credits", "preview"];
 pub const ANALYSIS_MARKER_PROVENANCE: [&str; 4] = ["estimated", "detected", "authored", "manual"];
 pub const ANALYSIS_MARKER_CONFIDENCE: [&str; 3] = ["low", "medium", "high"];
+/// Complete, bounded label universe for retained analysis lifecycle gauges.
+/// Store error strings are classified into these slots before they reach
+/// Prometheus, so paths or other unbounded values can never become labels.
+pub const ANALYSIS_LIFECYCLE_METRICS: [(&str, &str); 27] = [
+    ("claim", "all"),
+    ("lease_loss", "lease_expired"),
+    ("retry", "lease_expired"),
+    ("retry", "source_catalog_read_failed"),
+    ("retry", "source_probe_timeout"),
+    ("retry", "source_unavailable"),
+    ("retry", "source_attestation_failed"),
+    ("retry", "foreground_preempted"),
+    ("retry", "source_attestation_timeout"),
+    ("retry", "source_record_failed"),
+    ("retry", "queue_write_failed"),
+    ("retry", "queue_full_or_busy"),
+    ("retry", "pipeline_version_unavailable"),
+    ("retry", "other"),
+    ("cancel", "admin_cancelled"),
+    ("cancel", "source_deleted"),
+    ("cancel", "other"),
+    ("stale", "source_identity_changed"),
+    ("failure", "attempt_limit"),
+    ("failure", "pipeline_version_unavailable"),
+    ("failure", "stored_probe_invalid"),
+    ("failure", "source_duration_missing"),
+    ("failure", "invalid_cache_identity"),
+    ("failure", "unsupported"),
+    ("failure", "source_unavailable"),
+    ("failure", "other"),
+    ("publication", "validated"),
+];
 pub const ANALYSIS_QUEUE_METRIC_SLOTS: usize = ANALYSIS_METRIC_COMPONENTS.len()
     * ANALYSIS_METRIC_STATES.len()
-    * ANALYSIS_METRIC_PRIORITIES.len();
+    * ANALYSIS_METRIC_PRIORITIES.len()
+    * ANALYSIS_METRIC_TRIGGERS.len();
 pub const ANALYSIS_MARKER_METRIC_SLOTS: usize = ANALYSIS_MARKER_KINDS.len()
     * ANALYSIS_MARKER_PROVENANCE.len()
     * ANALYSIS_MARKER_CONFIDENCE.len();
+pub const ANALYSIS_LIFECYCLE_METRIC_SLOTS: usize = ANALYSIS_LIFECYCLE_METRICS.len();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnalysisStoreMetrics {
     pub queue_depth: [i64; ANALYSIS_QUEUE_METRIC_SLOTS],
     pub queue_oldest_age_seconds: [i64; ANALYSIS_QUEUE_METRIC_SLOTS],
-    pub claims: i64,
-    pub retries: i64,
-    pub cancellations: i64,
-    pub stale_identity: i64,
-    pub terminal_failures: i64,
-    pub publications: i64,
+    pub lifecycle_counts: [i64; ANALYSIS_LIFECYCLE_METRIC_SLOTS],
     pub marker_counts: [i64; ANALYSIS_MARKER_METRIC_SLOTS],
 }
 
@@ -229,12 +264,7 @@ impl Default for AnalysisStoreMetrics {
         Self {
             queue_depth: [0; ANALYSIS_QUEUE_METRIC_SLOTS],
             queue_oldest_age_seconds: [0; ANALYSIS_QUEUE_METRIC_SLOTS],
-            claims: 0,
-            retries: 0,
-            cancellations: 0,
-            stale_identity: 0,
-            terminal_failures: 0,
-            publications: 0,
+            lifecycle_counts: [0; ANALYSIS_LIFECYCLE_METRIC_SLOTS],
             marker_counts: [0; ANALYSIS_MARKER_METRIC_SLOTS],
         }
     }
@@ -245,6 +275,7 @@ struct AnalysisQueueMetricRow {
     component: String,
     state: String,
     priority: String,
+    trigger: String,
     count: i64,
     oldest: i64,
 }
@@ -257,30 +288,19 @@ struct AnalysisMarkerMetricRow {
     count: i64,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct AnalysisLifecycleMetrics {
-    pub claims: i64,
-    pub retries: i64,
-    pub cancellations: i64,
-    pub stale_identity: i64,
-    pub terminal_failures: i64,
-    pub publications: i64,
+#[derive(serde::Deserialize)]
+struct AnalysisLifecycleMetricRow {
+    event: String,
+    reason: String,
+    count: i64,
 }
 
 pub(crate) fn analysis_store_metrics(
     queue_json: &str,
     marker_json: &str,
-    lifecycle: AnalysisLifecycleMetrics,
+    lifecycle_json: &str,
 ) -> AnalysisStoreMetrics {
-    let mut metrics = AnalysisStoreMetrics {
-        claims: lifecycle.claims,
-        retries: lifecycle.retries,
-        cancellations: lifecycle.cancellations,
-        stale_identity: lifecycle.stale_identity,
-        terminal_failures: lifecycle.terminal_failures,
-        publications: lifecycle.publications,
-        ..Default::default()
-    };
+    let mut metrics = AnalysisStoreMetrics::default();
     for row in serde_json::from_str::<Vec<AnalysisQueueMetricRow>>(queue_json).unwrap_or_default() {
         let Some(component) = ANALYSIS_METRIC_COMPONENTS
             .iter()
@@ -300,9 +320,17 @@ pub(crate) fn analysis_store_metrics(
         else {
             continue;
         };
-        let slot = (component * ANALYSIS_METRIC_STATES.len() + state)
+        let Some(trigger) = ANALYSIS_METRIC_TRIGGERS
+            .iter()
+            .position(|value| *value == row.trigger)
+        else {
+            continue;
+        };
+        let slot = ((component * ANALYSIS_METRIC_STATES.len() + state)
             * ANALYSIS_METRIC_PRIORITIES.len()
-            + priority;
+            + priority)
+            * ANALYSIS_METRIC_TRIGGERS.len()
+            + trigger;
         metrics.queue_depth[slot] = row.count.max(0);
         metrics.queue_oldest_age_seconds[slot] = row.oldest.max(0);
     }
@@ -330,6 +358,17 @@ pub(crate) fn analysis_store_metrics(
             * ANALYSIS_MARKER_CONFIDENCE.len()
             + confidence;
         metrics.marker_counts[slot] = row.count.max(0);
+    }
+    for row in
+        serde_json::from_str::<Vec<AnalysisLifecycleMetricRow>>(lifecycle_json).unwrap_or_default()
+    {
+        let Some(slot) = ANALYSIS_LIFECYCLE_METRICS
+            .iter()
+            .position(|(event, reason)| *event == row.event && *reason == row.reason)
+        else {
+            continue;
+        };
+        metrics.lifecycle_counts[slot] = row.count.max(0);
     }
     metrics
 }
@@ -549,6 +588,14 @@ pub mod keys {
     /// off so an upgrade never starts full-library reads without the operator's
     /// topology measurement and explicit opt-in.
     pub const VOD_INDEX_CLUSTER_CACHE: &str = "playback.vod_index_cluster_cache";
+    /// Durable analysis retry budget. The settings API constrains this to a
+    /// small positive range so an operator can tune slow media without making
+    /// a corrupt source retry forever.
+    pub const ANALYSIS_MAX_ATTEMPTS: &str = "analysis.max_attempts";
+    /// Claim lease and capped exponential retry policy, in seconds.
+    pub const ANALYSIS_LEASE_SECS: &str = "analysis.lease_secs";
+    pub const ANALYSIS_BACKOFF_BASE_SECS: &str = "analysis.backoff_base_secs";
+    pub const ANALYSIS_BACKOFF_MAX_SECS: &str = "analysis.backoff_max_secs";
     /// VOD availability kill switch. Absent/on accepts immutable VOD session
     /// creation; `0` refuses it. It never selects the removed live HLS path.
     pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
@@ -1079,6 +1126,12 @@ pub trait MediaStore: Send + Sync + 'static {
     /// start-time readout in the player's sync menu, and the chapter markers
     /// the player shows as Skip Intro / Skip Credits).
     async fn get_file_probe_json(&self, file_id: i64) -> Result<Option<String>, StoreError>;
+    /// The stored `chapters` array projected in SQL, without materializing the
+    /// unrelated (and potentially much larger) ffprobe document in the caller.
+    async fn get_file_probe_chapters_json(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<String>, StoreError>;
     /// Graft a `chapters` array onto a file's stored probe JSON.
     ///
     /// Only for files probed before chapters were captured at scan time: the
@@ -2579,6 +2632,16 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
         duration_ms: i64,
         set: &crate::segplan::TimelineAnnotationSet,
     ) -> Result<(), StoreError>;
+
+    /// Publish a request-path fallback without overwriting a generation that
+    /// another worker published for the same source while the probe ran. A
+    /// stale row for a different physical or detector identity may be replaced.
+    async fn put_timeline_annotation_set_if_missing(
+        &self,
+        file_id: i64,
+        duration_ms: i64,
+        set: &crate::segplan::TimelineAnnotationSet,
+    ) -> Result<bool, StoreError>;
 
     /// Return the set only when it describes the caller's current source.
     async fn timeline_annotation_set(

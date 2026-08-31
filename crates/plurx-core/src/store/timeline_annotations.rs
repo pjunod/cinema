@@ -42,5 +42,16 @@ pub(crate) fn validated(
     i64::try_from(normalized.source_identity.size).map_err(|_| {
         StoreError::Database("timeline annotation source size exceeds SQLite INTEGER".to_owned())
     })?;
+    let encoded = serde_json::to_vec(&normalized.annotations).map_err(|error| {
+        StoreError::Database(format!(
+            "encode timeline annotations for validation: {error}"
+        ))
+    })?;
+    if encoded.len() > crate::segplan::MAX_TIMELINE_ANNOTATIONS_JSON_BYTES {
+        return Err(StoreError::Database(format!(
+            "timeline annotation payload exceeds {} bytes",
+            crate::segplan::MAX_TIMELINE_ANNOTATIONS_JSON_BYTES
+        )));
+    }
     Ok(normalized)
 }

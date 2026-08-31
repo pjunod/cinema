@@ -963,7 +963,10 @@ expected_occurrences = 347
 [[module_structures]]
 id = "method-spawn"
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 36
+# +1: `run_chapter_probe` spawns one bounded ffprobe child. Its caller owns a
+# cancellation token and deadline; the child is kill-on-drop and always reaped
+# on the explicit oversize and ordinary completion paths.
+expected_occurrences = 37
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -984,7 +987,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 505 since the two HDR10 boot probes joined: each wraps its one-shot ffmpeg
 # in the same 20-second `tokio::time::timeout` every probe beside it uses. A
 # capability check that can hang is a daemon that never finishes starting.
-expected_occurrences = 505
+# 503 since cluster discovery stopped probing media directly: it now persists
+# background requests into the unified queue, whose leased resolver owns the
+# one shared attestation deadline. The discovery-only polling helper left with
+# that direct execution path as well.
+expected_occurrences = 503
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1037,7 +1044,9 @@ expected_occurrences = 0
 [[module_structures]]
 id = "process-lifecycle-method"
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
-expected_occurrences = 293
+# +3: the bounded chapter probe kills and reaps oversized output, and reaps
+# ordinary completion. Cancellation/deadline drops the kill-on-drop child.
+expected_occurrences = 296
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -1050,7 +1059,9 @@ pattern = "kill_on_drop\\s*\\("
 # +2: the two HDR10 boot probes, which take it for the same reason every
 # other probe does -- a capability check that outlives its await is a stray
 # ffmpeg holding a device the first real session then cannot open.
-expected_occurrences = 32
+# +1: the chapter probe is dropped by cancellation or deadline selection and
+# must not leave ffprobe holding a NAS file or the queue's global media slot.
+expected_occurrences = 33
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

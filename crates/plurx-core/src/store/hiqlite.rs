@@ -1213,8 +1213,8 @@ impl HiqliteAuthStore {
         super::hiqlite_pretranscode::install_schema(&client).await?;
         super::hiqlite_sessions::install_schema(&client).await?;
         super::hiqlite_shared_cache::install_schema(&client).await?;
-        super::hiqlite_fragment_index_cluster::install_schema(&client).await?;
         super::hiqlite_timeline_annotations::install_schema(&client).await?;
+        super::hiqlite_fragment_index_cluster::install_schema(&client).await?;
 
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -1906,7 +1906,15 @@ impl HiqliteAuthStore {
     pub async fn validation_reset_contract_state(&self) -> Result<(), StoreError> {
         self.telemetry.clear().await?;
         let statements = vec![
+            (
+                "DELETE FROM analysis_lifecycle_counters".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM analysis_requests".to_owned(), params!()),
+            (
+                "DELETE FROM cluster_fragment_index_heads".to_owned(),
+                params!(),
+            ),
             (
                 "DELETE FROM cluster_fragment_index_locations".to_owned(),
                 params!(),
@@ -2416,7 +2424,8 @@ impl MetricsStore for HiqliteAuthStore {
                      FROM watched_outbox) AS outbox_failed, \
                     (SELECT COALESCE(json_group_array(json_object( \
                         'component', grouped.component, 'state', grouped.durable_state, \
-                        'priority', grouped.priority, 'count', grouped.depth, \
+                        'priority', grouped.priority, 'trigger', grouped.trigger, \
+                        'count', grouped.depth, \
                         'oldest', grouped.oldest_age_seconds)), '[]') \
                        FROM (SELECT component, \
                               CASE \
@@ -2427,12 +2436,25 @@ impl MetricsStore for HiqliteAuthStore {
                                 WHEN state = 'ready' THEN 'published' \
                                 WHEN state = 'cancelled' THEN 'canceled' \
                                 ELSE state END AS durable_state, \
-                              CASE force_rebuild WHEN 1 THEN 'forced' ELSE 'normal' END AS priority, \
+                              priority, trigger, \
                               COUNT(*) AS depth, \
                               CASE WHEN $2 > MIN(created_at_ms) \
                                 THEN ($2 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds \
-                         FROM analysis_requests \
-                        GROUP BY component, durable_state, priority) grouped) AS analysis_queue_json, \
+                         FROM ( \
+                           SELECT component, state, last_error_code, not_before_ms, \
+                                  priority, trigger, created_at_ms \
+                             FROM analysis_requests \
+                            WHERE component <> 'fragment_index' \
+                               OR NOT EXISTS ( \
+                                 SELECT 1 FROM cluster_fragment_index_jobs job \
+                                  WHERE job.cache_key = analysis_requests.result_cache_key \
+                                    AND job.target_node_id = analysis_requests.target_node_id) \
+                           UNION ALL \
+                           SELECT 'fragment_index', job.state, job.last_error_code, \
+                                  job.not_before_ms, job.priority, job.trigger, job.created_at_ms \
+                             FROM cluster_fragment_index_jobs job \
+                         ) durable_analysis \
+                        GROUP BY component, durable_state, priority, trigger) grouped) AS analysis_queue_json, \
                     (SELECT COALESCE(json_group_array(json_object( \
                         'kind', grouped.kind, 'provenance', grouped.provenance, \
                         'confidence', grouped.confidence, 'count', grouped.count)), '[]') \
@@ -2445,28 +2467,26 @@ impl MetricsStore for HiqliteAuthStore {
                                               ELSE 'high' END AS confidence \
                                        FROM timeline_annotation_sets annotation_set, \
                                             json_each(annotation_set.annotations_json) marker \
+                                      JOIN files current_file ON current_file.id = annotation_set.file_id \
+                                       AND current_file.size = annotation_set.source_size \
+                                       AND current_file.mtime = annotation_set.source_mtime \
                                       WHERE NOT EXISTS ( \
                                         SELECT 1 FROM timeline_manual_overrides manual \
                                          WHERE manual.file_id = annotation_set.file_id \
                                            AND manual.kind = json_extract(marker.value, '$.kind') \
                                            AND manual.source_size = annotation_set.source_size \
-                                           AND manual.source_mtime = annotation_set.source_mtime \
-                                           AND manual.argv_fingerprint = annotation_set.argv_fingerprint) \
+                                           AND manual.source_mtime = annotation_set.source_mtime) \
                                       UNION ALL \
                                      SELECT kind, 'manual', 'high' \
-                                       FROM timeline_manual_overrides) \
+                                       FROM timeline_manual_overrides manual \
+                                       JOIN files current_file ON current_file.id = manual.file_id \
+                                        AND current_file.size = manual.source_size \
+                                        AND current_file.mtime = manual.source_mtime) \
                               GROUP BY kind, provenance, confidence) grouped) AS analysis_marker_json, \
-                    (SELECT COALESCE(SUM(attempts), 0) FROM analysis_requests) AS analysis_claims, \
-                    (SELECT COALESCE(SUM(CASE WHEN attempts > 1 THEN attempts - 1 ELSE 0 END), 0) \
-                       FROM analysis_requests) AS analysis_retries, \
-                    (SELECT COALESCE(SUM(last_error_code = 'admin_cancelled'), 0) \
-                       FROM analysis_requests) AS analysis_cancellations, \
-                    (SELECT COALESCE(SUM(last_error_code = 'source_superseded'), 0) \
-                       FROM analysis_requests) AS analysis_stale_identity, \
-                    (SELECT COALESCE(SUM(state = 'failed'), 0) \
-                       FROM analysis_requests) AS analysis_terminal_failures, \
-                    (SELECT COALESCE(SUM(state = 'ready'), 0) \
-                       FROM analysis_requests) AS analysis_publications \
+                    (SELECT COALESCE(json_group_array(json_object( \
+                        'event', counter.event, 'reason', counter.reason, \
+                        'count', counter.count)), '[]') \
+                       FROM analysis_lifecycle_counters counter) AS analysis_lifecycle_json \
                  FROM offline_packages WHERE node_id = $1",
                 params!(node_id, now),
             )
@@ -3197,12 +3217,7 @@ struct PrometheusStoreRow {
     outbox_failed: i64,
     analysis_queue_json: String,
     analysis_marker_json: String,
-    analysis_claims: i64,
-    analysis_retries: i64,
-    analysis_cancellations: i64,
-    analysis_stale_identity: i64,
-    analysis_terminal_failures: i64,
-    analysis_publications: i64,
+    analysis_lifecycle_json: String,
 }
 
 impl From<&mut Row<'_>> for PrometheusStoreRow {
@@ -3225,12 +3240,7 @@ impl From<&mut Row<'_>> for PrometheusStoreRow {
             outbox_failed: row.get("outbox_failed"),
             analysis_queue_json: row.get("analysis_queue_json"),
             analysis_marker_json: row.get("analysis_marker_json"),
-            analysis_claims: row.get("analysis_claims"),
-            analysis_retries: row.get("analysis_retries"),
-            analysis_cancellations: row.get("analysis_cancellations"),
-            analysis_stale_identity: row.get("analysis_stale_identity"),
-            analysis_terminal_failures: row.get("analysis_terminal_failures"),
-            analysis_publications: row.get("analysis_publications"),
+            analysis_lifecycle_json: row.get("analysis_lifecycle_json"),
         }
     }
 }
@@ -3256,14 +3266,7 @@ impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
             analysis: super::analysis_store_metrics(
                 &row.analysis_queue_json,
                 &row.analysis_marker_json,
-                super::AnalysisLifecycleMetrics {
-                    claims: row.analysis_claims,
-                    retries: row.analysis_retries,
-                    cancellations: row.analysis_cancellations,
-                    stale_identity: row.analysis_stale_identity,
-                    terminal_failures: row.analysis_terminal_failures,
-                    publications: row.analysis_publications,
-                },
+                &row.analysis_lifecycle_json,
             ),
         }
     }

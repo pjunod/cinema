@@ -1378,7 +1378,8 @@ impl MetricsStore for SqliteStore {
                     (SELECT COALESCE(SUM(status = 'failed'), 0) FROM watched_outbox),
                     (SELECT COALESCE(json_group_array(json_object(
                         'component', grouped.component, 'state', grouped.durable_state,
-                        'priority', grouped.priority, 'count', grouped.depth,
+                        'priority', grouped.priority, 'trigger', grouped.trigger,
+                        'count', grouped.depth,
                         'oldest', grouped.oldest_age_seconds)), '[]')
                        FROM (SELECT component,
                               CASE
@@ -1389,12 +1390,25 @@ impl MetricsStore for SqliteStore {
                                 WHEN state = 'ready' THEN 'published'
                                 WHEN state = 'cancelled' THEN 'canceled'
                                 ELSE state END AS durable_state,
-                              CASE force_rebuild WHEN 1 THEN 'forced' ELSE 'normal' END AS priority,
+                              priority, trigger,
                               COUNT(*) AS depth,
                               CASE WHEN ?2 > MIN(created_at_ms)
                                 THEN (?2 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds
-                         FROM analysis_requests
-                        GROUP BY component, durable_state, priority) grouped),
+                         FROM (
+                           SELECT component, state, last_error_code, not_before_ms,
+                                  priority, trigger, created_at_ms
+                             FROM analysis_requests
+                            WHERE component <> 'fragment_index'
+                               OR NOT EXISTS (
+                                 SELECT 1 FROM cluster_fragment_index_jobs job
+                                  WHERE job.cache_key = analysis_requests.result_cache_key
+                                    AND job.target_node_id = analysis_requests.target_node_id)
+                           UNION ALL
+                           SELECT 'fragment_index', job.state, job.last_error_code,
+                                  job.not_before_ms, job.priority, job.trigger, job.created_at_ms
+                             FROM cluster_fragment_index_jobs job
+                         ) durable_analysis
+                        GROUP BY component, durable_state, priority, trigger) grouped),
                     (SELECT COALESCE(json_group_array(json_object(
                         'kind', grouped.kind, 'provenance', grouped.provenance,
                         'confidence', grouped.confidence, 'count', grouped.count)), '[]')
@@ -1407,26 +1421,26 @@ impl MetricsStore for SqliteStore {
                                               ELSE 'high' END AS confidence
                                        FROM timeline_annotation_sets annotation_set,
                                             json_each(annotation_set.annotations_json) marker
+                                      JOIN files current_file ON current_file.id = annotation_set.file_id
+                                       AND current_file.size = annotation_set.source_size
+                                       AND current_file.mtime = annotation_set.source_mtime
                                       WHERE NOT EXISTS (
                                         SELECT 1 FROM timeline_manual_overrides manual
                                          WHERE manual.file_id = annotation_set.file_id
                                            AND manual.kind = json_extract(marker.value, '$.kind')
                                            AND manual.source_size = annotation_set.source_size
-                                           AND manual.source_mtime = annotation_set.source_mtime
-                                           AND manual.argv_fingerprint = annotation_set.argv_fingerprint)
+                                           AND manual.source_mtime = annotation_set.source_mtime)
                                       UNION ALL
                                      SELECT kind, 'manual', 'high'
-                                       FROM timeline_manual_overrides)
+                                       FROM timeline_manual_overrides manual
+                                       JOIN files current_file ON current_file.id = manual.file_id
+                                        AND current_file.size = manual.source_size
+                                        AND current_file.mtime = manual.source_mtime)
                               GROUP BY kind, provenance, confidence) grouped),
-                    (SELECT COALESCE(SUM(attempts), 0) FROM analysis_requests),
-                    (SELECT COALESCE(SUM(CASE WHEN attempts > 1 THEN attempts - 1 ELSE 0 END), 0)
-                       FROM analysis_requests),
-                    (SELECT COALESCE(SUM(last_error_code = 'admin_cancelled'), 0)
-                       FROM analysis_requests),
-                    (SELECT COALESCE(SUM(last_error_code = 'source_superseded'), 0)
-                       FROM analysis_requests),
-                    (SELECT COALESCE(SUM(state = 'failed'), 0) FROM analysis_requests),
-                    (SELECT COALESCE(SUM(state = 'ready'), 0) FROM analysis_requests)
+                    (SELECT COALESCE(json_group_array(json_object(
+                        'event', counter.event, 'reason', counter.reason,
+                        'count', counter.count)), '[]')
+                       FROM analysis_lifecycle_counters counter)
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],
                 |row| {
@@ -1449,14 +1463,7 @@ impl MetricsStore for SqliteStore {
                         analysis: super::analysis_store_metrics(
                             &row.get::<_, String>(15)?,
                             &row.get::<_, String>(16)?,
-                            super::AnalysisLifecycleMetrics {
-                                claims: row.get(17)?,
-                                retries: row.get(18)?,
-                                cancellations: row.get(19)?,
-                                stale_identity: row.get(20)?,
-                                terminal_failures: row.get(21)?,
-                                publications: row.get(22)?,
-                            },
+                            &row.get::<_, String>(17)?,
                         ),
                     })
                 },
@@ -3127,7 +3134,11 @@ mod tests {
             [],
         )
         .expect("widened component accepts semantic work");
-        for table in ["timeline_annotation_sets", "timeline_manual_overrides"] {
+        for table in [
+            "timeline_annotation_sets",
+            "timeline_manual_overrides",
+            "analysis_lifecycle_counters",
+        ] {
             assert_eq!(
                 conn.query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",

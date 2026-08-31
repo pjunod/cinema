@@ -27,8 +27,9 @@ impl TimelineAnnotationStore for SqliteStore {
             conn.execute(
                 "INSERT INTO timeline_annotation_sets
                     (file_id, source_size, source_mtime, argv_fingerprint,
-                     generation_id, version, annotations_json, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     generation_id, version, annotations_json, updated_at_ms,
+                     publication_priority)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'normal')
                  ON CONFLICT(file_id) DO UPDATE SET
                     source_size = excluded.source_size,
                     source_mtime = excluded.source_mtime,
@@ -36,7 +37,8 @@ impl TimelineAnnotationStore for SqliteStore {
                     generation_id = excluded.generation_id,
                     version = excluded.version,
                     annotations_json = excluded.annotations_json,
-                    updated_at_ms = excluded.updated_at_ms",
+                    updated_at_ms = excluded.updated_at_ms,
+                    publication_priority = 'normal'",
                 params![
                     file_id,
                     source_size,
@@ -99,7 +101,7 @@ impl TimelineAnnotationStore for SqliteStore {
                         revision, generation_id
                    FROM timeline_manual_overrides
                   WHERE file_id = ?1 AND source_size = ?2
-                    AND source_mtime = ?3 AND argv_fingerprint = ?4
+                    AND source_mtime = ?3
                   ORDER BY updated_at_ms, kind",
             )?;
             let manual = statement.query_map(
@@ -107,7 +109,6 @@ impl TimelineAnnotationStore for SqliteStore {
                     file_id,
                     i64::try_from(source.size).unwrap_or(i64::MAX),
                     source.mtime_ms,
-                    source.argv_fingerprint,
                 ],
                 |row| {
                     Ok((
@@ -171,6 +172,61 @@ impl TimelineAnnotationStore for SqliteStore {
         .await
     }
 
+    async fn put_timeline_annotation_set_if_missing(
+        &self,
+        file_id: i64,
+        duration_ms: i64,
+        set: &TimelineAnnotationSet,
+    ) -> Result<bool, StoreError> {
+        let set = crate::store::timeline_annotations::validated(set, duration_ms)?;
+        let source_size = i64::try_from(set.source_identity.size)
+            .map_err(|_| StoreError::Database("source size exceeds SQLite INTEGER".to_owned()))?;
+        let annotations_json = serde_json::to_string(&set.annotations).map_err(|error| {
+            StoreError::Database(format!("encode timeline annotations: {error}"))
+        })?;
+        let now_ms = unix_ms()?;
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "INSERT INTO timeline_annotation_sets
+                    (file_id, source_size, source_mtime, argv_fingerprint,
+                     generation_id, version, annotations_json, updated_at_ms,
+                     publication_priority)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'normal'
+                  WHERE EXISTS (SELECT 1 FROM files
+                                 WHERE id = ?1 AND size = ?2 AND mtime = ?3)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM analysis_requests
+                       WHERE file_id = ?1 AND source_size = ?2 AND source_mtime = ?3
+                         AND component = 'skip_markers'
+                         AND state IN ('queued', 'running', 'submitted')
+                    )
+                 ON CONFLICT(file_id) DO UPDATE SET
+                    source_size = excluded.source_size,
+                    source_mtime = excluded.source_mtime,
+                    argv_fingerprint = excluded.argv_fingerprint,
+                    generation_id = excluded.generation_id,
+                    version = excluded.version,
+                    annotations_json = excluded.annotations_json,
+                    updated_at_ms = excluded.updated_at_ms,
+                    publication_priority = 'normal'
+                  WHERE timeline_annotation_sets.source_size <> excluded.source_size
+                     OR timeline_annotation_sets.source_mtime <> excluded.source_mtime
+                     OR timeline_annotation_sets.argv_fingerprint <> excluded.argv_fingerprint",
+                params![
+                    file_id,
+                    source_size,
+                    set.source_identity.mtime_ms,
+                    set.source_identity.argv_fingerprint,
+                    set.generation_id,
+                    i64::from(set.version),
+                    annotations_json,
+                    now_ms,
+                ],
+            )? == 1)
+        })
+        .await
+    }
+
     async fn forget_timeline_annotation_set(&self, file_id: i64) -> Result<bool, StoreError> {
         self.with_conn(move |conn| {
             Ok(conn.execute(
@@ -210,12 +266,14 @@ impl TimelineAnnotationStore for SqliteStore {
         let generation_id = generation_id.to_owned();
         let now_ms = unix_ms()?;
         self.with_conn(move |conn| {
-            conn.execute(
+            let changed = conn.execute(
                 "INSERT INTO timeline_manual_overrides
                     (file_id, kind, source_size, source_mtime, argv_fingerprint,
                      start_ticks, end_ticks, timescale, start_ms, end_ms,
                      revision, generation_id, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12
+                  WHERE EXISTS (SELECT 1 FROM files
+                                 WHERE id = ?1 AND size = ?3 AND mtime = ?4)
                  ON CONFLICT(file_id, kind) DO UPDATE SET
                     source_size = excluded.source_size,
                     source_mtime = excluded.source_mtime,
@@ -243,6 +301,11 @@ impl TimelineAnnotationStore for SqliteStore {
                     now_ms,
                 ],
             )?;
+            if changed != 1 {
+                return Err(StoreError::Task(
+                    "timeline annotation source changed".to_owned(),
+                ));
+            }
             let revision: i64 = conn.query_row(
                 "SELECT revision FROM timeline_manual_overrides
                   WHERE file_id = ?1 AND kind = ?2",
@@ -267,14 +330,12 @@ impl TimelineAnnotationStore for SqliteStore {
             Ok(conn.execute(
                 "DELETE FROM timeline_manual_overrides
                   WHERE file_id = ?1 AND kind = ?2 AND source_size = ?3
-                    AND source_mtime = ?4 AND argv_fingerprint = ?5
-                    AND revision = ?6",
+                    AND source_mtime = ?4 AND revision = ?5",
                 params![
                     file_id,
                     kind.as_str(),
                     i64::try_from(source.size).unwrap_or(i64::MAX),
                     source.mtime_ms,
-                    source.argv_fingerprint,
                     i64::try_from(expected_revision).unwrap_or(i64::MAX),
                 ],
             )? > 0)
