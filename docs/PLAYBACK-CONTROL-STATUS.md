@@ -30,7 +30,7 @@ one is deleted.
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **complete in source on all three clients**; the deletions wait on a fleet run |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike still **needs hardware**, and item 7 is not allowed to start without its numbers |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
-| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | **three of five** — annotations, overrides, and queue visibility merged as [#700](https://github.com/pjunod/plurx/pull/700); **subtitle windows and marker prewarm are not built** (see below); detection is deliberately deferred |
+| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); **subtitle windows are not built**; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
 
@@ -49,7 +49,7 @@ merge target: two client PRs in flight means the second always fails.
 | M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | merged |
 | M5b | web: the truncated-stream owner defers too | [#712](https://github.com/pjunod/plurx/pull/712) | merged |
 | M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | merged |
-| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | merged; built as [#726](https://github.com/pjunod/plurx/pull/726) |
+| M5.5 recon | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | merged; built as [#726](https://github.com/pjunod/plurx/pull/726) |
 | M5e | Apple: the stall funnel asks before it decides | [#715](https://github.com/pjunod/plurx/pull/715) | merged |
 | web bound | ruling D3 applied to the web ask | [#717](https://github.com/pjunod/plurx/pull/717) | merged |
 | M5g | Android: the stall owner asks before it decides | [#718](https://github.com/pjunod/plurx/pull/718) | merged |
@@ -71,30 +71,41 @@ merge target: two client PRs in flight means the second always fails.
 | acceptance | read the commit and the builds, do not quote them | [#734](https://github.com/pjunod/plurx/pull/734) | merged |
 | status | what item 8 actually delivered, and the M5.5 store half | — | this change |
 
-**What item 8 did not deliver.** The roadmap item names five things. #700
-delivered three: exact intro/credits destinations with provenance and
-confidence, manual overrides, and the analysis queue with its metrics. Two are
-absent, and both were absent by design rather than by oversight —
-[CONTENT-ANALYSIS-INDEX-HANDOFF.md](CONTENT-ANALYSIS-INDEX-HANDOFF.md) §6.1
-forbids the branch from touching `playback_control.rs` at all.
+**What item 8 did not deliver.** §6 item 8 names five things: exact
+intro/credits annotations, subtitle windows, force-analysis controls,
+queue/current-work visibility, and instrumentation. #700 delivered four. One is
+missing.
 
-- **Subtitle windows.** Not one added line of #700 mentions subtitles. The
-  handoff never scoped them; §6 item 8 of the implementation handoff does.
-- **Marker-destination prewarm.** Every callsite on all three clients emits a
-  hard-coded `"miss"` — `crates/plurxd/src/web/index.html`,
-  `PlayerController.swift`, `PlayerScreen.kt`. There is no `"hit"` path in the
-  product, so `plurx_playback_marker_prewarm_hit_ratio` is pinned at zero
-  permanently. **This reads on a dashboard as a broken feature rather than an
-  absent one**, which is the more expensive of the two failures: an operator
-  investigating a 0% hit rate is looking for a bug that does not exist. The
-  counter is instrumentation waiting for a consumer, and the consumer is
-  actor-side work that belongs to this programme, not to that one.
+- **Subtitle windows.** Not one added line of #700 mentions subtitles, and the
+  word appears once, incidentally, in the whole content-analysis handoff. This
+  is **unscoped, not deliberately excluded** — the handoff's milestones are M1
+  persist, M2 manual override, M3 queue, M4 operator surfaces, M5+ detection,
+  and subtitle work appears in none of them, nor in its open questions. The
+  gap is between the two documents, not inside either one. Client-demand-driven
+  subtitle materialization is specified in
+  [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) §13.8
+  and has no owner.
+
+**A separate defect the same reading found.** Marker-destination prewarm is
+*not* one of item 8's five — it is a §13.8 bullet — but its instrumentation
+shipped without it. Every callsite on all three clients emits a hard-coded
+`"miss"`: `crates/plurxd/src/web/index.html`, `PlayerController.swift`,
+`PlayerScreen.kt`. No `"hit"` path exists in the product, so
+`plurx_playback_marker_prewarm_hit_ratio` is pinned at zero permanently.
+**A metric that can only read zero presents an absent feature as a broken
+one**, and that costs more than silence: an operator investigating a 0% hit
+rate is hunting a bug that does not exist. This one *is* deliberate on the
+index side — [CONTENT-ANALYSIS-INDEX-HANDOFF.md](CONTENT-ANALYSIS-INDEX-HANDOFF.md)
+§6.1 forbids that branch from touching `playback_control.rs`, and §4.5 defers
+actor-side consumption to this programme. The counter is waiting for a consumer
+this programme owes it.
 
 **What is left in M5.** Nothing buildable. M5c and M5h — deleting the web and
 mobile budgets — are all that remains, and both are gated on
 [M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any code. The
 next thing that has to happen is a fleet run, and it is not a thing this side
-can do: the gpt prompt is §4.1 of that document.
+can do without one: §3 and §4 of that document are the procedure, and
+§4.0 is the web arm, which needs no device and should be settled first.
 
 ### Why Android does not await the verdict, and Apple does
 
@@ -217,7 +228,7 @@ action this server can send, and the fleet has never run a build that can
 receive one.
 
 **The server does emit actions.** `resolve_action` is called from
-`local_control_response` (`crates/plurxd/src/http/hls.rs:3525`) on the live
+`local_control_response` (`crates/plurxd/src/http/hls.rs:3609`) on the live
 control endpoint, not only from tests — a grep confined to
 `playback_control.rs` finds only test call sites, because the production one
 is fully qualified, and that mistake has been made once already in review.
@@ -484,8 +495,9 @@ fencing, observation-only actor projection, and command/deadline metrics are
 now part of the validated baseline. PR #636 subsequently moved
 prepublication transcode recovery and response settlement into that actor and
 executor. PR #641 moved published-transcode lifetime into the same owner and
-merged it into `main`; copy recovery is the remaining compatibility owner on
-merged `main` and is actor-owned in the active M4 candidate.
+merged it into `main`. PR #642 then moved copy recovery into it and merged as
+`062530d2`, and PR #663 re-anchored the replacement tests, closing handoff
+item 5. No compatibility recovery owner remains on `main`.
 The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 The resumable execution state is in
@@ -503,17 +515,22 @@ not being counted as complete merely because its foundation has landed.
 | Workstream | State | Shipped result | Still required |
 |---|---|---|---|
 | Design and adversarial review | **Complete** | End-to-end protocol, actor, replacement, cluster, index, observability, and watchdog-deletion contracts | Re-review each implementation PR against the contract |
-| M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
-| M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
+| M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Nothing — actions are no longer disabled; the server emits them and all three clients consume them |
+| M2 — passive clients | **Complete** | Web, Apple, and Android all report demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
 | M4 — server watchdog removal | **Complete** | #636 merged production startup recovery; #641 merged actor-managed published lifetime, frozen frontier, typed `producer_ended`, and removal of its compatibility watcher; #642 merged actor-owned copy lifetime and removed the copy watchdog, election, request-side exit inference, and copy-owned replacement policy; #663 re-anchored the replacement tests and closed handoff item 5 | Nothing — later lifecycle/observability cleanup is a separate slice |
 | M5 — one client action owner | **Complete in source** | Web, Apple, and Android each ask the server before recovering; a terminal verdict is recipe-scoped, so it gates only the rung that re-prepares the identical recipe | A fleet acceptance run, which is what the budget deletions (M5c, M5h) are gated on |
 | M5.5/M6 — prepared handoff and Auto | **Store half merged** | Staged generations: prepare, commit, and abort as compare-and-swap over a preparation ledger, on both backends ([#726](https://github.com/pjunod/plurx/pull/726)) | The feasibility spike, which needs physical devices; M6's transactional resolution of bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes may not start without its numbers |
-| M7 — semantic indexes/subtitles | **Three of five** | The fragment index and force-analysis queue, plus ([#700](https://github.com/pjunod/plurx/pull/700)) exact intro/credits annotations with provenance and confidence, manual overrides, and queue metrics | Subtitle windows, seek coalescing, and a marker prewarm that can report a hit; detection itself is separately gated |
+| M7 — semantic indexes/subtitles | **Four of five** | The fragment index, plus ([#700](https://github.com/pjunod/plurx/pull/700)) exact intro/credits annotations with provenance and confidence, manual overrides, force-analysis controls, and queue/current-work visibility with its instrumentation | Subtitle windows; and outside item 8, seek coalescing and a marker prewarm consumer that can report a hit; detection itself is separately gated |
 | M8 — cluster handoff | **Not started** | Control relay and owner fencing exist from M1 | Planned drain, VOD resurrection, rolling successor failover, compatibility-takeover retirement |
 | M9 — cutover/deletion | **Not started** | — | Mixed-fleet evidence, defaults on, compatibility engine and `/status` polling deleted, physical matrix green |
 
 ## Merged evidence
+
+**This table stops at #636.** #641, #642, #663, #700, #716, and #726 merged
+after it and are recorded in the slice ledger above with their PR numbers
+rather than here. The table is kept for the exact heads and hosted run ids it
+carries, which the ledger does not.
 
 | PR | Merged result | Verification at merge |
 |---|---|---|
@@ -536,7 +553,18 @@ not being counted as complete merely because its foundation has landed.
 | [#626](https://github.com/pjunod/plurx/pull/626) | Immutable actor decision slot, non-consuming poll contract, and bounded passive executor transport | Exact-head adversarial approval; focused Rust 85/85, ownership 7/7, `make check`, `make cluster-check`, and hosted run `33129200705` green; merged as `9063bb1e` |
 | [#636](https://github.com/pjunod/plurx/pull/636) | Actor-owned prepublication recovery, exact response settlement, three-phase cluster activation, and durable publication/terminal ownership | Exact head `d1b117bf2bddba600c659f2b2354ea50ee10830a`; hosted run `33236731526` fully green; merged as `a48884906da351ca0c72dc99c227aa169911d089` |
 
-## Active slice: M4 watchdog removal
+## M4 watchdog removal — merged, kept as the record
+
+**This section is the slice's record as it was written while the work was in
+flight, and it is deliberately not rewritten.** M4 is complete: #642 merged as
+`062530d2` and #663 closed handoff item 5 behind it. Every sentence below that
+speaks of "the active branch", "the active cut", "the active working tree", or
+a pending review, gate, or merge describes `codex/playback-control-m4-copy-lifetime`
+*before* that merge. It is kept because its failure modes recur and the
+reasoning is worth more than the tense; read it as history, not as a queue.
+`SOFTWARE_GRACE`, `WATCHDOG_POLL`, `watchdog_active`, `begin_copy_child_replacement`,
+`downgrade_one_step`, and `FIRST_SEGMENT_GRACE` now have zero occurrences
+anywhere under `crates/`.
 
 PR #618 merged the complete M4 implementation contract at `f9cef83b`, after
 seven adversarial passes and green local, cluster, and hosted gates. The actor
@@ -688,11 +716,13 @@ not playback watchdogs.
    clients now consume actions, not only `action:none`. See the item 6 row.
 4. Complete M5/M5.5/M6 so quality, codec, dynamic range, tracks, subtitles, and
    node placement use the same prepare/commit/abort transaction.
-5. Complete semantic indexing. **Three of five merged** as
+5. Complete semantic indexing. **Four of five merged** as
    [#700](https://github.com/pjunod/plurx/pull/700): exact intro/credits
-   destinations with provenance/confidence, manual overrides, and queue
-   metrics. **Subtitle readiness and marker-destination prewarm are not
-   built** — see §"What item 8 did not deliver". Detection itself, deciding
+   destinations with provenance/confidence, manual overrides, force-analysis
+   controls, and
+   queue/current-work visibility with its instrumentation. **Subtitle windows
+   are not built**, and marker-destination prewarm has its counter but no
+   consumer — see §"What item 8 did not deliver". Detection itself, deciding
    where an intro *is*, is a further deliberate exclusion gated on a labelled
    corpus and a false-positive-weighted evaluation.
 6. Complete clustered planned/hard handoff, mixed-fleet cutover, compatibility
