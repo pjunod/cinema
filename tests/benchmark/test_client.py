@@ -2,10 +2,12 @@
 
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,24 +45,38 @@ def client(executable: Path, timeout_seconds: float) -> FfmpegClient:
     return instance
 
 
+def record_spawned_processes():
+    """Patch the decoder spawn while retaining the real parent-observed PID."""
+    processes = []
+    real_popen = subprocess.Popen
+
+    def spawn(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    return processes, mock.patch.object(subprocess, "Popen", side_effect=spawn)
+
+
 class ClientTests(unittest.TestCase):
     def test_silent_decoder_obeys_deadline_and_is_reaped(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            pid_path = root / "pid"
             executable = root / "silent-decoder"
             executable.write_text(
                 "#!/bin/sh\n"
-                f"printf '%s\\n' \"$$\" > {str(pid_path)!r}\n"
                 "sleep 10\n",
                 encoding="utf-8",
             )
             executable.chmod(0o755)
             started = time.monotonic()
-            with self.assertRaisesRegex(ClientError, "did not finish"):
-                client(executable, 0.5).decode_for(stream(), 1)
+            processes, recording = record_spawned_processes()
+            with recording:
+                with self.assertRaisesRegex(ClientError, "did not finish"):
+                    client(executable, 0.5).decode_for(stream(), 1)
             self.assertLess(time.monotonic() - started, 1)
-            pid = int(pid_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(processes), 1)
+            pid = processes[0].pid
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
 
@@ -107,21 +123,22 @@ class ClientTests(unittest.TestCase):
     def test_signal_resistant_decoder_is_killed_without_a_five_second_overrun(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            pid_path = root / "pid"
             executable = root / "signal-resistant-decoder"
             executable.write_text(
                 "#!/bin/sh\n"
                 "trap '' TERM\n"
-                f"printf '%s\\n' \"$$\" > {str(pid_path)!r}\n"
                 "while :; do sleep 10; done\n",
                 encoding="utf-8",
             )
             executable.chmod(0o755)
             started = time.monotonic()
-            with self.assertRaisesRegex(ClientError, "did not finish"):
-                client(executable, 0.5).decode_for(stream(), 1)
+            processes, recording = record_spawned_processes()
+            with recording:
+                with self.assertRaisesRegex(ClientError, "did not finish"):
+                    client(executable, 0.5).decode_for(stream(), 1)
             self.assertLess(time.monotonic() - started, 1)
-            pid = int(pid_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(processes), 1)
+            pid = processes[0].pid
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
 
