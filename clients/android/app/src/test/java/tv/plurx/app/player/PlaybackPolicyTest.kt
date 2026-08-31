@@ -318,3 +318,72 @@ class ControlAskBoundTest {
         assertTrue(CONTROL_ASK_CAP_MS > CONTROL_ASK_MS)
     }
 }
+
+
+/**
+ * The verdict that ends the compatibility ladder before its last two rungs.
+ *
+ * The rule this pins is a carve-out, and a carve-out is the kind of thing a
+ * later edit deletes as redundant: `terminalVerdict` deliberately outlives the
+ * session that earned it, so without the transport check a dropped link would
+ * inherit a sentence written about something else entirely.
+ */
+class LadderVerdictTest {
+
+    private val terminal = ControlAction(type = "terminal", message = "Production stopped.")
+
+    /** The case the slice exists for: a source the producer has ruled out. */
+    @Test
+    fun aTerminalVerdictEndsTheLadderForAMediaFailure() {
+        assertEquals(
+            terminal,
+            ladderVerdict(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+                verdict = terminal,
+            ),
+        )
+    }
+
+    /**
+     * A dropped link keeps the client's own words. The verdict outlives its
+     * session, so it may have been formed for a cause that has nothing to do
+     * with why this socket died.
+     */
+    @Test
+    fun aTransportFailureNeverBorrowsTheServersWords() {
+        for (code in listOf(2000, 2001, 2002, 2003, 2004, 2007, 2008)) {
+            assertNull(
+                "transport code $code must not inherit a verdict",
+                ladderVerdict(errorCode = code, verdict = terminal),
+            )
+        }
+    }
+
+    /**
+     * A `hold` or a `retry_resource` on a dead item would leave the player
+     * with nothing to render and no path forward. The ladder is the only
+     * thing that can still produce a picture, so those keep walking it.
+     */
+    @Test
+    fun onlyATerminalVerdictEndsTheLadder() {
+        for (type in listOf("hold", "retry_resource", "none")) {
+            assertNull(
+                "a $type verdict must not end the ladder",
+                ladderVerdict(
+                    errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                    verdict = ControlAction(type = type, reason = "busy"),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun noVerdictKeepsTheLadderWalking() {
+        assertNull(
+            ladderVerdict(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                verdict = null,
+            ),
+        )
+    }
+}
