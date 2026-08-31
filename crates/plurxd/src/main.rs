@@ -2,6 +2,7 @@ mod admission;
 mod cachekeep;
 mod copyseg;
 mod delivery;
+mod dv_disk;
 mod ffmpeg;
 mod fragindex;
 mod fragment_index_cluster;
@@ -1851,6 +1852,7 @@ async fn probe_system(
         encoder_selected,
         decoders,
         tone_map,
+        dv_disk: crate::dv_disk::probe_capabilities().await,
     };
     let system = system_info(config, ffmpeg, hwaccel_pref, encoder_caps.clone(), measured);
     Ok((encoder_caps, system))
@@ -1869,6 +1871,7 @@ struct Measured {
     encoder_selected: String,
     decoders: Vec<String>,
     tone_map: pipeprobe::PipelineReport,
+    dv_disk: crate::dv_disk::DvDiskCapabilities,
 }
 
 /// Assemble what the settings page and every session read.
@@ -1901,6 +1904,7 @@ fn system_info(
         dovi_passthrough_qsv: measured.dovi_passthrough_qsv,
         hdr10_passthrough: measured.hdr10_passthrough,
         hdr10_passthrough_qsv: measured.hdr10_passthrough_qsv,
+        dv_disk: measured.dv_disk,
         // Not measured: the conversion is plurx's own code, so the only
         // question is whether an operator has turned it off. `PLURX_DV_CONVERT=0`
         // is the off switch, and the default is on — a Profile 7 title that
@@ -4903,6 +4907,7 @@ mod startup_tests {
                 encoder_selected: selected.clone(),
                 decoders: vec!["h264".to_owned(), "hevc".to_owned()],
                 tone_map: pipeprobe::PipelineReport::cpu_only("not probed"),
+                dv_disk: crate::dv_disk::DvDiskCapabilities::default(),
             },
         );
 

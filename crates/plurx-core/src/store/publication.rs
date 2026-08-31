@@ -663,6 +663,113 @@ impl<'a> PublicationStore<'a> {
         .await
     }
 
+    pub async fn mark_dv_conversion_running(
+        &self,
+        file_id: i64,
+        bytes_before: i64,
+    ) -> Result<bool, StoreError> {
+        if self.fence.is_none() {
+            return self
+                .store
+                .mark_dv_conversion_running(file_id, bytes_before)
+                .await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .mark_dv_conversion_running_fenced(file_id, bytes_before, &lease, &replacement)
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn mark_dv_conversion_verified(
+        &self,
+        file_id: i64,
+        el_type: Option<&str>,
+        bytes_after: i64,
+    ) -> Result<bool, StoreError> {
+        if self.fence.is_none() {
+            return self
+                .store
+                .mark_dv_conversion_verified(file_id, el_type, bytes_after)
+                .await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .mark_dv_conversion_verified_fenced(
+                        file_id,
+                        el_type,
+                        bytes_after,
+                        &lease,
+                        &replacement,
+                    )
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn mark_dv_conversion_committed(
+        &self,
+        file_id: i64,
+        original_path: Option<&str>,
+        bytes_after: i64,
+        finished_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if self.fence.is_none() {
+            return self
+                .store
+                .mark_dv_conversion_committed(file_id, original_path, bytes_after, finished_at_ms)
+                .await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .mark_dv_conversion_committed_fenced(
+                        file_id,
+                        original_path,
+                        bytes_after,
+                        finished_at_ms,
+                        &lease,
+                        &replacement,
+                    )
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn mark_dv_conversion_failed(
+        &self,
+        file_id: i64,
+        error: &str,
+        finished_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if self.fence.is_none() {
+            return self
+                .store
+                .mark_dv_conversion_failed(file_id, error, finished_at_ms)
+                .await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .mark_dv_conversion_failed_fenced(
+                        file_id,
+                        error,
+                        finished_at_ms,
+                        &lease,
+                        &replacement,
+                    )
+                    .await
+            })
+        })
+        .await
+    }
+
     /// Enqueue one speculative generation under the singleton candidate-pass
     /// lease. Worker ownership is allocated later by the queue row itself.
     pub async fn enqueue_pretranscode_job(

@@ -684,7 +684,7 @@ test("Settings loads only the active tab manifest", () => {
   assert.ok(declaration, "Settings endpoint manifest remains explicit and testable");
   const manifest = new Function(`${declaration[0]}; return SETTINGS_MANIFEST;`)();
   assert.deepEqual(manifest, {
-    libraries: { required: ["settings", "libs", "status"], secondary: [] },
+    libraries: { required: ["settings", "libs", "status", "dvConversions"], secondary: [] },
     metadata: { required: ["settings", "trakt"], secondary: ["libs"] },
     playback: { required: ["settings"], secondary: [] },
     analysis: { required: ["settings", "analysis"], secondary: [] },
@@ -707,7 +707,7 @@ test("Settings loads only the active tab manifest", () => {
   assert.match(loadTab, /patchSettingsSecondary/);
   assert.match(loadTab, /settingsCurrent\(generation,tab\)/);
   assert.match(loadTab, /patchSettingsSecondaryError/);
-  for (const endpoint of ["/libraries", "/settings", "/analysis/summary", "/scan/status", "/system", "/users", "/trakt/status", "/cluster/nodes"]) {
+  for (const endpoint of ["/libraries", "/settings", "/analysis/summary", "/scan/status", "/dv-conversions", "/system", "/users", "/trakt/status", "/cluster/nodes"]) {
     assert.match(SHIPPED_UI, new RegExp(`api\\(${JSON.stringify(endpoint).replace("/", "\\/")}`),
       `Settings endpoint map includes ${endpoint}`);
   }
@@ -997,7 +997,7 @@ test("Settings executes exact required and secondary waves for every tab", async
   const manifestDeclaration=SHIPPED_UI.match(/const SETTINGS_MANIFEST=({[\s\S]*?\n});/);
   assert.ok(endpointDeclaration&&manifestDeclaration);
   const cases={
-    libraries:{required:["/settings","/libraries","/scan/status"],secondary:[]},
+    libraries:{required:["/settings","/libraries","/scan/status","/dv-conversions"],secondary:[]},
     metadata:{required:["/settings","/trakt/status"],secondary:["/libraries"]},
     playback:{required:["/settings"],secondary:[]},
     analysis:{required:["/settings","/analysis/summary"],secondary:[]},

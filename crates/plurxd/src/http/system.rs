@@ -1431,6 +1431,10 @@ pub struct SettingsDto {
     pub offline_max_rows_per_user: i64,
     /// Scan every library once, ~30s after the server starts.
     pub scan_on_startup: bool,
+    /// Permanent Profile 7 conversion keeps the original by default and
+    /// admits one sequential-I/O worker cluster-wide unless changed.
+    pub dv_disk_keep_original: bool,
+    pub dv_disk_convert_parallel: i64,
     /// Is the one-off genre backfill armed? It disarms itself when it reaches
     /// the end of the catalogue, so this reads `false` again afterwards.
     ///
@@ -1562,6 +1566,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         super::offline::DEFAULT_USER_ROWS,
     );
     let scan_on_startup = setting(keys::JOB_SCAN_ON_STARTUP).is_some_and(|v| v.trim() == "1");
+    let dv_disk_keep_original = !matches!(
+        setting(keys::LIBRARY_DV_DISK_KEEP_ORIGINAL).as_deref(),
+        Some("0" | "false" | "off" | "no")
+    );
+    let dv_disk_convert_parallel = setting(keys::LIBRARY_DV_DISK_CONVERT_PARALLEL)
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(1)
+        .clamp(1, 8);
     let genre_backfill = setting(keys::GENRE_BACKFILL).is_some_and(|v| v.trim() == "1");
     let cluster_media_pool_enabled =
         setting(keys::CLUSTER_MEDIA_POOL_ENABLED).as_deref() == Some("1");
@@ -1622,6 +1634,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         offline_max_gb_per_user,
         offline_max_rows_per_user,
         scan_on_startup,
+        dv_disk_keep_original,
+        dv_disk_convert_parallel,
         genre_backfill,
         genre_backfill_last: state.jobs.last_genre_backfill().await,
     })
@@ -1706,6 +1720,8 @@ pub struct UpdateSettings {
     pub offline_max_gb_per_user: Option<i64>,
     pub offline_max_rows_per_user: Option<i64>,
     pub scan_on_startup: Option<bool>,
+    pub dv_disk_keep_original: Option<bool>,
+    pub dv_disk_convert_parallel: Option<i64>,
     /// Arm or disarm the one-off genre backfill.
     pub genre_backfill: Option<bool>,
 }
@@ -1818,6 +1834,29 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::MONARR_WATCHED_SYNC, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dv_disk_keep_original {
+        state
+            .store
+            .put_setting(
+                keys::LIBRARY_DV_DISK_KEEP_ORIGINAL,
+                if on { "1" } else { "0" },
+            )
+            .await?;
+    }
+    if let Some(parallel) = req.dv_disk_convert_parallel {
+        if !(1..=8).contains(&parallel) {
+            return Err(ApiError::BadRequest(
+                "dv_disk_convert_parallel must be between 1 and 8".into(),
+            ));
+        }
+        state
+            .store
+            .put_setting(
+                keys::LIBRARY_DV_DISK_CONVERT_PARALLEL,
+                &parallel.to_string(),
+            )
             .await?;
     }
     if let Some(on) = req.hls_typeless_sliding {

@@ -374,6 +374,92 @@ impl FencedPublicationStore for SqliteStore {
         })
         .await
     }
+
+    async fn mark_dv_conversion_running_fenced(
+        &self,
+        file_id: i64,
+        bytes_before: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            Ok(conn.execute(
+                "UPDATE dv_conversions
+                    SET state = 'running', bytes_before = ?2, bytes_after = NULL,
+                        error = NULL, finished_at_ms = NULL
+                  WHERE file_id = ?1 AND state IN ('queued', 'running')",
+                params![file_id, bytes_before],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn mark_dv_conversion_verified_fenced(
+        &self,
+        file_id: i64,
+        el_type: Option<&str>,
+        bytes_after: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        if !matches!(el_type, None | Some("mel" | "fel")) {
+            return Err(StoreError::Task(
+                "Dolby Vision enhancement-layer type must be mel, fel, or unknown".to_owned(),
+            ));
+        }
+        let el_type = el_type.map(str::to_owned);
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            Ok(conn.execute(
+                "UPDATE dv_conversions
+                    SET state = 'verified', el_type = ?2, bytes_after = ?3, error = NULL
+                  WHERE file_id = ?1 AND state = 'running'",
+                params![file_id, el_type, bytes_after],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn mark_dv_conversion_committed_fenced(
+        &self,
+        file_id: i64,
+        original_path: Option<&str>,
+        bytes_after: i64,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let original_path = original_path.map(str::to_owned);
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            Ok(conn.execute(
+                "UPDATE dv_conversions
+                    SET state = 'committed', original_path = ?2, bytes_after = ?3,
+                        error = NULL, finished_at_ms = ?4
+                  WHERE file_id = ?1 AND state = 'verified'",
+                params![file_id, original_path, bytes_after, finished_at_ms],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn mark_dv_conversion_failed_fenced(
+        &self,
+        file_id: i64,
+        error: &str,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let error = error.chars().take(4096).collect::<String>();
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            Ok(conn.execute(
+                "UPDATE dv_conversions
+                    SET state = 'failed', error = ?2, finished_at_ms = ?3
+                  WHERE file_id = ?1 AND state != 'committed'",
+                params![file_id, error, finished_at_ms],
+            )? == 1)
+        })
+        .await
+    }
 }
 
 fn put_setting(conn: &Connection, key: &str, value: &str) -> Result<(), StoreError> {

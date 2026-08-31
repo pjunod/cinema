@@ -5421,6 +5421,63 @@ function bookByline(it){
   return (it.kind==='book'||it.kind==='audiobook')&&it.author
     ? `<div class="muted" style="margin-top:4px">By ${esc(it.author)}</div>` : '';
 }
+function dvFileActionMount(file){
+  if(!ME||!ME.is_admin||![7,8].includes(Number(file&&file.dv_profile))) return "";
+  const id=exactWireId(file);
+  return `<div class="dv-file-action px-admin th-admin" id="dv-file-${id}" aria-live="polite"><span class="muted">Checking on-disk conversion…</span></div>`;
+}
+function dvConversionStateHtml(file,snapshot){
+  const conversion=snapshot.conversion;
+  const capability=snapshot.capabilities||{};
+  const id=exactWireId(file);
+  if(!conversion){
+    if(!snapshot.eligible) return "";
+    const reason=capability.available?"":capability.reason||"dovi_tool or mkvmerge is unavailable";
+    return `<div class="row" style="margin-top:8px;gap:8px"><span class="muted">Profile 7 can be permanently converted to Profile 8.1.</span>
+      <button class="ghost sm" onclick='queueDvFile(${JSON.stringify(id)},this)'${reason?' disabled':''}>Convert on disk</button>
+      ${reason?`<span class="problem">Unavailable: ${esc(reason)}</span>`:""}</div>`;
+  }
+  const state=conversion.state;
+  const bytes=(conversion.bytes_before||conversion.bytes_after)
+    ? ` · ${fmtBytes(conversion.bytes_before||0)}${conversion.bytes_after?` → ${fmtBytes(conversion.bytes_after)}`:""}`:"";
+  if(state==="committed"){
+    const layer=conversion.el_type?` · source ${String(conversion.el_type).toUpperCase()}`:"";
+    const original=conversion.original_path?` · original retained at <code>${esc(conversion.original_path)}</code>`:" · original deleted by policy";
+    return `<div class="muted" style="margin-top:8px">✓ Converted to Profile 8.1${layer}${bytes}${original}</div>`;
+  }
+  if(state==="failed"){
+    const unavailable=!capability.available;
+    const reason=unavailable?capability.reason||"conversion tools unavailable":"";
+    return `<div style="margin-top:8px"><div class="problem">Conversion failed: ${esc(conversion.error||"unknown error")}</div>
+      <button class="ghost sm" onclick='queueDvFile(${JSON.stringify(id)},this)'${unavailable?' disabled':''}>Retry conversion</button>${reason?` <span class="muted">${esc(reason)}</span>`:""}</div>`;
+  }
+  const labels={queued:"Queued for on-disk conversion",running:"Converting Profile 7",verified:"Replacement verified; publishing"};
+  return `<div class="muted" style="margin-top:8px">${esc(labels[state]||state)}${bytes}</div>`;
+}
+async function hydrateDvFileAction(file){
+  const id=exactWireId(file), mount=document.getElementById(`dv-file-${id}`);
+  if(!mount) return;
+  try{
+    const snapshot=await api(`/files/${id}/dv-conversion`);
+    if(document.getElementById(`dv-file-${id}`)===mount) mount.innerHTML=dvConversionStateHtml(file,snapshot);
+  }catch(e){
+    if(document.getElementById(`dv-file-${id}`)===mount) mount.innerHTML=`<div class="problem">Conversion status unavailable: ${esc(e.message||"request failed")}</div>`;
+  }
+}
+function hydrateDvFileActions(files){
+  if(!ME||!ME.is_admin) return;
+  for(const file of files||[]) hydrateDvFileAction(file);
+}
+async function queueDvFile(id,btn){
+  btn.disabled=true;
+  try{
+    await api(`/files/${id}/dv-conversion`,{method:"POST"});
+    toast("Dolby Vision conversion queued");
+    const file={id_text:String(id),dv_profile:7};
+    await hydrateDvFileAction(file);
+  }catch(e){ toast(e.message||"Couldn't queue conversion"); }
+  finally{ btn.disabled=false; }
+}
 function chapterList(p){
   const rows=[];
   for(const f of p.files){
@@ -5435,6 +5492,7 @@ async function viewItem(id){
   layoutChrome("home",`<div class="empty">Loading…</div>`);
   const page=await loadItem(id);
   document.getElementById("main").innerHTML=layoutView("item",page);
+  hydrateDvFileActions(page.files);
   restoreScroll();
   // One-click play from an episode list lands here and starts immediately.
   if(AUTOPLAY===String(id)){
@@ -5536,7 +5594,7 @@ function classicItemBody(p){
       const header=(multi||miss)
         ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" onclick='${playCall(p,v,resume)}'>▶ Play</button>`:''}</div>`
         : '';
-      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}</div>`;
+      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}</div>`;
     }).join("");
   } else if(p.shape==="episodes"){
     // Season: episodes as a list.
@@ -10867,6 +10925,7 @@ let LOGS_RUN=null, CLUSTER_LOGS_RUN=null;
 let SETTINGS_DATA={}, SETTINGS_LOADED=new Set(), SETTINGS_LOADS=new Map();
 const SETTINGS_ENDPOINTS={
   libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
+  dvConversions:()=>api("/dv-conversions"),
   sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
   analysis:()=>api("/analysis/summary"),
   playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
@@ -10880,7 +10939,7 @@ const SETTINGS_ENDPOINTS={
   clusterOps:()=>api("/cluster/status").then(ops=>{ clusterOpsStamp(); return ops; }),
 };
 const SETTINGS_MANIFEST={
-  libraries:{required:["settings","libs","status"],secondary:[]},
+  libraries:{required:["settings","libs","status","dvConversions"],secondary:[]},
   metadata:{required:["settings","trakt"],secondary:["libs"]},
   playback:{required:["settings"],secondary:[]},
   analysis:{required:["settings","analysis"],secondary:[]},
@@ -11036,7 +11095,7 @@ function settingsPanel(tab,d){
   if(tab==="users")    return usersPanel(d.users);
   if(tab==="system")   return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")  return clusterPanel(d);
-  return librariesPanel(d.libs,d.status,d.settings);
+  return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
 }
 // Intervals in minutes. Nothing under 15 — the server refuses it, because a
 // real library scanned every minute is a NAS denial-of-service on a timer.
@@ -11171,19 +11230,91 @@ async function savePrecache(btn){
   }catch(e){ toast(e.message||"Couldn't save"); }
   finally{ btn.disabled=false; }
 }
-function libRow(l,status){
+function dvProgressText(progress){
+  if(!progress) return "No eligible files found";
+  const active=Number(progress.queued||0)+Number(progress.running||0)+Number(progress.verified||0);
+  const parts=[];
+  if(active) parts.push(`${active} active`);
+  if(progress.committed) parts.push(`${progress.committed} converted`);
+  if(progress.failed) parts.push(`${progress.failed} failed`);
+  if(!parts.length) parts.push(`${progress.eligible||0} eligible`);
+  return parts.join(" · ");
+}
+function dvModeSelect(l,dv){
+  const mode=(dv&&dv.library_modes&&dv.library_modes[String(l.id)])||"off";
+  const unavailable=!(dv&&dv.capabilities&&dv.capabilities.available);
+  const reason=unavailable?(dv&&dv.capabilities&&dv.capabilities.reason)||"dovi_tool or mkvmerge is unavailable":"";
+  return `<div class="sched" title="${esc(reason)}"><span class="schedpair">Dolby Vision
+    <select id="dv-mode-${l.id}" style="max-width:105px;font-size:12px;padding:3px 6px"${unavailable?' disabled':''}>
+      ${[["off","Off"],["manual","Manual"],["auto","Automatic"]].map(([v,label])=>`<option value="${v}"${mode===v?' selected':''}>${label}</option>`).join("")}
+    </select></span>
+    <span class="schedpair"><button class="ghost sm" onclick="saveDvMode(${l.id},this)"${unavailable?' disabled':''}>Save</button>
+    <button class="ghost sm" onclick="convertDvLibrary(${l.id},this)"${unavailable||mode==="off"?' disabled':''}>Convert now</button></span>
+    <span class="muted">${esc(unavailable?`Unavailable: ${reason}`:dvProgressText(dv.progress_by_library&&dv.progress_by_library[String(l.id)]))}</span></div>`;
+}
+async function refreshDvConversions(){
+  const snapshot=await api("/dv-conversions");
+  SETTINGS_DATA.dvConversions=snapshot; SETTINGS_LOADED.add("dvConversions");
+  return snapshot;
+}
+async function saveDvMode(id,btn){
+  const mode=document.getElementById(`dv-mode-${id}`).value;
+  btn.disabled=true;
+  try{
+    await api(`/libraries/${id}/dv-conversion`,{method:"PUT",body:{mode}});
+    await refreshDvConversions();
+    toast(mode==="off"?"On-disk conversion disabled":mode==="auto"?"Automatic conversion enabled":"Manual conversion enabled");
+    renderSettings();
+  }catch(e){ toast(e.message||"Couldn't save Dolby Vision mode"); }
+  finally{ btn.disabled=false; }
+}
+async function convertDvLibrary(id,btn){
+  btn.disabled=true;
+  try{
+    const result=await api(`/libraries/${id}/dv-conversions`,{method:"POST",body:{retry_failed:true}});
+    await refreshDvConversions();
+    toast(`${result.queued||0} Dolby Vision file${Number(result.queued)===1?'':'s'} queued`);
+    renderSettings();
+  }catch(e){ toast(e.message||"Couldn't queue Dolby Vision conversion"); }
+  finally{ btn.disabled=false; }
+}
+async function saveDvDiskSettings(btn){
+  btn.disabled=true;
+  try{
+    const saved=await api("/settings",{method:"PUT",body:{
+      dv_disk_keep_original:document.getElementById("dv-keep-original").checked,
+      dv_disk_convert_parallel:Number(document.getElementById("dv-parallel").value)}});
+    cacheSettings(saved);
+    await refreshDvConversions();
+    toast("Dolby Vision conversion settings saved");
+    renderSettings();
+  }catch(e){ toast(e.message||"Couldn't save Dolby Vision settings"); }
+  finally{ btn.disabled=false; }
+}
+function dvDiskPanel(settings,dv){
+  const capabilities=dv&&dv.capabilities;
+  const reason=capabilities&&!capabilities.available?capabilities.reason:"";
+  return `<div class="card"><h2 class="section" style="margin-top:0">Dolby Vision on disk</h2>
+    ${reason?`<div class="setwarn">⚠ <b>Conversion unavailable.</b> ${esc(reason)}</div>`:""}
+    <div class="row setrow" style="gap:14px 18px">
+      <label class="schedpair"><input type="checkbox" id="dv-keep-original"${settings&&settings.dv_disk_keep_original?' checked':''}> Keep the Profile 7 original as <code>.p7.orig</code></label>
+      <span class="schedpair">Parallel files <select id="dv-parallel">${[1,2,3,4,5,6,7,8].map(n=>`<option value="${n}"${Number(settings&&settings.dv_disk_convert_parallel||1)===n?' selected':''}>${n}</option>`).join("")}</select></span>
+      <button class="ghost sm" onclick="saveDvDiskSettings(this)">Save</button></div>
+    <div class="hint">Profile 7 files are copied to a verified Profile 8.1 replacement before their public path changes. Keeping the original is safest and is on by default. Each file is leased cluster-wide, while parallelism limits work on this node.</div></div>`;
+}
+function libRow(l,status,dv){
   const paths=(l.paths||[]).map(p=>`<span class="pathchip">${esc(p)}</span>`).join(" ")||'<span class="muted">—</span>';
   return `<tr id="librow-${l.id}"><td class="libname"><b>${esc(l.name)}</b></td><td data-label="Kind">${esc(l.anime?'anime':l.kind)}</td>
       <td data-label="Paths"><div class="paths">${paths}</div></td>
-      <td class="muted" data-label="Status"><div id="st-${l.id}">${statusText(status[l.id],l.last_scan_at)}</div>${schedRow(l)}</td>
+      <td class="muted" data-label="Status"><div id="st-${l.id}">${statusText(status[l.id],l.last_scan_at)}</div>${schedRow(l)}${dvModeSelect(l,dv)}</td>
       <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end;gap:5px">
         <button class="ghost sm" onclick="scanLib(${l.id})">Scan</button>
         <button class="ghost sm" onclick="refreshLib(${l.id})" title="Re-fetch all metadata & artwork (incl. season posters)">Refresh art</button>
         <button class="ghost sm" onclick="editLib(${l.id})">Edit</button>
         <button class="ghost sm" onclick="delLib(${l.id})">Delete</button></div></td></tr>`;
 }
-function librariesPanel(libs,status,settings){
-  const rows=libs.map(l=>libRow(l,status)).join("")||`<tr><td colspan="5" class="muted">No libraries yet.</td></tr>`;
+function librariesPanel(libs,status,settings,dv){
+  const rows=libs.map(l=>libRow(l,status,dv)).join("")||`<tr><td colspan="5" class="muted">No libraries yet.</td></tr>`;
   const bulk=libs.length?`<div class="row" style="margin:0 0 14px;gap:8px;align-items:center">
         <button class="ghost sm" onclick="scanAll()" title="Scan every library for new & changed files">Scan all</button>
         <button class="ghost sm" onclick="refreshAll()" title="Re-fetch metadata & artwork for every library">Refresh all art</button>
@@ -11221,6 +11352,7 @@ function librariesPanel(libs,status,settings){
       <div class="err" id="lerr"></div>
       <button style="margin-top:12px" onclick="addLib()">Add & scan</button>
     </div>
+    ${dvDiskPanel(settings,dv)}
     ${maintenancePanel(settings)?`<div class="card">${maintenancePanel(settings)}</div>`:""}`;
 }
 // Set when a provider key is saved while libraries already exist.
@@ -13536,7 +13668,7 @@ function catalogItemBody(p){
       const header=(multi||miss)
         ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" onclick='play(${v.id},${esc(JSON.stringify(it.title))},${resume},${v.duration_ms||0},${esc(JSON.stringify(pmeta))})'>▶ Play</button>`:''}</div>`
         : '';
-      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}</div>`;
+      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}</div>`;
     }).join("");
   } else if(p.shape==="episodes"){
     const a=watchControls(it);
@@ -14016,7 +14148,7 @@ function theaterItemBody(p){
       const header=(p.multi||miss)
         ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&p.multi)?`<button class="ghost sm" onclick='play(${v.id},${esc(JSON.stringify(it.title))},${resume},${v.duration_ms||0},${esc(JSON.stringify(pmeta))})'>▶ Play</button>`:''}</div>`
         : '';
-      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}</div>`;
+      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}</div>`;
     }).join("");
   } else if(p.shape==="episodes"){
     const a=watchControls(it);

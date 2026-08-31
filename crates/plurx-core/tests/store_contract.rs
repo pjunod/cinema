@@ -55,16 +55,16 @@ use plurx_core::segplan::{
 use plurx_core::store::{
     cluster_fragment_index_key, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery,
     ArtworkRepairFence, ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation,
-    DvConversionState, DvConversionStore, LibraryStore, MediaStore, NewAnalysisRequest,
-    NewClusterFragmentIndexJob, OutboxEntry, PublicationStore, QueueDvConversionOutcome,
-    ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store,
+    DvConversionState, LibraryStore, MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob,
+    OutboxEntry, PublicationStore, QueueDvConversionOutcome, ReconcileOutcome,
+    RootFingerprintStatus, SqliteStore, Store,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
-    ApiKeyStore, ClusterFragmentIndexStore, CoordinationStore, FencedPublicationStore,
-    HiqliteAuthStore, MediaSessionStore, OfflinePackageStore, PlaybackTelemetryStore,
-    PretranscodeJobStore, ReadingStore, SettingsStore, TraktStore, TranscodeCacheStore, UserStore,
-    WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    ApiKeyStore, ClusterFragmentIndexStore, CoordinationStore, DvConversionStore,
+    FencedPublicationStore, HiqliteAuthStore, MediaSessionStore, OfflinePackageStore,
+    PlaybackTelemetryStore, PretranscodeJobStore, ReadingStore, SettingsStore, TraktStore,
+    TranscodeCacheStore, UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::store::{CatalogueReader, MetricsStore};
@@ -450,6 +450,10 @@ const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "touch_cache_claim_fenced",
     "complete_cache_entry_fenced",
     "forget_cache_entry_fenced",
+    "mark_dv_conversion_running_fenced",
+    "mark_dv_conversion_verified_fenced",
+    "mark_dv_conversion_committed_fenced",
+    "mark_dv_conversion_failed_fenced",
 ];
 const METRICS_METHODS: &[&str] = &["prometheus_store_snapshot"];
 
@@ -10722,7 +10726,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 253, "review the Store method count");
+    assert_eq!(declared.len(), 257, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

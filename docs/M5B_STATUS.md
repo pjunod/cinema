@@ -1,7 +1,7 @@
 # M5b status — permanent Dolby Vision Profile 7 conversion
 
 **Status:** implementation in progress · **Branch:**
-`effort/playback-caps-v2-m5b` · **Updated:** 2026-08-30
+`effort/playback-caps-v2-m5b` · **Updated:** 2026-08-31
 
 Companion to [PLAYBACK-CAPS-V2-PLAN.md](PLAYBACK-CAPS-V2-PLAN.md), which owns
 the contract, and [OPERATIONS.md](OPERATIONS.md), which will own the finished
@@ -20,10 +20,10 @@ a forecast.
 | Isolated workspace | Complete | Fresh clone at `/private/tmp/plurx-m5b.lQcDxU/repo`; the user's existing checkouts are untouched |
 | Integration line | Complete | One `effort/playback-caps-v2-m5b` branch from current `main`; development commits use `PLURX_EFFORT_COMMIT=1` |
 | Store ledger | Complete | SQLite v39 and replicated v20 implement the same terminal ledger; queue/transition contracts, historical fixtures, and SQLite-to-hiqlite import coverage pass |
-| Conversion worker | Not started | Add the six-stage temp-file pipeline, exact verification, and source fence without changing M5a files |
-| Operator surface | Not started | Add library/file actions, progress, availability reasons, settings, and admin UI |
+| Conversion worker | Complete | Six-stage sibling-temp pipeline, exact mux verification, scanner-identity plus open-handle source fence, leased parallel queue, fenced state transitions, and crash recovery compile and pass focused unit tests |
+| Operator surface | Complete | Admin-only library modes, progress, settings, file action/ledger, explicit tool refusal, and retry controls pass the embedded-web static contract |
 | Image and probes | Not started | Pin `dovi_tool` and MKVToolNix, then report exact boot capability |
-| Focused evidence | Not started | Run conversion safety, both-store migration, API, UI, and operations contracts |
+| Focused evidence | In progress | Conversion verification unit tests, SQLite Store contract, both backend compilation, and the complete embedded-web static contract pass; replicated Store, UI structure, API, and operations evidence remain |
 | Adversarial review | Not started | Independent correctness, destructive-media, cluster, and UI/API review passes after the PR opens |
 | Complete qualification | Not started | Run once after review fixes on the frozen effort-to-main candidate; every promotion job and the exact-tree receipt must pass |
 | Merge | Not started | Merge only while the qualified head and `main` base are unchanged |
@@ -54,13 +54,21 @@ a forecast.
 3. **Treat physical MEL/FEL and truncated-disc acceptance as operator
    evidence.** Automated tests will use controlled tool/probe fixtures for
    every destructive boundary; the PR will keep the real-media checks explicit
-   because no redistributable 60–80 GB source belongs in the repository.
+    because no redistributable 60–80 GB source belongs in the repository.
+4. **Require an explicit enhancement layer and RPU at admission.** Numeric
+   Profile 7 and HDR10 compatibility remain the primary eligibility contract,
+   but a destructive rewrite also refuses an incomplete or not-yet-backfilled
+   probe row. A later successful scan makes it eligible without an exception.
+5. **Do not continuously poll conversion state from Settings.** The Libraries
+   tab loads one admin snapshot, refreshes it after each mutation, and the
+   ordinary page refresh obtains a new one. This keeps the established bounded
+   settings read contract while still exposing per-library progress.
 
 ## Final evidence — fill only from the frozen tree
 
 | Evidence | Result |
 |---|---|
-| Focused local regressions | Store ledger: targeted SQLite migration and queue tests; backend-neutral store contract; import unit suite; all-target hiqlite-store compile |
+| Focused local regressions | Store ledger: targeted SQLite migration and queue tests; backend-neutral Store contract; import unit suite; all-target hiqlite-store compile. Worker/operator surface: five conversion verification/capability unit tests; `cargo check -p plurxd --all-targets`; `make web-check` |
 | Adversarial review findings | Pending |
 | Main promotion gate | Pending |
 | Qualification receipt | Pending |

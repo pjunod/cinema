@@ -490,6 +490,18 @@ pub mod keys {
     /// whose stored probe has no configuration record — would otherwise sit at
     /// the front of every window forever, hiding every fixable row behind it.
     pub const JOB_DV_BACKFILL_CURSOR: &str = "jobs.dv_facts_backfill_cursor";
+    /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
+    /// object from decimal library id to `off`, `manual`, or `auto`. Missing
+    /// libraries are always off: an upgrade must never rewrite media by
+    /// surprise.
+    pub const LIBRARY_DV_DISK_CONVERT: &str = "library.dv_disk_convert";
+    /// Whether a verified source is retained as `<source>.p7.orig`. Missing is
+    /// on, because the safe default preserves the operator's original bytes.
+    pub const LIBRARY_DV_DISK_KEEP_ORIGINAL: &str = "library.dv_disk_keep_original";
+    /// Cluster-wide conversion slots. Missing or invalid is one.
+    pub const LIBRARY_DV_DISK_CONVERT_PARALLEL: &str = "library.dv_disk_convert_parallel";
+    /// Highest file id examined by this node's bounded queue walk.
+    pub const JOB_DV_DISK_CONVERT_CURSOR: &str = "jobs.dv_disk_convert_cursor";
 }
 
 #[async_trait]
@@ -2141,6 +2153,39 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<(), StoreError>;
+    async fn mark_dv_conversion_running_fenced(
+        &self,
+        file_id: i64,
+        bytes_before: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    async fn mark_dv_conversion_verified_fenced(
+        &self,
+        file_id: i64,
+        el_type: Option<&str>,
+        bytes_after: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn mark_dv_conversion_committed_fenced(
+        &self,
+        file_id: i64,
+        original_path: Option<&str>,
+        bytes_after: i64,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    async fn mark_dv_conversion_failed_fenced(
+        &self,
+        file_id: i64,
+        error: &str,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
 }
 
 /// Durable idempotency and routing for cluster-owned live HLS sessions.

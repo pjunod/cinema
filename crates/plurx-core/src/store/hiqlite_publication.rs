@@ -1310,6 +1310,158 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let _forgotten = results.first().copied().unwrap_or_default();
         Ok(())
     }
+
+    async fn mark_dv_conversion_running_fenced(
+        &self,
+        file_id: i64,
+        bytes_before: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    "UPDATE dv_conversions
+                        SET state = 'running', bytes_before = $2, bytes_after = NULL,
+                            error = NULL, finished_at_ms = NULL
+                      WHERE file_id = $1 AND state IN ('queued', 'running')
+                        AND EXISTS (SELECT 1 FROM job_leases
+                          WHERE resource = $3 AND owner_node_id = $4
+                            AND fence = $5 AND revision = $6 AND expires_at_ms = $7)"
+                        .to_owned(),
+                    params!(
+                        file_id,
+                        bytes_before,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
+            )
+            .await?;
+        Ok(results.first().copied() == Some(1))
+    }
+
+    async fn mark_dv_conversion_verified_fenced(
+        &self,
+        file_id: i64,
+        el_type: Option<&str>,
+        bytes_after: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        if !matches!(el_type, None | Some("mel" | "fel")) {
+            return Err(StoreError::Task(
+                "Dolby Vision enhancement-layer type must be mel, fel, or unknown".to_owned(),
+            ));
+        }
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    "UPDATE dv_conversions
+                        SET state = 'verified', el_type = $2, bytes_after = $3, error = NULL
+                      WHERE file_id = $1 AND state = 'running'
+                        AND EXISTS (SELECT 1 FROM job_leases
+                          WHERE resource = $4 AND owner_node_id = $5
+                            AND fence = $6 AND revision = $7 AND expires_at_ms = $8)"
+                        .to_owned(),
+                    params!(
+                        file_id,
+                        el_type,
+                        bytes_after,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
+            )
+            .await?;
+        Ok(results.first().copied() == Some(1))
+    }
+
+    async fn mark_dv_conversion_committed_fenced(
+        &self,
+        file_id: i64,
+        original_path: Option<&str>,
+        bytes_after: i64,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    "UPDATE dv_conversions
+                        SET state = 'committed', original_path = $2, bytes_after = $3,
+                            error = NULL, finished_at_ms = $4
+                      WHERE file_id = $1 AND state = 'verified'
+                        AND EXISTS (SELECT 1 FROM job_leases
+                          WHERE resource = $5 AND owner_node_id = $6
+                            AND fence = $7 AND revision = $8 AND expires_at_ms = $9)"
+                        .to_owned(),
+                    params!(
+                        file_id,
+                        original_path,
+                        bytes_after,
+                        finished_at_ms,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
+            )
+            .await?;
+        Ok(results.first().copied() == Some(1))
+    }
+
+    async fn mark_dv_conversion_failed_fenced(
+        &self,
+        file_id: i64,
+        error: &str,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let error = error.chars().take(4096).collect::<String>();
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    "UPDATE dv_conversions
+                        SET state = 'failed', error = $2, finished_at_ms = $3
+                      WHERE file_id = $1 AND state != 'committed'
+                        AND EXISTS (SELECT 1 FROM job_leases
+                          WHERE resource = $4 AND owner_node_id = $5
+                            AND fence = $6 AND revision = $7 AND expires_at_ms = $8)"
+                        .to_owned(),
+                    params!(
+                        file_id,
+                        error,
+                        finished_at_ms,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
+            )
+            .await?;
+        Ok(results.first().copied() == Some(1))
+    }
 }
 
 fn lease_i64(label: &str, value: u64) -> Result<i64, StoreError> {

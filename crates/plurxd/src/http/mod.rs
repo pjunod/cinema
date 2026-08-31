@@ -13,6 +13,7 @@ pub(crate) mod cluster_operations;
 pub mod comingsoon;
 pub use comingsoon::ComingSoonCache;
 mod dto;
+mod dv_disk;
 mod error;
 mod extract;
 mod hls;
@@ -202,6 +203,11 @@ pub fn router(state: AppState) -> Router {
         .route("/libraries/{id}/schedule", put(libraries::set_schedule))
         .route("/libraries/{id}/scan", post(libraries::scan))
         .route("/libraries/{id}/refresh", post(libraries::refresh))
+        .route("/libraries/{id}/dv-conversion", put(dv_disk::set_mode))
+        .route(
+            "/libraries/{id}/dv-conversions",
+            post(dv_disk::queue_library),
+        )
         .route(
             "/libraries/{id}/root-identity/reset",
             post(libraries::reset_root_identity),
@@ -212,6 +218,11 @@ pub fn router(state: AppState) -> Router {
         .route("/items/{id}/reanalyze", post(items::reanalyze))
         .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
         .route("/files/{id}/analysis", post(analysis::request))
+        .route(
+            "/files/{id}/dv-conversion",
+            get(dv_disk::file_status).post(dv_disk::queue_file),
+        )
+        .route("/dv-conversions", get(dv_disk::status))
         .route("/analysis/summary", get(analysis::summary))
         .route("/analysis/jobs", get(analysis::jobs))
         .route("/hubs", get(browse::hubs))
