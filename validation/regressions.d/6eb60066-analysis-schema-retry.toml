@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6eb60066"]
+points = ["persistence.upgrades", "cluster.auth"]
+checks = ["rust-gate", "database-upgrades", "cluster-auth"]
+reason = "The retained SQLite stale-v41-marker regression proves startup settles a committed analysis schema without replaying non-idempotent DDL, while the replicated v10-v12 and populated-v14 contracts rebuild exact historical shapes before proving stepwise three-voter migration and import parity."
