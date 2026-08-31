@@ -313,10 +313,10 @@ impl DvConversionStore for HiqliteAuthStore {
             .client()
             .execute(
                 "UPDATE dv_conversions
-                    SET state = 'running', bytes_before = $2, bytes_after = NULL,
+                    SET state = 'running', bytes_before = $1, bytes_after = NULL,
                         error = NULL, finished_at_ms = NULL
-                  WHERE file_id = $1 AND state IN ('queued', 'running')",
-                params!(file_id, bytes_before),
+                  WHERE file_id = $2 AND state IN ('queued', 'running')",
+                params!(bytes_before, file_id),
             )
             .await?
             == 1)
@@ -337,9 +337,9 @@ impl DvConversionStore for HiqliteAuthStore {
             .client()
             .execute(
                 "UPDATE dv_conversions
-                    SET state = 'verified', el_type = $2, bytes_after = $3, error = NULL
-                  WHERE file_id = $1 AND state = 'running'",
-                params!(file_id, el_type, bytes_after),
+                    SET state = 'verified', el_type = $1, bytes_after = $2, error = NULL
+                  WHERE file_id = $3 AND state = 'running'",
+                params!(el_type, bytes_after, file_id),
             )
             .await?
             == 1)
@@ -356,10 +356,10 @@ impl DvConversionStore for HiqliteAuthStore {
             .client()
             .execute(
                 "UPDATE dv_conversions
-                    SET state = 'committed', original_path = $2, bytes_after = $3,
-                        error = NULL, finished_at_ms = $4
-                  WHERE file_id = $1 AND state = 'verified'",
-                params!(file_id, original_path, bytes_after, finished_at_ms),
+                    SET state = 'committed', original_path = $1, bytes_after = $2,
+                        error = NULL, finished_at_ms = $3
+                  WHERE file_id = $4 AND state = 'verified'",
+                params!(original_path, bytes_after, finished_at_ms, file_id),
             )
             .await?
             == 1)
@@ -376,9 +376,9 @@ impl DvConversionStore for HiqliteAuthStore {
             .client()
             .execute(
                 "UPDATE dv_conversions
-                    SET state = 'failed', error = $2, finished_at_ms = $3
-                  WHERE file_id = $1 AND state != 'committed'",
-                params!(file_id, error, finished_at_ms),
+                    SET state = 'failed', error = $1, finished_at_ms = $2
+                  WHERE file_id = $3 AND state != 'committed'",
+                params!(error, finished_at_ms, file_id),
             )
             .await?
             == 1)

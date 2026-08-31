@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::error::StoreError;
 
-pub(crate) const DV_CONVERSIONS_SCHEMA: &str = "CREATE TABLE dv_conversions (
+pub(crate) const DV_CONVERSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS dv_conversions (
     file_id        INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
     state          TEXT NOT NULL,
     el_type        TEXT,
@@ -22,7 +22,8 @@ pub(crate) const DV_CONVERSIONS_SCHEMA: &str = "CREATE TABLE dv_conversions (
     finished_at_ms INTEGER
 ) STRICT";
 
-pub(crate) const DV_CONVERSIONS_QUEUE_INDEX: &str = "CREATE INDEX dv_conversions_queue
+pub(crate) const DV_CONVERSIONS_QUEUE_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS dv_conversions_queue
         ON dv_conversions(state, queued_at_ms, file_id)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

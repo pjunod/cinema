@@ -6577,34 +6577,6 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
             // current schema, so leaving the table behind would make the v20
             // migration create a table on top of a fixture that was never old.
             ("DROP TABLE dv_conversions", hiqlite::params!()),
-            // The conversion ledger is v20's. These fixtures bootstrap the
-            // current schema, so leaving the table behind would make the v20
-            // migration create a table on top of a fixture that was never old.
-            ("DROP TABLE dv_conversions", hiqlite::params!()),
-            // The conversion ledger is v20's. These fixtures bootstrap the
-            // current schema, so leaving the table behind would make the v20
-            // migration create a table on top of a fixture that was never old.
-            ("DROP TABLE dv_conversions", hiqlite::params!()),
-            // The conversion ledger is v20's. These fixtures bootstrap the
-            // current schema, so leaving the table behind would make the v20
-            // migration create a table on top of a fixture that was never old.
-            ("DROP TABLE dv_conversions", hiqlite::params!()),
-            // The conversion ledger is v20's. These fixtures bootstrap the
-            // current schema, so leaving the table behind would make the v20
-            // migration create a table on top of a fixture that was never old.
-            ("DROP TABLE dv_conversions", hiqlite::params!()),
-            // The conversion ledger is v20's. These fixtures bootstrap the
-            // current schema, so leaving the table behind would make the v20
-            // migration create a table on top of a fixture that was never old.
-            ("DROP TABLE dv_conversions", hiqlite::params!()),
-            // The conversion ledger is v20's. These fixtures bootstrap the
-            // current schema, so leaving the table behind would make the v20
-            // migration create a table on top of a fixture that was never old.
-            ("DROP TABLE dv_conversions", hiqlite::params!()),
-            // The conversion ledger is v20's. These fixtures bootstrap the
-            // current schema, so leaving the table behind would make the v20
-            // migration create a table on top of a fixture that was never old.
-            ("DROP TABLE dv_conversions", hiqlite::params!()),
             // The Dolby Vision columns are v19's, so a fixture claiming an
             // earlier version has to give them back. Every fixture here is
             // built by bootstrapping the CURRENT schema and undoing what each
@@ -6881,6 +6853,7 @@ async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
                 hiqlite::params!(),
@@ -7063,6 +7036,7 @@ async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
                 hiqlite::params!(),
@@ -7231,6 +7205,7 @@ async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
                 hiqlite::params!(),
@@ -7403,6 +7378,7 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
                 hiqlite::params!(),
@@ -7611,6 +7587,7 @@ async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
                 hiqlite::params!(),
@@ -7792,6 +7769,7 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
                 hiqlite::params!(),
@@ -7971,6 +7949,7 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
                 hiqlite::params!(),
@@ -8876,10 +8855,10 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                  VALUES (30, 10, '/fixture/shows/season-1.mkv', 4096, 115, 3600000,
                          'matroska', 'h264', '[]', '[]', 116, 25);
              INSERT INTO dv_conversions
-                 (file_id, state, source_size, source_mtime, el_type, error,
-                  created_at, started_at, updated_at)
-                 VALUES (30, 'failed', 4096, 115, NULL, 'fixture interruption',
-                         116, 117, 118);
+                 (file_id, state, el_type, original_path, bytes_before,
+                  bytes_after, error, queued_at_ms, finished_at_ms)
+                 VALUES (30, 'failed', NULL, NULL, 4096, NULL,
+                         'fixture interruption', 116, 118);
              INSERT INTO watch_state
                  (user_id, item_id, position_ms, duration_ms, watched, updated_at)
                  VALUES (7, 10, 120000, 3600000, 0, 117);
@@ -9292,7 +9271,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 30);
+    assert_eq!(report.tables.len(), 31);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -9301,16 +9280,17 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             .find(|digest| digest.table == "dv_conversions")
             .expect("Dolby Vision conversion digest")
             .row_count,
-        1,
-        "the permanent-media ledger must survive SQLite-to-hiqlite activation"
+        0,
+        "a v14 source predates the permanent-media ledger"
     );
-    let conversion = store
-        .dv_conversion(30)
-        .await
-        .expect("read imported Dolby Vision conversion")
-        .expect("imported Dolby Vision conversion");
-    assert_eq!(conversion.state, DvConversionState::Failed);
-    assert_eq!(conversion.error.as_deref(), Some("fixture interruption"));
+    assert!(
+        store
+            .dv_conversion(30)
+            .await
+            .expect("read empty Dolby Vision conversion ledger")
+            .is_none(),
+        "startup migration must not invent conversion history for a v14 source"
+    );
     assert_eq!(
         report
             .tables
@@ -9456,6 +9436,13 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
             .row_count,
         1
     );
+    let conversion = store
+        .dv_conversion(30)
+        .await
+        .expect("read imported Dolby Vision conversion")
+        .expect("imported Dolby Vision conversion");
+    assert_eq!(conversion.state, DvConversionState::Failed);
+    assert_eq!(conversion.error.as_deref(), Some("fixture interruption"));
     let reading = store
         .reading_state(7, 10, 30)
         .await
