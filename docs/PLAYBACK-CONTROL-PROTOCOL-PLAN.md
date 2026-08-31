@@ -950,7 +950,7 @@ symbols are the acceptance handle; line numbers will move.
 | `replacing_child` | Hides intentional non-zero exits | Delete; actor state names `Replacing` |
 | `retired`/failure atomics | Fence detached tasks after removal | Replace with actor lifecycle enum and generation fencing |
 | `last_request` request-kind clock | Infers viewer life | Replace with lease renewals and explicit demand |
-| client stall reopen budgets/queues | Several detectors recreate sessions | Collapse into one client deadline and server action transaction |
+| client stall reopen owners | Several call sites recreate sessions | Collapse into one client deadline. The budgets and queues themselves are bounds, not owners — see §7.4 and server action transaction |
 | ahead-window flow-control polling | Infers buffer from fetched frontier | Use reported runway, hard caps, and actor target |
 
 No production module may contain a detached `sleep -> inspect -> recover`
@@ -965,57 +965,73 @@ before each client milestone; any newly found automatic recovery owner is
 added here before code changes.
 
 **Re-verified on `main` at `bc504681`, 2026-08-31.** Every symbol below still
-exists; none has been deleted. That pass corrected five rows and added four
-Apple owners the ledger had never named — the recon is in
+exists; none has been deleted. That pass changed ten classifications and added
+five owners the ledger had never named — the recon is in
 [M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md)
-§4. The correction matters more than the count: **a row that names a bound or
-a serializer as an automatic owner sends a milestone to delete the wrong
-thing**, and a row that omits a real owner leaves a recovery nobody asked the
-server about.
+§4. The corrections matter more than the count: **a row that names a bound, a
+detector or a serializer as an automatic owner sends a milestone to delete the
+wrong thing**, and a row that omits a real owner leaves a recovery nobody asked
+the server about.
 
-The `automatic?` column is the one that decides work. Automatic means the
-symbol mutates delivery — reopens, seeks, nudges the clock, changes the
-recipe — without the viewer asking. A symbol that only prompts, only counts,
-or only serializes is not an owner, however recovery-shaped its name.
+#### The classification rule
 
-| Apple source symbol | automatic? | Present mutation | Final disposition |
+The `automatic?` column decides work, so it needs one rule applied the same way
+everywhere:
+
+> **A symbol is automatic when it is the one that mutates delivery** —
+> reopens, seeks, changes the recipe, reattaches to another node. A symbol
+> that computes a verdict and returns it, counts attempts, or serializes
+> requests is *evidence* or a *bound*, and its caller is the owner.
+
+Detectors are therefore uniformly **no**, and the call site that acts on the
+detector's verdict is the row that carries the work. This is a change from the
+previous ledger, which classified three structurally identical Apple detectors
+three different ways. The practical consequence: **name the owner, ask the
+server there, and leave the detector alone** — a detector usually holds
+evidence the server cannot derive.
+
+| Apple symbol | automatic? | Present mutation | Final disposition |
 |---|---|---|---|
-| `startStatusPolling` / `statusTask` | **yes** (corrected) | `:3041` calls `observeDeliveryStarvation`, which ends in `retrySameDeliveryAfterStall` — it does own a recovery | Delete only that call and its detector; the rest feeds the debug panel and survives to M9 |
-| `DeliveryStarvationDetector` | yes | Confirms starvation and enters same-delivery reopen | Retain as evidence classification inside the controller; submit observation |
-| `PlaybackRecoveryMonitor` | yes | Nudges Play, then reopens on stagnant clock | Becomes the one `PlaybackProgressDeadline`. **The `.nudge` arm stays**: a `play()` on already-wanted playback mutates no delivery, and the server can answer nothing it asks |
-| `PlaybackStallDetector` | no (corrected) | Pure policy value; unit-tested | Retain until the arbiter demonstrably replaces it, then delete with its tests in one PR |
-| `BlackFrameWatchdog` | yes | Advancing audio with zero video size walks the compatibility ladder — the most invasive mutation on the platform | Keep the detector: it is the only Profile-5 evidence the server cannot derive. Route its verdict through the action ask |
-| `SameDeliveryStallRecoveryState` | yes | Allows one same-delivery reopen | Delete after action cutover; the server action transaction is the attempt state |
-| `StallReopenBudget` / `RecoveryReopenBudget` | no (corrected) | Bounds only; neither touches the player | Delete after action cutover, with their tests, in one PR |
-| `PlayerReopenQueue` | no (corrected) | Last-writer-wins serializer shared by viewer seeks and stall reopens, distinguished only by `PlayerOpenIntent` | **Delete nothing.** Its automatic half disappears when its callers stop calling `reopen` |
-| early-end handler (`observeEnd`, `endAction`) | yes | Reopens up to `RecoveryReopenBudget`, then stops | Send typed ended observation; arbiter chooses one action |
-| item-failure handler (`handleItemFailure`) | yes | Three-rung ladder: next node, established HDR, compatibility fallback | Send typed failed observation; a `terminal` verdict short-circuits the ladder |
-| `retryEstablishedHDRDelivery` | yes (added) | Reopens once, then stops with a viewer-visible verdict | Invoked only by a prepared server action |
-| `retryWithNextCompatibilityFallback` | yes (added) | Forces `forceCompatibleHDRBase` / `forceCompatibilityTranscode`, then reopens — changes the recipe without asking | Invoked only by a prepared server action |
-| `retryMediaOnNextNode` | yes (added) | Reattaches through another ingress, bumps `openGeneration`, calls `play()` | Becomes the client half of M8's node-replacement action |
-| `itemReadinessDeadlineSeconds` (15 s) | yes (added) | A real progress watchdog feeding the same ladder | Folds into the one `PlaybackProgressDeadline` |
+| `statusTask` / `startStatusPolling` (`:3016`) | **yes** (changed) | `:3039` calls `observeDeliveryStarvation`, which spawns `retrySameDeliveryAfterStall` — it does own a recovery | Delete `:3039` and its detector. The rest feeds the debug panel and survives to M9 |
+| `DeliveryStarvationDetector` (`:741`) | **no** (changed) | Server-truth wedge evidence: returns a verdict, touches no player | Retain as evidence; submit as observation |
+| `PlaybackStallDetector` (`:997`) | **no** (changed) | Returns `.nudge` / `.reopen`; touches no player | Retain until the arbiter replaces it, then delete with its tests in one PR |
+| `BlackFrameWatchdog` (`:860`) | **no** (changed) | Returns `Bool` from the periodic time observer | Retain: it is the only Profile-5 evidence the server cannot derive |
+| `PlaybackRecoveryMonitor` (`:1131`) | yes | Acts on `PlaybackStallDetector`: nudges Play, then reopens | Becomes the one `PlaybackProgressDeadline`. **The `.nudge` arm stays** — it plays already-wanted playback and mutates no delivery |
+| `handleBlackFrameDecodeFailure` (`:4384`) | **yes** (added) | Acts on `BlackFrameWatchdog`: walks the compatibility ladder. The most invasive mutation on the platform | Route its verdict through the action ask |
+| `retrySameDeliveryAfterStall` (`:3156`) | **yes** (added) | The single funnel every stall owner reaches. Reopens or stops | The M5 ask goes here, **before its first statement** — `:3157` already spends the one same-delivery attempt |
+| `SameDeliveryStallRecoveryState` (`:702`) | **no** (changed) | A one-shot flag. `next()` spends it; the caller reopens | Delete after action cutover; the server action transaction is the attempt state |
+| `StallReopenBudget` (`:512`) | **no** (changed) | A bound — **and the owner of `userActionSequence`**, the viewer-intent fencing `ControllerStallGuard`'s Apple counterpart delegates to | Delete the bound after cutover; **the fencing sequence is retained and must be moved out first** |
+| `RecoveryReopenBudget` (`:810`) | **no** (changed) | A storm bound. `admit()` mutates the budget, never the player | Delete after action cutover |
+| `PlayerReopenQueue` (`:438`) | **no** (changed) | Last-writer-wins serializer shared by viewer seeks and stall reopens, split only by `PlayerOpenIntent` | **Delete nothing.** Its automatic half disappears when its callers stop calling `reopen` |
+| early-end handler (`observeEnd` `:3512`) | yes | Reopens up to `RecoveryReopenBudget`, then stops | Send typed ended observation; the arbiter chooses one action |
+| `handleItemFailure` (`:3598`) | yes | Three-rung ladder: next node (`:3616`), established HDR, compatibility fallback | Send typed failed observation. The ask goes **before rung one** — a source verdict does not change by node |
+| `retryEstablishedHDRDelivery` (`:4298`) | yes (added) | Reopens once, then stops with a viewer-visible verdict | Invoked only by a prepared server action |
+| `retryWithNextCompatibilityFallback` (`:4323`) | yes (added) | Forces `forceCompatibleHDRBase` / `forceCompatibilityTranscode`, then reopens — changes the recipe without asking | Invoked only by a prepared server action |
+| `retryMediaOnNextNode` (`:3684`) | yes (added) | Reattaches through another ingress, bumps `openGeneration`, calls `play()` | Becomes the client half of M8's node-replacement action |
+| `awaitItemReady` / `retryAfterReadinessTimeout` (`:4432`, `:4366`) | yes (added) | A 15-second readiness watchdog feeding the same ladder | Folds into the one `PlaybackProgressDeadline` |
 
-| Web source symbol | automatic? | Present mutation | Final disposition |
+| Web symbol | automatic? | Present mutation | Final disposition |
 |---|---|---|---|
-| `waitTimer` / `persistentWait` | yes | Times persistent media wait and reopens/falls back | Becomes the one `PlaybackProgressDeadline`; report observation only |
-| `stallTimer` / `armStall` | yes | Times startup/seek progress and tears down | Absorb into the same deadline and central action owner |
-| `stallDiagnose` | **no** (corrected) | Diagnoses and shows *Try again / Force transcode / Close* — viewer intent | **Retain.** Its verdicts are the only thing that tells a viewer an ad-blocker is eating `/hls/*.ts`; a server action can never know that |
-| `pollSessionHealth` interval | no | Reads `/status` | Replace with the control reporter; M9 deletes it |
-| hls.js fatal-error handlers | yes | Destroy/recreate or compatibility-transcode | Normalize error as proposal; only the controller applies the returned action |
-| Auto ABR sample/controller | yes | Opens a replacement session | Retain as action proposal using joined control facts; no direct create |
+| `waitTimer` / `persistentWait` (`:3378`, `:3424`) | yes | Times persistent media wait, then reopens or falls back a rung | Becomes the one `PlaybackProgressDeadline`; report observation only |
+| `stallTimer` / `armStall` (`:8336`) | **no** (changed) | Arms `stallDiagnose` and nothing else | **Retain.** A timer whose only payload is a viewer prompt is not an automatic owner |
+| `stallDiagnose` (`:8350`) | **no** (changed) | Diagnoses and shows *Try again / Force transcode / Close* | **Retain.** Its verdicts are the only thing that tells a viewer an ad-blocker is eating `/hls/*.ts`; a server action can never know that |
+| `pollSessionHealth` (`:10126`) | no | Reads `/status` | Replace with the control reporter; M9 deletes it |
+| hls.js fatal-error handlers | yes | Destroy/recreate or compatibility-transcode | Normalize the error as a proposal; only the controller applies the returned action |
+| Auto ABR sample/controller | yes | Opens a replacement session | Retain as an action proposal using joined control facts; no direct create |
 | automatic fallback claim/budgets | no | Prevent recovery collisions | Delete once the server arbiter and action ID are authoritative |
-| `handleEnded` / `endedTries` | yes | Treats an early media end as failure and reopens up to its budget | Send a failed observation now; after cutover only the controller applies the successor action |
+| `handleEnded` / `endedTries` (`:8925`) | yes | Treats an early media end as failure and reopens up to its budget | Send a failed observation now; after cutover only the controller applies the successor action |
 
-| Android source symbol | automatic? | Present mutation | Final disposition |
+| Android symbol | automatic? | Present mutation | Final disposition |
 |---|---|---|---|
-| `BufferingStallTracker` | **no** (corrected) | A post-hoc reporter: it emits one event when the playhead **recovers** and returns nothing while stalled | Retain as evidence. **The automatic owner is the one-second loop in `Controller`'s `init`**, which is the row this table should have named |
-| the one-second stall loop → `onStall` | yes (added) | Creates the successor session through `SessionCreateCoordinator.reopenAfterStall` | The M5 ask goes here. Note it cannot fire during an open-ended freeze — only after buffering ends and a ≥6 s stagnant interval closes |
-| `startStatusPolling` / `statusPollingJob` | **no** (corrected) | Pure read; `sessionStatus` feeds the info panel and nothing else | Free deletion whenever the panel is re-sourced — this row has no recovery to take |
-| `ControllerStallGuard` | **no** (corrected) | Mints and compares request versions for viewer seeks and track changes | Retain as viewer-intent fencing; it is not a recovery owner |
-| `StallReopenBudget` | **no** (corrected) | A counter | Delete after action cutover, with `StallBudgetTest.kt`, in one PR |
-| `SessionCreateCoordinator.reopenAfterStall` | yes | Creates the lower/same successor directly, and retries once unbound on a 400 | Invoked only by a prepared server action |
-| Media3 player-error callback | yes | Three-rung ladder via `playbackErrorAction` | Send typed failed observation; arbiter chooses one action |
-| Media3 end callback (`STATE_ENDED`) | **no** (corrected) | Posts progress and autoplays the next episode or audiobook part | **Nothing for M5 to take.** Android has no early-end reopen — no analogue of web's `endedTries` or Apple's `endAction` |
+| `BufferingStallTracker` (`PlaybackTelemetry.kt:263`) | **no** (changed) | A post-hoc reporter. It returns a measurement only once the playhead moves again, and `null` while the playhead is stuck | Retain as evidence |
+| the one-second loop → `onStall` (`Controller.kt:497`, `:783`) | **yes** (added) | Creates the successor session through `SessionCreateCoordinator.reopenAfterStall`. **This is the row the table should always have carried** | The M5 ask goes here. Note it cannot fire during an open-ended freeze — see §4.3 of the M5 handoff |
+| `startStatusPolling` / `statusPollingJob` (`:1052`) | **no** (changed) | A pure read; `sessionStatus` has no reader outside the details panel | Free deletion whenever the panel is re-sourced — this row has no recovery to take |
+| `ControllerStallGuard` (`StallReopen.kt:77`) | **no** (changed) | Mints and compares request versions; delegates its reset to `StallReopenBudget` | Retain as viewer-intent fencing |
+| `StallReopenBudget` (`StallReopen.kt:10`) | **no** (changed) | A counter — **and the owner of `userActionSequence`**, which `ControllerStallGuard` delegates to | Delete the counting half after cutover. **`resetForUserAction` is retained fencing and must move first**; `StallBudgetTest.kt` also covers two retained symbols and cannot be deleted with it |
+| `SessionCreateCoordinator.reopenAfterStall` (`StallReopen.kt:142`) | yes | Creates the lower/same successor directly, and retries once unbound on a 400 | Invoked only by a prepared server action |
+| `onPlayerError` (`Controller.kt:391`) | yes | Node failover (`:398`), then a three-rung ladder via `playbackErrorAction` | Send typed failed observation. The ask goes **before `:398`** |
+| `retryMediaOnNextNode` (`Controller.kt:1089`) | yes (added) | Reattaches to the next ingress: `setMediaItem`, `prepare`, `playWhenReady` | Becomes the client half of M8's node-replacement action |
+| Media3 end callback (`PlayerScreen.kt:733`) | **no** (changed) | Posts progress and autoplays the next episode or audiobook part | **Nothing for M5 to take.** Android has no early-end reopen — no analogue of web's `endedTries` or Apple's `endAction` |
 
 PGS cue-boundary jobs, UI-hide timers, seek debounce, progress reporting, and
 subtitle retry scheduling remain ordinary scheduling timers. They do not infer

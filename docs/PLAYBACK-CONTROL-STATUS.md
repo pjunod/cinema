@@ -2,8 +2,8 @@
 
 **Updated:** 2026-08-31 · **Baseline:** `main` at `55c6f374` ·
 **Fleet:** nuc3 · nuc4 · m6 serve `v0.2.8-106-g55abad8f`; nynuc serves a
-later untagged build · **Devices:** Android 47 · Apple 86, two client
-releases behind the tree
+later untagged build · **Devices:** Android 47 · Apple 86 —
+the tree is Android 54 · Apple 95, and neither has run on hardware
 
 Companion to
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) (what
@@ -26,8 +26,8 @@ one is deleted.
 |---|---|---|---|
 | 1-4 | protocol, transport, hold/resume barriers | — | merged |
 | 5 | delete detached recovery loops | — | merged as #663 |
-| 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) | **in progress** |
-| — | M5.5 — preparation feasibility | [remaining](REMAINING-ROADMAP-HANDOFF.md) §2 | **in progress** |
+| 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) | wire complete; **no client acts on an action yet** |
+| — | M5.5 — preparation feasibility | [remaining](REMAINING-ROADMAP-HANDOFF.md) §2 | not started; the spike needs hardware |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | separate track |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
@@ -41,7 +41,7 @@ merge target: two client PRs in flight means the second always fails.
 
 | slice | what it does | PR | state |
 |---|---|---|---|
-| docs | status page, §7.4 ledger corrections, Apple/Android recon | — | this change |
+| docs | status page, §7.4 re-verification, Apple/Android recon, ruling D1 | [#705](https://github.com/pjunod/plurx/pull/705) | in review |
 
 ## The gate that blocks every deletion, and what it does not block
 
@@ -69,11 +69,13 @@ blocks the slices now in flight; each shapes M6.
 
 1. How long may a client wait for an action before falling back to its own
    behaviour?
-2. Does `terminal` end playback outright, or offer the verdict with a *Try
-   again*?
+2. ~~Does `terminal` end playback outright, or offer the verdict with a *Try
+   again*?~~ **Answered** by ruling D1, M5 handoff §4.6 — it arms the verdict
+   rather than tearing the player down. Decided without the operator.
 3. Does a retry bound belong on the client at all?
 4. Is a bounded admission overcommit proven safe on any of the fleet's
-   hardware? §5.3's first fallback assumes one exists; if none does, the
+   hardware? The protocol plan's §5.3 assumes one exists as its first
+   fallback (reached via [remaining](REMAINING-ROADMAP-HANDOFF.md) §3.2); if none does, the
    one-encoder-slot path is the common case rather than the exception and
    M6's shape changes.
 5. What interruption bound is acceptable for `buffered_break_before_make`?

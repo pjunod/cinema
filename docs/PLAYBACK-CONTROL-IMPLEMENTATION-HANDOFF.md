@@ -1390,8 +1390,8 @@ The remaining work is:
 4. ~~Add desired physical hold/resume command/intention barriers to the shared
    actor sequence~~ — **merged as #656**; the successful physical
    acknowledgements already in producer ingress are retained.
-5. Delete remaining detached recovery loops and legacy catalog sentinels —
-   **written, green, awaiting the merge of #663**. `downgrade_one_step` is
+5. ~~Delete remaining detached recovery loops and legacy catalog sentinels.~~
+   **Merged as #663.** `downgrade_one_step` is
    deleted and pinned at zero; every remaining `child_transition` use still
    serializes non-copy lifecycle, retirement, retention, or cleanup and is
    retained until its own replacement is proved.
