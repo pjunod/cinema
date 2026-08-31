@@ -81,16 +81,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
-      - name: Restore patched crates to registry provenance for advisory matching
-        run: scripts/vendor-audit-lock --output target/vendor-audit/Cargo.lock
-      # Keep exactly one issue publisher. Running one reporter per lockfile can
-      # race when the same advisory affects dependencies shared by both locks.
+      - name: Build one complete advisory inventory
+        run: >-
+          scripts/vendor-audit-lock --output target/rust-audit/Cargo.lock
+          --additional-lock fuzz/Cargo.lock
+      # Keep exactly one issue publisher over the deduplicated root, vendored,
+      # and fuzz package inventory. One reporter per lockfile can race when the
+      # same advisory affects dependencies shared by more than one lock.
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-      # The action above installs the pinned cargo-audit binary. These scans
-      # remain blocking for vulnerabilities without creating duplicate issues.
-      - name: Audit synthesized vendor lockfile
-        run: cargo audit --file target/vendor-audit/Cargo.lock
-      - name: Audit fuzz lockfile
-        run: cargo audit --file fuzz/Cargo.lock
+          working-directory: target/rust-audit

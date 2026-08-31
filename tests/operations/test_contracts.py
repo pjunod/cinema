@@ -882,7 +882,8 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("      issues: write", scheduled)
         self.assertNotIn("      checks: write", scheduled)
         self.assertEqual(scheduled.count("uses: rustsec/audit-check@"), 1)
-        self.assertIn("run: cargo audit --file fuzz/Cargo.lock", scheduled)
+        self.assertIn("--additional-lock fuzz/Cargo.lock", scheduled)
+        self.assertIn("working-directory: target/rust-audit", scheduled)
         self.assertEqual(workflow.count("token: ${{ secrets.GITHUB_TOKEN }}"), 3)
 
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
