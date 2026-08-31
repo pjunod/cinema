@@ -9142,6 +9142,7 @@ const ENDED_SLACK_SEC=15;
 // threshold from a few seconds in; the flag is sticky, so a single truncated
 // stream marked a film watched permanently and told Trakt so.
 async function handleEnded(fileId){
+  const p=PLAYER, generation=(PLAYER&&PLAYER._seekToken)||0;
   const total=pbTotalSec(), pos=pbPosSec();
   if(PLAYER&&PLAYER.bookParts&&PLAYER.bookParts.length){
     const i=PLAYER.bookParts.findIndex(p=>p.id===PLAYER.fileId);
@@ -9164,11 +9165,62 @@ async function handleEnded(fileId){
   // repeats at the same position, so a stream that gets further each time is
   // making progress and keeps its budget.
   PLAYER.endedTries=(prev!=null&&Math.abs(pos-prev)<1)?(PLAYER.endedTries||0)+1:1;
-  const hopeless = PLAYER.method==='direct_play' || PLAYER.endedTries>3;
-  const controlTrigger=notifyPlaybackControl("failed");
+  // A stream that stopped short is the clearest evidence this client has that
+  // production ended, and the one the server can most often explain: it knows
+  // whether the producer was told to stop, ran out of a resource, or gave a
+  // verdict about the source. The budget below is a guess standing in for
+  // exactly that answer.
+  const ask=askPlaybackControl("failed",
+    {decoder_state:"failed",error_code:"media",error_detail:"truncated_stream"});
+  const controlTrigger=ask.trigger;
+  const verdict=(await ask.action)||PLAYER.controlVerdict||null;
+  // The viewer had the whole ask window — up to CONTROL_ASK_CAP_MS — to seek,
+  // pause or close, and `handleEnded` can be re-entered by the next `ended`
+  // event on a stream that reopened while we waited. `endedAt` alone is a poor
+  // token here by construction: a truncated stream repeats at the SAME
+  // position, which is what `endedTries` counts, so two overlapping
+  // invocations would both see it unchanged. Identity and the seek token are
+  // the checks that hold.
+  if(!endedStillOurs(p,generation,fileId,pos)) return;
+  if(verdict&&verdict.type==="terminal"){
+    // Ruling D1: the verdict is armed, not executed. The stream is already
+    // over — the only thing this changes is whether the viewer reads the
+    // server's reason or the client's inference from a runtime mismatch.
+    clientLog({level:"warn",event:"truncated_stream",detail:"terminal:"+verdict.code,
+      message:`server verdict ended this recipe — ${controlVerdictText(verdict.message)}`,
+      control_trigger:controlTrigger});
+    return setLoading(true,controlVerdictText(verdict.message),
+      "It ended "+clockFromSec(total-pos)+" short of the runtime. Your place is saved.",
+      `<button onclick="retryPlayback()">Try again</button>`+
+      (PLAYER.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-manual')">Force transcode</button>`:``)+
+      `<button onclick="closePlayer()">Close</button>`);
+  }
+  if(verdict&&verdict.type==="hold"){
+    // Production is deliberately not advancing, so reconnecting is exactly
+    // what a hold says not to do — and here it is worse than churn. A VOD
+    // session seeks in place, so resuming at the truncation point re-fires
+    // `ended` at once and the loop has nothing in it but one round trip. The
+    // reopen is what a hold suppresses; the explanation is what it earns.
+    clientLog({level:"warn",event:"truncated_stream",detail:"deferred:hold",
+      message:`server holds this stream (${verdict.reason}) — resume deferred`,
+      control_trigger:controlTrigger});
+    return setLoading(true,"Waiting for the server.",holdReasonText(verdict.reason),
+      `<button onclick="retryPlayback()">Try again</button>`+
+      `<button onclick="closePlayer()">Close</button>`);
+  }
+  // A server that named an interval owns the decision for that long, so the
+  // local budget does not bound it — but the deferral is itself bounded. A
+  // server that keeps saying "soon" is not distinguishable, from here, from
+  // one that is never going to be ready, and today's path is better than an
+  // unbounded reconnect loop.
+  const answered=!!(verdict&&verdict.type==="retry_resource"&&
+    PLAYER.endedTries<=CONTROL_DEFER_LIMIT);
+  const hopeless = !answered &&
+    (PLAYER.method==='direct_play' || PLAYER.endedTries>3);
   clientLog({level:"warn",event:"truncated_stream",
     message:`stream ended at ${Math.round(pos)}s of ${Math.round(total)}s`,
-    detail:`method=${PLAYER.method} attempt=${PLAYER.endedTries}${hopeless?" giving-up":" resuming"}`,
+    detail:`method=${PLAYER.method} attempt=${PLAYER.endedTries}`+
+      (answered?` deferred:${verdict.type}`:(hopeless?" giving-up":" resuming")),
     control_trigger:controlTrigger});
   if(hopeless){
     return setLoading(true,"The stream stopped before the end.",
@@ -9179,7 +9231,26 @@ async function handleEnded(fileId){
   }
   setLoading(true,"Reconnecting…","the stream ended early — resuming from "+clockFromSec(pos));
   PLAYER.stallFrom=pos;   // so "Try again" from a later stall aims here too
+  if(answered){
+    const after=Math.min(Math.max(verdict.after_ms,CONTROL_MIN_EXCHANGE_MS),PERSISTENT_STALL_MS);
+    await new Promise((done)=>setTimeout(done,after));
+    // The same window, again: the viewer had `after` milliseconds to leave.
+    if(!endedStillOurs(p,generation,fileId,pos)) return;
+  }
   seekTo(pos);
+}
+// Is the player this `handleEnded` was entered for still the one on screen,
+// still on the same file, still on the same stream generation, and still
+// waiting at the position it ended at?
+//
+// Every clause was checked at entry and none of them survives an await on its
+// own. Identity rather than file id, because `seekTo` and `attachSession`
+// reuse the same PLAYER object, and the seek token because a viewer who
+// scrubbed away must not be dragged back to a truncation they have left.
+function endedStillOurs(p,generation,fileId,pos){
+  const v=document.getElementById("video");
+  return !!p && PLAYER===p && p.fileId===fileId && p.endedAt===pos
+    && (p._seekToken||0)===generation && !!v && !v.seeking;
 }
 
 // ---- audio-language + subtitle menus --------------------------------------
