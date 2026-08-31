@@ -1411,26 +1411,32 @@ async fn media_session_a_removed_owner_cannot_prepare() {
             backend,
         )
         .await;
+        // A dedicated owner id, because the replicated contract reset
+        // deliberately preserves `internal.cluster_job_owner_removed.*` —
+        // fencing the shared `staged-node` here would fence it for every
+        // scenario that runs after this one on the same cluster.
         store
             .put_setting(
                 // Spelled out rather than imported: the key builder is
                 // crate-private, and a contract test that reached inside for
                 // it would stop being a test of the contract.
-                "internal.cluster_job_owner_removed.staged-node",
+                "internal.cluster_job_owner_removed.staged-removed-node",
                 "removed",
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: fence the owner: {error}"));
+        let mut fenced = staged_preparation(
+            user.id,
+            playback,
+            "00000000-0000-4000-8000-00000000fc03",
+            "00000000-0000-4000-8000-00000000fc04",
+            predecessor,
+        );
+        fenced.owner_node_id = "staged-removed-node".to_owned();
 
         assert!(
             store
-                .prepare_media_session(&staged_preparation(
-                    user.id,
-                    playback,
-                    "00000000-0000-4000-8000-00000000fc03",
-                    "00000000-0000-4000-8000-00000000fc04",
-                    predecessor,
-                ))
+                .prepare_media_session(&fenced)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: removed-owner prepare: {error}"))
                 .is_none(),
@@ -10170,7 +10176,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 30);
+    assert_eq!(report.tables.len(), 31);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
