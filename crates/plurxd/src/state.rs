@@ -598,6 +598,7 @@ impl AppState {
             )
             .with_decoders(system.decoders.clone())
             .with_dv_strippable(system.dovi_rpu)
+            .with_dv_convertible(system.dolby_vision_convert)
             .with_dovi_reshape(system.dovi_reshape)
             .with_dovi_passthrough(system.dovi_passthrough)
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
@@ -1393,6 +1394,12 @@ struct ClusterFragmentIndexWorker {
     engine_sha256: String,
     cache_root: PathBuf,
     have_dovi: bool,
+    /// Whether this node converts Dolby Vision Profile 7 to 8.1, which decides
+    /// whether a convertible file has a third identity to index at all. Read
+    /// once with `have_dovi` beside it rather than per job: both are node
+    /// facts, and reading them at different moments is how a worker comes to
+    /// enumerate one identity set and index another.
+    convert_dolby_vision: bool,
     retry_policy: AnalysisRetryPolicy,
 }
 
@@ -1656,12 +1663,14 @@ async fn fragment_index_video_identities(
     store: &dyn Store,
     file: &MediaFile,
     have_dovi: bool,
+    convert: bool,
 ) -> Result<Vec<plurx_core::transcode::CopyVideoOptions>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
     Ok(crate::fragindex::video_identities(
         file,
         probe_json.as_deref(),
         have_dovi,
+        convert,
     ))
 }
 
@@ -1684,9 +1693,11 @@ async fn fragment_index_requested_video_options(
     store: &dyn Store,
     file: &MediaFile,
     have_dovi: bool,
+    convert: bool,
 ) -> Result<plurx_core::transcode::CopyVideoOptions, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
-    let videos = crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi);
+    let videos =
+        crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi, convert);
     for video in &videos {
         let identity = crate::fragindex::identity_for(file, *video);
         if store.fragment_index(file.id, &identity).await?.is_none() {
@@ -4243,6 +4254,7 @@ impl JobManager {
 
         let deadline = std::time::Instant::now() + INDEX_WINDOW;
         let have_dovi = transcode.dv_strippable();
+        let convert = transcode.dv_convertible();
         let runtime_cache = transcode.runtime_cache_dir().to_path_buf();
         let libraries = match self.store.list_libraries().await {
             Ok(libraries) => libraries,
@@ -4295,6 +4307,7 @@ impl JobManager {
                 self.store.as_ref(),
                 &file,
                 have_dovi,
+                convert,
             )
             .await
             {
@@ -4944,12 +4957,17 @@ impl JobManager {
                 "pipeline_version_unavailable",
             ));
         }
-        let video = fragment_index_requested_video_options(self.store.as_ref(), &file, have_dovi)
-            .await
-            .map_err(|_| AnalysisResolutionError::Retry {
-                code: "source_catalog_read_failed",
-                charge_attempt: true,
-            })?;
+        let video = fragment_index_requested_video_options(
+            self.store.as_ref(),
+            &file,
+            have_dovi,
+            transcode.dv_convertible(),
+        )
+        .await
+        .map_err(|_| AnalysisResolutionError::Retry {
+            code: "source_catalog_read_failed",
+            charge_attempt: true,
+        })?;
         let object_version = crate::fragment_index_cluster::inspect_source(&file)
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
@@ -5119,6 +5137,7 @@ impl JobManager {
             engine_sha256: crate::ffmpeg::fragment_index_engine_digest().await,
             cache_root: crate::fragment_index_cluster::cache_root(transcode.runtime_cache_dir()),
             have_dovi: transcode.dv_strippable(),
+            convert_dolby_vision: transcode.dv_convertible(),
             retry_policy: self.analysis_retry_policy().await,
         };
         let mut built = 0_usize;
@@ -5331,6 +5350,7 @@ impl JobManager {
             self.store.as_ref(),
             &file,
             worker.have_dovi,
+            worker.convert_dolby_vision,
         )
         .await
         {

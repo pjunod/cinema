@@ -958,8 +958,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # maintenance block beside the genre backfill. It is a leased catalogue job
 # (`catalogue:dv-facts`) that walks a node-local cursor and writes columns —
 # it owns no producer, no process, and no timer of its own.
-# The additional spawn is confined to the HTTP marker race fixture: its join
-# handle is awaited inside the test and it owns no shipped producer or process.
+# 347 -> 348 on main: the additional spawn is confined to the HTTP marker race
+# fixture; its join handle is awaited inside the test and it owns no shipped
+# producer or process.
+#
+# This milestone adds none of its own. The Profile 7 -> 8.1 conversion runs no
+# process: it used to be a second ffmpeg with a bridging task between the two,
+# and that design was withdrawn because feeding a raw elementary stream between
+# ffmpegs destroys the video timeline (see `plurxd::dvpipe`). The conversion now
+# rewrites NAL units inside the fragments the one producer already writes, so
+# the process and task counts are exactly what they were before it.
 expected_occurrences = 348
 
 [[module_structures]]

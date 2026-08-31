@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["5d58b910"]
+points = []
+checks = []
+reason = "Documentation only: two handoffs for M5a's remaining client and hardware work, and a correction to the plan's own text where it still described the withdrawn two-ffmpeg pipe and asked for MEL/FEL in a decision-time field that cannot carry it. No runtime behaviour changes; the behaviour these documents describe is covered by the mappings on the commits that built it."
+ignore = true

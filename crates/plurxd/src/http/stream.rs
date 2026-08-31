@@ -2947,12 +2947,14 @@ mod tests {
 
     fn planned(method: playback::PlaybackMethod) -> Decision {
         Decision {
+            convert_dolby_vision: false,
             method,
             reasons: Vec::new(),
             transcode_audio: true,
             preserve_dolby_vision: true,
             container: "mp4",
             delivered_dynamic_range: "dolby_vision",
+            delivered_dolby_vision_profile: Some(8),
             transcode_grade: plurx_core::transcode::OutputGrade::Sdr,
         }
     }
@@ -3093,6 +3095,10 @@ mod tests {
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
             bitrate: Some(90_892_368),
+            // The columns, not only the label. The conversion needs the level
+            // and the compatibility id as numbers to build the configuration
+            // record its output declares, so a label-only row is deliberately
+            // not converted — see `file_can_convert_to_p81`.
             audio_streams: vec![
                 AudioStream {
                     index: 0,
@@ -3115,7 +3121,12 @@ mod tests {
             scanned_at: 1,
             audio_offset_ms: 0,
             probed: true,
-            dolby_vision: Default::default(),
+            dolby_vision: plurx_core::domain::DolbyVisionFacts {
+                profile: Some(7),
+                level: Some(6),
+                bl_compat_id: Some(1),
+                ..Default::default()
+            },
         };
         let caps = Caps {
             vcodec: Some("h264,hevc,av1,vp9".into()),
@@ -3133,7 +3144,13 @@ mod tests {
         let english = caps.decide(&file, &playback::RenderCaps::proven(true), NOW_MS);
         assert_eq!(english.method, playback::PlaybackMethod::Remux);
         assert!(english.transcode_audio, "TrueHD must become AAC in MP4");
-        assert_eq!(english.delivered_dynamic_range, "hdr10");
+        // Since M5a a Profile 7 source over an HDR10 base reaches a client
+        // that decodes profile 8 as a conversion rather than a strip. This
+        // test is about the audio; the range is asserted because the audio
+        // decision must not disturb the video one — a track swap re-encoding
+        // the picture's grade would be the bug worth catching here.
+        assert!(english.convert_dolby_vision);
+        assert_eq!(english.delivered_dynamic_range, "dolby_vision");
         assert!(english
             .reasons
             .iter()

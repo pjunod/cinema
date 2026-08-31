@@ -67,21 +67,38 @@ pub enum IndexOutcome {
 /// Generic over the source for the same reason [`crate::copyseg::run`] is:
 /// everything between the pipe and the index is worth testing and none of it
 /// needs a real child process to be worth testing.
+/// `dolby_vision` is **both** answers, and deliberately one parameter rather
+/// than two: `Some(record)` means "this pass converts Profile 7 to 8.1, and
+/// its output must declare this record". They have to agree — a pass that
+/// converts must store the record its stream needs, and a pass that does not
+/// must store none — and two parameters is how they come to disagree, on a
+/// pair nothing downstream would notice: the rows would be byte counts for
+/// one stream and the served init a description of the other.
 #[cfg_attr(not(test), allow(dead_code))]
 pub async fn index_stream<R: AsyncRead + Unpin>(
     src: R,
     identity: SourceIdentity,
     expected_ms: Option<i64>,
+    dolby_vision: Option<plurx_core::fmp4::DolbyVisionRecord>,
 ) -> IndexOutcome {
-    index_stream_with_progress(src, identity, expected_ms, None).await
+    index_stream_with_progress(src, identity, expected_ms, dolby_vision, None).await
 }
 
 async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     mut src: R,
     identity: SourceIdentity,
     expected_ms: Option<i64>,
+    dolby_vision: Option<plurx_core::fmp4::DolbyVisionRecord>,
     progress: Option<&IndexProgress>,
 ) -> IndexOutcome {
+    let convert = dolby_vision.is_some();
+    // A converting identity's index has to describe the CONVERTED bytes. An
+    // index is a list of the producer's own output byte counts and the landing
+    // matcher compares them, so an index built from the unconverted stream
+    // would not be stale — it would be confidently wrong about media this
+    // identity never produces. The conversion shortens every RPU, so every
+    // fragment carrying one is a different size.
+    let mut converter: Option<crate::dvpipe::Converter> = None;
     let mut reader = FragmentReader::new();
     let mut init: Option<Init> = None;
     let mut init_sha = String::new();
@@ -160,6 +177,26 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                             "a fragment arrived before the moov".into(),
                         );
                     };
+                    let mut fragment = fragment;
+                    if convert {
+                        if converter.is_none() {
+                            match crate::dvpipe::Converter::for_init(init) {
+                                Ok(ready) => converter = Some(ready),
+                                Err(refused) => {
+                                    return IndexOutcome::Unsupported(format!(
+                                        "this stream cannot be converted: {refused}"
+                                    ))
+                                }
+                            }
+                        }
+                        let converter = converter.as_mut().expect("just set");
+                        if let Err(refused) = converter.convert(&mut fragment) {
+                            return IndexOutcome::Unsupported(format!(
+                                "this stream cannot be converted: {refused}"
+                            ));
+                        }
+                    }
+                    let fragment = fragment;
                     let Some(video) = init.video() else {
                         return IndexOutcome::Unsupported("the moov lost its video track".into());
                     };
@@ -259,17 +296,51 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
         }
     }
 
-    let promotion = promotion.unwrap_or_default();
+    // A converting pass that rewrote nothing is a pass whose file's stored
+    // facts are wrong: the row says Profile 7 and the stream carries no RPUs
+    // at all. Indexing it as the converted identity would record that lie in
+    // the keyspace, and every session looking that identity up would be served
+    // segments cut for a stream that was never converted.
+    if convert {
+        let report = converter.as_ref().map(|c| c.report()).unwrap_or_default();
+        if report.rpus == 0 {
+            return IndexOutcome::Unsupported(
+                "this source is recorded as Dolby Vision Profile 7 but its stream carries no \
+                 RPUs to convert"
+                    .into(),
+            );
+        }
+        // After the refusal, not before it. The index pass reads every RPU in
+        // the file, so its answer is the whole film's rather than one
+        // session's opening fragment's — and it is what the conversion costs a
+        // viewer, since MEL carries no picture detail of its own while FEL
+        // carries real residual detail. A line logged on the failure path
+        // would report a default MEL/FEL answer for a pass that read no RPU at
+        // all, which is worse than saying nothing: this is what an operator
+        // reading a "why does this look softer" report has to go on.
+        tracing::info!(
+            rpus = report.rpus,
+            source_profile = report.source_profile,
+            enhancement_layer = ?report.enhancement_layer,
+            "indexed a converted stream: {}",
+            report.enhancement_layer.reason()
+        );
+    }
+    let mut promotion = promotion.unwrap_or_default();
+    // The record cannot come out of a fragment: what the muxer wrote describes
+    // the source, not the converted stream, which is the whole reason plurx
+    // supplies its own. It rides in the stored promotion inputs so the served
+    // init this pass validates and the served init a later generation promotes
+    // are produced by the same function from the same facts.
+    promotion.dolby_vision = dolby_vision;
     let Some(mut served_init) = init.clone() else {
         return IndexOutcome::Unsupported(
             "the index pipe ended without an init to validate".into(),
         );
     };
-    if let Err(error) =
-        fmp4::promote_hevc_parameter_sets_from(&mut served_init, &promotion.parameter_sets)
-    {
+    if let Err(error) = fmp4::promote_from(&mut served_init, &promotion) {
         return IndexOutcome::Unsupported(format!(
-            "the HEVC decoder configuration could not be completed: {error}"
+            "the served init could not be built from this pass's promotion inputs: {error}"
         ));
     }
     if let Err(error) = fmp4::validate_hevc_decoder_configuration(&served_init) {
@@ -282,6 +353,42 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     built.promotion = promotion;
     built.parameter_sets_constant = parameter_sets_constant;
     IndexOutcome::Built(Box::new(built))
+}
+
+/// The Dolby Vision configuration record a converted stream must declare.
+///
+/// Built from the source's stored facts rather than read from the output,
+/// because what the output carries is the *source's* record: ffmpeg derives it
+/// from its input container rather than from the RPUs (measured,
+/// `docs/PLAYBACK-CAPS-V2-M0.md` §8), and the rewrite that makes the RPUs say
+/// 8.1 runs on the far side of that muxer. Left alone, the sample entry would
+/// declare Profile 7 over samples that are no longer Profile 7.
+///
+/// What changes from the source's own record and what does not:
+///
+/// - **profile becomes 8**, which is what the RPUs now say;
+/// - **`el_present` becomes false**, because `filter_units=remove_types=63`
+///   dropped the enhancement layer and a record still declaring one tells a
+///   decoder to expect a layer that is not in the stream;
+/// - **the level and the compatibility id are the source's**, unchanged. The
+///   level bounds resolution and frame rate, neither of which the conversion
+///   touches; the compatibility id says what a non-Dolby-Vision client sees of
+///   the base layer, and the base layer is copied byte for byte.
+fn converted_dolby_vision_record(
+    file: &MediaFile,
+) -> Result<plurx_core::fmp4::DolbyVisionRecord, String> {
+    let level = file
+        .dolby_vision
+        .level
+        .and_then(|level| u8::try_from(level).ok())
+        .ok_or("the source has no stored Dolby Vision level")?;
+    let compat = file
+        .dolby_vision
+        .bl_compat_id
+        .and_then(|id| u8::try_from(id).ok())
+        .ok_or("the source has no stored base-layer compatibility id")?;
+    plurx_core::fmp4::DolbyVisionRecord::new(8, level, false, true, true, compat)
+        .map_err(|error| error.to_string())
 }
 
 /// The identity a file's index is keyed by, for this build of ffmpeg.
@@ -319,33 +426,39 @@ pub fn identity_for(file: &MediaFile, video: transcode::CopyVideoOptions) -> Sou
 /// copy, but `decide_forced` with `Force::Original` does, and that copy is
 /// indexed today — dropping it would regress a path that works.
 ///
-/// **The Profile 7 → 8.1 conversion is a third identity, and it is not here
-/// yet.** `copy_video_args` already carries `DV_CONVERT_MARKER` for a
-/// converting copy, so that pipeline's fingerprint exists and differs — but
-/// nothing sets `dv_convert` outside tests, so no session can ask for it, and
-/// adding the identity now would spend a third full pass over every Profile 7
-/// remux in the library to index a stream nothing plays. It belongs in the
-/// commit that wires the conversion into a session, keyed on the same file
-/// facts `plurx_core::playback::dolby_vision_converts_to_p81` reads (Profile 7
-/// with an HDR10 base) — and it has to land in that commit, not after it, or a
-/// converting session looks up an index nothing built, gets
-/// `vod_index_pending`, and falls through to the live-HLS recovery path on
-/// every play. That is exactly the regression the paragraph above describes,
-/// and it is the reason this note is here rather than in a plan document.
+/// **The Profile 7 → 8.1 conversion is the third identity**, and it is here
+/// for the same reason the preserved one is: a converting session builds its
+/// identity from its own `CopyVideoOptions`, so an index built only for the
+/// other two would leave it looking up something nothing built. It is added
+/// only when the *file* could convert — Profile 7 over an HDR10 base — because
+/// which clients convert is a per-session question and an index is per-file.
+///
+/// `convert` is the node's answer, not the file's: an operator who turned the
+/// conversion off (`PLURX_DV_CONVERT=0`) has no converting sessions to serve,
+/// and indexing for them would spend a third full pass over every Profile 7
+/// remux in the library on a stream nothing can ask for.
 pub fn video_identities(
     file: &MediaFile,
     probe_json: Option<&str>,
     have_dovi: bool,
+    convert: bool,
 ) -> Vec<transcode::CopyVideoOptions> {
     let preserve_choices: &[bool] = if plurx_core::playback::is_dolby_vision(file) {
         &[false, true]
     } else {
         &[false]
     };
-    let mut identities = Vec::with_capacity(preserve_choices.len());
+    let mut identities = Vec::with_capacity(preserve_choices.len() + 1);
     let mut seen = std::collections::HashSet::new();
     for preserve in preserve_choices {
         let video = transcode::CopyVideoOptions::from_probe(file, probe_json, have_dovi, *preserve);
+        if seen.insert(identity_for(file, video).argv_fingerprint) {
+            identities.push(video);
+        }
+    }
+    if convert && plurx_core::playback::file_can_convert_to_p81(file) {
+        let video = transcode::CopyVideoOptions::from_probe(file, probe_json, have_dovi, true)
+            .with_dolby_vision_conversion(true);
         if seen.insert(identity_for(file, video).argv_fingerprint) {
             identities.push(video);
         }
@@ -469,6 +582,25 @@ async fn build_with_args(
     progress: Option<SharedIndexProgress>,
 ) -> IndexOutcome {
     let identity = identity_for(file, video);
+    // A converting pass produces a stream whose sample entry declares the
+    // *source's* Dolby Vision record: ffmpeg copies it from the input
+    // container, and the rewrite that makes the RPUs say 8.1 runs after that
+    // muxer. So plurx builds the right one from the source's own stored facts
+    // and hands it to the promotion, which is the single funnel both this
+    // pass's served init and every later generation's go through.
+    let dolby_vision = if video.converts_dolby_vision() {
+        match converted_dolby_vision_record(file) {
+            Ok(record) => Some(record),
+            Err(reason) => {
+                return IndexOutcome::Unsupported(format!(
+                    "a converting index needs a Dolby Vision record and this file cannot \
+                     describe one: {reason}"
+                ))
+            }
+        }
+    } else {
+        None
+    };
     // The probe's duration, carried in so a short read is caught. Passed in
     // milliseconds and converted against the pipe's own timescale inside the
     // reader, because the timescale is not known until the moov arrives.
@@ -520,6 +652,7 @@ async fn build_with_args(
             rows: 0,
         };
     };
+
     // stderr must be drained on its own task or ffmpeg blocks on a full pipe
     // and the whole build deadlocks — the same discipline `spawn_ffmpeg_pipe`
     // keeps for a live session.
@@ -536,7 +669,13 @@ async fn build_with_args(
 
     let outcome = match tokio::time::timeout(
         budget,
-        index_stream_with_progress(stdout, identity, expected_ms, progress.as_deref()),
+        index_stream_with_progress(
+            stdout,
+            identity,
+            expected_ms,
+            dolby_vision,
+            progress.as_deref(),
+        ),
     )
     .await
     {
@@ -595,6 +734,12 @@ mod tests {
     use plurx_core::segplan::{self, SEGPLAN_VERSION};
     use plurx_core::testfixtures;
 
+    /// The record a converting pass supplies — and, being `Some`, the way a
+    /// caller says that this pass converts at all.
+    fn converting_record() -> plurx_core::fmp4::DolbyVisionRecord {
+        plurx_core::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("record")
+    }
+
     fn identity() -> SourceIdentity {
         SourceIdentity::new(1, 1, "fingerprint")
     }
@@ -626,7 +771,7 @@ mod tests {
     }
 
     fn fingerprints_of(file: &MediaFile, have_dovi: bool) -> Vec<String> {
-        video_identities(file, None, have_dovi)
+        video_identities(file, None, have_dovi, false)
             .into_iter()
             .map(|video| identity_for(file, video).argv_fingerprint)
             .collect()
@@ -635,9 +780,9 @@ mod tests {
     #[test]
     fn a_plain_file_has_one_pipeline_to_index() {
         let file = hevc_file(None, None);
-        assert_eq!(video_identities(&file, None, true).len(), 1);
+        assert_eq!(video_identities(&file, None, true, false).len(), 1);
         assert!(
-            !video_identities(&file, None, true)[0].preserves_dolby_vision(),
+            !video_identities(&file, None, true, false)[0].preserves_dolby_vision(),
             "the stripped identity stays first, so a fully indexed library \
              does not re-order its work to adopt the identity set"
         );
@@ -649,7 +794,7 @@ mod tests {
             Some("dolby_vision"),
             Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
         );
-        let videos = video_identities(&file, None, true);
+        let videos = video_identities(&file, None, true, false);
         assert_eq!(videos.len(), 2);
         assert!(!videos[0].preserves_dolby_vision());
         assert!(videos[1].preserves_dolby_vision());
@@ -662,6 +807,101 @@ mod tests {
         );
     }
 
+    /// The converting identity is added only for a file that can actually be
+    /// converted, and only on a node that will.
+    ///
+    /// Both halves are load-bearing in opposite directions. Dropping the file
+    /// check would index a third pipeline for every Dolby Vision title in the
+    /// library — a full extra pass over a 60 GB remux each — for a stream no
+    /// session can ask for. Dropping the node check would do the same on a
+    /// node where an operator turned the conversion off.
+    #[test]
+    fn the_converting_identity_is_indexed_only_when_it_can_be_served() {
+        let mut p7 = hevc_file(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        );
+        p7.dolby_vision.profile = Some(7);
+        p7.dolby_vision.level = Some(6);
+        p7.dolby_vision.bl_compat_id = Some(1);
+
+        let converting = video_identities(&p7, None, true, true);
+        assert_eq!(converting.len(), 3, "strip, preserve, convert");
+        assert!(converting[2].converts_dolby_vision());
+        assert!(
+            converting[0..2].iter().all(|v| !v.converts_dolby_vision()),
+            "the stripped identity stays first so a fully indexed library does \
+             not re-order its work to adopt this"
+        );
+
+        // Three different byte streams, so three different indexes. Sharing
+        // one would hand a session a playlist whose cut points describe media
+        // it never produces.
+        let fingerprints: std::collections::HashSet<_> = converting
+            .iter()
+            .map(|video| identity_for(&p7, *video).argv_fingerprint)
+            .collect();
+        assert_eq!(fingerprints.len(), 3);
+
+        // The node switch stands it down.
+        assert_eq!(video_identities(&p7, None, true, false).len(), 2);
+
+        // …and so does a file the conversion cannot describe. A Profile 8
+        // source is already what the conversion produces; a row with no
+        // columns cannot have its configuration record built at all.
+        let p8 = {
+            let mut file = p7.clone();
+            file.dolby_vision.profile = Some(8);
+            file
+        };
+        assert_eq!(video_identities(&p8, None, true, true).len(), 2);
+        let label_only = hevc_file(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        );
+        assert_eq!(video_identities(&label_only, None, true, true).len(), 2);
+    }
+
+    /// The converted stream's configuration record, from the source's facts.
+    ///
+    /// What its output carries is the source's own record — ffmpeg copies the
+    /// one the input container had — so every field here is either changed
+    /// deliberately or carried deliberately, and getting either wrong is a
+    /// stream that describes itself incorrectly with nothing to catch it.
+    #[test]
+    fn the_converted_record_says_profile_eight_with_no_enhancement_layer() {
+        let mut file = hevc_file(Some("dolby_vision"), None);
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(9);
+        file.dolby_vision.bl_compat_id = Some(6);
+
+        let record = converted_dolby_vision_record(&file).expect("describable");
+        assert_eq!(record.profile, 8, "the RPUs now say 8.1");
+        assert!(
+            !record.el_present,
+            "the copy's bitstream filter dropped the enhancement layer; a \
+             record still declaring one tells a decoder to expect what is not \
+             there"
+        );
+        assert!(record.rpu_present, "the RPUs are the point");
+        assert!(record.bl_present);
+        assert_eq!(
+            record.level, 9,
+            "the level bounds resolution and frame rate, neither of which the \
+             conversion touches"
+        );
+        assert_eq!(
+            record.bl_signal_compatibility_id, 6,
+            "the base layer is copied byte for byte, so what a non-DV client \
+             sees of it is unchanged"
+        );
+
+        // A row that cannot describe one refuses rather than inventing values.
+        let mut levelless = file.clone();
+        levelless.dolby_vision.level = None;
+        assert!(converted_dolby_vision_record(&levelless).is_err());
+    }
+
     #[test]
     fn profile_five_keeps_its_stripping_identity_too() {
         // `decide` never routes a Profile 5 source to a stripping copy -- it
@@ -669,7 +909,7 @@ mod tests {
         // that copy is indexed today. The plan's M1 acceptance check expects
         // one row here; dropping the second would regress a live path.
         let file = hevc_file(Some("dolby_vision"), Some("Dolby Vision · Profile 5"));
-        assert_eq!(video_identities(&file, None, true).len(), 2);
+        assert_eq!(video_identities(&file, None, true, false).len(), 2);
     }
 
     #[test]
@@ -689,10 +929,131 @@ mod tests {
         assert_ne!(held[0], held[1]);
     }
 
+    /// The record the caller supplies reaches the stored promotion inputs, and
+    /// therefore the served init every later generation is promoted to.
+    ///
+    /// This is the wire between "plurx builds a Dolby Vision record because
+    /// ffmpeg cannot" and "every served init carries it". Without it the
+    /// record is built, discarded, and the converted stream tells every client
+    /// it is plain HDR10 — the whole milestone delivering nothing, with no
+    /// error anywhere.
+    #[tokio::test]
+    async fn the_supplied_dolby_vision_record_reaches_the_stored_promotion() {
+        testfixtures::require_ffmpeg();
+        let bytes = index_pipe_bytes("closed-gop");
+
+        let plain = index_stream(std::io::Cursor::new(bytes.clone()), identity(), None, None).await;
+        let IndexOutcome::Built(plain) = plain else {
+            panic!("{plain:?}");
+        };
+        assert!(
+            plain.promotion.dolby_vision.is_none(),
+            "an ordinary pass supplies none"
+        );
+
+        let record =
+            plurx_core::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("record");
+        // Supplying the record *is* asking for the conversion, so the stream
+        // has to be one there is something to convert in.
+        let converted = index_stream(
+            std::io::Cursor::new(testfixtures::with_dolby_vision_rpus(&bytes)),
+            identity(),
+            None,
+            Some(record.clone()),
+        )
+        .await;
+        let IndexOutcome::Built(converted) = converted else {
+            panic!("{converted:?}");
+        };
+        assert_eq!(
+            converted.promotion.dolby_vision,
+            Some(record),
+            "the record is stored, so a regenerated init is promoted from it too"
+        );
+        assert!(!converted.promotion.is_empty());
+    }
+
+    /// The conversion runs inside the index pass, and the rows describe the
+    /// converted stream.
+    ///
+    /// This is the wire the whole converting identity hangs from. The index a
+    /// converting session lands against has to have been built from converted
+    /// fragments: an 8.1 RPU is smaller than the Profile 7 one it replaces, so
+    /// every `video_bytes` differs, and an index built without the conversion
+    /// would describe a stream no converting session ever produces — the
+    /// landing would miss on every fragment and the session would fail with
+    /// nothing pointing at why.
+    #[tokio::test]
+    async fn a_converting_pass_indexes_the_converted_stream() {
+        testfixtures::require_ffmpeg();
+        let plain_bytes = index_pipe_bytes("closed-gop");
+        let dv_bytes = testfixtures::with_dolby_vision_rpus(&plain_bytes);
+
+        let unconverted = index_stream(
+            std::io::Cursor::new(dv_bytes.clone()),
+            identity(),
+            None,
+            None,
+        )
+        .await;
+        let IndexOutcome::Built(unconverted) = unconverted else {
+            panic!("a Dolby Vision stream indexes without converting: {unconverted:?}");
+        };
+
+        let converted = index_stream(
+            std::io::Cursor::new(dv_bytes),
+            identity(),
+            None,
+            Some(converting_record()),
+        )
+        .await;
+        let IndexOutcome::Built(converted) = converted else {
+            panic!("the converting pass must build: {converted:?}");
+        };
+
+        assert_eq!(
+            converted.rows.len(),
+            unconverted.rows.len(),
+            "the conversion rewrites metadata, it does not add or drop frames"
+        );
+        for (with, without) in converted.rows.iter().zip(unconverted.rows.iter()) {
+            assert_eq!(with.dts, without.dts, "no timestamp is reconstructed");
+            assert_eq!(with.duration, without.duration);
+            assert!(
+                with.video_bytes < without.video_bytes,
+                "every fragment shrinks by what the 8.1 RPUs no longer carry"
+            );
+        }
+    }
+
+    /// A converting pass over a stream with no RPUs in it refuses.
+    ///
+    /// The row said Profile 7 and the stream carries nothing to convert, so
+    /// one of the two is lying. Indexing it under the converted identity would
+    /// record that lie in the keyspace, and every session that looked the
+    /// identity up would be served segments cut for a stream that was never
+    /// converted.
+    #[tokio::test]
+    async fn a_converting_pass_over_a_stream_with_no_rpus_is_not_an_index() {
+        testfixtures::require_ffmpeg();
+        let bytes = index_pipe_bytes("closed-gop");
+        let outcome = index_stream(
+            std::io::Cursor::new(bytes),
+            identity(),
+            None,
+            Some(converting_record()),
+        )
+        .await;
+        let IndexOutcome::Unsupported(reason) = outcome else {
+            panic!("a stream with no RPUs cannot be indexed as converted: {outcome:?}");
+        };
+        assert!(reason.contains("no RPUs to convert"), "{reason}");
+    }
+
     /// The index pipe over a real fixture, read the way the daemon reads it.
     async fn index_fixture(kind: &str) -> IndexOutcome {
         let bytes = index_pipe_bytes(kind);
-        index_stream(std::io::Cursor::new(bytes), identity(), None).await
+        index_stream(std::io::Cursor::new(bytes), identity(), None, None).await
     }
 
     /// The video-only pipe's own output, cached beside the fixture.
@@ -781,7 +1142,7 @@ mod tests {
         // duplicate SPS array. The ordinary fixture pipe has already removed
         // in-band sets, so there is no hidden PPS from which to "succeed".
         replace_hvcc_array_type(&mut bytes, 34, 33);
-        let outcome = index_stream(std::io::Cursor::new(bytes), identity(), None).await;
+        let outcome = index_stream(std::io::Cursor::new(bytes), identity(), None, None).await;
         let IndexOutcome::Unsupported(reason) = outcome else {
             panic!("an incomplete emitted hvcC must not be indexed: {outcome:?}");
         };
@@ -795,7 +1156,7 @@ mod tests {
         // per-IDR parameter-set variation. The check still has to work.
         let bytes = index_pipe_bytes("closed-gop");
         let IndexOutcome::Built(index) =
-            index_stream(std::io::Cursor::new(bytes), identity(), None).await
+            index_stream(std::io::Cursor::new(bytes), identity(), None, None).await
         else {
             panic!("must index");
         };
@@ -807,10 +1168,12 @@ mod tests {
         // makes.
         use plurx_core::fmp4::PromotionInputs;
         let canonical = PromotionInputs {
+            dolby_vision: None,
             parameter_sets: vec![vec![0x40, 0x01, 0x0c]],
             hdr10_sei: Vec::new(),
         };
         let differing = PromotionInputs {
+            dolby_vision: None,
             parameter_sets: vec![vec![0x40, 0x01, 0x0d]],
             hdr10_sei: Vec::new(),
         };
@@ -880,6 +1243,7 @@ mod tests {
             std::io::Cursor::new(bytes[..half].to_vec()),
             identity(),
             None,
+            None,
         )
         .await;
         assert!(
@@ -892,7 +1256,7 @@ mod tests {
     async fn a_pipe_that_stops_short_of_the_probed_duration_is_truncated() {
         let bytes = index_pipe_bytes("closed-gop");
         let IndexOutcome::Built(full) =
-            index_stream(std::io::Cursor::new(bytes.clone()), identity(), None).await
+            index_stream(std::io::Cursor::new(bytes.clone()), identity(), None, None).await
         else {
             panic!("the full pipe indexes");
         };
@@ -903,6 +1267,7 @@ mod tests {
             std::io::Cursor::new(bytes),
             identity(),
             Some(60_000 + 12_000),
+            None,
         )
         .await;
         assert!(
@@ -1013,6 +1378,7 @@ mod equality_tests {
             let IndexOutcome::Built(index) = index_stream(
                 std::io::Cursor::new(super::tests::index_pipe_bytes(kind)),
                 SourceIdentity::new(1, 1, "fingerprint"),
+                None,
                 None,
             )
             .await

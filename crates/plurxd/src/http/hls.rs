@@ -151,6 +151,21 @@ pub struct StartResponse {
     /// the store mid-request: the client keeps whatever it had.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered_dynamic_range: Option<String>,
+    /// The Dolby Vision profile *this session's* bytes carry, when it is
+    /// known. Absent for a transcode, a strip, a source that never had Dolby
+    /// Vision — and for a pre-M2 row whose label names no profile, which is
+    /// why absence means "no answer" rather than "not Dolby Vision".
+    /// `delivered_dynamic_range` beside it is the field that answers that.
+    ///
+    /// The one thing the field above cannot say. A Profile 7 title preserved
+    /// for a device that enumerates 7 and the same title converted to 8.1 for
+    /// a device that does not are both `"dolby_vision"`, and the badge that
+    /// spells both `DV P7` is telling one of them something untrue about its
+    /// own file (MEDIA-BADGES-PLAN §2.3). It overrides the decision's answer
+    /// for the same reason the range does: a burn or a forced rung produces a
+    /// session the decision never promised.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_dolby_vision_profile: Option<u8>,
     /// Optional behavior-neutral v1 control capability. It is persisted with
     /// the idempotent create result so a setting change cannot mutate the wire
     /// contract of an already-open session.
@@ -625,6 +640,12 @@ impl CreateSession {
             SessionKind::Copy {
                 aac: self.aac == Some(true),
                 preserve_dolby_vision: self.preserve_dolby_vision == Some(true),
+                // Never taken from the body. A client cannot ask to be handed
+                // a conversion — whether one happens is decided from its caps
+                // and the node's, and create overwrites this from the plan it
+                // re-derives (`review_client_plan`). A wire field here would
+                // be a claim the client has no way to be right about.
+                convert_dolby_vision: false,
             }
         } else {
             SessionKind::Transcode { height }
@@ -738,6 +759,15 @@ pub struct CreateOverrides {
 pub(crate) struct PlanReview {
     /// The value create must use, whatever the body asked for.
     pub preserve_dolby_vision: bool,
+    /// Whether the copy converts Profile 7 to 8.1 on the way through.
+    ///
+    /// Not clamped against anything the client asked for, because there is
+    /// nothing to clamp: the conversion is not a wire field and a client has
+    /// no way to be right or wrong about it. It follows
+    /// `preserve_dolby_vision` instead — a client that declines Dolby Vision
+    /// declines the converted kind too, and there is no such thing as
+    /// converting RPUs a stripping filter has already removed.
+    pub convert_dolby_vision: bool,
     /// Likewise for the HDR10 re-encode request. Still only a *request*:
     /// `TranscodeManager::hdr10_grade_for` refuses it for any source, rung, or
     /// build that did not prove the chain, and that refusal is unchanged.
@@ -750,6 +780,37 @@ pub(crate) struct PlanReview {
     /// refusal (Paul, 2026-08-29: "I don't see a reason for it to prevent
     /// functionality").
     pub mismatched: bool,
+}
+
+/// Put the reconciled plan onto the request that will actually be built, and
+/// hand back the notes that explain it.
+///
+/// Separate from `create` because this is the only place the server's own
+/// derivation reaches the session, and every field it copies has a different
+/// way of going wrong if it does not:
+///
+/// - `preserve_dolby_vision` reverts to the client's echo, which is the
+///   pre-caps-v2 bug this milestone exists to close;
+/// - `convert_dolby_vision` is never set at all — `into_request` leaves it
+///   false, because a client has no way to ask for a conversion — so the whole
+///   feature silently does nothing on every session;
+/// - `hdr10` reverts to a claim the caps did not support.
+fn apply_plan_review(
+    request: &mut crate::transcode::SessionRequest,
+    review: PlanReview,
+) -> Vec<String> {
+    if let crate::transcode::SessionKind::Copy {
+        preserve_dolby_vision,
+        convert_dolby_vision,
+        ..
+    } = &mut request.kind
+    {
+        *preserve_dolby_vision = review.preserve_dolby_vision;
+        // The only place this is ever set. It is derived, never echoed.
+        *convert_dolby_vision = review.convert_dolby_vision;
+    }
+    request.hdr10 = review.hdr10;
+    review.notes
 }
 
 /// Re-derive the plan from the capabilities the client sent, and reconcile it
@@ -807,6 +868,7 @@ pub(crate) fn review_client_plan(
     let derived = decide_forced(file, &profile, force, node);
     let mut review = PlanReview {
         preserve_dolby_vision: derived.preserve_dolby_vision,
+        convert_dolby_vision: derived.convert_dolby_vision,
         hdr10: asked_hdr10 && profile.supports_hdr10_transcode,
         notes: Vec::new(),
         mismatched: false,
@@ -868,6 +930,11 @@ pub(crate) fn review_client_plan(
             *derived = false;
         }
     }
+    // Whatever the clamps and the overrides settled, the conversion follows
+    // the preservation. A `compatible_hdr_base` retry that declined Dolby
+    // Vision, or a client that never asked for it, must not be handed a
+    // converted stream by a flag nobody looked at.
+    review.convert_dolby_vision &= review.preserve_dolby_vision;
     if review.mismatched {
         plan_derivation::count_mismatched();
     }
@@ -948,20 +1015,44 @@ fn session_delivered_dynamic_range(
     kind: &crate::transcode::SessionKind,
     grade: plurx_core::transcode::OutputGrade,
 ) -> Option<&'static str> {
-    use crate::transcode::SessionKind;
     let file = source?;
-    // One helper for both wire fields, so the decision and the session can
-    // never disagree about the same delivery.
-    let (method, preserve) = match kind {
-        SessionKind::Copy {
-            preserve_dolby_vision,
-            ..
-        } => (PlaybackMethod::Remux, *preserve_dolby_vision),
-        SessionKind::Transcode { .. } => (PlaybackMethod::Transcode, false),
-    };
+    let (method, preserve, _) = session_delivery_shape(kind);
     Some(plurx_core::playback::delivered_dynamic_range(
         file, method, preserve, grade,
     ))
+}
+
+/// The Dolby Vision profile this session's bytes carry, read off the session
+/// it actually built — same rule, same reason, as the range beside it.
+fn session_delivered_dolby_vision_profile(
+    source: Option<&MediaFile>,
+    kind: &crate::transcode::SessionKind,
+) -> Option<u8> {
+    let file = source?;
+    let (method, preserve, convert) = session_delivery_shape(kind);
+    plurx_core::playback::delivered_dolby_vision_profile(file, method, preserve, convert)
+}
+
+/// What a session kind means to the two badge helpers.
+///
+/// One reading for both, so the range and the profile can never disagree
+/// about the same delivery — a session badged `dolby_vision` with no profile,
+/// or a profile on a stream whose range says HDR10, is a worse answer than
+/// either field alone.
+fn session_delivery_shape(kind: &crate::transcode::SessionKind) -> (PlaybackMethod, bool, bool) {
+    use crate::transcode::SessionKind;
+    match kind {
+        SessionKind::Copy {
+            preserve_dolby_vision,
+            convert_dolby_vision,
+            ..
+        } => (
+            PlaybackMethod::Remux,
+            *preserve_dolby_vision,
+            *convert_dolby_vision,
+        ),
+        SessionKind::Transcode { .. } => (PlaybackMethod::Transcode, false, false),
+    }
 }
 
 /// POST /api/v1/files/:id/hls/sessions — create a stream, or recover the one
@@ -1159,17 +1250,7 @@ pub async fn create(
     // apply to the request that will actually be built.
     let fingerprint = request.durable_intent_fingerprint(user.id);
     let plan_notes = match review {
-        Some(review) => {
-            if let crate::transcode::SessionKind::Copy {
-                preserve_dolby_vision,
-                ..
-            } = &mut request.kind
-            {
-                *preserve_dolby_vision = review.preserve_dolby_vision;
-            }
-            request.hdr10 = review.hdr10;
-            review.notes
-        }
+        Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
     let now_ms = unix_ms();
@@ -1753,6 +1834,10 @@ pub async fn create(
         ladder: crate::transcode::advertised_ladder(source_height, ladder_ceiling),
         prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
         delivered_dynamic_range: delivered.map(str::to_owned),
+        delivered_dolby_vision_profile: session_delivered_dolby_vision_profile(
+            source.as_ref(),
+            &info.kind,
+        ),
         control: advertise_control.then(|| {
             crate::playback_control::ControlBootstrap::new(
                 &info.session_id,
@@ -8562,6 +8647,7 @@ mod tests {
             ladder: vec![],
             prior_kbps: None,
             delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
             control: crate::playback_control::ControlBootstrap::new(
                 &session_id,
                 &generation,
@@ -9178,6 +9264,7 @@ mod tests {
             ladder: vec![],
             prior_kbps: None,
             delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
             control: crate::playback_control::ControlBootstrap::new(
                 &session_id,
                 &generation,
@@ -9407,6 +9494,7 @@ mod tests {
                 ladder: vec![],
                 prior_kbps: None,
                 delivered_dynamic_range: Some("sdr".to_owned()),
+                delivered_dolby_vision_profile: None,
                 control: crate::playback_control::ControlBootstrap::new(
                     &session_id,
                     &generation,
@@ -11735,6 +11823,275 @@ mod tests {
         assert!(review.notes.is_empty(), "{:?}", review.notes);
     }
 
+    /// The session's own answer for both badge fields, for every kind of
+    /// session that can carry Dolby Vision.
+    ///
+    /// Read off the session that was built rather than the decision that
+    /// suggested one, because a burn or a forced rung produces a delivery
+    /// `/decision` never promised. The two fields are asserted together
+    /// because they are read together: a session badged `dolby_vision` whose
+    /// profile is absent, or a profile on a session whose range says HDR10,
+    /// is a worse answer than either field alone would be.
+    #[test]
+    fn a_sessions_badge_names_the_range_and_the_profile_it_actually_carries() {
+        use crate::transcode::SessionKind;
+        use plurx_core::transcode::OutputGrade;
+
+        let mut p7 = dolby_vision_p8_file();
+        p7.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".into());
+        p7.dolby_vision.profile = Some(7);
+        p7.dolby_vision.level = Some(6);
+        p7.dolby_vision.bl_compat_id = Some(1);
+
+        let copy = |preserve: bool, convert: bool| SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: preserve,
+            convert_dolby_vision: convert,
+        };
+        let badge = |kind: &SessionKind| {
+            (
+                session_delivered_dynamic_range(Some(&p7), kind, OutputGrade::Sdr),
+                session_delivered_dolby_vision_profile(Some(&p7), kind),
+            )
+        };
+
+        assert_eq!(
+            badge(&copy(true, true)),
+            (Some("dolby_vision"), Some(8)),
+            "a converting session delivers Dolby Vision, and the profile is the \
+             one the conversion made — not the 7 the source row says"
+        );
+        assert_eq!(
+            badge(&copy(true, false)),
+            (Some("dolby_vision"), Some(7)),
+            "the same range as the converting answer, which is why the profile \
+             has to be on the wire at all"
+        );
+        assert_eq!(
+            badge(&copy(false, false)),
+            (Some("hdr10"), None),
+            "a stripped stream carries no Dolby Vision to name"
+        );
+        assert_eq!(
+            badge(&SessionKind::Transcode { height: 1080 }),
+            (Some("sdr"), None),
+            "no plurx encode rung produces Dolby Vision"
+        );
+
+        // A source the store could not load says nothing rather than guessing.
+        assert_eq!(
+            session_delivered_dolby_vision_profile(None, &copy(true, true)),
+            None
+        );
+    }
+
+    /// A create body with nothing set, to be spread over.
+    fn bare_create() -> CreateSession {
+        CreateSession {
+            playback_id: String::new(),
+            request_id: None,
+            previous_session_id: None,
+            reopen_reason: None,
+            height: None,
+            quality_auto: None,
+            subtitle_burn: None,
+            subtitle_burn_sdr: None,
+            native_subtitles: None,
+            subtitle: None,
+            start: None,
+            audio: None,
+            copy: None,
+            aac: None,
+            preserve_dolby_vision: None,
+            hdr10: None,
+            caps: None,
+            overrides: None,
+            audio_offset_ms: None,
+            presentation: None,
+            block_budget_secs: None,
+        }
+    }
+
+    /// The server's re-derivation reaches the session, and the body never
+    /// does.
+    ///
+    /// `review_client_plan` is well covered; this is the wire between it and
+    /// the request that gets built, and each field it carries fails
+    /// differently if the wire is cut. `preserve_dolby_vision` reverts to the
+    /// client's own echo — the pre-caps-v2 bug where a blanket `dv=1` got
+    /// Safari a preserved Profile 7 it could not decode. `hdr10` reverts to a
+    /// claim the caps did not support. And `convert_dolby_vision` is never set
+    /// at all: `into_request` leaves it false because a client has no way to
+    /// ask for a conversion, so this assignment is the *only* one, and without
+    /// it the whole milestone is dead code that ships and does nothing.
+    #[test]
+    fn the_reconciled_plan_reaches_the_request_and_the_body_cannot() {
+        let body = CreateSession {
+            playback_id: "p".into(),
+            copy: Some(true),
+            // The client asks for the opposite of everything the review says.
+            preserve_dolby_vision: Some(false),
+            hdr10: Some(false),
+            ..bare_create()
+        };
+        let mut request = body.into_request(1, 0);
+        let asked = request.kind;
+        assert!(
+            matches!(
+                asked,
+                crate::transcode::SessionKind::Copy {
+                    convert_dolby_vision: false,
+                    ..
+                }
+            ),
+            "a client cannot ask to be handed a conversion: {asked:?}"
+        );
+
+        // …including a client that asks for everything adjacent to one. The
+        // conversion is not a wire field, so no combination of body values can
+        // produce it — which is what makes the assignment below the only one.
+        let eager = CreateSession {
+            playback_id: "p".into(),
+            copy: Some(true),
+            preserve_dolby_vision: Some(true),
+            hdr10: Some(true),
+            ..bare_create()
+        }
+        .into_request(1, 0);
+        assert!(
+            matches!(
+                eager.kind,
+                crate::transcode::SessionKind::Copy {
+                    convert_dolby_vision: false,
+                    preserve_dolby_vision: true,
+                    ..
+                }
+            ),
+            "asking to preserve is not asking to convert: {:?}",
+            eager.kind
+        );
+
+        let notes = apply_plan_review(
+            &mut request,
+            PlanReview {
+                preserve_dolby_vision: true,
+                convert_dolby_vision: true,
+                hdr10: true,
+                notes: vec!["a note".to_owned()],
+                mismatched: false,
+            },
+        );
+        let crate::transcode::SessionKind::Copy {
+            preserve_dolby_vision,
+            convert_dolby_vision,
+            ..
+        } = request.kind
+        else {
+            panic!("a copy request stays a copy request");
+        };
+        assert!(preserve_dolby_vision, "the server's answer, not the body's");
+        assert!(
+            convert_dolby_vision,
+            "the only assignment there is — without it the conversion never runs"
+        );
+        assert!(request.hdr10, "and the same for the HDR10 request");
+        assert_eq!(notes, vec!["a note".to_owned()]);
+
+        // A transcode request has no Dolby Vision fields to carry, and must
+        // still take the notes and the HDR10 answer.
+        let mut transcode = CreateSession {
+            playback_id: "p".into(),
+            height: Some(1080),
+            ..bare_create()
+        }
+        .into_request(1, 1080);
+        apply_plan_review(
+            &mut transcode,
+            PlanReview {
+                preserve_dolby_vision: true,
+                convert_dolby_vision: true,
+                hdr10: true,
+                notes: Vec::new(),
+                mismatched: false,
+            },
+        );
+        assert!(matches!(
+            transcode.kind,
+            crate::transcode::SessionKind::Transcode { .. }
+        ));
+        assert!(transcode.hdr10);
+    }
+
+    /// A Profile 7 title reaches a Profile-8 client as a conversion, and the
+    /// conversion follows the preservation wherever that goes.
+    ///
+    /// The two flags are set together and clamped together. `convert` is not a
+    /// wire field — a client has no way to be right or wrong about it — so it
+    /// is never compared against anything the body asked for; it follows
+    /// `preserve_dolby_vision`, and the `compatible_hdr_base` retry is the
+    /// case that makes it matter. A client that decoded Dolby Vision, failed
+    /// on this title, and asked for the plain HDR10 base must not be handed a
+    /// *converted* Dolby Vision stream instead: that is the same stream it
+    /// just failed on, wearing a different profile number.
+    #[test]
+    fn a_declined_dolby_vision_plan_declines_the_converted_kind_too() {
+        let mut file = dolby_vision_p8_file();
+        file.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".into());
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(6);
+        file.dolby_vision.bl_compat_id = Some(1);
+
+        // The ordinary answer for a client that takes 8 and not 7.
+        let converted = review_client_plan(
+            &dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            true,
+            false,
+            NOW_MS,
+        );
+        assert!(converted.convert_dolby_vision);
+        assert!(
+            converted.preserve_dolby_vision,
+            "there is nothing to convert in a stream the filter removed"
+        );
+
+        // The client declines Dolby Vision by not asking for it. The
+        // conversion goes with it.
+        let declined = review_client_plan(
+            &dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            false,
+            false,
+            NOW_MS,
+        );
+        assert!(!declined.preserve_dolby_vision);
+        assert!(
+            !declined.convert_dolby_vision,
+            "a client that declined Dolby Vision declined the converted kind"
+        );
+
+        // And the same through the named override, which is the path Apple's
+        // retry actually takes.
+        let overridden = review_client_plan(
+            &dolby_vision_client(),
+            Some(&CreateOverrides {
+                compatible_hdr_base: Some(true),
+                ..Default::default()
+            }),
+            &file,
+            &capable_node(),
+            true,
+            false,
+            NOW_MS,
+        );
+        assert!(!overridden.preserve_dolby_vision);
+        assert!(!overridden.convert_dolby_vision);
+    }
+
     /// Apple's `forceCompatibleHDRBase` retry, and why it needs a name.
     ///
     /// The client decoded the Dolby Vision stream, failed on this title, and
@@ -12235,6 +12592,7 @@ mod tests {
     fn a_session_reports_the_dynamic_range_of_the_stream_it_just_built() {
         let file = hls_file(vec![]);
         let copy = |preserve: bool| crate::transcode::SessionKind::Copy {
+            convert_dolby_vision: false,
             aac: false,
             preserve_dolby_vision: preserve,
         };

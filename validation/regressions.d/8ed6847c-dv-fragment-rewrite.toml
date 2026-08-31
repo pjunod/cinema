@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8ed6847c"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The subject reads as corrective because the commit's whole subject is a fixup chain — it corrects the sizes that described a sample after a rewrite changes its length. It is new capability rather than a repair of shipped behaviour: nothing called `rewrite_video_samples` before this commit. Mapped to the playback pipeline because that is the point owning `fmp4.rs`, and covered by the rust gate, which runs the three tests that hold it: a real ffmpeg fragment shortened and read back sample by sample, a no-op rewrite that must change nothing, and a refusal partway through that must leave the fragment untouched."

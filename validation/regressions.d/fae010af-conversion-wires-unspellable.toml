@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["fae010af"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Corrective, and against an unmerged branch rather than a release: the previous round's fixes were covered as extracted functions and not as the wires they were extracted from, so both call sites of served_copy_options and the index pass's convert flag could be reverted verbatim with the suite green. Two of them are now unspellable rather than merely tested — start_copy_with_audio_offset shadows its options with the served value, and index_stream takes one parameter where it took two — and the rest are tests, including the four guards in the atomic fragment rewrite whose absence would panic out of a function contracted to return Result. Mapped to the playback pipeline, which owns the copy path, the fragment index and the segmenter, and covered by the rust gate, which runs every one of those tests."

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["33226604"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Corrective because it is: the create response badged a converting title's first watch as Dolby Vision over the HDR10 base the legacy single-ffmpeg copy actually serves, since the returned SessionKind was built from the decision's options rather than the served ones. Nothing shipped with that — the whole conversion is unmerged and this repairs a branch — and the same commit makes rewrite_video_samples atomic through its apply phase and adds the tests that kill nine wires the fourth adversarial review cut with the suite still green. Mapped to the playback pipeline, which owns the copy path, the fragment index and the segmenter, and covered by the rust gate, which runs every one of those tests."

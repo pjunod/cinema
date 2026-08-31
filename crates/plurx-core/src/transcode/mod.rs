@@ -274,7 +274,31 @@ pub fn hevc_copy_bsf_for_client(
     have_dovi_bsf: bool,
     preserve_dolby_vision: bool,
 ) -> String {
-    if hdr == Some("dolby_vision") && preserve_dolby_vision {
+    hevc_copy_bsf_for_copy(hdr, have_dovi_bsf, preserve_dolby_vision, false)
+}
+
+/// The same choice, told whether this copy also converts Profile 7 to 8.1.
+///
+/// A converting copy drops NAL type 63 — the enhancement layer, which Profile
+/// 8.1 does not have and which no consumer decoder was ever going to use —
+/// while keeping type 62, because the RPUs are what plurx rewrites after the
+/// muxer. Every other Dolby Vision branch here keeps both or removes both,
+/// since every other path is preserving the stream or stripping it; the
+/// conversion is the only caller that wants exactly one.
+///
+/// Leaving the enhancement layer in would ship orphan type-63 units behind
+/// RPUs that no longer reference them: a stream declaring single-layer
+/// Profile 8.1 while carrying a second layer's data, which is bytes on the
+/// wire that nothing will ever read.
+pub fn hevc_copy_bsf_for_copy(
+    hdr: Option<&str>,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+    convert_dolby_vision: bool,
+) -> String {
+    if hdr == Some("dolby_vision") && convert_dolby_vision {
+        "filter_units=remove_types=32-34|63".to_owned()
+    } else if hdr == Some("dolby_vision") && preserve_dolby_vision {
         "filter_units=remove_types=32-34".to_owned()
     } else if hdr == Some("dolby_vision") {
         if have_dovi_bsf {
@@ -1369,21 +1393,32 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
             filters.push("extract_extradata");
             if source.hdr.as_deref() == Some("dolby_vision") && !options.preserve_dolby_vision {
                 filters.push("filter_units=remove_types=62-63");
+            } else if source.hdr.as_deref() == Some("dolby_vision") && options.dv_convert {
+                // The enhancement layer goes here too. This branch rebuilds
+                // the hvcC for a source whose parameter sets live only in
+                // band, and it is reached by a Profile 7 title with a 23-byte
+                // hvcC like any other — leaving type 63 in would ship orphan
+                // enhancement-layer units behind RPUs that no longer
+                // reference them, while the configuration record plurx writes
+                // says `el_present = false`. Type 62 stays: those are what the
+                // rewrite after the muxer converts.
+                filters.push("filter_units=remove_types=63");
             }
             args.push("-bsf:v".into());
             args.push(filters.join(","));
         } else if !promote_profile5_parameter_sets {
             args.push("-bsf:v".into());
-            args.push(hevc_copy_bsf_for_client(
+            args.push(hevc_copy_bsf_for_copy(
                 source.hdr.as_deref(),
                 options.have_dovi_bsf,
                 options.preserve_dolby_vision,
+                options.dv_convert,
             ));
         }
     }
-    // The conversion is not an ffmpeg argument — it happens between two
-    // ffmpegs, in `transcode::dvconvert` — but it has to appear here, and this
-    // is the honest place for it.
+    // The conversion is not an ffmpeg argument — it happens after this child,
+    // in `transcode::dvconvert`, on the fragments the muxer wrote — but it has
+    // to appear here, and this is the honest place for it.
     //
     // `copy_video_args` is what the fragment index fingerprints. A converted
     // stream has different bytes and therefore different segment boundaries,
@@ -1417,8 +1452,8 @@ pub const DV_CONVERT_MARKER: &str = "--plurx-dv-convert=p7-to-p81";
 ///
 /// The argv is two things at once: the recipe the fragment index is keyed by,
 /// and the command line ffmpeg receives. Where those disagree — a stage plurx
-/// runs itself, between ffmpegs — the recipe carries a token and the command
-/// line does not.
+/// runs itself, on the far side of the muxer — the recipe carries a token and
+/// the command line does not.
 pub fn strip_plurx_markers(args: &[String]) -> Vec<String> {
     args.iter()
         .filter(|arg| !arg.starts_with("--plurx-"))
@@ -3850,8 +3885,14 @@ mod index_pipe_tests {
                 "…and so must their NAL type: {rendered}"
             );
             assert!(
-                rendered.contains("filter_units=remove_types=32-34"),
-                "the ordinary parameter-set filtering still applies: {rendered}"
+                rendered.contains("filter_units=remove_types=32-34|63"),
+                "the parameter-set filtering still applies, and the enhancement \
+                 layer goes with it: {rendered}"
+            );
+            assert!(
+                !rendered.contains("62"),
+                "type 62 is the RPU — removing it would leave nothing for the \
+                 rewrite after the muxer to convert: {rendered}"
             );
             // A compatible base keeps the `hvc1` sample entry — the Profile
             // 8.1 the conversion produces is an enhancement of HDR10, and the
@@ -3868,6 +3909,47 @@ mod index_pipe_tests {
         let off = CopyVideoOptions::new(true, false).with_dolby_vision_conversion(false);
         assert!(!off.preserves_dolby_vision());
         assert!(!off.converts_dolby_vision());
+    }
+
+    /// The parameter-set promotion branch drops the enhancement layer too.
+    ///
+    /// That branch rebuilds the hvcC for a source whose VPS/SPS/PPS live only
+    /// in band, and a Profile 7 title with a 23-byte hvcC reaches it like any
+    /// other. It was the one path where a converting copy rendered an argv
+    /// byte-identical to a preserving one — so the enhancement layer survived
+    /// into a stream whose configuration record says it has none, and the two
+    /// pipelines were told apart only by the marker.
+    #[test]
+    fn a_converting_copy_drops_the_enhancement_layer_on_the_promotion_branch_too() {
+        let mut file = hevc_dv();
+        file.hdr_format =
+            Some("Dolby Vision, Version 1.0, dvhe.07.06, BL+EL+RPU, HDR10-compatible".into());
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(6);
+        file.dolby_vision.bl_compat_id = Some(1);
+
+        let convert = CopyVideoOptions::new(true, false)
+            .with_dolby_vision_conversion(true)
+            .with_parameter_set_promotion(true);
+        let preserve = CopyVideoOptions::new(true, true).with_parameter_set_promotion(true);
+
+        let converting = copy_video_args(&file, convert).join(" ");
+        assert!(
+            converting.contains("filter_units=remove_types=63"),
+            "the enhancement layer must go: {converting}"
+        );
+        assert!(
+            !converting.contains("62"),
+            "the RPUs must stay — they are what the rewrite converts: {converting}"
+        );
+        assert!(converting.contains("extract_extradata"), "{converting}");
+
+        // …and the two pipelines no longer render the same command line, so
+        // the marker is no longer the only thing separating their indexes.
+        assert_ne!(
+            strip_plurx_markers(&copy_video_args(&file, convert)),
+            copy_video_args(&file, preserve),
+        );
     }
 
     /// A converted stream gets its own fragment index.
