@@ -37,6 +37,14 @@ impl From<&mut Row<'_>> for AnalysisSettingRow {
     }
 }
 
+struct SchemaCountRow(i64);
+
+impl From<&mut Row<'_>> for SchemaCountRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("count"))
+    }
+}
+
 async fn configured_max_attempts(store: &HiqliteAuthStore) -> Result<i64, StoreError> {
     let raw = store
         .client()
@@ -603,7 +611,48 @@ pub(super) fn analysis_component_migration_statements(
     migration_statements(ANALYSIS_COMPONENT_STATEMENTS)
 }
 
+/// Whether the complete v22 analysis shape is already installed.
+///
+/// The bootstrap schema transaction lands before `cluster_meta` is seeded. A
+/// process crash in that narrow gap, or an acknowledged bootstrap whose reply
+/// is lost, must therefore be safely retryable even though v22 contains table
+/// rebuilds and `ALTER TABLE ADD COLUMN` statements that are not independently
+/// idempotent. The same predicate lets a schema coordinator settle a v21
+/// marker after observing that another coordinator already installed v22.
+pub(super) const ANALYSIS_COMPONENT_SCHEMA_CURRENT_SQL: &str = r#"
+SELECT
+    (SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+      WHERE name IN ('priority','trigger','target_node_id'))
+  + (SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+      WHERE (name = 'cache_key' AND pk = 1)
+         OR (name = 'target_node_id' AND pk = 2))
+  + (SELECT COUNT(*) FROM pragma_table_info('timeline_annotation_sets')
+      WHERE name = 'publication_priority')
+  + (SELECT COUNT(*) FROM pragma_table_info('analysis_requests')
+      WHERE name IN ('pipeline_version','requested_generation',
+                     'expected_predecessor_generation','priority','trigger',
+                     'cancel_requested'))
+  + (SELECT COUNT(*) FROM sqlite_master
+      WHERE type = 'table' AND name IN
+        ('analysis_attempts','cluster_fragment_index_heads',
+         'analysis_lifecycle_counters')) AS count
+"#;
+
+pub(super) async fn analysis_component_schema_is_current(
+    client: &hiqlite::Client,
+) -> Result<bool, StoreError> {
+    validate_sql(ANALYSIS_COMPONENT_SCHEMA_CURRENT_SQL)?;
+    let rows = client
+        .query_consistent_map::<SchemaCountRow, _>(ANALYSIS_COMPONENT_SCHEMA_CURRENT_SQL, params!())
+        .await
+        .map_err(database_error)?;
+    Ok(rows.len() == 1 && rows[0].0 == 15)
+}
+
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
+    if analysis_component_schema_is_current(client).await? {
+        return Ok(());
+    }
     let mut statements = fragment_index_schema_migration_statements()?;
     statements.extend(analysis_request_schema_migration_statements()?);
     statements.extend(analysis_history_index_migration_statements()?);

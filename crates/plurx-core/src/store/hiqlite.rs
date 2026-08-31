@@ -1288,6 +1288,16 @@ impl HiqliteAuthStore {
         Ok(store)
     }
 
+    async fn analysis_component_schema_is_current(&self) -> Result<bool, StoreError> {
+        let sql = super::hiqlite_fragment_index_cluster::ANALYSIS_COMPONENT_SCHEMA_CURRENT_SQL;
+        validate_sql(sql)?;
+        let rows = self
+            .client()
+            .query_consistent_map::<CountRow, _>(sql, params!())
+            .await?;
+        Ok(rows.len() == 1 && rows[0].count == 15)
+    }
+
     async fn migrate_schema(&self) -> Result<(), StoreError> {
         loop {
             let sql = "SELECT schema_version, protocol_min, protocol_max \
@@ -1735,8 +1745,12 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
-                    let mut statements = super::hiqlite_fragment_index_cluster::
-                        analysis_component_migration_statements()?;
+                    let mut statements = if self.analysis_component_schema_is_current().await? {
+                        Vec::new()
+                    } else {
+                        super::hiqlite_fragment_index_cluster::
+                            analysis_component_migration_statements()?
+                    };
                     statements.push((
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
                          WHERE singleton = 1 AND schema_version = $3"

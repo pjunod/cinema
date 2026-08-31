@@ -123,6 +123,43 @@ const MEDIA_SESSIONS_FIXTURE_EXPIRY_INDEX: &str = "CREATE INDEX media_sessions_e
 const MEDIA_SESSIONS_FIXTURE_RETENTION_INDEX: &str = "CREATE INDEX media_sessions_retention
         ON media_sessions(state, updated_at_ms, incarnation_id)";
 
+/// Exact v12 fragment-job shape used by the stepwise replicated migration
+/// fixture. Current v22 uses a composite key and three scheduling columns, so
+/// merely lowering `cluster_meta` would manufacture a schema that never
+/// shipped and make the v22 migration replay its own column additions.
+#[cfg(feature = "hiqlite-contract-tests")]
+const FRAGMENT_INDEX_JOBS_V12_FIXTURE_SCHEMA: &str = "CREATE TABLE cluster_fragment_index_jobs (
+        cache_key         TEXT PRIMARY KEY,
+        file_id           INTEGER NOT NULL,
+        source_size       INTEGER NOT NULL,
+        source_mtime      INTEGER NOT NULL,
+        source_sha256     TEXT NOT NULL,
+        pipeline_sha256   TEXT NOT NULL,
+        state             TEXT NOT NULL CHECK (
+            state IN ('queued', 'running', 'ready', 'failed', 'cancelled')),
+        owner_node_id     TEXT,
+        fence             INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
+        lease_expires_ms  INTEGER,
+        attempts          INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        not_before_ms     INTEGER NOT NULL,
+        last_error_code   TEXT,
+        created_at_ms     INTEGER NOT NULL,
+        updated_at_ms     INTEGER NOT NULL
+    ) STRICT";
+#[cfg(feature = "hiqlite-contract-tests")]
+const FRAGMENT_INDEX_JOBS_V12_DUE_INDEX: &str = "CREATE INDEX cluster_fragment_index_jobs_due
+        ON cluster_fragment_index_jobs(state, not_before_ms, created_at_ms, cache_key)";
+#[cfg(feature = "hiqlite-contract-tests")]
+const FRAGMENT_INDEX_JOBS_V12_CANCEL_TRIGGER: &str =
+    "CREATE TRIGGER cluster_fragment_indexes_cancel_source BEFORE DELETE ON files
+    BEGIN
+        DELETE FROM cluster_fragment_index_sources WHERE file_id = OLD.id;
+        UPDATE cluster_fragment_index_jobs
+           SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+               last_error_code = 'source_deleted'
+         WHERE file_id = OLD.id AND state IN ('queued', 'running');
+    END";
+
 #[cfg(feature = "hiqlite-contract-tests")]
 static HIQLITE_CASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -7519,6 +7556,39 @@ async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
                 hiqlite::params!(),
             ),
             (
+                "DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS cluster_fragment_index_lifecycle_counters",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_attempts_recent",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE IF EXISTS analysis_attempts", hiqlite::params!()),
+            (
+                "DROP TABLE IF EXISTS cluster_fragment_index_heads",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE IF EXISTS analysis_lifecycle_counters",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS cluster_fragment_indexes_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS cluster_fragment_index_jobs_due",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cluster_fragment_index_jobs", hiqlite::params!()),
+            (FRAGMENT_INDEX_JOBS_V12_FIXTURE_SCHEMA, hiqlite::params!()),
+            (FRAGMENT_INDEX_JOBS_V12_DUE_INDEX, hiqlite::params!()),
+            (FRAGMENT_INDEX_JOBS_V12_CANCEL_TRIGGER, hiqlite::params!()),
+            (
                 "DROP TRIGGER analysis_requests_bound_terminal_history",
                 hiqlite::params!(),
             ),
@@ -7537,6 +7607,8 @@ async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
             ("DROP INDEX analysis_requests_status", hiqlite::params!()),
             ("DROP INDEX analysis_requests_due", hiqlite::params!()),
             ("DROP TABLE analysis_requests", hiqlite::params!()),
+            ("DROP TABLE timeline_manual_overrides", hiqlite::params!()),
+            ("DROP TABLE timeline_annotation_sets", hiqlite::params!()),
             (
                 "DROP INDEX media_session_terminal_acks_expiry",
                 hiqlite::params!(),
@@ -7752,6 +7824,39 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
                 hiqlite::params!(),
             ),
             (
+                "DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS cluster_fragment_index_lifecycle_counters",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_attempts_recent",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE IF EXISTS analysis_attempts", hiqlite::params!()),
+            (
+                "DROP TABLE IF EXISTS cluster_fragment_index_heads",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE IF EXISTS analysis_lifecycle_counters",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS cluster_fragment_indexes_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS cluster_fragment_index_jobs_due",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cluster_fragment_index_jobs", hiqlite::params!()),
+            (FRAGMENT_INDEX_JOBS_V12_FIXTURE_SCHEMA, hiqlite::params!()),
+            (FRAGMENT_INDEX_JOBS_V12_DUE_INDEX, hiqlite::params!()),
+            (FRAGMENT_INDEX_JOBS_V12_CANCEL_TRIGGER, hiqlite::params!()),
+            (
                 "DROP TRIGGER analysis_requests_bound_terminal_history",
                 hiqlite::params!(),
             ),
@@ -7770,6 +7875,8 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             ("DROP INDEX analysis_requests_status", hiqlite::params!()),
             ("DROP INDEX analysis_requests_due", hiqlite::params!()),
             ("DROP TABLE analysis_requests", hiqlite::params!()),
+            ("DROP TABLE timeline_manual_overrides", hiqlite::params!()),
+            ("DROP TABLE timeline_annotation_sets", hiqlite::params!()),
             (
                 "DROP INDEX media_session_terminal_acks_expiry",
                 hiqlite::params!(),
@@ -7902,6 +8009,39 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
                 hiqlite::params!(),
             ),
             (
+                "DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS cluster_fragment_index_lifecycle_counters",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_attempts_recent",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE IF EXISTS analysis_attempts", hiqlite::params!()),
+            (
+                "DROP TABLE IF EXISTS cluster_fragment_index_heads",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE IF EXISTS analysis_lifecycle_counters",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS cluster_fragment_indexes_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS cluster_fragment_index_jobs_due",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cluster_fragment_index_jobs", hiqlite::params!()),
+            (FRAGMENT_INDEX_JOBS_V12_FIXTURE_SCHEMA, hiqlite::params!()),
+            (FRAGMENT_INDEX_JOBS_V12_DUE_INDEX, hiqlite::params!()),
+            (FRAGMENT_INDEX_JOBS_V12_CANCEL_TRIGGER, hiqlite::params!()),
+            (
                 "DROP TRIGGER analysis_requests_bound_terminal_history",
                 hiqlite::params!(),
             ),
@@ -7920,6 +8060,8 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             ("DROP INDEX analysis_requests_status", hiqlite::params!()),
             ("DROP INDEX analysis_requests_due", hiqlite::params!()),
             ("DROP TABLE analysis_requests", hiqlite::params!()),
+            ("DROP TABLE timeline_manual_overrides", hiqlite::params!()),
+            ("DROP TABLE timeline_annotation_sets", hiqlite::params!()),
             (
                 "DROP INDEX media_session_terminal_acks_expiry",
                 hiqlite::params!(),
@@ -9263,6 +9405,20 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              -- back to 14 without removing them is not a v14 database: the
              -- ordinary startup migration would re-run its own ALTER TABLE ADD
              -- COLUMN against a table that already has them.
+             DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters;
+             DROP TRIGGER IF EXISTS cluster_fragment_index_lifecycle_counters;
+             DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history;
+             DROP TRIGGER IF EXISTS analysis_requests_supersede_source;
+             DROP TRIGGER IF EXISTS analysis_requests_cancel_source;
+             DROP TRIGGER IF EXISTS cluster_fragment_indexes_cancel_source;
+             DROP TABLE IF EXISTS analysis_attempts;
+             DROP TABLE IF EXISTS cluster_fragment_index_heads;
+             DROP TABLE IF EXISTS analysis_lifecycle_counters;
+             DROP TABLE IF EXISTS analysis_requests;
+             DROP TABLE IF EXISTS cluster_fragment_index_locations;
+             DROP TABLE IF EXISTS cluster_fragment_index_artifacts;
+             DROP TABLE IF EXISTS cluster_fragment_index_jobs;
+             DROP TABLE IF EXISTS cluster_fragment_index_sources;
              DROP TABLE timeline_manual_overrides;
              DROP TABLE timeline_annotation_sets;
              ALTER TABLE files DROP COLUMN dv_rpu_present;
@@ -9361,7 +9517,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 35);
+    assert_eq!(report.tables.len(), 36);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report

@@ -1184,9 +1184,12 @@ impl SqliteStore {
             // out here. Integrity is re-checked below instead of enforced
             // statement by statement.
             conn.pragma_update(None, "foreign_keys", "OFF")?;
-            let applied = conn
-                .execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
-                .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")));
+            let applied = if version == 41 && Self::analysis_component_schema_is_current(conn)? {
+                Ok(())
+            } else {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))
+            };
             conn.pragma_update(None, "foreign_keys", "ON")?;
             applied?;
             let dangling: i64 =
@@ -1220,6 +1223,34 @@ impl SqliteStore {
             tracing::info!(instance_id = %id, "generated new instance id");
         }
         Ok(())
+    }
+
+    /// Detect a fully committed v41 schema whose `user_version` marker was
+    /// not advanced before the process stopped. The v41 migration contains
+    /// non-idempotent column additions and table rebuilds, so replaying it
+    /// would turn a successful commit into a permanent startup failure.
+    fn analysis_component_schema_is_current(conn: &Connection) -> Result<bool, StoreError> {
+        let installed: i64 = conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+                  WHERE name IN ('priority','trigger','target_node_id'))
+              + (SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+                  WHERE (name = 'cache_key' AND pk = 1)
+                     OR (name = 'target_node_id' AND pk = 2))
+              + (SELECT COUNT(*) FROM pragma_table_info('timeline_annotation_sets')
+                  WHERE name = 'publication_priority')
+              + (SELECT COUNT(*) FROM pragma_table_info('analysis_requests')
+                  WHERE name IN ('pipeline_version','requested_generation',
+                                 'expected_predecessor_generation','priority','trigger',
+                                 'cancel_requested'))
+              + (SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'table' AND name IN
+                    ('analysis_attempts','cluster_fragment_index_heads',
+                     'analysis_lifecycle_counters'))",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(installed == 15)
     }
 
     async fn with_conn<T, F>(&self, f: F) -> Result<T, StoreError>
@@ -3150,6 +3181,29 @@ mod tests {
                 "missing {table}"
             );
         }
+    }
+
+    #[test]
+    fn v41_schema_commit_with_a_stale_marker_recovers_without_replaying_ddl() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        SqliteStore::open(&db).expect("create current database");
+
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            conn.pragma_update(None, "user_version", 40)
+                .expect("simulate interruption after the v41 schema commit");
+        }
+
+        SqliteStore::open(&db).expect("settle the committed v41 migration");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert!(SqliteStore::analysis_component_schema_is_current(&conn)
+            .expect("inspect current analysis schema"));
     }
 
     #[test]
