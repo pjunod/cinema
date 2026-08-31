@@ -104,8 +104,10 @@ this programme owes it.
 mobile budgets — are all that remains, and both are gated on
 [M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any code. The
 next thing that has to happen is a fleet run, and it is not a thing this side
-can do without one: §3 and §4 of that document are the procedure, and
-§4.0 is the web arm, which needs no device and should be settled first.
+can do. §3 and §4 of that document are the procedure. §4.0 is the web arm,
+which needs no device and should be settled first — and it is the arm that
+matters most, because the web reporter's fix has never been confirmed on
+hardware.
 
 ### Why Android does not await the verdict, and Apple does
 
@@ -515,9 +517,9 @@ not being counted as complete merely because its foundation has landed.
 | Workstream | State | Shipped result | Still required |
 |---|---|---|---|
 | Design and adversarial review | **Complete** | End-to-end protocol, actor, replacement, cluster, index, observability, and watchdog-deletion contracts | Re-review each implementation PR against the contract |
-| M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Nothing — actions are no longer disabled; the server emits them and all three clients consume them |
-| M2 — passive clients | **Complete** | Web, Apple, and Android all report demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Alternate-ingress physical evidence |
-| M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
+| M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Actions are no longer disabled — the server emits them and all three clients consume them — but the advertisement is still default-off behind `playback.control_protocol_v1`, and turning it on is M9's |
+| M2 — passive clients | **Partial** | Web, Apple, and Android all report demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Alternate-ingress retry, which plan §13.2 makes an M2 deliverable and which no native client implements — this is a missing feature, not a missing measurement; and the playback-lab run that joins each legacy recovery to its preceding control snapshot |
+| M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | Nothing — M4 moved recovery decisions through that owner and merged |
 | M4 — server watchdog removal | **Complete** | #636 merged production startup recovery; #641 merged actor-managed published lifetime, frozen frontier, typed `producer_ended`, and removal of its compatibility watcher; #642 merged actor-owned copy lifetime and removed the copy watchdog, election, request-side exit inference, and copy-owned replacement policy; #663 re-anchored the replacement tests and closed handoff item 5 | Nothing — later lifecycle/observability cleanup is a separate slice |
 | M5 — one client action owner | **Complete in source** | Web, Apple, and Android each ask the server before recovering; a terminal verdict is recipe-scoped, so it gates only the rung that re-prepares the identical recipe | A fleet acceptance run, which is what the budget deletions (M5c, M5h) are gated on |
 | M5.5/M6 — prepared handoff and Auto | **Store half merged** | Staged generations: prepare, commit, and abort as compare-and-swap over a preparation ledger, on both backends ([#726](https://github.com/pjunod/plurx/pull/726)) | The feasibility spike, which needs physical devices; M6's transactional resolution of bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes may not start without its numbers |
@@ -527,10 +529,12 @@ not being counted as complete merely because its foundation has landed.
 
 ## Merged evidence
 
-**This table stops at #636.** #641, #642, #663, #700, #716, and #726 merged
-after it and are recorded in the slice ledger above with their PR numbers
-rather than here. The table is kept for the exact heads and hosted run ids it
-carries, which the ledger does not.
+**This table stops at #636, and nothing replaced it.** The slice ledger above
+begins at #705, so the PRs that merged between them — #641, #642, #652, #654,
+#655, #656, and #663 — are recorded in neither table, only in prose. #700,
+#716, and #726 are in the ledger. The table is kept for the exact heads and
+hosted run ids it carries, which the ledger does not; the gap between the two
+is real and is the reason a reader should trust the roadmap table over either.
 
 | PR | Merged result | Verification at merge |
 |---|---|---|
@@ -557,11 +561,18 @@ carries, which the ledger does not.
 
 **This section is the slice's record as it was written while the work was in
 flight, and it is deliberately not rewritten.** M4 is complete: #642 merged as
-`062530d2` and #663 closed handoff item 5 behind it. Every sentence below that
-speaks of "the active branch", "the active cut", "the active working tree", or
-a pending review, gate, or merge describes `codex/playback-control-m4-copy-lifetime`
-*before* that merge. It is kept because its failure modes recur and the
-reasoning is worth more than the tense; read it as history, not as a queue.
+`062530d2` and #663 closed handoff item 5 behind it. Read the whole section as
+history, not as a queue — it is kept because its failure modes recur and the
+reasoning is worth more than the tense. Two things need saying before it, both
+of which the tense hides:
+
+- **"the active branch" is not one branch.** Most of the section means
+  `codex/playback-control-m4-copy-lifetime`, which became #642. A few
+  sentences written earlier mean #641's branch, which merged to `main` first
+  as `32af5fa9`. Where the two appear in adjacent sentences, the earlier one
+  is #641.
+- **Every "present on merged `main`" cell below is now false.** Those cells
+  were true when written and describe symbols that no longer exist.
 `SOFTWARE_GRACE`, `WATCHDOG_POLL`, `watchdog_active`, `begin_copy_child_replacement`,
 `downgrade_one_step`, and `FIRST_SEGMENT_GRACE` now have zero occurrences
 anywhere under `crates/`.
@@ -719,8 +730,7 @@ not playback watchdogs.
 5. Complete semantic indexing. **Four of five merged** as
    [#700](https://github.com/pjunod/plurx/pull/700): exact intro/credits
    destinations with provenance/confidence, manual overrides, force-analysis
-   controls, and
-   queue/current-work visibility with its instrumentation. **Subtitle windows
+   controls, and queue/current-work visibility with its instrumentation. **Subtitle windows
    are not built**, and marker-destination prewarm has its counter but no
    consumer — see §"What item 8 did not deliver". Detection itself, deciding
    where an intro *is*, is a further deliberate exclusion gated on a labelled
