@@ -682,6 +682,14 @@ struct PlaybackStallTerminalState: Equatable {
 enum SameDeliveryStallRecoveryOutcome: String, Equatable {
     case reopen
     case terminal
+    /// The server decided this stall. Kept distinct from `terminal` and
+    /// `reopen` because "the client stopped after its own budget ran out" and
+    /// "the server said this recipe is finished" are different events, and a
+    /// log that spells them the same way cannot tell whether the control
+    /// plane is doing anything.
+    case serverTerminal = "server_terminal"
+    case serverHold = "server_hold"
+    case serverRetryResource = "server_retry_resource"
 }
 
 enum SameDeliveryStallRecoveryDecision: Equatable {
@@ -3170,11 +3178,17 @@ final class PlayerController: ObservableObject {
     /// stalled, so the server resolves it one rung down instead of rebuilding
     /// the rung that just starved.
     private func retrySameDeliveryAfterStall(_ event: PlaybackStallEvent) async {
-        // Publish this owner's evidence before it decides anything. The
-        // server's picture of a wedge is otherwise whatever the periodic
-        // observer happened to catch, which is the same moment described
-        // less precisely. M5e asks for a verdict here; this only tells.
-        reportControlEvidence(Self.stallEvidence(for: event.kind), render: .stalled)
+        // The ask goes here, before the first statement, and the placement is
+        // the one detail worth getting right. `next(for:)` below sets
+        // `attempted` and returns `.stop` on every later call — it IS the
+        // spend — so an ask placed after it would let a server `hold`
+        // permanently retire the one same-delivery reopen this client had,
+        // which is the exact failure a hold exists to avoid.
+        let generation = openGeneration
+        let verdict = await controlVerdictForStall(event)
+        // Everything the caller checked may have changed across that await.
+        guard openGeneration == generation, started, stallRecoveryStillEligible else { return }
+        if let verdict, applyStallVerdict(verdict, event: event) { return }
         var decision = sameDeliveryStallRecovery.next(for: event.kind)
         #if os(iOS)
         let hasOfflineAsset = offlineAssetURL != nil
@@ -3213,6 +3227,150 @@ final class PlayerController: ObservableObject {
             // carry rather than causing one. The client's own message is a
             // guess at why production stopped; the server's is the answer.
             playbackError = playbackControl.terminalVerdict?.message ?? terminal.message
+        }
+    }
+
+    /// How long a recovery owner waits for the server's verdict before
+    /// deciding for itself.
+    ///
+    /// Deliberately far shorter than the exchange deadline. The fallback is
+    /// the branch the entire fleet takes — no installed build answers with
+    /// anything but `none` — so this number is added to every real stall on
+    /// every device, on top of the sixteen-second idle threshold the delivery
+    /// detector already waits out. A server that cannot answer inside a second
+    /// and a half is a server whose answer is not worth more frozen picture
+    /// than the recovery it would have replaced.
+    ///
+    /// Extended once, because the reporter cannot start this ask's request
+    /// while another is in flight.
+    static let controlAskSeconds: TimeInterval = 1.5
+    static let controlAskCapSeconds: TimeInterval = 3
+
+    /// Publish this owner's evidence and wait, briefly, for the verdict.
+    ///
+    /// A remembered verdict is used only when this ask produced none of its
+    /// own: a fresh answer is always better evidence than an armed one.
+    private func controlVerdictForStall(_ event: PlaybackStallEvent) async -> ControlAction? {
+        // The evidence is published from inside the ask, after it has read the
+        // sequence floor. Publishing first lets the pump start the next
+        // request before that read lands, which makes the floor one too high
+        // and rejects the very exchange that carried this stall's evidence.
+        //
+        // A remembered verdict is deliberately NOT consulted here. It arms the
+        // words a failure carries; letting it decide would make the first
+        // stall of every later session instantly fatal with no retry, because
+        // a terminal stops the reporter and no fresher answer can ever
+        // override it. Ruling D1 says armed, not executed.
+        let evidence = Self.stallEvidence(for: event.kind)
+        return await playbackControl.askForAction(
+            bound: Self.controlAskSeconds,
+            cap: Self.controlAskCapSeconds,
+            publish: { [weak self] in
+                self?.reportControlEvidence(evidence, render: .stalled)
+            }
+        )
+    }
+
+    /// Nothing to recover for: the player moved on while the ask was out.
+    /// Is a stall recovery still the right thing to do?
+    ///
+    /// Both call sites gated on all of this before entering, and none of it
+    /// survives an await. Seconds pass in the ask, and a viewer who paused,
+    /// seeked or hit an unrelated failure in that window must not have a
+    /// session reopened under them — a native seek in particular changes no
+    /// generation and sets no flag, so `openGeneration` alone does not see it.
+    private var stallRecoveryStillEligible: Bool {
+        wantsPlayback
+            && !finished
+            && !failed
+            && !isChangingStream
+            && seekState.pendingMs == nil
+            && player.currentItem != nil
+    }
+
+    /// Act on a server verdict, or say it did not decide this stall.
+    ///
+    /// Returns `true` when the verdict is the decision, so the caller returns
+    /// without spending its own attempt. `false` means today's path, unchanged
+    /// — which is the branch every node in the fleet takes, because no client
+    /// has ever completed a full-vocabulary exchange with one.
+    private func applyStallVerdict(
+        _ verdict: ControlAction,
+        event: PlaybackStallEvent
+    ) -> Bool {
+        switch verdict.type {
+        case "terminal":
+            // Ruling D1: the verdict is armed, not executed. This player is
+            // stalled with nothing left to render — that is what reaching this
+            // function means — so the only thing the verdict changes is whose
+            // words the viewer reads.
+            let terminal = event.kind.terminalState
+            player.pause()
+            isPlaying = terminal.isPlaying
+            wantsPlayback = terminal.wantsPlayback
+            isChangingStream = false
+            failed = terminal.failed
+            playbackFailureTitle = Self.playbackStoppedFailureTitle
+            playbackError = verdict.message ?? terminal.message
+            reportPlaybackStall(event, outcome: .serverTerminal)
+            return true
+        case "hold":
+            // Production is deliberately not advancing, so a reopen would
+            // churn against a server that already knows better — and it must
+            // not spend the one same-delivery attempt either.
+            //
+            // The explanation is not optional. A hold is never lifted by
+            // anything this client does, and the recovery monitor re-enters
+            // here on its own cadence, so a client that only returned would
+            // leave a viewer in front of a frozen picture with no bound and
+            // nothing said. The notice is transient and the monitor re-shows
+            // it, which is the right shape: it disappears when the hold does.
+            showPlaybackNotice(Self.holdNotice(verdict.reason), duration: .seconds(30))
+            restartDeliveryPollAfterDeferral(event)
+            reportPlaybackStall(event, outcome: .serverHold)
+            return true
+        case "retry_resource":
+            // Production stopped for something that may not recur, and named
+            // when to look again. The monitor is already a loop, so the honest
+            // response is to spend nothing and let it come round — the pacing
+            // this client can honour is "not now", not a precise interval.
+            showPlaybackNotice(Self.holdNotice(verdict.reason), duration: .seconds(30))
+            restartDeliveryPollAfterDeferral(event)
+            reportPlaybackStall(event, outcome: .serverRetryResource)
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// A deferred delivery stall leaves the poll that found it dead.
+    ///
+    /// `startStatusPolling`'s task ends itself the moment
+    /// `observeDeliveryStarvation` fires, on the documented assumption that a
+    /// reopen follows and `open()` will start a fresh one. A deferral breaks
+    /// that assumption: nothing reopens, so the server-truth wedge detector —
+    /// the one that exists because AVPlayer froze on tvOS 2160p without ever
+    /// tripping the position-clock ladder — would stay dead for the rest of
+    /// the session, long after the hold lifted.
+    private func restartDeliveryPollAfterDeferral(_ event: PlaybackStallEvent) {
+        // The task object outlives its own `return`, so there is nothing to
+        // test for. `startStatusPolling` cancels whatever is there first, and
+        // for any other stall kind the poll was never the thing that ended.
+        guard event.kind == .delivery else { return }
+        startStatusPolling()
+    }
+
+    /// The server's seven hold reasons, in the viewer's words. An unknown
+    /// reason shows the generic line rather than its wire name: a viewer
+    /// reading `working_set` learns less than one reading a sentence.
+    nonisolated static func holdNotice(_ reason: String?) -> String {
+        switch reason {
+        case "demand": return "Another player is using this stream."
+        case "time", "bytes": return "The server is pacing this stream."
+        case "global": return "The server is busy."
+        case "ahead": return "The stream is already far enough ahead."
+        case "working_set", "no_room": return "The server is short of space."
+        default: return "Waiting for the server."
         }
     }
 
