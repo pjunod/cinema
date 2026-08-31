@@ -22,8 +22,8 @@ a forecast.
 | Store ledger | Complete | SQLite v39 and replicated v20 implement the same terminal ledger; queue/transition contracts, historical fixtures, and SQLite-to-hiqlite import coverage pass |
 | Conversion worker | Complete | Six-stage sibling-temp pipeline, exact mux verification, scanner-identity plus open-handle source fence, leased parallel queue, fenced state transitions, and crash recovery compile and pass focused unit tests |
 | Operator surface | Complete | Admin-only library modes, progress, settings, file action/ledger, explicit tool refusal, and retry controls pass the embedded-web static contract |
-| Image and probes | Not started | Pin `dovi_tool` and MKVToolNix, then report exact boot capability |
-| Focused evidence | In progress | Conversion verification unit tests, SQLite Store contract, both backend compilation, and the complete embedded-web static contract pass; replicated Store, UI structure, API, and operations evidence remain |
+| Image and probes | Complete | Image installs checksum-pinned `dovi_tool` 2.3.3 assets and exact Bookworm MKVToolNix 74.0.0-1; the boot probe names command, version, availability, and an exact refusal reason |
+| Focused evidence | In progress | Conversion verification unit tests, SQLite Store contract, both backend compilation, embedded-web static contract, validation catalog, and 127 operations contracts pass; replicated Store, UI structure, and API evidence remain |
 | Adversarial review | Not started | Independent correctness, destructive-media, cluster, and UI/API review passes after the PR opens |
 | Complete qualification | Not started | Run once after review fixes on the frozen effort-to-main candidate; every promotion job and the exact-tree receipt must pass |
 | Merge | Not started | Merge only while the qualified head and `main` base are unchanged |
@@ -54,7 +54,7 @@ a forecast.
 3. **Treat physical MEL/FEL and truncated-disc acceptance as operator
    evidence.** Automated tests will use controlled tool/probe fixtures for
    every destructive boundary; the PR will keep the real-media checks explicit
-    because no redistributable 60–80 GB source belongs in the repository.
+   because no redistributable 60–80 GB source belongs in the repository.
 4. **Require an explicit enhancement layer and RPU at admission.** Numeric
    Profile 7 and HDR10 compatibility remain the primary eligibility contract,
    but a destructive rewrite also refuses an incomplete or not-yet-backfilled
@@ -68,7 +68,7 @@ a forecast.
 
 | Evidence | Result |
 |---|---|
-| Focused local regressions | Store ledger: targeted SQLite migration and queue tests; backend-neutral Store contract; import unit suite; all-target hiqlite-store compile. Worker/operator surface: five conversion verification/capability unit tests; `cargo check -p plurxd --all-targets`; `make web-check` |
+| Focused local regressions | Store ledger: targeted SQLite migration and queue tests; backend-neutral Store contract; import unit suite; all-target hiqlite-store compile. Worker/operator surface: five conversion verification/capability unit tests; `cargo check -p plurxd --all-targets`; `make web-check`. Packaging: 127 operations contracts, including exact tool pins and both release-asset checksums |
 | Adversarial review findings | Pending |
 | Main promotion gate | Pending |
 | Qualification receipt | Pending |

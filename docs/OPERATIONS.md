@@ -22,7 +22,7 @@ cd deploy
 cp docker-compose.override.example.yml docker-compose.override.yml   # your mounts + GPU
 cd .. && make docker-up      # builds + starts, and stamps the commit so the server can name it
 
-# Bare metal — one binary, needs ffmpeg/ffprobe on PATH (or PLURX_FFMPEG/PLURX_FFPROBE)
+# Bare metal — one binary, needs ffmpeg/ffprobe on PATH (and the optional conversion tools below)
 plurxd run            # serves :32400
 
 # From source (development)
@@ -33,6 +33,64 @@ Open `http://<host>:32400`, create the admin account, add a library. Library
 paths you type in the UI are **container-side** paths under Docker (e.g.
 `/media/movies`), which must be mounted in your override file. Full deploy matrix
 (Unraid, TrueNAS/k8s, ports, GPU passthrough): [`deploy/README.md`](../deploy/README.md).
+
+### Permanent Dolby Vision Profile 7 → 8.1 conversion
+
+This is the only operator action that replaces media bytes. It is admin-only,
+off for every library by default, and separate from playback's temporary
+Profile 7 compatibility path.
+
+The release image contains checksum-pinned `dovi_tool` 2.3.3 and Debian's
+exact `mkvmerge` 74.0.0 build. A bare-metal install needs both commands on
+`PATH`, or explicit `PLURX_DOVI_TOOL` and `PLURX_MKVMERGE` paths. Startup probes
+both. If either is missing, too old, or does not return a version, Settings →
+Libraries names the dependency and disables only on-disk conversion; scanning
+and playback still start normally.
+
+To convert:
+
+1. Open Settings → Libraries. Leave **Keep the Profile 7 original** enabled
+   unless the storage cost is unacceptable; the retained file is
+   `<source>.p7.orig`.
+2. Choose **Manual** for a library and save. **Convert now** queues its current
+   eligible files, including failed rows when explicitly retried. **Automatic**
+   also queues newly discovered eligible files during scheduler passes.
+3. Set **Parallel files** conservatively. The default is one and the allowed
+   range is one through eight. Each pass reads and writes roughly the size of
+   the source, so the storage path, not CPU, is usually the limiting resource.
+4. Read progress in the library row. A Profile 7 file's admin detail view shows
+   its durable ledger state and offers the same one-file action.
+
+Eligibility is numeric Dolby Vision Profile 7 with HDR10 base-layer
+compatibility id 1 or 6, an enhancement layer, and an RPU observed by the
+scanner. A row whose probe lacks those facts is refused rather than guessed;
+scan it successfully first.
+
+For every file plurx creates a hidden sibling working directory, extracts the
+base-layer/RPU HEVC stream, converts the RPU to Profile 8.1, and remuxes the
+converted video with the source's non-video tracks. It will not touch the
+source pathname until a fresh probe proves all of these facts:
+
+- Dolby Vision profile is 8 and no enhancement layer remains;
+- audio, subtitle, and chapter counts are unchanged;
+- duration differs by no more than one source frame; and
+- the open source still has the scanner's size/mtime identity and the exact
+  file-object version captured before the long conversion.
+
+Publication first renames the source into the same-filesystem working
+directory, then atomically renames the verified replacement to the source
+path. The ledger moves through `queued`, `running`, `verified`, and
+`committed`; `failed` records the exact refusal. A committed row is terminal
+and cannot be queued twice. If the daemon dies around either rename, leave the
+hidden working directory and any staged original alone: the next leased worker
+re-probes the artifacts and either completes the verified publication or
+restores a recoverable source. It never treats staged originals as scratch.
+
+If a retained `.p7.orig` already exists, publication refuses to overwrite it.
+Move or verify that file yourself before retrying. With **Keep original** off,
+the staged Profile 7 file is deleted only after the Profile 8 path has been
+published and re-probed. A verification failure leaves the public source
+untouched and records the mismatch for the retry control.
 
 ### Rolling back a deploy
 
@@ -2235,6 +2293,8 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CONFIG` | — | — | Explicit config-file path (must exist if set) |
 | `PLURX_FFMPEG` | — | `ffmpeg` | ffmpeg binary — point at jellyfin-ffmpeg for best hwaccel |
 | `PLURX_FFPROBE` | — | `ffprobe` | ffprobe binary (inspection + chapter markers) |
+| `PLURX_DOVI_TOOL` | — | `dovi_tool` | `dovi_tool` binary for permanent Profile 7 → 8.1 conversion; probed at boot and required only when that feature is enabled |
+| `PLURX_MKVMERGE` | — | `mkvmerge` | MKVToolNix muxer for the verified Profile 8.1 replacement; version 68 or newer is required |
 | `PLURX_HWACCEL` | — | `auto` | Preferred encoder: `auto` · `qsv` · `vaapi` · `nvenc` · `videotoolbox` |
 | `PLURX_VAAPI_DEVICE` | — | `/dev/dri/renderD128` | VA-API render node |
 | `PLURX_TONEMAP` | — | zscale | The **CPU** tone-map operator: `zscale` · `libplacebo` · `off` (no tone-map — plays HDR washed, but a useful test/escape hatch). Which *pipeline* runs — GPU or CPU — is probed at boot, not configured; this only chooses the operator when the CPU chain is the one running |

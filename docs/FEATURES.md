@@ -703,9 +703,12 @@ enrichment has no TMDB key, not that the scan failed.
 
 Listed so the inventory above is unambiguous — these are deliberate, with reasons:
 
-- **Does not write to your media.** Libraries are read-only; no rename, move,
-  organize, or delete. A media server that edits files is one bug from eating
-  them.
+- **Does not organize or mutate media by default.** Scans, metadata, and
+  playback are read-only; plurx never renames, moves, organizes, or deletes a
+  title as ordinary library maintenance. The one explicit exception is the
+  admin-only, per-library Dolby Vision Profile 7 → 8.1 conversion in Settings
+  → Libraries. It is off by default, builds and verifies a sibling replacement
+  before changing the source path, and keeps the Profile 7 original by default.
 - **Does not phone home or need the cloud.** No accounts hosted elsewhere, no
   plex.tv contact, no telemetry. It runs on a LAN with no internet.
 - **Does not push anything to other applications.** The integration in §11 is

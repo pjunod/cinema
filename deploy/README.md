@@ -166,7 +166,7 @@ Nothing mapping to `/var/lib/plurx` means the next rebuild loses everything.
 ## Bare metal
 
 ```sh
-# Linux amd64/arm64, macOS, Windows — one binary, no runtime deps but ffmpeg.
+# Linux amd64/arm64, macOS, Windows — one binary; ffmpeg is the base runtime dependency.
 plurxd run          # serves :32400; config via ./plurx.toml or PLURX_* env
 ```
 
@@ -174,6 +174,12 @@ Install `ffmpeg`/`ffprobe` (or point `PLURX_FFMPEG`/`PLURX_FFPROBE` at a build
 such as jellyfin-ffmpeg for the best hardware/tone-mapping support). To keep it
 running across reboots, install it as a service — **systemd** on Linux or
 **launchd** on macOS, both below.
+
+Permanent Dolby Vision Profile 7 → 8.1 conversion additionally needs
+`dovi_tool` and `mkvmerge` 68 or newer. The Docker image includes pinned builds;
+bare-metal installs may put them on `PATH` or set `PLURX_DOVI_TOOL` and
+`PLURX_MKVMERGE`. Missing tools disable that admin action with a reason and do
+not prevent the server from starting.
 
 ### Hardware transcode & recent Intel GPUs
 
