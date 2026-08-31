@@ -53,14 +53,15 @@ merge target: two client PRs in flight means the second always fails.
 | web bound | ruling D3 applied to the web ask | [#717](https://github.com/pjunod/plurx/pull/717) | merged |
 | M5g | Android: the stall owner asks before it decides | [#718](https://github.com/pjunod/plurx/pull/718) | merged |
 | ask exits | Apple: read the answer slot at every exit | [#719](https://github.com/pjunod/plurx/pull/719) | merged |
-| acceptance | what a fleet run has to show | — | this change |
+| acceptance | what a fleet run has to show | [#720](https://github.com/pjunod/plurx/pull/720) | merged |
+| M5e ladder | Apple: ask before walking the compatibility ladder | [#721](https://github.com/pjunod/plurx/pull/721) | in review |
+| M5g ladder | Android: ask before walking the compatibility ladder | this change | open |
 
-**What is left in M5, and what each is waiting for.** M5c and M5h — deleting
-the web and mobile budgets — are the only remaining slices, and both are
-gated on [M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any
-code. Two smaller asks are buildable now and deliberately were not bundled:
-Apple's `handleItemFailure` ladder and Android's `onPlayerError`, each of
-which short-circuits a three-rung compatibility walk on a `terminal`.
+**What is left in M5, and what each is waiting for.** With the two ladder
+asks landed, M5c and M5h — deleting the web and mobile budgets — are the only
+remaining slices, and both are gated on
+[M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any code. No
+buildable M5 work remains.
 
 ## The gate that blocks every deletion, and what it does not block
 

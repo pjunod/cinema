@@ -20,8 +20,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.2.8**, build `56` — native viewer parity across phone, foldable,
-> and TV. Build 46 accepts the temporary live-HLS recovery presentation while
+> Status: **v0.2.8**, build `57` — native viewer parity across phone, foldable,
+> and TV. Build 57 asks the server before walking the compatibility ladder,
+> so a source the producer has already ruled out fails once instead of three
+> times. Build 46 accepts the temporary live-HLS recovery presentation while
 > immutable VOD indexes are backfilled. Build 44
 > retries a stalled stream through another cluster node's
 > ingress without moving the account origin or spending the codec-compatibility

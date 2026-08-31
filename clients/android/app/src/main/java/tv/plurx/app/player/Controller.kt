@@ -276,6 +276,15 @@ class Controller(
 
     /** The HLS session this player owns, if the plan opened one. */
     private var sessionId: String? = null
+
+    /**
+     * The surface is gone and the player with it.
+     *
+     * `release()` tears down an ExoPlayer that a deferred ladder would go on
+     * to interrogate, so anything that resumes after a wait checks this before
+     * touching `player`.
+     */
+    private var released = false
     private var activeMediaPath: String? = null
 
     private val playbackTelemetry = ControllerPlaybackTelemetry(
@@ -388,96 +397,13 @@ class Controller(
     )
 
     private val listener = object : Player.Listener {
+        // The ladder cannot run inline any more: it waits on a verdict
+        // first, and a `Player.Listener` override cannot suspend. `scope`
+        // is the screen's own scope — main-dispatched and cancelled with
+        // the screen — so every player call below still lands on the main
+        // thread and none of them outlive the surface they belong to.
         override fun onPlayerError(error: PlaybackException) {
-            val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
-            // Only a transport failure can be answered by another node. A
-            // terminal answer — an ended session's 404, a refused
-            // credential — is the same on every ingress, and walking the list
-            // for one costs a full player prepare per node before the viewer
-            // sees the error they were always going to see.
-            reportControlEvidence(
-                ClientObservation(
-                    decoderState = DecoderState.FAILED,
-                    errorCode = controlErrorCode(error.errorCode),
-                    errorDetail = error.errorCodeName,
-                ),
-                render = RenderState.FAILED,
-            )
-            if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) return
-            val action = playbackErrorAction(
-                deliveryMode = deliveryMode,
-                preservesDolbyVision = plan.preserveDolbyVision,
-                remuxRescueAlreadyUsed = compatibilityRemuxUsed,
-                transcodeRescueAlreadyUsed = compatibilityTranscodeUsed,
-                mediaCompatibilityFailure = mediaCompatibilityFailure,
-                deliveredRange = deliveredRange,
-                establishedPlayback = establishedPlayback,
-                sameHdrRetryAlreadyUsed = sameHdrRetryUsed,
-            )
-            playbackTelemetry.report(
-                event = "playback_error",
-                level = "error",
-                message = error.errorCodeName,
-                code = error.errorCode,
-                detail = buildString {
-                    append("action=").append(action)
-                    append(" media_compatibility=").append(mediaCompatibilityFailure)
-                    append(" preserves_dv=").append(plan.preserveDolbyVision)
-                    append(" established=").append(establishedPlayback)
-                    if (caps.isNotEmpty()) {
-                        append(" caps=")
-                        append(
-                            caps.entries.sortedBy { it.key }
-                                .joinToString(",") { "${it.key}=${it.value}" },
-                        )
-                    }
-                },
-            )
-            Log.w(
-                "plurx-playback",
-                "file=${plan.fileId} delivery=$deliveryMode preservesDv=" +
-                    "${plan.preserveDolbyVision} action=$action caps=$caps " +
-                    "mediaFailure=${isCompatibilityPlaybackError(error.errorCode)} " +
-                    "error=${error.errorCodeName}",
-                error,
-            )
-            when (action) {
-                PlaybackErrorAction.RetrySameHDRDelivery -> {
-                    val position = realPosition()
-                    sameHdrRetryUsed = true
-                    restartAt(position, "fallback")
-                }
-                PlaybackErrorAction.RetryAsDolbyVisionRemux -> {
-                    val position = realPosition()
-                    compatibilityRemuxUsed = true
-                    forceCompatibilityRemux = true
-                    subtitleDelivery =
-                        subtitleRoute(trackFor(selectedSubtitle), planMode, subtitleDelivery).delivery
-                    restartAt(position, "fallback")
-                }
-                PlaybackErrorAction.RetryAsCompatibilityTranscode -> {
-                    // Read the position before the mode moves: which timeline
-                    // the player is on depends on the delivery about to change.
-                    val position = realPosition()
-                    compatibilityTranscodeUsed = true
-                    forceCompatibilityTranscode = true
-                    // `planMode` is a transcode now, and that can move the
-                    // selection's route with it: an embedded track on a
-                    // directly-played file has to become a rendition.
-                    subtitleDelivery =
-                        subtitleRoute(trackFor(selectedSubtitle), planMode, subtitleDelivery).delivery
-                    restartAt(position, "fallback")
-                }
-                PlaybackErrorAction.Fail -> onError(
-                    // A verdict says production stopped for a reason retrying
-                    // cannot change. A dropped link is a different cause with
-                    // a different answer, so a transport failure keeps the
-                    // client's own words rather than borrowing the server's.
-                    (if (isTransportPlaybackError(error.errorCode)) null
-                    else playbackControl.terminalVerdict?.message)
-                        ?: error.errorCodeName.let { "Playback stopped ($it)." },
-                )
-            }
+            scope.launch { handlePlayerError(error) }
         }
 
         override fun onRenderedFirstFrame() {
@@ -503,6 +429,138 @@ class Controller(
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) =
             pgsOverlay.itemChanged()
+    }
+
+    /**
+     * The compatibility ladder, and the ask that now precedes it.
+     *
+     * Split out of the listener because it suspends. Everything below the
+     * ask runs only if the player is still holding this same failure.
+     */
+    private suspend fun handlePlayerError(error: PlaybackException) {
+        val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
+        // The ask goes before rung one, not before rung two. Rung one is
+        // `retryMediaOnNextNode`, and a verdict about the *source* does not
+        // change by node: an `unsupported` producer decision would otherwise
+        // walk next-node → established HDR → compatibility transcode, guessing
+        // at retry the whole way and failing three times to learn what the
+        // server knew before the first one. Each rung costs a full player
+        // prepare the viewer watches.
+        //
+        // The evidence is published from INSIDE the ask, after it has read the
+        // sequence floor — see `askForAction`. Publishing first lets the pump
+        // start the next request before that read lands, which makes the floor
+        // one too high and rejects the very exchange carrying this failure.
+        val verdict = playbackControl.askForAction(
+            boundMs = CONTROL_ASK_MS,
+            capMs = CONTROL_ASK_CAP_MS,
+            publish = {
+                reportControlEvidence(
+                    ClientObservation(
+                        decoderState = DecoderState.FAILED,
+                        errorCode = controlErrorCode(error.errorCode),
+                        errorDetail = error.errorCodeName,
+                    ),
+                    render = RenderState.FAILED,
+                )
+            },
+        )
+        // Seconds passed. `playerError` is this exception only while nothing
+        // has re-prepared the player: a restart, a failover, a new session or
+        // a release all clear or replace it, and each one means this failure
+        // is no longer the one on screen.
+        if (released) return
+        if (player.playerError !== error) return
+        // Only `terminal` short-circuits. A `hold` or a `retry_resource` on a
+        // dead item would leave the player with nothing to render and no path
+        // forward, so those fall through to the ladder — the ladder is the
+        // only thing that can still produce a picture. This is the opposite of
+        // the stall funnel, where a `hold` means *don't churn* and the media
+        // is still there.
+        if (verdict != null && verdict.type == "terminal") {
+            onError(verdict.message ?: "Playback stopped.")
+            return
+        }
+        // Only a transport failure can be answered by another node. A
+        // terminal answer — an ended session's 404, a refused credential — is
+        // the same on every ingress, and walking the list for one costs a full
+        // player prepare per node before the viewer sees the error they were
+        // always going to see.
+        if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) return
+        val action = playbackErrorAction(
+            deliveryMode = deliveryMode,
+            preservesDolbyVision = plan.preserveDolbyVision,
+            remuxRescueAlreadyUsed = compatibilityRemuxUsed,
+            transcodeRescueAlreadyUsed = compatibilityTranscodeUsed,
+            mediaCompatibilityFailure = mediaCompatibilityFailure,
+            deliveredRange = deliveredRange,
+            establishedPlayback = establishedPlayback,
+            sameHdrRetryAlreadyUsed = sameHdrRetryUsed,
+        )
+        playbackTelemetry.report(
+            event = "playback_error",
+            level = "error",
+            message = error.errorCodeName,
+            code = error.errorCode,
+            detail = buildString {
+                append("action=").append(action)
+                append(" media_compatibility=").append(mediaCompatibilityFailure)
+                append(" preserves_dv=").append(plan.preserveDolbyVision)
+                append(" established=").append(establishedPlayback)
+                if (caps.isNotEmpty()) {
+                    append(" caps=")
+                    append(
+                        caps.entries.sortedBy { it.key }
+                            .joinToString(",") { "${it.key}=${it.value}" },
+                    )
+                }
+            },
+        )
+        Log.w(
+            "plurx-playback",
+            "file=${plan.fileId} delivery=$deliveryMode preservesDv=" +
+                "${plan.preserveDolbyVision} action=$action caps=$caps " +
+                "mediaFailure=${isCompatibilityPlaybackError(error.errorCode)} " +
+                "error=${error.errorCodeName}",
+            error,
+        )
+        when (action) {
+            PlaybackErrorAction.RetrySameHDRDelivery -> {
+                val position = realPosition()
+                sameHdrRetryUsed = true
+                restartAt(position, "fallback")
+            }
+            PlaybackErrorAction.RetryAsDolbyVisionRemux -> {
+                val position = realPosition()
+                compatibilityRemuxUsed = true
+                forceCompatibilityRemux = true
+                subtitleDelivery =
+                    subtitleRoute(trackFor(selectedSubtitle), planMode, subtitleDelivery).delivery
+                restartAt(position, "fallback")
+            }
+            PlaybackErrorAction.RetryAsCompatibilityTranscode -> {
+                // Read the position before the mode moves: which timeline
+                // the player is on depends on the delivery about to change.
+                val position = realPosition()
+                compatibilityTranscodeUsed = true
+                forceCompatibilityTranscode = true
+                // `planMode` is a transcode now, and that can move the
+                // selection's route with it: an embedded track on a
+                // directly-played file has to become a rendition.
+                subtitleDelivery =
+                    subtitleRoute(trackFor(selectedSubtitle), planMode, subtitleDelivery).delivery
+                restartAt(position, "fallback")
+            }
+            PlaybackErrorAction.Fail -> onError(
+                // A verdict says production stopped for a reason retrying
+                // cannot change. A dropped link is a different cause with
+                // a different answer, so a transport failure keeps the
+                // client's own words rather than borrowing the server's.
+                (if (isTransportPlaybackError(error.errorCode)) null
+                else playbackControl.terminalVerdict?.message)
+                    ?: error.errorCodeName.let { "Playback stopped ($it)." },
+            )
+        }
     }
 
     init {
@@ -587,6 +645,7 @@ class Controller(
     }
 
     fun release() {
+        released = true
         stallWatchdogJob.cancel()
         clearStatusPolling()
         pgsOverlay.release()
