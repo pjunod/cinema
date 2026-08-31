@@ -41,7 +41,8 @@ merge target: two client PRs in flight means the second always fails.
 
 | slice | what it does | PR | state |
 |---|---|---|---|
-| docs | status page, §7.4 re-verification, Apple/Android recon, ruling D1 | [#705](https://github.com/pjunod/plurx/pull/705) | in review |
+| docs | status page, §7.4 re-verification, Apple/Android recon, ruling D1 | [#705](https://github.com/pjunod/plurx/pull/705) | merged |
+| M5a | web: `persistentWait` asks the server before deciding | [#706](https://github.com/pjunod/plurx/pull/706) | in review |
 
 ## The gate that blocks every deletion, and what it does not block
 
