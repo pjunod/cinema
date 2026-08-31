@@ -1234,6 +1234,267 @@ async function main() {
     for (const player of harness.attached) harness.stub.detach(player);
   }
 
+  // ---- the ask: handleEnded defers its truncated-stream decision -----------
+  //
+  // `endedTries > 3` is a guess standing in for the answer the server has: it
+  // knows whether the producer was told to stop, ran out of something, or gave
+  // a verdict about the source. When the server answers, the guess must stop
+  // bounding anything; when it does not, the guess must still be there.
+  function endedHarness(options = {}) {
+    const timers = new Map();
+    let nextTimer = 1;
+    const log = [];
+    const loading = [];
+    const seeks = [];
+    let answer = options.answer || (() => ({ type: "none" }));
+    let hold = null;
+    const video = { seeking: false };
+    const stub = new Function(
+      "setTimeout", "clearTimeout", "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC",
+      "pbTotalSec", "pbPosSec", "reportProgress", "finishPlayback",
+      "playNextAudiobookPart", "clientLog", "setLoading", "seekTo", "clockFromSec",
+      "CONTROL_CLIENT_ID", "playbackControlSnapshot", "sendPlaybackControl",
+      "window", "PlurxPlaybackControl", "performance", "document",
+      [
+        "let PLAYER=null;",
+        askConstants,
+        shippedSource("controlVerdictText"),
+        shippedSource("holdReasonText"),
+        shippedSource("playbackControlObservationOverride"),
+        shippedSource("notifyPlaybackControl"),
+        shippedSource("askPlaybackControl"),
+        shippedSource("settlePlaybackControlWaiters"),
+        shippedSource("clearPlaybackControlWaiters"),
+        shippedSource("stopPlaybackControl"),
+        shippedSource("startPlaybackControl"),
+        shippedSource("endedStillOurs"),
+        shippedSource("handleEnded"),
+        "return {",
+        " attach(player,video,bootstrap){PLAYER=player;",
+        "   return startPlaybackControl(video,player,bootstrap);},",
+        " detach(player){PLAYER=player; stopPlaybackControl(player); PLAYER=null;},",
+        " ended(player,fileId){PLAYER=player; return handleEnded(fileId);}};",
+      ].join("\n"),
+    )(
+      (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
+      (id) => { timers.delete(id); },
+      8_000,
+      15,
+      () => 3_600,
+      () => 1_200,
+      async () => {},
+      () => {},
+      async () => false,
+      (entry) => log.push(entry),
+      (on, title, detail, buttons) => loading.push({ on, title, detail, buttons }),
+      (sec) => seeks.push(sec),
+      (sec) => `0:${Math.round(sec)}`,
+      "44444444-4444-4444-8444-444444444444",
+      () => snapshot(1_000, "failed"),
+      async (_url, request) => {
+        const held = hold && hold(request);
+        if (held) return held;
+        return Object.assign(response(request), { action: answer(request) });
+      },
+      { PlurxPlaybackControl: control },
+      control,
+      performance,
+      { getElementById: () => video },
+    );
+    const made = {
+      stub, timers, log, loading, seeks, video, attached: [],
+      answerWith(next) { answer = next; },
+      holdWith(next) { hold = next; },
+      fire() {
+        for (const [id, timer] of Array.from(timers)) { timers.delete(id); timer.fn(); }
+      },
+    };
+    harnessCleanup.push(made);
+    return made;
+  }
+
+  // A repeat only counts when the stream dies at the SAME position, so a
+  // player with prior attempts has to carry the position it died at.
+  function endedPlayer(tries = 0) {
+    return {
+      fileId: 7, method: "remux", endedAt: tries > 0 ? 1_200 : null,
+      endedTries: tries, bookParts: null, durMs: 3_600_000, _seekToken: 5,
+    };
+  }
+
+  async function endedWith(action, tries = 0) {
+    const h = endedHarness();
+    const player = endedPlayer(tries);
+    h.stub.attach(player, {}, bootstrap());
+    h.attached.push(player);
+    await flush();
+    h.answerWith(() => action);
+    const running = h.stub.ended(player, 7);
+    await settleExchange();
+    // A retry_resource verdict paces with a timer; nothing else arms one.
+    const paced = Array.from(h.timers.values()).map((timer) => timer.ms);
+    h.fire();
+    await flush();
+    await running;
+    h.stub.detach(player);
+    return { h, player, paced };
+  }
+
+  // With no answer, today's behaviour is untouched — including the guess.
+  {
+    const { h, player } = await endedWith({ type: "none" });
+    assert.equal(h.seeks.length, 1, "a none verdict resumes, as today");
+    assert.equal(player.endedTries, 1, "and counts the attempt");
+  }
+  {
+    const { h } = await endedWith({ type: "none" }, 3);
+    assert.equal(h.seeks.length, 0, "past the local budget it gives up, as today");
+    assert.equal(h.loading[0].title, "The stream stopped before the end.");
+  }
+
+  // When the server answers, the guess stops bounding anything. This is the
+  // whole milestone: the budget existed because nothing better was available.
+  // A hold reconnects NOTHING. This is the case that is easy to get backwards:
+  // an ended media element looks like it can only go forward by reconnecting,
+  // but a VOD session seeks in place, so resuming at the truncation point
+  // re-fires `ended` immediately and the loop contains one round trip. Left
+  // that way a held stream reconnects forever behind a buttonless overlay.
+  {
+    const { h, player, paced } = await endedWith({ type: "hold", reason: "no_room" }, 1);
+    assert.equal(h.seeks.length, 0, "a hold reconnects nothing");
+    assert.deepEqual(paced, [], "and arms no retry");
+    assert.equal(h.loading.length, 1, "the viewer is told what is happening");
+    assert.equal(h.loading[0].detail, "The server is short of space.");
+    assert.match(h.loading[0].buttons, /retryPlayback/, "and can act on it");
+    assert.match(h.loading[0].buttons, /closePlayer/);
+    assert.match(h.log[0].detail, /deferred:hold/);
+    assert.equal(player.endedTries, 2, "the count is kept as evidence");
+  }
+
+  // retry_resource resumes at the server's interval, clamped — and bounded.
+  // A server that keeps saying "soon" is not distinguishable from here from
+  // one that is never going to be ready.
+  for (const [afterMs, expected] of [[400, 400], [1, 250], [59_000, 8_000]]) {
+    const action = { type: "retry_resource", reason: "reader_failed", after_ms: afterMs };
+    const { h, player, paced } = await endedWith(action, 1);
+    assert.equal(h.seeks.length, 1, "a paced verdict resumes");
+    assert.equal(h.seeks[0], 1_200);
+    assert.match(h.log[0].detail, /deferred:retry_resource/);
+    assert.equal(player.endedTries, 2);
+    assert.deepEqual(paced, [expected],
+      "and waits exactly as long as it is entitled to");
+  }
+  {
+    // Past the deferral bound the local path is taken anyway.
+    const { h } = await endedWith(
+      { type: "retry_resource", reason: "reader_failed", after_ms: 400 }, 9,
+    );
+    assert.equal(h.seeks.length, 0, "an unbounded pacing verdict does not defer forever");
+    assert.equal(h.loading[0].title, "The stream stopped before the end.");
+  }
+
+  // And the pacing window is a second chance to leave. A viewer who scrubs
+  // away while a retry_resource interval is running must not be dragged back
+  // to the truncation when it elapses.
+  {
+    // The bootstrap exchange answers `none`. Answering it with the verdict
+    // under test would pace the reporter by `after_ms` before the ask's own
+    // request could even start, and the ask would still be outstanding here.
+    const h = endedHarness();
+    const player = endedPlayer(1);
+    h.stub.attach(player, {}, bootstrap());
+    h.attached.push(player);
+    await flush();
+    h.answerWith(() => ({ type: "retry_resource", reason: "reader_failed", after_ms: 400 }));
+    const running = h.stub.ended(player, 7);
+    await settleExchange();
+    // The armed interval is the proof the first guard has already passed, so
+    // what follows can only be caught by the second one.
+    // The interval's own duration is the proof: the ask's timer is
+    // CONTROL_ASK_MS, so seeing 400 means the ask settled and the first guard
+    // has already passed. Without this the test would be measuring the ask's
+    // timeout and proving nothing about the second guard.
+    assert.deepEqual(Array.from(h.timers.values()).map((t) => t.ms), [400],
+      "the paced interval is armed, so the first guard has passed");
+    player._seekToken = 6;
+    h.fire();
+    await running;
+    assert.equal(h.seeks.length, 0,
+      "leaving during the paced interval is as good as leaving during the ask");
+    h.stub.detach(player);
+  }
+
+  // Direct play has no lower rung to reconnect to, so it gives up at once.
+  {
+    const h = endedHarness();
+    const player = Object.assign(endedPlayer(), { method: "direct_play" });
+    h.stub.attach(player, {}, bootstrap());
+    h.attached.push(player);
+    await flush();
+    const running = h.stub.ended(player, 7);
+    await settleExchange();
+    h.fire();
+    await running;
+    assert.equal(h.seeks.length, 0, "direct play reconnects nothing");
+    assert.equal(h.loading[0].title, "The stream stopped before the end.");
+    h.stub.detach(player);
+  }
+
+  // A terminal that arrived on an ordinary exchange stopped the reporter, so
+  // there is nothing left to ask when the stream ends. The verdict is armed,
+  // and it still replaces the client's inference.
+  {
+    const h = endedHarness({
+      answer: () => ({ type: "terminal", code: "unsupported", message: "Armed earlier." }),
+    });
+    const player = endedPlayer();
+    h.stub.attach(player, {}, bootstrap());
+    h.attached.push(player);
+    await settleExchange();
+    assert.equal(player.controlReporter.stopped, true);
+    const running = h.stub.ended(player, 7);
+    await flush(); await flush();
+    await running;
+    assert.equal(h.seeks.length, 0, "the armed verdict still suppresses the guess");
+    assert.equal(h.loading[0].title, "Armed earlier.");
+    h.stub.detach(player);
+  }
+
+  // The viewer had the ask window to leave, and the next `ended` event on a
+  // stream that reopened while we waited re-enters this function.
+  for (const [label, leave] of [
+    ["the viewer opened another file", (player) => { player.fileId = 8; }],
+    ["the viewer scrubbed away", (player) => { player._seekToken = 6; }],
+    ["a seek is in flight", (player, h) => { h.video.seeking = true; }],
+    ["the stream already reopened and ended again", (player) => { player.endedAt = 90; }],
+  ]) {
+    const h = endedHarness();
+    const player = endedPlayer();
+    h.stub.attach(player, {}, bootstrap());
+    h.attached.push(player);
+    await flush();
+    h.answerWith(() => { leave(player, h); return { type: "none" }; });
+    const running = h.stub.ended(player, 7);
+    await settleExchange();
+    h.fire();
+    await running;
+    assert.equal(h.seeks.length, 0, `${label}: nothing reconnects`);
+    assert.equal(h.loading.length, 0, label);
+    h.stub.detach(player);
+  }
+
+  // A terminal verdict replaces the client's inference from a runtime
+  // mismatch with the server's reason, and reconnects nothing.
+  {
+    const { h } = await endedWith({
+      type: "terminal", code: "unsupported", message: "The source stops here.",
+    }, 0);
+    assert.equal(h.seeks.length, 0, "a terminal verdict reconnects nothing");
+    assert.equal(h.loading[0].title, "The source stops here.");
+    assert.match(h.loading[0].buttons, /retryPlayback/,
+      "and the viewer keeps every option they had");
+  }
+
   reporter.stop();
   process.stdout.write("PASS passive web playback-control reporter\n");
 }
