@@ -812,11 +812,15 @@ class Controller(
             // against a server that already knows better, and it must not
             // spend the budget either.
             //
-            // The explanation is not optional. A hold is never lifted by
-            // anything this client does and the one-second watchdog re-enters
-            // here, so a client that only returned would leave a viewer in
-            // front of a frozen picture with nothing said.
-            playbackNotice = holdNotice(verdict.reason)
+            // And unlike web and Apple, this one says nothing to the viewer,
+            // because of what this detector actually is. `sampleStall` emits
+            // a measurement when a stall ENDS — the playhead has moved again
+            // by the time control reaches here — so the viewer is watching,
+            // not staring at a frozen picture. A banner reading "the server is
+            // busy" over playback that just resumed is noise, and the case the
+            // banner exists for on the other two platforms cannot reach this
+            // function at all: during an open-ended freeze `sampleStall`
+            // returns null forever.
             true
         }
         else -> false
@@ -845,6 +849,17 @@ class Controller(
         // fire during an open-ended freeze at all, so a frozen playhead stays
         // invisible to the control plane either way.
         val session = sessionId
+        // The token is taken BEFORE the ask, not after, and it is the token
+        // the reopen goes on to use. A VOD seek or an in-place subtitle change
+        // invalidates through `stallGuard` and changes no session id, so a
+        // token minted after the wait would not merely miss the viewer's
+        // action — `beginRequest` increments the version, so it would
+        // overwrite the invalidation and make a stale stall current again.
+        val requestVersion = stallGuard.beginRequest()
+        // Measured before the wait, so the stall-recovery beacon includes the
+        // time this ask itself costs. M5.5 exists to measure exactly that, and
+        // an instrument that excludes it cannot.
+        val observedAtMs = monotonicNowMs()
         val verdict = playbackControl.askForAction(
             boundMs = CONTROL_ASK_MS,
             capMs = CONTROL_ASK_CAP_MS,
@@ -855,21 +870,24 @@ class Controller(
                 )
             },
         )
-        // Seconds passed. A viewer who seeked, paused or left, or a session
-        // that was replaced under us, must not have one reopened for them.
+        // Seconds passed, and one session-id comparison is not enough to
+        // notice. The predicate that let control in here was
+        // `playWhenReady && establishedPlayback`; a viewer who paused, or a
+        // transport failover that started on the same session, or any seek
+        // that invalidated the guard, all leave the id alone.
         if (sessionId != session || sessionId == null) return
+        if (!stallGuard.isCurrent(requestVersion)) return
+        if (!player.playWhenReady || !establishedPlayback) return
         if (verdict != null && applyStallVerdict(verdict)) return
         // If we have already exhausted the budget at the current floor rung,
         // stop reopening — the server cannot step further down and the client
         // must not churn forever.
         if (!stallReopenBudget.canReopen()) return
         val reason = "stall"
-        val observedAtMs = monotonicNowMs()
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
         // Use the stall-specific session body that carries the predecessor
         // info. `sessionBody` is also called for seeks and track switches;
         // those paths must NOT carry stall fields.
-        val requestVersion = stallGuard.beginRequest()
         val prevId = sessionId
         // Capture the predecessor height for the same-rung budget
         // before nulling the session ID.  The first stall reopen
@@ -1389,23 +1407,6 @@ class Controller(
         controlRenderOverride = null
         controlEvidencePositionMs = null
     }
-}
-
-/**
- * The server's seven hold reasons, in the viewer's words.
- *
- * A viewer reading `working_set` learns less than one reading a sentence, and a
- * reason this client has never heard of is a newer server rather than a broken
- * one — so an unknown reason gets the generic line instead of its wire name or
- * nothing at all.
- */
-internal fun holdNotice(reason: String?): String = when (reason) {
-    "demand" -> "Another player is using this stream."
-    "time", "bytes" -> "The server is pacing this stream."
-    "global" -> "The server is busy."
-    "ahead" -> "The stream is already far enough ahead."
-    "working_set", "no_room" -> "The server is short of space."
-    else -> "Waiting for the server."
 }
 
 /**

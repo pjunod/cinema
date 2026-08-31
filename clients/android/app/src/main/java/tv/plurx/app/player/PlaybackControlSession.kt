@@ -123,6 +123,13 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     private var answerAction: ControlAction? = null
     private var answerRequestSequence = 0L
     private var answersSeen = 0L
+    /**
+     * The answer slot keeps its own copy of the generation rather than reading
+     * the verdict slot's under the wrong lock. Two counters that must agree
+     * are a bug waiting for a reason, but one counter read without its lock is
+     * one already.
+     */
+    private var answerGeneration = 0
 
     private val verdictLock = Any()
     private var verdict: ControlAction? = null
@@ -155,12 +162,6 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         }
 
     /**
-     * A new title. The old verdict described a source that is no longer
-     * playing, so keeping it would show a confident sentence about the wrong
-     * film. A reopen deliberately does not clear it: the failure a verdict
-     * explains normally arrives on the far side of one.
-     */
-    /**
      * Publish what a recovery owner is about to act on, then wait — briefly —
      * for the verdict that evidence earns.
      *
@@ -183,6 +184,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         boundMs: Long,
         capMs: Long,
         publish: () -> Unit,
+        now: () -> Long = ::monotonicNowMs,
     ): ControlAction? {
         val subject = reporter ?: return null
         val status = subject.status()
@@ -190,12 +192,12 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         val floor = status.sequence + 1
         val seenAtStart = synchronized(answerLock) { answersSeen }
         publish()
-        val startedAt = monotonicNowMs()
+        val startedAt = now()
         var deadline = startedAt + boundMs
         val hardDeadline = startedAt + capMs
         var seen = seenAtStart
         var extended = false
-        while (monotonicNowMs() < deadline) {
+        while (now() < deadline) {
             val ready = synchronized(answerLock) {
                 // Both conditions. An answer that arrived before this ask
                 // cannot be its answer, and a 409 owner reset zeroes the
@@ -216,7 +218,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                 // this instant, once.
                 if (!extended) {
                     extended = true
-                    deadline = minOf(monotonicNowMs() + boundMs, hardDeadline)
+                    deadline = minOf(now() + boundMs, hardDeadline)
                 }
             }
             kotlinx.coroutines.delay(ASK_POLL_MS)
@@ -226,6 +228,12 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         return null
     }
 
+    /**
+     * A new title. The old verdict described a source that is no longer
+     * playing, so keeping it would show a confident sentence about the wrong
+     * film. A reopen deliberately does not clear it: the failure a verdict
+     * explains normally arrives on the far side of one.
+     */
     fun clearVerdict() {
         synchronized(verdictLock) { verdict = null }
     }
@@ -250,6 +258,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         // would otherwise carry a previous generation's verdict into this one.
         val generation = synchronized(verdictLock) { ++verdictGeneration }
         synchronized(answerLock) {
+            answerGeneration = generation
             answerAction = null
             answerRequestSequence = 0
             answersSeen = 0
@@ -274,7 +283,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                 // an owner that asked must not wait out its whole bound for an
                 // exchange that has already come back with nothing.
                 synchronized(answerLock) {
-                    if (generation == verdictGeneration) {
+                    if (generation == answerGeneration) {
                         answersSeen += 1
                         answerAction = exchange.response?.action
                         answerRequestSequence = exchange.request.sequence

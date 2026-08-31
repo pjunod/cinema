@@ -302,41 +302,15 @@ class ControlErrorClassTest {
     }
 }
 
+
 /**
- * The server's seven hold reasons, in the viewer's words.
- *
- * A viewer reading `working_set` learns less than one reading a sentence, and
- * a reason this client has never heard of is a newer server rather than a
- * broken one — so an unknown reason gets the generic line instead of its wire
- * name or nothing at all.
+ * Ruling D3. The fallback is the branch the whole fleet takes, so the ask
+ * bound is added to every real stall on every device — and the three platforms
+ * carry the same pair of numbers, so a drift is visible here rather than
+ * silent.
  */
-class HoldNoticeTest {
+class ControlAskBoundTest {
 
-    @Test
-    fun everyHoldReasonHasSomethingAViewerCanRead() {
-        for (reason in listOf("demand", "time", "bytes", "global", "ahead", "working_set", "no_room")) {
-            val notice = holdNotice(reason)
-            // A sentence, not a token. "ahead" legitimately appears inside its
-            // own sentence, so the test is that the viewer gets prose rather
-            // than that a particular word is absent.
-            assertTrue(notice.endsWith("."))
-            assertTrue(notice.length > reason.length + 8)
-            assertFalse(notice == reason)
-        }
-    }
-
-    @Test
-    fun anUnknownReasonFallsBackRatherThanShowingItsWireName() {
-        assertEquals("Waiting for the server.", holdNotice("a reason from a newer server"))
-        assertEquals("Waiting for the server.", holdNotice(null))
-    }
-
-    /**
-     * Ruling D3. The fallback is the branch the whole fleet takes, so the ask
-     * bound is added to every real stall on every device — and the three
-     * platforms carry the same pair of numbers, so a drift is visible here
-     * rather than silent.
-     */
     @Test
     fun theAskBoundIsShortAndItsCapIsLonger() {
         assertEquals(1_500L, CONTROL_ASK_MS)
