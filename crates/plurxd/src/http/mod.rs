@@ -8680,7 +8680,10 @@ mod tests {
             if marker_offers() == offers_before_decision + 1 {
                 break;
             }
-            tokio::task::yield_now().await;
+            // The handler records telemetry in a detached task. A bare yield
+            // does not guarantee that task is polled, especially when LLVM
+            // coverage instrumentation changes the scheduler's timing.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert_eq!(marker_offers(), offers_before_decision + 1);
         state
