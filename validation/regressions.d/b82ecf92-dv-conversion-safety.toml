@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b82ecf92"]
+points = ["core.media", "persistence.upgrades", "cluster.auth", "server.api", "web.experience", "operations.packaging"]
+checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth", "resource-bounds", "web-static", "web-layout", "operations-contract", "container-runtime", "history-regressions"]
+reason = "Retained SQLite and three-voter contracts prove atomic MKV-only admission, capped library batches and bulk reads, concurrent mode preservation, grouped progress, and strict retryable v19 migration failure. Daemon regressions exercise bounded/versioned probes, verified replacement mismatch and truncation rejection, no-clobber renames, staged-original recovery and rollback, owned scratch cleanup, missing-library HTTP semantics, unchanged destructive settings on validation failure, one-request item hydration, active-only polling, accessible controls, and both container architectures. Restoring the pre-fix behavior reintroduces source replacement races, unsafe recovery, unbounded Raft work, stale concurrent writes, or invisible operator state."
