@@ -395,6 +395,14 @@ class Controller(
             // credential — is the same on every ingress, and walking the list
             // for one costs a full player prepare per node before the viewer
             // sees the error they were always going to see.
+            reportControlEvidence(
+                ClientObservation(
+                    decoderState = DecoderState.FAILED,
+                    errorCode = controlErrorCode(error.errorCode),
+                    errorDetail = error.errorCodeName,
+                ),
+                render = RenderState.FAILED,
+            )
             if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) return
             val action = playbackErrorAction(
                 deliveryMode = deliveryMode,
@@ -461,7 +469,13 @@ class Controller(
                     restartAt(position, "fallback")
                 }
                 PlaybackErrorAction.Fail -> onError(
-                    error.errorCodeName.let { "Playback stopped ($it)." },
+                    // A verdict says production stopped for a reason retrying
+                    // cannot change. A dropped link is a different cause with
+                    // a different answer, so a transport failure keeps the
+                    // client's own words rather than borrowing the server's.
+                    (if (isTransportPlaybackError(error.errorCode)) null
+                    else playbackControl.terminalVerdict?.message)
+                        ?: error.errorCodeName.let { "Playback stopped ($it)." },
                 )
             }
         }
@@ -578,7 +592,14 @@ class Controller(
         pgsOverlay.release()
         stallGuard.invalidateForUserAction()
         playbackControl.end()
+        // A verdict survives a reopen because the failure it explains usually
+        // arrives after one. It must not survive the title: a confident
+        // sentence about the wrong film is worse than a generic one.
+        playbackControl.clearVerdict()
         controlWaitingSince = null
+        controlObservationOverride = null
+        controlRenderOverride = null
+        controlEvidencePositionMs = null
         sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
 
@@ -782,6 +803,16 @@ class Controller(
      */
     private fun onStall(positionMs: Long) {
         if (sessionId == null) return
+        // Publish this owner's evidence before it decides anything. The
+        // server's picture of a stall is otherwise whatever the one-second
+        // tick happened to catch. M5g asks for a verdict here; this only
+        // tells. Note the limit: this detector cannot fire during an
+        // open-ended freeze at all, so a frozen playhead stays invisible to
+        // the control plane either way.
+        reportControlEvidence(
+            ClientObservation(decoderState = DecoderState.STARVED),
+            render = RenderState.STALLED,
+        )
         // If we have already exhausted the budget at the current floor rung,
         // stop reopening — the server cannot step further down and the client
         // must not churn forever.
@@ -855,7 +886,10 @@ class Controller(
                         "PlurxPlayback",
                         "session reopen failed ${redactedFailureDetail("session_reopen", error)}",
                     )
-                    onError("The stream stalled and recovery failed.")
+                    onError(
+                        playbackControl.terminalVerdict?.message
+                            ?: "The stream stalled and recovery failed.",
+                    )
                 }
                 return@launch
             }
@@ -1144,6 +1178,14 @@ class Controller(
      * does not depend on the control plane and never should.
      */
     private fun beginPlaybackControl(hls: HlsStart) {
+        // The override describes the session that just ended. Carrying it into
+        // the replacement would make its very first exchange — a session that
+        // has rendered nothing yet — report a stall belonging to another.
+        // Cleared before the bootstrap is judged, so a reopen against a server
+        // that offers no control plane cannot leave one behind either.
+        controlObservationOverride = null
+        controlRenderOverride = null
+        controlEvidencePositionMs = null
         val bootstrap = hls.control
         if (bootstrap == null || !bootstrap.isValid) {
             playbackControl.end()
@@ -1167,6 +1209,42 @@ class Controller(
      * that could be wrong lives in [PlaybackControlMapping], where it is
      * tested.
      */
+    /**
+     * Evidence a recovery owner is about to act on, published for the next
+     * exchange. The mapper has consumed an override since M2 — a recovery
+     * path knows things Media3 cannot report — and until now nothing set one.
+     */
+    private var controlObservationOverride: ClientObservation? = null
+    private var controlRenderOverride: RenderState? = null
+
+    /**
+     * The film position when the override was published, so progress past it
+     * can expire the override. A moving film clock is the only proof the stall
+     * the evidence describes is actually over; `playbackState` is not, because
+     * Android's own stall detector cannot fire during an open-ended freeze.
+     */
+    private var controlEvidencePositionMs: Long? = null
+
+    /**
+     * Publish what a recovery owner is about to act on, and send it now.
+     *
+     * Two things are load-bearing: the override is set before the snapshot is
+     * taken, or the exchange carries Media3's vaguer version of the same
+     * moment; and the report is urgent rather than coalesced, because the
+     * owner's own reopen normally ends the reporter before its next scheduled
+     * exchange.
+     */
+    private fun reportControlEvidence(
+        observation: ClientObservation?,
+        render: RenderState? = null,
+    ) {
+        refreshControlWaiting()
+        controlObservationOverride = observation
+        controlRenderOverride = render
+        controlEvidencePositionMs = realPosition()
+        playbackControl.reportEvidence()
+    }
+
     private fun playbackControlObservation(): PlayerControlObservation? {
         val capabilities = deviceControlCapabilities ?: return null
         val position = realPosition()
@@ -1196,6 +1274,8 @@ class Controller(
             isLikelyToKeepUp = player.playbackState == Player.STATE_READY,
             droppedFrames = null,
             observedDownloadBps = null,
+            observationOverride = controlObservationOverride,
+            renderOverride = controlRenderOverride,
             selection = playbackControlSelection(),
             capabilities = capabilities,
         )
@@ -1237,13 +1317,60 @@ class Controller(
      * replaces what the next exchange will carry.
      */
     private fun playbackControlPlayerChanged() {
+        refreshControlWaiting()
+        expireControlEvidenceIfProgressed()
+        playbackControl.playerChanged()
+    }
+
+    private fun refreshControlWaiting() {
         if (player.playbackState == Player.STATE_BUFFERING) {
             if (controlWaitingSince == null) controlWaitingSince = monotonicNowMs()
         } else {
             controlWaitingSince = null
         }
-        playbackControl.playerChanged()
     }
+
+    private fun expireControlEvidenceIfProgressed() {
+        val publishedAt = controlEvidencePositionMs ?: return
+        // Any movement, not only forward movement. A VOD seek never reopens
+        // the session, so a viewer scrubbing BACK from a stall would otherwise
+        // leave the override in place for the rest of the title — and the
+        // mapper ranks an override above everything the player reports, so
+        // every exchange for the next hour of healthy playback would say
+        // `stalled`.
+        if (realPosition() == publishedAt) return
+        controlObservationOverride = null
+        controlRenderOverride = null
+        controlEvidencePositionMs = null
+    }
+}
+
+/**
+ * Which class of failure Media3 reported, in the protocol's vocabulary.
+ *
+ * The classes are not decoration. A decoder error says this device cannot play
+ * this recipe and a different rung might; a network error says nothing about
+ * the recipe at all; a manifest or source error is about what the server
+ * produced. Sending `unknown` for all of them would hand the arbiter one word
+ * where it has to choose between three different answers.
+ */
+internal fun controlErrorCode(errorCode: Int): ClientErrorCode = when (errorCode) {
+    // Media3's 3xxx family is *parsing*, and it splits: the container codes
+    // are about the media, the manifest codes are about what the server
+    // produced. This client's own compatibility ladder already treats 3001
+    // and 3003 as media failures (`isCompatibilityPlaybackError`), so
+    // reporting them as `manifest` would tell the arbiter the playlist was
+    // bad at the moment the client is about to re-encode the file.
+    3001, 3003 -> ClientErrorCode.MEDIA
+    1003 -> ClientErrorCode.NETWORK // ERROR_CODE_TIMEOUT
+    in 2000..2999 -> ClientErrorCode.NETWORK
+    in 3000..3999 -> ClientErrorCode.MANIFEST
+    // 4xxx is decoder/renderer init and decode; 5xxx is the AudioTrack
+    // renderer, which is the same class of answer: this device could not
+    // render this recipe.
+    in 4000..5999 -> ClientErrorCode.DECODER
+    in 6000..6999 -> ClientErrorCode.DRM
+    else -> ClientErrorCode.UNKNOWN
 }
 
 /**
