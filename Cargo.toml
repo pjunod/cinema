@@ -45,6 +45,11 @@ serde_json = "1"
 # extractor would have produced — which is precisely the step that could hide a
 # disagreement.
 serde_urlencoded = "0.7"
+# Dolby Vision RPU parsing and rewriting, for the Profile 7 to 8.1 conversion
+# (PLAYBACK-CAPS-V2-PLAN section 4.8). Default features only: `capi`, `xml`
+# and `serde` are for tools that emit RPU files, and plurx rewrites NAL units
+# in memory and writes nothing.
+dolby_vision = { version = "3.4", default-features = false }
 toml = "0.8"
 # Errors / logging
 thiserror = "2"

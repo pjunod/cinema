@@ -1,7 +1,7 @@
 # Playback capabilities v2 — highest deliverable grade, negotiated not guessed
 
-**Status:** building — M0, M1, M2, M3a–M3d, M4 merged; M6 in review;
-M5a-0 spike done; M5a, M5b not started · **Executes:** fable's rulings of 2026-08-29 on
+**Status:** building — M0, M1, M2, M3a–M3d, M4 and M6 merged; M5a in review
+(#688); M5b not started · **Executes:** fable's rulings of 2026-08-29 on
 opus's DV-delivery findings · **Analysed:** `main` @ `4ba8bb48` ·
 **Written:** 2026-08-29 · **Updated:** 2026-08-30 · **Builder:** opus
 

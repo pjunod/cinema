@@ -1901,7 +1901,34 @@ fn system_info(
         dovi_passthrough_qsv: measured.dovi_passthrough_qsv,
         hdr10_passthrough: measured.hdr10_passthrough,
         hdr10_passthrough_qsv: measured.hdr10_passthrough_qsv,
+        // Not measured: the conversion is plurx's own code, so the only
+        // question is whether an operator has turned it off. `PLURX_DV_CONVERT=0`
+        // is the off switch, and the default is on — a Profile 7 title that
+        // reaches a Dolby Vision client as HDR10 is the thing this exists to
+        // stop, so it should not need enabling.
+        //
+        // Case-folded, like every other boolean switch plurx reads
+        // (`PLURX_PGS_OVERLAY`, `state.rs:579`). An operator who writes
+        // `PLURX_DV_CONVERT=OFF` in a compose file means off; a switch that
+        // quietly ignored them would leave the feature on with nothing to
+        // explain why.
+        dolby_vision_convert: dv_convert_enabled(std::env::var("PLURX_DV_CONVERT").ok().as_deref()),
     }
+}
+
+/// Whether the Profile 7 → 8.1 conversion runs, from the raw environment
+/// value.
+///
+/// Separated from `system_info` so it is testable without setting a process
+/// environment variable — which the test harness runs threads in, so a test
+/// that set one would decide the answer for whatever else was running.
+fn dv_convert_enabled(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        )
+    })
 }
 
 /// The encoder preference this boot runs under.
@@ -4822,6 +4849,33 @@ mod startup_tests {
             .expect("an orderly shutdown is exit 0");
     }
 
+    /// The Dolby Vision conversion is on unless an operator says otherwise,
+    /// and every spelling of "otherwise" that plurx accepts elsewhere works
+    /// here too.
+    ///
+    /// Case matters because compose files are hand-written. `PLURX_DV_CONVERT=OFF`
+    /// is what someone types when they mean off, and a switch that answered
+    /// "on" to it would leave a node converting with nothing on the settings
+    /// page or in the boot log to explain why the variable did nothing.
+    #[test]
+    fn the_conversion_switch_reads_every_spelling_of_off() {
+        // Default on: a Profile 7 title reaching a Dolby Vision client as
+        // HDR10 is what this exists to stop, so it must not need enabling.
+        assert!(dv_convert_enabled(None));
+
+        for off in [
+            "0", "false", "off", "no", "FALSE", "Off", "NO", " off ", "False",
+        ] {
+            assert!(!dv_convert_enabled(Some(off)), "{off:?} means off");
+        }
+
+        // Everything else is not a request to turn it off, and an unreadable
+        // value must not silently disable a feature.
+        for on in ["1", "true", "on", "yes", "", "maybe", "0.0"] {
+            assert!(dv_convert_enabled(Some(on)), "{on:?} must leave it on");
+        }
+    }
+
     /// The settings page and every session read this record, so the encoder it
     /// names has to be the one the probe actually chose.
     #[test]
@@ -4856,6 +4910,15 @@ mod startup_tests {
         assert_eq!(system.ffmpeg, "/opt/jellyfin-ffmpeg/ffmpeg");
         assert_eq!(system.encoder_selected, selected);
         assert_eq!(system.hwaccel_pref, "auto");
+        // The record has to carry the switch's answer, not a literal. A test
+        // suite that only covers `dv_convert_enabled` leaves the wire between
+        // it and this record uncovered: replacing the call with `true` would
+        // pass everything else and quietly ignore the operator.
+        assert_eq!(
+            system.dolby_vision_convert,
+            dv_convert_enabled(std::env::var("PLURX_DV_CONVERT").ok().as_deref()),
+            "the reported conversion state is the one the switch decides"
+        );
         assert!(system.dovi_rpu);
         assert!(system.dovi_reshape);
         assert!(system.pacing.readrate);

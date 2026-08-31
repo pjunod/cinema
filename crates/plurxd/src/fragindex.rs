@@ -289,6 +289,20 @@ pub fn identity_for(file: &MediaFile, video: transcode::CopyVideoOptions) -> Sou
 /// strip to. [`plurx_core::playback::decide`] never routes it to a stripping
 /// copy, but `decide_forced` with `Force::Original` does, and that copy is
 /// indexed today — dropping it would regress a path that works.
+///
+/// **The Profile 7 → 8.1 conversion is a third identity, and it is not here
+/// yet.** `copy_video_args` already carries `DV_CONVERT_MARKER` for a
+/// converting copy, so that pipeline's fingerprint exists and differs — but
+/// nothing sets `dv_convert` outside tests, so no session can ask for it, and
+/// adding the identity now would spend a third full pass over every Profile 7
+/// remux in the library to index a stream nothing plays. It belongs in the
+/// commit that wires the conversion into a session, keyed on the same file
+/// facts `plurx_core::playback::dolby_vision_converts_to_p81` reads (Profile 7
+/// with an HDR10 base) — and it has to land in that commit, not after it, or a
+/// converting session looks up an index nothing built, gets
+/// `vod_index_pending`, and falls through to the live-HLS recovery path on
+/// every play. That is exactly the regression the paragraph above describes,
+/// and it is the reason this note is here rather than in a plan document.
 pub fn video_identities(
     file: &MediaFile,
     probe_json: Option<&str>,
