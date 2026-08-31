@@ -293,6 +293,149 @@ fn convert_units(input: &[u8], out: &mut Vec<u8>) -> Result<Converted, DvConvert
     Ok(report)
 }
 
+/// Rewrite every RPU in a **length-prefixed** sample, the shape a sample has
+/// inside an fMP4 fragment.
+///
+/// The Annex B form above exists for a pipeline that no longer ships: feeding
+/// a raw elementary stream between two ffmpegs destroys the video timeline,
+/// because ffmpeg's raw HEVC demuxer emits every packet with no timestamps at
+/// all and the muxer then fabricates a decode-order grid — `pts == dts` for
+/// every sample, presentation reordering erased, every minigop played in
+/// coding order. Measured: ~410 display-order inversions in 819 frames on an
+/// ordinary three-B-frame encode, on every GOP, seek or no seek.
+///
+/// So the rewrite moved to the other side of the muxer. One ffmpeg produces
+/// the fragmented MP4 it always produced — video and audio from one open, one
+/// timeline, timestamps copied rather than reconstructed — and plurx rewrites
+/// the RPU NAL units inside the fragments it already parses. There is no
+/// second stream to align, which is why there is no longer an alignment
+/// question to get wrong.
+///
+/// `nal_length_size` is the `hvcC` field: 1, 2 or 4. Returns what the sample
+/// held, and the caller owns the consequences of the size change — a shorter
+/// sample has to be declared shorter, which is the size-fixup chain in
+/// [`crate::fmp4`].
+pub fn convert_length_prefixed(
+    sample: &[u8],
+    nal_length_size: u8,
+    out: &mut Vec<u8>,
+) -> Result<Converted, DvConvertError> {
+    out.clear();
+    out.reserve(sample.len());
+    match convert_length_prefixed_into(sample, nal_length_size, out) {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            out.clear();
+            Err(error)
+        }
+    }
+}
+
+fn convert_length_prefixed_into(
+    sample: &[u8],
+    nal_length_size: u8,
+    out: &mut Vec<u8>,
+) -> Result<Converted, DvConvertError> {
+    let width = usize::from(nal_length_size);
+    if !matches!(width, 1 | 2 | 4) {
+        return Err(DvConvertError::Unreadable {
+            frame: 0,
+            offset: 0,
+            detail: format!("a {nal_length_size}-byte NAL length prefix is not a legal hvcC value"),
+        });
+    }
+    let mut report = Converted::default();
+    let mut at = 0usize;
+    while at < sample.len() {
+        if at + width > sample.len() {
+            return Err(DvConvertError::Unreadable {
+                frame: report.rpus,
+                offset: at,
+                detail: "a NAL length prefix runs past the end of the sample".to_owned(),
+            });
+        }
+        let length = sample[at..at + width]
+            .iter()
+            .fold(0usize, |acc, byte| (acc << 8) | usize::from(*byte));
+        let body = at + width;
+        let end = body
+            .checked_add(length)
+            .filter(|end| *end <= sample.len())
+            .ok_or_else(|| DvConvertError::Unreadable {
+                frame: report.rpus,
+                offset: at,
+                detail: format!("a NAL unit declares {length} bytes the sample does not carry"),
+            })?;
+        let nal = &sample[body..end];
+
+        if nal_type(nal) != Some(RPU_NAL_TYPE) {
+            out.extend_from_slice(&sample[at..end]);
+            at = end;
+            continue;
+        }
+
+        let mut rpu =
+            DoviRpu::parse_unspec62_nalu(nal).map_err(|error| DvConvertError::Unreadable {
+                frame: report.rpus,
+                offset: at,
+                detail: error.to_string(),
+            })?;
+        // The same guard the Annex B form applies, for the same reasons: the
+        // error type's own documentation says what each wrong answer looks
+        // like on screen.
+        if rpu.dovi_profile != 7 {
+            return Err(DvConvertError::UnsupportedProfile {
+                frame: report.rpus,
+                offset: at,
+                profile: rpu.dovi_profile,
+            });
+        }
+        if report.source_profile.is_none() {
+            report.source_profile = Some(rpu.dovi_profile);
+            report.enhancement_layer = match rpu.el_type {
+                Some(DoviELType::MEL) => EnhancementLayer::Minimum,
+                Some(DoviELType::FEL) => EnhancementLayer::Full,
+                None => EnhancementLayer::None,
+            };
+        }
+        rpu.convert_with_mode(ConversionMode::To81)
+            .map_err(|error| DvConvertError::Unconvertible {
+                frame: report.rpus,
+                offset: at,
+                detail: error.to_string(),
+            })?;
+        // `write_hevc_unspec62_nalu` emits the Annex B spelling: the NAL with
+        // its type byte, ready for a start code. Inside a sample the same
+        // bytes take a length prefix instead, so the payload is identical and
+        // only the framing differs.
+        let written =
+            rpu.write_hevc_unspec62_nalu()
+                .map_err(|error| DvConvertError::Unconvertible {
+                    frame: report.rpus,
+                    offset: at,
+                    detail: error.to_string(),
+                })?;
+        let length = written.len();
+        if length >= 1usize << (8 * width) {
+            return Err(DvConvertError::Unconvertible {
+                frame: report.rpus,
+                offset: at,
+                detail: format!(
+                    "the converted RPU is {length} bytes, which a {width}-byte length prefix \
+                     cannot express"
+                ),
+            });
+        }
+        for shift in (0..width).rev() {
+            out.push(((length >> (8 * shift)) & 0xff) as u8);
+        }
+        out.extend_from_slice(&written);
+        report.rpus += 1;
+        at = end;
+    }
+    Ok(report)
+}
+
 /// How much of a read buffer is safely convertible: everything up to the last
 /// start code in it.
 ///
@@ -518,6 +661,98 @@ mod tests {
         let tail: &[u8] = &[0, 0, 1];
         assert!(out.ends_with(slice));
         assert!(out[..out.len() - slice.len()].ends_with(tail));
+    }
+
+    /// The length-prefixed form converts the same RPUs the Annex B form does,
+    /// and re-frames them without touching the payload.
+    ///
+    /// This is the form that ships. The two differ only in framing — a length
+    /// prefix instead of a start code — so the converted NAL bytes must come
+    /// out identical, and any divergence would mean one is doing something to
+    /// the payload the other is not.
+    #[test]
+    fn a_length_prefixed_sample_converts_to_the_same_rpu_the_annex_b_form_does() {
+        let rpu = rpu_bytes();
+        let slice: &[u8] = &[0x26, 0x01, 0xaf, 0x12];
+
+        let mut annex_b_out = Vec::new();
+        let stream = annex_b(&[(&[0, 0, 1], &rpu)]);
+        convert_annex_b(&stream, &mut annex_b_out).expect("convert");
+        let annex_b_rpu = &annex_b_out[3..];
+
+        let mut sample = Vec::new();
+        sample.extend_from_slice(&(slice.len() as u32).to_be_bytes());
+        sample.extend_from_slice(slice);
+        sample.extend_from_slice(&(rpu.len() as u32).to_be_bytes());
+        sample.extend_from_slice(&rpu);
+
+        let mut out = Vec::new();
+        let report = convert_length_prefixed(&sample, 4, &mut out).expect("convert");
+        assert_eq!(report.rpus, 1);
+        assert_eq!(report.source_profile, Some(7));
+        assert_eq!(report.enhancement_layer, EnhancementLayer::Full);
+
+        // The slice is byte for byte, prefix included.
+        assert_eq!(&out[..4 + slice.len()], &sample[..4 + slice.len()]);
+
+        // …and the RPU is the same one, re-framed.
+        let at = 4 + slice.len();
+        let length = u32::from_be_bytes(out[at..at + 4].try_into().expect("prefix")) as usize;
+        assert_eq!(&out[at + 4..at + 4 + length], annex_b_rpu);
+        assert!(
+            length < rpu.len(),
+            "the conversion shortens the RPU, which is why the caller has size \
+             fixups to do"
+        );
+        assert_eq!(out.len(), at + 4 + length);
+    }
+
+    /// Every legal `hvcC` prefix width, and one that is not.
+    #[test]
+    fn every_legal_nal_length_width_is_read_and_an_illegal_one_is_refused() {
+        let rpu = rpu_bytes();
+        for width in [1usize, 2, 4] {
+            // A one-byte prefix cannot express this RPU's length, so that case
+            // exercises the framing with a short non-RPU unit instead.
+            let unit: &[u8] = if width == 1 {
+                &[0x26, 0x01, 0xaf]
+            } else {
+                &rpu
+            };
+            let mut sample = Vec::new();
+            for shift in (0..width).rev() {
+                sample.push(((unit.len() >> (8 * shift)) & 0xff) as u8);
+            }
+            sample.extend_from_slice(unit);
+
+            let mut out = Vec::new();
+            let report = convert_length_prefixed(&sample, width as u8, &mut out)
+                .unwrap_or_else(|error| panic!("width {width}: {error}"));
+            assert_eq!(report.rpus, u64::from(width != 1));
+        }
+
+        let mut out = Vec::new();
+        assert!(convert_length_prefixed(&[0, 0, 0], 3, &mut out).is_err());
+    }
+
+    /// A sample whose framing does not add up is refused, not guessed at.
+    ///
+    /// A declared length running past the sample means the caller handed over
+    /// the wrong bytes — a mis-computed `trun` offset, most likely — and
+    /// converting whatever happens to be there would write a rewritten RPU
+    /// into the middle of a picture.
+    #[test]
+    fn a_sample_whose_lengths_do_not_add_up_is_refused() {
+        let mut out = Vec::new();
+
+        let mut overrun = 999u32.to_be_bytes().to_vec();
+        overrun.extend_from_slice(&[0x26, 0x01]);
+        let error = convert_length_prefixed(&overrun, 4, &mut out).expect_err("must refuse");
+        assert!(error.to_string().contains("does not carry"), "{error}");
+        assert!(out.is_empty(), "a refusal leaves nothing to forward");
+
+        assert!(convert_length_prefixed(&[0, 0], 4, &mut out).is_err());
+        assert!(out.is_empty());
     }
 
     /// A stream with no RPUs converts to itself, and says so.

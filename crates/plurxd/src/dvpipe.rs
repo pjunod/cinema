@@ -58,10 +58,20 @@ pub struct ConvertingProducer {
 /// last RPU is rewritten. The session's reasons read it when it settles.
 #[derive(Debug, Clone)]
 pub enum Outcome {
-    /// The stream converted. `rpus: 0` is included here and is *not* an error
-    /// at this layer — see [`dvconvert::convert_annex_b`]; whether a source
-    /// believed to be Profile 7 carrying no RPUs is a refusal is a question
-    /// for the caller, which has the file's stored facts.
+    /// The input stream **ended** and everything in it converted.
+    ///
+    /// Deliberately not spelled "succeeded". This stage cannot tell a stream
+    /// that ran to its natural end from one whose producer was killed
+    /// mid-film — both close the pipe, and the stage that owns the exit status
+    /// is the caller's, not this task's. A session purge, a head regeneration
+    /// that read its init and stopped, and a complete film all arrive here, so
+    /// a caller that needs "did the whole film convert" has to ask its own
+    /// child rather than read a claim from this.
+    ///
+    /// `rpus: 0` is included and is *not* an error at this layer — see
+    /// [`dvconvert::convert_annex_b`]; whether a source believed to be Profile
+    /// 7 carrying no RPUs is a refusal is a question for the caller, which has
+    /// the file's stored facts.
     Converted(Converted),
     /// An RPU could not be read, converted, or was a profile this stage
     /// refuses. The stream stops here rather than continuing unconverted: a

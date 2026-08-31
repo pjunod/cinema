@@ -172,6 +172,14 @@ impl Init {
 pub struct Sample {
     pub duration: u32,
     pub size: u32,
+    /// Byte offset of this sample's `sample_size` field within the fragment's
+    /// bytes, when the `trun` carries one per sample.
+    ///
+    /// Recorded so a rewrite that changes a sample's length can correct the
+    /// declaration in place. `None` means the run used `default_sample_size`
+    /// from the `tfhd`, which no per-sample rewrite can express — such a
+    /// fragment is refused rather than silently mis-sized.
+    pub size_at: Option<usize>,
     pub flags: u32,
     /// Composition offset (pts − dts). Signed here even though ffmpeg writes
     /// version-0 unsigned offsets over a shifted dts, because a version-1
@@ -194,6 +202,15 @@ pub struct Run {
     /// enclosing [`Fragment`]'s bytes (which begin at the `moof` — the same
     /// origin `default-base-is-moof` gives the `trun`).
     pub data_offset: usize,
+    /// Byte offset of the `data_offset` *field* within the fragment's bytes,
+    /// when this `trun` carries one.
+    ///
+    /// A run whose offset was inherited from the previous run has `None`: its
+    /// position follows from the samples before it, so correcting those
+    /// corrects this. Recorded for the same reason as
+    /// [`Sample::size_at`] — a rewrite that changes sample lengths has to move
+    /// every later run, and this is where it says so.
+    pub data_offset_at: Option<usize>,
     pub samples: Vec<Sample>,
 }
 
@@ -1877,7 +1894,7 @@ fn parse_moof(
         if hdr.kind() != b"traf" {
             continue;
         }
-        out.push(parse_traf(&body[start..end], tracks)?);
+        out.push(parse_traf(&body[start..end], header_len + start, tracks)?);
     }
     if out.is_empty() {
         return malformed("moof has no traf");
@@ -1885,7 +1902,7 @@ fn parse_moof(
     Ok(out)
 }
 
-fn parse_traf(payload: &[u8], tracks: &[Track]) -> Result<TrackFragment, Fmp4Error> {
+fn parse_traf(payload: &[u8], base: usize, tracks: &[Track]) -> Result<TrackFragment, Fmp4Error> {
     let mut track_id = 0u32;
     let mut base_decode_time = 0u64;
     // Seeded from `trex`, overwritten by `tfhd`, overwritten again per sample
@@ -1968,6 +1985,7 @@ fn parse_traf(payload: &[u8], tracks: &[Track]) -> Result<TrackFragment, Fmp4Err
             b"trun" => {
                 let run = parse_trun(
                     b,
+                    base + start,
                     default_duration,
                     default_size,
                     default_flags,
@@ -1991,6 +2009,7 @@ fn parse_traf(payload: &[u8], tracks: &[Track]) -> Result<TrackFragment, Fmp4Err
 
 fn parse_trun(
     b: &[u8],
+    base: usize,
     default_duration: u32,
     default_size: u32,
     default_flags: u32,
@@ -2003,11 +2022,13 @@ fn parse_trun(
     let flags = be_u32(b, 0) & 0x00ff_ffff;
     let count = be_u32(b, 4) as usize;
     let mut p = 8;
+    let mut data_offset_at = None;
     let data_offset = if flags & 0x00_0001 != 0 {
         if b.len() < p + 4 {
             return malformed("trun truncated at data_offset");
         }
         let v = be_u32(b, p) as i32;
+        data_offset_at = Some(base + p);
         p += 4;
         if v < 0 {
             return Err(Fmp4Error::Unsupported(
@@ -2059,8 +2080,10 @@ fn parse_trun(
             duration = be_u32(b, p);
             p += 4;
         }
+        let mut size_at = None;
         if flags & 0x00_0200 != 0 {
             size = be_u32(b, p);
+            size_at = Some(base + p);
             p += 4;
         }
         if flags & 0x00_0400 != 0 {
@@ -2084,12 +2107,14 @@ fn parse_trun(
         samples.push(Sample {
             duration,
             size,
+            size_at,
             flags: sflags,
             cto,
         });
     }
     Ok(Run {
         data_offset,
+        data_offset_at,
         samples,
     })
 }
@@ -3443,6 +3468,7 @@ impl Segmenter {
                                 track_id: track.id,
                                 base_decode_time: selected_decode_time,
                                 runs: vec![Run {
+                                    data_offset_at: None,
                                     data_offset: selected_data_offset,
                                     samples: run.samples[group_start..group_end].to_vec(),
                                 }],
@@ -3785,8 +3811,10 @@ mod tests {
                 track_id,
                 base_decode_time: 0,
                 runs: vec![Run {
+                    data_offset_at: None,
                     data_offset: 0,
                     samples: vec![Sample {
+                        size_at: None,
                         duration: 1_000,
                         size,
                         flags: 0,
@@ -4672,6 +4700,7 @@ mod tests {
     fn synthetic(track_id: u32, base: u64, duration: u32, count: usize, size: u32) -> Fragment {
         let samples = vec![
             Sample {
+                size_at: None,
                 duration,
                 size,
                 flags: 0,
@@ -4689,6 +4718,7 @@ mod tests {
                 track_id,
                 base_decode_time: base,
                 runs: vec![Run {
+                    data_offset_at: None,
                     data_offset: 8,
                     samples,
                 }],

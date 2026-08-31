@@ -4051,7 +4051,7 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
     let recipe = &rendition.recipe;
     let attested = attested_source_setup(rendition);
     let (mut child, stdout) = if recipe.video.converts_dolby_vision() {
-        match spawn_converting_producer(rendition, start_seconds, attested).await {
+        match spawn_converting_producer(shared, rendition, start_seconds, attested).await {
             Ok(pair) => pair,
             Err(cause) => {
                 record_failure(shared, rendition, cause);
@@ -4214,6 +4214,7 @@ fn converting_producer_args(
 }
 
 async fn spawn_converting_producer(
+    shared: &Arc<Shared>,
     rendition: &Arc<Rendition>,
     start_seconds: f64,
     attested: bool,
@@ -4241,6 +4242,8 @@ async fn spawn_converting_producer(
         converting_producer_args(recipe, input, start_seconds, audio_start);
 
     let key = rendition.key.clone();
+    let failed = Arc::clone(shared);
+    let owner = Arc::clone(rendition);
     let producer = crate::dvpipe::spawn(
         &ffmpeg_bin(),
         &source_args,
@@ -4251,12 +4254,24 @@ async fn spawn_converting_producer(
                 rendition = %key,
                 rpus = report.rpus,
                 enhancement_layer = ?report.enhancement_layer,
-                "converted this generation's Dolby Vision to profile 8.1"
+                "this generation's Dolby Vision stream ended"
             ),
-            crate::dvpipe::Outcome::Refused(reason) => tracing::warn!(
-                rendition = %key,
-                "the Dolby Vision conversion refused this generation: {reason}"
-            ),
+            // A refusal is terminal for this rendition, not for this
+            // generation. The conversion stops at a particular RPU because
+            // that RPU cannot be converted, so respawning lands on the same
+            // frame and refuses again — a restart loop, and a viewer error
+            // with no cause in it. Recording the failure is what turns that
+            // into one message naming the byte.
+            crate::dvpipe::Outcome::Refused(reason) => {
+                record_failure(
+                    &failed,
+                    &owner,
+                    format!("the Dolby Vision conversion refused this stream: {reason}"),
+                );
+            }
+            // Not a failure: the ordinary end of a killed producer. A session
+            // purge, a suspend that outlived its budget, or the head
+            // regeneration reading an init and stopping all arrive here.
             crate::dvpipe::Outcome::Interrupted(reason) => tracing::debug!(
                 rendition = %key,
                 "the Dolby Vision conversion ended early: {reason}"
