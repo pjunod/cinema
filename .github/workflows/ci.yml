@@ -508,8 +508,17 @@ jobs:
             mkdir -p target/validation
             touch target/validation/android-instrumentation-started
             PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
+      - name: Freeze whether the first instrumentation script started
+        id: android_instrumentation_first_attempt
+        if: always()
+        run: |
+          if [[ -f target/validation/android-instrumentation-started ]]; then
+            echo "started=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "started=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Retry a pre-test emulator boot failure once
-        if: steps.android_instrumentation.outcome == 'failure' && hashFiles('target/validation/android-instrumentation-started') == ''
+        if: steps.android_instrumentation.outcome == 'failure' && steps.android_instrumentation_first_attempt.outputs.started == 'false'
         uses: reactivecircus/android-emulator-runner@v2
         with:
           # The upstream action checks boot completion and then sends one
@@ -527,7 +536,7 @@ jobs:
             touch target/validation/android-instrumentation-started
             PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
       - name: Propagate an instrumented-test failure without retrying it
-        if: steps.android_instrumentation.outcome == 'failure' && hashFiles('target/validation/android-instrumentation-started') != ''
+        if: steps.android_instrumentation.outcome == 'failure' && steps.android_instrumentation_first_attempt.outputs.started == 'true'
         run: exit 1
       - name: Upload Android test reports
         if: always()

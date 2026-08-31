@@ -122,6 +122,7 @@ import tv.plurx.app.BuildConfig
 import tv.plurx.app.data.AudioTrack
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.Decision
+import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.Marker
 import tv.plurx.app.data.MediaFileDto
 import tv.plurx.app.data.PlaybackSessionStatus
@@ -160,6 +161,9 @@ private data class Plan(
     override val aac: Boolean,
     override val preserveDolbyVision: Boolean,
     override val deliveredDynamicRange: String?,
+    /** Both protocol spellings from the route probe that produced the plan. */
+    val legacyCaps: Map<String, String>,
+    val decisionCaps: DeviceCaps,
     /**
      * `delivery.audio` — the audio index this plan already carries. Executed as
      * given rather than re-derived: it is what the server actually applied to
@@ -208,7 +212,8 @@ private suspend fun loadPlan(
     // back already carries it. Starting on the policy default and switching
     // afterwards is what criterion 4 forbids: it is a visible re-buffer to
     // apply something the viewer chose before playback began.
-    val decision: Decision = planLoadStage("decision") { vm.decision(fileId, tracks) }
+    val playbackDecision = planLoadStage("decision") { vm.playbackDecision(fileId, tracks) }
+    val decision: Decision = playbackDecision.decision
     val file = detail.files.firstOrNull { it.id == fileId } ?: detail.files.firstOrNull()
     val mode = decision.delivery?.mode ?: when (decision.method) {
         "direct_play" -> "direct"
@@ -238,6 +243,8 @@ private suspend fun loadPlan(
             preserveDolbyVision = decision.delivery?.preserve_dolby_vision
                 ?: decision.preserve_dolby_vision,
             deliveredDynamicRange = decision.delivered_dynamic_range,
+            legacyCaps = playbackDecision.capabilities.legacyQuery,
+            decisionCaps = playbackDecision.capabilities.document,
             deliveryAudio = decision.delivery?.audio,
             markers = decision.markers,
             reasons = decision.reasons,
@@ -628,7 +635,8 @@ private fun PlayerContent(
             context,
             buildPlayer(context, vm),
             plan,
-            vm.playbackCaps,
+            plan.legacyCaps,
+            plan.decisionCaps,
             vm,
             scope,
             initialAudioOffsetMs = audioOffsetMs,

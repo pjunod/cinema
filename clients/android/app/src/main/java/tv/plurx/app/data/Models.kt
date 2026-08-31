@@ -680,6 +680,8 @@ data class CreateSessionReq(
     val aac: Boolean? = null,
     /** With `copy`: the decision said this client can take the source's DV. */
     val preserve_dolby_vision: Boolean? = null,
+    /** Per-title request for the HDR10 transcode rung selected by `/decision`. */
+    val hdr10: Boolean? = null,
     /** The probe snapshot that produced `/decision`, repeated for server-side
      * plan derivation instead of trusting the DV/HDR echo above. */
     val caps: DeviceCaps? = null,

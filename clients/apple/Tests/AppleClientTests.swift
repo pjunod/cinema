@@ -4495,6 +4495,7 @@ final class AppleClientTests: XCTestCase {
             dolbyVision: false
         ))
         XCTAssertEqual(hdrOnly["hdr"], "1")
+        XCTAssertEqual(hdrOnly["hdr10t"], "1")
         XCTAssertEqual(hdrOnly["dv"], "0")
         XCTAssertEqual(hdrOnly["dvprofile"], "")
         XCTAssertEqual(hdrOnly["dvhls"], "1")
@@ -4512,6 +4513,7 @@ final class AppleClientTests: XCTestCase {
             dolbyVision: true
         ))
         XCTAssertEqual(dolbyVision["hdr"], "1")
+        XCTAssertEqual(dolbyVision["hdr10t"], "1")
         XCTAssertEqual(dolbyVision["dv"], "1")
         XCTAssertEqual(dolbyVision["dvprofile"], "5,8")
         XCTAssertEqual(dolbyVision["dvhls"], "1")
@@ -4526,6 +4528,7 @@ final class AppleClientTests: XCTestCase {
             dolbyVision: true
         ))
         XCTAssertEqual(noHEVC["hdr"], "1")
+        XCTAssertEqual(noHEVC["hdr10t"], "0")
         XCTAssertEqual(noHEVC["dv"], "0")
         XCTAssertEqual(noHEVC["dvprofile"], "")
 
@@ -4535,6 +4538,7 @@ final class AppleClientTests: XCTestCase {
         })
         print("PLURX_CAPABILITIES \(runtime)")
         XCTAssertNotNil(runtime["hdr"])
+        XCTAssertNotNil(runtime["hdr10t"])
         XCTAssertNotNil(runtime["dv"])
         XCTAssertNotNil(runtime["dvprofile"])
         XCTAssertEqual(runtime["client"], "apple")
@@ -4624,6 +4628,72 @@ final class AppleClientTests: XCTestCase {
         let caps = try XCTUnwrap(json["caps"] as? [String: Any])
         XCTAssertEqual(caps["v"] as? Int, 2)
         XCTAssertEqual((caps["display"] as? [String: Any])?["dolby_vision"] as? Bool, false)
+    }
+
+    func testSessionCreateRequestsHDR10OnlyForAnActualHDR10Transcode() throws {
+        XCTAssertEqual(
+            PlayerController.sessionHDR10Request(
+                copy: false,
+                deliveredRange: "HDR10",
+                forcesSDR: false
+            ),
+            true
+        )
+        XCTAssertNil(PlayerController.sessionHDR10Request(
+            copy: false,
+            deliveredRange: "sdr",
+            forcesSDR: false
+        ))
+        XCTAssertNil(PlayerController.sessionHDR10Request(
+            copy: true,
+            deliveredRange: "hdr10",
+            forcesSDR: false
+        ), "a copy create must not repeat a transcode-only HDR10 request")
+        XCTAssertNil(PlayerController.sessionHDR10Request(
+            copy: false,
+            deliveredRange: "hdr10",
+            forcesSDR: true
+        ))
+
+        let request = CreateSessionRequest(
+            playbackId: "player-hdr10",
+            hdr10: true,
+            caps: Caps.capsDocument(
+                hevc: true,
+                av1: false,
+                displayHDR: true,
+                dolbyVision: false
+            )
+        )
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(request)) as? [String: Any]
+        )
+        XCTAssertEqual(json["hdr10"] as? Bool, true)
+        XCTAssertNotNil(json["caps"])
+    }
+
+    func testCompatibilityRescueAndBurnNeverRepeatTheReplacedHDR10Plan() {
+        for fallback in ["direct rescue", "remux rescue", "subtitle burn"] {
+            XCTAssertNil(PlayerController.sessionHDR10Request(
+                copy: false,
+                deliveredRange: "hdr10",
+                forcesSDR: true
+            ), fallback)
+        }
+    }
+
+    func testManualQualityTranscodePreservesDirectOrRemuxHDR10Decision() {
+        // A selected height makes either original decision a non-copy create;
+        // `/decision` is not repeated before this session request.
+        for originalMode in ["direct", "remux"] {
+            XCTAssertEqual(PlayerController.sessionHDR10Request(
+                copy: false,
+                deliveredRange: "hdr10",
+                forcesSDR: false
+            ), true, originalMode)
+        }
     }
 
     func testPictureInPictureCommandStartsStopsAndWaitsForAvailability() {
