@@ -3852,10 +3852,10 @@ final class PlayerController: ObservableObject {
         // path forward, so those fall through to the ladder — the ladder is
         // the only thing that can still produce a picture.
         let generation = openGeneration
-        let verdict = await controlVerdictForItemFailure(item)
+        let itemVerdict = await controlVerdictForItemFailure(item)
         guard openGeneration == generation, player.currentItem === item,
               !isChangingStream else { return }
-        if let verdict, verdict.type == "terminal" {
+        if let itemVerdict, itemVerdict.type == "terminal" {
             player.pause()
             isPlaying = false
             wantsPlayback = false
@@ -3864,7 +3864,7 @@ final class PlayerController: ObservableObject {
             playbackFailureTitle = currentMs > 0
                 ? Self.playbackStoppedFailureTitle
                 : Self.playbackStartFailureTitle
-            playbackError = verdict.message
+            playbackError = itemVerdict.message
             reportPlaybackFailure(
                 item,
                 step: PlaybackCompatibilityLadderStep(
