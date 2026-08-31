@@ -38,6 +38,13 @@ def workflow_step_blocks(job: str) -> dict[str, str]:
     }
 
 
+def workflow_step_scalar(step: str, key: str) -> str:
+    values = re.findall(rf"(?m)^        {re.escape(key)}: ([^\n]+)$", step)
+    if len(values) != 1:
+        raise AssertionError(f"expected one scalar {key!r}, found {len(values)}")
+    return values[0]
+
+
 class OperationsContractCase(unittest.TestCase):
     def test_browser_validation_never_claims_host_audio_or_media_controls(self):
         for path in ("scripts/playback-lab", "scripts/ui-baseline"):
@@ -674,46 +681,58 @@ class OperationsContractCase(unittest.TestCase):
             "Propagate an instrumented-test failure without retrying it"
         ]
 
-        self.assertIn("id: android_instrumentation", first_attempt)
-        self.assertIn("continue-on-error: true", first_attempt)
         self.assertEqual(
-            first_attempt.count(
-                "touch target/validation/android-instrumentation-started"
-            ),
-            1,
+            workflow_step_scalar(first_attempt, "id"), "android_instrumentation"
         )
-        self.assertIn(
-            "id: android_instrumentation_first_attempt", freeze_attempt
+        self.assertEqual(
+            workflow_step_scalar(first_attempt, "continue-on-error"), "true"
         )
-        self.assertIn("if: always()", freeze_attempt)
-        self.assertIn(
-            "if [[ -f target/validation/android-instrumentation-started ]]; then",
-            freeze_attempt,
+        first_script_marker = "          script: |\n"
+        self.assertEqual(first_attempt.count(first_script_marker), 1)
+        self.assertEqual(
+            first_attempt.split(first_script_marker, 1)[1],
+            "            mkdir -p target/validation\n"
+            "            touch target/validation/android-instrumentation-started\n"
+            '            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" '
+            "make android-instrumentation-run\n",
         )
-        self.assertIn(
-            'echo "started=true" >> "$GITHUB_OUTPUT"', freeze_attempt
+        self.assertEqual(
+            workflow_step_scalar(freeze_attempt, "id"),
+            "android_instrumentation_first_attempt",
         )
-        self.assertIn(
-            'echo "started=false" >> "$GITHUB_OUTPUT"', freeze_attempt
+        self.assertEqual(workflow_step_scalar(freeze_attempt, "if"), "always()")
+        freeze_script_marker = "        run: |\n"
+        self.assertEqual(freeze_attempt.count(freeze_script_marker), 1)
+        self.assertEqual(
+            freeze_attempt.split(freeze_script_marker, 1)[1],
+            "          if [[ -f "
+            "target/validation/android-instrumentation-started ]]; then\n"
+            '            echo "started=true" >> "$GITHUB_OUTPUT"\n'
+            "          else\n"
+            '            echo "started=false" >> "$GITHUB_OUTPUT"\n'
+            "          fi\n",
         )
-        self.assertIn(
-            "if: steps.android_instrumentation.outcome == 'failure' && "
+        self.assertEqual(
+            workflow_step_scalar(retry_attempt, "if"),
+            "steps.android_instrumentation.outcome == 'failure' && "
             "steps.android_instrumentation_first_attempt.outputs.started == 'false'",
-            retry_attempt,
         )
         self.assertNotIn("continue-on-error:", retry_attempt)
+        retry_script_marker = "          script: |\n"
+        self.assertEqual(retry_attempt.count(retry_script_marker), 1)
         self.assertEqual(
-            retry_attempt.count(
-                "touch target/validation/android-instrumentation-started"
-            ),
-            1,
+            retry_attempt.split(retry_script_marker, 1)[1],
+            "            mkdir -p target/validation\n"
+            "            touch target/validation/android-instrumentation-started\n"
+            '            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" '
+            "make android-instrumentation-run\n",
         )
-        self.assertIn(
-            "if: steps.android_instrumentation.outcome == 'failure' && "
+        self.assertEqual(
+            workflow_step_scalar(propagate_failure, "if"),
+            "steps.android_instrumentation.outcome == 'failure' && "
             "steps.android_instrumentation_first_attempt.outputs.started == 'true'",
-            propagate_failure,
         )
-        self.assertIn("run: exit 1", propagate_failure)
+        self.assertEqual(workflow_step_scalar(propagate_failure, "run"), "exit 1")
         self.assertNotIn(
             "hashFiles('target/validation/android-instrumentation-started')",
             android_device,
