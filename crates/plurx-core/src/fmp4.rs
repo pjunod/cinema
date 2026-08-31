@@ -853,11 +853,6 @@ impl PromotionInputs {
     }
 }
 
-/// Promote an init from captured inputs — the planned generation's path.
-///
-/// Answers whether anything changed. Applying this to a muxer init that is
-/// byte-identical across generations yields a served init that is
-/// byte-identical across generations, which is the whole point.
 /// Rewrite every video sample in a fragment, correcting every size the
 /// rewrite invalidates.
 ///
@@ -878,9 +873,18 @@ impl PromotionInputs {
 /// later run without its own `data_offset`, cannot express a per-sample
 /// rewrite: the first has one size for every sample and the second's position
 /// is implied by bytes this function is changing. Either one is an
-/// `Unsupported`, and the caller falls back to the delivery that does not need
-/// the rewrite. Audio and any other track's samples are untouched and their
-/// runs still move, which is why their offsets are corrected too.
+/// `Unsupported`, and so is an `mdat` whose size cannot be corrected in place.
+/// Audio and any other track's samples are untouched and their runs still
+/// move, which is why their offsets are corrected too.
+///
+/// **A refusal leaves the fragment exactly as it was**, at every step, not
+/// only while the edits are being collected: every fallible decision is made
+/// before a byte moves, and the result is built into a fresh buffer that
+/// replaces the fragment's only once the re-parse has proved it readable.
+/// This is the invariant the callers' safety is argued from — `plurxd`'s
+/// session fails the generation on a refusal and its index pass returns
+/// `Unsupported`, and neither expects the fragment it still holds to be half
+/// rewritten.
 pub fn rewrite_video_samples<F>(
     fragment: &mut Fragment,
     tracks: &[Track],
@@ -892,8 +896,8 @@ where
 {
     // Collect the edits before applying any, so a refusal partway through
     // leaves the fragment exactly as it was. A half-rewritten fragment is a
-    // stream that decodes to garbage, and the caller's fallback expects
-    // something it can still serve.
+    // stream that decodes to garbage — and one that still parses, so nothing
+    // downstream would notice.
     struct Edit {
         at: Range<usize>,
         replacement: Vec<u8>,
@@ -967,17 +971,41 @@ where
         }
     }
 
-    // Apply back to front so an earlier edit's offsets stay valid.
-    let mut delta_at: Vec<(usize, i64)> = Vec::new();
-    for edit in edits.iter().rev() {
+    // Everything that can fail is decided here, before a single byte moves.
+    //
+    // The atomicity above is the invariant every caller's safety is argued
+    // from — `vodgen` fails the generation on a refusal, `fragindex` returns
+    // `Unsupported`, and neither expects the fragment it still holds to be
+    // half-rewritten. Collecting the edits was only half of keeping that
+    // promise: an `Unsupported` raised while applying them would have left the
+    // bytes spliced and the sizes not yet corrected.
+    edits.sort_by_key(|edit| edit.at.start);
+    let mut previous_end = 0usize;
+    for edit in &edits {
+        if edit.at.start < previous_end {
+            return Err(Fmp4Error::Unsupported(
+                "two samples of this fragment overlap, so their rewrites cannot both be                  applied"
+                    .into(),
+            ));
+        }
+        previous_end = edit.at.end;
+    }
+    let first_edit = edits[0].at.start;
+
+    // Every size and offset this writes lives in the `moof`, and every edit is
+    // in the `mdat` payload behind it — which is what lets the fields be
+    // written at the offsets they were parsed at even though the bytes after
+    // them moved. Checked rather than assumed: a field that landed inside the
+    // rewritten region would be written at a position the rewrite had already
+    // changed the meaning of.
+    let mut writes: Vec<(usize, u32)> = Vec::with_capacity(edits.len() + offsets.len());
+    let mut delta_at: Vec<(usize, i64)> = Vec::with_capacity(edits.len());
+    for edit in &edits {
         let before = edit.at.end - edit.at.start;
         let after = edit.replacement.len();
-        fragment
-            .bytes
-            .splice(edit.at.clone(), edit.replacement.iter().copied());
         let size = u32::try_from(after)
             .map_err(|_| Fmp4Error::Unsupported("a rewritten sample is absurdly long".into()))?;
-        write_be_u32(&mut fragment.bytes, edit.size_at, size)?;
+        writes.push((edit.size_at, size));
         delta_at.push((edit.at.start, after as i64 - before as i64));
     }
 
@@ -1000,16 +1028,23 @@ where
             .ok_or_else(|| {
                 Fmp4Error::Unsupported("a corrected trun data_offset does not fit".into())
             })?;
-        write_be_u32(&mut fragment.bytes, field, moved)?;
+        writes.push((field, moved));
     }
 
     // And the `mdat`, which is the only box whose size changes.
     let total: i64 = delta_at.iter().map(|(_, delta)| *delta).sum();
     let header = fragment.mdat_payload.start;
-    if header < 8 {
-        return Err(Fmp4Error::Unsupported(
-            "an mdat with no room for its own header".into(),
-        ));
+    // Read the width rather than assuming eight. A `largesize` `mdat` states
+    // its length in a 64-bit field past the box name, so `header - 8` would
+    // land on the high half of it — zero for anything under 4 GiB, which then
+    // reads as the "size is elsewhere" sentinel and refuses by luck rather
+    // than by decision. Refuse it by name instead: this rewrite writes a
+    // 32-bit size, and there is nowhere in a `largesize` box to write one.
+    let mdat_header = mdat_header_len(&fragment.bytes, header)?;
+    if mdat_header != 8 {
+        return Err(Fmp4Error::Unsupported(format!(
+            "an mdat with a {mdat_header}-byte header states its size in a field this              rewrite cannot correct"
+        )));
     }
     let old = be_u32(&fragment.bytes, header - 8) as i64;
     if old == 0 || old == 1 {
@@ -1019,11 +1054,32 @@ where
     }
     let new = u32::try_from(old + total)
         .map_err(|_| Fmp4Error::Unsupported("a corrected mdat size does not fit".into()))?;
-    write_be_u32(&mut fragment.bytes, header - 8, new)?;
-    fragment.mdat_payload = fragment.mdat_payload.start
-        ..usize::try_from(fragment.mdat_payload.end as i64 + total).map_err(|_| {
-            Fmp4Error::Unsupported("a corrected mdat payload range does not fit".into())
-        })?;
+    writes.push((header - 8, new));
+    let payload_end = usize::try_from(fragment.mdat_payload.end as i64 + total)
+        .map_err(|_| Fmp4Error::Unsupported("a corrected mdat payload range does not fit".into()))?;
+
+    for (field, _) in &writes {
+        if field.saturating_add(4) > first_edit {
+            return Err(Fmp4Error::Unsupported(
+                "a size this rewrite must correct sits inside the bytes it rewrites".into(),
+            ));
+        }
+    }
+
+    // Built forward into a fresh buffer rather than spliced in place: one pass
+    // instead of one memmove per edit, and the fragment stays untouched until
+    // the re-parse below has proved the result readable.
+    let mut bytes = Vec::with_capacity(fragment.bytes.len());
+    let mut copied = 0usize;
+    for edit in &edits {
+        bytes.extend_from_slice(&fragment.bytes[copied..edit.at.start]);
+        bytes.extend_from_slice(&edit.replacement);
+        copied = edit.at.end;
+    }
+    bytes.extend_from_slice(&fragment.bytes[copied..]);
+    for (field, value) in writes {
+        write_be_u32(&mut bytes, field, value)?;
+    }
 
     // Re-parse rather than adjusting the model by hand: the bytes are the
     // truth now, and a model patched in parallel is a model that can disagree
@@ -1037,10 +1093,13 @@ where
     // exist. The audio run, which sits after the video the rewrite shortened,
     // lands past the end of `bytes`, and every converting session fails at its
     // first segment.
-    let header_len = moof_header_len(&fragment.bytes)?;
-    let mdat_header = mdat_header_len(&fragment.bytes, fragment.mdat_payload.start)?;
+    let header_len = moof_header_len(&bytes)?;
     let moof_len = fragment.mdat_payload.start - mdat_header;
-    fragment.tracks = parse_moof(&fragment.bytes[..moof_len], header_len, tracks)?;
+    let parsed = parse_moof(&bytes[..moof_len], header_len, tracks)?;
+
+    fragment.bytes = bytes;
+    fragment.mdat_payload = fragment.mdat_payload.start..payload_end;
+    fragment.tracks = parsed;
     Ok(true)
 }
 
@@ -1086,6 +1145,13 @@ fn write_be_u32(bytes: &mut [u8], at: usize, value: u32) -> Result<(), Fmp4Error
     Ok(())
 }
 
+/// Promote an init from captured inputs — the planned generation's path.
+///
+/// Answers whether anything changed. Applying this to a muxer init that is
+/// byte-identical across generations yields a served init that is
+/// byte-identical across generations, which is the whole point: a client
+/// holding a playlist from one generation is served media from another, and
+/// the init it fetched has to describe both.
 pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, Fmp4Error> {
     let hevc = promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)?;
     let hdr10 = promote_hdr10_static_metadata_from(init, &inputs.hdr10_sei)?;
@@ -1413,14 +1479,18 @@ pub fn dolby_vision_record(init: &Init) -> Result<Option<DolbyVisionRecord>, Fmp
 /// One caller today, one contingency (M5a-0, `docs/PLAYBACK-CAPS-V2-M0.md` §8):
 ///
 /// - **The conversion.** ffmpeg does not derive this record from the RPU — it
-///   copies the one the input container had, and the P7→P8.1 pipe feeds it a
-///   raw Annex B stream with no container. So its output carries correct
-///   Profile 8.1 RPUs inside `mdat` and nothing in the sample entry to say so,
-///   and this writer supplies the record.
+///   copies the one the input container had. The P7→P8.1 rewrite runs on the
+///   far side of that muxer, so its output carries the *source's* Profile 7
+///   `dvcC` over samples whose RPUs now say 8.1: a sample entry declaring an
+///   enhancement layer that is no longer in the stream, which is worse than
+///   no record at all. This writer replaces it — the payload is 24 bytes in
+///   both spellings, so the box changes name and contents and nothing
+///   resizes. It appends instead on the shape where the muxer wrote none,
+///   which is why both branches exist.
 /// - **A correction**, should a stream ever be found whose record disagrees
-///   with its samples. Nothing does today: plurx's strip removes the side data
-///   outright rather than leaving a stale record, and its preserve keeps both
-///   the layers and the record that describes them.
+///   with its samples in some other way. Nothing does today: plurx's strip
+///   removes the side data outright rather than leaving a stale record, and
+///   its preserve keeps both the layers and the record that describes them.
 ///
 /// Answers whether the init changed. Writing a record byte-identical to the
 /// one already there — under the same box name — is a no-op, and that is not a
@@ -4405,6 +4475,95 @@ mod tests {
             fragment.bytes, before,
             "the first sample's edit must not have been applied"
         );
+    }
+
+    /// The shapes this rewrite refuses, and what accepting each would do.
+    ///
+    /// Each refusal is the only thing standing between the code and a
+    /// corruption that still parses, so each is asserted with the corruption
+    /// named. The shapes are built by hand because ffmpeg does not emit them
+    /// for a video track today — which is exactly why nothing would catch the
+    /// guard going missing.
+    #[test]
+    fn the_shapes_a_per_sample_rewrite_cannot_express_are_refused() {
+        let feed = pipe("closed-gop");
+        let (init, frags, _) = read_all(&feed);
+        let video = init.video().expect("video").id;
+
+        // A `trun` that sizes its samples from the `tfhd` default has one size
+        // for every sample and no field to correct. Without the refusal the
+        // size is written at offset zero — over the `moof` box's own length —
+        // and the re-parse still succeeds, because it reads the `moof`'s
+        // extent from the `mdat` payload rather than from that field. A
+        // corrupt fragment, returned as a success.
+        let mut defaulted = frags[0].clone();
+        for track in &mut defaulted.tracks {
+            if track.track_id == video {
+                for run in &mut track.runs {
+                    for sample in &mut run.samples {
+                        sample.size_at = None;
+                    }
+                }
+            }
+        }
+        let before = defaulted.bytes.clone();
+        let error = rewrite_video_samples(&mut defaulted, &init.tracks, video, |sample| {
+            Ok(sample[..sample.len() - 4].to_vec())
+        })
+        .expect_err("a tfhd-defaulted trun cannot express a per-sample rewrite");
+        assert!(error.to_string().contains("tfhd default"), "{error}");
+        assert_eq!(defaulted.bytes, before);
+
+        // A second `trun` that inherits its position from the run before it
+        // follows bytes this rewrite moves. Accepting it leaves that run
+        // reading its samples from the wrong offsets, in a fragment that still
+        // parses perfectly.
+        let mut inherited = frags[0].clone();
+        for track in &mut inherited.tracks {
+            if track.track_id == video && track.runs.len() == 1 {
+                let mut second = track.runs[0].clone();
+                second.data_offset_at = None;
+                second.samples.truncate(1);
+                track.runs.push(second);
+            }
+        }
+        let before = inherited.bytes.clone();
+        let error = rewrite_video_samples(&mut inherited, &init.tracks, video, |sample| {
+            Ok(sample[..sample.len() - 4].to_vec())
+        })
+        .expect_err("an inherited data_offset follows bytes this moves");
+        assert!(error.to_string().contains("continues from"), "{error}");
+        assert_eq!(inherited.bytes, before);
+
+        // An `mdat` whose length lives in a 64-bit `largesize` field has
+        // nowhere for a corrected 32-bit size to go. Refused by name rather
+        // than by luck: reading `header - 8` on such a box lands on the high
+        // half of the length, which is zero for anything under 4 GiB and would
+        // otherwise be mistaken for the "size is elsewhere" sentinel.
+        let mut large = frags[0].clone();
+        {
+            let payload = large.mdat_payload.clone();
+            let length = (large.bytes.len() - (payload.start - 8)) as u64;
+            let mut widened = large.bytes[..payload.start - 8].to_vec();
+            widened.extend_from_slice(&1u32.to_be_bytes());
+            widened.extend_from_slice(b"mdat");
+            widened.extend_from_slice(&(length + 8).to_be_bytes());
+            widened.extend_from_slice(&large.bytes[payload.start..]);
+            large.bytes = widened;
+            large.mdat_payload = payload.start + 8..payload.end + 8;
+            for track in &mut large.tracks {
+                for run in &mut track.runs {
+                    run.data_offset += 8;
+                }
+            }
+        }
+        let before = large.bytes.clone();
+        let error = rewrite_video_samples(&mut large, &init.tracks, video, |sample| {
+            Ok(sample[..sample.len() - 4].to_vec())
+        })
+        .expect_err("a largesize mdat has no 32-bit size to correct");
+        assert!(error.to_string().contains("16-byte header"), "{error}");
+        assert_eq!(large.bytes, before);
     }
 
     /// Every video sample's bytes, in order.

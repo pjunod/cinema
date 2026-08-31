@@ -767,6 +767,37 @@ pub(crate) struct PlanReview {
     pub mismatched: bool,
 }
 
+/// Put the reconciled plan onto the request that will actually be built, and
+/// hand back the notes that explain it.
+///
+/// Separate from `create` because this is the only place the server's own
+/// derivation reaches the session, and every field it copies has a different
+/// way of going wrong if it does not:
+///
+/// - `preserve_dolby_vision` reverts to the client's echo, which is the
+///   pre-caps-v2 bug this milestone exists to close;
+/// - `convert_dolby_vision` is never set at all — `into_request` leaves it
+///   false, because a client has no way to ask for a conversion — so the whole
+///   feature silently does nothing on every session;
+/// - `hdr10` reverts to a claim the caps did not support.
+fn apply_plan_review(
+    request: &mut crate::transcode::SessionRequest,
+    review: PlanReview,
+) -> Vec<String> {
+    if let crate::transcode::SessionKind::Copy {
+        preserve_dolby_vision,
+        convert_dolby_vision,
+        ..
+    } = &mut request.kind
+    {
+        *preserve_dolby_vision = review.preserve_dolby_vision;
+        // The only place this is ever set. It is derived, never echoed.
+        *convert_dolby_vision = review.convert_dolby_vision;
+    }
+    request.hdr10 = review.hdr10;
+    review.notes
+}
+
 /// Re-derive the plan from the capabilities the client sent, and reconcile it
 /// with what the client asked for.
 ///
@@ -1180,22 +1211,7 @@ pub async fn create(
     // apply to the request that will actually be built.
     let fingerprint = request.durable_intent_fingerprint(user.id);
     let plan_notes = match review {
-        Some(review) => {
-            if let crate::transcode::SessionKind::Copy {
-                preserve_dolby_vision,
-                convert_dolby_vision,
-                ..
-            } = &mut request.kind
-            {
-                *preserve_dolby_vision = review.preserve_dolby_vision;
-                // The only place this is ever set. It is derived, never
-                // echoed: `into_request` leaves it false because a client has
-                // no way to ask for it.
-                *convert_dolby_vision = review.convert_dolby_vision;
-            }
-            request.hdr10 = review.hdr10;
-            review.notes
-        }
+        Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
     let now_ms = unix_ms();
@@ -11759,6 +11775,143 @@ mod tests {
         assert!(review.hdr10, "the caps present PQ on hevc");
         assert!(!review.mismatched);
         assert!(review.notes.is_empty(), "{:?}", review.notes);
+    }
+
+    /// A create body with nothing set, to be spread over.
+    fn bare_create() -> CreateSession {
+        CreateSession {
+            playback_id: String::new(),
+            request_id: None,
+            previous_session_id: None,
+            reopen_reason: None,
+            height: None,
+            quality_auto: None,
+            subtitle_burn: None,
+            subtitle_burn_sdr: None,
+            native_subtitles: None,
+            subtitle: None,
+            start: None,
+            audio: None,
+            copy: None,
+            aac: None,
+            preserve_dolby_vision: None,
+            hdr10: None,
+            caps: None,
+            overrides: None,
+            audio_offset_ms: None,
+            presentation: None,
+            block_budget_secs: None,
+        }
+    }
+
+    /// The server's re-derivation reaches the session, and the body never
+    /// does.
+    ///
+    /// `review_client_plan` is well covered; this is the wire between it and
+    /// the request that gets built, and each field it carries fails
+    /// differently if the wire is cut. `preserve_dolby_vision` reverts to the
+    /// client's own echo — the pre-caps-v2 bug where a blanket `dv=1` got
+    /// Safari a preserved Profile 7 it could not decode. `hdr10` reverts to a
+    /// claim the caps did not support. And `convert_dolby_vision` is never set
+    /// at all: `into_request` leaves it false because a client has no way to
+    /// ask for a conversion, so this assignment is the *only* one, and without
+    /// it the whole milestone is dead code that ships and does nothing.
+    #[test]
+    fn the_reconciled_plan_reaches_the_request_and_the_body_cannot() {
+        let body = CreateSession {
+            playback_id: "p".into(),
+            copy: Some(true),
+            // The client asks for the opposite of everything the review says.
+            preserve_dolby_vision: Some(false),
+            hdr10: Some(false),
+            ..bare_create()
+        };
+        let mut request = body.into_request(1, 0);
+        let asked = request.kind;
+        assert!(
+            matches!(
+                asked,
+                crate::transcode::SessionKind::Copy {
+                    convert_dolby_vision: false,
+                    ..
+                }
+            ),
+            "a client cannot ask to be handed a conversion: {asked:?}"
+        );
+
+        // …including a client that asks for everything adjacent to one. The
+        // conversion is not a wire field, so no combination of body values can
+        // produce it — which is what makes the assignment below the only one.
+        let eager = CreateSession {
+            playback_id: "p".into(),
+            copy: Some(true),
+            preserve_dolby_vision: Some(true),
+            hdr10: Some(true),
+            ..bare_create()
+        }
+        .into_request(1, 0);
+        assert!(
+            matches!(
+                eager.kind,
+                crate::transcode::SessionKind::Copy {
+                    convert_dolby_vision: false,
+                    preserve_dolby_vision: true,
+                    ..
+                }
+            ),
+            "asking to preserve is not asking to convert: {:?}",
+            eager.kind
+        );
+
+        let notes = apply_plan_review(
+            &mut request,
+            PlanReview {
+                preserve_dolby_vision: true,
+                convert_dolby_vision: true,
+                hdr10: true,
+                notes: vec!["a note".to_owned()],
+                mismatched: false,
+            },
+        );
+        let crate::transcode::SessionKind::Copy {
+            preserve_dolby_vision,
+            convert_dolby_vision,
+            ..
+        } = request.kind
+        else {
+            panic!("a copy request stays a copy request");
+        };
+        assert!(preserve_dolby_vision, "the server's answer, not the body's");
+        assert!(
+            convert_dolby_vision,
+            "the only assignment there is — without it the conversion never runs"
+        );
+        assert!(request.hdr10, "and the same for the HDR10 request");
+        assert_eq!(notes, vec!["a note".to_owned()]);
+
+        // A transcode request has no Dolby Vision fields to carry, and must
+        // still take the notes and the HDR10 answer.
+        let mut transcode = CreateSession {
+            playback_id: "p".into(),
+            height: Some(1080),
+            ..bare_create()
+        }
+        .into_request(1, 1080);
+        apply_plan_review(
+            &mut transcode,
+            PlanReview {
+                preserve_dolby_vision: true,
+                convert_dolby_vision: true,
+                hdr10: true,
+                notes: Vec::new(),
+                mismatched: false,
+            },
+        );
+        assert!(matches!(
+            transcode.kind,
+            crate::transcode::SessionKind::Transcode { .. }
+        ));
+        assert!(transcode.hdr10);
     }
 
     /// A Profile 7 title reaches a Profile-8 client as a conversion, and the

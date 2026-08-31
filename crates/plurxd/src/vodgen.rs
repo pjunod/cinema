@@ -295,10 +295,29 @@ impl<S: Sink> GenerationRun<'_, S> {
         // stream.
         let mut fragment = fragment;
         if let Some(converter) = self.converter.as_mut() {
+            let before = converter.report().source_profile;
             if let Err(refused) = converter.convert(&mut fragment) {
                 return Err(Outcome::Failed(Failure::Stream(format!(
                     "this stream cannot be converted: {refused}"
                 ))));
+            }
+            // Said once, on the fragment that first carried an RPU, because
+            // this is the only place the answer exists. What the conversion
+            // costs a viewer is not in the file's columns and not in the
+            // decision: MEL carries no picture detail of its own so dropping
+            // it is lossless, while FEL carries real residual detail and
+            // dropping it is not, and only the RPU says which. Until the badge
+            // carries it (M5a's client half), this line is what an operator
+            // reading a "why does this look softer" report has to go on.
+            let report = converter.report();
+            if before.is_none() && report.source_profile.is_some() {
+                tracing::info!(
+                    session = %crate::transcode::session_log_id(self.session_log),
+                    source_profile = report.source_profile,
+                    enhancement_layer = ?report.enhancement_layer,
+                    "converting Dolby Vision to Profile 8.1: {}",
+                    report.enhancement_layer.reason()
+                );
             }
         }
         let fragment = fragment;
@@ -813,6 +832,116 @@ mod tests {
              got {refused:?}"
         );
         assert!(off.taken().is_empty());
+    }
+
+    /// A refusal after the landing fails the generation rather than
+    /// publishing what it could not rewrite.
+    ///
+    /// This is the last guard, and it is the only one. Once `engage()` has
+    /// run, `push_to_segmenter` compares nothing against the index — the
+    /// landing matcher reads only the first `LANDING_WINDOW` fragments — so a
+    /// conversion that refuses on fragment 200 (an unreadable RPU, a Profile 8
+    /// one spliced in from another source, a `trun` shape the rewrite cannot
+    /// correct) would otherwise pass that fragment through with its Profile 7
+    /// RPUs intact, into a segment served under a playlist advertising
+    /// `dvh1.08.06`. A decoder that said it takes 8 and not 7 would be handed
+    /// 7 partway through the film, with nothing anywhere reporting a problem.
+    #[tokio::test]
+    async fn a_refusal_after_the_landing_fails_the_generation() {
+        let film = converting_film().await;
+        // Past the landing window, so the generation is producing by the time
+        // the bad fragment arrives — which is the whole point of the test.
+        let broken_at = LANDING_WINDOW + 1;
+        assert!(
+            film.index.rows.len() > broken_at,
+            "the fixture must have a fragment past the landing window"
+        );
+        let feed = testfixtures::with_one_unconvertible_rpu(&film.feed, broken_at);
+
+        let sink = MemSink::default();
+        let mut converting = generation(&film, 0);
+        converting.convert_dolby_vision = true;
+        let outcome = run(&feed[..], converting, &sink, "test").await;
+        let Outcome::Failed(Failure::Stream(reason)) = outcome else {
+            panic!("an unconvertible RPU must fail the generation, got {outcome:?}");
+        };
+        assert!(reason.contains("cannot be converted"), "{reason}");
+
+        // Whatever it published before the refusal is entries the plan
+        // promised, produced from fragments that did convert. What must not
+        // exist is a segment built from the fragment that did not — so the
+        // run has to have stopped, not skipped.
+        let writes = sink.taken();
+        assert!(
+            writes.len() < film.plan.len(),
+            "a refused generation must not have finished the plan"
+        );
+
+        // The same feed with the conversion off is the control: it fails for a
+        // different reason (it cannot land on a converted index at all), which
+        // is what makes the assertion above about the refusal and not about
+        // the corruption.
+        let off = MemSink::default();
+        let refused = run(&feed[..], generation(&film, 0), &off, "off").await;
+        assert!(matches!(refused, Outcome::Failed(_)), "{refused:?}");
+    }
+
+    /// An init the conversion cannot describe fails before a single segment.
+    ///
+    /// Refusing here rather than at the first fragment is the difference
+    /// between a failed generation and a published segment: the rendition's
+    /// playlist already names every entry, so anything materialized under one
+    /// of those indexes is a permanent cache hit that admission can make
+    /// durable.
+    #[tokio::test]
+    async fn an_init_the_conversion_cannot_describe_fails_before_any_segment() {
+        let film = converting_film().await;
+        // `hvcC` spells the NAL length width as `lengthSizeMinusOne`, so 2
+        // means a three-byte prefix — a value the field can hold and no
+        // container carries. A converter that accepted it would read a byte of
+        // picture as the top of a NAL length.
+        let feed = with_hvcc_length_size(&film.feed, 3);
+        let mut init = muxer_init(&feed);
+        sanitize_stale_dolby_brand(&mut init);
+        let identity = InitIdentity::establish(&init, film.index.promotion.clone())
+            .expect("establishing identity");
+
+        let sink = MemSink::default();
+        let outcome = run(
+            &feed[..],
+            Generation {
+                convert_dolby_vision: true,
+                identity,
+                ..generation(&film, 0)
+            },
+            &sink,
+            "test",
+        )
+        .await;
+        let Outcome::Failed(Failure::Stream(reason)) = outcome else {
+            panic!("an undescribable init must fail the generation, got {outcome:?}");
+        };
+        assert!(reason.contains("cannot be converted"), "{reason}");
+        assert!(
+            sink.taken().is_empty(),
+            "the refusal must land before any segment is materialized"
+        );
+    }
+
+    /// Rewrite the `hvcC`'s `lengthSizeMinusOne` in a stream's init.
+    ///
+    /// A one-byte edit in a fixed-width field, so nothing resizes and every
+    /// offset in the stream stays where it was.
+    fn with_hvcc_length_size(stream: &[u8], width: u8) -> Vec<u8> {
+        let mut out = stream.to_vec();
+        let at = out
+            .windows(4)
+            .position(|window| window == b"hvcC")
+            .expect("an hvcC box");
+        // The field is the 22nd byte of the record, low two bits.
+        let field = at + 4 + 21;
+        out[field] = (out[field] & 0xfc) | (width - 1);
+        out
     }
 
     fn generation(film: &Film, start_entry: u32) -> Generation {

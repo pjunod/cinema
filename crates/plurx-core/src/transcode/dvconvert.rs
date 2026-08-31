@@ -202,20 +202,9 @@ pub enum DvConvertError {
 /// Rewrite every RPU in a **length-prefixed** sample, the shape a sample has
 /// inside an fMP4 fragment.
 ///
-/// The Annex B form above exists for a pipeline that no longer ships: feeding
-/// a raw elementary stream between two ffmpegs destroys the video timeline,
-/// because ffmpeg's raw HEVC demuxer emits every packet with no timestamps at
-/// all and the muxer then fabricates a decode-order grid — `pts == dts` for
-/// every sample, presentation reordering erased, every minigop played in
-/// coding order. Measured: ~410 display-order inversions in 819 frames on an
-/// ordinary three-B-frame encode, on every GOP, seek or no seek.
-///
-/// So the rewrite moved to the other side of the muxer. One ffmpeg produces
-/// the fragmented MP4 it always produced — video and audio from one open, one
-/// timeline, timestamps copied rather than reconstructed — and plurx rewrites
-/// the RPU NAL units inside the fragments it already parses. There is no
-/// second stream to align, which is why there is no longer an alignment
-/// question to get wrong.
+/// This is the only form there is. An Annex B form existed for the pipeline
+/// the module header describes and withdraws; it is gone, along with the
+/// buffer-cutting helper a streaming caller of it needed.
 ///
 /// `nal_length_size` is the `hvcC` field: 1, 2 or 4. Returns what the sample
 /// held, and the caller owns the consequences of the size change — a shorter
@@ -286,9 +275,9 @@ fn convert_length_prefixed_into(
                 offset: at,
                 detail: error.to_string(),
             })?;
-        // The same guard the Annex B form applies, for the same reasons: the
-        // error type's own documentation says what each wrong answer looks
-        // like on screen.
+        // Refuse before converting, not after. `To81` has an answer for every
+        // profile it is handed and none of them fail loudly; the error type's
+        // own documentation says what each wrong answer looks like on screen.
         if rpu.dovi_profile != 7 {
             return Err(DvConvertError::UnsupportedProfile {
                 frame: report.rpus,

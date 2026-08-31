@@ -265,7 +265,20 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
     // the keyspace, and every session looking that identity up would be served
     // segments cut for a stream that was never converted.
     if convert {
-        let rpus = converter.as_ref().map_or(0, |c| c.report().rpus);
+        let report = converter.as_ref().map(|c| c.report()).unwrap_or_default();
+        // The index pass reads every RPU in the file, so its answer is the
+        // whole film's rather than one session's opening fragment's. Recorded
+        // here because it is what the conversion costs a viewer — MEL is
+        // lossless to drop, FEL is not — and nothing else in the pipeline
+        // learns it.
+        tracing::info!(
+            rpus = report.rpus,
+            source_profile = report.source_profile,
+            enhancement_layer = ?report.enhancement_layer,
+            "indexed a converted stream: {}",
+            report.enhancement_layer.reason()
+        );
+        let rpus = report.rpus;
         if rpus == 0 {
             return IndexOutcome::Unsupported(
                 "this source is recorded as Dolby Vision Profile 7 but its stream carries no \
@@ -474,11 +487,12 @@ async fn build_with_args(
     budget: Duration,
 ) -> IndexOutcome {
     let identity = identity_for(file, video);
-    // A converting pass produces a stream whose sample entry declares no Dolby
-    // Vision at all: ffmpeg copies the record from its input container, and a
-    // raw Annex B pipe has none. So plurx builds one from the source's own
-    // stored facts and hands it to the promotion, which is the single funnel
-    // both this pass's served init and every later generation's go through.
+    // A converting pass produces a stream whose sample entry declares the
+    // *source's* Dolby Vision record: ffmpeg copies it from the input
+    // container, and the rewrite that makes the RPUs say 8.1 runs after that
+    // muxer. So plurx builds the right one from the source's own stored facts
+    // and hands it to the promotion, which is the single funnel both this
+    // pass's served init and every later generation's go through.
     let dolby_vision = if video.converts_dolby_vision() {
         match converted_dolby_vision_record(file) {
             Ok(record) => Some(record),
@@ -564,8 +578,14 @@ async fn build_with_args(
             stdout,
             identity,
             expected_ms,
-            dolby_vision,
-            video.converts_dolby_vision(),
+            dolby_vision.clone(),
+            // Derived from the record rather than asked a second time. The two
+            // have to agree — a pass that converts must store the record its
+            // output needs, and a pass that does not must store none — and
+            // asking `video` twice is how they come to disagree. `is_some()`
+            // makes that unrepresentable: the record exists exactly when the
+            // pass that produces the stream it describes runs.
+            dolby_vision.is_some(),
         ),
     )
     .await
@@ -749,11 +769,10 @@ mod tests {
 
     /// The converted stream's configuration record, from the source's facts.
     ///
-    /// Its output has none to read — ffmpeg copies the record from the input
-    /// container and a raw elementary stream has none — so every field here is
-    /// either changed deliberately or carried deliberately, and getting either
-    /// wrong is a stream that describes itself incorrectly with nothing to
-    /// catch it.
+    /// What its output carries is the source's own record — ffmpeg copies the
+    /// one the input container had — so every field here is either changed
+    /// deliberately or carried deliberately, and getting either wrong is a
+    /// stream that describes itself incorrectly with nothing to catch it.
     #[test]
     fn the_converted_record_says_profile_eight_with_no_enhancement_layer() {
         let mut file = hevc_file(Some("dolby_vision"), None);

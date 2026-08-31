@@ -1005,10 +1005,10 @@ pub fn dolby_vision_converts_to_p81(
 /// `hdr_format` prose, and that is right: the question is what to deliver, and
 /// a label that says "Profile 7 (HDR10-compatible)" answers it. The conversion
 /// asks something the prose cannot answer. Its output must declare a Dolby
-/// Vision configuration record, plurx writes that record itself (ffmpeg copies
-/// one from the input container and a converted stream's input is a raw
-/// elementary stream with no container), and building one needs the *level*
-/// and the *compatibility id* as numbers. A label-only row would be routed to
+/// Vision configuration record that describes the converted stream, plurx
+/// writes that record itself (ffmpeg copies one from the input container, and
+/// a converting copy's input container is the Profile 7 source), and building
+/// one needs the *level* and the *compatibility id* as numbers. A label-only row would be routed to
 /// a conversion whose index could never be built — a permanent
 /// `vod_index_pending`, and a fall through to live recovery on every play.
 ///
@@ -1022,7 +1022,17 @@ pub fn file_can_convert_to_p81(file: &MediaFile) -> bool {
             .dolby_vision
             .bl_compat_id
             .is_some_and(|compat| matches!(compat, 1 | 6))
-        && file.dolby_vision.level.is_some_and(|level| level > 0)
+        // The range the record can actually hold, not merely "present".
+        // `DolbyVisionRecord::new` caps the level at 0x3f because the field is
+        // six bits, so a row whose scan produced anything larger would route
+        // here, reach the converting index pass, and fail to have its record
+        // built at all — a permanent `vod_index_pending` and a fall through to
+        // live recovery on every play, which is the exact outcome the column
+        // requirement above exists to prevent. Real levels are 1 to 13.
+        && file
+            .dolby_vision
+            .level
+            .is_some_and(|level| (1..=0x3f).contains(&level))
 }
 
 fn dv_handling(

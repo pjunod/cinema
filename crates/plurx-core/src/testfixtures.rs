@@ -360,6 +360,66 @@ pub fn with_dolby_vision_rpus(stream: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The same stream with the RPU in one fragment made unreadable.
+///
+/// The NAL header is left alone so the unit is still routed as an RPU and has
+/// to be *refused*, not skipped. `at_fragment` is zero-based and counts
+/// fragments, so a caller can put the damage past the landing window — which
+/// is the case that matters: the landing matcher only reads the first few
+/// fragments, so a refusal after it is the last thing standing between a
+/// Profile 7 RPU and a client holding a Profile 8.1 playlist.
+pub fn with_one_unconvertible_rpu(stream: &[u8], at_fragment: usize) -> Vec<u8> {
+    use crate::fmp4::{FragmentReader, Init, Unit};
+
+    let rpu = p7_rpu();
+    let mut reader = FragmentReader::new();
+    reader.push(stream);
+    let mut out: Vec<u8> = Vec::with_capacity(stream.len());
+    let mut init: Option<Init> = None;
+    let mut index = 0usize;
+    let mut broke = false;
+    loop {
+        match reader.next_unit().expect("parsing the fixture stream") {
+            Some(Unit::Init(parsed)) => {
+                out.extend_from_slice(&parsed.bytes);
+                init = Some(parsed);
+            }
+            Some(Unit::Fragment(mut fragment)) => {
+                if index == at_fragment {
+                    let init = init.as_ref().expect("an init before any fragment");
+                    let video = init.video().expect("a video track").id;
+                    let track = fragment.track(video).expect("a video track").clone();
+                    let mut end = None;
+                    for run in &track.runs {
+                        let mut at = run.data_offset;
+                        for sample in &run.samples {
+                            at += sample.size as usize;
+                            end = Some(at);
+                        }
+                    }
+                    let end = end.expect("a sample");
+                    assert_eq!(
+                        &fragment.bytes[end - rpu.len()..end],
+                        &rpu[..],
+                        "this stream was not built by `with_dolby_vision_rpus`"
+                    );
+                    fragment.bytes[end - rpu.len() + 2..end].fill(0xff);
+                    broke = true;
+                }
+                out.extend_from_slice(&fragment.bytes);
+                index += 1;
+            }
+            Some(Unit::Trailer) => {}
+            None => break,
+        }
+    }
+    assert!(broke, "the stream has no fragment {at_fragment}");
+    if let Some(at) = trailer_at(stream) {
+        out.extend_from_slice(&stream[at..]);
+    }
+    out
+}
+
 /// Where the `mfra` trailer starts, by a top-level box walk.
 fn trailer_at(stream: &[u8]) -> Option<usize> {
     let mut at = 0usize;

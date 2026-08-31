@@ -1492,18 +1492,13 @@ impl VodServe {
             .get_file_probe_json(file.id)
             .await
             .map_err(|error| format!("reading the file probe: {error}"))?;
-        // The conversion rides in the options, not beside them, so it reaches
-        // the argv fingerprint and therefore the identity below. A converted
-        // stream has different bytes and different segment boundaries; sharing
-        // an identity with the unconverted one would hand this session a
-        // playlist whose cut points describe different media.
-        let video = CopyVideoOptions::from_probe(
+        let video = copy_video_pipeline(
             file,
             probe_json.as_deref(),
             have_dovi,
             preserve_dolby_vision,
-        )
-        .with_dolby_vision_conversion(convert_dolby_vision);
+            convert_dolby_vision,
+        );
         let identity = crate::fragindex::identity_for(file, video);
         let cluster_cache_enabled = self
             .shared
@@ -4126,6 +4121,29 @@ fn replace_inputs_with_attested_descriptor(args: &mut [String]) {
     }
 }
 
+/// The video pipeline one copy session runs, from what that session asked for.
+///
+/// The conversion rides **in** the options rather than beside them, so it
+/// reaches `copy_video_args` and therefore the argv fingerprint and the
+/// fragment-index identity. A converted stream has different bytes and
+/// different segment boundaries; sharing an identity with the unconverted one
+/// would hand a session a playlist whose cut points describe different media,
+/// and the session would fail its landing on every fragment.
+///
+/// Every later reader — the rendition's generation, its playlist facts, its
+/// index pass — asks these options rather than carrying a second copy of the
+/// answer, which is why this is the one place the two flags meet.
+fn copy_video_pipeline(
+    file: &MediaFile,
+    probe_json: Option<&str>,
+    have_dovi: bool,
+    preserve_dolby_vision: bool,
+    convert_dolby_vision: bool,
+) -> CopyVideoOptions {
+    CopyVideoOptions::from_probe(file, probe_json, have_dovi, preserve_dolby_vision)
+        .with_dolby_vision_conversion(convert_dolby_vision)
+}
+
 /// Hand a child the attested source as fd 3, if there is one.
 ///
 /// Factored out because two spawn sites need it — the producer and head
@@ -5000,6 +5018,47 @@ mod tests {
                 },
             )
         }
+    }
+
+    /// The conversion reaches the pipeline, and therefore the identity.
+    ///
+    /// This is the join between "the plan review said convert" and everything
+    /// downstream: the generation, the playlist facts and the index pass all
+    /// read these options rather than carrying their own copy of the answer,
+    /// so the flag arriving here is what makes them agree — and the argv
+    /// fingerprint is what stops a converting session ever landing on the
+    /// unconverted stream's index.
+    #[test]
+    fn a_converting_session_gets_a_converting_pipeline_and_its_own_identity() {
+        let mut file = fixture_file();
+        file.hdr = Some("dolby_vision".into());
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(6);
+        file.dolby_vision.bl_compat_id = Some(1);
+
+        let converting = copy_video_pipeline(&file, None, true, true, true);
+        assert!(converting.converts_dolby_vision());
+        assert!(
+            converting.preserves_dolby_vision(),
+            "there is nothing to convert in a stream the filter removed"
+        );
+
+        let preserving = copy_video_pipeline(&file, None, true, true, false);
+        assert!(!preserving.converts_dolby_vision());
+        assert!(preserving.preserves_dolby_vision());
+
+        let stripping = copy_video_pipeline(&file, None, true, false, false);
+        assert!(!stripping.preserves_dolby_vision());
+
+        // Three pipelines, three identities. Two of them sharing one would
+        // hand a session a playlist whose cut points describe media it never
+        // produces — the failure the whole third-identity design exists to
+        // prevent.
+        let fingerprints: std::collections::HashSet<_> = [converting, preserving, stripping]
+            .into_iter()
+            .map(|video| crate::fragindex::identity_for(&file, video).argv_fingerprint)
+            .collect();
+        assert_eq!(fingerprints.len(), 3, "{fingerprints:?}");
     }
 
     fn fixture_file() -> MediaFile {

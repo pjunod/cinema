@@ -6883,6 +6883,38 @@ fn copied_audio_codec(file: &plurx_core::domain::MediaFile, selected: Option<i64
     }
 }
 
+/// What the legacy single-ffmpeg copy can actually deliver, given what the
+/// decision asked for.
+///
+/// The live-HLS recovery path and the takeover muxer run one ffmpeg and have
+/// nowhere to put the RPU rewrite, so a decision that asked for a conversion
+/// has to give up its **preservation** here, not just its conversion.
+///
+/// The failure that closes: `decide` answers `preserve = true` for every
+/// converting client, because the RPUs must survive the bitstream filter for
+/// the conversion to have anything to rewrite. Carrying that `true` onto a
+/// path with no conversion in it keeps the Profile 7 RPUs *and* the type-63
+/// enhancement layer and copies the source's own Profile 7 configuration
+/// record through — handing dual-layer Dolby Vision to a client whose caps say
+/// it decodes 8 and not 7. That is a black screen, where the strip this
+/// produces is the HDR10 base the same client was getting before the
+/// conversion existed and can certainly play.
+///
+/// Dropping the conversion flag matters for a different reason and both are
+/// load-bearing: it is what the playlist and the create response's badge are
+/// computed from, so leaving it set advertises `dvh1.08.LL` and badges
+/// `dolby_vision` over a stream this path stripped to HDR10.
+///
+/// A separate value rather than a mutation, so the caller keeps the decision's
+/// answer to log the difference.
+fn served_copy_options(options: CopySessionOptions) -> CopySessionOptions {
+    CopySessionOptions {
+        preserve_dolby_vision: options.preserve_dolby_vision && !options.convert_dolby_vision,
+        convert_dolby_vision: false,
+        ..options
+    }
+}
+
 fn copied_hls_codecs(
     file: &plurx_core::domain::MediaFile,
     audio_index: Option<i64>,
@@ -15356,21 +15388,9 @@ impl TranscodeManager {
         // left the DV configuration in every remux, and had Chrome refuse the
         // stream Safari played fine.
         let have_dovi = self.dv_strippable();
-        // This is the legacy single-ffmpeg copy — the live-HLS recovery path
-        // and the takeover muxer — and it cannot convert. A decision that
-        // asked for one therefore has to give up its *preservation* here, not
-        // just its conversion.
-        //
-        // The failure that closes: `decide` answers `preserve = true` for
-        // every converting client, because the RPUs must survive the bitstream
-        // filter for the conversion to have anything to rewrite. Carrying that
-        // `true` onto a path with no conversion in it keeps the Profile 7 RPUs
-        // *and* the type-63 enhancement layer and copies the source's own
-        // Profile 7 configuration record through — handing dual-layer Dolby
-        // Vision to a client whose caps say it decodes 8 and not 7. That is a
-        // black screen, where the strip below is the HDR10 base this client
-        // was getting before the conversion existed and can certainly play.
-        let preserve = options.preserve_dolby_vision && !options.convert_dolby_vision;
+        // What this path can actually deliver — see `served_copy_options`.
+        let served = served_copy_options(options);
+        let preserve = served.preserve_dolby_vision;
         if options.convert_dolby_vision {
             tracing::info!(
                 file_id,
@@ -15454,16 +15474,9 @@ impl TranscodeManager {
         // presentation even if the start future is later cancelled.
         let media_origin_seconds = probe_media_origin(&file.path, start_seconds).await;
 
-        // Both describe the copy that actually runs, not the one the decision
-        // asked for. After the strip-down above they are the same thing for
-        // every other session and deliberately different for a converting one:
-        // its playlist must advertise the HDR10 base this path serves, and its
-        // session record must not claim a conversion that did not happen.
-        let served = CopySessionOptions {
-            preserve_dolby_vision: preserve,
-            convert_dolby_vision: false,
-            ..options
-        };
+        // `served`, not `options`, from here on: the playlist must advertise
+        // the HDR10 base this path serves and the session record must not
+        // claim a conversion that did not happen.
         let (hls_codecs, hls_supplemental_codecs) =
             copied_hls_codecs(&file, audio_index, served, probe_json.as_deref());
         let copy_kind = SessionKind::Copy {
@@ -15776,10 +15789,17 @@ impl TranscodeManager {
             start_seconds,
             media_origin_seconds,
             target_height: file.height.unwrap_or(0),
+            // `served`, not `options` — for the reason the strip-down above
+            // gives. This is the value the create response's
+            // `delivered_dynamic_range` is computed from, and it overrides
+            // whatever `/decision` said, so `options`' `preserve` would badge
+            // a stream this path stripped to HDR10 as Dolby Vision: the
+            // session record, the playlist and the badge would disagree about
+            // one delivery, and the badge is the one the viewer reads.
             kind: SessionKind::Copy {
-                aac: options.transcode_audio,
-                preserve_dolby_vision: options.preserve_dolby_vision,
-                convert_dolby_vision: options.convert_dolby_vision,
+                aac: served.transcode_audio,
+                preserve_dolby_vision: served.preserve_dolby_vision,
+                convert_dolby_vision: served.convert_dolby_vision,
             },
             encoder: "copy",
             // A copy session encodes nothing; its dynamic range is the
@@ -25775,6 +25795,121 @@ mod tests {
         assert!(producer_request_beyond_frontier(Some(43), Some(42)));
         assert!(producer_request_beyond_frontier(Some(0), None));
         assert!(producer_request_beyond_frontier(None, Some(42)));
+    }
+
+    /// The legacy single-ffmpeg copy gives up preservation, not just
+    /// conversion, and says so in every field a client reads.
+    ///
+    /// This is the path a converting title takes the first time it is played,
+    /// before its third fragment index exists — so it is not an exotic
+    /// fallback, it is the normal first watch. Three fields have to agree that
+    /// the stream is the HDR10 base: the argv's bitstream filter (through
+    /// `preserve_dolby_vision`), the playlist (through `convert_dolby_vision`)
+    /// and the create response's badge (through the `SessionKind` the caller
+    /// returns). Any one of them left at the decision's answer is a lie to a
+    /// different consumer, and the viewer only ever sees the last.
+    #[test]
+    fn a_copy_that_cannot_convert_serves_and_describes_the_hdr10_base() {
+        let asked = CopySessionOptions {
+            transcode_audio: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: true,
+        };
+        let served = served_copy_options(asked);
+        assert!(
+            !served.preserve_dolby_vision,
+            "keeping the RPUs on a path that cannot rewrite them hands dual-layer \
+             Profile 7 to a client that said it decodes 8 and not 7"
+        );
+        assert!(
+            !served.convert_dolby_vision,
+            "and claiming the conversion advertises dvh1.08 over media that is \
+             plain HDR10"
+        );
+        assert!(served.transcode_audio == asked.transcode_audio, "audio is unrelated");
+
+        // Every other session is untouched: a preserving copy still preserves,
+        // which is the case that would break if the strip-down were
+        // unconditional.
+        let preserving = CopySessionOptions {
+            convert_dolby_vision: false,
+            ..asked
+        };
+        assert!(
+            served_copy_options(preserving).preserve_dolby_vision,
+            "a client that claimed the source's own profile still gets it"
+        );
+    }
+
+    /// The playlist for a converting session describes what the conversion
+    /// produces, not what the source is.
+    ///
+    /// The source is Profile 7, so every other arm of `copied_hls_codecs`
+    /// would read the source's ffprobe record and answer `dvh1.07.LL` — the
+    /// one profile this client's caps said it cannot decode — over media whose
+    /// sample entry is `hvc1` and whose configuration record plurx wrote as
+    /// profile 8. Two lies at once, to the only client class that ever reaches
+    /// this branch.
+    #[tokio::test]
+    async fn a_converting_session_advertises_the_profile_it_produces() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let mut file = store
+            .get_file(file_id)
+            .await
+            .expect("read file")
+            .expect("seeded file");
+        file.hdr = Some("dolby_vision".into());
+        file.audio_streams = Vec::new();
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(9);
+        file.dolby_vision.bl_compat_id = Some(1);
+
+        // The source's own record, which is what the other arms would read.
+        let probe = r#"{"streams":[{"codec_type":"video","profile":"Main 10","level":150,"side_data_list":[{"side_data_type":"DOVI configuration record","dv_profile":7,"dv_level":9,"dv_bl_signal_compatibility_id":1}]}]}"#;
+
+        let (codecs, supplemental) = copied_hls_codecs(
+            &file,
+            None,
+            CopySessionOptions {
+                transcode_audio: false,
+                preserve_dolby_vision: true,
+                convert_dolby_vision: true,
+            },
+            Some(probe),
+        );
+        assert!(
+            codecs.starts_with("hvc1"),
+            "8.1 is a backward-compatible enhancement of HDR10, so the base \
+             sample entry stays hvc1: {codecs}"
+        );
+        assert!(
+            !codecs.contains("dvh1"),
+            "the primary codec must not name a Dolby Vision profile at all: {codecs}"
+        );
+        assert_eq!(
+            supplemental.as_deref(),
+            Some("dvh1.08.09/db1p"),
+            "the level is the source's, the profile is what the conversion made, \
+             and db1p is the HDR10-compatible base"
+        );
+
+        // The same file with the conversion off is the contrast: the
+        // source's record wins and the playlist says 7.
+        let (codecs, supplemental) = copied_hls_codecs(
+            &file,
+            None,
+            CopySessionOptions {
+                transcode_audio: false,
+                preserve_dolby_vision: true,
+                convert_dolby_vision: false,
+            },
+            Some(probe),
+        );
+        assert!(codecs.contains("dvh1.07"), "{codecs}");
+        assert_eq!(supplemental, None);
     }
 
     #[tokio::test]
