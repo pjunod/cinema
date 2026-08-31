@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["fee7768c"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static"]
+reason = "`defaultTimersAreCallableFromAnyReceiver` (tests/playback/web-control.test.js) constructs the reporter with no injected timers -- the branch that actually ships -- while globalThis.setTimeout and clearTimeout are substituted for stand-ins that enforce the browser's rule and throw TypeError on any receiver but the global. It then drives a full exchange and asserts the request was sent, the deadline timer armed, and stop() cleared it. Reverting the fix to the shipped `this.setTimer = value.setTimer || setTimeout` reproduces the fleet's exact `Illegal invocation`; nothing else in the suite can, because node's timers accept any receiver and every other reporter test injects its own."
