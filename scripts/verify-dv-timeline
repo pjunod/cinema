@@ -45,9 +45,17 @@ def main(src, out):
     order = sorted(range(len(ov)), key=lambda i: f(ov[i]))
     seq = [f(sv[kv+i]) for i in order]
     inv = [i for i in range(1, len(seq)) if seq[i] < seq[i-1]]
+    # The head window forgives inversions in the first 32 display positions,
+    # because an open-GOP seek really does emit leading pictures that reorder
+    # there. `head_ok` is what stops that forgiveness being a blanket amnesty:
+    # each of the first eight output packets must still land near the front.
+    # Without it a stream whose whole timeline was rebuilt in decode order --
+    # the exact failure that withdrew the two-ffmpeg design -- passes the head
+    # window by having its damage start inside it.
     head_ok = all(order.index(j) < 3*8 for j in range(min(8, len(ov))))  # tolerate head RASLs
     real_inv = [i for i in inv if i > 32]
-    print(f"inversions: {len(inv)} total, {len(real_inv)} beyond the head window")
+    print(f"inversions: {len(inv)} total, {len(real_inv)} beyond the head window, "
+          f"head {'ok' if head_ok else 'DISPLACED'}")
 
     # 2. skew
     S_a = f(sa[ka]) - f(oa[0])
@@ -63,7 +71,7 @@ def main(src, out):
                      (f(sv[kv+i]) - f(sv[kv+i], "dts_time"))) > fdur*0.25)
     print(f"ctts (pts-dts) mismatches: {bad}/{len(ov)}")
 
-    ok = (not real_inv) and abs(med) <= 0.005 and spread <= 1.5*fdur and bad == 0
+    ok = (not real_inv) and head_ok and abs(med) <= 0.005 and spread <= 1.5*fdur and bad == 0
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 

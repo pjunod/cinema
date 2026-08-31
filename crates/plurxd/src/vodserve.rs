@@ -4128,10 +4128,10 @@ fn replace_inputs_with_attested_descriptor(args: &mut [String]) {
 
 /// Hand a child the attested source as fd 3, if there is one.
 ///
-/// Factored out of the spawn site because the conversion runs two children and
-/// both need it: stage one reads the picture and stage two reads the audio,
-/// and a stage two that opened the file by name could pair one file's audio
-/// with another file's video.
+/// Factored out because two spawn sites need it — the producer and head
+/// regeneration — and a child that opened the file by name rather than by the
+/// attested descriptor could read a file that had been replaced since the
+/// fence was taken, pairing a playlist with media from a different film.
 fn attach_attested_descriptor(
     command: &mut tokio::process::Command,
     source: Option<&crate::fragment_index_cluster::SourceFence>,
@@ -4803,10 +4803,8 @@ async fn read_regenerated_head_before(
     budget: Duration,
     max_bytes: usize,
 ) -> Result<Init, HeadRegenerationError> {
-    // The stdout arrives separately from the child because a converting
-    // regeneration reads the *second* ffmpeg's output while the child this
-    // owner kills is the first — that is the whole chain: kill stage one, its
-    // stdout closes, the conversion reaches EOF, stage two exits.
+    // The stdout arrives separately from the child because the owner below
+    // takes the child by value, and the read needs the pipe after that move.
     let mut child = HeadChildOwner::new(child);
     let mut stdout = stdout;
     let head = tokio::time::timeout(budget, read_muxer_init_bounded(&mut stdout, max_bytes)).await;

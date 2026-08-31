@@ -306,17 +306,18 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
 /// The Dolby Vision configuration record a converted stream must declare.
 ///
 /// Built from the source's stored facts rather than read from the output,
-/// because the output has none to read: the conversion's second ffmpeg is fed
-/// a raw Annex B elementary stream, and ffmpeg derives this record from its
-/// input container rather than from the RPUs (measured,
-/// `docs/PLAYBACK-CAPS-V2-M0.md` §8).
+/// because what the output carries is the *source's* record: ffmpeg derives it
+/// from its input container rather than from the RPUs (measured,
+/// `docs/PLAYBACK-CAPS-V2-M0.md` §8), and the rewrite that makes the RPUs say
+/// 8.1 runs on the far side of that muxer. Left alone, the sample entry would
+/// declare Profile 7 over samples that are no longer Profile 7.
 ///
 /// What changes from the source's own record and what does not:
 ///
 /// - **profile becomes 8**, which is what the RPUs now say;
-/// - **`el_present` becomes false**, because the enhancement layer was dropped
-///   by stage one and a record still declaring one tells a decoder to expect a
-///   layer that is not in the stream;
+/// - **`el_present` becomes false**, because `filter_units=remove_types=63`
+///   dropped the enhancement layer and a record still declaring one tells a
+///   decoder to expect a layer that is not in the stream;
 /// - **the level and the compatibility id are the source's**, unchanged. The
 ///   level bounds resolution and frame rate, neither of which the conversion
 ///   touches; the compatibility id says what a non-Dolby-Vision client sees of
@@ -764,8 +765,9 @@ mod tests {
         assert_eq!(record.profile, 8, "the RPUs now say 8.1");
         assert!(
             !record.el_present,
-            "stage one dropped the enhancement layer; a record still declaring \
-             one tells a decoder to expect what is not there"
+            "the copy's bitstream filter dropped the enhancement layer; a \
+             record still declaring one tells a decoder to expect what is not \
+             there"
         );
         assert!(record.rpu_present, "the RPUs are the point");
         assert!(record.bl_present);
@@ -861,6 +863,80 @@ mod tests {
             "the record is stored, so a regenerated init is promoted from it too"
         );
         assert!(!converted.promotion.is_empty());
+    }
+
+    /// The conversion runs inside the index pass, and the rows describe the
+    /// converted stream.
+    ///
+    /// This is the wire the whole converting identity hangs from. The index a
+    /// converting session lands against has to have been built from converted
+    /// fragments: an 8.1 RPU is smaller than the Profile 7 one it replaces, so
+    /// every `video_bytes` differs, and an index built without the conversion
+    /// would describe a stream no converting session ever produces — the
+    /// landing would miss on every fragment and the session would fail with
+    /// nothing pointing at why.
+    #[tokio::test]
+    async fn a_converting_pass_indexes_the_converted_stream() {
+        testfixtures::require_ffmpeg();
+        let plain_bytes = index_pipe_bytes("closed-gop");
+        let dv_bytes = testfixtures::with_dolby_vision_rpus(&plain_bytes);
+
+        let unconverted = index_stream(
+            std::io::Cursor::new(dv_bytes.clone()),
+            identity(),
+            None,
+            None,
+            false,
+        )
+        .await;
+        let IndexOutcome::Built(unconverted) = unconverted else {
+            panic!("a Dolby Vision stream indexes without converting: {unconverted:?}");
+        };
+
+        let converted = index_stream(
+            std::io::Cursor::new(dv_bytes),
+            identity(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let IndexOutcome::Built(converted) = converted else {
+            panic!("the converting pass must build: {converted:?}");
+        };
+
+        assert_eq!(
+            converted.rows.len(),
+            unconverted.rows.len(),
+            "the conversion rewrites metadata, it does not add or drop frames"
+        );
+        for (with, without) in converted.rows.iter().zip(unconverted.rows.iter()) {
+            assert_eq!(with.dts, without.dts, "no timestamp is reconstructed");
+            assert_eq!(with.duration, without.duration);
+            assert!(
+                with.video_bytes < without.video_bytes,
+                "every fragment shrinks by what the 8.1 RPUs no longer carry"
+            );
+        }
+    }
+
+    /// A converting pass over a stream with no RPUs in it refuses.
+    ///
+    /// The row said Profile 7 and the stream carries nothing to convert, so
+    /// one of the two is lying. Indexing it under the converted identity would
+    /// record that lie in the keyspace, and every session that looked the
+    /// identity up would be served segments cut for a stream that was never
+    /// converted.
+    #[tokio::test]
+    async fn a_converting_pass_over_a_stream_with_no_rpus_is_not_an_index() {
+        testfixtures::require_ffmpeg();
+        let bytes = index_pipe_bytes("closed-gop");
+        let outcome =
+            index_stream(std::io::Cursor::new(bytes), identity(), None, None, true).await;
+        let IndexOutcome::Unsupported(reason) = outcome else {
+            panic!("a stream with no RPUs cannot be indexed as converted: {outcome:?}");
+        };
+        assert!(reason.contains("no RPUs to convert"), "{reason}");
     }
 
     /// The index pipe over a real fixture, read the way the daemon reads it.

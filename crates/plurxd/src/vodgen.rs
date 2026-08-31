@@ -93,7 +93,7 @@ pub struct Generation {
     /// fragments arrive.
     ///
     /// The conversion lives here, after the muxer, because the alternative —
-    /// converting a raw elementary stream between two ffmpegs — destroys the
+    /// converting a raw elementary stream between two ffmpegs — destroyed the
     /// video timeline: ffmpeg's raw HEVC demuxer emits packets with no
     /// timestamps and the muxer fabricates a decode-order grid, so
     /// presentation order is erased. See `crate::dvpipe`.
@@ -707,6 +707,112 @@ mod tests {
             video_id,
             feed,
         }
+    }
+
+    /// The same fixture with real Profile 7 RPUs in every video sample,
+    /// indexed and identified the way a converting session's rendition is.
+    ///
+    /// Every step is the production one: the index is built by the converting
+    /// index pass, the identity is established from the converted pass's
+    /// promotion inputs, and the feed is a production pipe — video and audio
+    /// from one open of one file, which is the whole design.
+    async fn converting_film() -> Film {
+        testfixtures::require_ffmpeg();
+        let feed = testfixtures::with_dolby_vision_rpus(&pipe("clean-cra"));
+        let record = plurx_core::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1)
+            .expect("a describable record");
+        let indexed =
+            testfixtures::with_dolby_vision_rpus(&index_pipe_bytes("clean-cra"));
+        let index = match index_stream(
+            std::io::Cursor::new(indexed),
+            SourceIdentity::new(1, 1, "fingerprint+p81"),
+            None,
+            Some(record),
+            true,
+        )
+        .await
+        {
+            IndexOutcome::Built(index) => *index,
+            other => panic!("the converting pass must index: {other:?}"),
+        };
+        let policy = CutPolicy::new(3, 1, 48_000_000, 15, index.timescale);
+        let plan = plurx_core::segplan::plan_copy(
+            &index,
+            &policy,
+            &TrackDurations {
+                video_ms: 12_000,
+                audio_ms: 12_000,
+                audio_bits_per_second: 256_000,
+            },
+        );
+        let mut init = muxer_init(&feed);
+        sanitize_stale_dolby_brand(&mut init);
+        let video_id = init.video().expect("a video track").id;
+        let identity =
+            InitIdentity::establish(&init, index.promotion.clone()).expect("establishing identity");
+        Film {
+            index,
+            plan,
+            identity,
+            policy,
+            video_id,
+            feed,
+        }
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|at| at == needle)
+    }
+
+    /// A converting generation converts, and what it materializes is the
+    /// converted stream.
+    ///
+    /// Two halves, and both are load-bearing. The first is that no Profile 7
+    /// RPU reaches the client: the media is what the playlist says it is,
+    /// checked against the fixture's own bytes rather than against a tally the
+    /// conversion keeps about itself. The second is that a generation which
+    /// did *not* convert cannot land at all — the index it lands against was
+    /// built from converted fragments, and an 8.1 RPU is smaller than the
+    /// Profile 7 one it replaces, so every `video_bytes` disagrees. That is
+    /// the property that makes the two streams uncombinable by construction,
+    /// which is what stops a converting session ever being served unconverted
+    /// bytes under a Dolby Vision label.
+    #[tokio::test]
+    async fn a_converting_generation_serves_the_converted_stream() {
+        let film = converting_film().await;
+        let rpu = testfixtures::p7_rpu();
+        assert!(
+            contains(&film.feed, &rpu),
+            "the feed carries the Profile 7 RPUs the conversion is for"
+        );
+
+        let sink = MemSink::default();
+        let mut converting = generation(&film, 0);
+        converting.convert_dolby_vision = true;
+        let outcome = run(&film.feed[..], converting, &sink, "test").await;
+        let Outcome::Ran { produced_through } = outcome else {
+            panic!("the converting generation did not run: {outcome:?}");
+        };
+        assert_eq!(produced_through, Some(film.plan.len() as u32 - 1));
+
+        let writes = sink.taken();
+        assert_eq!(writes.len(), film.plan.len());
+        for (entry, bytes) in &writes {
+            assert!(
+                !contains(mdat_payload(bytes), &rpu),
+                "entry {entry} carried an unrewritten Profile 7 RPU"
+            );
+        }
+
+        // And the same generation with the conversion off cannot land.
+        let off = MemSink::default();
+        let refused = run(&film.feed[..], generation(&film, 0), &off, "off").await;
+        assert!(
+            matches!(refused, Outcome::Failed(_)),
+            "an unconverted generation must not land on a converted index, \
+             got {refused:?}"
+        );
+        assert!(off.taken().is_empty());
     }
 
     fn generation(film: &Film, start_entry: u32) -> Generation {

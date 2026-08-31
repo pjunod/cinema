@@ -260,3 +260,116 @@ pub fn source_with_chapters() -> PathBuf {
     std::fs::rename(&tmp, &path).expect("publishing the chaptered fixture");
     path
 }
+
+/// One real Profile 7 RPU, captured 2026-08-30 from
+/// `Nosferatu (2024) Remux-2160p.mkv` on nuc4 through
+/// `-c:v copy -bsf:v hevc_mp4toannexb,filter_units=remove_types=63`.
+///
+/// A real one rather than a synthetic one because the question the conversion
+/// answers is whether a library's idea of a Profile 7 RPU matches what a disc
+/// remux actually carries.
+///
+/// It lives in a file rather than a literal because a hand-wrapped copy has
+/// now lost bytes twice — once in `dvconvert`'s own tests and once again when
+/// it was transcribed into a second module. Both times the length assertion
+/// below caught it and the failure read as "invalid mapping_idc", which is a
+/// long way from "you dropped three bytes".
+const REAL_P7_RPU: &str = include_str!("../../../tests/playback/dv-p7-rpu.hex");
+
+/// That RPU as a bare NAL unit — no start code, no length prefix.
+pub fn p7_rpu() -> Vec<u8> {
+    let hex = REAL_P7_RPU.trim();
+    assert_eq!(
+        hex.len(),
+        734,
+        "the fixture lost bytes on its way into the test"
+    );
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex"))
+        .collect()
+}
+
+/// The same fMP4 stream with a real Profile 7 RPU appended to every video
+/// sample.
+///
+/// No fixture encoder produces Dolby Vision — x265 in the CI image has no
+/// `--dolby-vision-rpu` and the corpus is 640x360 lavfi — so a stream the
+/// conversion can actually run on has to be built. Appending a real RPU to
+/// each sample of a real pipe's output is the closest honest approximation:
+/// the framing, the `trun` shapes and the sample sizes are ffmpeg's, and the
+/// bytes the converter rewrites are a disc's.
+///
+/// It uses [`crate::fmp4::rewrite_video_samples`] to do the injecting, which
+/// is also what the conversion uses. That is deliberate and it is not
+/// circular: what these fixtures test is that the conversion is *wired* — that
+/// it runs, that its refusals refuse — and every consumer reads the result
+/// back through the ordinary [`crate::fmp4::FragmentReader`], which would not
+/// parse a fragment this had corrupted. The rewrite's own correctness is
+/// proved directly in `fmp4`'s tests, against bytes it did not build.
+pub fn with_dolby_vision_rpus(stream: &[u8]) -> Vec<u8> {
+    use crate::fmp4::{FragmentReader, Init, Unit};
+
+    let rpu = p7_rpu();
+    let mut reader = FragmentReader::new();
+    reader.push(stream);
+    let mut out: Vec<u8> = Vec::with_capacity(stream.len() * 2);
+    let mut init: Option<Init> = None;
+    loop {
+        match reader.next_unit().expect("parsing the fixture stream") {
+            Some(Unit::Init(parsed)) => {
+                out.extend_from_slice(&parsed.bytes);
+                init = Some(parsed);
+            }
+            Some(Unit::Fragment(mut fragment)) => {
+                let init = init.as_ref().expect("an init before any fragment");
+                let video = init.video().expect("a video track");
+                let width = usize::from(video.nal_length_size);
+                assert!(matches!(width, 1 | 2 | 4), "an hvcC length width");
+                crate::fmp4::rewrite_video_samples(
+                    &mut fragment,
+                    &init.tracks,
+                    video.id,
+                    |sample| {
+                        let mut next = Vec::with_capacity(sample.len() + width + rpu.len());
+                        next.extend_from_slice(sample);
+                        next.extend_from_slice(&(rpu.len() as u64).to_be_bytes()[8 - width..]);
+                        next.extend_from_slice(&rpu);
+                        Ok(next)
+                    },
+                )
+                .expect("injecting the RPUs");
+                out.extend_from_slice(&fragment.bytes);
+            }
+            // Handled after the loop: `Unit::Trailer` carries no bytes, and
+            // the trailer has to survive because a generation's end is only
+            // trustworthy when ffmpeg's `mfra` says so.
+            Some(Unit::Trailer) => {}
+            None => break,
+        }
+    }
+    if let Some(at) = trailer_at(stream) {
+        // Verbatim, stale offsets and all. `tfra` indexes `moof` positions
+        // this rewrite has moved — and so does production: ffmpeg writes the
+        // trailer and plurx rewrites the fragments behind it. Nothing reads
+        // the entries (the trailer is recognised so it is never mistaken for
+        // payload, and never published), so a fixture that "fixed" them would
+        // be less like the stream a session actually carries, not more.
+        out.extend_from_slice(&stream[at..]);
+    }
+    out
+}
+
+/// Where the `mfra` trailer starts, by a top-level box walk.
+fn trailer_at(stream: &[u8]) -> Option<usize> {
+    let mut at = 0usize;
+    while at + 8 <= stream.len() {
+        let size = u32::from_be_bytes(stream[at..at + 4].try_into().ok()?) as usize;
+        assert!(size >= 8, "a 64-bit box size is not something these fixtures emit");
+        if &stream[at + 4..at + 8] == b"mfra" {
+            return Some(at);
+        }
+        at = at.checked_add(size)?;
+    }
+    None
+}

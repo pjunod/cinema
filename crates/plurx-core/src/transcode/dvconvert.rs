@@ -19,35 +19,44 @@
 //! untouched; what shrinks is metadata describing a layer that is no longer
 //! there.
 //!
-//! This is the middle stage of the pipe in PLAYBACK-CAPS-V2-PLAN §4.8:
+//! **Where this runs: on the far side of the muxer**, on samples in the shape
+//! an fMP4 fragment carries them — each NAL unit behind an `hvcC` length
+//! prefix, not an Annex B start code.
 //!
 //! ```text
-//!  ffmpeg#1  -c:v copy -bsf:v hevc_mp4toannexb,filter_units=remove_types=63
-//!                │  Annex B, base layer + RPU, enhancement layer dropped
-//!                ▼
-//!  this module   type 62 (RPU) → convert to 8.1, CRC32 recomputed
-//!                anything else → passed through byte for byte
-//!                │
-//!                ▼
-//!  ffmpeg#2  -f hevc -i -  -c copy  -tag:v hvc1 → the HLS segmenter
+//!  one ffmpeg  -c:v copy -bsf:v filter_units=remove_types=32-34|63
+//!       │  fragmented MP4: video and audio from one open, one timeline,
+//!       │  timestamps copied rather than reconstructed
+//!       ▼
+//!  crate::fmp4::rewrite_video_samples  ─▶  this module, one sample at a time
+//!       │                                  type 62 (RPU) → 8.1, CRC32 redone
+//!       │                                  anything else → byte for byte
+//!       ▼
+//!  the fragment reader, unchanged — the same kind of stream a plain copy
+//!  produces, with only the RPUs inside it different
 //! ```
 //!
-//! **Nothing runs this pipe yet.** `convert_annex_b` and
-//! [`whole_units_prefix`] have no callers outside these tests, and what
-//! [`super::copy_video_args`] renders today for a converting source is the
-//! ordinary single-ffmpeg copy — fragmented MP4, which this stage cannot read
-//! — plus the marker that reserves its fragment-index identity. Wiring the
-//! stage up therefore has to change that argv (Annex B out of ffmpeg#1, and
-//! `remove_types=63` to drop the enhancement layer, which is not dropped
-//! today), and changing the argv changes the fingerprint. That is the intended
-//! order: the marker exists so a converted stream never shares an index with
-//! an unconverted one, and re-indexing at the moment the pipe becomes real is
-//! correct, not a cost to design around.
+//! **It used to sit between two ffmpegs, and that was wrong.** The first
+//! emitted a raw Annex B elementary stream for this stage and the second
+//! remuxed it — but ffmpeg's raw HEVC demuxer emits every packet with no
+//! timestamps at all, and the muxer then fabricates a decode-order grid:
+//! `pts == dts` for every sample, presentation reordering erased, every
+//! minigop played in coding order. Measured on an ordinary three-B-frame
+//! encode: ~410 display-order inversions in 819 frames, on every GOP, seek or
+//! no seek, closed-GOP sources included. No seek anchor could have repaired
+//! it — an anchor translates a timeline, it does not reorder one. So the
+//! Annex B form is gone rather than kept for a caller that might want it: a
+//! function whose only correct use is one this project has withdrawn is a
+//! trap with tests around it.
 //!
-//! ffmpeg#2 writes no Dolby Vision configuration record — it copies the one
-//! its input container had, and a raw Annex B stream has no container
-//! (measured: `docs/PLAYBACK-CAPS-V2-M0.md` §8). The record is written
-//! separately by [`crate::fmp4::set_dolby_vision_record`].
+//! The **configuration record** the output needs is written separately, by
+//! [`crate::fmp4::set_dolby_vision_record`] out of the source file's stored
+//! facts. ffmpeg does not derive that record from the RPUs — it copies the one
+//! its input container had (measured, `docs/PLAYBACK-CAPS-V2-M0.md` §8) — so a
+//! converted stream comes out of the muxer carrying the *source's* Profile 7
+//! `dvcC`, describing a dual-layer stream that is no longer there. Replacing
+//! it is not optional and not a nicety: a decoder reading it expects an
+//! enhancement layer the conversion dropped.
 //!
 //! Three names for the output get confused with each other, so all three at
 //! once. The **sample entry** is `hvc1`, not `dvh1`: Profile 8.1 is a
@@ -188,109 +197,6 @@ pub enum DvConvertError {
         offset: usize,
         profile: u8,
     },
-}
-
-/// Rewrite every RPU in an Annex B byte stream to Profile 8.1, leaving every
-/// other NAL unit byte for byte as it was.
-///
-/// `out` is **replaced** by the whole stream, converted; anything it held is
-/// discarded, so the same buffer can be reused across calls without carrying
-/// the previous chunk's bytes into this one's output.
-///
-/// **The caller owns framing.** This converts the buffer it is given and
-/// nothing else — a NAL unit split across two calls would be handed to the
-/// RPU parser in halves and refused. A caller reading from a pipe must cut its
-/// buffer at a unit boundary and carry the remainder into the next read;
-/// [`whole_units_prefix`] is that cut. What it bounds is the *carried tail* —
-/// one NAL unit, never the file, which for a two-hour 4K remux is ~72 GB. The
-/// rest of a call's memory is the caller's read buffer and two `Vec`s
-/// proportional to it, so the read size is the caller's to choose.
-///
-/// **A stream with no RPUs converts to itself**, and answers `rpus: 0`. That
-/// is not an error: the caller decides whether a source it believed was
-/// Profile 7 having no RPUs is a reason to refuse, and it has the file's
-/// stored facts to decide with, which this function does not.
-///
-/// **On any error `out` is left empty**, not holding the units that converted
-/// before the failure. A refusal happens partway through by construction — the
-/// bad RPU is discovered after its predecessors were written — and a caller
-/// that forwarded the buffer on its error path would publish a stream truncated
-/// mid-frame, which a segmenter will happily index and a player will happily
-/// stall on. The bytes are unrecoverable anyway: the refusal means the stream
-/// cannot be converted, not that some prefix of it can.
-pub fn convert_annex_b(input: &[u8], out: &mut Vec<u8>) -> Result<Converted, DvConvertError> {
-    out.clear();
-    out.reserve(input.len());
-    match convert_units(input, out) {
-        Ok(report) => Ok(report),
-        Err(error) => {
-            out.clear();
-            Err(error)
-        }
-    }
-}
-
-/// The conversion proper. Separate only so its early returns cannot leave a
-/// half-converted stream behind — see `convert_annex_b`.
-fn convert_units(input: &[u8], out: &mut Vec<u8>) -> Result<Converted, DvConvertError> {
-    let mut report = Converted::default();
-    for unit in annex_b_units(input) {
-        let AnnexBUnit {
-            start_code,
-            nal,
-            offset,
-        } = unit;
-        if nal_type(nal) != Some(RPU_NAL_TYPE) {
-            out.extend_from_slice(start_code);
-            out.extend_from_slice(nal);
-            continue;
-        }
-        let mut rpu =
-            DoviRpu::parse_unspec62_nalu(nal).map_err(|error| DvConvertError::Unreadable {
-                frame: report.rpus,
-                offset,
-                detail: error.to_string(),
-            })?;
-        // Refuse before converting, not after. `To81` has an answer for every
-        // profile it is handed and none of them fail loudly; the error's own
-        // documentation says what each wrong answer looks like on screen.
-        if rpu.dovi_profile != 7 {
-            return Err(DvConvertError::UnsupportedProfile {
-                frame: report.rpus,
-                offset,
-                profile: rpu.dovi_profile,
-            });
-        }
-        if report.source_profile.is_none() {
-            report.source_profile = Some(rpu.dovi_profile);
-            report.enhancement_layer = match rpu.el_type {
-                Some(DoviELType::MEL) => EnhancementLayer::Minimum,
-                Some(DoviELType::FEL) => EnhancementLayer::Full,
-                None => EnhancementLayer::None,
-            };
-        }
-        // `To81` is the conversion the plan names; the module doc says what it
-        // does beyond clearing the enhancement-layer references. The library
-        // writes the NAL type back and re-applies start-code emulation
-        // prevention, so what comes out is a complete replacement unit.
-        rpu.convert_with_mode(ConversionMode::To81)
-            .map_err(|error| DvConvertError::Unconvertible {
-                frame: report.rpus,
-                offset,
-                detail: error.to_string(),
-            })?;
-        let written =
-            rpu.write_hevc_unspec62_nalu()
-                .map_err(|error| DvConvertError::Unconvertible {
-                    frame: report.rpus,
-                    offset,
-                    detail: error.to_string(),
-                })?;
-        out.extend_from_slice(start_code);
-        out.extend_from_slice(&written);
-        report.rpus += 1;
-    }
-    Ok(report)
 }
 
 /// Rewrite every RPU in a **length-prefixed** sample, the shape a sample has
@@ -436,120 +342,9 @@ fn convert_length_prefixed_into(
     Ok(report)
 }
 
-/// How much of a read buffer is safely convertible: everything up to the last
-/// start code in it.
-///
-/// A pipe hands out whatever bytes have arrived, and the last NAL unit in a
-/// read is almost always incomplete. Converting it would refuse a perfectly
-/// good RPU as unreadable; passing it through would emit a Profile 7 RPU into
-/// a stream every other RPU says is 8.1. So a streaming caller converts this
-/// prefix, keeps the tail, and prepends it to the next read.
-///
-/// Answers `0` when the buffer holds no start code at all — the caller has not
-/// yet read a whole unit and must read more. The tail a caller carries is
-/// therefore bounded by one NAL unit, not by the file.
-pub fn whole_units_prefix(input: &[u8]) -> usize {
-    let starts = start_codes(input);
-    match starts.len() {
-        // Nothing, or a single unit that may still be growing.
-        0 | 1 => 0,
-        _ => starts[starts.len() - 1].0,
-    }
-}
-
-/// One Annex B unit: its start code and the NAL that follows.
-///
-/// The start code is carried rather than normalized so a pass-through is byte
-/// for byte — ffmpeg emits four-byte codes at parameter sets and three-byte
-/// ones elsewhere, and rewriting them would change bytes this stage has no
-/// business changing.
-struct AnnexBUnit<'a> {
-    start_code: &'a [u8],
-    nal: &'a [u8],
-    /// Byte offset of the start code within the buffer, so a refusal names a
-    /// place in the stream and not just an ordinal.
-    offset: usize,
-}
-
 /// The HEVC NAL type, from the two-byte header.
 fn nal_type(nal: &[u8]) -> Option<u8> {
     (nal.len() >= 2).then(|| (nal[0] >> 1) & 0x3f)
-}
-
-/// Every start code in the buffer, as `(offset, width)`.
-///
-/// Scanning for the byte pattern is the whole of Annex B parsing, and it is
-/// safe to do without decoding anything: HEVC requires an encoder to insert an
-/// emulation-prevention byte wherever `00 00 00`, `00 00 01`, `00 00 02` or
-/// `00 00 03` would otherwise appear inside a NAL payload (ITU-T H.265
-/// §7.4.2). So a `00 00 01` inside a conformant unit does not exist, and a
-/// split at one is a unit boundary by definition. A non-conformant stream
-/// would split a payload here — the fragment is then passed through byte for
-/// byte unless its first two bytes happen to spell NAL type 62, which is the
-/// only case that could misroute, and which cannot arise from a stream ffmpeg
-/// just wrote.
-fn start_codes(input: &[u8]) -> Vec<(usize, usize)> {
-    let mut starts: Vec<(usize, usize)> = Vec::new();
-    let mut at = 0usize;
-    while at + 3 <= input.len() {
-        if input[at] == 0 && input[at + 1] == 0 {
-            // The two arms are mutually exclusive and their order does not
-            // matter: the three-byte pattern needs `input[at + 2] == 1` and
-            // the four-byte one needs it to be `0`. Said here because the
-            // shape invites the assumption that longest-match-first is load
-            // bearing, and a future reader reordering them would be right to.
-            if input[at + 2] == 0 && at + 4 <= input.len() && input[at + 3] == 1 {
-                starts.push((at, 4));
-                at += 4;
-                continue;
-            }
-            if input[at + 2] == 1 {
-                starts.push((at, 3));
-                at += 3;
-                continue;
-            }
-        }
-        at += 1;
-    }
-    starts
-}
-
-/// Split an Annex B stream into units.
-///
-/// Anything before the first start code is emitted as a unit with an empty
-/// start code, so a caller's bytes are never dropped even when the input does
-/// not begin where this expects.
-fn annex_b_units(input: &[u8]) -> Vec<AnnexBUnit<'_>> {
-    let starts = start_codes(input);
-    if starts.is_empty() {
-        return if input.is_empty() {
-            Vec::new()
-        } else {
-            vec![AnnexBUnit {
-                start_code: &input[..0],
-                nal: input,
-                offset: 0,
-            }]
-        };
-    }
-    let mut out = Vec::with_capacity(starts.len() + 1);
-    if starts[0].0 > 0 {
-        out.push(AnnexBUnit {
-            start_code: &input[..0],
-            nal: &input[..starts[0].0],
-            offset: 0,
-        });
-    }
-    for (index, &(offset, width)) in starts.iter().enumerate() {
-        let nal_start = offset + width;
-        let nal_end = starts.get(index + 1).map_or(input.len(), |&(next, _)| next);
-        out.push(AnnexBUnit {
-            start_code: &input[offset..nal_start],
-            nal: &input[nal_start..nal_end],
-            offset,
-        });
-    }
-    out
 }
 
 #[cfg(test)]
@@ -557,41 +352,38 @@ mod tests {
     use super::*;
     use dolby_vision::rpu::generate::{GenerateConfig, GenerateProfile};
 
-    /// One real Profile 7 RPU, captured 2026-08-30 from
-    /// `Nosferatu (2024) Remux-2160p.mkv` on nuc4 through the pipe's own first
-    /// stage — `-c:v copy -bsf:v hevc_mp4toannexb,filter_units=remove_types=63`.
-    ///
-    /// A real one rather than a synthetic one because the whole question this
-    /// module answers is whether a library's idea of a Profile 7 RPU matches
-    /// what a disc remux actually carries.
-    ///
-    /// It lives in a file rather than a literal, and is shared with
-    /// `plurxd::dvpipe`, because a hand-wrapped copy has now lost bytes twice:
-    /// once on the first attempt here, and once again when it was transcribed
-    /// into the second module. Both times the length assertion below caught it
-    /// and the failure read as "invalid mapping_idc", which is a long way from
-    /// "you dropped three bytes".
-    const REAL_P7_RPU: &str = include_str!("../../../../tests/playback/dv-p7-rpu.hex");
-
     fn rpu_bytes() -> Vec<u8> {
-        let hex = REAL_P7_RPU.trim();
-        assert_eq!(
-            hex.len(),
-            734,
-            "the fixture lost bytes on its way into the test"
-        );
-        (0..hex.len())
-            .step_by(2)
-            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex"))
-            .collect()
+        crate::testfixtures::p7_rpu()
     }
 
-    fn annex_b(units: &[(&[u8], &[u8])]) -> Vec<u8> {
+    /// One sample in the shape an fMP4 fragment carries it: each NAL unit
+    /// behind a big-endian length prefix of the `hvcC` width.
+    fn sample(units: &[&[u8]], width: usize) -> Vec<u8> {
         let mut out = Vec::new();
-        for (start_code, nal) in units {
-            out.extend_from_slice(start_code);
-            out.extend_from_slice(nal);
+        for unit in units {
+            for shift in (0..width).rev() {
+                out.push(((unit.len() >> (8 * shift)) & 0xff) as u8);
+            }
+            out.extend_from_slice(unit);
         }
+        out
+    }
+
+    /// Walk a converted sample back into its NAL units, so a test can say
+    /// what came out rather than where it sat.
+    fn units_of(sample: &[u8], width: usize) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while at + width <= sample.len() {
+            let length = sample[at..at + width]
+                .iter()
+                .fold(0usize, |acc, byte| (acc << 8) | usize::from(*byte));
+            let body = at + width;
+            assert!(body + length <= sample.len(), "a unit runs past the sample");
+            out.push(sample[body..body + length].to_vec());
+            at = body + length;
+        }
+        assert_eq!(at, sample.len(), "the sample ends on a unit boundary");
         out
     }
 
@@ -609,102 +401,57 @@ mod tests {
             "the fixture is what it claims to be"
         );
 
-        let stream = annex_b(&[(&[0, 0, 1], &rpu)]);
+        let input = sample(&[&rpu], 4);
         let mut out = Vec::new();
-        let report = convert_annex_b(&stream, &mut out).expect("convert");
+        let report = convert_length_prefixed(&input, 4, &mut out).expect("convert");
 
         assert_eq!(report.rpus, 1);
         assert_eq!(report.source_profile, Some(7));
 
-        // The output is still one Annex B unit, and its RPU now says 8.
-        let converted_nal = &out[3..];
-        let after = DoviRpu::parse_unspec62_nalu(converted_nal).expect("the converted RPU parses");
+        let units = units_of(&out, 4);
+        assert_eq!(units.len(), 1, "one unit in, one unit out");
+        let after = DoviRpu::parse_unspec62_nalu(&units[0]).expect("the converted RPU parses");
         assert_eq!(
             after.dovi_profile, 8,
             "profile 8.1 is the whole point of the conversion"
         );
-        assert_ne!(out, stream, "something has to have changed");
-        assert_eq!(&out[..3], &[0, 0, 1], "the start code is carried through");
+        assert_ne!(out, input, "something has to have changed");
+        assert!(
+            units[0].len() < rpu.len(),
+            "the conversion shortens the RPU, which is why the caller has size \
+             fixups to do"
+        );
     }
 
     /// Everything that is not an RPU comes out byte for byte.
     ///
-    /// This stage sits between two ffmpegs in a copy pipeline. Any byte it
-    /// changes outside an RPU is a byte of picture or parameter set it had no
-    /// business touching — and it would be invisible, because the stream would
-    /// still decode.
+    /// Any byte this stage changes outside an RPU is a byte of picture or
+    /// parameter set it had no business touching — and it would be invisible,
+    /// because the stream would still decode.
     #[test]
     fn every_other_nal_unit_is_passed_through_unchanged() {
         let vps: &[u8] = &[0x40, 0x01, 0x0c, 0x01, 0xff, 0xff];
         let sps: &[u8] = &[0x42, 0x01, 0x01, 0x22, 0x20];
         let slice: &[u8] = &[0x26, 0x01, 0xaf, 0x00, 0x00, 0x01, 0x02];
-        let sei: &[u8] = &[0x4e, 0x01, 0x89, 0x04];
         let rpu = rpu_bytes();
 
-        // Four-byte start codes on the parameter sets and three-byte ones
-        // elsewhere, which is what ffmpeg emits and what a byte-for-byte
-        // pass-through has to preserve.
-        let stream = annex_b(&[
-            (&[0, 0, 0, 1], vps),
-            (&[0, 0, 0, 1], sps),
-            (&[0, 0, 1], sei),
-            (&[0, 0, 1], &rpu),
-            (&[0, 0, 1], slice),
-        ]);
+        let input = sample(&[vps, sps, &rpu, slice], 4);
         let mut out = Vec::new();
-        let report = convert_annex_b(&stream, &mut out).expect("convert");
+        let report = convert_length_prefixed(&input, 4, &mut out).expect("convert");
         assert_eq!(report.rpus, 1);
 
-        // The prefix up to the RPU and the suffix after it are identical.
-        let prefix_len = 4 + vps.len() + 4 + sps.len() + 3 + sei.len();
-        assert_eq!(&out[..prefix_len], &stream[..prefix_len]);
-        let tail: &[u8] = &[0, 0, 1];
-        assert!(out.ends_with(slice));
-        assert!(out[..out.len() - slice.len()].ends_with(tail));
-    }
+        let units = units_of(&out, 4);
+        assert_eq!(units.len(), 4);
+        assert_eq!(units[0], vps);
+        assert_eq!(units[1], sps);
+        assert_ne!(units[2], rpu, "the RPU is the one unit that changes");
+        assert_eq!(units[3], slice, "including a slice full of zero bytes");
 
-    /// The length-prefixed form converts the same RPUs the Annex B form does,
-    /// and re-frames them without touching the payload.
-    ///
-    /// This is the form that ships. The two differ only in framing — a length
-    /// prefix instead of a start code — so the converted NAL bytes must come
-    /// out identical, and any divergence would mean one is doing something to
-    /// the payload the other is not.
-    #[test]
-    fn a_length_prefixed_sample_converts_to_the_same_rpu_the_annex_b_form_does() {
-        let rpu = rpu_bytes();
-        let slice: &[u8] = &[0x26, 0x01, 0xaf, 0x12];
-
-        let mut annex_b_out = Vec::new();
-        let stream = annex_b(&[(&[0, 0, 1], &rpu)]);
-        convert_annex_b(&stream, &mut annex_b_out).expect("convert");
-        let annex_b_rpu = &annex_b_out[3..];
-
-        let mut sample = Vec::new();
-        sample.extend_from_slice(&(slice.len() as u32).to_be_bytes());
-        sample.extend_from_slice(slice);
-        sample.extend_from_slice(&(rpu.len() as u32).to_be_bytes());
-        sample.extend_from_slice(&rpu);
-
-        let mut out = Vec::new();
-        let report = convert_length_prefixed(&sample, 4, &mut out).expect("convert");
-        assert_eq!(report.rpus, 1);
-        assert_eq!(report.source_profile, Some(7));
-        assert_eq!(report.enhancement_layer, EnhancementLayer::Full);
-
-        // The slice is byte for byte, prefix included.
-        assert_eq!(&out[..4 + slice.len()], &sample[..4 + slice.len()]);
-
-        // …and the RPU is the same one, re-framed.
-        let at = 4 + slice.len();
-        let length = u32::from_be_bytes(out[at..at + 4].try_into().expect("prefix")) as usize;
-        assert_eq!(&out[at + 4..at + 4 + length], annex_b_rpu);
-        assert!(
-            length < rpu.len(),
-            "the conversion shortens the RPU, which is why the caller has size \
-             fixups to do"
-        );
-        assert_eq!(out.len(), at + 4 + length);
+        // The prefixes of the untouched units are byte for byte too, so the
+        // pass-through really is a copy and not a re-framing that happens to
+        // agree.
+        let head = 4 + vps.len() + 4 + sps.len();
+        assert_eq!(&out[..head], &input[..head]);
     }
 
     /// Every legal `hvcC` prefix width, and one that is not.
@@ -719,20 +466,23 @@ mod tests {
             } else {
                 &rpu
             };
-            let mut sample = Vec::new();
-            for shift in (0..width).rev() {
-                sample.push(((unit.len() >> (8 * shift)) & 0xff) as u8);
-            }
-            sample.extend_from_slice(unit);
-
+            let input = sample(&[unit], width);
             let mut out = Vec::new();
-            let report = convert_length_prefixed(&sample, width as u8, &mut out)
+            let report = convert_length_prefixed(&input, width as u8, &mut out)
                 .unwrap_or_else(|error| panic!("width {width}: {error}"));
             assert_eq!(report.rpus, u64::from(width != 1));
         }
 
+        // `hvcC` spells the width as `lengthSizeMinusOne`, so 3 is a value the
+        // field can hold and no container ever carries. Reading a sample with
+        // it would take a byte of picture as the top of a NAL length and
+        // rewrite whatever it found in the middle of a frame.
         let mut out = Vec::new();
-        assert!(convert_length_prefixed(&[0, 0, 0], 3, &mut out).is_err());
+        for width in [0u8, 3, 5, 8] {
+            let error = convert_length_prefixed(&[0, 0, 0], width, &mut out)
+                .expect_err("not an hvcC width");
+            assert!(error.to_string().contains("legal hvcC value"), "{error}");
+        }
     }
 
     /// A sample whose framing does not add up is refused, not guessed at.
@@ -751,44 +501,40 @@ mod tests {
         assert!(error.to_string().contains("does not carry"), "{error}");
         assert!(out.is_empty(), "a refusal leaves nothing to forward");
 
-        assert!(convert_length_prefixed(&[0, 0], 4, &mut out).is_err());
+        // A prefix that is itself cut short, which is the other half of the
+        // same mistake.
+        let error = convert_length_prefixed(&[0, 0], 4, &mut out).expect_err("must refuse");
+        assert!(error.to_string().contains("past the end"), "{error}");
+        assert!(out.is_empty());
+
+        // A trailing byte after a whole unit is the same thing: the sample
+        // does not end on a boundary, so the caller's framing is wrong.
+        let mut trailing = sample(&[&[0x26, 0x01, 0xaf]], 4);
+        trailing.push(0xff);
+        assert!(convert_length_prefixed(&trailing, 4, &mut out).is_err());
         assert!(out.is_empty());
     }
 
-    /// A stream with no RPUs converts to itself, and says so.
+    /// A sample with no RPUs converts to itself, and says so.
     ///
     /// Not an error: whether a source that was supposed to be Profile 7 having
     /// no RPUs is a refusal is the caller's judgement, made with the file's
     /// stored facts, which this function does not have.
     #[test]
-    fn a_stream_with_no_rpus_is_returned_verbatim() {
-        let slice: &[u8] = &[0x26, 0x01, 0xaf, 0x00];
-        let stream = annex_b(&[(&[0, 0, 0, 1], &[0x40, 0x01, 0x0c]), (&[0, 0, 1], slice)]);
+    fn a_sample_with_no_rpus_is_returned_verbatim() {
+        let input = sample(&[&[0x40, 0x01, 0x0c], &[0x26, 0x01, 0xaf, 0x00]], 4);
         let mut out = Vec::new();
-        let report = convert_annex_b(&stream, &mut out).expect("convert");
+        let report = convert_length_prefixed(&input, 4, &mut out).expect("convert");
         assert_eq!(report.rpus, 0);
         assert_eq!(report.source_profile, None);
         assert_eq!(report.enhancement_layer, EnhancementLayer::None);
-        assert_eq!(out, stream, "not one byte moves");
-    }
+        assert_eq!(out, input, "not one byte moves");
 
-    /// Bytes before the first start code are still bytes.
-    ///
-    /// A pipe read can start anywhere. Dropping a leading fragment would
-    /// corrupt the stream silently, which is the failure mode this whole
-    /// module has to avoid.
-    #[test]
-    fn bytes_outside_any_start_code_are_not_dropped() {
-        let leading: &[u8] = &[0xde, 0xad, 0xbe, 0xef];
-        let mut stream = leading.to_vec();
-        stream.extend_from_slice(&annex_b(&[(&[0, 0, 1], &[0x26, 0x01, 0xaf])]));
-        let mut out = Vec::new();
-        convert_annex_b(&stream, &mut out).expect("convert");
-        assert_eq!(out, stream);
-
-        // …and an empty input is empty, not a panic.
+        // …and an empty sample is empty, not a panic. ffmpeg does not write
+        // zero-length samples, but `rewrite_video_samples` hands over whatever
+        // the `trun` declared and a zero there must not be a crash.
         let mut empty = Vec::new();
-        let report = convert_annex_b(&[], &mut empty).expect("convert");
+        let report = convert_length_prefixed(&[], 4, &mut empty).expect("convert");
         assert_eq!(report.rpus, 0);
         assert!(empty.is_empty());
     }
@@ -807,9 +553,9 @@ mod tests {
         for byte in broken.iter_mut().skip(2) {
             *byte = 0xff;
         }
-        let stream = annex_b(&[(&[0, 0, 1], &broken)]);
+        let input = sample(&[&broken], 4);
         let mut out = Vec::new();
-        let error = convert_annex_b(&stream, &mut out).expect_err("must refuse");
+        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
         assert!(
             matches!(error, DvConvertError::Unreadable { frame: 0, .. }),
             "{error}"
@@ -821,9 +567,8 @@ mod tests {
     /// Refusals happen partway through by construction: the bad RPU is only
     /// discovered after its predecessors have been written. A caller that
     /// forwarded `out` on its error path — a cleanup that flushes what it has,
-    /// say — would publish a stream truncated mid-picture, which a segmenter
-    /// indexes without complaint and a player stalls on with nothing to say
-    /// why.
+    /// say — would publish a sample truncated mid-picture, which the size
+    /// fixups downstream would then declare as if it were whole.
     #[test]
     fn a_refusal_leaves_the_output_buffer_empty() {
         let good: &[u8] = &[0x26, 0x01, 0xaf, 0x12, 0x34, 0x56, 0x78];
@@ -834,13 +579,9 @@ mod tests {
 
         // Enough good bytes before the failure that a partial write would be
         // both non-empty and plausible-looking.
-        let stream = annex_b(&[
-            (&[0, 0, 0, 1], good),
-            (&[0, 0, 1], &rpu_bytes()),
-            (&[0, 0, 1], &broken),
-        ]);
+        let input = sample(&[good, &rpu_bytes(), &broken], 4);
         let mut out = vec![0xab; 64];
-        convert_annex_b(&stream, &mut out).expect_err("must refuse");
+        convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
         assert!(
             out.is_empty(),
             "a refused conversion published {} bytes",
@@ -853,17 +594,17 @@ mod tests {
             .expect("generate")
             .write_hevc_unspec62_nalu()
             .expect("write");
-        let mixed = annex_b(&[(&[0, 0, 1], &rpu_bytes()), (&[0, 0, 1], &p81)]);
+        let mixed = sample(&[&rpu_bytes(), &p81], 4);
         let mut out = Vec::new();
-        convert_annex_b(&mixed, &mut out).expect_err("a spliced stream is refused");
+        convert_length_prefixed(&mixed, 4, &mut out).expect_err("a spliced stream is refused");
         assert!(out.is_empty());
     }
 
     /// A refusal names the byte it happened at, not only the RPU ordinal.
     ///
     /// An ordinal cannot be turned back into bytes on disk. The offset is what
-    /// makes a refusal reproducible with `dd`, which is the difference between
-    /// a diagnosable failure and a mystery.
+    /// makes a refusal reproducible, which is the difference between a
+    /// diagnosable failure and a mystery.
     #[test]
     fn a_refusal_carries_the_byte_offset_of_the_offending_unit() {
         let mut broken = rpu_bytes();
@@ -871,27 +612,24 @@ mod tests {
             *byte = 0xff;
         }
         let filler: &[u8] = &[0x26, 0x01, 0xaf, 0x12];
-        let stream = annex_b(&[(&[0, 0, 0, 1], filler), (&[0, 0, 1], &broken)]);
+        let input = sample(&[filler, &broken], 4);
         let expected = 4 + filler.len();
 
         let mut out = Vec::new();
-        let error = convert_annex_b(&stream, &mut out).expect_err("must refuse");
+        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
         let DvConvertError::Unreadable { offset, .. } = error else {
             panic!("wrong variant: {error}");
         };
-        assert_eq!(offset, expected, "the offset points at the start code");
+        assert_eq!(offset, expected, "the offset points at the length prefix");
         assert_eq!(
-            &stream[offset..offset + 3],
-            &[0, 0, 1],
-            "…and that is where the unit really begins"
+            &input[offset..offset + 4],
+            &(broken.len() as u32).to_be_bytes(),
+            "…and that is where the offending unit's prefix really is"
         );
     }
 
-    /// Profile 7 is the only accepted input, and both refusals matter.
-    ///
-    /// `To81` converts whatever it is handed and never fails loudly, so each
-    /// refusal here is the only thing standing between a mis-routed source and
-    /// a stream that decodes to the wrong colours while reporting success:
+    /// Only Profile 7 is accepted, and the reason is that nothing else can be
+    /// told apart from something it must not be confused with.
     ///
     /// - **Profile 5** goes through `p5_to_p81` and comes out labelled 8.1
     ///   over an IPT-PQ-C2 base layer.
@@ -939,9 +677,9 @@ mod tests {
                 "and 8.1 needs no conversion, so refusing costs it nothing",
             ),
         ] {
-            let stream = annex_b(&[(&[0, 0, 1], nal)]);
+            let input = sample(&[nal], 4);
             let mut out = Vec::new();
-            let error = convert_annex_b(&stream, &mut out).expect_err(why);
+            let error = convert_length_prefixed(&input, 4, &mut out).expect_err(why);
             let DvConvertError::UnsupportedProfile {
                 frame: 0,
                 profile: got,
@@ -978,9 +716,9 @@ mod tests {
         assert_eq!(converted.el_type, Some(DoviELType::MEL));
         let mel = converted.write_hevc_unspec62_nalu().expect("write");
 
-        let stream = annex_b(&[(&[0, 0, 1], &fel), (&[0, 0, 1], &mel)]);
+        let input = sample(&[&fel, &mel], 4);
         let mut out = Vec::new();
-        let report = convert_annex_b(&stream, &mut out).expect("convert");
+        let report = convert_length_prefixed(&input, 4, &mut out).expect("convert");
 
         assert_eq!(report.rpus, 2, "both units are rewritten");
         assert_eq!(report.source_profile, Some(7));
@@ -992,107 +730,66 @@ mod tests {
 
         // …and the other way round, so this pins first-wins rather than
         // FEL-wins.
-        let reversed = annex_b(&[(&[0, 0, 1], &mel), (&[0, 0, 1], &fel)]);
+        let reversed = sample(&[&mel, &fel], 4);
         let mut out = Vec::new();
-        let report = convert_annex_b(&reversed, &mut out).expect("convert");
+        let report = convert_length_prefixed(&reversed, 4, &mut out).expect("convert");
         assert_eq!(report.enhancement_layer, EnhancementLayer::Minimum);
     }
 
-    /// A rewritten unit keeps the width of the start code it arrived with.
+    /// A rewritten unit's prefix keeps the width it arrived with and states
+    /// the new length.
     ///
     /// The pass-through path copies the caller's bytes, so it cannot get this
-    /// wrong; the RPU path re-emits the start code from the recorded width,
-    /// and a four-byte code narrowed to three drops a zero byte out of the
-    /// stream. ffmpeg emits four-byte codes at parameter sets, so a stream
-    /// that ever puts an RPU behind one would decode short by a byte.
+    /// wrong; the RPU path writes a fresh prefix, and the RPU shrinks. A
+    /// prefix written at the wrong width, or left declaring the old length,
+    /// puts every following unit in the sample at the wrong offset — and the
+    /// sample still parses, because the bytes are all still there.
     #[test]
-    fn a_rewritten_rpu_keeps_a_four_byte_start_code_four_bytes_wide() {
-        let stream = annex_b(&[(&[0, 0, 0, 1], &rpu_bytes())]);
-        let mut out = Vec::new();
-        let report = convert_annex_b(&stream, &mut out).expect("convert");
+    fn a_rewritten_rpu_gets_a_prefix_of_the_declared_width_and_the_new_length() {
+        let tail: &[u8] = &[0x26, 0x01, 0xaf, 0x12];
+        for width in [2usize, 4] {
+            let input = sample(&[&rpu_bytes(), tail], width);
+            let mut out = Vec::new();
+            let report = convert_length_prefixed(&input, width as u8, &mut out).expect("convert");
+            assert_eq!(report.rpus, 1);
 
-        assert_eq!(report.rpus, 1);
-        assert_eq!(
-            &out[..4],
-            &[0, 0, 0, 1],
-            "the four-byte start code survives the rewrite"
-        );
-        assert_eq!(
-            nal_type(&out[4..]),
-            Some(RPU_NAL_TYPE),
-            "and the unit behind it is still the RPU"
-        );
+            let declared = out[..width]
+                .iter()
+                .fold(0usize, |acc, byte| (acc << 8) | usize::from(*byte));
+            let units = units_of(&out, width);
+            assert_eq!(units.len(), 2, "width {width}: the sample still frames");
+            assert_eq!(declared, units[0].len(), "width {width}");
+            assert!(declared < rpu_bytes().len(), "width {width}: it shrank");
+            assert_eq!(units[1], tail, "width {width}: and the unit after it is intact");
+        }
     }
 
     /// The output buffer is replaced, never appended to.
     ///
-    /// A streaming caller reuses one buffer across reads. If a call kept what
-    /// the buffer already held, every chunk after the first would carry the
-    /// previous chunk's bytes into the muxer — a stream that grows
-    /// quadratically and decodes as garbage.
+    /// A caller reuses one buffer across every sample of every fragment. If a
+    /// call kept what the buffer already held, every sample after the first
+    /// would carry the previous one's bytes — samples that grow without bound
+    /// and decode as garbage.
     #[test]
     fn a_reused_output_buffer_does_not_carry_the_previous_conversion() {
-        let stream = annex_b(&[(&[0, 0, 1], &rpu_bytes())]);
+        let input = sample(&[&rpu_bytes()], 4);
 
         let mut fresh = Vec::new();
-        convert_annex_b(&stream, &mut fresh).expect("convert");
+        convert_length_prefixed(&input, 4, &mut fresh).expect("convert");
 
         let mut reused = vec![0xab; 4096];
-        convert_annex_b(&stream, &mut reused).expect("convert");
+        convert_length_prefixed(&input, 4, &mut reused).expect("convert");
 
         assert_eq!(reused, fresh, "the second call starts from nothing");
-    }
-
-    /// The cut a streaming caller makes, so no unit is ever handed over in
-    /// halves.
-    ///
-    /// This is what bounds the tail a session carries between reads to one NAL
-    /// unit. The alternative — buffering until the stream ends — is ~72 GB for
-    /// a two-hour 4K remux, which is not a thing that fits anywhere.
-    #[test]
-    fn a_partial_read_is_cut_at_the_last_whole_unit() {
-        let first: &[u8] = &[0x26, 0x01, 0xaf];
-        let second: &[u8] = &[0x40, 0x01, 0x0c];
-        let stream = annex_b(&[(&[0, 0, 1], first), (&[0, 0, 0, 1], second)]);
-
-        // The last unit may still be growing, so the cut is in front of it.
-        let cut = whole_units_prefix(&stream);
-        assert_eq!(cut, 3 + first.len(), "everything before the final unit");
-        assert_eq!(&stream[cut..cut + 4], &[0, 0, 0, 1], "…at a start code");
-
-        // One unit, or none, is never safe to convert yet — including when
-        // that one unit is preceded by a carried fragment, which is the shape
-        // every read after the first has. Cutting in front of a lone start
-        // code would hand `convert_annex_b` a NAL that is still growing: a
-        // good RPU refused as unreadable, or a truncated unit emitted.
-        assert_eq!(whole_units_prefix(&annex_b(&[(&[0, 0, 1], first)])), 0);
-        let mut carried = vec![0xde, 0xad, 0xbe, 0xef];
-        carried.extend_from_slice(&annex_b(&[(&[0, 0, 1], first)]));
-        assert_eq!(
-            whole_units_prefix(&carried),
-            0,
-            "a lone start code is a unit that may still be growing, wherever it sits"
-        );
-        assert_eq!(whole_units_prefix(&[]), 0);
-        assert_eq!(whole_units_prefix(&[0, 0]), 0);
-
-        // And the carried tail plus the next read reconstructs the stream.
-        let (head, tail) = stream.split_at(cut);
-        let mut converted = Vec::new();
-        convert_annex_b(head, &mut converted).expect("convert");
-        let mut rest = Vec::new();
-        convert_annex_b(tail, &mut rest).expect("convert");
-        converted.extend_from_slice(&rest);
-        assert_eq!(converted, stream, "nothing is lost at the seam");
     }
 
     /// The enhancement-layer type is read and reported, because it is what the
     /// conversion costs the viewer.
     #[test]
     fn the_enhancement_layer_type_is_reported_for_the_badge() {
-        let stream = annex_b(&[(&[0, 0, 1], &rpu_bytes())]);
+        let input = sample(&[&rpu_bytes()], 4);
         let mut out = Vec::new();
-        let report = convert_annex_b(&stream, &mut out).expect("convert");
+        let report = convert_length_prefixed(&input, 4, &mut out).expect("convert");
 
         // Which one, not merely that one was named. The badge tells a viewer
         // whether the conversion cost them picture detail, so getting MEL and

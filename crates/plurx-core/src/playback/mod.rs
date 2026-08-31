@@ -1058,7 +1058,7 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
     // A converted stream carries Dolby Vision too, so it preserves. The two
     // flags are set together and read together: `preserve` decides whether the
     // copy's bitstream filter keeps the RPU NAL units, and `convert` decides
-    // whether they are rewritten between the two ffmpegs. Keeping them without
+    // whether they are rewritten in the fragments it writes. Keeping them without
     // rewriting them would hand a Profile 7 stream to a decoder that asked for
     // 8; rewriting them without keeping them would rewrite nothing.
     let convert_dolby_vision = dolby_vision_converts_to_p81(file, profile, node);
@@ -2826,7 +2826,7 @@ mod tests {
     ///
     /// The three flags have to move together or the badge lies: a converted
     /// stream preserves Dolby Vision (the RPUs survive the bitstream filter),
-    /// converts it (they are rewritten between the two ffmpegs), and delivers
+    /// converts it (they are rewritten in the fragments), and delivers
     /// Dolby Vision (which is the whole point — before this, the same client
     /// on the same title was handed the HDR10 base).
     #[test]

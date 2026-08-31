@@ -1393,6 +1393,16 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
             filters.push("extract_extradata");
             if source.hdr.as_deref() == Some("dolby_vision") && !options.preserve_dolby_vision {
                 filters.push("filter_units=remove_types=62-63");
+            } else if source.hdr.as_deref() == Some("dolby_vision") && options.dv_convert {
+                // The enhancement layer goes here too. This branch rebuilds
+                // the hvcC for a source whose parameter sets live only in
+                // band, and it is reached by a Profile 7 title with a 23-byte
+                // hvcC like any other — leaving type 63 in would ship orphan
+                // enhancement-layer units behind RPUs that no longer
+                // reference them, while the configuration record plurx writes
+                // says `el_present = false`. Type 62 stays: those are what the
+                // rewrite after the muxer converts.
+                filters.push("filter_units=remove_types=63");
             }
             args.push("-bsf:v".into());
             args.push(filters.join(","));
@@ -1406,9 +1416,9 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
             ));
         }
     }
-    // The conversion is not an ffmpeg argument — it happens between two
-    // ffmpegs, in `transcode::dvconvert` — but it has to appear here, and this
-    // is the honest place for it.
+    // The conversion is not an ffmpeg argument — it happens after this child,
+    // in `transcode::dvconvert`, on the fragments the muxer wrote — but it has
+    // to appear here, and this is the honest place for it.
     //
     // `copy_video_args` is what the fragment index fingerprints. A converted
     // stream has different bytes and therefore different segment boundaries,
@@ -3899,6 +3909,47 @@ mod index_pipe_tests {
         let off = CopyVideoOptions::new(true, false).with_dolby_vision_conversion(false);
         assert!(!off.preserves_dolby_vision());
         assert!(!off.converts_dolby_vision());
+    }
+
+    /// The parameter-set promotion branch drops the enhancement layer too.
+    ///
+    /// That branch rebuilds the hvcC for a source whose VPS/SPS/PPS live only
+    /// in band, and a Profile 7 title with a 23-byte hvcC reaches it like any
+    /// other. It was the one path where a converting copy rendered an argv
+    /// byte-identical to a preserving one — so the enhancement layer survived
+    /// into a stream whose configuration record says it has none, and the two
+    /// pipelines were told apart only by the marker.
+    #[test]
+    fn a_converting_copy_drops_the_enhancement_layer_on_the_promotion_branch_too() {
+        let mut file = hevc_dv();
+        file.hdr_format =
+            Some("Dolby Vision, Version 1.0, dvhe.07.06, BL+EL+RPU, HDR10-compatible".into());
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(6);
+        file.dolby_vision.bl_compat_id = Some(1);
+
+        let convert = CopyVideoOptions::new(true, false)
+            .with_dolby_vision_conversion(true)
+            .with_parameter_set_promotion(true);
+        let preserve = CopyVideoOptions::new(true, true).with_parameter_set_promotion(true);
+
+        let converting = copy_video_args(&file, convert).join(" ");
+        assert!(
+            converting.contains("filter_units=remove_types=63"),
+            "the enhancement layer must go: {converting}"
+        );
+        assert!(
+            !converting.contains("62"),
+            "the RPUs must stay — they are what the rewrite converts: {converting}"
+        );
+        assert!(converting.contains("extract_extradata"), "{converting}");
+
+        // …and the two pipelines no longer render the same command line, so
+        // the marker is no longer the only thing separating their indexes.
+        assert_ne!(
+            strip_plurx_markers(&copy_video_args(&file, convert)),
+            copy_video_args(&file, preserve),
+        );
     }
 
     /// A converted stream gets its own fragment index.

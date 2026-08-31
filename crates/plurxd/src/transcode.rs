@@ -7528,9 +7528,9 @@ pub enum SessionKind {
         /// Beside `preserve_dolby_vision` rather than inside it because they
         /// answer different questions of the same copy: preserving decides
         /// whether the RPU NAL units survive the bitstream filter, converting
-        /// decides whether they are rewritten between the two ffmpegs. Only
-        /// ever true when preserving is — there is nothing to rewrite in a
-        /// stream the filter removed.
+        /// decides whether they are rewritten in the fragments that copy
+        /// writes. Only ever true when preserving is — there is nothing to
+        /// rewrite in a stream the filter removed.
         convert_dolby_vision: bool,
     },
 }
@@ -7556,8 +7556,8 @@ impl ReopenReason {
 struct CopySessionOptions {
     transcode_audio: bool,
     preserve_dolby_vision: bool,
-    /// Rewrite Profile 7 RPUs to Profile 8.1 between the two ffmpegs of the
-    /// copy pipe. Only ever set beside `preserve_dolby_vision`.
+    /// Rewrite Profile 7 RPUs to Profile 8.1 in the fragments the copy pipe
+    /// writes. Only ever set beside `preserve_dolby_vision`.
     convert_dolby_vision: bool,
 }
 
