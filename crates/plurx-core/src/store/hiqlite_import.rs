@@ -537,9 +537,28 @@ const TABLES: &[TablePlan] = &[
             "error",
             "queued_at_ms",
             "finished_at_ms",
+            "recovery_guard_id",
         ],
         order_by: "file_id",
         minimum_schema: 39,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "dv_recovery_guards",
+        columns: &[
+            "guard_id",
+            "file_id",
+            "library_id",
+            "source_path",
+            "recovery_path",
+            "state",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "guard_id",
+        minimum_schema: 40,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -1605,6 +1624,7 @@ fn open_validated_source(
         )));
     }
     verify_source(&source)?;
+    verify_source_dv_recovery_guards(&source, schema_version)?;
     let (instance_id, instance_updated_at) = source
         .query_row(
             "SELECT value, updated_at FROM settings WHERE key = ?1",
@@ -1647,6 +1667,61 @@ fn verify_source(source: &Connection) -> Result<(), StoreError> {
         return Err(import_error(format!(
             "SQLite backup contains {dangling} dangling foreign key reference(s)"
         )));
+    }
+    Ok(())
+}
+
+/// Refuse an audit claim that the original was deleted unless the immutable
+/// backup also contains the exact active recovery guard that makes that claim
+/// recoverable. Pre-v40 sources have no guard ledger, so such a claim cannot be
+/// made truthful by import and must be repaired on the source install first.
+fn verify_source_dv_recovery_guards(
+    source: &Connection,
+    schema_version: i64,
+) -> Result<(), StoreError> {
+    if schema_version < 39 {
+        return Ok(());
+    }
+    let invalid: i64 = if schema_version < 40 {
+        source.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM dv_conversions
+                  WHERE state = 'committed' AND original_path IS NULL
+                  LIMIT 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+    } else {
+        source.query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                   FROM dv_conversions d
+                   JOIN files f ON f.id = d.file_id
+                   JOIN items i ON i.id = f.item_id
+              LEFT JOIN dv_recovery_guards g
+                     ON g.guard_id = d.recovery_guard_id
+                    AND g.file_id = d.file_id
+                    AND g.library_id = i.library_id
+                    AND g.source_path = f.path
+                    AND g.state = 'active'
+                  WHERE d.state = 'committed' AND d.original_path IS NULL
+                    AND (d.recovery_guard_id IS NULL OR g.guard_id IS NULL)
+                  LIMIT 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+    }
+    .map_err(|error| {
+        import_error(format!(
+            "checking source Dolby Vision recovery guards: {error}"
+        ))
+    })?;
+    if invalid != 0 {
+        return Err(import_error(
+            "SQLite backup contains a committed Dolby Vision conversion whose deleted original lacks its exact active recovery guard; repair or retain the original on the source install before clustering",
+        ));
     }
     Ok(())
 }
@@ -1909,12 +1984,15 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 // the honest value: the destination's own backfill will fill
                 // it in from the probe JSON that comes across with the row.
                 "NULL".to_owned()
-            } else if table.name == "items"
-                && matches!(
-                    *column,
-                    "author" | "book_work_id" | "book_edition_id" | "book_metadata_source"
-                )
-                && schema_version < 21
+            } else if (table.name == "dv_conversions"
+                && *column == "recovery_guard_id"
+                && schema_version < 40)
+                || (table.name == "items"
+                    && matches!(
+                        *column,
+                        "author" | "book_work_id" | "book_edition_id" | "book_metadata_source"
+                    )
+                    && schema_version < 21)
             {
                 "NULL".to_owned()
             } else if table.name == "offline_packages"
@@ -2182,7 +2260,20 @@ mod tests {
         assert!(names.contains(&"cluster_fragment_index_artifacts"));
         assert!(names.contains(&"cluster_fragment_index_locations"));
         assert!(names.contains(&"dv_conversions"));
-        assert_eq!(names.len(), 31, "review every imported durable table");
+        assert!(names.contains(&"dv_recovery_guards"));
+        assert_eq!(names.len(), 32, "review every imported durable table");
+    }
+
+    #[test]
+    fn pre_v40_conversion_projection_supplies_a_null_recovery_guard_link() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "dv_conversions")
+            .copied()
+            .expect("conversion table plan");
+        assert!(value_projection(table, 39, false).ends_with("finished_at_ms, NULL"));
+        assert!(value_projection(table, SQLITE_SCHEMA_VERSION, false)
+            .ends_with("finished_at_ms, recovery_guard_id"));
     }
 
     #[test]

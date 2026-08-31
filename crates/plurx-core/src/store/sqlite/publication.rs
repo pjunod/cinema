@@ -10,8 +10,10 @@ use crate::domain::{
     ProbeResult,
 };
 use crate::error::StoreError;
+use crate::store::dv_conversion::validate_recovery_guard_identity;
 use crate::store::{
-    ArtworkRepairFence, FencedPublicationStore, ReconcileOutcome, RootFingerprintStatus,
+    ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, ReconcileOutcome,
+    RootFingerprintStatus,
 };
 
 #[async_trait]
@@ -419,6 +421,51 @@ impl FencedPublicationStore for SqliteStore {
         .await
     }
 
+    async fn begin_dv_recovery_guard_fenced(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        recovery_path: &str,
+        now_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        validate_recovery_guard_identity(guard_id, recovery_path)?;
+        let guard_id = guard_id.to_owned();
+        let recovery_path = recovery_path.to_owned();
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            conn.execute(
+                "INSERT INTO dv_recovery_guards
+                   (guard_id, file_id, library_id, source_path, recovery_path,
+                    state, created_at_ms, updated_at_ms)
+                 SELECT ?2, d.file_id, i.library_id, f.path, ?3,
+                        'intent', ?4, ?4
+                   FROM dv_conversions d
+                   JOIN files f ON f.id = d.file_id
+                   JOIN items i ON i.id = f.item_id
+                  WHERE d.file_id = ?1 AND d.state = 'verified'
+                    AND (d.recovery_guard_id IS NULL OR d.recovery_guard_id = ?2)
+                 ON CONFLICT(guard_id) DO NOTHING",
+                params![file_id, guard_id, recovery_path, now_ms],
+            )?;
+            Ok(conn.execute(
+                "UPDATE dv_conversions AS d SET recovery_guard_id = ?2
+                  WHERE d.file_id = ?1 AND d.state = 'verified'
+                    AND (d.recovery_guard_id IS NULL OR d.recovery_guard_id = ?2)
+                    AND EXISTS (
+                      SELECT 1 FROM dv_recovery_guards g
+                      JOIN files f ON f.id = d.file_id
+                      JOIN items i ON i.id = f.item_id
+                      WHERE g.guard_id = ?2 AND g.file_id = d.file_id
+                        AND g.library_id = i.library_id
+                        AND g.source_path = f.path AND g.recovery_path = ?3
+                        AND g.state = 'intent')",
+                params![file_id, guard_id, recovery_path],
+            )? == 1)
+        })
+        .await
+    }
+
     async fn mark_dv_conversion_committed_fenced(
         &self,
         file_id: i64,
@@ -428,14 +475,115 @@ impl FencedPublicationStore for SqliteStore {
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<bool, StoreError> {
-        let original_path = original_path.map(str::to_owned);
+        let Some(original_path) = original_path.map(str::to_owned) else {
+            return Err(StoreError::Task(
+                "a guardless committed Dolby Vision conversion requires a retained original path"
+                    .to_owned(),
+            ));
+        };
         self.with_fenced_conn(lease, replacement, move |conn| {
             Ok(conn.execute(
                 "UPDATE dv_conversions
                     SET state = 'committed', original_path = ?2, bytes_after = ?3,
                         error = NULL, finished_at_ms = ?4
-                  WHERE file_id = ?1 AND state = 'verified'",
+                  WHERE file_id = ?1 AND state = 'verified'
+                    AND recovery_guard_id IS NULL",
                 params![file_id, original_path, bytes_after, finished_at_ms],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn mark_dv_conversion_committed_with_guard_fenced(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        bytes_after: i64,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let guard_id = guard_id.to_owned();
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            let committed = conn.execute(
+                "UPDATE dv_conversions
+                    SET state = 'committed', original_path = NULL, bytes_after = ?3,
+                        error = NULL, finished_at_ms = ?4
+                  WHERE file_id = ?1 AND recovery_guard_id = ?2
+                    AND ((state = 'verified' AND EXISTS (
+                           SELECT 1 FROM dv_recovery_guards
+                            WHERE guard_id = ?2 AND state = 'intent'))
+                      OR (state = 'committed' AND original_path IS NULL
+                          AND bytes_after = ?3 AND finished_at_ms = ?4
+                          AND EXISTS (SELECT 1 FROM dv_recovery_guards
+                                       WHERE guard_id = ?2 AND state = 'active'))) ",
+                params![file_id, guard_id, bytes_after, finished_at_ms],
+            )?;
+            if committed != 1 {
+                return Ok(false);
+            }
+            let activated = conn.execute(
+                "UPDATE dv_recovery_guards SET state = 'active', updated_at_ms = ?3
+                  WHERE guard_id = ?2 AND file_id = ?1 AND state IN ('intent', 'active')
+                    AND EXISTS (SELECT 1 FROM dv_conversions
+                                 WHERE file_id = ?1 AND recovery_guard_id = ?2
+                                   AND state = 'committed' AND original_path IS NULL
+                                   AND bytes_after = ?4 AND finished_at_ms = ?3)",
+                params![file_id, guard_id, finished_at_ms, bytes_after],
+            )?;
+            if activated != 1 {
+                return Err(StoreError::Database(
+                    "Dolby Vision recovery guard activation lost its intent row".to_owned(),
+                ));
+            }
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn advance_dv_recovery_guard_fenced(
+        &self,
+        guard_id: &str,
+        expected: DvRecoveryGuardState,
+        next: DvRecoveryGuardState,
+        updated_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        if !expected.permits_cleanup_transition(next) {
+            return Err(StoreError::Task(format!(
+                "invalid Dolby Vision recovery guard transition {} -> {}",
+                expected.as_str(),
+                next.as_str()
+            )));
+        }
+        let guard_id = guard_id.to_owned();
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            Ok(conn.execute(
+                "UPDATE dv_recovery_guards SET state = ?3, updated_at_ms = ?4
+                  WHERE guard_id = ?1 AND state IN (?2, ?3)
+                    AND NOT EXISTS (SELECT 1 FROM dv_conversions d
+                                    WHERE d.recovery_guard_id = ?1)",
+                params![guard_id, expected.as_str(), next.as_str(), updated_at_ms],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn delete_dv_recovery_guard_fenced(
+        &self,
+        guard_id: &str,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let guard_id = guard_id.to_owned();
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            Ok(conn.execute(
+                "DELETE FROM dv_recovery_guards
+                  WHERE guard_id = ?1 AND state = 'scratch_removed'
+                    AND NOT EXISTS (SELECT 1 FROM dv_conversions d
+                                    WHERE d.recovery_guard_id = ?1)",
+                [guard_id],
             )? == 1)
         })
         .await
@@ -453,7 +601,8 @@ impl FencedPublicationStore for SqliteStore {
         self.with_fenced_conn(lease, replacement, move |conn| {
             Ok(conn.execute(
                 "UPDATE dv_conversions
-                    SET state = 'failed', error = ?2, finished_at_ms = ?3
+                    SET state = 'failed', error = ?2, finished_at_ms = ?3,
+                        recovery_guard_id = NULL
                   WHERE file_id = ?1 AND state != 'committed'",
                 params![file_id, error, finished_at_ms],
             )? == 1)
@@ -857,7 +1006,10 @@ fn reconcile_library(
     {
         let mut delete = conn.prepare_cached(
             "DELETE FROM files WHERE id = ?1 AND item_id IN
-             (SELECT id FROM items WHERE library_id = ?2)",
+             (SELECT id FROM items WHERE library_id = ?2)
+             AND NOT EXISTS (SELECT 1 FROM dv_conversions d
+                             WHERE d.file_id = files.id
+                               AND d.state IN ('running', 'verified'))",
         )?;
         for id in ids {
             deleted_files += delete.execute(params![id, library_id])? as u64;

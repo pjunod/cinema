@@ -21,12 +21,84 @@ pub(crate) const DV_CONVERSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS dv_co
     bytes_after    INTEGER,
     error          TEXT,
     queued_at_ms   INTEGER NOT NULL,
-    finished_at_ms INTEGER
+    finished_at_ms INTEGER,
+    recovery_guard_id TEXT CHECK
+                        (state != 'committed' OR original_path IS NOT NULL
+                         OR recovery_guard_id IS NOT NULL)
 ) STRICT";
 
 pub(crate) const DV_CONVERSIONS_QUEUE_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS dv_conversions_queue
         ON dv_conversions(state, queued_at_ms, file_id)";
+
+pub(crate) const DV_CONVERSIONS_RECOVERY_GUARD_INDEX: &str =
+    "CREATE UNIQUE INDEX IF NOT EXISTS dv_conversions_recovery_guard
+        ON dv_conversions(recovery_guard_id) WHERE recovery_guard_id IS NOT NULL";
+
+/// Hiqlite's `execute_returning` is the only replicated mutation API that can
+/// return row values, while its multi-statement transaction API returns only
+/// affected-row counts. Use one self-retiring settings row as the statement's
+/// result envelope: the value is computed from the pre-admission snapshot,
+/// this trigger applies the corresponding admission, and the envelope is
+/// deleted before the statement commits. Nothing transient is retained or
+/// imported, and the caller receives the exact facts which authorized (or
+/// refused) the mutation from the same Raft log entry.
+macro_rules! dv_queue_admission_trigger {
+    ($if_not_exists:literal) => {
+        concat!(
+            "CREATE TRIGGER ",
+            $if_not_exists,
+            "dv_queue_admission_settings_ai
+     AFTER INSERT ON settings
+     WHEN NEW.key GLOB '__plurx_internal.dv_queue_admission.*' BEGIN
+       INSERT INTO dv_conversions (file_id, state, queued_at_ms)
+       SELECT f.id,
+              'queued',
+              CAST(json_extract(NEW.value, '$.requested_queued_at_ms') AS INTEGER)
+         FROM files f
+        WHERE f.id = CAST(json_extract(NEW.value, '$.requested_file_id') AS INTEGER)
+          AND json_extract(NEW.value, '$.outcome') = 'queued'
+          AND LOWER(f.container) = 'mkv' AND f.dv_profile = 7
+          AND f.dv_bl_compat_id IN (1, 6)
+          AND f.dv_el_present = 1 AND f.dv_rpu_present = 1
+       ON CONFLICT(file_id) DO UPDATE SET
+         state = 'queued', el_type = NULL, original_path = NULL,
+         bytes_before = NULL, bytes_after = NULL, error = NULL,
+         queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL
+       WHERE dv_conversions.state = 'failed';
+       DELETE FROM settings WHERE key = NEW.key;
+     END"
+        )
+    };
+}
+
+pub(crate) const DV_QUEUE_ADMISSION_TRIGGER: &str = dv_queue_admission_trigger!("IF NOT EXISTS ");
+
+/// Versioned migrations must create the trigger themselves rather than rely
+/// on the fresh-cluster installer. Strict DDL makes a pre-existing trigger at
+/// a v20 marker fail closed: the migration can advance to v21 only when it
+/// created this exact canonical body in the same replicated transaction.
+pub(crate) const DV_QUEUE_ADMISSION_MIGRATION_TRIGGER: &str = dv_queue_admission_trigger!("");
+
+/// Permanent, non-cascading witness for a replacement that must outlive its
+/// catalogue row. `guard_id`, not `file_id`, is the durable identity: SQLite
+/// may reuse a deleted integer row id, and a new file must never make an old
+/// recovery guard look attached again.
+pub(crate) const DV_RECOVERY_GUARDS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS dv_recovery_guards (
+    guard_id       TEXT PRIMARY KEY,
+    file_id        INTEGER NOT NULL,
+    library_id     INTEGER NOT NULL,
+    source_path    TEXT NOT NULL,
+    recovery_path  TEXT NOT NULL UNIQUE,
+    state          TEXT NOT NULL CHECK
+                     (state IN ('intent','active','guard_removed','scratch_removed')),
+    created_at_ms  INTEGER NOT NULL,
+    updated_at_ms  INTEGER NOT NULL
+) STRICT";
+
+pub(crate) const DV_RECOVERY_GUARDS_FILE_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS dv_recovery_guards_file
+        ON dv_recovery_guards(file_id, guard_id)";
 
 /// Strict DDL for the versioned replicated migration.
 ///
@@ -48,11 +120,39 @@ pub(crate) const DV_CONVERSIONS_MIGRATION_SCHEMA: &str = "CREATE TABLE dv_conver
 pub(crate) const DV_CONVERSIONS_MIGRATION_QUEUE_INDEX: &str = "CREATE INDEX dv_conversions_queue
         ON dv_conversions(state, queued_at_ms, file_id)";
 
+pub(crate) const DV_RECOVERY_GUARDS_MIGRATION_COLUMN: &str =
+    "ALTER TABLE dv_conversions ADD COLUMN recovery_guard_id TEXT CHECK
+         (state != 'committed' OR original_path IS NOT NULL
+          OR recovery_guard_id IS NOT NULL)";
+
+pub(crate) const DV_RECOVERY_GUARDS_MIGRATION_LINK_INDEX: &str =
+    "CREATE UNIQUE INDEX dv_conversions_recovery_guard
+        ON dv_conversions(recovery_guard_id) WHERE recovery_guard_id IS NOT NULL";
+
+pub(crate) const DV_RECOVERY_GUARDS_MIGRATION_SCHEMA: &str = "CREATE TABLE dv_recovery_guards (
+    guard_id       TEXT PRIMARY KEY,
+    file_id        INTEGER NOT NULL,
+    library_id     INTEGER NOT NULL,
+    source_path    TEXT NOT NULL,
+    recovery_path  TEXT NOT NULL UNIQUE,
+    state          TEXT NOT NULL CHECK
+                     (state IN ('intent','active','guard_removed','scratch_removed')),
+    created_at_ms  INTEGER NOT NULL,
+    updated_at_ms  INTEGER NOT NULL
+) STRICT";
+
+pub(crate) const DV_RECOVERY_GUARDS_MIGRATION_FILE_INDEX: &str =
+    "CREATE INDEX dv_recovery_guards_file
+        ON dv_recovery_guards(file_id, guard_id)";
+
 /// One Raft/SQLite mutation may never admit more rows than this.
 pub const DV_CONVERSION_QUEUE_BATCH_MAX: i64 = 64;
 
 /// One admin projection may never expand into an unbounded SQL payload.
 pub const DV_CONVERSION_LEDGER_READ_MAX: usize = 256;
+
+/// One operator/cleanup guard scan may never expand without a hard ceiling.
+pub const DV_RECOVERY_GUARD_READ_MAX: i64 = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +162,75 @@ pub enum DvConversionState {
     Verified,
     Committed,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DvRecoveryGuardState {
+    Intent,
+    Active,
+    GuardRemoved,
+    ScratchRemoved,
+}
+
+impl DvRecoveryGuardState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Intent => "intent",
+            Self::Active => "active",
+            Self::GuardRemoved => "guard_removed",
+            Self::ScratchRemoved => "scratch_removed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "intent" => Some(Self::Intent),
+            "active" => Some(Self::Active),
+            "guard_removed" => Some(Self::GuardRemoved),
+            "scratch_removed" => Some(Self::ScratchRemoved),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn permits_cleanup_transition(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Intent | Self::Active, Self::GuardRemoved)
+                | (Self::GuardRemoved, Self::ScratchRemoved)
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DvRecoveryGuard {
+    pub guard_id: String,
+    pub file_id: i64,
+    pub library_id: i64,
+    pub source_path: String,
+    pub recovery_path: String,
+    pub state: DvRecoveryGuardState,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DvRecoveryGuardSummary {
+    pub intent: i64,
+    pub active: i64,
+    pub guard_removed: i64,
+    pub scratch_removed: i64,
+    pub orphaned: i64,
+}
+
+/// One coherent operator projection of recovery-guard counts and a bounded
+/// orphan page. Both fields come from one backend snapshot so a concurrent
+/// cascade or cleanup transition cannot make the count disagree with the
+/// page returned alongside it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DvRecoveryGuardSnapshot {
+    pub summary: DvRecoveryGuardSummary,
+    pub orphans: Vec<DvRecoveryGuard>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -117,6 +286,7 @@ pub struct DvConversion {
     pub error: Option<String>,
     pub queued_at_ms: i64,
     pub finished_at_ms: Option<i64>,
+    pub recovery_guard: Option<DvRecoveryGuard>,
 }
 
 /// A small candidate projection for a node-local cursor.
@@ -224,12 +394,43 @@ pub trait DvConversionStore: Send + Sync + 'static {
         limit: i64,
     ) -> Result<Vec<DvConversionCandidate>, StoreError>;
 
-    /// Return the next terminal conversion whose owned scratch may need
-    /// crash-convergent cleanup. The caller wraps by retrying from zero.
+    /// Return the next guardless terminal conversion whose owned scratch may
+    /// need crash-convergent cleanup. Guarded commits deliberately retain their
+    /// scratch until the non-cascading guard lifecycle becomes orphaned. The
+    /// caller wraps by retrying from zero.
     async fn dv_committed_cleanup_candidate(
         &self,
         after_file_id: i64,
     ) -> Result<Option<i64>, StoreError>;
+
+    /// Read the guard linked to the current conversion attempt for `file_id`.
+    /// An unlinked orphan with a reused integer file id is intentionally not
+    /// returned by this method.
+    async fn dv_recovery_guard(&self, file_id: i64) -> Result<Option<DvRecoveryGuard>, StoreError>;
+
+    async fn dv_recovery_guard_by_id(
+        &self,
+        guard_id: &str,
+    ) -> Result<Option<DvRecoveryGuard>, StoreError>;
+
+    /// Return only guards whose exact durable id is no longer linked by a
+    /// conversion row. The lexical cursor and hard cap bound every pass.
+    async fn dv_recovery_guard_orphans(
+        &self,
+        after_guard_id: &str,
+        limit: i64,
+    ) -> Result<Vec<DvRecoveryGuard>, StoreError>;
+
+    async fn dv_recovery_guard_summary(&self) -> Result<DvRecoveryGuardSummary, StoreError>;
+
+    /// Return recovery-guard totals and one bounded orphan page from the same
+    /// database snapshot. This is the operator-facing projection; cleanup uses
+    /// the cheaper cursor-only orphan selector above.
+    async fn dv_recovery_guard_snapshot(
+        &self,
+        after_guard_id: &str,
+        limit: i64,
+    ) -> Result<DvRecoveryGuardSnapshot, StoreError>;
 
     async fn dv_conversion_progress(
         &self,
@@ -246,6 +447,14 @@ pub trait DvConversionStore: Send + Sync + 'static {
         &self,
         library_id: i64,
         mode: DvConversionMode,
+    ) -> Result<bool, StoreError>;
+
+    async fn begin_dv_recovery_guard(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        recovery_path: &str,
+        now_ms: i64,
     ) -> Result<bool, StoreError>;
 
     async fn mark_dv_conversion_running(
@@ -269,12 +478,47 @@ pub trait DvConversionStore: Send + Sync + 'static {
         finished_at_ms: i64,
     ) -> Result<bool, StoreError>;
 
+    async fn mark_dv_conversion_committed_with_guard(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        bytes_after: i64,
+        finished_at_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn advance_dv_recovery_guard(
+        &self,
+        guard_id: &str,
+        expected: DvRecoveryGuardState,
+        next: DvRecoveryGuardState,
+        updated_at_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn delete_dv_recovery_guard(&self, guard_id: &str) -> Result<bool, StoreError>;
+
     async fn mark_dv_conversion_failed(
         &self,
         file_id: i64,
         error: &str,
         finished_at_ms: i64,
     ) -> Result<bool, StoreError>;
+}
+
+pub(crate) fn validate_recovery_guard_identity(
+    guard_id: &str,
+    recovery_path: &str,
+) -> Result<(), StoreError> {
+    if guard_id.is_empty() || guard_id.len() > 128 {
+        return Err(StoreError::Task(
+            "Dolby Vision recovery guard id must contain 1..=128 bytes".to_owned(),
+        ));
+    }
+    if recovery_path.is_empty() || recovery_path.len() > 4096 {
+        return Err(StoreError::Task(
+            "Dolby Vision recovery path must contain 1..=4096 bytes".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn eligibility_reason(
@@ -305,6 +549,19 @@ pub(crate) fn eligibility_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versioned_queue_trigger_is_the_strict_canonical_shape() {
+        assert!(!DV_QUEUE_ADMISSION_MIGRATION_TRIGGER.contains("IF NOT EXISTS"));
+        assert_eq!(
+            DV_QUEUE_ADMISSION_MIGRATION_TRIGGER.replacen(
+                "CREATE TRIGGER ",
+                "CREATE TRIGGER IF NOT EXISTS ",
+                1
+            ),
+            DV_QUEUE_ADMISSION_TRIGGER
+        );
+    }
 
     #[test]
     fn disk_conversion_requires_the_numeric_hdr10_compatible_profile_7_shape() {

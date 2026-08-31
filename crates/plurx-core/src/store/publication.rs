@@ -18,7 +18,7 @@ use crate::cluster::coordination::{unix_ms, Lease, StoreCoordinator};
 use crate::domain::{BookMetadataPatch, MetadataPatch, NewItem, NewPretranscodeJob, ProbeResult};
 use crate::error::StoreError;
 
-use super::{ReconcileOutcome, RootFingerprintStatus, Store};
+use super::{DvRecoveryGuardState, ReconcileOutcome, RootFingerprintStatus, Store};
 
 const PUBLICATION_CALL_SAFETY_WINDOW: Duration = Duration::from_secs(3);
 type FencedFuture<'a, T> =
@@ -712,6 +712,36 @@ impl<'a> PublicationStore<'a> {
         .await
     }
 
+    pub async fn begin_dv_recovery_guard(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        recovery_path: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if self.fence.is_none() {
+            return self
+                .store
+                .begin_dv_recovery_guard(file_id, guard_id, recovery_path, now_ms)
+                .await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .begin_dv_recovery_guard_fenced(
+                        file_id,
+                        guard_id,
+                        recovery_path,
+                        now_ms,
+                        &lease,
+                        &replacement,
+                    )
+                    .await
+            })
+        })
+        .await
+    }
+
     pub async fn mark_dv_conversion_committed(
         &self,
         file_id: i64,
@@ -736,6 +766,85 @@ impl<'a> PublicationStore<'a> {
                         &lease,
                         &replacement,
                     )
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn mark_dv_conversion_committed_with_guard(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        bytes_after: i64,
+        finished_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if self.fence.is_none() {
+            return self
+                .store
+                .mark_dv_conversion_committed_with_guard(
+                    file_id,
+                    guard_id,
+                    bytes_after,
+                    finished_at_ms,
+                )
+                .await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .mark_dv_conversion_committed_with_guard_fenced(
+                        file_id,
+                        guard_id,
+                        bytes_after,
+                        finished_at_ms,
+                        &lease,
+                        &replacement,
+                    )
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn advance_dv_recovery_guard(
+        &self,
+        guard_id: &str,
+        expected: DvRecoveryGuardState,
+        next: DvRecoveryGuardState,
+        updated_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if self.fence.is_none() {
+            return self
+                .store
+                .advance_dv_recovery_guard(guard_id, expected, next, updated_at_ms)
+                .await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .advance_dv_recovery_guard_fenced(
+                        guard_id,
+                        expected,
+                        next,
+                        updated_at_ms,
+                        &lease,
+                        &replacement,
+                    )
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn delete_dv_recovery_guard(&self, guard_id: &str) -> Result<bool, StoreError> {
+        if self.fence.is_none() {
+            return self.store.delete_dv_recovery_guard(guard_id).await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .delete_dv_recovery_guard_fenced(guard_id, &lease, &replacement)
                     .await
             })
         })

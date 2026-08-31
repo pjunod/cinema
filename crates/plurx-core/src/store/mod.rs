@@ -56,7 +56,9 @@ pub mod replicated;
 pub use dv_conversion::{
     DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
     DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
+    DvRecoveryGuard, DvRecoveryGuardSnapshot, DvRecoveryGuardState, DvRecoveryGuardSummary,
     QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_CONVERSION_QUEUE_BATCH_MAX,
+    DV_RECOVERY_GUARD_READ_MAX,
 };
 
 use std::collections::BTreeMap;
@@ -2174,12 +2176,48 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         replacement: &Lease,
     ) -> Result<bool, StoreError>;
     #[allow(clippy::too_many_arguments)]
+    async fn begin_dv_recovery_guard_fenced(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        recovery_path: &str,
+        now_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    #[allow(clippy::too_many_arguments)]
     async fn mark_dv_conversion_committed_fenced(
         &self,
         file_id: i64,
         original_path: Option<&str>,
         bytes_after: i64,
         finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn mark_dv_conversion_committed_with_guard_fenced(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        bytes_after: i64,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn advance_dv_recovery_guard_fenced(
+        &self,
+        guard_id: &str,
+        expected: DvRecoveryGuardState,
+        next: DvRecoveryGuardState,
+        updated_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    async fn delete_dv_recovery_guard_fenced(
+        &self,
+        guard_id: &str,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<bool, StoreError>;

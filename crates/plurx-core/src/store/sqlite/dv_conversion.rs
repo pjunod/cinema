@@ -8,15 +8,25 @@ use rusqlite::{params, OptionalExtension, Row};
 
 use super::SqliteStore;
 use crate::error::StoreError;
-use crate::store::dv_conversion::eligibility_reason;
+use crate::store::dv_conversion::{eligibility_reason, validate_recovery_guard_identity};
 use crate::store::{
     keys, DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
     DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
+    DvRecoveryGuard, DvRecoveryGuardSnapshot, DvRecoveryGuardState, DvRecoveryGuardSummary,
     QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_CONVERSION_QUEUE_BATCH_MAX,
+    DV_RECOVERY_GUARD_READ_MAX,
 };
 
-const CONVERSION_COLS: &str = "file_id, state, el_type, original_path, bytes_before,
-    bytes_after, error, queued_at_ms, finished_at_ms";
+const JOINED_CONVERSION_COLS: &str = "d.file_id, d.state, d.el_type, d.original_path,
+    d.bytes_before, d.bytes_after, d.error, d.queued_at_ms, d.finished_at_ms,
+    d.recovery_guard_id, g.guard_id, g.file_id, g.library_id, g.source_path,
+    g.recovery_path, g.state, g.created_at_ms, g.updated_at_ms";
+
+const GUARD_COLS: &str = "guard_id, file_id, library_id, source_path, recovery_path,
+    state, created_at_ms, updated_at_ms";
+
+const QUALIFIED_GUARD_COLS: &str = "g.guard_id, g.file_id, g.library_id, g.source_path,
+    g.recovery_path, g.state, g.created_at_ms, g.updated_at_ms";
 
 fn invalid_state(column: usize, state: String) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
@@ -24,6 +34,33 @@ fn invalid_state(column: usize, state: String) -> rusqlite::Error {
         Type::Text,
         format!("invalid Dolby Vision conversion state `{state}`").into(),
     )
+}
+
+fn invalid_guard_state(column: usize, state: String) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        Type::Text,
+        format!("invalid Dolby Vision recovery guard state `{state}`").into(),
+    )
+}
+
+fn guard_from_row_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<DvRecoveryGuard> {
+    let state: String = row.get(offset + 5)?;
+    Ok(DvRecoveryGuard {
+        guard_id: row.get(offset)?,
+        file_id: row.get(offset + 1)?,
+        library_id: row.get(offset + 2)?,
+        source_path: row.get(offset + 3)?,
+        recovery_path: row.get(offset + 4)?,
+        state: DvRecoveryGuardState::parse(&state)
+            .ok_or_else(|| invalid_guard_state(offset + 5, state))?,
+        created_at_ms: row.get(offset + 6)?,
+        updated_at_ms: row.get(offset + 7)?,
+    })
+}
+
+fn guard_from_row(row: &Row<'_>) -> rusqlite::Result<DvRecoveryGuard> {
+    guard_from_row_at(row, 0)
 }
 
 fn conversion_from_row(row: &Row<'_>) -> rusqlite::Result<DvConversion> {
@@ -38,7 +75,24 @@ fn conversion_from_row(row: &Row<'_>) -> rusqlite::Result<DvConversion> {
         error: row.get(6)?,
         queued_at_ms: row.get(7)?,
         finished_at_ms: row.get(8)?,
+        recovery_guard: None,
     })
+}
+
+fn joined_conversion_from_row(row: &Row<'_>) -> rusqlite::Result<DvConversion> {
+    let mut conversion = conversion_from_row(row)?;
+    if let Some(guard_id) = row.get::<_, Option<String>>(9)? {
+        let joined_guard_id = row.get::<_, Option<String>>(10)?.ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10,
+                Type::Null,
+                format!("Dolby Vision conversion links missing recovery guard `{guard_id}`").into(),
+            )
+        })?;
+        debug_assert_eq!(guard_id, joined_guard_id);
+        conversion.recovery_guard = Some(guard_from_row_at(row, 10)?);
+    }
+    Ok(conversion)
 }
 
 fn read_conversion(
@@ -46,9 +100,13 @@ fn read_conversion(
     file_id: i64,
 ) -> rusqlite::Result<Option<DvConversion>> {
     conn.query_row(
-        &format!("SELECT {CONVERSION_COLS} FROM dv_conversions WHERE file_id = ?1"),
+        &format!(
+            "SELECT {JOINED_CONVERSION_COLS} FROM dv_conversions d
+             LEFT JOIN dv_recovery_guards g ON g.guard_id = d.recovery_guard_id
+             WHERE d.file_id = ?1"
+        ),
         [file_id],
-        conversion_from_row,
+        joined_conversion_from_row,
     )
     .optional()
 }
@@ -77,11 +135,12 @@ impl DvConversionStore for SqliteStore {
             .map_err(|error| StoreError::Database(error.to_string()))?;
         self.with_read(move |conn| {
             let mut statement = conn.prepare(&format!(
-                "SELECT {CONVERSION_COLS} FROM dv_conversions
-                  WHERE file_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?1))
-                  ORDER BY file_id"
+                "SELECT {JOINED_CONVERSION_COLS} FROM dv_conversions d
+                  LEFT JOIN dv_recovery_guards g ON g.guard_id = d.recovery_guard_id
+                  WHERE d.file_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?1))
+                  ORDER BY d.file_id"
             ))?;
-            let rows = statement.query_map([encoded], conversion_from_row)?;
+            let rows = statement.query_map([encoded], joined_conversion_from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
         .await
@@ -168,12 +227,17 @@ impl DvConversionStore for SqliteStore {
                 return Ok(QueueDvConversionOutcome::Queued(queued));
             }
             if let Some(existing) = read_conversion(conn, file_id)? {
-                return Ok(match existing.state {
+                match existing.state {
                     DvConversionState::Committed => {
-                        QueueDvConversionOutcome::AlreadyCommitted(existing)
+                        return Ok(QueueDvConversionOutcome::AlreadyCommitted(existing));
                     }
-                    _ => QueueDvConversionOutcome::AlreadyActive(existing),
-                });
+                    DvConversionState::Queued
+                    | DvConversionState::Running
+                    | DvConversionState::Verified => {
+                        return Ok(QueueDvConversionOutcome::AlreadyActive(existing));
+                    }
+                    DvConversionState::Failed => {}
+                }
             }
             let facts = conn
                 .query_row(
@@ -292,11 +356,169 @@ impl DvConversionStore for SqliteStore {
                 .query_row(
                     "SELECT file_id FROM dv_conversions
                       WHERE file_id > ?1 AND state = 'committed'
+                        AND recovery_guard_id IS NULL
                       ORDER BY file_id LIMIT 1",
                     [after_file_id],
                     |row| row.get(0),
                 )
                 .optional()?)
+        })
+        .await
+    }
+
+    async fn dv_recovery_guard(&self, file_id: i64) -> Result<Option<DvRecoveryGuard>, StoreError> {
+        self.with_read(move |conn| {
+            Ok(conn
+                .query_row(
+                    &format!(
+                        "SELECT {QUALIFIED_GUARD_COLS} FROM dv_recovery_guards g
+                         JOIN dv_conversions d ON d.recovery_guard_id = g.guard_id
+                         WHERE d.file_id = ?1"
+                    ),
+                    [file_id],
+                    guard_from_row,
+                )
+                .optional()?)
+        })
+        .await
+    }
+
+    async fn dv_recovery_guard_by_id(
+        &self,
+        guard_id: &str,
+    ) -> Result<Option<DvRecoveryGuard>, StoreError> {
+        let guard_id = guard_id.to_owned();
+        self.with_read(move |conn| {
+            Ok(conn
+                .query_row(
+                    &format!("SELECT {GUARD_COLS} FROM dv_recovery_guards WHERE guard_id = ?1"),
+                    [guard_id],
+                    guard_from_row,
+                )
+                .optional()?)
+        })
+        .await
+    }
+
+    async fn dv_recovery_guard_orphans(
+        &self,
+        after_guard_id: &str,
+        limit: i64,
+    ) -> Result<Vec<DvRecoveryGuard>, StoreError> {
+        let limit = limit.clamp(0, DV_RECOVERY_GUARD_READ_MAX);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let after_guard_id = after_guard_id.to_owned();
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT {GUARD_COLS} FROM dv_recovery_guards g
+                 WHERE g.guard_id > ?1
+                   AND NOT EXISTS (SELECT 1 FROM dv_conversions d
+                                   WHERE d.recovery_guard_id = g.guard_id)
+                 ORDER BY g.guard_id LIMIT ?2"
+            ))?;
+            let rows = statement.query_map(params![after_guard_id, limit], guard_from_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    async fn dv_recovery_guard_summary(&self) -> Result<DvRecoveryGuardSummary, StoreError> {
+        self.with_read(move |conn| {
+            Ok(conn.query_row(
+                "SELECT
+                   COALESCE(SUM(state = 'intent'), 0),
+                   COALESCE(SUM(state = 'active'), 0),
+                   COALESCE(SUM(state = 'guard_removed'), 0),
+                   COALESCE(SUM(state = 'scratch_removed'), 0),
+                   COALESCE(SUM(NOT EXISTS (
+                     SELECT 1 FROM dv_conversions d
+                      WHERE d.recovery_guard_id = g.guard_id)), 0)
+                 FROM dv_recovery_guards g",
+                [],
+                |row| {
+                    Ok(DvRecoveryGuardSummary {
+                        intent: row.get(0)?,
+                        active: row.get(1)?,
+                        guard_removed: row.get(2)?,
+                        scratch_removed: row.get(3)?,
+                        orphaned: row.get(4)?,
+                    })
+                },
+            )?)
+        })
+        .await
+    }
+
+    async fn dv_recovery_guard_snapshot(
+        &self,
+        after_guard_id: &str,
+        limit: i64,
+    ) -> Result<DvRecoveryGuardSnapshot, StoreError> {
+        let limit = limit.clamp(0, DV_RECOVERY_GUARD_READ_MAX);
+        let after_guard_id = after_guard_id.to_owned();
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare(
+                "WITH guard_rows AS (
+                   SELECT g.*,
+                          CASE WHEN NOT EXISTS (
+                            SELECT 1 FROM dv_conversions d
+                             WHERE d.recovery_guard_id = g.guard_id)
+                          THEN 1 ELSE 0 END AS orphaned
+                     FROM dv_recovery_guards g
+                 ), totals AS (
+                   SELECT
+                     COALESCE(SUM(CASE WHEN state = 'intent' THEN 1 ELSE 0 END), 0)
+                       AS intent,
+                     COALESCE(SUM(CASE WHEN state = 'active' THEN 1 ELSE 0 END), 0)
+                       AS active,
+                     COALESCE(SUM(CASE WHEN state = 'guard_removed' THEN 1 ELSE 0 END), 0)
+                       AS guard_removed,
+                     COALESCE(SUM(CASE WHEN state = 'scratch_removed' THEN 1 ELSE 0 END), 0)
+                       AS scratch_removed,
+                     COALESCE(SUM(orphaned), 0) AS orphaned
+                   FROM guard_rows
+                 ), orphan_page AS (
+                   SELECT * FROM guard_rows
+                    WHERE orphaned = 1 AND guard_id > ?1
+                    ORDER BY guard_id LIMIT ?2
+                 )
+                 SELECT totals.intent, totals.active, totals.guard_removed,
+                        totals.scratch_removed, totals.orphaned,
+                        orphan_page.guard_id, orphan_page.file_id,
+                        orphan_page.library_id, orphan_page.source_path,
+                        orphan_page.recovery_path, orphan_page.state,
+                        orphan_page.created_at_ms, orphan_page.updated_at_ms
+                   FROM totals LEFT JOIN orphan_page ON 1 = 1
+                  ORDER BY orphan_page.guard_id",
+            )?;
+            let mut rows = statement.query(params![after_guard_id, limit])?;
+            let mut summary = None;
+            let mut orphans = Vec::new();
+            while let Some(row) = rows.next()? {
+                let current = DvRecoveryGuardSummary {
+                    intent: row.get(0)?,
+                    active: row.get(1)?,
+                    guard_removed: row.get(2)?,
+                    scratch_removed: row.get(3)?,
+                    orphaned: row.get(4)?,
+                };
+                if let Some(existing) = summary {
+                    debug_assert_eq!(existing, current);
+                } else {
+                    summary = Some(current);
+                }
+                if row.get::<_, Option<String>>(5)?.is_some() {
+                    orphans.push(guard_from_row_at(row, 5)?);
+                }
+            }
+            Ok(DvRecoveryGuardSnapshot {
+                summary: summary.ok_or_else(|| {
+                    StoreError::Database("missing recovery guard snapshot row".to_owned())
+                })?,
+                orphans,
+            })
         })
         .await
     }
@@ -425,6 +647,55 @@ impl DvConversionStore for SqliteStore {
         .await
     }
 
+    async fn begin_dv_recovery_guard(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        recovery_path: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        validate_recovery_guard_identity(guard_id, recovery_path)?;
+        let guard_id = guard_id.to_owned();
+        let recovery_path = recovery_path.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO dv_recovery_guards
+                   (guard_id, file_id, library_id, source_path, recovery_path,
+                    state, created_at_ms, updated_at_ms)
+                 SELECT ?2, d.file_id, i.library_id, f.path, ?3,
+                        'intent', ?4, ?4
+                   FROM dv_conversions d
+                   JOIN files f ON f.id = d.file_id
+                   JOIN items i ON i.id = f.item_id
+                  WHERE d.file_id = ?1 AND d.state = 'verified'
+                    AND (d.recovery_guard_id IS NULL OR d.recovery_guard_id = ?2)
+                 ON CONFLICT(guard_id) DO NOTHING",
+                params![file_id, guard_id, recovery_path, now_ms],
+            )?;
+            let linked = tx.execute(
+                "UPDATE dv_conversions AS d SET recovery_guard_id = ?2
+                  WHERE d.file_id = ?1 AND d.state = 'verified'
+                    AND (d.recovery_guard_id IS NULL OR d.recovery_guard_id = ?2)
+                    AND EXISTS (
+                      SELECT 1 FROM dv_recovery_guards g
+                      JOIN files f ON f.id = d.file_id
+                      JOIN items i ON i.id = f.item_id
+                      WHERE g.guard_id = ?2 AND g.file_id = d.file_id
+                        AND g.library_id = i.library_id
+                        AND g.source_path = f.path AND g.recovery_path = ?3
+                        AND g.state = 'intent')",
+                params![file_id, guard_id, recovery_path],
+            )?;
+            if linked != 1 {
+                return Ok(false);
+            }
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
     async fn mark_dv_conversion_running(
         &self,
         file_id: i64,
@@ -472,14 +743,116 @@ impl DvConversionStore for SqliteStore {
         bytes_after: i64,
         finished_at_ms: i64,
     ) -> Result<bool, StoreError> {
-        let original_path = original_path.map(str::to_owned);
+        let Some(original_path) = original_path.map(str::to_owned) else {
+            return Err(StoreError::Task(
+                "a guardless committed Dolby Vision conversion requires a retained original path"
+                    .to_owned(),
+            ));
+        };
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 "UPDATE dv_conversions
                     SET state = 'committed', original_path = ?2, bytes_after = ?3,
                         error = NULL, finished_at_ms = ?4
-                  WHERE file_id = ?1 AND state = 'verified'",
+                  WHERE file_id = ?1 AND state = 'verified'
+                    AND recovery_guard_id IS NULL",
                 params![file_id, original_path, bytes_after, finished_at_ms],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn mark_dv_conversion_committed_with_guard(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        bytes_after: i64,
+        finished_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let guard_id = guard_id.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let already_committed = tx
+                .query_row(
+                    "SELECT 1 FROM dv_conversions d
+                     JOIN dv_recovery_guards g ON g.guard_id = d.recovery_guard_id
+                     WHERE d.file_id = ?1 AND d.state = 'committed'
+                       AND d.original_path IS NULL AND d.recovery_guard_id = ?2
+                       AND d.bytes_after = ?3 AND d.finished_at_ms = ?4
+                       AND g.state = 'active'",
+                    params![file_id, guard_id, bytes_after, finished_at_ms],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if already_committed {
+                tx.commit()?;
+                return Ok(true);
+            }
+            let committed = tx.execute(
+                "UPDATE dv_conversions
+                    SET state = 'committed', original_path = NULL, bytes_after = ?3,
+                        error = NULL, finished_at_ms = ?4
+                  WHERE file_id = ?1 AND state = 'verified' AND recovery_guard_id = ?2
+                    AND EXISTS (SELECT 1 FROM dv_recovery_guards
+                                 WHERE guard_id = ?2 AND state = 'intent')",
+                params![file_id, guard_id, bytes_after, finished_at_ms],
+            )?;
+            if committed != 1 {
+                return Ok(false);
+            }
+            let activated = tx.execute(
+                "UPDATE dv_recovery_guards SET state = 'active', updated_at_ms = ?3
+                  WHERE guard_id = ?2 AND file_id = ?1 AND state = 'intent'",
+                params![file_id, guard_id, finished_at_ms],
+            )?;
+            if activated != 1 {
+                return Err(StoreError::Database(
+                    "Dolby Vision recovery guard activation lost its intent row".to_owned(),
+                ));
+            }
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn advance_dv_recovery_guard(
+        &self,
+        guard_id: &str,
+        expected: DvRecoveryGuardState,
+        next: DvRecoveryGuardState,
+        updated_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if !expected.permits_cleanup_transition(next) {
+            return Err(StoreError::Task(format!(
+                "invalid Dolby Vision recovery guard transition {} -> {}",
+                expected.as_str(),
+                next.as_str()
+            )));
+        }
+        let guard_id = guard_id.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE dv_recovery_guards SET state = ?3, updated_at_ms = ?4
+                  WHERE guard_id = ?1 AND state IN (?2, ?3)
+                    AND NOT EXISTS (SELECT 1 FROM dv_conversions d
+                                    WHERE d.recovery_guard_id = ?1)",
+                params![guard_id, expected.as_str(), next.as_str(), updated_at_ms],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn delete_dv_recovery_guard(&self, guard_id: &str) -> Result<bool, StoreError> {
+        let guard_id = guard_id.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "DELETE FROM dv_recovery_guards
+                  WHERE guard_id = ?1 AND state = 'scratch_removed'
+                    AND NOT EXISTS (SELECT 1 FROM dv_conversions d
+                                    WHERE d.recovery_guard_id = ?1)",
+                [guard_id],
             )? == 1)
         })
         .await
@@ -495,7 +868,8 @@ impl DvConversionStore for SqliteStore {
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 "UPDATE dv_conversions
-                    SET state = 'failed', error = ?2, finished_at_ms = ?3
+                    SET state = 'failed', error = ?2, finished_at_ms = ?3,
+                        recovery_guard_id = NULL
                   WHERE file_id = ?1 AND state != 'committed'",
                 params![file_id, error, finished_at_ms],
             )? == 1)
@@ -621,13 +995,13 @@ mod tests {
 
     #[cfg(feature = "hiqlite-store")]
     #[test]
-    fn sqlite_v38_fixture_migrates_the_conversion_ledger_once() {
+    fn sqlite_v38_fixture_migrates_conversion_and_guard_ledgers_once() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("v38.db");
         let connection = rusqlite::Connection::open(&path).expect("fixture");
         SqliteStore::apply_migrations_for_test(
             &connection,
-            crate::store::SQLITE_SCHEMA_VERSION - 1,
+            crate::store::SQLITE_SCHEMA_VERSION - 2,
         )
         .expect("v38 schema");
         drop(connection);
@@ -643,5 +1017,165 @@ mod tests {
             )
             .expect("table count");
         assert_eq!(tables, 1);
+        let guards: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'table' AND name = 'dv_recovery_guards'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("guard table count");
+        assert_eq!(guards, 1);
+        let columns: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('dv_conversions')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("conversion columns");
+        assert_eq!(columns, 10);
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn sqlite_v39_guard_migration_rejects_a_malformed_preexisting_ledger() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v39-malformed-guard.db");
+        let connection = rusqlite::Connection::open(&path).expect("fixture");
+        SqliteStore::apply_migrations_for_test(
+            &connection,
+            crate::store::SQLITE_SCHEMA_VERSION - 1,
+        )
+        .expect("v39 schema");
+        connection
+            .execute_batch(
+                "CREATE TABLE dv_recovery_guards (
+                    guard_id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL
+                 ) STRICT;",
+            )
+            .expect("malformed guard ledger");
+        drop(connection);
+
+        let error = match SqliteStore::open(&path) {
+            Ok(_) => panic!("malformed v40 guard ledger must refuse"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("already exists"), "{error}");
+        let connection = rusqlite::Connection::open(&path).expect("inspect refused fixture");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, crate::store::SQLITE_SCHEMA_VERSION - 1);
+        let columns: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('dv_conversions')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rolled-back conversion columns");
+        assert_eq!(columns, 9);
+        connection
+            .execute("DROP TABLE dv_recovery_guards", [])
+            .expect("remove malformed guard ledger");
+        drop(connection);
+
+        let _store = SqliteStore::open(&path).expect("retry exact v40 migration");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn sqlite_v39_guard_migration_refuses_an_unrecoverable_committed_claim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v39-unrecoverable-commit.db");
+        let store = SqliteStore::open(&path).expect("current store");
+        let (_, file_id) = p7_file(&store, "Unrecoverable", 6).await;
+        assert!(matches!(
+            store.queue_dv_conversion(file_id, 1).await.expect("queue"),
+            QueueDvConversionOutcome::Queued(_)
+        ));
+        assert!(store
+            .mark_dv_conversion_running(file_id, 80_000)
+            .await
+            .expect("running"));
+        assert!(store
+            .mark_dv_conversion_verified(file_id, Some("fel"), 60_000)
+            .await
+            .expect("verified"));
+        assert!(store
+            .mark_dv_conversion_committed(
+                file_id,
+                Some("/Unrecoverable/Unrecoverable.mkv.p7.orig"),
+                60_000,
+                2,
+            )
+            .await
+            .expect("recoverable current commit"));
+        drop(store);
+
+        let connection = rusqlite::Connection::open(&path).expect("downgrade fixture");
+        connection
+            .execute_batch(
+                "DROP INDEX dv_conversions_recovery_guard;
+                 DROP TABLE dv_recovery_guards;
+                 ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
+                 PRAGMA user_version = 39;",
+            )
+            .expect("construct unrecoverable v39 commit");
+        connection
+            .execute(
+                "UPDATE dv_conversions SET original_path = NULL WHERE file_id = ?1",
+                [file_id],
+            )
+            .expect("remove the only recovery path from the v39 claim");
+        drop(connection);
+
+        let error = match SqliteStore::open(&path) {
+            Ok(_) => panic!("v39 unrecoverable committed claim must refuse"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("CHECK constraint failed"),
+            "{error}"
+        );
+        let connection = rusqlite::Connection::open(&path).expect("inspect refused fixture");
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("schema version"),
+            39
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('dv_conversions')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("conversion columns"),
+            9,
+            "the refused migration must roll its added column back"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                      WHERE type = 'table' AND name = 'dv_recovery_guards'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("guard table count"),
+            0,
+            "the refused migration must not leave a partial guard schema"
+        );
+        connection
+            .execute(
+                "UPDATE dv_conversions SET original_path = ?1 WHERE file_id = ?2",
+                params!["/Unrecoverable/Unrecoverable.mkv.p7.orig", file_id],
+            )
+            .expect("repair source recovery claim");
+        drop(connection);
+
+        let _store = SqliteStore::open(&path).expect("retry repaired v40 migration");
     }
 }

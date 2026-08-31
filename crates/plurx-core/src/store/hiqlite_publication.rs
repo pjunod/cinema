@@ -16,8 +16,10 @@ use crate::domain::{
     ProbeResult,
 };
 use crate::error::StoreError;
+use crate::store::dv_conversion::validate_recovery_guard_identity;
 use crate::store::{
-    ArtworkRepairFence, FencedPublicationStore, ReconcileOutcome, RootFingerprintStatus,
+    ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, ReconcileOutcome,
+    RootFingerprintStatus,
 };
 
 const ATOMIC_PUBLICATION_TTL_MS: i64 = 90_000;
@@ -968,6 +970,9 @@ impl FencedPublicationStore for HiqliteAuthStore {
                    (SELECT id FROM items WHERE library_id = $1)
                  AND id IN (SELECT value FROM json_each($2))
                  AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1)
+                 AND NOT EXISTS (SELECT 1 FROM dv_conversions d
+                                 WHERE d.file_id = files.id
+                                   AND d.state IN ('running', 'verified'))
                  AND EXISTS (SELECT 1 FROM job_leases WHERE resource = $3
                    AND owner_node_id = $4 AND fence = $5 AND revision = $6
                    AND expires_at_ms = $7)"
@@ -1387,6 +1392,105 @@ impl FencedPublicationStore for HiqliteAuthStore {
         Ok(results.first().copied() == Some(1))
     }
 
+    async fn begin_dv_recovery_guard_fenced(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        recovery_path: &str,
+        now_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        validate_recovery_guard_identity(guard_id, recovery_path)?;
+        let fence = lease_i64("fence", lease.fence)?;
+        let revision = lease_i64("revision", lease.revision)?;
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![
+                    (
+                        "WITH requested(file_id, guard_id, recovery_path, now_ms,
+                                        resource, owner_node_id, fence, revision, expires_at_ms) AS
+                               (VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9))
+                         INSERT INTO dv_recovery_guards
+                           (guard_id, file_id, library_id, source_path, recovery_path,
+                            state, created_at_ms, updated_at_ms)
+                         SELECT requested.guard_id, d.file_id, i.library_id, f.path,
+                                requested.recovery_path, 'intent', requested.now_ms,
+                                requested.now_ms
+                           FROM dv_conversions d
+                           JOIN files f ON f.id = d.file_id
+                           JOIN items i ON i.id = f.item_id
+                           JOIN requested
+                          WHERE d.file_id = requested.file_id AND d.state = 'verified'
+                            AND (d.recovery_guard_id IS NULL
+                                 OR d.recovery_guard_id = requested.guard_id)
+                            AND EXISTS (SELECT 1 FROM job_leases
+                              WHERE job_leases.resource = requested.resource
+                                AND job_leases.owner_node_id = requested.owner_node_id
+                                AND job_leases.fence = requested.fence
+                                AND job_leases.revision = requested.revision
+                                AND job_leases.expires_at_ms = requested.expires_at_ms)
+                         ON CONFLICT(guard_id) DO NOTHING"
+                            .to_owned(),
+                        params!(
+                            file_id,
+                            guard_id,
+                            recovery_path,
+                            now_ms,
+                            lease.resource.as_str(),
+                            lease.owner_node_id.as_str(),
+                            fence,
+                            revision,
+                            lease.expires_at_unix_ms
+                        ),
+                    ),
+                    (
+                        "WITH requested(file_id, guard_id, recovery_path, resource,
+                                        owner_node_id, fence, revision, expires_at_ms) AS
+                               (VALUES ($1, $2, $3, $4, $5, $6, $7, $8))
+                         UPDATE dv_conversions AS d
+                            SET recovery_guard_id = (SELECT guard_id FROM requested)
+                          WHERE d.file_id = (SELECT file_id FROM requested)
+                            AND d.state = 'verified'
+                            AND (d.recovery_guard_id IS NULL OR d.recovery_guard_id =
+                                 (SELECT guard_id FROM requested))
+                            AND EXISTS (
+                              SELECT 1 FROM dv_recovery_guards g
+                              JOIN files f ON f.id = d.file_id
+                              JOIN items i ON i.id = f.item_id
+                              JOIN requested
+                              WHERE g.guard_id = requested.guard_id AND g.file_id = d.file_id
+                                AND g.library_id = i.library_id
+                                AND g.source_path = f.path
+                                AND g.recovery_path = requested.recovery_path
+                                AND g.state = 'intent')
+                            AND EXISTS (SELECT 1 FROM job_leases
+                              JOIN requested
+                              WHERE job_leases.resource = requested.resource
+                                AND job_leases.owner_node_id = requested.owner_node_id
+                                AND job_leases.fence = requested.fence
+                                AND job_leases.revision = requested.revision
+                                AND job_leases.expires_at_ms = requested.expires_at_ms)"
+                            .to_owned(),
+                        params!(
+                            file_id,
+                            guard_id,
+                            recovery_path,
+                            lease.resource.as_str(),
+                            lease.owner_node_id.as_str(),
+                            fence,
+                            revision,
+                            lease.expires_at_unix_ms
+                        ),
+                    ),
+                ],
+            )
+            .await?;
+        Ok(results.get(1).copied() == Some(1))
+    }
+
     async fn mark_dv_conversion_committed_fenced(
         &self,
         file_id: i64,
@@ -1396,6 +1500,12 @@ impl FencedPublicationStore for HiqliteAuthStore {
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<bool, StoreError> {
+        let Some(original_path) = original_path else {
+            return Err(StoreError::Task(
+                "a guardless committed Dolby Vision conversion requires a retained original path"
+                    .to_owned(),
+            ));
+        };
         let results = self
             .atomic_publication(
                 lease,
@@ -1405,6 +1515,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
                         SET state = 'committed', original_path = $2, bytes_after = $3,
                             error = NULL, finished_at_ms = $4
                       WHERE file_id = $1 AND state = 'verified'
+                        AND recovery_guard_id IS NULL
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = $5 AND owner_node_id = $6
                             AND fence = $7 AND revision = $8 AND expires_at_ms = $9)"
@@ -1414,6 +1525,197 @@ impl FencedPublicationStore for HiqliteAuthStore {
                         original_path,
                         bytes_after,
                         finished_at_ms,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
+            )
+            .await?;
+        Ok(results.first().copied() == Some(1))
+    }
+
+    async fn mark_dv_conversion_committed_with_guard_fenced(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        bytes_after: i64,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let fence = lease_i64("fence", lease.fence)?;
+        let revision = lease_i64("revision", lease.revision)?;
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![
+                    (
+                        "WITH requested(file_id, guard_id, bytes_after, finished_at_ms,
+                                        resource, owner_node_id, fence, revision, expires_at_ms) AS
+                               (VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9))
+                         UPDATE dv_conversions
+                            SET state = 'committed', original_path = NULL,
+                                bytes_after = (SELECT bytes_after FROM requested),
+                                error = NULL,
+                                finished_at_ms = (SELECT finished_at_ms FROM requested)
+                          WHERE file_id = (SELECT file_id FROM requested)
+                            AND recovery_guard_id = (SELECT guard_id FROM requested)
+                            AND ((state = 'verified' AND EXISTS (
+                                   SELECT 1 FROM dv_recovery_guards
+                                    WHERE guard_id = (SELECT guard_id FROM requested)
+                                      AND state = 'intent'))
+                              OR (state = 'committed' AND original_path IS NULL
+                                  AND bytes_after = (SELECT bytes_after FROM requested)
+                                  AND finished_at_ms = (SELECT finished_at_ms FROM requested)
+                                  AND EXISTS (SELECT 1 FROM dv_recovery_guards
+                                               WHERE guard_id =
+                                                 (SELECT guard_id FROM requested)
+                                                 AND state = 'active')))
+                            AND EXISTS (SELECT 1 FROM job_leases
+                              JOIN requested
+                              WHERE job_leases.resource = requested.resource
+                                AND job_leases.owner_node_id = requested.owner_node_id
+                                AND job_leases.fence = requested.fence
+                                AND job_leases.revision = requested.revision
+                                AND job_leases.expires_at_ms = requested.expires_at_ms)"
+                            .to_owned(),
+                        params!(
+                            file_id,
+                            guard_id,
+                            bytes_after,
+                            finished_at_ms,
+                            lease.resource.as_str(),
+                            lease.owner_node_id.as_str(),
+                            fence,
+                            revision,
+                            lease.expires_at_unix_ms
+                        ),
+                    ),
+                    (
+                        "WITH requested(file_id, guard_id, finished_at_ms, bytes_after,
+                                        resource, owner_node_id, fence, revision, expires_at_ms) AS
+                               (VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9))
+                         UPDATE dv_recovery_guards
+                            SET state = 'active',
+                                updated_at_ms = (SELECT finished_at_ms FROM requested)
+                          WHERE guard_id = (SELECT guard_id FROM requested)
+                            AND file_id = (SELECT file_id FROM requested)
+                            AND state IN ('intent', 'active')
+                            AND EXISTS (SELECT 1 FROM dv_conversions
+                              WHERE file_id = (SELECT file_id FROM requested)
+                                AND recovery_guard_id = (SELECT guard_id FROM requested)
+                                AND state = 'committed' AND original_path IS NULL
+                                AND bytes_after = (SELECT bytes_after FROM requested)
+                                AND finished_at_ms = (SELECT finished_at_ms FROM requested))
+                            AND EXISTS (SELECT 1 FROM job_leases
+                              JOIN requested
+                              WHERE job_leases.resource = requested.resource
+                                AND job_leases.owner_node_id = requested.owner_node_id
+                                AND job_leases.fence = requested.fence
+                                AND job_leases.revision = requested.revision
+                                AND job_leases.expires_at_ms = requested.expires_at_ms)"
+                            .to_owned(),
+                        params!(
+                            file_id,
+                            guard_id,
+                            finished_at_ms,
+                            bytes_after,
+                            lease.resource.as_str(),
+                            lease.owner_node_id.as_str(),
+                            fence,
+                            revision,
+                            lease.expires_at_unix_ms
+                        ),
+                    ),
+                ],
+            )
+            .await?;
+        Ok(matches!(results.as_slice(), [1, 1]))
+    }
+
+    async fn advance_dv_recovery_guard_fenced(
+        &self,
+        guard_id: &str,
+        expected: DvRecoveryGuardState,
+        next: DvRecoveryGuardState,
+        updated_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        if !expected.permits_cleanup_transition(next) {
+            return Err(StoreError::Task(format!(
+                "invalid Dolby Vision recovery guard transition {} -> {}",
+                expected.as_str(),
+                next.as_str()
+            )));
+        }
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    "WITH requested(guard_id, expected, next, updated_at_ms, resource,
+                                    owner_node_id, fence, revision, expires_at_ms) AS
+                           (VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9))
+                     UPDATE dv_recovery_guards
+                        SET state = (SELECT next FROM requested),
+                            updated_at_ms = (SELECT updated_at_ms FROM requested)
+                      WHERE guard_id = (SELECT guard_id FROM requested)
+                        AND state IN ((SELECT expected FROM requested),
+                                      (SELECT next FROM requested))
+                        AND NOT EXISTS (SELECT 1 FROM dv_conversions d
+                                        WHERE d.recovery_guard_id =
+                                          (SELECT guard_id FROM requested))
+                        AND EXISTS (SELECT 1 FROM job_leases
+                          JOIN requested
+                          WHERE job_leases.resource = requested.resource
+                            AND job_leases.owner_node_id = requested.owner_node_id
+                            AND job_leases.fence = requested.fence
+                            AND job_leases.revision = requested.revision
+                            AND job_leases.expires_at_ms = requested.expires_at_ms)"
+                        .to_owned(),
+                    params!(
+                        guard_id,
+                        expected.as_str(),
+                        next.as_str(),
+                        updated_at_ms,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
+            )
+            .await?;
+        Ok(results.first().copied() == Some(1))
+    }
+
+    async fn delete_dv_recovery_guard_fenced(
+        &self,
+        guard_id: &str,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    "DELETE FROM dv_recovery_guards
+                      WHERE guard_id = $1 AND state = 'scratch_removed'
+                        AND NOT EXISTS (SELECT 1 FROM dv_conversions d
+                                        WHERE d.recovery_guard_id = $1)
+                        AND EXISTS (SELECT 1 FROM job_leases
+                          WHERE resource = $2 AND owner_node_id = $3
+                            AND fence = $4 AND revision = $5 AND expires_at_ms = $6)"
+                        .to_owned(),
+                    params!(
+                        guard_id,
                         lease.resource.as_str(),
                         lease.owner_node_id.as_str(),
                         lease_i64("fence", lease.fence)?,
@@ -1441,7 +1743,8 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 replacement,
                 vec![(
                     "UPDATE dv_conversions
-                        SET state = 'failed', error = $2, finished_at_ms = $3
+                        SET state = 'failed', error = $2, finished_at_ms = $3,
+                            recovery_guard_id = NULL
                       WHERE file_id = $1 AND state != 'committed'
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = $4 AND owner_node_id = $5

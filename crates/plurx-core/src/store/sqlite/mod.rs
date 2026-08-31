@@ -894,6 +894,28 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX dv_conversions_queue
         ON dv_conversions(state, queued_at_ms, file_id);",
+    // v40: a non-cascading, attempt-identified recovery witness. The link on
+    // the cascading conversion row makes a deleted-and-reused integer file id
+    // unable to adopt an old guard accidentally; the guard itself survives a
+    // confirmed scan deletion until bounded filesystem cleanup completes.
+    "ALTER TABLE dv_conversions ADD COLUMN recovery_guard_id TEXT CHECK
+         (state != 'committed' OR original_path IS NOT NULL
+          OR recovery_guard_id IS NOT NULL);
+    CREATE UNIQUE INDEX dv_conversions_recovery_guard
+        ON dv_conversions(recovery_guard_id) WHERE recovery_guard_id IS NOT NULL;
+    CREATE TABLE dv_recovery_guards (
+        guard_id       TEXT PRIMARY KEY,
+        file_id        INTEGER NOT NULL,
+        library_id     INTEGER NOT NULL,
+        source_path    TEXT NOT NULL,
+        recovery_path  TEXT NOT NULL UNIQUE,
+        state          TEXT NOT NULL CHECK
+                         (state IN ('intent','active','guard_removed','scratch_removed')),
+        created_at_ms  INTEGER NOT NULL,
+        updated_at_ms  INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX dv_recovery_guards_file
+        ON dv_recovery_guards(file_id, guard_id);",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

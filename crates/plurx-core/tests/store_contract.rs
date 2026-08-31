@@ -55,9 +55,10 @@ use plurx_core::segplan::{
 use plurx_core::store::{
     cluster_fragment_index_key, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery,
     ArtworkRepairFence, ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation,
-    DvConversionMode, DvConversionState, LibraryStore, MediaStore, NewAnalysisRequest,
-    NewClusterFragmentIndexJob, OutboxEntry, PublicationStore, QueueDvConversionOutcome,
-    ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store, DV_CONVERSION_LEDGER_READ_MAX,
+    DvConversionMode, DvConversionState, DvRecoveryGuardState, LibraryStore, MediaStore,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
+    QueueDvConversionOutcome, ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store,
+    DV_CONVERSION_LEDGER_READ_MAX, DV_RECOVERY_GUARD_READ_MAX,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
@@ -176,12 +177,21 @@ const DV_CONVERSION_METHODS: &[&str] = &[
     "queue_library_dv_conversion_batch",
     "dv_conversion_candidates",
     "dv_committed_cleanup_candidate",
+    "dv_recovery_guard",
+    "dv_recovery_guard_by_id",
+    "dv_recovery_guard_orphans",
+    "dv_recovery_guard_summary",
+    "dv_recovery_guard_snapshot",
     "dv_conversion_progress",
     "dv_conversion_progress_snapshot",
     "set_library_dv_conversion_mode",
+    "begin_dv_recovery_guard",
     "mark_dv_conversion_running",
     "mark_dv_conversion_verified",
     "mark_dv_conversion_committed",
+    "mark_dv_conversion_committed_with_guard",
+    "advance_dv_recovery_guard",
+    "delete_dv_recovery_guard",
     "mark_dv_conversion_failed",
 ];
 const USER_METHODS: &[&str] = &[
@@ -458,7 +468,11 @@ const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "forget_cache_entry_fenced",
     "mark_dv_conversion_running_fenced",
     "mark_dv_conversion_verified_fenced",
+    "begin_dv_recovery_guard_fenced",
     "mark_dv_conversion_committed_fenced",
+    "mark_dv_conversion_committed_with_guard_fenced",
+    "advance_dv_recovery_guard_fenced",
+    "delete_dv_recovery_guard_fenced",
     "mark_dv_conversion_failed_fenced",
 ];
 const METRICS_METHODS: &[&str] = &["prometheus_store_snapshot"];
@@ -6582,6 +6596,11 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
             // The conversion ledger is v20's. These fixtures bootstrap the
             // current schema, so leaving the table behind would make the v20
             // migration create a table on top of a fixture that was never old.
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
             ("DROP TABLE dv_conversions", hiqlite::params!()),
             // The Dolby Vision columns are v19's, so a fixture claiming an
             // earlier version has to give them back. Every fixture here is
@@ -6711,6 +6730,11 @@ async fn replicated_v19_store_migrates_the_conversion_ledger_on_daemon_open() {
 
     let results = client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
             ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "CREATE TABLE dv_conversions (
@@ -6722,7 +6746,7 @@ async fn replicated_v19_store_migrates_the_conversion_ledger_on_daemon_open() {
             ),
             (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-                hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+                hiqlite::params!(AUTH_SCHEMA_VERSION - 2),
             ),
         ])
         .await
@@ -6747,7 +6771,7 @@ async fn replicated_v19_store_migrates_the_conversion_ledger_on_daemon_open() {
         )
         .await
         .expect("read marker after refused malformed migration");
-    assert_eq!(marker[0].value, AUTH_SCHEMA_VERSION - 1);
+    assert_eq!(marker[0].value, AUTH_SCHEMA_VERSION - 2);
     client
         .execute("DROP TABLE dv_conversions", hiqlite::params!())
         .await
@@ -6755,7 +6779,7 @@ async fn replicated_v19_store_migrates_the_conversion_ledger_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v19 through v20 migration");
+        .expect("daemon v19 through current migration");
     assert_eq!(
         migrated
             .get_setting("migration.v19.proof")
@@ -6772,7 +6796,350 @@ async fn replicated_v19_store_migrates_the_conversion_ledger_on_daemon_open() {
         .await
         .expect("inspect conversion ledger");
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].value, 9);
+    assert_eq!(rows[0].value, 10);
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v20_store_migrates_recovery_guards_and_rejects_malformed_shape() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect v20 recovery-guard migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v20-recovery-guard-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current recovery-guard schema");
+    current
+        .put_setting("migration.v20.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    let results = client
+        .txn([
+            (
+                "DROP INDEX dv_conversions_recovery_guard",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
+            (
+                "CREATE TABLE dv_recovery_guards (
+                    guard_id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL
+                 ) STRICT",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+            ),
+        ])
+        .await
+        .expect("construct malformed v20 recovery-guard fixture");
+    results
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit malformed v20 recovery-guard fixture");
+
+    let malformed = match HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await {
+        Ok(_) => panic!("v21 migration must reject a pre-existing malformed guard ledger"),
+        Err(error) => error,
+    };
+    assert!(
+        malformed.to_string().contains("already exists"),
+        "{malformed}"
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION - 1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
+            9,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('dv_recovery_guards')",
+            2,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect refused v20 migration");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+
+    client
+        .execute("DROP TABLE dv_recovery_guards", hiqlite::params!())
+        .await
+        .expect("remove malformed guard ledger before trigger-shape refusal");
+    client
+        .execute(
+            "CREATE TRIGGER dv_queue_admission_settings_ai
+             AFTER INSERT ON settings BEGIN SELECT 1; END",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("install malformed queue-admission trigger");
+    let malformed_trigger =
+        match HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await {
+            Ok(_) => panic!("v21 migration must reject a pre-existing trigger body"),
+            Err(error) => error,
+        };
+    assert!(
+        malformed_trigger.to_string().contains("already exists"),
+        "{malformed_trigger}"
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION - 1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
+            9,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master
+             WHERE type = 'table' AND name = 'dv_recovery_guards'",
+            0,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect refused queue-trigger migration");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+    client
+        .execute(
+            "DROP TRIGGER dv_queue_admission_settings_ai",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("remove malformed queue-admission trigger for exact retry");
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v20 through v21 recovery-guard migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v20.proof")
+            .await
+            .expect("read v20 migration proof")
+            .as_deref(),
+        Some("survives")
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
+            10,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('dv_recovery_guards')",
+            8,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master
+             WHERE type = 'index' AND name = 'dv_conversions_recovery_guard'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'dv_queue_admission_settings_ai'",
+            1,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect migrated v21 recovery-guard schema");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+
+    let library = migrated
+        .create_library(&NewLibrary {
+            name: "v20 unrecoverable commit".to_owned(),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from("/contract/v20-unrecoverable")],
+            anime: false,
+        })
+        .await
+        .expect("v20 migration fixture library");
+    let item = migrated
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "v20 unrecoverable commit".to_owned(),
+            year: Some(2026),
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("v20 migration fixture item");
+    let file_id = migrated
+        .upsert_file(
+            item,
+            "/contract/v20-unrecoverable/movie.mkv",
+            80_000,
+            7,
+            &ProbeResult {
+                container: Some("mkv".to_owned()),
+                dolby_vision: DolbyVisionFacts {
+                    profile: Some(7),
+                    level: Some(6),
+                    bl_compat_id: Some(6),
+                    el_present: Some(true),
+                    rpu_present: Some(true),
+                },
+                raw_json: Some("{}".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("v20 migration fixture file");
+    assert!(matches!(
+        migrated
+            .queue_dv_conversion(file_id, 1)
+            .await
+            .expect("queue v20 fixture"),
+        QueueDvConversionOutcome::Queued(_)
+    ));
+    let admitted: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT COUNT(*) AS value FROM dv_conversions
+              WHERE file_id = $1 AND state = 'queued'",
+            hiqlite::params!(file_id),
+        )
+        .await
+        .expect("inspect migrated queue admission");
+    assert_eq!(admitted[0].value, 1);
+    let transient: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT COUNT(*) AS value FROM settings
+              WHERE key GLOB '__plurx_internal.dv_queue_admission.*'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("inspect migrated queue result envelopes");
+    assert_eq!(
+        transient[0].value, 0,
+        "migrated queue admission must retire its result envelope"
+    );
+    assert!(migrated
+        .mark_dv_conversion_running(file_id, 80_000)
+        .await
+        .expect("run v20 fixture"));
+    assert!(migrated
+        .mark_dv_conversion_verified(file_id, Some("fel"), 60_000)
+        .await
+        .expect("verify v20 fixture"));
+    assert!(migrated
+        .mark_dv_conversion_committed(
+            file_id,
+            Some("/contract/v20-unrecoverable/movie.mkv.p7.orig"),
+            60_000,
+            2,
+        )
+        .await
+        .expect("commit recoverable v21 fixture"));
+    drop(migrated);
+
+    let results = client
+        .txn([
+            (
+                "DROP INDEX dv_conversions_recovery_guard",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
+            (
+                "ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE dv_conversions SET original_path = NULL WHERE file_id = $1",
+                hiqlite::params!(file_id),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+            ),
+        ])
+        .await
+        .expect("construct unrecoverable v20 commit fixture");
+    results
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit unrecoverable v20 fixture");
+
+    let error = match HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await {
+        Ok(_) => panic!("v21 migration must refuse an unrecoverable committed claim"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("CHECK constraint failed"),
+        "{error}"
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION - 1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
+            9,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master
+             WHERE type = 'table' AND name = 'dv_recovery_guards'",
+            0,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect refused unrecoverable v20 migration");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+    client
+        .execute(
+            "UPDATE dv_conversions SET original_path = $1 WHERE file_id = $2",
+            hiqlite::params!("/contract/v20-unrecoverable/movie.mkv.p7.orig", file_id),
+        )
+        .await
+        .expect("repair v20 recovery claim");
+    HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("retry repaired v20 through v21 migration");
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -6888,6 +7255,11 @@ async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
             ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
@@ -7071,6 +7443,11 @@ async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
             ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
@@ -7240,6 +7617,11 @@ async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
             ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
@@ -7413,6 +7795,11 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
             ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
@@ -7622,6 +8009,11 @@ async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
             ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
@@ -7804,6 +8196,11 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
             ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
@@ -7984,6 +8381,11 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
             // that already has it, and the chain fails on a fixture that was
             // never really old.
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
             ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
                 "ALTER TABLE files DROP COLUMN dv_profile",
@@ -8891,9 +9293,16 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                          'matroska', 'h264', '[]', '[]', 116, 25);
              INSERT INTO dv_conversions
                  (file_id, state, el_type, original_path, bytes_before,
-                  bytes_after, error, queued_at_ms, finished_at_ms)
-                 VALUES (30, 'failed', NULL, NULL, 4096, NULL,
-                         'fixture interruption', 116, 118);
+                  bytes_after, error, queued_at_ms, finished_at_ms, recovery_guard_id)
+                 VALUES (30, 'committed', 'fel', NULL, 4096, 3072,
+                         NULL, 116, 118, 'fixture-recovery-guard');
+             INSERT INTO dv_recovery_guards
+                 (guard_id, file_id, library_id, source_path, recovery_path, state,
+                  created_at_ms, updated_at_ms)
+                 VALUES ('fixture-recovery-guard', 30, 9,
+                         '/fixture/shows/season-1.mkv',
+                         '/fixture/shows/.plurx/recovery-guard.mkv',
+                         'active', 117, 118);
              INSERT INTO watch_state
                  (user_id, item_id, position_ms, duration_ms, watched, updated_at)
                  VALUES (7, 10, 120000, 3600000, 0, 117);
@@ -9204,7 +9613,8 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
-             -- v39's permanent Dolby Vision conversion ledger.
+             -- v40's permanent recovery-guard ledger, then v39's conversion ledger.
+             DROP TABLE dv_recovery_guards;
              DROP TABLE dv_conversions;
              -- v38's Dolby Vision columns. A fixture that stamps user_version
              -- back to 14 without removing them is not a v14 database: the
@@ -9306,7 +9716,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 31);
+    assert_eq!(report.tables.len(), 32);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -9325,6 +9735,16 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             .expect("read empty Dolby Vision conversion ledger")
             .is_none(),
         "startup migration must not invent conversion history for a v14 source"
+    );
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .find(|digest| digest.table == "dv_recovery_guards")
+            .expect("recovery-guard digest")
+            .row_count,
+        0,
+        "a v14 source predates permanent recovery guards"
     );
     assert_eq!(
         report
@@ -9476,8 +9896,21 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         .await
         .expect("read imported Dolby Vision conversion")
         .expect("imported Dolby Vision conversion");
-    assert_eq!(conversion.state, DvConversionState::Failed);
-    assert_eq!(conversion.error.as_deref(), Some("fixture interruption"));
+    assert_eq!(conversion.state, DvConversionState::Committed);
+    let guard = conversion
+        .recovery_guard
+        .expect("imported conversion retains its recovery guard projection");
+    assert_eq!(guard.guard_id, "fixture-recovery-guard");
+    assert_eq!(guard.state, DvRecoveryGuardState::Active);
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .find(|digest| digest.table == "dv_recovery_guards")
+            .expect("recovery-guard digest")
+            .row_count,
+        1
+    );
     let reading = store
         .reading_state(7, 10, 30)
         .await
@@ -9755,6 +10188,159 @@ fn a_replicated_deadline_is_never_reported_as_a_wal_size_violation() {
     );
 }
 
+/// A deleted-original claim is importable only with its exact active guard.
+/// Both refusals happen while the target is still empty, and both repaired
+/// source databases prove that an operator can retry instead of being stranded.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_import_refuses_unrecoverable_committed_claims_before_raft_and_retries() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated recovery-guard import target");
+
+    let current = tempfile::tempdir().expect("current malformed fixture directory");
+    let current_path = populated_current_import_fixture(current.path());
+    rusqlite::Connection::open(&current_path)
+        .expect("open current malformed fixture")
+        .execute(
+            "UPDATE dv_recovery_guards SET source_path = '/wrong/source.mkv'
+              WHERE guard_id = 'fixture-recovery-guard'",
+            [],
+        )
+        .expect("break exact current guard linkage");
+    let prepared = prepare_sqlite_import(current.path()).expect("prepare malformed current backup");
+    let refusal = store
+        .import_sqlite_backup(
+            &prepared.backup_path,
+            &prepared.backup_sha256,
+            prepared.schema_version,
+        )
+        .await
+        .expect_err("a mismatched current guard must refuse import");
+    assert!(
+        refusal.to_string().contains("exact active recovery guard"),
+        "{refusal}"
+    );
+    assert!(
+        store
+            .list_libraries()
+            .await
+            .expect("target after current refusal")
+            .is_empty(),
+        "source validation must precede the first Raft mutation"
+    );
+
+    rusqlite::Connection::open(&current_path)
+        .expect("reopen current fixture")
+        .execute(
+            "UPDATE dv_recovery_guards SET source_path = '/fixture/shows/season-1.mkv'
+              WHERE guard_id = 'fixture-recovery-guard'",
+            [],
+        )
+        .expect("repair exact current guard linkage");
+    let repaired = prepare_sqlite_import(current.path()).expect("prepare repaired current backup");
+    store
+        .import_sqlite_backup(
+            &repaired.backup_path,
+            &repaired.backup_sha256,
+            repaired.schema_version,
+        )
+        .await
+        .expect("retry repaired current import");
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset target before v39 import");
+    assert!(store
+        .advance_dv_recovery_guard(
+            "fixture-recovery-guard",
+            DvRecoveryGuardState::Active,
+            DvRecoveryGuardState::GuardRemoved,
+            201,
+        )
+        .await
+        .expect("retire imported guard capability for test reset"));
+    assert!(store
+        .advance_dv_recovery_guard(
+            "fixture-recovery-guard",
+            DvRecoveryGuardState::GuardRemoved,
+            DvRecoveryGuardState::ScratchRemoved,
+            202,
+        )
+        .await
+        .expect("retire imported guard scratch for test reset"));
+    assert!(store
+        .delete_dv_recovery_guard("fixture-recovery-guard")
+        .await
+        .expect("delete terminal imported guard for test reset"));
+
+    let legacy = tempfile::tempdir().expect("v39 malformed fixture directory");
+    let legacy_path = populated_current_import_fixture(legacy.path());
+    rusqlite::Connection::open(&legacy_path)
+        .expect("open v39 malformed fixture")
+        .execute_batch(
+            "DROP INDEX dv_conversions_recovery_guard;
+             DROP TABLE dv_recovery_guards;
+             ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
+             PRAGMA user_version = 39;",
+        )
+        .expect("downgrade malformed fixture to exact v39 shape");
+    let prepared = prepare_sqlite_import(legacy.path()).expect("prepare malformed v39 backup");
+    assert_eq!(prepared.schema_version, 39);
+    let refusal = store
+        .import_sqlite_backup(
+            &prepared.backup_path,
+            &prepared.backup_sha256,
+            prepared.schema_version,
+        )
+        .await
+        .expect_err("v39 cannot substantiate a deleted-original claim");
+    assert!(
+        refusal.to_string().contains("exact active recovery guard"),
+        "{refusal}"
+    );
+    assert!(
+        store
+            .list_libraries()
+            .await
+            .expect("target after v39 refusal")
+            .is_empty(),
+        "legacy source validation must precede the first Raft mutation"
+    );
+
+    rusqlite::Connection::open(&legacy_path)
+        .expect("reopen v39 fixture")
+        .execute(
+            "UPDATE dv_conversions SET original_path = '/fixture/shows/season-1.mkv.p7.orig'
+              WHERE file_id = 30",
+            [],
+        )
+        .expect("repair v39 claim with a retained original");
+    let repaired = prepare_sqlite_import(legacy.path()).expect("prepare repaired v39 backup");
+    store
+        .import_sqlite_backup(
+            &repaired.backup_path,
+            &repaired.backup_sha256,
+            repaired.schema_version,
+        )
+        .await
+        .expect("retry repaired v39 import");
+    let conversion = store
+        .dv_conversion(30)
+        .await
+        .expect("read repaired v39 conversion")
+        .expect("imported v39 conversion");
+    assert_eq!(
+        conversion.original_path.as_deref(),
+        Some("/fixture/shows/season-1.mkv.p7.orig")
+    );
+    assert!(conversion.recovery_guard.is_none());
+}
+
 /// Import transactions must be bounded by serialized bytes, not by a row count.
 ///
 /// The fixture is built to defeat a row count on purpose: the oversized band's
@@ -9763,7 +10349,6 @@ fn a_replicated_deadline_is_never_reported_as_a_wal_size_violation() {
 /// panicked node `m6` into an HTTP-healthy unreplicated boot (#290). That
 /// premise is asserted where the fixture sizes are declared, so passing means
 /// the builder split on bytes rather than that the row count was favourable.
-///
 /// The #279 band is retained alongside it: the byte bound must not regress the
 /// ordinary large-library case that motivated the row cap.
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -13561,9 +14146,67 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             0,
             "{backend}: automatic discovery must not loop failed media"
         );
+        let p7_path = format!("/contract/dv-{backend}/p7.mkv");
         assert_eq!(
             store
-                .queue_library_dv_conversion_batch(library.id, 104, true, 64)
+                .upsert_file(
+                    item,
+                    &p7_path,
+                    80_000,
+                    12,
+                    &ProbeResult {
+                        container: Some("mkv".to_owned()),
+                        dolby_vision: DolbyVisionFacts {
+                            profile: Some(8),
+                            level: Some(6),
+                            bl_compat_id: Some(6),
+                            el_present: Some(false),
+                            rpu_present: Some(true),
+                        },
+                        raw_json: Some("{}".to_owned()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("scan failed source as Profile 8"),
+            p7,
+            "{backend}"
+        );
+        assert!(matches!(
+            store
+                .queue_dv_conversion(p7, 104)
+                .await
+                .expect("failed source is no longer eligible"),
+            QueueDvConversionOutcome::Ineligible(_)
+        ));
+        assert_eq!(
+            store
+                .upsert_file(
+                    item,
+                    &p7_path,
+                    80_000,
+                    13,
+                    &ProbeResult {
+                        container: Some("mkv".to_owned()),
+                        dolby_vision: DolbyVisionFacts {
+                            profile: Some(7),
+                            level: Some(6),
+                            bl_compat_id: Some(6),
+                            el_present: Some(true),
+                            rpu_present: Some(true),
+                        },
+                        raw_json: Some("{}".to_owned()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("scan retry source back as Profile 7"),
+            p7,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .queue_library_dv_conversion_batch(library.id, 105, true, 64)
                 .await
                 .expect("manual retry")
                 .queued,
@@ -13583,6 +14226,24 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .await
             .expect("committed"));
 
+        assert!(store
+            .mark_dv_conversion_running(p7_race, 82_000)
+            .await
+            .expect("second guardless cleanup candidate running"));
+        assert!(store
+            .mark_dv_conversion_verified(p7_race, Some("fel"), 62_000)
+            .await
+            .expect("second guardless cleanup candidate verified"));
+        assert!(store
+            .mark_dv_conversion_committed(
+                p7_race,
+                Some("/contract/dv/p7-race.mkv.p7.orig"),
+                62_000,
+                106,
+            )
+            .await
+            .expect("second guardless cleanup candidate committed"));
+
         let row = store.dv_conversion(p7).await.expect("ledger").expect("row");
         assert_eq!(row.state, DvConversionState::Committed, "{backend}");
         assert_eq!(row.el_type.as_deref(), Some("mel"), "{backend}");
@@ -13599,10 +14260,88 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .mark_dv_conversion_verified(p7_second, Some("fel"), 61_000)
             .await
             .expect("second cleanup candidate verified"));
+        assert_eq!(
+            store
+                .ensure_library_root_fingerprint(library.id, "dv-contract-root", true)
+                .await
+                .expect("establish DV reconcile root"),
+            RootFingerprintStatus::Established,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .reconcile_library(library.id, "dv-contract-root", &[p7_second], 1)
+                .await
+                .expect("reconcile verified conversion"),
+            ReconcileOutcome::Applied {
+                deleted_files: 0,
+                pruned_items: 0,
+            },
+            "{backend}: reconciliation must defer an in-flight verified conversion"
+        );
+        let guard_id = format!("guard-{backend}-p7-second");
+        let recovery_path = format!("/contract/dv-{backend}/.plurx/guard-p7-second.mkv");
         assert!(store
-            .mark_dv_conversion_committed(p7_second, None, 61_000, 107)
+            .begin_dv_recovery_guard(p7_second, &guard_id, &recovery_path, 106)
             .await
-            .expect("second cleanup candidate committed"));
+            .expect("create recovery guard intent"));
+        assert!(store
+            .begin_dv_recovery_guard(p7_second, &guard_id, &recovery_path, 106)
+            .await
+            .expect("idempotent recovery guard intent"));
+        assert!(!store
+            .begin_dv_recovery_guard(
+                p7_second,
+                &format!("competing-{guard_id}"),
+                &format!("{recovery_path}.other"),
+                106,
+            )
+            .await
+            .expect("competing guard intent loses"));
+        let guarded = store
+            .dv_conversion(p7_second)
+            .await
+            .expect("guarded ledger")
+            .expect("guarded row");
+        assert_eq!(
+            guarded.recovery_guard.as_ref().map(|guard| guard.state),
+            Some(DvRecoveryGuardState::Intent),
+            "{backend}"
+        );
+        assert!(
+            store
+                .mark_dv_conversion_committed(p7_second, None, 61_000, 107)
+                .await
+                .is_err(),
+            "{backend}: guardless commit cannot claim the original was safely removed"
+        );
+        assert!(store
+            .mark_dv_conversion_committed_with_guard(p7_second, &guard_id, 61_000, 107)
+            .await
+            .expect("guarded cleanup candidate committed"));
+        assert!(store
+            .mark_dv_conversion_committed_with_guard(p7_second, &guard_id, 61_000, 107)
+            .await
+            .expect("idempotent guarded commit"));
+        assert_eq!(
+            store
+                .dv_recovery_guard(p7_second)
+                .await
+                .expect("linked guard")
+                .expect("linked guard row")
+                .state,
+            DvRecoveryGuardState::Active,
+            "{backend}"
+        );
+        assert!(!store
+            .advance_dv_recovery_guard(
+                &guard_id,
+                DvRecoveryGuardState::Active,
+                DvRecoveryGuardState::GuardRemoved,
+                108,
+            )
+            .await
+            .expect("attached guard cannot advance"));
 
         let first_cleanup = store
             .dv_committed_cleanup_candidate(0)
@@ -13615,7 +14354,7 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .await
             .expect("second cleanup candidate")
             .expect("second committed row");
-        assert_eq!(second_cleanup, p7_second, "{backend}");
+        assert_eq!(second_cleanup, p7_race, "{backend}");
         assert_eq!(
             store
                 .dv_committed_cleanup_candidate(second_cleanup)
@@ -13632,6 +14371,408 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             Some(first_cleanup),
             "{backend}: caller can wrap cleanup selection back to zero"
         );
+        assert_ne!(
+            second_cleanup, p7_second,
+            "{backend}: an active recovery guard owns guarded committed scratch"
+        );
+
+        assert_eq!(
+            store
+                .dv_recovery_guard_summary()
+                .await
+                .expect("attached guard summary")
+                .active,
+            1,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .delete_files(&[p7_race])
+                .await
+                .expect("delete higher id"),
+            1,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .delete_files(&[p7_second])
+                .await
+                .expect("confirmed guarded file deletion"),
+            1,
+            "{backend}"
+        );
+        let reused = store
+            .upsert_file(
+                item,
+                &format!("/contract/dv-{backend}/replacement-id-reuse.mkv"),
+                90_000,
+                12,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("reuse deleted maximum file id");
+        assert_eq!(reused, p7_second, "{backend}: exercise integer id reuse");
+        assert!(
+            store
+                .dv_recovery_guard(reused)
+                .await
+                .expect("new file guard lookup")
+                .is_none(),
+            "{backend}: a reused file id must not adopt the old guard"
+        );
+        assert!(
+            store
+                .dv_recovery_guard_by_id(&guard_id)
+                .await
+                .expect("durable orphan lookup")
+                .is_some(),
+            "{backend}: cascading conversion deletion must retain the guard"
+        );
+        let orphans = store
+            .dv_recovery_guard_orphans("", DV_RECOVERY_GUARD_READ_MAX + 1)
+            .await
+            .expect("bounded orphan list");
+        assert_eq!(orphans.len(), 1, "{backend}");
+        assert_eq!(orphans[0].guard_id, guard_id, "{backend}");
+        assert_eq!(
+            store
+                .dv_recovery_guard_summary()
+                .await
+                .expect("orphan summary")
+                .orphaned,
+            1,
+            "{backend}"
+        );
+        let snapshot = store
+            .dv_recovery_guard_snapshot("", DV_RECOVERY_GUARD_READ_MAX + 1)
+            .await
+            .expect("coherent guard snapshot");
+        assert_eq!(snapshot.summary.orphaned, 1, "{backend}");
+        assert_eq!(snapshot.orphans, orphans, "{backend}");
+        let empty_page = store
+            .dv_recovery_guard_snapshot(&guard_id, 0)
+            .await
+            .expect("zero-limit coherent guard snapshot");
+        assert_eq!(empty_page.summary, snapshot.summary, "{backend}");
+        assert!(empty_page.orphans.is_empty(), "{backend}");
+        assert!(store
+            .advance_dv_recovery_guard(
+                &guard_id,
+                DvRecoveryGuardState::Active,
+                DvRecoveryGuardState::GuardRemoved,
+                109,
+            )
+            .await
+            .expect("remove orphan guard"));
+        assert!(store
+            .advance_dv_recovery_guard(
+                &guard_id,
+                DvRecoveryGuardState::GuardRemoved,
+                DvRecoveryGuardState::ScratchRemoved,
+                110,
+            )
+            .await
+            .expect("remove orphan scratch"));
+        assert!(store
+            .delete_dv_recovery_guard(&guard_id)
+            .await
+            .expect("delete completed guard ledger"));
+        assert!(
+            store
+                .dv_recovery_guard_by_id(&guard_id)
+                .await
+                .expect("deleted guard lookup")
+                .is_none(),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn hiqlite_dv_queue_outcome_is_bound_to_the_atomic_admission_snapshot() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated queue race state");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "DV atomic queue race".to_owned(),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from("/contract/dv-atomic-queue-race")],
+            anime: false,
+        })
+        .await
+        .expect("create race library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "DV atomic queue race".to_owned(),
+            year: Some(2026),
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("create race item");
+    let path = "/contract/dv-atomic-queue-race/movie.mkv";
+    let profile_7 = ProbeResult {
+        container: Some("mkv".to_owned()),
+        dolby_vision: DolbyVisionFacts {
+            profile: Some(7),
+            level: Some(6),
+            bl_compat_id: Some(1),
+            el_present: Some(true),
+            rpu_present: Some(true),
+        },
+        raw_json: Some("{}".to_owned()),
+        ..Default::default()
+    };
+    let file_id = store
+        .upsert_file(item, path, 80_000, 1, &profile_7)
+        .await
+        .expect("create eligible race file");
+    assert!(matches!(
+        store
+            .queue_dv_conversion(file_id, 1)
+            .await
+            .expect("queue initial attempt"),
+        QueueDvConversionOutcome::Queued(_)
+    ));
+    assert!(store
+        .mark_dv_conversion_running(file_id, 80_000)
+        .await
+        .expect("mark race attempt running"));
+    assert!(store
+        .mark_dv_conversion_failed(file_id, "fixture failure", 2)
+        .await
+        .expect("mark race attempt failed"));
+    let profile_8 = ProbeResult {
+        container: Some("mkv".to_owned()),
+        dolby_vision: DolbyVisionFacts {
+            profile: Some(8),
+            level: Some(6),
+            bl_compat_id: Some(1),
+            el_present: Some(false),
+            rpu_present: Some(true),
+        },
+        raw_json: Some("{}".to_owned()),
+        ..Default::default()
+    };
+    assert_eq!(
+        store
+            .upsert_file(item, path, 80_000, 2, &profile_8)
+            .await
+            .expect("scan race file as Profile 8"),
+        file_id
+    );
+
+    let (classified, release) =
+        HiqliteAuthStore::validation_pause_next_queue_admission_after_return();
+    let first_store = store.clone();
+    let first = tokio::spawn(async move { first_store.queue_dv_conversion(file_id, 3).await });
+    tokio::time::timeout(Duration::from_secs(10), classified)
+        .await
+        .expect("first admission reaches return seam")
+        .expect("first admission publishes return seam");
+
+    assert_eq!(
+        store
+            .upsert_file(item, path, 80_000, 3, &profile_7)
+            .await
+            .expect("concurrent scan restores Profile 7 facts"),
+        file_id
+    );
+    assert!(matches!(
+        store
+            .queue_dv_conversion(file_id, 4)
+            .await
+            .expect("concurrent caller requeues corrected file"),
+        QueueDvConversionOutcome::Queued(_)
+    ));
+    release
+        .send(())
+        .expect("release first admission result decoder");
+    assert_eq!(
+        first
+            .await
+            .expect("join first admission")
+            .expect("first admission result"),
+        QueueDvConversionOutcome::Ineligible("file is not Dolby Vision Profile 7")
+    );
+    assert_eq!(
+        store
+            .dv_conversion(file_id)
+            .await
+            .expect("read final race ledger")
+            .expect("final race ledger exists")
+            .state,
+        DvConversionState::Queued
+    );
+    assert!(store
+        .settings_snapshot()
+        .await
+        .expect("read settings after admission race")
+        .keys()
+        .all(|key| !key.starts_with("__plurx_internal.dv_queue_admission.")));
+}
+
+#[tokio::test]
+async fn dv_recovery_guard_fenced_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("DV fenced guard {backend}"),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from(format!("/contract/dv-fenced-{backend}"))],
+                anime: false,
+            })
+            .await
+            .expect("fenced guard library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "DV Fenced Guard".to_owned(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("fenced guard item");
+        let file_id = store
+            .upsert_file(
+                item,
+                &format!("/contract/dv-fenced-{backend}/movie.mkv"),
+                80_000,
+                1,
+                &ProbeResult {
+                    container: Some("mkv".to_owned()),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(7),
+                        level: Some(6),
+                        bl_compat_id: Some(6),
+                        el_present: Some(true),
+                        rpu_present: Some(true),
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("fenced guard file");
+        assert!(matches!(
+            store
+                .queue_dv_conversion(file_id, 1)
+                .await
+                .expect("queue fenced guard conversion"),
+            QueueDvConversionOutcome::Queued(_)
+        ));
+        assert!(store
+            .mark_dv_conversion_running(file_id, 80_000)
+            .await
+            .expect("running fenced guard conversion"));
+        assert!(store
+            .mark_dv_conversion_verified(file_id, Some("fel"), 60_000)
+            .await
+            .expect("verified fenced guard conversion"));
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let resource = format!("dv-disk-convert:{file_id}");
+        let first = acquired(
+            store
+                .acquire_lease(&resource, "node-a", now, now.saturating_add(90_000))
+                .await
+                .expect("acquire fenced guard lease"),
+            backend,
+        );
+        let guard_id = format!("fenced-guard-{backend}");
+        let recovery_path = format!("/contract/dv-fenced-{backend}/.guard.mkv");
+        let mut current = first.clone();
+        let replacement = publication_successor(&current);
+        assert!(store
+            .begin_dv_recovery_guard_fenced(
+                file_id,
+                &guard_id,
+                &recovery_path,
+                now,
+                &current,
+                &replacement,
+            )
+            .await
+            .expect("fenced guard intent"));
+        current = replacement;
+        assert!(matches!(
+            store
+                .begin_dv_recovery_guard_fenced(
+                    file_id,
+                    &guard_id,
+                    &recovery_path,
+                    now,
+                    &first,
+                    &publication_successor(&first),
+                )
+                .await,
+            Err(StoreError::FenceRejected { .. })
+        ));
+        let replacement = publication_successor(&current);
+        assert!(store
+            .mark_dv_conversion_committed_with_guard_fenced(
+                file_id,
+                &guard_id,
+                60_000,
+                now.saturating_add(1),
+                &current,
+                &replacement,
+            )
+            .await
+            .expect("fenced guard activation and commit"));
+        current = replacement;
+
+        assert_eq!(
+            store.delete_files(&[file_id]).await.expect("delete file"),
+            1
+        );
+        let replacement = publication_successor(&current);
+        assert!(store
+            .advance_dv_recovery_guard_fenced(
+                &guard_id,
+                DvRecoveryGuardState::Active,
+                DvRecoveryGuardState::GuardRemoved,
+                now.saturating_add(2),
+                &current,
+                &replacement,
+            )
+            .await
+            .expect("fenced guard removal"));
+        current = replacement;
+        let replacement = publication_successor(&current);
+        assert!(store
+            .advance_dv_recovery_guard_fenced(
+                &guard_id,
+                DvRecoveryGuardState::GuardRemoved,
+                DvRecoveryGuardState::ScratchRemoved,
+                now.saturating_add(3),
+                &current,
+                &replacement,
+            )
+            .await
+            .expect("fenced scratch removal"));
+        current = replacement;
+        let replacement = publication_successor(&current);
+        assert!(store
+            .delete_dv_recovery_guard_fenced(&guard_id, &current, &replacement)
+            .await
+            .expect("fenced guard ledger deletion"));
     })
     .await;
 }
