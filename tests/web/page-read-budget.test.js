@@ -728,15 +728,17 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
   assert.equal(snapshotActive({ progress: { committed: 4, failed: 1 } }), false);
 
   const hydrate = shippedSource("hydrateDvFileActions");
+  assert.match(hydrate, /at\+=DV_CONVERSION_LEDGER_READ_MAX/);
+  assert.match(hydrate, /Promise\.all\(batches\.map\(batch=>/);
   assert.match(hydrate,
-    /api\(`\/dv-conversions\?file_ids=\$\{encodeURIComponent\(ids\.join\(","\)\)\}`\)/);
+    /api\(`\/dv-conversions\?file_ids=\$\{encodeURIComponent\(batch\.join\(","\)\)\}`\)/);
   assert.equal((hydrate.match(/api\(/g)||[]).length, 1,
-    "an item detail hydrates every conversion ledger in one bounded request");
-  assert.match(hydrate, /const eligibility=snapshot\.eligible_by_file\|\|\{\}/,
+    "item hydration has one batch request site rather than a per-file fallback");
+  assert.match(hydrate, /Object\.assign\(eligibility,snapshot\.eligible_by_file\|\|\{\}\)/,
     "item actions consume server-computed Dolby Vision eligibility");
   assert.match(hydrate, /eligible:eligibility\[id\]===true/,
     "the client never infers Profile 7 conversion eligibility from its item DTO");
-  assert.match(hydrate, /const capabilities=snapshot\.capabilities\|\|\{\}/,
+  assert.match(hydrate, /const capabilities=snapshots\[0\]\.capabilities\|\|\{\}/,
     "item actions consume the shared conversion-tool capability snapshot");
   assert.match(hydrate, /capabilities,/,
     "the batch response supplies one shared tool capability snapshot");
@@ -744,6 +746,73 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     "the UI does not enable an action from the numeric profile alone");
   assert.doesNotMatch(hydrate, /\/files\/\$\{id\}\/dv-conversion/,
     "item hydration never falls back to one request per file");
+
+  const mounts = new Map();
+  const files = Array.from({ length: 257 }, (_, index) => ({ id: index + 1 }));
+  for (const file of files) mounts.set(`dv-file-${file.id}`, {
+    dataset: { dvActive: "false" }, innerHTML: "Checking",
+  });
+  const requests = [];
+  const api = async (url) => {
+    requests.push(url);
+    const ids = new URL(url, "http://plurx.test").searchParams
+      .get("file_ids").split(",");
+    return {
+      conversions_by_file: ids.includes("1") ? { 1: { state: "queued" } } : {},
+      eligible_by_file: Object.fromEntries(ids.map((id) => [id, id === "257"])),
+      capabilities: { available: true },
+    };
+  };
+  const hydrate257 = new Function(
+    "ME", "document", "exactWireId", "api", "dvConversionIsActive",
+    "dvConversionStateHtml", "esc", "DV_CONVERSION_LEDGER_READ_MAX",
+    `${hydrate}; return hydrateDvFileActions;`,
+  )(
+    { is_admin: true },
+    { getElementById: (id) => mounts.get(id) || null },
+    (file) => String(file.id),
+    api,
+    (conversion) => conversion && ["queued", "running", "verified"].includes(conversion.state),
+    (file, snapshot) => `${file.id}:${snapshot.conversion?.state || "none"}:${snapshot.eligible}`,
+    String,
+    256,
+  );
+  assert.equal(await hydrate257(files), true);
+  assert.equal(requests.length, 2, "257 visible files use exactly two bounded reads");
+  const requestedIds = requests.map((url) => new URL(url, "http://plurx.test")
+    .searchParams.get("file_ids").split(","));
+  assert.deepEqual(requestedIds.map((ids) => ids.length), [256, 1]);
+  assert.deepEqual(requestedIds.flat(), files.map((file) => String(file.id)));
+  assert.equal(mounts.get("dv-file-1").innerHTML, "1:queued:false",
+    "the first batch survives the deterministic merge");
+  assert.equal(mounts.get("dv-file-257").innerHTML, "257:none:true",
+    "the final batch survives the deterministic merge");
+
+  for (const mount of mounts.values()) mount.dataset.dvActive = "false";
+  let calls = 0;
+  const rejectSecondBatch = new Function(
+    "ME", "document", "exactWireId", "api", "dvConversionIsActive",
+    "dvConversionStateHtml", "esc", "DV_CONVERSION_LEDGER_READ_MAX",
+    `${hydrate}; return hydrateDvFileActions;`,
+  )(
+    { is_admin: true },
+    { getElementById: (id) => mounts.get(id) || null },
+    (file) => String(file.id),
+    async () => {
+      calls += 1;
+      if (calls === 2) throw new Error("second batch failed");
+      return { conversions_by_file: { 1: { state: "queued" } } };
+    },
+    () => true,
+    () => "partial result must not paint",
+    String,
+    256,
+  );
+  assert.equal(await rejectSecondBatch(files), false);
+  assert.equal(calls, 2);
+  assert.match(mounts.get("dv-file-1").innerHTML, /second batch failed/,
+    "one failed batch makes the whole visible snapshot explicitly unavailable");
+  assert.doesNotMatch(mounts.get("dv-file-1").innerHTML, /partial result must not paint/);
 
   const refresh = shippedSource("refreshDvConversions");
   assert.match(refresh, /DV_SETTINGS_POLL_AT=Date\.now\(\)\+DV_PROGRESS_POLL_MS/,

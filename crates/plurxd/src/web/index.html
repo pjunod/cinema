@@ -5485,7 +5485,7 @@ function bookByline(it){
   return (it.kind==='book'||it.kind==='audiobook')&&it.author
     ? `<div class="muted" style="margin-top:4px">By ${esc(it.author)}</div>` : '';
 }
-const DV_PROGRESS_POLL_MS=10000;
+const DV_PROGRESS_POLL_MS=10000, DV_CONVERSION_LEDGER_READ_MAX=256;
 let DV_FILE_PAGE_FILES=[], DV_FILE_POLLING=false, DV_SETTINGS_POLL_AT=0;
 function dvConversionIsActive(conversion){
   return !!conversion&&["queued","running","verified"].includes(conversion.state);
@@ -5531,12 +5531,24 @@ async function hydrateDvFileActions(files){
   if(!ME||!ME.is_admin) return false;
   const targets=(files||[]).filter(file=>document.getElementById(`dv-file-${exactWireId(file)}`));
   if(!targets.length) return false;
-  const ids=targets.map(exactWireId);
+  const ids=[...new Set(targets.map(exactWireId))];
   try{
-    const snapshot=await api(`/dv-conversions?file_ids=${encodeURIComponent(ids.join(","))}`);
-    const conversions=snapshot.conversions_by_file||{};
-    const eligibility=snapshot.eligible_by_file||{};
-    const capabilities=snapshot.capabilities||{};
+    const batches=[];
+    for(let at=0;at<ids.length;at+=DV_CONVERSION_LEDGER_READ_MAX){
+      batches.push(ids.slice(at,at+DV_CONVERSION_LEDGER_READ_MAX));
+    }
+    // Promise.all preserves batch order and rejects the whole snapshot if any
+    // bounded read fails, so the page never renders a misleading partial view.
+    const snapshots=await Promise.all(batches.map(batch=>
+      api(`/dv-conversions?file_ids=${encodeURIComponent(batch.join(","))}`)));
+    const conversions={}, eligibility={};
+    for(const snapshot of snapshots){
+      Object.assign(conversions,snapshot.conversions_by_file||{});
+      Object.assign(eligibility,snapshot.eligible_by_file||{});
+    }
+    // Tool capability is process-wide; choosing the first ID-ordered batch
+    // makes the result independent of which concurrent request finishes first.
+    const capabilities=snapshots[0].capabilities||{};
     let anyActive=false;
     for(const file of targets){
       const id=exactWireId(file), mount=document.getElementById(`dv-file-${id}`);
