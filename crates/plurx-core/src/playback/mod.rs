@@ -644,6 +644,15 @@ pub struct Decision {
     /// instead of claiming the source's grade for a stripped remux. A session
     /// created later overrides it (MEDIA-BADGES-PLAN §3.2).
     pub delivered_dynamic_range: &'static str,
+    /// The Dolby Vision profile the delivered bytes carry, when they carry
+    /// any — see [`delivered_dolby_vision_profile`].
+    ///
+    /// The one thing `delivered_dynamic_range` cannot say: a preserved
+    /// Profile 7 and a Profile 7 converted to 8.1 are both `"dolby_vision"`,
+    /// and only this separates them. Absent on the wire when the delivery
+    /// carries no Dolby Vision at all, which is not the same as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_dolby_vision_profile: Option<u8>,
     /// The grade a re-encode would target. Meaningless for direct play and
     /// remux, where nothing is encoded — [`OutputGrade::Sdr`] there, which is
     /// what every method answered before M5.
@@ -857,6 +866,43 @@ pub fn delivered_dynamic_range(
         // (HDR10+ probes as "hdr10"), or a file nobody ever probed.
         _ => "sdr",
     }
+}
+
+/// The Dolby Vision profile the delivered *bytes* carry, when they carry any.
+///
+/// A companion to [`delivered_dynamic_range`], and the field that separates
+/// two deliveries it cannot: a Profile 7 title preserved for a device that
+/// enumerates 7, and the same title converted to 8.1 for a device that does
+/// not, both answer `"dolby_vision"`. The grade is the same — that is the
+/// point of the conversion — but the profile on screen is not the profile on
+/// disk, and the badge that says `DV P7` for both is telling one of them
+/// something untrue about its own file (MEDIA-BADGES-PLAN §2.3).
+///
+/// `None` means there is no Dolby Vision in the delivered bytes at all: a
+/// transcode, a strip, or a source that never had any. That is not the same
+/// as "unknown", and it is why this is separate from
+/// [`dolby_vision_profile`], which answers what the *source* carries.
+pub fn delivered_dolby_vision_profile(
+    file: &MediaFile,
+    method: PlaybackMethod,
+    preserve_dolby_vision: bool,
+    convert_dolby_vision: bool,
+) -> Option<u8> {
+    // Every transcode re-encodes the picture, and no plurx encode rung
+    // produces Dolby Vision.
+    if method == PlaybackMethod::Transcode || !preserve_dolby_vision {
+        return None;
+    }
+    if !is_dolby_vision(file) {
+        return None;
+    }
+    if convert_dolby_vision {
+        // Not read back from the file: the conversion's output is 8.1 by
+        // construction, and the source row says 7. Reading the row here would
+        // report the profile the conversion exists to replace.
+        return Some(8);
+    }
+    dolby_vision_profile(file)
 }
 
 /// Profile number from the Dolby Vision configuration record, or from the
@@ -1274,6 +1320,12 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
             preserve_dolby_vision && method != PlaybackMethod::Transcode,
             transcode_grade,
         ),
+        delivered_dolby_vision_profile: delivered_dolby_vision_profile(
+            file,
+            method,
+            preserve_dolby_vision && method != PlaybackMethod::Transcode,
+            convert_dolby_vision,
+        ),
         transcode_grade,
     }
 }
@@ -1316,6 +1368,7 @@ pub fn decide_forced(
                     false,
                     grade,
                 ),
+                delivered_dolby_vision_profile: None,
                 transcode_grade: grade,
             }
         }
@@ -1374,6 +1427,12 @@ pub fn decide_forced(
                     method,
                     preserve_dolby_vision,
                     OutputGrade::Sdr,
+                ),
+                delivered_dolby_vision_profile: delivered_dolby_vision_profile(
+                    file,
+                    method,
+                    preserve_dolby_vision,
+                    convert_dolby_vision,
                 ),
                 transcode_grade: OutputGrade::Sdr,
             }
@@ -2870,6 +2929,12 @@ mod tests {
         );
         assert_eq!(converted.delivered_dynamic_range, "dolby_vision");
         assert_eq!(
+            converted.delivered_dolby_vision_profile,
+            Some(8),
+            "the badge has to be able to say `DV P7 → DV P8`; the range alone \
+             cannot, because a preserved P7 answers `dolby_vision` too"
+        );
+        assert_eq!(
             converted.method,
             PlaybackMethod::Remux,
             "the picture is copied; only the per-frame metadata is rewritten"
@@ -2888,12 +2953,22 @@ mod tests {
         let native = decide(&p7, &client(vec![7, 8]), &node);
         assert!(!native.convert_dolby_vision);
         assert!(native.preserve_dolby_vision);
+        assert_eq!(
+            native.delivered_dolby_vision_profile,
+            Some(7),
+            "the same range as the converted answer, and this is what tells \
+             them apart"
+        );
 
         // A client that decodes neither still gets the ordinary strip.
         let stripped = decide(&p7, &client(vec![]), &node);
         assert!(!stripped.convert_dolby_vision);
         assert!(!stripped.preserve_dolby_vision);
         assert_eq!(stripped.delivered_dynamic_range, "hdr10");
+        assert_eq!(
+            stripped.delivered_dolby_vision_profile, None,
+            "a stripped stream carries no Dolby Vision to name"
+        );
 
         // And an operator can turn it off, which puts that client back on the
         // strip rather than on a refusal.
@@ -2907,6 +2982,7 @@ mod tests {
         );
         assert!(!off.convert_dolby_vision);
         assert_eq!(off.delivered_dynamic_range, "hdr10");
+        assert_eq!(off.delivered_dolby_vision_profile, None);
     }
 
     /// A verdict that re-encodes the picture converts nothing.

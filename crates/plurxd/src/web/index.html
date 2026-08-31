@@ -4861,6 +4861,15 @@ function sourceDynamicRange(f){
   if(/hlg/i.test(s)) return 'hlg';
   return s?'hdr10':null;                                 // "HDR10+" / "HDR10"
 }
+// The source's Dolby Vision profile as a number, from the same rich label
+// `hdrChip` regexes. Null for a source with no profile in its label — a row
+// scanned before the columns existed, or a file that is not Dolby Vision — in
+// which case there is nothing to compare a delivered profile against and the
+// chip stays as it was.
+function sourceDolbyVisionProfile(f){
+  const m=/profile\s*(\d+)/i.exec((f&&f.hdr_format)||"");
+  return m?Number(m[1]):null;
+}
 const RANGE_SHORT={dolby_vision:'DV',hdr10:'HDR10',hlg:'HLG',sdr:'SDR'};
 const RANGE_LONG={dolby_vision:'Dolby Vision',hdr10:'HDR10',hlg:'HLG',sdr:'SDR'};
 // The server's reason string already says *why* ("Dolby Vision metadata
@@ -4879,7 +4888,7 @@ function dynamicRangeReason(){
 //
 // `delivered` falsy — no session yet, an old server, or a session the store
 // could not resolve (§3.2) — degrades to exactly today's source-only chip.
-function dynamicRangeBadge(f, delivered, displayHdr){
+function dynamicRangeBadge(f, delivered, displayHdr, deliveredDvProfile){
   f=f||{};
   const chip=hdrChip(f); if(!chip) return null;
   const source=sourceDynamicRange(f);
@@ -4891,7 +4900,25 @@ function dynamicRangeBadge(f, delivered, displayHdr){
   // delivered HDR and rendered SDR.
   const displayLoss = delivered!=='sdr' && !displayHdr;
   const rendered = displayLoss ? 'sdr' : delivered;
-  if(rendered===source) return {...lit, rendered, panel:`${RANGE_LONG[source]} (rendering)`};
+  if(rendered===source){
+    // Same grade, different profile: the Profile 7 → 8.1 conversion
+    // (PLAYBACK-CAPS-V2-PLAN §4.8). Neither half dims — the base layer is
+    // copied byte for byte, nothing is re-encoded, and what reaches this
+    // browser really is Dolby Vision — but the profile on screen is not the
+    // profile on disk, and a chip that said plain `DV P7` would be describing
+    // the file rather than the picture (MEDIA-BADGES-PLAN §2.3).
+    const sourceDv=sourceDolbyVisionProfile(f);
+    if(source==='dolby_vision' && deliveredDvProfile && sourceDv && deliveredDvProfile!==sourceDv){
+      const arrow=`DV P${deliveredDvProfile}`;
+      return {cls:chip.cls, text:`${chip.text} → ${arrow}`, base:chip.text, arrow,
+        full:`${chip.full} — playing as Dolby Vision Profile ${deliveredDvProfile} `
+          +`(converted for this browser; the HDR10-compatible base layer is copied untouched)`,
+        aria:`Dolby Vision Profile ${sourceDv}, playing as Dolby Vision Profile ${deliveredDvProfile}`,
+        panel:`Dolby Vision Profile ${deliveredDvProfile} — converted for this browser`,
+        off:false, source, rendered};
+    }
+    return {...lit, rendered, panel:`${RANGE_LONG[source]} (rendering)`};
+  }
   const note = displayLoss ? "this browser did not expose HDR presentation"
     : (dynamicRangeReason()
       || (rendered==='sdr' ? `tone-mapped from ${RANGE_LONG[source]||'the source grade'}`
@@ -4943,7 +4970,7 @@ function playerFactBadges(){
   // during playback, where "what am I getting?" is the question. The detail
   // page's specBadges() deliberately stays source-only: there is no session to
   // report on there.
-  const h=dynamicRangeBadge(s, PLAYER.deliveredRange, displayIsHdr());
+  const h=dynamicRangeBadge(s, PLAYER.deliveredRange, displayIsHdr(), PLAYER.deliveredDvProfile);
   if(h) b.push(`<span class="vbadge ${h.cls}${h.off?' off':''}" title="${esc(h.full||h.text)}" aria-label="${
     esc(h.aria||h.text)}">${mediaIcon('dynamic')}<span class="vsrc">${esc(h.base)}</span>${
     h.arrow?`<span class="varrow">→ ${esc(h.arrow)}</span>`:''}</span>`);
@@ -5229,7 +5256,8 @@ function prePlayApplication(decision, selection){
   const sub=selection&&selection.subtitle!=null?selection.subtitle:null;
   const action=prePlayBurnNeeded(decision, sub)
     ? PlaybackPolicy.subtitleBurnAction({requiresBurn:true,
-        deliveredRange:decision.delivered_dynamic_range})
+        deliveredRange:decision.delivered_dynamic_range,
+        deliveredDvProfile:decision.delivered_dolby_vision_profile||null})
     : "native";
   return {
     subtitle:sub,
@@ -5737,7 +5765,7 @@ async function setWatched(id, watched){
 //  direct_play → native <video>, client-side seek/resume
 //  remux       → progressive fMP4 from ffmpeg, server fast-seek for resume
 //  transcode   → HLS via hls.js (ffmpeg tone-maps/re-encodes), offset resume
-let PLAYER={fileId:null,timer:null,offset:0,hls:null,knownDur:0,durMs:0,markers:[],source:null,started:false,idleTimer:null,autoskip:false,deliveredRange:null,waitTimer:null,bookOffset:0,bookDuration:0,bookParts:null};
+let PLAYER={fileId:null,timer:null,offset:0,hls:null,knownDur:0,durMs:0,markers:[],source:null,started:false,idleTimer:null,autoskip:false,deliveredRange:null,deliveredDvProfile:null,waitTimer:null,bookOffset:0,bookDuration:0,bookParts:null};
 let PLAYER_WIRED=false;
 // Native HLS (`video.src = playlist.m3u8`) is for real Safari ONLY — it's what
 // makes AirPlay work (an MSE stream can't be flung to an Apple TV). The trap:
@@ -6579,6 +6607,10 @@ function attachSession(v, t, info, wantSec){
   // create whose source lookup came back None) keeps whatever we had: the
   // decision's value is still the best answer. MEDIA-BADGES-PLAN.md §3.2.
   if(info.delivered_dynamic_range) t.deliveredRange=info.delivered_dynamic_range;
+  // Absent means "this session carries no Dolby Vision", which is an answer,
+  // so it is written unconditionally where the range beside it is not: a
+  // session that stripped must clear a profile an earlier decision reported.
+  if(info.delivered_dynamic_range) t.deliveredDvProfile=info.delivered_dolby_vision_profile||null;
   // …and repaint, or the chip keeps its pre-session HTML forever while the
   // one-second stats panel follows the new truth. That is how "DV P7 → HDR10"
   // sat beside "Dynamic range: SDR" on a tone-mapped Dexter episode: both
@@ -7063,7 +7095,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
       learnedLimitView=PlaybackPolicy.learnedDecodeLimitView({
         source:decision.source||{},limit:lim,
         ordinaryRange:decision.delivered_dynamic_range,
-        deliveredRange:decision.delivered_dynamic_range
+        deliveredRange:decision.delivered_dynamic_range,
+        deliveredDvProfile:decision.delivered_dolby_vision_profile||null
       });
       clientLog({level:"info",event:"decode_limit_retest",
         message:`re-testing ${decodeLimitLabel(decision.source||{})} on Auto — `+
@@ -7079,7 +7112,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
         if(!openIsCurrent()) return;
         learnedLimitView=PlaybackPolicy.learnedDecodeLimitView({
           source:decision.source||{},limit:lim,ordinaryRange,
-          deliveredRange:d2.delivered_dynamic_range
+          deliveredRange:d2.delivered_dynamic_range,
+          deliveredDvProfile:d2.delivered_dolby_vision_profile||null
         });
         d2.reasons=[`${learnedLimitView.reason} `+
           `(Quality → Original bypasses this measurement)`].concat(d2.reasons||[]);
@@ -7156,6 +7190,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     // decision never promised); direct play has no session, so this stands for
     // the whole playback. MEDIA-BADGES-PLAN.md §3.2.
     deliveredRange:decision.delivered_dynamic_range||null,
+    deliveredDvProfile:decision.delivered_dolby_vision_profile||null,
     playStartedAt:clickedAt, ttffMs:null, stalls:0, sessionId:null, streamId:null, health:null,
     attemptId:null, attemptReason:null, bufferLimits:null,
     ladder, priorKbps, autoHeight:autoStartHeight,
@@ -10231,7 +10266,7 @@ function updateStats(){
     // sentence, with the server's own reason. Same pure function, same parts —
     // the two can never drift into disagreeing. Absent for an SDR source:
     // there is no grade to have an opinion about.
-    (()=>{ const d=dynamicRangeBadge(PLAYER.source||{}, PLAYER.deliveredRange, displayIsHdr());
+    (()=>{ const d=dynamicRangeBadge(PLAYER.source||{}, PLAYER.deliveredRange, displayIsHdr(), PLAYER.deliveredDvProfile);
       return d?{l:"Dynamic range",note:true,c:d.off?"stat-muted":"",v:`${esc(d.panel)}`}:null; })(),
     {l:"Dropped",c:statsToneClass(droppedCount==null?'muted':droppedCount===0?'good':droppedCount<3?'warn':'bad'),
       v:`${dropped} frames`},
@@ -10315,7 +10350,7 @@ function updateStats(){
   ];
   const debugHtml=panelHtml(debugSections);
 
-  const rangeBadge=dynamicRangeBadge(PLAYER.source||{}, PLAYER.deliveredRange, displayIsHdr());
+  const rangeBadge=dynamicRangeBadge(PLAYER.source||{}, PLAYER.deliveredRange, displayIsHdr(), PLAYER.deliveredDvProfile);
   // Two forms, two audiences. `.panel` is the full sentence ("SDR — this
   // browser did not expose HDR presentation") and it belongs in the standard
   // and debug ledgers, where there is a column for a sentence. `.text` is the

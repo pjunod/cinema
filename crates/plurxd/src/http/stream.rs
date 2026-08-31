@@ -2538,6 +2538,7 @@ mod tests {
             preserve_dolby_vision: true,
             container: "mp4",
             delivered_dynamic_range: "dolby_vision",
+            delivered_dolby_vision_profile: Some(8),
             transcode_grade: plurx_core::transcode::OutputGrade::Sdr,
         }
     }

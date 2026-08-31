@@ -2814,6 +2814,67 @@ asyncTest("the Dolby Vision probe is unchanged by the tiering", async () => {
   assert.match(safari.capsQuery(caps), /&dv=1&dvprofile=5,8&/);
 });
 
+test("a converted Dolby Vision stream names the profile it is playing as", () => {
+  // The badge state PLAYBACK-CAPS-V2-PLAN §4.8 adds and MEDIA-BADGES-PLAN
+  // §2.3 spells out. A Profile 7 disc remux converted to 8.1 for a browser
+  // that takes 8 and not 7 is delivered `dolby_vision` — the same value a
+  // preserved Profile 7 answers — so the range alone cannot tell the two
+  // apart, and a chip reading plain `DV P7` for both is describing the file
+  // rather than the picture.
+  //
+  // Neither half dims. The base layer is copied byte for byte and nothing is
+  // re-encoded, so the source capability is active; dimming it would say the
+  // opposite of what happened.
+  const build = new Function(
+    "RANGE_SHORT",
+    "RANGE_LONG",
+    [
+      shippedSource("hdrChip"),
+      shippedSource("sourceDynamicRange"),
+      shippedSource("sourceDolbyVisionProfile"),
+      shippedSource("dynamicRangeReason"),
+      shippedSource("dynamicRangeBadge"),
+      "return {dynamicRangeBadge};",
+    ].join("\n"),
+  );
+  const { dynamicRangeBadge } = build(
+    { dolby_vision: "DV", hdr10: "HDR10", hlg: "HLG", sdr: "SDR" },
+    { dolby_vision: "Dolby Vision", hdr10: "HDR10", hlg: "HLG", sdr: "SDR" },
+  );
+
+  const p7 = {
+    hdr: "dolby_vision",
+    hdr_format: "Dolby Vision · Profile 7 (HDR10-compatible)",
+  };
+
+  const converted = dynamicRangeBadge(p7, "dolby_vision", true, 8);
+  assert.equal(converted.text, "DV P7 → DV P8");
+  assert.equal(converted.off, false, "nothing about the grade was lost");
+  assert.match(converted.aria, /Profile 7, playing as Dolby Vision Profile 8/);
+
+  // A client that decodes Profile 7 gets it untouched, and the arrow would be
+  // a lie: the profile on screen is the profile on disk.
+  const preserved = dynamicRangeBadge(p7, "dolby_vision", true, 7);
+  assert.equal(preserved.text, "DV P7");
+  assert.equal(preserved.arrow, null);
+
+  // A server too old to send the field, or a session that carries no Dolby
+  // Vision, degrades to exactly the chip that shipped before this.
+  assert.equal(dynamicRangeBadge(p7, "dolby_vision", true).text, "DV P7");
+  assert.equal(dynamicRangeBadge(p7, "dolby_vision", true, null).text, "DV P7");
+
+  // A stripped stream is a different grade and keeps the dimmed state it had:
+  // there the source capability really is unavailable.
+  const stripped = dynamicRangeBadge(p7, "hdr10", true, null);
+  assert.equal(stripped.text, "DV P7 → HDR10");
+  assert.equal(stripped.off, true);
+
+  // A row scanned before the profile columns existed has no number to compare
+  // against, so it stays as it was rather than inventing an arrow.
+  const unlabelled = { hdr: "dolby_vision", hdr_format: "Dolby Vision" };
+  assert.equal(dynamicRangeBadge(unlabelled, "dolby_vision", true, 8).text, "DV");
+});
+
 test("a session that lands on a different range repaints the badge", () => {
   // The field bug: on a tone-mapped Dexter episode the chip read "DV P7 →
   // HDR10" while the stats panel one line below read "Dynamic range: SDR".

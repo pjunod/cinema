@@ -151,6 +151,19 @@ pub struct StartResponse {
     /// the store mid-request: the client keeps whatever it had.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered_dynamic_range: Option<String>,
+    /// The Dolby Vision profile *this session's* bytes carry, when they carry
+    /// any. Absent for a transcode, a strip, and any source that never had
+    /// Dolby Vision — which is not the same as unknown.
+    ///
+    /// The one thing the field above cannot say. A Profile 7 title preserved
+    /// for a device that enumerates 7 and the same title converted to 8.1 for
+    /// a device that does not are both `"dolby_vision"`, and the badge that
+    /// spells both `DV P7` is telling one of them something untrue about its
+    /// own file (MEDIA-BADGES-PLAN §2.3). It overrides the decision's answer
+    /// for the same reason the range does: a burn or a forced rung produces a
+    /// session the decision never promised.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_dolby_vision_profile: Option<u8>,
     /// Optional behavior-neutral v1 control capability. It is persisted with
     /// the idempotent create result so a setting change cannot mutate the wire
     /// contract of an already-open session.
@@ -1000,20 +1013,44 @@ fn session_delivered_dynamic_range(
     kind: &crate::transcode::SessionKind,
     grade: plurx_core::transcode::OutputGrade,
 ) -> Option<&'static str> {
-    use crate::transcode::SessionKind;
     let file = source?;
-    // One helper for both wire fields, so the decision and the session can
-    // never disagree about the same delivery.
-    let (method, preserve) = match kind {
-        SessionKind::Copy {
-            preserve_dolby_vision,
-            ..
-        } => (PlaybackMethod::Remux, *preserve_dolby_vision),
-        SessionKind::Transcode { .. } => (PlaybackMethod::Transcode, false),
-    };
+    let (method, preserve, _) = session_delivery_shape(kind);
     Some(plurx_core::playback::delivered_dynamic_range(
         file, method, preserve, grade,
     ))
+}
+
+/// The Dolby Vision profile this session's bytes carry, read off the session
+/// it actually built — same rule, same reason, as the range beside it.
+fn session_delivered_dolby_vision_profile(
+    source: Option<&MediaFile>,
+    kind: &crate::transcode::SessionKind,
+) -> Option<u8> {
+    let file = source?;
+    let (method, preserve, convert) = session_delivery_shape(kind);
+    plurx_core::playback::delivered_dolby_vision_profile(file, method, preserve, convert)
+}
+
+/// What a session kind means to the two badge helpers.
+///
+/// One reading for both, so the range and the profile can never disagree
+/// about the same delivery — a session badged `dolby_vision` with no profile,
+/// or a profile on a stream whose range says HDR10, is a worse answer than
+/// either field alone.
+fn session_delivery_shape(kind: &crate::transcode::SessionKind) -> (PlaybackMethod, bool, bool) {
+    use crate::transcode::SessionKind;
+    match kind {
+        SessionKind::Copy {
+            preserve_dolby_vision,
+            convert_dolby_vision,
+            ..
+        } => (
+            PlaybackMethod::Remux,
+            *preserve_dolby_vision,
+            *convert_dolby_vision,
+        ),
+        SessionKind::Transcode { .. } => (PlaybackMethod::Transcode, false, false),
+    }
 }
 
 /// POST /api/v1/files/:id/hls/sessions — create a stream, or recover the one
@@ -1795,6 +1832,10 @@ pub async fn create(
         ladder: crate::transcode::advertised_ladder(source_height, ladder_ceiling),
         prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
         delivered_dynamic_range: delivered.map(str::to_owned),
+        delivered_dolby_vision_profile: session_delivered_dolby_vision_profile(
+            source.as_ref(),
+            &info.kind,
+        ),
         control: advertise_control.then(|| {
             crate::playback_control::ControlBootstrap::new(
                 &info.session_id,
@@ -8604,6 +8645,7 @@ mod tests {
             ladder: vec![],
             prior_kbps: None,
             delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
             control: crate::playback_control::ControlBootstrap::new(
                 &session_id,
                 &generation,
@@ -9220,6 +9262,7 @@ mod tests {
             ladder: vec![],
             prior_kbps: None,
             delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
             control: crate::playback_control::ControlBootstrap::new(
                 &session_id,
                 &generation,
@@ -9449,6 +9492,7 @@ mod tests {
                 ladder: vec![],
                 prior_kbps: None,
                 delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
                 control: crate::playback_control::ControlBootstrap::new(
                     &session_id,
                     &generation,
