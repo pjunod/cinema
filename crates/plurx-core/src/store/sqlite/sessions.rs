@@ -217,16 +217,21 @@ fn abort_staged_generation(
                 AND staged_incarnation_id = ?2)",
         params![now_ms, staged_incarnation_id, user_id, playback_id],
     )?;
-    // The next two chain on the retirement above rather than re-reading the
-    // ledger: "this row is ended and was ended at this instant" proves the
-    // first statement fired, which a second ledger lookup does not. It is the
-    // guard the replicated twin uses, and the two must read the same.
+    // The next two carry BOTH guards. "Ended at this instant" alone is not
+    // proof the retirement above fired: `now_ms` is the caller's, not the
+    // retirement's, so a row that happened to be ended at exactly that
+    // millisecond by anything else would satisfy it — and an incarnation id
+    // names any session in the database. The ledger EXISTS is what makes this
+    // a staged successor of this playback; the timestamp is what makes it
+    // this abort's own work.
     tx.execute(
         "DELETE FROM cache_consumer_pins
           WHERE consumer_kind = 'media_session' AND consumer_id = ?1
             AND EXISTS (SELECT 1 FROM media_sessions
-              WHERE incarnation_id = ?1 AND state = 'ended' AND updated_at_ms = ?2)",
-        params![staged_incarnation_id, now_ms],
+              WHERE incarnation_id = ?1 AND state = 'ended' AND updated_at_ms = ?2)
+            AND EXISTS (SELECT 1 FROM media_session_preparations
+              WHERE user_id = ?3 AND playback_id = ?4 AND staged_incarnation_id = ?1)",
+        params![staged_incarnation_id, now_ms, user_id, playback_id],
     )?;
     tx.execute(
         "UPDATE job_leases
@@ -235,11 +240,15 @@ fn abort_staged_generation(
                 revision = revision + 1, updated_at_ms = ?1
           WHERE resource = ?2 AND revision < 9223372036854775807
             AND EXISTS (SELECT 1 FROM media_sessions
-              WHERE incarnation_id = ?3 AND state = 'ended' AND updated_at_ms = ?1)",
+              WHERE incarnation_id = ?3 AND state = 'ended' AND updated_at_ms = ?1)
+            AND EXISTS (SELECT 1 FROM media_session_preparations
+              WHERE user_id = ?4 AND playback_id = ?5 AND staged_incarnation_id = ?3)",
         params![
             now_ms,
             format!("session:{staged_incarnation_id}"),
             staged_incarnation_id,
+            user_id,
+            playback_id,
         ],
     )?;
     tx.execute(
@@ -1385,6 +1394,19 @@ impl MediaSessionStore for SqliteStore {
             // `Err` means malformed input or a real database fault while a
             // lost race is `Ok(None)`. The replicated twin inlines the same
             // check into its INSERT for the same reason.
+            // A node the cluster has fenced off cannot activate or renew a
+            // session; it must not be able to prepare one either, or it would
+            // go on to commit and move the playback pointer to a session
+            // owned by a node nobody can reach.
+            let removed_owner: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM settings WHERE key = ?1",
+                params![removed_job_owner_key(&preparation.owner_node_id)],
+                |row| row.get(0),
+            )?;
+            if removed_owner > 0 {
+                tx.commit()?;
+                return Ok(None);
+            }
             let staged_elsewhere: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM media_session_preparations
                   WHERE staged_incarnation_id = ?1",

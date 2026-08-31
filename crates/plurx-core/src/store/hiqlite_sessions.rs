@@ -1203,21 +1203,67 @@ impl MediaSessionStore for HiqliteAuthStore {
         // RETURNING. The pointer identity, the ledger's emptiness and all
         // three admission bounds therefore appear inside the INSERT itself.
         let prepare_lease_resource = format!("session:{}", preparation.incarnation_id);
+        let removed_owner_key = removed_job_owner_key(&preparation.owner_node_id);
         let statements: Vec<(&str, hiqlite::Params)> = vec![
             (
                 // The staged row's own session lease, taken before the row as
                 // activation does. Without it the successor can never be
                 // renewed or taken over: renewal's first statement is an
                 // UPDATE on this exact resource, and takeover requires it.
+                //
+                // It carries the WHOLE precondition set, not just its own.
+                // There is no rollback here — a replicated transaction that
+                // commits has committed — so a lease taken on a prepare that
+                // the later statements then refuse is a durable orphan, and
+                // the orphan satisfies the next attempt's lease guard, which
+                // makes that attempt insert its rows and still report a loss.
+                // Every statement in this transaction therefore fires on
+                // exactly the same conditions or none of them do.
+                //
+                // An upsert rather than an insert-if-absent, for the same
+                // reason activation uses one: a recycled resource left by a
+                // prior life must be refreshable by its own owner instead of
+                // wedging the playback until retention expiry.
                 "INSERT INTO job_leases
                     (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
                  SELECT $1, $2, 1, 1, $3, $4
-                  WHERE NOT EXISTS (SELECT 1 FROM job_leases WHERE resource = $1)",
+                  WHERE EXISTS (SELECT 1 FROM media_playback_pointers
+                      WHERE user_id = $5 AND playback_id = $6
+                        AND current_incarnation_id = $7)
+                    AND NOT EXISTS (SELECT 1 FROM media_session_preparations
+                      WHERE user_id = $5 AND playback_id = $6)
+                    AND NOT EXISTS (SELECT 1 FROM media_session_preparations
+                      WHERE staged_incarnation_id = $8)
+                    AND NOT EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $8)
+                    AND (SELECT COUNT(*) FROM media_sessions
+                          WHERE user_id = $5 AND state IN ('starting', 'active')
+                            AND lease_expires_at_ms > $4 AND incarnation_id != $8) < $9
+                    AND (SELECT COUNT(*) FROM media_sessions
+                          WHERE user_id = $5 AND incarnation_id != $8) < $10
+                    AND (SELECT COUNT(*) FROM media_sessions
+                          WHERE owner_node_id = $2 AND state = 'active'
+                            AND lease_expires_at_ms > $4 AND incarnation_id != $8) < $11
+                    AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $12)
+                 ON CONFLICT(resource) DO UPDATE SET
+                    expires_at_ms = excluded.expires_at_ms,
+                    revision = job_leases.revision + 1,
+                    updated_at_ms = excluded.updated_at_ms
+                  WHERE job_leases.owner_node_id = excluded.owner_node_id
+                    AND job_leases.fence = 1 AND job_leases.expires_at_ms > $4
+                    AND job_leases.revision < 9223372036854775807",
                 params!(
                     prepare_lease_resource.as_str(),
                     preparation.owner_node_id.as_str(),
                     preparation.deadline_ms,
-                    preparation.now_ms
+                    preparation.now_ms,
+                    preparation.user_id,
+                    preparation.playback_id.as_str(),
+                    preparation.expected_predecessor_incarnation_id.as_str(),
+                    preparation.incarnation_id.as_str(),
+                    MAX_CURRENT_PER_USER,
+                    MAX_SESSION_ROWS_PER_USER,
+                    MAX_OWNED,
+                    removed_owner_key.as_str()
                 ),
             ),
             (
@@ -1245,7 +1291,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                           WHERE user_id = $3 AND incarnation_id != $1) < $15
                     AND (SELECT COUNT(*) FROM media_sessions
                           WHERE owner_node_id = $6 AND state = 'active'
-                            AND lease_expires_at_ms > $12 AND incarnation_id != $1) < $16",
+                            AND lease_expires_at_ms > $12 AND incarnation_id != $1) < $16
+                    AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $17)",
                 params!(
                     preparation.incarnation_id.as_str(),
                     preparation.session_id.as_str(),
@@ -1262,7 +1309,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     preparation.expected_predecessor_incarnation_id.as_str(),
                     MAX_CURRENT_PER_USER,
                     MAX_SESSION_ROWS_PER_USER,
-                    MAX_OWNED
+                    MAX_OWNED,
+                    removed_owner_key.as_str()
                 ),
             ),
             (
@@ -1313,15 +1361,27 @@ impl MediaSessionStore for HiqliteAuthStore {
         let route = route_by(self, "incarnation_id", &preparation.incarnation_id)
             .await?
             .filter(|route| preparation_route_matches(route, preparation));
-        let Some(route) = route else {
+        let staged = staged_row(self, preparation.user_id, &preparation.playback_id).await?;
+        let staged_is_ours = staged.map(|staged| staged.staged_incarnation_id).as_deref()
+            == Some(preparation.incarnation_id.as_str());
+        let Some(route) = route.filter(|_| staged_is_ours) else {
+            // There is nothing to roll back — a replicated transaction that
+            // commits has committed — so the cleanup is explicit. Without it a
+            // caller told it lost would leave a live staged row holding the
+            // one-per-playback slot and a slot of the user's admission cap,
+            // with nobody left who would ever commit or abort it. The SQLite
+            // twin reaches the same durable state by rolling back.
+            if staged_is_ours {
+                self.abort_media_session_preparation(
+                    preparation.user_id,
+                    &preparation.playback_id,
+                    &preparation.incarnation_id,
+                    preparation.now_ms,
+                )
+                .await?;
+            }
             return Ok(None);
         };
-        let staged = staged_row(self, preparation.user_id, &preparation.playback_id).await?;
-        if staged.map(|staged| staged.staged_incarnation_id).as_deref()
-            != Some(preparation.incarnation_id.as_str())
-        {
-            return Ok(None);
-        }
         Ok(Some(route))
     }
 
@@ -1573,8 +1633,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "DELETE FROM cache_consumer_pins
                   WHERE consumer_kind = 'media_session' AND consumer_id = $1
                     AND EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)",
-                params!(staged_incarnation_id, now_ms),
+                      WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)
+                    AND EXISTS (SELECT 1 FROM media_session_preparations
+                      WHERE user_id = $3 AND playback_id = $4
+                        AND staged_incarnation_id = $1)",
+                params!(staged_incarnation_id, now_ms, user_id, playback_id),
             ),
             (
                 "UPDATE job_leases
@@ -1583,8 +1646,17 @@ impl MediaSessionStore for HiqliteAuthStore {
                         revision = revision + 1, updated_at_ms = $1
                   WHERE resource = $2 AND revision < 9223372036854775807
                     AND EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)",
-                params!(now_ms, lease_resource.as_str(), staged_incarnation_id),
+                      WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)
+                    AND EXISTS (SELECT 1 FROM media_session_preparations
+                      WHERE user_id = $4 AND playback_id = $5
+                        AND staged_incarnation_id = $3)",
+                params!(
+                    now_ms,
+                    lease_resource.as_str(),
+                    staged_incarnation_id,
+                    user_id,
+                    playback_id
+                ),
             ),
             (
                 "DELETE FROM media_session_preparations
@@ -3431,9 +3503,18 @@ mod tests {
                 .matches("state = 'ended' AND updated_at_ms = $")
                 .count(),
             2,
-            "the pin delete and the lease clamp chain on that retirement \
-             having fired at this instant, which is stronger than re-reading \
-             the ledger and is what the SQLite twin now does too"
+            "the pin delete and the lease clamp also chain on that retirement \
+             having fired at this instant — `now_ms` is the caller's, so the \
+             timestamp alone is not proof, and the ledger EXISTS alone does \
+             not say the work is this abort's"
+        );
+        assert_eq!(
+            source
+                .matches("EXISTS (SELECT 1 FROM media_session_preparations")
+                .count(),
+            3,
+            "all three mutations are ledger-gated; only the ledger DELETE \
+             itself is not, and it comes last"
         );
         let ledger_delete = source
             .find("DELETE FROM media_session_preparations")

@@ -1209,6 +1209,237 @@ async fn media_session_commit_replay_survives_a_later_preparation() {
     .await;
 }
 
+/// The admission cap counts the predecessor, because a prepare does not reap
+/// it.
+///
+/// Activation's counting queries exclude the incarnation the pointer names, and
+/// that exclusion is correct there: the same transaction is about to end it.
+/// Copied into prepare it discounted a slot that was not being freed, and the
+/// user ended up one session past a cap the store is supposed to enforce.
+#[tokio::test]
+async fn media_session_prepare_does_not_discount_the_predecessor_against_the_cap() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-cap-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-cap user: {error}"));
+        // One live session per playback, up to the cap. The last one is the
+        // predecessor the preparation will be made against.
+        let cap = 64usize;
+        let mut last = String::new();
+        for index in 0..cap {
+            let incarnation = format!("00000000-0000-4000-8000-0000000{index:05x}");
+            let session = format!("00000000-0000-4000-8000-0000001{index:05x}");
+            current_media_session(
+                store.as_ref(),
+                user.id,
+                &format!("staged-cap-playback-{index}"),
+                &incarnation,
+                &session,
+                backend,
+            )
+            .await;
+            last = incarnation;
+        }
+        let refused = store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                &format!("staged-cap-playback-{}", cap - 1),
+                "00000000-0000-4000-8000-0000000fffff",
+                "00000000-0000-4000-8000-0000001fffff",
+                &last,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare at the cap: {error}"));
+        assert!(
+            refused.is_none(),
+            "{backend}: a user at the cap gets no 65th session by preparing \
+             one — the predecessor is still playing and its slot is not free"
+        );
+    })
+    .await;
+}
+
+/// A staged successor ended by something other than expiry is not committable,
+/// and the attempt must release the slot rather than wedge it.
+///
+/// Without the `state = 'active'` guard on the pointer CAS, SQLite advanced the
+/// pointer to an `ended` row, retired the predecessor, and then threw the whole
+/// transaction away when the projection failed — leaving the ledger row behind
+/// and the playback locked out of preparation until maintenance.
+#[tokio::test]
+async fn media_session_commit_of_an_ended_successor_releases_the_slot() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-ended-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-ended user: {error}"));
+        let playback = "staged-ended-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fa01";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fa02",
+            backend,
+        )
+        .await;
+        let before = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route before: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: predecessor current"));
+        let staged = "00000000-0000-4000-8000-00000000fa03";
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                staged,
+                "00000000-0000-4000-8000-00000000fa04",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: prepare must win"));
+        // An admin stop, a delete — anything that ends the staged row while
+        // its ledger entry is still there.
+        store
+            // By session id, which is what this method takes — the staged
+            // row's, not the predecessor's.
+            .end_media_session("00000000-0000-4000-8000-00000000fa04", "admin_stop", 2_500)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: end staged: {error}"));
+
+        assert!(
+            store
+                .commit_media_session_preparation(user.id, playback, staged, 3_000, 900_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: commit an ended successor: {error}"))
+                .is_none(),
+            "{backend}: an ended successor cannot become current"
+        );
+        let after = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route after: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the predecessor is still current"));
+        assert_eq!(
+            after, before,
+            "{backend}: and the predecessor is neither retired nor pointed away from"
+        );
+        assert!(
+            store
+                .staged_media_session_for_playback(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: staged after: {error}"))
+                .is_none(),
+            "{backend}: the slot is released rather than wedged until maintenance"
+        );
+    })
+    .await;
+}
+
+/// A prepare replay is an *exact* replay. A different recipe under the same
+/// incarnation is a different preparation and must not read back.
+#[tokio::test]
+async fn media_session_prepare_replay_requires_the_same_request() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-identity-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-identity user: {error}"));
+        let playback = "staged-identity-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fb01";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fb02",
+            backend,
+        )
+        .await;
+        let staged = "00000000-0000-4000-8000-00000000fb03";
+        let preparation = staged_preparation(
+            user.id,
+            playback,
+            staged,
+            "00000000-0000-4000-8000-00000000fb04",
+            predecessor,
+        );
+        store
+            .prepare_media_session(&preparation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: prepare must win"));
+
+        let mut rederived = preparation.clone();
+        rederived.request_fingerprint = "c".repeat(64);
+        assert!(
+            store
+                .prepare_media_session(&rederived)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: re-derived prepare: {error}"))
+                .is_none(),
+            "{backend}: a different recipe under the same incarnation is not \
+             the preparation that is already staged"
+        );
+    })
+    .await;
+}
+
+/// A node the cluster has fenced off must not be able to stage a successor.
+///
+/// It cannot activate or renew one; letting it prepare would let it go on to
+/// commit and move the playback pointer to a session nobody can reach.
+#[tokio::test]
+async fn media_session_a_removed_owner_cannot_prepare() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-removed-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-removed user: {error}"));
+        let playback = "staged-removed-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fc01";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fc02",
+            backend,
+        )
+        .await;
+        store
+            .put_setting(
+                // Spelled out rather than imported: the key builder is
+                // crate-private, and a contract test that reached inside for
+                // it would stop being a test of the contract.
+                "internal.cluster_job_owner_removed.staged-node",
+                "removed",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fence the owner: {error}"));
+
+        assert!(
+            store
+                .prepare_media_session(&staged_preparation(
+                    user.id,
+                    playback,
+                    "00000000-0000-4000-8000-00000000fc03",
+                    "00000000-0000-4000-8000-00000000fc04",
+                    predecessor,
+                ))
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: removed-owner prepare: {error}"))
+                .is_none(),
+            "{backend}: a fenced-off node cannot stage a successor"
+        );
+    })
+    .await;
+}
+
 /// Acceptance 7 — the owner died mid-preparation and nothing ever aborts it.
 ///
 /// Maintenance is the backstop for exactly this, and it is a backstop rather
