@@ -1022,11 +1022,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +3 (M3): `Response::status()` reads in the caps-document body-limit test.
 # They are HTTP status codes on an in-process `oneshot` response — no child
 # process, no producer, nothing to own.
-# +4: `ProducerDecisionReason::status()` reads — one in `from_status`, three in
-# the tests that pin the permanence split and the wire names. All are
-# `&'static str` lookups on a fieldless enum used to bound one wire field;
-# none launches anything or owns a producer.
-expected_occurrences = 185
+# +10: `ProducerDecisionReason::status()` reads — one in `from_status`, one in
+# the terminal message fallback, two in the relay believability check, and six
+# across the tests that pin the permanence split, the action ranking and the
+# wire names. All are `&'static str` lookups on a fieldless enum used to name
+# one wire field; none launches anything or owns a producer.
+expected_occurrences = 191
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

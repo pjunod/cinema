@@ -41,6 +41,11 @@ const MAX_CAPABILITY_VALUES: usize = 8;
 const MAX_SUPPORTED_ACTIONS: usize = 16;
 const MAX_ACTION_NAME_LEN: usize = 32;
 const HOLD_ACTION: &str = "hold";
+const TERMINAL_ACTION: &str = "terminal";
+const RETRY_RESOURCE_ACTION: &str = "retry_resource";
+/// The longest explanation a terminal action carries, matching the error
+/// body's bound: it is operator-facing text on a client-visible path.
+const MAX_TERMINAL_MESSAGE_BYTES: usize = 512;
 const MIN_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 const RELAY_BUCKETS_MS: [u64; 9] = [10, 25, 50, 100, 250, 500, 1_000, 2_500, 4_000];
 /// Compatibility budget retained only by legacy actor fixtures. Production
@@ -253,9 +258,14 @@ impl ControlRequestV1 {
 
     /// Whether this client said it will apply `hold`.
     pub(crate) fn accepts_hold(&self) -> bool {
+        self.accepts(HOLD_ACTION)
+    }
+
+    /// Whether this client said it will apply the named action.
+    pub(crate) fn accepts(&self, action: &str) -> bool {
         self.supported_actions
             .as_deref()
-            .is_some_and(|actions| actions.iter().any(|name| name == HOLD_ACTION))
+            .is_some_and(|actions| actions.iter().any(|name| name == action))
     }
 
     /// Canonical digest for binding a retained terminal acknowledgement to
@@ -600,13 +610,33 @@ impl ControlResponseV1 {
     /// action at all. Anything else is a peer inventing an instruction out of
     /// a fact it did not send, and the client would obey it.
     fn action_is_believable(&self, request: &ControlRelayRequest) -> bool {
-        match &self.action {
-            ControlAction::None => true,
-            ControlAction::Hold { reason } => {
-                request.control.accepts_hold()
-                    && self.delivery.hold_reason.as_deref() == Some(reason.as_delivery_str())
+        let declared = self
+            .action
+            .vocabulary_name()
+            .is_none_or(|name| request.control.accepts(name));
+        declared
+            && match &self.action {
+                ControlAction::None => true,
+                ControlAction::Hold { reason } => {
+                    self.delivery.hold_reason.as_deref() == Some(reason.as_delivery_str())
+                }
+                // Both verdicts must agree with the decision the same response
+                // reported, and the permanence must match the verdict: a peer
+                // calling a retryable decision terminal would end a playable
+                // session, and the reverse would loop a client forever.
+                ControlAction::Terminal { code, message } => {
+                    self.delivery.producer_decision.as_deref() == Some(code.status())
+                        && code.is_permanent()
+                        && !message.is_empty()
+                        && message.len() <= MAX_TERMINAL_MESSAGE_BYTES
+                }
+                ControlAction::RetryResource { after_ms, reason } => {
+                    self.delivery.producer_decision.as_deref() == Some(reason.status())
+                        && !reason.is_permanent()
+                        && *after_ms > 0
+                        && *after_ms <= 60_000
+                }
             }
-        }
     }
 }
 
@@ -815,12 +845,46 @@ pub(crate) enum ControlAction {
     Hold {
         reason: HoldReason,
     },
+    /// Production stopped for a reason that trying again cannot change.
+    ///
+    /// This is the only thing besides buffer exhaustion that authorises a
+    /// client to tear down a player it is still holding buffer for. A 404 or
+    /// 410 does not: those say the route has no session to answer for, which
+    /// a client survives by continuing to consume what it already has.
+    ///
+    /// The `code` is the producer decision itself rather than a second
+    /// vocabulary invented for the wire, so an operator reading the action and
+    /// the delivery view sees one word for one fact.
+    Terminal {
+        code: ProducerDecisionReason,
+        message: String,
+    },
+    /// Production stopped for a reason that may not recur.
+    ///
+    /// Twelve of the fourteen producer decisions are timing, process or
+    /// executor facts. The client should try again on the server's own
+    /// cadence rather than deciding for itself how hard to retry, which is
+    /// what every client does today.
+    RetryResource {
+        after_ms: u32,
+        reason: ProducerDecisionReason,
+    },
 }
 
 impl ControlAction {
     /// The one action a passive client is always safe to receive.
     pub(crate) fn is_passive(&self) -> bool {
         matches!(self, Self::None)
+    }
+
+    /// The vocabulary name a client must declare to be sent this action.
+    pub(crate) fn vocabulary_name(&self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Hold { .. } => Some(HOLD_ACTION),
+            Self::Terminal { .. } => Some(TERMINAL_ACTION),
+            Self::RetryResource { .. } => Some(RETRY_RESOURCE_ACTION),
+        }
     }
 }
 
@@ -851,6 +915,8 @@ pub(crate) struct ActionMetrics {
 pub(crate) enum ActionKind {
     None = 0,
     Hold = 1,
+    Terminal = 2,
+    RetryResource = 3,
 }
 
 /// What this response's action says about the exchange, for metrics only.
@@ -865,6 +931,16 @@ pub(crate) fn action_metrics(
             hold_reason: Some(*reason),
             suppressed: false,
         },
+        ControlAction::Terminal { .. } => ActionMetrics {
+            action: ActionKind::Terminal,
+            hold_reason: None,
+            suppressed: false,
+        },
+        ControlAction::RetryResource { .. } => ActionMetrics {
+            action: ActionKind::RetryResource,
+            hold_reason: None,
+            suppressed: false,
+        },
         ControlAction::None => ActionMetrics {
             action: ActionKind::None,
             hold_reason: None,
@@ -872,11 +948,26 @@ pub(crate) fn action_metrics(
             // suppressed. A reason it does not recognise was never a candidate
             // instruction, so counting it here would inflate the gap with
             // responses no vocabulary rollout would change.
-            suppressed: !request.accepts_hold()
-                && delivery
-                    .hold_reason
-                    .as_deref()
-                    .is_some_and(|reason| HoldReason::from_delivery(reason).is_some()),
+            // A producer decision the server could have named outranks a
+            // hold, so it is the thing withheld when the client is passive.
+            suppressed: match delivery
+                .producer_decision
+                .as_deref()
+                .and_then(ProducerDecisionReason::from_status)
+            {
+                Some(decision) => !request.accepts(if decision.is_permanent() {
+                    TERMINAL_ACTION
+                } else {
+                    RETRY_RESOURCE_ACTION
+                }),
+                None => {
+                    !request.accepts_hold()
+                        && delivery
+                            .hold_reason
+                            .as_deref()
+                            .is_some_and(|reason| HoldReason::from_delivery(reason).is_some())
+                }
+            },
         },
     }
 }
@@ -889,6 +980,40 @@ pub(crate) fn resolve_action(
     if !decided.is_passive() {
         return decided.clone();
     }
+    // Ranked, and the order is the point. A verdict that trying again cannot
+    // help outranks one that says wait, which outranks one that says this
+    // pause is deliberate. A client that received `hold` when the truth was
+    // `terminal` would sit through a film that was never going to play.
+    if let Some(decision) = delivery
+        .producer_decision
+        .as_deref()
+        .and_then(ProducerDecisionReason::from_status)
+    {
+        let proposed = if decision.is_permanent() {
+            ControlAction::Terminal {
+                code: decision,
+                message: terminal_message(decision),
+            }
+        } else {
+            ControlAction::RetryResource {
+                // The server's own exchange cadence. A client should not be
+                // inventing a retry interval when the server already publishes
+                // the rate at which it wants to be asked.
+                after_ms: NEXT_EXCHANGE_MS,
+                reason: decision,
+            }
+        };
+        if proposed
+            .vocabulary_name()
+            .is_some_and(|name| request.accepts(name))
+        {
+            return proposed;
+        }
+        // The client cannot apply this one. Fall through rather than
+        // substituting a hold: a producer that has stopped is not holding, and
+        // saying so would be a comfortable lie.
+        return ControlAction::None;
+    }
     if !request.accepts_hold() {
         return ControlAction::None;
     }
@@ -897,6 +1022,26 @@ pub(crate) fn resolve_action(
         .as_deref()
         .and_then(HoldReason::from_delivery)
         .map_or(ControlAction::None, |reason| ControlAction::Hold { reason })
+}
+
+/// A bounded explanation for a terminal verdict.
+///
+/// Deliberately not the producer's own prose: that text carries file paths and
+/// ffmpeg diagnostics, and this travels to three clients and their logs.
+fn terminal_message(decision: ProducerDecisionReason) -> String {
+    let text = match decision {
+        ProducerDecisionReason::Unsupported => {
+            "this source cannot be carried by this delivery pipeline"
+        }
+        ProducerDecisionReason::InvalidConfiguration => {
+            "the requested delivery configuration is not a legal one"
+        }
+        // Only permanent decisions reach here today; a future permanent
+        // variant without its own sentence gets the reason and no invention.
+        other => other.status(),
+    };
+    debug_assert!(text.len() <= MAX_TERMINAL_MESSAGE_BYTES);
+    text.to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1743,7 +1888,7 @@ pub(crate) struct RollingLeaseSnapshot {
 /// Legacy rolling sessions remain action-passive; only an explicit
 /// actor-managed producer constructor permits production decisions before or
 /// after first-media publication.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
 pub(crate) enum ProducerDecisionReason {
@@ -1796,10 +1941,6 @@ impl ProducerDecisionReason {
     /// client seeing a failure has no way to tell "try again" from "this will
     /// never work", and every client currently guesses toward retry: it
     /// reopens the session, gets the same verdict, and reopens again.
-    /// Proven here before anything consumes it: the action that will read it
-    /// is the next slice, and shipping the split with its test now means that
-    /// slice cannot quietly get the classification wrong later.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_permanent(self) -> bool {
         matches!(self, Self::Unsupported | Self::InvalidConfiguration)
     }
@@ -8790,7 +8931,7 @@ static CONTROL_RELAY_DURATION_MICROS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_LEASE_RENEWALS: [AtomicU64; 3] =
     [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 /// Resolved actions by kind and client platform.
-static CONTROL_ACTIONS: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
+static CONTROL_ACTIONS: [[AtomicU64; 3]; 4] = [const { [const { AtomicU64::new(0) }; 3] }; 4];
 /// Holds actually sent, by reason.
 static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// Exchanges where production was held and the client had not declared the
@@ -8913,8 +9054,13 @@ pub(crate) fn record_action(
     if metrics.suppressed {
         CONTROL_ACTIONS_SUPPRESSED[platform].fetch_add(1, Ordering::Relaxed);
     }
-    CONTROL_VOCABULARY[usize::from(request.accepts_hold())][platform]
-        .fetch_add(1, Ordering::Relaxed);
+    // "Fully declared" means every action this server can send. A client that
+    // names only some of them is still partially unmanaged, and a metric that
+    // called it rolled out would hide that.
+    let complete = request.accepts(HOLD_ACTION)
+        && request.accepts(TERMINAL_ACTION)
+        && request.accepts(RETRY_RESOURCE_ACTION);
+    CONTROL_VOCABULARY[usize::from(complete)][platform].fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn record_producer_hold(reason: crate::transcode::AheadHoldReason) {
@@ -8965,7 +9111,10 @@ pub(crate) fn prometheus() -> String {
         "# HELP plurx_playback_control_actions_total Resolved playback-control actions by kind and client platform.\n\
          # TYPE plurx_playback_control_actions_total counter\n",
     );
-    for (action_index, action) in ["none", "hold"].iter().enumerate() {
+    for (action_index, action) in ["none", "hold", "terminal", "retry_resource"]
+        .iter()
+        .enumerate()
+    {
         for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
             output.push_str(&format!(
                 "plurx_playback_control_actions_total{{action=\"{action}\",platform=\"{platform}\"}} {}\n",
@@ -9005,13 +9154,13 @@ pub(crate) fn prometheus() -> String {
         ));
     }
     output.push_str(
-        "# HELP plurx_playback_control_vocabulary_total Accepted exchanges by client platform and whether the client declared it accepts a hold.\n\
+        "# HELP plurx_playback_control_vocabulary_total Accepted exchanges by client platform and whether the client declared every action this server can send.\n\
          # TYPE plurx_playback_control_vocabulary_total counter\n",
     );
     for (accepts_index, accepts) in ["false", "true"].iter().enumerate() {
         for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
             output.push_str(&format!(
-                "plurx_playback_control_vocabulary_total{{accepts_hold=\"{accepts}\",platform=\"{platform}\"}} {}\n",
+                "plurx_playback_control_vocabulary_total{{complete=\"{accepts}\",platform=\"{platform}\"}} {}\n",
                 CONTROL_VOCABULARY[accepts_index][platform_index].load(Ordering::Relaxed)
             ));
         }
@@ -9568,6 +9717,146 @@ mod tests {
                 "{name} is not a wire-safe name",
             );
         }
+    }
+
+    fn delivery_with_decision(decision: &str) -> DeliveryView {
+        let mut delivery = delivery_with_hold(None);
+        delivery.producer_state = "failed".to_owned();
+        delivery.producer_decision = Some(decision.to_owned());
+        delivery
+    }
+
+    fn accepts_everything() -> ControlRequestV1 {
+        let mut request = request();
+        request.supported_actions = Some(vec![
+            HOLD_ACTION.to_owned(),
+            TERMINAL_ACTION.to_owned(),
+            RETRY_RESOURCE_ACTION.to_owned(),
+        ]);
+        request
+    }
+
+    #[test]
+    fn a_permanent_decision_ends_the_session_and_a_transient_one_does_not() {
+        let client = accepts_everything();
+        for reason in ProducerDecisionReason::ALL {
+            let delivery = delivery_with_decision(reason.status());
+            let action = resolve_action(&ControlAction::None, &delivery, &client);
+            if reason.is_permanent() {
+                let ControlAction::Terminal { code, message } = action else {
+                    panic!("{} must end the session", reason.status());
+                };
+                assert_eq!(code, reason);
+                assert!(!message.is_empty());
+                assert!(message.len() <= MAX_TERMINAL_MESSAGE_BYTES);
+            } else {
+                assert_eq!(
+                    action,
+                    ControlAction::RetryResource {
+                        after_ms: NEXT_EXCHANGE_MS,
+                        reason,
+                    },
+                    "{} must be retryable",
+                    reason.status(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stopped_producer_outranks_a_hold() {
+        // A client told to hold while the producer is finished would sit
+        // through a film that was never going to play. The ranking is what
+        // stops that, so it is asserted rather than assumed.
+        let client = accepts_everything();
+        let mut delivery = delivery_with_decision("unsupported");
+        delivery.hold_reason = Some("demand".to_owned());
+        assert!(matches!(
+            resolve_action(&ControlAction::None, &delivery, &client),
+            ControlAction::Terminal { .. },
+        ));
+
+        let mut retryable = delivery_with_decision("reader_failed");
+        retryable.hold_reason = Some("demand".to_owned());
+        assert!(matches!(
+            resolve_action(&ControlAction::None, &retryable, &client),
+            ControlAction::RetryResource { .. },
+        ));
+    }
+
+    #[test]
+    fn an_undeclared_verdict_is_withheld_rather_than_softened_into_a_hold() {
+        // The client accepts `hold` and nothing else. It must not be told to
+        // hold when the truth is that the producer stopped: a producer that
+        // has stopped is not holding, and saying so would be a comfortable
+        // lie that leaves the client waiting on nothing.
+        let mut hold_only = request();
+        hold_only.supported_actions = Some(vec![HOLD_ACTION.to_owned()]);
+        let mut delivery = delivery_with_decision("unsupported");
+        delivery.hold_reason = Some("demand".to_owned());
+        assert_eq!(
+            resolve_action(&ControlAction::None, &delivery, &hold_only),
+            ControlAction::None,
+        );
+        assert!(
+            action_metrics(&ControlAction::None, &delivery, &hold_only).suppressed,
+            "the withheld verdict is what the rollout metric counts",
+        );
+    }
+
+    #[test]
+    fn a_relayed_verdict_must_match_the_decision_and_its_permanence() {
+        // A peer calling a retryable decision terminal would end a playable
+        // session; the reverse would loop a client forever. Neither is
+        // forwarded.
+        let permanent = ProducerDecisionReason::Unsupported;
+        let transient = ProducerDecisionReason::ReaderFailed;
+        assert!(permanent.is_permanent() && !transient.is_permanent());
+        assert_eq!(
+            ControlAction::Terminal {
+                code: permanent,
+                message: terminal_message(permanent),
+            }
+            .vocabulary_name(),
+            Some(TERMINAL_ACTION),
+        );
+        assert_eq!(
+            ControlAction::RetryResource {
+                after_ms: NEXT_EXCHANGE_MS,
+                reason: transient,
+            }
+            .vocabulary_name(),
+            Some(RETRY_RESOURCE_ACTION),
+        );
+        assert_eq!(ControlAction::None.vocabulary_name(), None);
+    }
+
+    #[test]
+    fn the_new_actions_are_tagged_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(ControlAction::Terminal {
+                code: ProducerDecisionReason::Unsupported,
+                message: "nope".to_owned(),
+            })
+            .expect("action json"),
+            serde_json::json!({
+                "type": "terminal",
+                "code": "unsupported",
+                "message": "nope",
+            }),
+        );
+        assert_eq!(
+            serde_json::to_value(ControlAction::RetryResource {
+                after_ms: 5_000,
+                reason: ProducerDecisionReason::ReaderFailed,
+            })
+            .expect("action json"),
+            serde_json::json!({
+                "type": "retry_resource",
+                "after_ms": 5_000,
+                "reason": "reader_failed",
+            }),
+        );
     }
 
     #[test]
