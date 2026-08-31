@@ -22,6 +22,8 @@ const ENCODERS: [&str; 8] = [
     "cached",
     "vod",
 ];
+const MARKER_ACTIONS: [&str; 4] = ["offer", "manual_skip", "automatic_skip", "undo_seek_back"];
+const MARKER_PREWARM_RESULTS: [&str; 2] = ["hit", "miss"];
 
 struct PlaybackMetrics {
     ttff_buckets: [[AtomicU64; TTFF_BUCKETS.len() + 1]; METHODS.len()],
@@ -33,6 +35,8 @@ struct PlaybackMetrics {
     suspended_ms: AtomicU64,
     cache_serves: [AtomicU64; CACHE_RESULTS.len()],
     sessions: [AtomicU64; ENCODERS.len() + 1],
+    marker_actions: [AtomicU64; MARKER_ACTIONS.len()],
+    marker_prewarm: [AtomicU64; MARKER_PREWARM_RESULTS.len()],
 }
 
 impl PlaybackMetrics {
@@ -48,6 +52,8 @@ impl PlaybackMetrics {
             suspended_ms: AtomicU64::new(0),
             cache_serves: [const { AtomicU64::new(0) }; CACHE_RESULTS.len()],
             sessions: [const { AtomicU64::new(0) }; ENCODERS.len() + 1],
+            marker_actions: [const { AtomicU64::new(0) }; MARKER_ACTIONS.len()],
+            marker_prewarm: [const { AtomicU64::new(0) }; MARKER_PREWARM_RESULTS.len()],
         }
     }
 
@@ -116,6 +122,31 @@ impl PlaybackMetrics {
                         self.cache_serves[index].fetch_add(1, Ordering::Relaxed);
                     }
                 }
+            }
+            "marker_manual_skip" => {
+                self.marker_actions[1].fetch_add(1, Ordering::Relaxed);
+            }
+            "marker_offer" => {
+                self.marker_actions[0].fetch_add(1, Ordering::Relaxed);
+            }
+            "marker_automatic_skip" => {
+                self.marker_actions[2].fetch_add(1, Ordering::Relaxed);
+            }
+            "marker_undo" | "marker_seek_back" => {
+                self.marker_actions[3].fetch_add(1, Ordering::Relaxed);
+            }
+            "marker_skip" => {
+                let slot = usize::from(
+                    event
+                        .detail
+                        .as_deref()
+                        .is_some_and(|detail| detail.contains("automatic")),
+                ) + 1;
+                self.marker_actions[slot].fetch_add(1, Ordering::Relaxed);
+            }
+            "marker_prewarm" => {
+                let result = usize::from(event.detail.as_deref() != Some("hit"));
+                self.marker_prewarm[result].fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
         }
@@ -195,6 +226,34 @@ impl PlaybackMetrics {
             &session_labels,
             &self.sessions,
         );
+        render_counters(
+            &mut out,
+            "plurx_playback_marker_actions_total",
+            "Playback marker offers, skips, and undo or seek-back actions.",
+            "action",
+            &MARKER_ACTIONS,
+            &self.marker_actions,
+        );
+        render_counters(
+            &mut out,
+            "plurx_playback_marker_prewarm_total",
+            "Skip-destination prewarm outcomes.",
+            "result",
+            &MARKER_PREWARM_RESULTS,
+            &self.marker_prewarm,
+        );
+        let hits = self.marker_prewarm[0].load(Ordering::Relaxed);
+        let total = hits.saturating_add(self.marker_prewarm[1].load(Ordering::Relaxed));
+        out.push_str(&format!(
+            "# HELP plurx_playback_marker_prewarm_hit_ratio Skip-destination prewarm hit rate.\n\
+             # TYPE plurx_playback_marker_prewarm_hit_ratio gauge\n\
+             plurx_playback_marker_prewarm_hit_ratio {:.6}\n",
+            if total == 0 {
+                0.0
+            } else {
+                hits as f64 / total as f64
+            }
+        ));
         out
     }
 }
@@ -381,6 +440,20 @@ mod tests {
             ms: Some(1_500),
             ..PlaybackEvent::default()
         });
+        for (event, detail) in [
+            ("marker_offer", Some("intro")),
+            ("marker_manual_skip", None),
+            ("marker_automatic_skip", None),
+            ("marker_seek_back", None),
+            ("marker_prewarm", Some("hit")),
+            ("marker_prewarm", Some("miss")),
+        ] {
+            metrics.record(&PlaybackEvent {
+                event: event.to_owned(),
+                detail: detail.map(str::to_owned),
+                ..PlaybackEvent::default()
+            });
+        }
         let text = metrics.render();
         assert!(text.contains("plurx_ttff_ms_count{method=\"remux\"} 1"));
         assert!(text.contains("plurx_ttff_ms_bucket{method=\"remux\",le=\"1000\"} 1"));
@@ -389,6 +462,13 @@ mod tests {
         assert!(text.contains("plurx_stall_recoveries_total{outcome=\"recovered\"} 1"));
         assert!(text.contains("plurx_suspends_total{reason=\"time\"} 1"));
         assert!(text.contains("plurx_suspended_seconds_total 1.500"));
+        assert!(text.contains("plurx_playback_marker_actions_total{action=\"offer\"} 1"));
+        assert!(text.contains("plurx_playback_marker_actions_total{action=\"manual_skip\"} 1"));
+        assert!(text.contains("plurx_playback_marker_actions_total{action=\"automatic_skip\"} 1"));
+        assert!(text.contains("plurx_playback_marker_actions_total{action=\"undo_seek_back\"} 1"));
+        assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"hit\"} 1"));
+        assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"miss\"} 1"));
+        assert!(text.contains("plurx_playback_marker_prewarm_hit_ratio 0.500000"));
         assert!(!text.contains("title="));
         assert!(!text.contains("user="));
         assert!(!text.contains("path="));

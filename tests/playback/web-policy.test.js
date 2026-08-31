@@ -279,6 +279,7 @@ test("analysis controls are first-class settings separate from playback mode con
 
 test("estimated skip markers are hedged without rebuilding each tick", () => {
   let writes = 0;
+  const markerEvents = [];
   const skip = {
     dataset: {},
     value: "",
@@ -290,14 +291,21 @@ test("estimated skip markers are hedged without rebuilding each tick", () => {
       this.value = value;
     },
   };
+  const player = { autoskip: false, _markerOffers: new Set() };
   const renderSkip = new Function(
     "document",
     "esc",
-    `${shippedSource("renderSkip")}
+    "PLAYER",
+    "clientLog",
+    `${shippedSource("markerIsEstimated")}
+${shippedSource("markerAutoSkipEligible")}
+${shippedSource("renderSkip")}
 return renderSkip;`,
   )(
     { getElementById: (id) => (id === "pskip" ? skip : null) },
     (value) => value,
+    player,
+    (event) => markerEvents.push(event),
   );
   const exact = {
     kind: "credits",
@@ -311,15 +319,87 @@ return renderSkip;`,
   );
   renderSkip(exact);
   assert.equal(writes, 1, "the exact marker should not rebuild on timeupdate");
+  assert.deepEqual(markerEvents.map((event) => event.event), ["marker_offer"]);
 
-  const estimated = { ...exact, chapter: false };
+  const estimated = { ...exact, chapter: false, provenance: "estimated" };
   renderSkip(estimated);
   assert.equal(
     skip.innerHTML,
     '<button onclick="skipCurrent()">Skip Credits · Estimated ›</button>',
   );
+  assert.equal(markerEvents.length, 1, "one boundary is offered once per playback");
   renderSkip(estimated);
   assert.equal(writes, 2, "the estimated marker should not rebuild on timeupdate");
+
+  const manual = {
+    ...exact,
+    start_ms: 7_000,
+    chapter: false,
+    provenance: "manual",
+    confidence: 1_000,
+  };
+  renderSkip(manual);
+  assert.equal(
+    skip.innerHTML,
+    '<button onclick="skipCurrent()">Skip Credits ›</button>',
+    "manual corrections are exact even though their legacy chapter bit may be false",
+  );
+
+  player.autoskip = true;
+  const ineligible = { ...estimated, start_ms: 8_000 };
+  renderSkip(ineligible);
+  assert.equal(
+    markerEvents.at(-1).event,
+    "marker_offer",
+    "an ineligible marker stays manually offerable when global auto-skip is on",
+  );
+});
+
+test("auto-skip only seeks exact marker provenance", () => {
+  const markerAutoSkipEligible = new Function(
+    `${shippedSource("markerAutoSkipEligible")}
+return markerAutoSkipEligible;`,
+  )();
+  const skipped = [];
+  const player = { autoskip: true, markers: [] };
+  const checkMarkers = new Function(
+    "PLAYER",
+    "markerNowMs",
+    "renderSkip",
+    "skipMarker",
+    "markerAutoSkipEligible",
+    `${shippedSource("checkMarkers")}
+return checkMarkers;`,
+  )(
+    player,
+    () => 1_500,
+    () => {},
+    (marker, automatic) => skipped.push({ marker, automatic }),
+    markerAutoSkipEligible,
+  );
+  const marker = (provenance, chapter = false) => ({
+    kind: "credits",
+    label: "Skip Credits",
+    start_ms: 1_000,
+    end_ms: 2_000,
+    chapter,
+    provenance,
+  });
+
+  player.markers = [marker("estimated")];
+  checkMarkers();
+  player.markers = [marker("detected")];
+  checkMarkers();
+  assert.equal(skipped.length, 0);
+
+  player.markers = [marker("manual")];
+  checkMarkers();
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].automatic, true);
+
+  player.markers = [marker("authored", true)];
+  checkMarkers();
+  assert.equal(skipped.length, 2);
 });
 
 test("every server verdict reaches exactly one initial web transport", () => {

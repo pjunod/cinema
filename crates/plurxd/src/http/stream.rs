@@ -452,10 +452,28 @@ pub struct Marker {
     pub label: String,
     pub start_ms: i64,
     pub end_ms: i64,
+    /// Source-timeline coordinates retained for replicated persistence. These
+    /// are intentionally not part of the compatibility wire object.
+    #[serde(skip)]
+    start_ticks: i64,
+    #[serde(skip)]
+    end_ticks: i64,
+    #[serde(skip)]
+    timescale: u32,
     /// True when a chapter title named this region; false for either inferred
     /// credits window, boundary-derived or duration-derived (so the UI can
     /// hedge the wording). The wire shape is fixed — three clients decode it.
     pub chapter: bool,
+    /// Additive semantic metadata. Optional until every shipped client has
+    /// migrated; the five fields above remain the compatibility contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detector_version: Option<String>,
 }
 
 /// The server-owned execution plan for a verdict.
@@ -946,21 +964,103 @@ const CREDITS_MIN_START_PCT: i64 = 70;
 struct ChapterSpan {
     start_ms: i64,
     end_ms: i64,
+    start_ticks: i64,
+    end_ticks: i64,
+    timescale: u32,
     /// The `(kind, label)` its title named, if any.
     class: Option<(&'static str, &'static str)>,
+}
+
+fn integer_field(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str()?.parse::<i64>().ok())
+}
+
+fn ticks_to_ms_checked(ticks: i64, timescale: u32) -> Option<i64> {
+    if ticks < 0 || timescale == 0 {
+        return None;
+    }
+    i64::try_from(i128::from(ticks) * 1_000 / i128::from(timescale)).ok()
+}
+
+fn ms_to_ticks_checked(milliseconds: i64, timescale: u32) -> Option<i64> {
+    if milliseconds < 0 || timescale == 0 {
+        return None;
+    }
+    i64::try_from(i128::from(milliseconds) * i128::from(timescale) / 1_000).ok()
+}
+
+fn common_timebase(left: u32, right: u32) -> Option<u32> {
+    fn gcd(mut left: u32, mut right: u32) -> u32 {
+        while right != 0 {
+            (left, right) = (right, left % right);
+        }
+        left
+    }
+
+    left.checked_div(gcd(left, right))?.checked_mul(right)
+}
+
+fn chapter_span(chapter: &serde_json::Value) -> Option<ChapterSpan> {
+    let exact = (|| {
+        let time_base = chapter.get("time_base")?.as_str()?;
+        let (numerator, denominator) = time_base.split_once('/')?;
+        let numerator = numerator.parse::<i64>().ok()?;
+        let denominator = denominator.parse::<u32>().ok()?;
+        if numerator <= 0 || denominator == 0 {
+            return None;
+        }
+        let start_ticks = integer_field(chapter.get("start")?)?.checked_mul(numerator)?;
+        let end_ticks = integer_field(chapter.get("end")?)?.checked_mul(numerator)?;
+        let start_ms = ticks_to_ms_checked(start_ticks, denominator)?;
+        let end_ms = ticks_to_ms_checked(end_ticks, denominator)?;
+        (end_ticks > start_ticks && end_ms > start_ms).then_some(ChapterSpan {
+            start_ms,
+            end_ms,
+            start_ticks,
+            end_ticks,
+            timescale: denominator,
+            class: None,
+        })
+    })();
+    if exact.is_some() {
+        return exact;
+    }
+
+    let seconds_ms = |key: &str| -> Option<i64> {
+        let value = chapter.get(key)?;
+        let seconds = value
+            .as_f64()
+            .or_else(|| value.as_str()?.parse::<f64>().ok())?;
+        if !seconds.is_finite() || seconds < 0.0 {
+            return None;
+        }
+        let milliseconds = seconds * 1_000.0;
+        if !milliseconds.is_finite() || milliseconds > i64::MAX as f64 {
+            return None;
+        }
+        Some(milliseconds as i64)
+    };
+    let start_ms = seconds_ms("start_time")?;
+    let end_ms = seconds_ms("end_time")?;
+    (end_ms > start_ms).then_some(ChapterSpan {
+        start_ms,
+        end_ms,
+        start_ticks: start_ms,
+        end_ticks: end_ms,
+        timescale: 1_000,
+        class: None,
+    })
 }
 
 /// Turn an ffprobe `chapters` array into skippable intro/credits markers.
 /// Pure, so the classification and the bounds checks are testable without a
 /// file or a subprocess.
-fn markers_from_chapters(chapters: &[serde_json::Value], duration_ms: Option<i64>) -> Vec<Marker> {
-    let at = |ch: &serde_json::Value, key: &str| -> Option<i64> {
-        ch.get(key)
-            .and_then(|s| s.as_str())
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|s| (s * 1000.0) as i64)
-    };
-
+pub(crate) fn markers_from_chapters(
+    chapters: &[serde_json::Value],
+    duration_ms: Option<i64>,
+) -> Vec<Marker> {
     // Every chapter with a sane span, classified or not. The unclassified ones
     // are not noise: the last boundary among them is the only positional
     // evidence a chaptered file offers when no title says "credits".
@@ -971,14 +1071,9 @@ fn markers_from_chapters(chapters: &[serde_json::Value], duration_ms: Option<i64
             .and_then(|t| t.get("title"))
             .and_then(|t| t.as_str())
             .unwrap_or("");
-        if let (Some(start_ms), Some(end_ms)) = (at(ch, "start_time"), at(ch, "end_time")) {
-            if end_ms > start_ms {
-                spans.push(ChapterSpan {
-                    start_ms,
-                    end_ms,
-                    class: classify_chapter(title),
-                });
-            }
+        if let Some(mut span) = chapter_span(ch) {
+            span.class = classify_chapter(title);
+            spans.push(span);
         }
     }
     spans.sort_by_key(|s| s.start_ms);
@@ -987,7 +1082,10 @@ fn markers_from_chapters(chapters: &[serde_json::Value], duration_ms: Option<i64
     // one still has the chapters' own extent, which is close enough to place a
     // marker as a fraction. With neither there is nothing to place and nothing
     // to guess from.
-    let Some(timeline_ms) = duration_ms.or_else(|| spans.iter().map(|s| s.end_ms).max()) else {
+    let Some(timeline_ms) = duration_ms
+        .filter(|duration_ms| *duration_ms > 0)
+        .or_else(|| spans.iter().map(|s| s.end_ms).max())
+    else {
         return Vec::new();
     };
 
@@ -995,16 +1093,20 @@ fn markers_from_chapters(chapters: &[serde_json::Value], duration_ms: Option<i64
     for &ChapterSpan {
         start_ms,
         end_ms,
+        start_ticks,
+        end_ticks,
+        timescale,
         class,
     } in &spans
     {
         let Some((kind, label)) = class else { continue };
         let in_bounds = if kind == "intro" {
-            start_ms * 100 <= timeline_ms * INTRO_MAX_START_PCT
+            i128::from(start_ms) * 100 <= i128::from(timeline_ms) * i128::from(INTRO_MAX_START_PCT)
         } else {
-            start_ms * 100 >= timeline_ms * CREDITS_MIN_START_PCT
+            i128::from(start_ms) * 100
+                >= i128::from(timeline_ms) * i128::from(CREDITS_MIN_START_PCT)
         };
-        if !in_bounds {
+        if !in_bounds || end_ms > timeline_ms {
             continue;
         }
         out.push(Marker {
@@ -1012,7 +1114,14 @@ fn markers_from_chapters(chapters: &[serde_json::Value], duration_ms: Option<i64
             label: label.to_owned(),
             start_ms,
             end_ms,
+            start_ticks,
+            end_ticks,
+            timescale,
             chapter: true,
+            provenance: None,
+            confidence: None,
+            generation: None,
+            detector_version: None,
         });
     }
 
@@ -1035,14 +1144,37 @@ fn markers_from_chapters(chapters: &[serde_json::Value], duration_ms: Option<i64
             // becoming the button.
             let boundary = spans
                 .last()
-                .map(|s| s.start_ms)
-                .filter(|start| (15_000..=tail * 2).contains(&(dur - start)));
+                .copied()
+                .filter(|span| span.start_ms <= dur)
+                .filter(|span| (15_000..=tail * 2).contains(&(dur - span.start_ms)));
+            let exact_boundary = boundary.and_then(|span| {
+                let timescale = common_timebase(span.timescale, 1_000)?;
+                let start_ticks = span
+                    .start_ticks
+                    .checked_mul(i64::from(timescale / span.timescale))?;
+                let end_ticks = ms_to_ticks_checked(dur, timescale)?;
+                (end_ticks > start_ticks).then_some((
+                    span.start_ms,
+                    start_ticks,
+                    end_ticks,
+                    timescale,
+                ))
+            });
+            let (start_ms, start_ticks, end_ticks, timescale) =
+                exact_boundary.unwrap_or((dur - tail, dur - tail, dur, 1_000));
             out.push(Marker {
                 kind: "credits".to_owned(),
                 label: "Skip Credits".to_owned(),
-                start_ms: boundary.unwrap_or(dur - tail),
+                start_ms,
                 end_ms: dur,
+                start_ticks,
+                end_ticks,
+                timescale,
                 chapter: false,
+                provenance: None,
+                confidence: None,
+                generation: None,
+                detector_version: None,
             });
         }
     }
@@ -1065,21 +1197,216 @@ fn markers_from_chapters(chapters: &[serde_json::Value], duration_ms: Option<i64
 /// any other. A file whose probe never succeeded has no document to graft
 /// onto and simply keeps probing live; it has larger problems, and the
 /// reanalyze button is the fix for them.
-async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
-    if let Some(chapters) = stored_chapters(state, file.id).await {
-        return markers_from_chapters(&chapters, file.duration_ms);
+pub(crate) const CHAPTER_ANNOTATION_VERSION: &str = "chapter-classifier-v1";
+
+pub(crate) fn annotation_source_identity(file: &MediaFile) -> plurx_core::segplan::SourceIdentity {
+    plurx_core::segplan::SourceIdentity::new(
+        u64::try_from(file.size).unwrap_or_default(),
+        file.mtime,
+        plurx_core::segplan::argv_fingerprint(&[
+            "timeline-annotations".to_owned(),
+            CHAPTER_ANNOTATION_VERSION.to_owned(),
+        ]),
+    )
+}
+
+pub(crate) fn annotation_set_from_markers(
+    source_identity: plurx_core::segplan::SourceIdentity,
+    markers: &[Marker],
+) -> plurx_core::segplan::TimelineAnnotationSet {
+    use plurx_core::segplan::{
+        AnnotationKind, AnnotationProvenance, TimelineAnnotation, TimelineAnnotationSet,
+    };
+
+    TimelineAnnotationSet {
+        source_identity,
+        generation_id: uuid::Uuid::new_v4().to_string(),
+        version: 1,
+        annotations: markers
+            .iter()
+            .filter_map(|marker| {
+                let kind = match marker.kind.as_str() {
+                    "intro" => AnnotationKind::Intro,
+                    "recap" => AnnotationKind::Recap,
+                    "credits" => AnnotationKind::Credits,
+                    "preview" => AnnotationKind::Preview,
+                    _ => return None,
+                };
+                let provenance = if marker.chapter {
+                    AnnotationProvenance::Authored
+                } else {
+                    AnnotationProvenance::Estimated
+                };
+                Some(TimelineAnnotation {
+                    kind,
+                    start_ticks: marker.start_ticks,
+                    end_ticks: marker.end_ticks,
+                    timescale: marker.timescale,
+                    start_ms: marker.start_ms,
+                    end_ms: marker.end_ms,
+                    provenance,
+                    confidence_millis: if marker.chapter { 1_000 } else { 250 },
+                    detector_version: CHAPTER_ANNOTATION_VERSION.to_owned(),
+                    manual_override_revision: None,
+                })
+            })
+            .collect(),
     }
-    let probed = probe_chapters(&file.path).await;
-    if let Some(chapters) = &probed {
-        // Best-effort backfill: a failure here costs one more probe next time,
-        // not correctness.
-        if let Ok(json) = serde_json::to_string(chapters) {
-            if let Err(e) = state.store.merge_file_probe_chapters(file.id, &json).await {
-                tracing::warn!(file_id = file.id, error = %e, "could not cache file chapters");
-            }
+}
+
+fn markers_from_annotation_set(set: plurx_core::segplan::TimelineAnnotationSet) -> Vec<Marker> {
+    use plurx_core::segplan::AnnotationProvenance;
+
+    let generation = set.generation_id;
+    set.annotations
+        .into_iter()
+        .map(|annotation| Marker {
+            kind: annotation.kind.as_str().to_owned(),
+            label: annotation.kind.label().to_owned(),
+            start_ms: annotation.start_ms,
+            end_ms: annotation.end_ms,
+            start_ticks: annotation.start_ticks,
+            end_ticks: annotation.end_ticks,
+            timescale: annotation.timescale,
+            // `chapter` is the compatibility exactness bit for clients that
+            // predate provenance. A manual correction is just as exact as an
+            // authored chapter and must not be mislabeled as an estimate.
+            chapter: matches!(
+                annotation.provenance,
+                AnnotationProvenance::Authored | AnnotationProvenance::Manual
+            ),
+            provenance: Some(annotation.provenance.as_str().to_owned()),
+            confidence: Some(annotation.confidence_millis),
+            generation: Some(generation.clone()),
+            detector_version: Some(annotation.detector_version),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn marker_fallback_pauses() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, std::sync::Arc<tokio::sync::Barrier>>,
+> {
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Barrier>>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+
+/// Pause one request after its authoritative miss and before fallback
+/// publication. Keying by the unique fixture path keeps parallel HTTP tests
+/// isolated even though their in-memory stores reuse file ids.
+#[cfg(test)]
+pub(super) fn pause_next_marker_fallback_for_test(
+    path: &Path,
+) -> std::sync::Arc<tokio::sync::Barrier> {
+    let pause = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    marker_fallback_pauses()
+        .lock()
+        .expect("marker fallback pause registry")
+        .insert(
+            path.to_string_lossy().into_owned(),
+            std::sync::Arc::clone(&pause),
+        );
+    pause
+}
+
+#[cfg(test)]
+async fn pause_marker_fallback_for_test(path: &Path) {
+    let key = path.to_string_lossy().into_owned();
+    let pause = marker_fallback_pauses()
+        .lock()
+        .expect("marker fallback pause registry")
+        .get(&key)
+        .cloned();
+    if let Some(pause) = pause {
+        pause.wait().await;
+        pause.wait().await;
+        marker_fallback_pauses()
+            .lock()
+            .expect("marker fallback pause registry")
+            .remove(&key);
+    }
+}
+
+async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
+    let source_identity = annotation_source_identity(file);
+    match state
+        .store
+        .timeline_annotation_set(file.id, &source_identity)
+        .await
+    {
+        Ok(Some(set)) => return markers_from_annotation_set(set),
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(file_id = file.id, %error, "could not read timeline annotations");
+            // The read composes automatic evidence with the manual authority.
+            // On uncertainty, offering a derived automatic boundary could
+            // silently skip over a manual correction that we failed to read.
+            return Vec::new();
         }
     }
-    markers_from_chapters(&probed.unwrap_or_default(), file.duration_ms)
+
+    #[cfg(test)]
+    pause_marker_fallback_for_test(&file.path).await;
+
+    let markers = if let Some(chapters) = stored_chapters(state, file.id).await {
+        markers_from_chapters(&chapters, file.duration_ms)
+    } else {
+        let probed = probe_chapters(&file.path).await;
+        if let Some(chapters) = &probed {
+            // Best-effort backfill: a failure here costs one more probe next time,
+            // not correctness.
+            if let Ok(json) = serde_json::to_string(chapters) {
+                if let Err(e) = state.store.merge_file_probe_chapters(file.id, &json).await {
+                    tracing::warn!(file_id = file.id, error = %e, "could not cache file chapters");
+                }
+            }
+        }
+        markers_from_chapters(&probed.unwrap_or_default(), file.duration_ms)
+    };
+
+    let Some(duration_ms) = file.duration_ms.filter(|duration| *duration > 0) else {
+        return markers;
+    };
+    let set = annotation_set_from_markers(source_identity, &markers);
+    match state
+        .store
+        .put_timeline_annotation_set_if_missing(file.id, duration_ms, &set)
+        .await
+    {
+        Ok(_) => match state
+            .store
+            .timeline_annotation_set(file.id, &set.source_identity)
+            .await
+        {
+            Ok(Some(winner)) => markers_from_annotation_set(winner),
+            Ok(None) => {
+                let source_is_still_current = state
+                    .store
+                    .get_file(file.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|current| {
+                        annotation_source_identity(&current) == set.source_identity
+                    });
+                if source_is_still_current {
+                    markers
+                } else {
+                    Vec::new()
+                }
+            }
+            Err(error) => {
+                tracing::warn!(file_id = file.id, %error, "could not read winning timeline annotations");
+                Vec::new()
+            }
+        },
+        Err(error) => {
+            tracing::warn!(file_id = file.id, %error, "could not persist timeline annotations");
+            Vec::new()
+        }
+    }
 }
 
 /// Chapters from the stored scan probe. `None` means "this probe predates
@@ -1088,18 +1415,81 @@ async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
 async fn stored_chapters(state: &AppState, file_id: i64) -> Option<Vec<serde_json::Value>> {
     let raw = state
         .store
-        .get_file_probe_json(file_id)
+        .get_file_probe_chapters_json(file_id)
         .await
         .ok()
         .flatten()?;
-    let probe: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    probe.get("chapters")?.as_array().cloned()
+    bounded_chapter_array(&raw).ok()
 }
 
 /// One live `ffprobe -show_chapters`. `None` when ffprobe failed, so the caller
 /// can tell "no chapters" from "could not ask" and decline to cache the latter.
-async fn probe_chapters(path: &Path) -> Option<Vec<serde_json::Value>> {
-    let out = tokio::process::Command::new(ffprobe_bin())
+pub(crate) async fn probe_chapters(path: &Path) -> Option<Vec<serde_json::Value>> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    probe_chapters_until(path, &cancel, std::time::Duration::from_secs(30))
+        .await
+        .ok()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChapterProbeFailure {
+    Failed,
+    Timeout,
+    Cancelled,
+}
+
+const MAX_CHAPTER_PROBE_BYTES: usize = 256 * 1_024;
+const MAX_PROBED_CHAPTERS: usize = 256;
+
+#[cfg(test)]
+pub(crate) fn bounded_stored_chapters(
+    raw: &str,
+) -> Result<Option<Vec<serde_json::Value>>, ChapterProbeFailure> {
+    let probe: serde_json::Value =
+        serde_json::from_str(raw).map_err(|_| ChapterProbeFailure::Failed)?;
+    let Some(chapters) = probe.get("chapters").and_then(|value| value.as_array()) else {
+        return Ok(None);
+    };
+    if chapters.len() > MAX_PROBED_CHAPTERS
+        || serde_json::to_vec(chapters)
+            .map_err(|_| ChapterProbeFailure::Failed)?
+            .len()
+            > MAX_CHAPTER_PROBE_BYTES
+    {
+        return Err(ChapterProbeFailure::Failed);
+    }
+    Ok(Some(chapters.clone()))
+}
+
+pub(crate) fn bounded_chapter_array(
+    raw: &str,
+) -> Result<Vec<serde_json::Value>, ChapterProbeFailure> {
+    if raw.len() > MAX_CHAPTER_PROBE_BYTES {
+        return Err(ChapterProbeFailure::Failed);
+    }
+    let chapters: Vec<serde_json::Value> =
+        serde_json::from_str(raw).map_err(|_| ChapterProbeFailure::Failed)?;
+    if chapters.len() > MAX_PROBED_CHAPTERS {
+        return Err(ChapterProbeFailure::Failed);
+    }
+    Ok(chapters)
+}
+
+pub(crate) async fn probe_chapters_until(
+    path: &Path,
+    cancel: &tokio_util::sync::CancellationToken,
+    timeout: std::time::Duration,
+) -> Result<Vec<serde_json::Value>, ChapterProbeFailure> {
+    tokio::select! {
+        result = run_chapter_probe(path) => result,
+        () = cancel.cancelled() => Err(ChapterProbeFailure::Cancelled),
+        () = crate::state::wait_analysis_deadline(timeout) => Err(ChapterProbeFailure::Timeout),
+    }
+}
+
+async fn run_chapter_probe(path: &Path) -> Result<Vec<serde_json::Value>, ChapterProbeFailure> {
+    let mut command = tokio::process::Command::new(ffprobe_bin());
+    command
         .args([
             "-v",
             "error",
@@ -1110,14 +1500,40 @@ async fn probe_chapters(path: &Path) -> Option<Vec<serde_json::Value>> {
         ])
         .arg(path)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|_| ChapterProbeFailure::Failed)?;
+    let stdout = child.stdout.take().ok_or(ChapterProbeFailure::Failed)?;
+    let mut bytes = Vec::new();
+    stdout
+        .take((MAX_CHAPTER_PROBE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
         .await
-        .ok()?;
-    if !out.status.success() {
-        return None;
+        .map_err(|_| ChapterProbeFailure::Failed)?;
+    if bytes.len() > MAX_CHAPTER_PROBE_BYTES {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err(ChapterProbeFailure::Failed);
     }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    v.get("chapters")?.as_array().cloned()
+    let status = child
+        .wait()
+        .await
+        .map_err(|_| ChapterProbeFailure::Failed)?;
+    if !status.success() {
+        return Err(ChapterProbeFailure::Failed);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| ChapterProbeFailure::Failed)?;
+    let chapters = value
+        .get("chapters")
+        .and_then(|chapters| chapters.as_array())
+        .cloned()
+        .ok_or(ChapterProbeFailure::Failed)?;
+    if chapters.len() > MAX_PROBED_CHAPTERS {
+        return Err(ChapterProbeFailure::Failed);
+    }
+    Ok(chapters)
 }
 
 /// GET /api/v1/files/:id/decision — players send `?vcodec=…&vmaxheight=…&
@@ -2950,6 +3366,30 @@ mod tests {
         assert_eq!(classify_chapter("The Heist"), None);
     }
 
+    #[test]
+    fn stored_chapter_bound_ignores_unrelated_probe_metadata() {
+        let raw = serde_json::json!({
+            "format": {"tags": {"padding": "x".repeat(MAX_CHAPTER_PROBE_BYTES + 1)}},
+            "streams": [],
+            "chapters": [chapter("Intro", "0", "60")],
+        })
+        .to_string();
+        assert!(raw.len() > MAX_CHAPTER_PROBE_BYTES);
+        let chapters = bounded_stored_chapters(&raw)
+            .expect("only the extracted chapter payload is bounded")
+            .expect("stored chapter array");
+        assert_eq!(chapters.len(), 1);
+
+        let oversized = serde_json::json!({
+            "chapters": [{"tags": {"title": "x".repeat(MAX_CHAPTER_PROBE_BYTES + 1)}}],
+        })
+        .to_string();
+        assert_eq!(
+            bounded_stored_chapters(&oversized),
+            Err(ChapterProbeFailure::Failed)
+        );
+    }
+
     fn chapter(title: &str, start: &str, end: &str) -> serde_json::Value {
         serde_json::json!({ "start_time": start, "end_time": end, "tags": { "title": title } })
     }
@@ -3015,6 +3455,132 @@ mod tests {
             serde_json::json!({ "tags": { "title": "Intro" } }),
         ];
         assert!(markers_from_chapters(&junk, None).is_empty());
+    }
+
+    #[test]
+    fn marker_wire_keeps_its_five_fields_and_adds_optional_annotation_evidence() {
+        let derived = markers_from_chapters(&[chapter("Opening", "0", "90")], Some(600_000));
+        let legacy = serde_json::to_value(&derived[0]).expect("serialize derived marker");
+        let fields = legacy
+            .as_object()
+            .expect("marker object")
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            fields,
+            ["chapter", "end_ms", "kind", "label", "start_ms"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+
+        let set = annotation_set_from_markers(
+            plurx_core::segplan::SourceIdentity::new(10, 20, "timeline-v1"),
+            &derived,
+        );
+        let persisted = serde_json::to_value(&markers_from_annotation_set(set)[0])
+            .expect("serialize persisted marker");
+        for field in ["kind", "label", "start_ms", "end_ms", "chapter"] {
+            assert_eq!(
+                persisted[field], legacy[field],
+                "compatibility field {field}"
+            );
+        }
+        assert_eq!(persisted["provenance"], "authored");
+        assert_eq!(persisted["confidence"], 1_000);
+        assert!(persisted["generation"].is_string());
+        assert_eq!(persisted["detector_version"], CHAPTER_ANNOTATION_VERSION);
+
+        let mut manual_set = annotation_set_from_markers(
+            plurx_core::segplan::SourceIdentity::new(10, 20, "timeline-v1"),
+            &derived,
+        );
+        manual_set.annotations[0].provenance = plurx_core::segplan::AnnotationProvenance::Manual;
+        manual_set.annotations[0].manual_override_revision = Some(1);
+        let manual = serde_json::to_value(&markers_from_annotation_set(manual_set)[0])
+            .expect("serialize manual marker");
+        assert_eq!(manual["provenance"], "manual");
+        assert_eq!(
+            manual["chapter"], true,
+            "legacy clients see manual as exact"
+        );
+    }
+
+    #[test]
+    fn authored_chapter_persistence_keeps_ffprobe_ticks_authoritative() {
+        let chapters = [serde_json::json!({
+            "start": "1",
+            "end": "2",
+            "time_base": "1/24",
+            "start_time": "0.041667",
+            "end_time": "0.083333",
+            "tags": { "title": "Opening" }
+        })];
+        let markers = markers_from_chapters(&chapters, Some(1_000));
+        assert_eq!(markers.len(), 1);
+        assert_eq!((markers[0].start_ms, markers[0].end_ms), (41, 83));
+
+        let set = annotation_set_from_markers(
+            plurx_core::segplan::SourceIdentity::new(10, 20, "timeline-v1"),
+            &markers,
+        );
+        let annotation = &set.annotations[0];
+        assert_eq!(
+            (
+                annotation.start_ticks,
+                annotation.end_ticks,
+                annotation.timescale,
+            ),
+            (1, 2, 24)
+        );
+        assert_eq!((annotation.start_ms, annotation.end_ms), (41, 83));
+
+        let inferred = markers_from_chapters(
+            &[
+                chapters[0].clone(),
+                serde_json::json!({
+                    "start": "13800",
+                    "end": "14400",
+                    "time_base": "1/24",
+                    "start_time": "575.0",
+                    "end_time": "600.0",
+                    "tags": { "title": "Finale" }
+                }),
+            ],
+            Some(600_001),
+        );
+        let inferred_set = annotation_set_from_markers(
+            plurx_core::segplan::SourceIdentity::new(10, 20, "timeline-v1"),
+            &inferred,
+        )
+        .validate_and_normalize(600_001)
+        .expect("non-frame-aligned duration remains tick-consistent");
+        let credits = inferred_set
+            .annotations
+            .iter()
+            .find(|annotation| annotation.kind == plurx_core::segplan::AnnotationKind::Credits)
+            .expect("inferred credits");
+        assert_eq!(credits.timescale, 3_000);
+        assert_eq!(credits.end_ms, 600_001);
+    }
+
+    #[test]
+    fn malformed_or_extreme_chapter_times_are_rejected_without_arithmetic_wrap() {
+        let chapters = [
+            chapter("Opening", "-9000000000000000", "1"),
+            chapter("Opening", "9000000000000000", "9100000000000000"),
+            serde_json::json!({
+                "start": i64::MAX.to_string(),
+                "end": i64::MAX.to_string(),
+                "time_base": "2/1",
+                "tags": { "title": "Opening" }
+            }),
+        ];
+        assert!(markers_from_chapters(&chapters, Some(60_000)).is_empty());
+        let maximum_duration = markers_from_chapters(&[], Some(i64::MAX));
+        assert_eq!(maximum_duration.len(), 1);
+        assert!(maximum_duration[0].start_ms < maximum_duration[0].end_ms);
     }
 
     /// A chaptered file whose chapter titles never say "credits" still carries

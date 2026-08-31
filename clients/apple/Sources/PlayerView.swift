@@ -523,10 +523,10 @@ struct PlayerMarkerButtonLabel: View {
     static let estimatedSymbol = "forward.end"
     static let estimatedMark = "≈"
 
-    /// `chapter` is optional on the wire. Only an explicit `false` is an
-    /// estimate; a missing field is not evidence of one.
+    /// Provenance is authoritative when present. `chapter` remains the
+    /// compatibility fallback for an older server.
     static func isEstimated(_ marker: Marker) -> Bool {
-        marker.chapter == false
+        marker.isEstimated
     }
 
     static func symbol(estimated: Bool) -> String {
@@ -1643,6 +1643,7 @@ struct PlayerView: View {
         .buttonStyle(.borderedProminent)
         .tint(Palette.accent)
         #endif
+        .onAppear { controller.reportMarkerOffer(marker) }
     }
 
     private var expandedControlRow: some View {

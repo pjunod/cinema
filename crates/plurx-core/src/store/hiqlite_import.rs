@@ -740,6 +740,9 @@ const TABLES: &[TablePlan] = &[
             "source_mtime",
             "source_sha256",
             "pipeline_sha256",
+            "priority",
+            "trigger",
+            "target_node_id",
             "state",
             "owner_node_id",
             "fence",
@@ -750,7 +753,7 @@ const TABLES: &[TablePlan] = &[
             "created_at_ms",
             "updated_at_ms",
         ],
-        order_by: "cache_key",
+        order_by: "cache_key, target_node_id",
         minimum_schema: 30,
         import_filter: None,
         sealed_columns: &[],
@@ -787,6 +790,123 @@ const TABLES: &[TablePlan] = &[
         ],
         order_by: "cache_key, node_id",
         minimum_schema: 30,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "analysis_requests",
+        columns: &[
+            "request_id",
+            "file_id",
+            "source_size",
+            "source_mtime",
+            "component",
+            "pipeline_version",
+            "requested_generation",
+            "expected_predecessor_generation",
+            "priority",
+            "trigger",
+            "force_rebuild",
+            "target_node_id",
+            "state",
+            "owner_node_id",
+            "fence",
+            "lease_expires_ms",
+            "attempts",
+            "not_before_ms",
+            "result_cache_key",
+            "last_error_code",
+            "cancel_requested",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "request_id",
+        minimum_schema: 31,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "analysis_attempts",
+        columns: &[
+            "request_id",
+            "attempt",
+            "claim_node_id",
+            "claim_epoch",
+            "claim_expires_at_ms",
+            "phase",
+            "started_at_ms",
+            "phase_updated_at_ms",
+            "terminal_code",
+        ],
+        order_by: "request_id, claim_epoch",
+        minimum_schema: 41,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "cluster_fragment_index_heads",
+        columns: &[
+            "logical_cache_key",
+            "generation_cache_key",
+            "request_id",
+            "updated_at_ms",
+        ],
+        order_by: "logical_cache_key",
+        minimum_schema: 41,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "analysis_lifecycle_counters",
+        columns: &["event", "reason", "count"],
+        order_by: "event, reason",
+        minimum_schema: 41,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "timeline_annotation_sets",
+        columns: &[
+            "file_id",
+            "source_size",
+            "source_mtime",
+            "argv_fingerprint",
+            "generation_id",
+            "version",
+            "annotations_json",
+            "updated_at_ms",
+            "publication_priority",
+        ],
+        order_by: "file_id",
+        minimum_schema: 39,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "timeline_manual_overrides",
+        columns: &[
+            "file_id",
+            "kind",
+            "source_size",
+            "source_mtime",
+            "argv_fingerprint",
+            "start_ticks",
+            "end_ticks",
+            "timescale",
+            "start_ms",
+            "end_ms",
+            "revision",
+            "generation_id",
+            "updated_at_ms",
+        ],
+        order_by: "file_id, kind",
+        minimum_schema: 40,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -1708,10 +1828,19 @@ fn import_select_sql(table: TablePlan, schema_version: i64) -> String {
     let filter = import_filter_sql(table)
         .map(|filter| format!(" WHERE {filter}"))
         .unwrap_or_default();
+    let order_by = source_order_by(table, schema_version);
     format!(
-        "SELECT {projection} FROM {}{filter} ORDER BY {} LIMIT ?1 OFFSET ?2",
-        table.name, table.order_by
+        "SELECT {projection} FROM {}{filter} ORDER BY {order_by} LIMIT ?1 OFFSET ?2",
+        table.name
     )
+}
+
+fn source_order_by(table: TablePlan, schema_version: i64) -> &'static str {
+    if table.name == "cluster_fragment_index_jobs" && schema_version < 41 {
+        "cache_key"
+    } else {
+        table.order_by
+    }
 }
 
 fn import_filter_sql(table: TablePlan) -> Option<String> {
@@ -1833,9 +1962,10 @@ fn source_digest(
         return Ok(OrderedRowsHasher::new().finish());
     }
     let projection = json_projection(table, schema_version, false);
+    let order_by = source_order_by(table, schema_version);
     let sql = format!(
-        "SELECT json_array({projection}) AS value FROM {} ORDER BY {}",
-        table.name, table.order_by
+        "SELECT json_array({projection}) AS value FROM {} ORDER BY {order_by}",
+        table.name
     );
     let mut statement = source
         .prepare(&sql)
@@ -1862,7 +1992,64 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
         .columns
         .iter()
         .map(|column| {
-            if table.name == "watched_outbox" && *column == "claim_until" && schema_version < 16 {
+            if table.name == "cluster_fragment_index_jobs"
+                && *column == "priority"
+                && schema_version < 41
+            {
+                "'normal'".to_owned()
+            } else if table.name == "cluster_fragment_index_jobs"
+                && *column == "trigger"
+                && schema_version < 41
+            {
+                "'background'".to_owned()
+            } else if table.name == "cluster_fragment_index_jobs"
+                && *column == "target_node_id"
+                && schema_version < 41
+            {
+                if schema_version < 31 {
+                    return "''".to_owned();
+                }
+                let cache_key = if qualify { "source.cache_key" } else { "cache_key" };
+                format!("COALESCE((SELECT request.target_node_id FROM analysis_requests request WHERE request.result_cache_key = {cache_key} ORDER BY request.updated_at_ms DESC, request.request_id DESC LIMIT 1), '')")
+            } else if table.name == "timeline_annotation_sets"
+                && *column == "publication_priority"
+                && schema_version < 41
+            {
+                "'normal'".to_owned()
+            } else if table.name == "analysis_requests"
+                && *column == "pipeline_version"
+                && schema_version < 41
+            {
+                let component = if qualify { "source.component" } else { "component" };
+                format!("CASE {component} WHEN 'fragment_index' THEN 'legacy-fragment-index' ELSE 'chapter-classifier-v1' END")
+            } else if table.name == "analysis_requests"
+                && *column == "requested_generation"
+                && schema_version < 41
+            {
+                if qualify { "source.request_id".to_owned() } else { "request_id".to_owned() }
+            } else if table.name == "analysis_requests"
+                && *column == "expected_predecessor_generation"
+                && schema_version < 41
+            {
+                "''".to_owned()
+            } else if table.name == "analysis_requests"
+                && *column == "priority"
+                && schema_version < 41
+            {
+                let force = if qualify { "source.force_rebuild" } else { "force_rebuild" };
+                format!("CASE {force} WHEN 1 THEN 'forced' ELSE 'normal' END")
+            } else if table.name == "analysis_requests"
+                && *column == "trigger"
+                && schema_version < 41
+            {
+                "'admin'".to_owned()
+            } else if (table.name == "analysis_requests"
+                && *column == "cancel_requested"
+                && schema_version < 41)
+                || (table.name == "watched_outbox"
+                    && *column == "claim_until"
+                    && schema_version < 16)
+            {
                 "0".to_owned()
             } else if table.name == "media_sessions"
                 && *column == "terminal_reason"
@@ -2162,7 +2349,13 @@ mod tests {
         assert!(names.contains(&"cluster_fragment_index_jobs"));
         assert!(names.contains(&"cluster_fragment_index_artifacts"));
         assert!(names.contains(&"cluster_fragment_index_locations"));
-        assert_eq!(names.len(), 30, "review every imported durable table");
+        assert!(names.contains(&"analysis_requests"));
+        assert!(names.contains(&"analysis_attempts"));
+        assert!(names.contains(&"cluster_fragment_index_heads"));
+        assert!(names.contains(&"analysis_lifecycle_counters"));
+        assert!(names.contains(&"timeline_annotation_sets"));
+        assert!(names.contains(&"timeline_manual_overrides"));
+        assert_eq!(names.len(), 36, "review every imported durable table");
     }
 
     #[test]
@@ -2366,6 +2559,90 @@ mod tests {
                     Param::Integer(9_000),
                 ],
                 "schema v{schema_version} import row",
+            );
+        }
+    }
+
+    /// The v30 queue predates `analysis_requests`, while v31-v40 queues have
+    /// no target column of their own. Exercise the real read-only import SQL
+    /// (including its ordering and digest paths) at both boundaries so a new
+    /// target projection cannot make an otherwise supported backup unreadable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fragment_index_job_import_reads_real_v30_and_v40_schemas() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "cluster_fragment_index_jobs")
+            .copied()
+            .expect("fragment-index job plan");
+
+        for schema_version in [30_i64, 40] {
+            let data = tempfile::tempdir().expect("source dir");
+            let path = data.path().join("legacy.db");
+            {
+                let conn = Connection::open(&path).expect("raw source open");
+                crate::store::sqlite::SqliteStore::apply_migrations_for_test(&conn, schema_version)
+                    .expect("apply legacy migrations");
+                conn.execute(
+                    "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![keys::INSTANCE_ID, "legacy-instance", 1_i64],
+                )
+                .expect("seed source instance");
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_jobs
+                        (cache_key, file_id, source_size, source_mtime,
+                         source_sha256, pipeline_sha256, state, owner_node_id,
+                         fence, lease_expires_ms, attempts, not_before_ms,
+                         last_error_code, created_at_ms, updated_at_ms)
+                     VALUES ('legacy-key', 7, 100, 20, 'source-sha',
+                             'pipeline-sha', 'queued', NULL, 0, NULL, 0,
+                             30, NULL, 30, 30)",
+                    [],
+                )
+                .expect("seed legacy job");
+                if schema_version >= 31 {
+                    conn.execute(
+                        "INSERT INTO analysis_requests
+                            (request_id, file_id, source_size, source_mtime,
+                             component, force_rebuild, target_node_id, state,
+                             not_before_ms, result_cache_key, created_at_ms,
+                             updated_at_ms)
+                         VALUES ('legacy-request', 7, 100, 20,
+                                 'fragment_index', 0, 'node-legacy', 'queued',
+                                 30, 'legacy-key', 30, 30)",
+                        [],
+                    )
+                    .expect("seed legacy request target");
+                }
+            }
+
+            let expected_sha256 = sha256_file(&path).expect("hash source");
+            let (reader, metadata) = SourceReader::open(&path, &expected_sha256, schema_version)
+                .await
+                .expect("open source reader");
+            assert_eq!(metadata.schema_version, schema_version);
+            let rows = reader
+                .import_chunk(table, schema_version, SourceChunk::Offset(0))
+                .await
+                .expect("read source import chunk");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), table.columns.len());
+            assert_eq!(rows[0][6], Param::Text("normal".to_owned()));
+            assert_eq!(rows[0][7], Param::Text("background".to_owned()));
+            assert_eq!(
+                rows[0][8],
+                Param::Text(if schema_version == 30 {
+                    String::new()
+                } else {
+                    "node-legacy".to_owned()
+                })
+            );
+            assert_eq!(
+                reader
+                    .digest(table, schema_version)
+                    .await
+                    .expect("digest legacy source")
+                    .row_count,
+                1
             );
         }
     }

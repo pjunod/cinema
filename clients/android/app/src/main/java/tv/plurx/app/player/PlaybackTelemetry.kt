@@ -35,6 +35,13 @@ internal data class PlaybackClientLog(
     @SerialName("session_id") val sessionId: String? = null,
 )
 
+internal class MarkerOfferLedger {
+    private val offered = mutableSetOf<String>()
+
+    fun shouldReport(generation: String, kind: String, startMs: Long): Boolean =
+        offered.add("$generation:$kind:$startMs")
+}
+
 /** Build the request separately so the wire contract stays unit-testable. */
 internal fun clientLogRequest(origin: String, event: PlaybackClientLog): Request {
     val body = Net.json.encodeToString(event)

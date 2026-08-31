@@ -596,3 +596,11 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "nonisolated static func sessionHDR10Request("
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testManualQualityTranscodePreservesDirectOrRemuxHDR10Decision"
+
+[[fixes]]
+id = "clients.marker-provenance-auto-skip"
+commits = ["ce253a55"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "val isAutoSkipEligible: Boolean"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/MarkerLabelTest.kt"
+test_anchor = "provenanceControlsExactnessAndAutomaticEligibility"

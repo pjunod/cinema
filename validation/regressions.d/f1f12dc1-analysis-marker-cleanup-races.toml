@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f1f12dc1"]
+points = ["core.media", "cluster.auth", "persistence.upgrades"]
+checks = ["rust-gate", "cluster-auth", "database-upgrades"]
+reason = "The retained HTTP race test pauses fallback marker publication after its authoritative miss, commits a manual override, and requires the returned decision to use the manual boundary; read and publication uncertainty fail closed to no markers. The backend-neutral Store contract pages stale locations and exact terminal jobs one row at a time, proves retained failures cannot starve eligible cleanup, and keeps an artifact until its final location disappears on both SQLite and the real three-voter store. The three-voter bootstrap contract also reopens an already-current identity and recovers a stale v21 marker over the complete v22 shape. Rust, cluster-auth, and database-upgrades retain those concurrency, bounded-cleanup, parity, and retryable-upgrade regressions."
