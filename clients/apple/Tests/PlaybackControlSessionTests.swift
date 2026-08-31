@@ -374,6 +374,135 @@ final class PlaybackControlSessionTests: XCTestCase {
         session.end()
     }
 
+    /// The ask: report evidence, then wait briefly for the verdict it earns.
+    func testAnAskIsAnsweredByTheExchangeItProvoked() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(type: "hold", reason: "no_room"))
+        defer { controlAnswer.set(ControlAction(type: "none")) }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        let verdict = await session.askForAction(bound: 5, cap: 8, publish: {})
+        XCTAssertEqual(verdict?.type, "hold")
+        XCTAssertEqual(verdict?.reason, "no_room")
+        session.end()
+    }
+
+    /// A terminal verdict is answered and then stops the reporter in the same
+    /// instant, so an ask that gives up on `stopped` without reading the slot
+    /// again discards the one verdict it most needed to see — and the client
+    /// falls through to its own guess for the exact case where the server was
+    /// certain.
+    func testATerminalVerdictReachesTheAskThatProvokedIt() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        defer { controlAnswer.set(ControlAction(type: "none")) }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        // The bootstrap exchange answers `none`, or the reporter stops before
+        // the ask exists and the test measures that instead.
+        controlAnswer.set(ControlAction(type: "none"))
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "Nothing more to send."
+        ))
+        let verdict = await session.askForAction(bound: 5, cap: 8, publish: {})
+        XCTAssertEqual(verdict?.type, "terminal",
+                       "the verdict that stopped the reporter still answers the ask")
+        XCTAssertEqual(verdict?.message, "Nothing more to send.")
+        session.end()
+    }
+
+    /// An exchange that was already in flight when the ask was made carries an
+    /// observation taken before the stall existed. Settling on it would hand
+    /// this stall somebody else's verdict.
+    func testAnAskIsNotAnsweredByAnExchangeAlreadyInFlight() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        defer { controlGate.reset(); controlAnswer.set(ControlAction(type: "none")) }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        // Sequence 1 is held with a verdict this ask must refuse.
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "not this stall's"
+        ))
+        controlGate.arm()
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+
+        // Everything after it answers `none`, so the only way to see the held
+        // verdict is to have taken the wrong exchange.
+        controlAnswer.set(ControlAction(type: "none"))
+        async let asked = session.askForAction(bound: 4, cap: 6, publish: {})
+        try await Task.sleep(nanoseconds: 150_000_000)
+        controlGate.release()
+        let verdict = await asked
+        XCTAssertNotEqual(verdict?.type, "terminal",
+                          "an in-flight exchange does not answer this ask")
+        session.end()
+    }
+
+    /// The ask always settles. A stalled viewer waiting on a promise nothing
+    /// will resolve is worse than the guess the client would have made.
+    func testAnAskWithNoAnswerSettlesAtItsBound() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        defer { controlGate.reset() }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        controlGate.arm()
+        let started = Date()
+        let verdict = await session.askForAction(bound: 0.3, cap: 0.5, publish: {})
+        controlGate.release()
+        XCTAssertNil(verdict)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3,
+                          "the bound is the bound")
+        session.end()
+    }
+
+    /// An ask against a session that never began answers at once rather than
+    /// after the bound.
+    func testAnAskWithNoReporterAnswersImmediately() async throws {
+        let session = PlaybackControlSession()
+        let started = Date()
+        let verdict = await session.askForAction(bound: 5, cap: 8, publish: {})
+        XCTAssertNil(verdict)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+    }
+
     /// A verdict outlives its reporter and its session, but not the lease the
     /// server gave that session.
     ///

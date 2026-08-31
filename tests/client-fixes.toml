@@ -321,7 +321,7 @@ test_anchor = "test_repository_build_claims_match_release_inputs"
 id = "android.bound-stall-downgrade"
 commits = ["c54f9411"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "private fun onStall(positionMs: Long)"
+source_anchor = "private suspend fun onStall(positionMs: Long)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/StallBudgetTest.kt"
 test_anchor = "budgetStopsAfterThreeSameRungAnswers"
 
