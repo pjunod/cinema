@@ -1,9 +1,10 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-31 · **Baseline:** `main` at `c571a50d` ·
+**Updated:** 2026-08-31 · **Baseline:** `main` at `8f9f7cee` ·
 **Fleet:** nuc3 · nuc4 · m6 serve `v0.2.8-106-g55abad8f`; nynuc serves a
-later untagged build · **Devices:** Android 47 · Apple 86 —
-the tree is Android 57 · Apple 101, and neither has run on hardware
+later untagged build · **Devices:** Apple 99 and Android 56 were **installed**
+on 2026-08-31 and neither has produced a control exchange — see
+§"The first fleet run" · the tree is Android 57 · Apple 101
 
 Companion to
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) (what
@@ -129,6 +130,50 @@ second half of the answer: the verdict rules out the established-HDR
 stop that keeps an established HDR delivery from descending to SDR, and
 skipping the call handed the compatibility ladder a stream it has always been
 vetoed from. The gate sits inside the rung, on the reconnect only.
+
+## The first fleet run — installation passed, acceptance did not
+
+2026-08-31, against `943d8a9a`, Apple 99 / Android 56. `scripts/ship-physical`
+completed its first end-to-end run and installed on every reachable device.
+**It settled none of the rulings**, and the reason it settled none of them is
+worth more than the run cost.
+
+**Web: the control plane had never run.** The player rendered VOD HLS in about
+2.9 s and its Control panel sat at *"awaiting first acceptance · exchange in
+flight"* forever, because the reporter threw before exchange one:
+
+```
+TypeError: Illegal invocation
+    at Reporter.drain (.../assets/playback-control.js:237:35)
+```
+
+`setTimeout` is a WindowTimers method, every browser brand-checks its receiver,
+and the reporter stored it on itself and called `this.setTimer(...)`. **No web
+control request has ever reached the server.** That is the whole explanation for
+`vocabulary_total{platform="web"}` reading zero — not a deployment gap, a dead
+runtime. Fixed in [#727](https://github.com/pjunod/plurx/pull/727).
+
+Node does not brand-check, and every unit test injected its own timer, so the
+only branch a browser takes was covered by nothing.
+[#729](https://github.com/pjunod/plurx/pull/729) adds the gate that would have
+caught it: the shipped module, a real browser, two real exchanges required.
+
+**Apple and Android: the devices were locked.** Every reachable iOS device and
+the Apple TV refused a foreground launch (asleep or locked); the Pixel installed
+and stayed on the keyguard. No title played on either platform, so §4.1, §4.2
+and §4.3 are all still unobserved.
+
+**The old counters are not partial credit.** m6 held 4,657 Apple exchanges and
+nynuc 3 Android, all `complete="false"` — incomplete older clients, which is
+what that label means. They cannot settle a ruling about the full vocabulary,
+and they predate the requested builds.
+
+**What the run did prove:** `scripts/ship-physical` works end to end, and the
+signed artifacts reach hardware. Also that the fleet was further ahead than this
+page claimed — devices were on Apple 94 / Android 53, not 86 / 47.
+
+**What the next run needs, beyond a deploy:** an unlocked, awake device with
+auto-lock disabled. Web can be settled without one, and should be settled first.
 
 ## The gate that blocks every deletion, and what it does not block
 
