@@ -1,9 +1,9 @@
 # Playback capabilities v2 — highest deliverable grade, negotiated not guessed
 
 **Status:** building — M0, M1, M2, M3a–M3d, M4 and M6 merged; M5a in review
-(#688); M5b not started · **Executes:** fable's rulings of 2026-08-29 on
-opus's DV-delivery findings · **Analysed:** `main` @ `4ba8bb48` ·
-**Written:** 2026-08-29 · **Updated:** 2026-08-30 · **Builder:** opus
+(#688); M5b implementation complete in #710 · **Executes:** fable's rulings
+of 2026-08-29 on opus's DV-delivery findings · **Analysed:** `main` @ `4ba8bb48` ·
+**Written:** 2026-08-29 · **Updated:** 2026-08-31 · **Builder:** opus
 
 Companion to [MEDIA-BADGES-PLAN.md](MEDIA-BADGES-PLAN.md) (what the badge
 promises) and [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) (how a
