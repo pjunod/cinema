@@ -676,10 +676,20 @@ class OperationsContractCase(unittest.TestCase):
 
         self.assertIn("id: android_instrumentation", first_attempt)
         self.assertIn("continue-on-error: true", first_attempt)
+        self.assertEqual(
+            first_attempt.count(
+                "touch target/validation/android-instrumentation-started"
+            ),
+            1,
+        )
         self.assertIn(
             "id: android_instrumentation_first_attempt", freeze_attempt
         )
         self.assertIn("if: always()", freeze_attempt)
+        self.assertIn(
+            "if [[ -f target/validation/android-instrumentation-started ]]; then",
+            freeze_attempt,
+        )
         self.assertIn(
             'echo "started=true" >> "$GITHUB_OUTPUT"', freeze_attempt
         )
@@ -692,6 +702,12 @@ class OperationsContractCase(unittest.TestCase):
             retry_attempt,
         )
         self.assertNotIn("continue-on-error:", retry_attempt)
+        self.assertEqual(
+            retry_attempt.count(
+                "touch target/validation/android-instrumentation-started"
+            ),
+            1,
+        )
         self.assertIn(
             "if: steps.android_instrumentation.outcome == 'failure' && "
             "steps.android_instrumentation_first_attempt.outputs.started == 'true'",
