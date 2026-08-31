@@ -564,3 +564,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.k
 source_anchor = "internal fun bindDecisionPlan("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
 test_anchor = "decisionPlanBindingRepeatsCapsAndRequestsOnlyAnHdr10Transcode"
+
+[[fixes]]
+id = "native.compatibility-rescue-sdr"
+commits = ["9243855b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
+source_anchor = "internal fun sessionHDR10Request("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "compatibilityRescueAndBurnNeverRepeatTheReplacedHdr10Plan"
