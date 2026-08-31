@@ -276,40 +276,6 @@ class Controller(
 
     /** The HLS session this player owns, if the plan opened one. */
     private var sessionId: String? = null
-
-    /**
-     * The surface is gone and the player with it.
-     *
-     * `release()` tears down an ExoPlayer that a deferred ladder would go on
-     * to interrogate, so anything that resumes after a wait checks this before
-     * touching `player`.
-     */
-    private var released = false
-
-    /**
-     * How many session opens are in flight *right now*.
-     *
-     * The Android answer to Apple's `isChangingStream`, and it exists for one
-     * reader: the compatibility ladder, which resumes seconds after the
-     * failure it is recovering from and has to know whether a `prepare` it
-     * cannot see synchronously is still on its way.
-     *
-     * In flight, not started. A generation counter answers "did an open begin
-     * while I waited", which is the wrong question in the one case that
-     * matters most: `openSession` ends the predecessor server-side, so the
-     * 404s that supersession causes arrive *after* the count went up, and a
-     * ladder comparing snapshots would see no change and walk a deleted
-     * playlist.
-     *
-     * Session opens and nothing else. `stallGuard` is the wrong fence in both
-     * directions: it is bumped by a VOD seek and an in-place subtitle change,
-     * neither of which re-prepares an `IDLE` player — a ladder that stood down
-     * for those would leave a frozen picture with no error and no affordance
-     * for the life of the screen — and bumping it from the failure path
-     * cancels creates that are already running. Every re-prepare that is not a
-     * session open happens inline, and the `playerError` identity catches it.
-     */
-    private var sessionOpensInFlight = 0
     private var activeMediaPath: String? = null
 
     private val playbackTelemetry = ControllerPlaybackTelemetry(
@@ -422,21 +388,131 @@ class Controller(
     )
 
     private val listener = object : Player.Listener {
-        // The ladder cannot run inline any more: it waits on a verdict
-        // first, and a `Player.Listener` override cannot suspend. `scope`
-        // is the screen's own scope — main-dispatched and cancelled with
-        // the screen — so every player call below still lands on the main
-        // thread and none of them outlive the surface they belong to.
-        //
-        // Nothing is claimed here. A failure is not an owner of anything —
-        // `stallGuard.beginRequest()` would invalidate a create already in
-        // flight, which is how a viewer's seek turns into an error banner:
-        // `openSession` ends the old session server-side before its create
-        // returns, the player's next segment request against the deleted
-        // playlist 404s, and that 404 would then cancel the very seek that
-        // caused it.
         override fun onPlayerError(error: PlaybackException) {
-            scope.launch { handlePlayerError(error) }
+            val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
+            // Only a transport failure can be answered by another node. A
+            // terminal answer — an ended session's 404, a refused
+            // credential — is the same on every ingress, and walking the list
+            // for one costs a full player prepare per node before the viewer
+            // sees the error they were always going to see.
+            reportControlEvidence(
+                ClientObservation(
+                    decoderState = DecoderState.FAILED,
+                    errorCode = controlErrorCode(error.errorCode),
+                    errorDetail = error.errorCodeName,
+                ),
+                render = RenderState.FAILED,
+            )
+            if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) return
+            // The armed verdict is consulted HERE, before the compatibility
+            // rungs, rather than only at `Fail` four branches down.
+            //
+            // For a source the producer has already ruled out, the ladder's
+            // remaining rungs are two full player prepares spent learning what
+            // the server knew before the first one: an established-HDR retry
+            // and a compatibility transcode, each one a reopen the viewer
+            // watches, ending in the sentence the verdict already carried.
+            // Rung one keeps its place ahead of this, because a failover
+            // proves nothing about the source and costs one prepare against a
+            // node that may simply be reachable.
+            //
+            // Armed, not awaited. `reportControlEvidence` above notifies the
+            // reporter urgently, so the exchange carrying this failure is
+            // already out; the verdict it earns lands in `terminalVerdict` and
+            // short-circuits the rung after this one. Waiting for it here
+            // instead is what this slice deliberately does not do — see
+            // §"Why Android does not await the verdict" in
+            // docs/PLAYBACK-CONTROL-STATUS.md.
+            //
+            // The transport carve-out is the `Fail` branch's, unchanged and
+            // for its reason: a verdict outlives the session that earned it,
+            // and a dropped link is a different cause with a different answer,
+            // so it must not borrow the server's words for one.
+            val armedVerdict = ladderVerdict(
+                errorCode = error.errorCode,
+                verdict = playbackControl.terminalVerdict,
+            )
+            if (armedVerdict != null) {
+                onError(
+                    armedVerdict.message
+                        ?: error.errorCodeName.let { "Playback stopped ($it)." },
+                )
+                return
+            }
+            val action = playbackErrorAction(
+                deliveryMode = deliveryMode,
+                preservesDolbyVision = plan.preserveDolbyVision,
+                remuxRescueAlreadyUsed = compatibilityRemuxUsed,
+                transcodeRescueAlreadyUsed = compatibilityTranscodeUsed,
+                mediaCompatibilityFailure = mediaCompatibilityFailure,
+                deliveredRange = deliveredRange,
+                establishedPlayback = establishedPlayback,
+                sameHdrRetryAlreadyUsed = sameHdrRetryUsed,
+            )
+            playbackTelemetry.report(
+                event = "playback_error",
+                level = "error",
+                message = error.errorCodeName,
+                code = error.errorCode,
+                detail = buildString {
+                    append("action=").append(action)
+                    append(" media_compatibility=").append(mediaCompatibilityFailure)
+                    append(" preserves_dv=").append(plan.preserveDolbyVision)
+                    append(" established=").append(establishedPlayback)
+                    if (caps.isNotEmpty()) {
+                        append(" caps=")
+                        append(
+                            caps.entries.sortedBy { it.key }
+                                .joinToString(",") { "${it.key}=${it.value}" },
+                        )
+                    }
+                },
+            )
+            Log.w(
+                "plurx-playback",
+                "file=${plan.fileId} delivery=$deliveryMode preservesDv=" +
+                    "${plan.preserveDolbyVision} action=$action caps=$caps " +
+                    "mediaFailure=${isCompatibilityPlaybackError(error.errorCode)} " +
+                    "error=${error.errorCodeName}",
+                error,
+            )
+            when (action) {
+                PlaybackErrorAction.RetrySameHDRDelivery -> {
+                    val position = realPosition()
+                    sameHdrRetryUsed = true
+                    restartAt(position, "fallback")
+                }
+                PlaybackErrorAction.RetryAsDolbyVisionRemux -> {
+                    val position = realPosition()
+                    compatibilityRemuxUsed = true
+                    forceCompatibilityRemux = true
+                    subtitleDelivery =
+                        subtitleRoute(trackFor(selectedSubtitle), planMode, subtitleDelivery).delivery
+                    restartAt(position, "fallback")
+                }
+                PlaybackErrorAction.RetryAsCompatibilityTranscode -> {
+                    // Read the position before the mode moves: which timeline
+                    // the player is on depends on the delivery about to change.
+                    val position = realPosition()
+                    compatibilityTranscodeUsed = true
+                    forceCompatibilityTranscode = true
+                    // `planMode` is a transcode now, and that can move the
+                    // selection's route with it: an embedded track on a
+                    // directly-played file has to become a rendition.
+                    subtitleDelivery =
+                        subtitleRoute(trackFor(selectedSubtitle), planMode, subtitleDelivery).delivery
+                    restartAt(position, "fallback")
+                }
+                PlaybackErrorAction.Fail -> onError(
+                    // A verdict says production stopped for a reason retrying
+                    // cannot change. A dropped link is a different cause with
+                    // a different answer, so a transport failure keeps the
+                    // client's own words rather than borrowing the server's.
+                    (if (isTransportPlaybackError(error.errorCode)) null
+                    else playbackControl.terminalVerdict?.message)
+                        ?: error.errorCodeName.let { "Playback stopped ($it)." },
+                )
+            }
         }
 
         override fun onRenderedFirstFrame() {
@@ -464,243 +540,13 @@ class Controller(
             pgsOverlay.itemChanged()
     }
 
-    /**
-     * The compatibility ladder, and the ask that now precedes it.
-     *
-     * Split out of the listener because it suspends. Everything below the
-     * ask runs only if the player is still holding this same failure.
-     */
-    private suspend fun handlePlayerError(error: PlaybackException) {
-        val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
-        // The ask goes before rung one, not before rung two. Rung one is
-        // `retryMediaOnNextNode`, and a verdict about the *source* does not
-        // change by node: an `unsupported` producer decision would otherwise
-        // walk next-node → established HDR → compatibility transcode, guessing
-        // at retry the whole way and failing three times to learn what the
-        // server knew before the first one. Each rung costs a full player
-        // prepare the viewer watches.
-        //
-        // What that costs, stated plainly: ingress failover now waits too, so
-        // a dead node freezes the picture for the ask's bound before the
-        // second node is tried. That is the right side of the trade only
-        // because both cases arrive as transport codes — an ended session's
-        // 404 is a transport code, and failing over for one walks EVERY node
-        // at a prepare each. One bounded wait beats N prepares. `askForAction`
-        // returns at its first line when there is no reporter, so direct play
-        // and progressive remux — the plans without a failover list — pay
-        // nothing.
-        //
-        // The evidence is published from INSIDE the ask, after it has read the
-        // sequence floor — see `askForAction`. Publishing first lets the pump
-        // start the next request before that read lands, which makes the floor
-        // one too high and rejects the very exchange carrying this failure.
-        val verdict = playbackControl.askForAction(
-            boundMs = CONTROL_ASK_MS,
-            capMs = CONTROL_ASK_CAP_MS,
-            publish = {
-                reportControlEvidence(
-                    ClientObservation(
-                        decoderState = DecoderState.FAILED,
-                        errorCode = controlErrorCode(error.errorCode),
-                        errorDetail = error.errorCodeName,
-                    ),
-                    render = RenderState.FAILED,
-                )
-            },
-        )
-        // A session open may be in flight — very likely one, if this failure
-        // is a 404 against the playlist that open just deleted. Wait it out
-        // rather than standing aside for it.
-        //
-        // Standing aside is the tempting shape and it is wrong, because an
-        // open has three exits that neither prepare nor report: the
-        // coordinator refusing a superseded request, and two staleness checks.
-        // A ladder that deferred to one of those would leave the player `IDLE`
-        // holding this exception with nothing left to clear it — `prepare()`
-        // is the only thing that does, the stall watchdog is gated on the same
-        // field, and ExoPlayer will not fire `onPlayerError` twice. Frozen
-        // picture, no error, no affordance, for the life of the screen.
-        //
-        // Waiting instead makes both outcomes self-describing. If the open
-        // prepares, `playerError` is cleared and the identity check below
-        // stands the ladder down. If it aborts, the exception is still there
-        // and the ladder is exactly the right owner for it.
-        var waitedForOpenMs = 0L
-        while (!released && sessionOpensInFlight > 0 && waitedForOpenMs < LADDER_OPEN_WAIT_MS) {
-            delay(LADDER_OPEN_POLL_MS)
-            waitedForOpenMs += LADDER_OPEN_POLL_MS
-        }
-        // Two conditions, and the ladder needs both. The predicate takes the
-        // raw inputs rather than booleans computed here, so there is no logic
-        // at this call site for a mutation to slip past.
-        if (!ladderStillOwnsFailure(
-                released = released,
-                failure = error,
-                // Lazy on purpose: `release()` tore this player down, and
-                // ExoPlayer's `release` does not clear `playbackError`, so
-                // reading it here is both meaningless and unsafe. The
-                // predicate must not reach this lambda when `released`.
-                current = { player.playerError },
-            )
-        ) {
-            // The `playback_error` beacon below never fires on this path, and
-            // the fleet run reads these. Say the failure was superseded rather
-            // than leaving no client-side record of it at all — but say it
-            // without `playbackTelemetry.report`, which samples position,
-            // buffer and video height straight off the player.
-            Log.w(
-                "plurx-playback",
-                "file=${plan.fileId} superseded error=${error.errorCodeName} " +
-                    "code=${error.errorCode} released=$released " +
-                    "waited_ms=$waitedForOpenMs",
-            )
-            if (!released) {
-                playbackTelemetry.report(
-                    event = "playback_error_superseded",
-                    level = "warn",
-                    message = error.errorCodeName,
-                    code = error.errorCode,
-                    detail = "waited_ms=$waitedForOpenMs",
-                )
-            }
-            return
-        }
-        // Only `terminal` short-circuits. A `hold` or a `retry_resource` on a
-        // dead item would leave the player with nothing to render and no path
-        // forward, so those fall through to the ladder — the ladder is the
-        // only thing that can still produce a picture. This is the opposite of
-        // the stall funnel, where a `hold` means *don't churn* and the media
-        // is still there.
-        //
-        // A transport failure is not carved out here, and the `Fail` branch
-        // below still carves one out, because they are answering different
-        // questions. That branch borrows `terminalVerdict`, which survives
-        // reopens and may have been formed for another cause entirely; this
-        // one is a fresh answer to evidence published for this exact failure.
-        // And the case the carve-out protects — a dead ingress — is the case
-        // a `terminal` most wants to short-circuit: an ended session's 404 is
-        // the same on every node, so failing over walks the whole list to
-        // arrive at the sentence the server already sent.
-        if (verdict != null && verdict.type == "terminal") {
-            onError(
-                verdict.message
-                    ?: error.errorCodeName.let { "Playback stopped ($it)." },
-            )
-            return
-        }
-        // Only a transport failure can be answered by another node. A
-        // terminal answer — an ended session's 404, a refused credential — is
-        // the same on every ingress, and walking the list for one costs a full
-        // player prepare per node before the viewer sees the error they were
-        // always going to see.
-        if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) return
-        val action = playbackErrorAction(
-            deliveryMode = deliveryMode,
-            preservesDolbyVision = plan.preserveDolbyVision,
-            remuxRescueAlreadyUsed = compatibilityRemuxUsed,
-            transcodeRescueAlreadyUsed = compatibilityTranscodeUsed,
-            mediaCompatibilityFailure = mediaCompatibilityFailure,
-            deliveredRange = deliveredRange,
-            establishedPlayback = establishedPlayback,
-            sameHdrRetryAlreadyUsed = sameHdrRetryUsed,
-        )
-        playbackTelemetry.report(
-            event = "playback_error",
-            level = "error",
-            message = error.errorCodeName,
-            code = error.errorCode,
-            detail = buildString {
-                append("action=").append(action)
-                append(" media_compatibility=").append(mediaCompatibilityFailure)
-                append(" preserves_dv=").append(plan.preserveDolbyVision)
-                append(" established=").append(establishedPlayback)
-                if (caps.isNotEmpty()) {
-                    append(" caps=")
-                    append(
-                        caps.entries.sortedBy { it.key }
-                            .joinToString(",") { "${it.key}=${it.value}" },
-                    )
-                }
-            },
-        )
-        Log.w(
-            "plurx-playback",
-            "file=${plan.fileId} delivery=$deliveryMode preservesDv=" +
-                "${plan.preserveDolbyVision} action=$action caps=$caps " +
-                "mediaFailure=${isCompatibilityPlaybackError(error.errorCode)} " +
-                "error=${error.errorCodeName}",
-            error,
-        )
-        when (action) {
-            PlaybackErrorAction.RetrySameHDRDelivery -> {
-                val position = realPosition()
-                sameHdrRetryUsed = true
-                restartAt(position, "fallback")
-            }
-            PlaybackErrorAction.RetryAsDolbyVisionRemux -> {
-                val position = realPosition()
-                compatibilityRemuxUsed = true
-                forceCompatibilityRemux = true
-                subtitleDelivery =
-                    subtitleRoute(trackFor(selectedSubtitle), planMode, subtitleDelivery).delivery
-                restartAt(position, "fallback")
-            }
-            PlaybackErrorAction.RetryAsCompatibilityTranscode -> {
-                // Read the position before the mode moves: which timeline
-                // the player is on depends on the delivery about to change.
-                val position = realPosition()
-                compatibilityTranscodeUsed = true
-                forceCompatibilityTranscode = true
-                // `planMode` is a transcode now, and that can move the
-                // selection's route with it: an embedded track on a
-                // directly-played file has to become a rendition.
-                subtitleDelivery =
-                    subtitleRoute(trackFor(selectedSubtitle), planMode, subtitleDelivery).delivery
-                restartAt(position, "fallback")
-            }
-            PlaybackErrorAction.Fail -> onError(
-                // A verdict says production stopped for a reason retrying
-                // cannot change. A dropped link is a different cause with
-                // a different answer, so a transport failure keeps the
-                // client's own words rather than borrowing the server's.
-                (if (isTransportPlaybackError(error.errorCode)) null
-                else playbackControl.terminalVerdict?.message)
-                    ?: error.errorCodeName.let { "Playback stopped ($it)." },
-            )
-        }
-    }
-
     init {
         player.addListener(listener)
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
         stallWatchdogJob = scope.launch {
             while (isActive) {
                 playbackControlPlayerChanged()
-                // A player holding a `PlaybackException` is not a recovered
-                // stall, and `sampleStall` cannot tell the difference. An
-                // error moves ExoPlayer to `IDLE`, so `buffering` goes false
-                // on exactly the falling edge the tracker reports as recovery,
-                // while `playWhenReady` and `establishedPlayback` both stay
-                // true until the ladder restarts.
-                //
-                // Two things go wrong without this gate. The failure and the
-                // stall race for the same evidence slot and the same answer —
-                // `STARVED/STALLED` overwrites the ladder's `FAILED/MEDIA`
-                // before it is ever sent, both asks read one answer slot, and
-                // whichever resumes first clears `establishedPlayback` and
-                // pushes the other into `Fail`. And `sampleStall` is not a
-                // pure measurement: it emits its own beacon labelled
-                // `state=recovered`, which for a stream that just died is a
-                // false statement landing in the fleet run beside the
-                // `playback_error` for the same instant.
-                //
-                // The cost, stated: the interval is dropped rather than
-                // relabelled, so a viewer who stared at a frozen picture for
-                // eight seconds before the node died leaves no stall record.
-                // A wrong number is worse than a missing one, and the
-                // `playback_error` beacon still marks the instant.
-                val stallable = establishedPlayback && player.playerError == null
-                val measurement = playbackTelemetry.sampleStall(stallable, monotonicNowMs())
+                val measurement = playbackTelemetry.sampleStall(establishedPlayback, monotonicNowMs())
                 if (measurement != null) {
                     onStall(measurement.positionMs)
                 }
@@ -776,7 +622,6 @@ class Controller(
     }
 
     fun release() {
-        released = true
         stallWatchdogJob.cancel()
         clearStatusPolling()
         pgsOverlay.release()
@@ -912,10 +757,6 @@ class Controller(
      * client sends is unit-tested rather than assembled inline.
      */
     private fun openSession(ms: Long, attempt: PlaybackAttempt) {
-        // Before the predecessor is ended, because the 404s that ending it
-        // causes are exactly what the ladder must not mistake for its own
-        // problem.
-        sessionOpensInFlight++
         val requestVersion = stallGuard.beginRequest()
         sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
@@ -923,75 +764,65 @@ class Controller(
         encoder = null
         sessionIsVod = false
         scope.launch {
-            try {
-                val hls = try {
-                    sessionCreateCoordinator.create(
-                        body = sessionBody(ms),
-                        isCurrent = { stallGuard.isCurrent(requestVersion) },
-                    ) ?: return@launch
-                } catch (cancelled: CancellationException) {
-                    // The screen left composition (or a newer request superseded
-                    // this one) — the caller saying stop, not the server failing.
-                    // Swallowing it here would show a failure state for a stream
-                    // nobody is waiting for any more.
-                    throw cancelled
-                } catch (error: Exception) {
-                    if (stallGuard.isCurrent(requestVersion)) {
-                        playbackTelemetry.report(
-                            event = "playback_error",
-                            level = "error",
-                            message = "session create failed before Media3 started",
-                            code = (error as? HttpException)?.code(),
-                            detail = redactedFailureDetail("session_create", error),
-                            attempt = attempt,
-                        )
-                        playbackTelemetry.cancel(attempt)
-                        Log.w(
-                            "PlurxPlayback",
-                            "session create failed ${redactedFailureDetail("session_create", error)}",
-                        )
-                        onError("The server couldn't start this stream.")
-                    }
-                    return@launch
+            val hls = try {
+                sessionCreateCoordinator.create(
+                    body = sessionBody(ms),
+                    isCurrent = { stallGuard.isCurrent(requestVersion) },
+                ) ?: return@launch
+            } catch (cancelled: CancellationException) {
+                // The screen left composition (or a newer request superseded
+                // this one) — the caller saying stop, not the server failing.
+                // Swallowing it here would show a failure state for a stream
+                // nobody is waiting for any more.
+                throw cancelled
+            } catch (error: Exception) {
+                if (stallGuard.isCurrent(requestVersion)) {
+                    playbackTelemetry.report(
+                        event = "playback_error",
+                        level = "error",
+                        message = "session create failed before Media3 started",
+                        code = (error as? HttpException)?.code(),
+                        detail = redactedFailureDetail("session_create", error),
+                        attempt = attempt,
+                    )
+                    playbackTelemetry.cancel(attempt)
+                    Log.w(
+                        "PlurxPlayback",
+                        "session create failed ${redactedFailureDetail("session_create", error)}",
+                    )
+                    onError("The server couldn't start this stream.")
                 }
-                // A later seek or track switch won while this request was in
-                // flight. Release this now-stale server session instead of letting
-                // its older timeline replace the current one.
-                if (!stallGuard.isCurrent(requestVersion)) {
-                    vm.endHlsSession(hls.session_id)
-                    return@launch
-                }
-                sessionId = hls.session_id
-                beginPlaybackControl(hls)
-                startStatusPolling(hls.session_id)
-                // Save this session's resolved height so the stall-reopen budget
-                // can compare each stall response against the predecessor rung.
-                stallReopenBudget.seed(hls.height)
-                encoder = hls.encoder
-                sessionIsVod = hls.vod
-                hls.delivered_dynamic_range?.let { deliveredRange = it }
-                // A cached session is the whole stream on disk: its timeline
-                // starts at zero and the player seeks, exactly like direct play.
-                val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
-                baseMs = timeline.baseMs
-                activeMediaPath = relativeMediaPath(hls.playlist_url)
-                player.setMediaItem(
-                    MediaItem.fromUri(Session.url(hls.playlist_url)),
-                    timeline.attachPositionMs,
-                )
-                player.prepare()
-                playbackTelemetry.prepared(attempt)
-                player.playWhenReady = true
-                armTrackSelections()
-            } finally {
-                // Every exit, including the two silent ones — the coordinator
-                // refusing a superseded request, and the post-create staleness
-                // check. Those abort without preparing and without an error,
-                // so a ladder waiting on this count has to be released, or a
-                // player left `IDLE` holding an exception stays that way for
-                // the life of the screen.
-                sessionOpensInFlight--
+                return@launch
             }
+            // A later seek or track switch won while this request was in
+            // flight. Release this now-stale server session instead of letting
+            // its older timeline replace the current one.
+            if (!stallGuard.isCurrent(requestVersion)) {
+                vm.endHlsSession(hls.session_id)
+                return@launch
+            }
+            sessionId = hls.session_id
+            beginPlaybackControl(hls)
+            startStatusPolling(hls.session_id)
+            // Save this session's resolved height so the stall-reopen budget
+            // can compare each stall response against the predecessor rung.
+            stallReopenBudget.seed(hls.height)
+            encoder = hls.encoder
+            sessionIsVod = hls.vod
+            hls.delivered_dynamic_range?.let { deliveredRange = it }
+            // A cached session is the whole stream on disk: its timeline
+            // starts at zero and the player seeks, exactly like direct play.
+            val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
+            baseMs = timeline.baseMs
+            activeMediaPath = relativeMediaPath(hls.playlist_url)
+            player.setMediaItem(
+                MediaItem.fromUri(Session.url(hls.playlist_url)),
+                timeline.attachPositionMs,
+            )
+            player.prepare()
+            playbackTelemetry.prepared(attempt)
+            player.playWhenReady = true
+            armTrackSelections()
         }
     }
 
@@ -1101,100 +932,95 @@ class Controller(
         // server validates previous_session_id against a live session
         // map.  Session creation supersedes and kills the predecessor
         // atomically.
-        sessionOpensInFlight++
         sessionId = null
         clearStatusPolling()
         encoder = null
         sessionIsVod = false
         scope.launch {
-            try {
-                val body = bindDecisionPlan(
-                    body = subtitleSessionBody(
-                        playbackId = playbackId,
-                        requestId = UUID.randomUUID().toString(),
-                        startSeconds = positionMs / 1000.0,
-                        delivery = subtitleDelivery,
-                        subtitleIndex = selectedSubtitle,
-                        copyableVideo = planMode != "transcode",
-                        aac = plan.aac,
-                        preserveDolbyVision = plan.preserveDolbyVision,
-                        audioIndex = selectedAudio,
-                        audioOffsetMs = audioOffsetMs,
-                        quality = vm.preferences.value.playbackQuality,
-                        sourceHeight = plan.sourceHeight,
-                        deliveredDynamicRange = deliveredRange,
-                        previousSessionId = prevId,
-                        reopenReason = ReopenReason.Stall,
-                    ),
-                    caps = decisionCaps,
-                    requestHDR10 = sessionHDR10Request(
-                        decisionMode = plan.mode,
-                        deliveredDynamicRange = plan.deliveredDynamicRange,
-                        compatibilityTranscode = forceCompatibilityTranscode,
-                        delivery = subtitleDelivery,
-                    ),
-                )
-                val hls = try {
-                    sessionCreateCoordinator.reopenAfterStall(
-                        body = body,
-                        isCurrent = { stallGuard.isCurrent(requestVersion) },
-                    ) ?: return@launch
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Exception) {
-                    if (stallGuard.isCurrent(requestVersion)) {
-                        playbackTelemetry.report(
-                            event = "playback_error",
-                            level = "error",
-                            message = "session reopen failed before Media3 started",
-                            code = (error as? HttpException)?.code(),
-                            detail = redactedFailureDetail("session_reopen", error),
-                            attempt = attempt,
-                        )
-                        playbackTelemetry.cancel(attempt)
-                        Log.w(
-                            "PlurxPlayback",
-                            "session reopen failed ${redactedFailureDetail("session_reopen", error)}",
-                        )
-                        onError(
-                            playbackControl.terminalVerdict?.message
-                                ?: "The stream stalled and recovery failed.",
-                        )
-                    }
-                    return@launch
+            val body = bindDecisionPlan(
+                body = subtitleSessionBody(
+                    playbackId = playbackId,
+                    requestId = UUID.randomUUID().toString(),
+                    startSeconds = positionMs / 1000.0,
+                    delivery = subtitleDelivery,
+                    subtitleIndex = selectedSubtitle,
+                    copyableVideo = planMode != "transcode",
+                    aac = plan.aac,
+                    preserveDolbyVision = plan.preserveDolbyVision,
+                    audioIndex = selectedAudio,
+                    audioOffsetMs = audioOffsetMs,
+                    quality = vm.preferences.value.playbackQuality,
+                    sourceHeight = plan.sourceHeight,
+                    deliveredDynamicRange = deliveredRange,
+                    previousSessionId = prevId,
+                    reopenReason = ReopenReason.Stall,
+                ),
+                caps = decisionCaps,
+                requestHDR10 = sessionHDR10Request(
+                    decisionMode = plan.mode,
+                    deliveredDynamicRange = plan.deliveredDynamicRange,
+                    compatibilityTranscode = forceCompatibilityTranscode,
+                    delivery = subtitleDelivery,
+                ),
+            )
+            val hls = try {
+                sessionCreateCoordinator.reopenAfterStall(
+                    body = body,
+                    isCurrent = { stallGuard.isCurrent(requestVersion) },
+                ) ?: return@launch
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (stallGuard.isCurrent(requestVersion)) {
+                    playbackTelemetry.report(
+                        event = "playback_error",
+                        level = "error",
+                        message = "session reopen failed before Media3 started",
+                        code = (error as? HttpException)?.code(),
+                        detail = redactedFailureDetail("session_reopen", error),
+                        attempt = attempt,
+                    )
+                    playbackTelemetry.cancel(attempt)
+                    Log.w(
+                        "PlurxPlayback",
+                        "session reopen failed ${redactedFailureDetail("session_reopen", error)}",
+                    )
+                    onError(
+                        playbackControl.terminalVerdict?.message
+                            ?: "The stream stalled and recovery failed.",
+                    )
                 }
-                if (!stallGuard.isCurrent(requestVersion)) {
-                    vm.endHlsSession(hls.session_id)
-                    return@launch
-                }
-                // Update the same-rung budget: the budget counts consecutive
-                // reopen responses that do NOT resolve a strictly lower rung than
-                // the predecessor (same rung, absent/zero height, or a higher
-                // rung).  A genuine strict downgrade resets the count.
-                // Absent or zero height counts as no step down — it is the server
-                // saying "this session is already at its answer" without a rung
-                // the client can compare.
-                stallReopenBudget.record(hls.height)
-                sessionId = hls.session_id
-                beginPlaybackControl(hls)
-                startStatusPolling(hls.session_id)
-                encoder = hls.encoder
-                sessionIsVod = hls.vod
-                hls.delivered_dynamic_range?.let { deliveredRange = it }
-                val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
-                baseMs = timeline.baseMs
-                activeMediaPath = relativeMediaPath(hls.playlist_url)
-                player.setMediaItem(
-                    MediaItem.fromUri(Session.url(hls.playlist_url)),
-                    timeline.attachPositionMs,
-                )
-                player.prepare()
-                playbackTelemetry.prepared(attempt)
-                player.playWhenReady = true
-                armTrackSelections()
-            } finally {
-                sessionOpensInFlight--
+                return@launch
             }
+            if (!stallGuard.isCurrent(requestVersion)) {
+                vm.endHlsSession(hls.session_id)
+                return@launch
+            }
+            // Update the same-rung budget: the budget counts consecutive
+            // reopen responses that do NOT resolve a strictly lower rung than
+            // the predecessor (same rung, absent/zero height, or a higher
+            // rung).  A genuine strict downgrade resets the count.
+            // Absent or zero height counts as no step down — it is the server
+            // saying "this session is already at its answer" without a rung
+            // the client can compare.
+            stallReopenBudget.record(hls.height)
+            sessionId = hls.session_id
+            beginPlaybackControl(hls)
+            startStatusPolling(hls.session_id)
+            encoder = hls.encoder
+            sessionIsVod = hls.vod
+            hls.delivered_dynamic_range?.let { deliveredRange = it }
+            val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
+            baseMs = timeline.baseMs
+            activeMediaPath = relativeMediaPath(hls.playlist_url)
+            player.setMediaItem(
+                MediaItem.fromUri(Session.url(hls.playlist_url)),
+                timeline.attachPositionMs,
+            )
+            player.prepare()
+            playbackTelemetry.prepared(attempt)
+            player.playWhenReady = true
+            armTrackSelections()
         }
     }
 
@@ -1624,18 +1450,27 @@ class Controller(
  * carry: the fallback is the branch the whole fleet takes, so this is added to
  * every real stall on every device.
  */
-/**
- * How long the deferred ladder waits for a session open already in flight.
- *
- * Generous, because the alternative to waiting long enough is acting on a
- * player somebody else is about to re-prepare; and bounded, because the
- * alternative to a bound is a ladder that never runs when a create hangs.
- */
-internal const val LADDER_OPEN_WAIT_MS = 10_000L
-internal const val LADDER_OPEN_POLL_MS = 100L
-
 internal const val CONTROL_ASK_MS = 1_500L
 internal const val CONTROL_ASK_CAP_MS = 3_000L
+
+/**
+ * The verdict that ends the compatibility ladder, or null to keep walking it.
+ *
+ * A function rather than an inline `if`, so that the one rule it encodes is
+ * pinned by a test: a transport failure never borrows the server's words.
+ *
+ * [verdict] is `terminalVerdict`, which deliberately outlives the session that
+ * earned it — that is what lets a verdict explain a failure that arrives after
+ * a reopen, and it is also exactly why a dropped link must not inherit it. A
+ * transport failure is a different cause with a different answer, and the
+ * client's own sentence is the honest one for it.
+ */
+internal fun ladderVerdict(errorCode: Int, verdict: ControlAction?): ControlAction? = when {
+    verdict == null -> null
+    verdict.type != "terminal" -> null
+    isTransportPlaybackError(errorCode) -> null
+    else -> verdict
+}
 
 /**
  * Which class of failure Media3 reported, in the protocol's vocabulary.
@@ -1646,41 +1481,6 @@ internal const val CONTROL_ASK_CAP_MS = 3_000L
  * produced. Sending `unknown` for all of them would hand the arbiter one word
  * where it has to choose between three different answers.
  */
-/**
- * Does the deferred compatibility ladder still own the failure it waited on?
- *
- * Two conditions, in this order, and the ladder needs both. It takes the raw
- * inputs rather than ready-made booleans so that the call site has no logic of
- * its own — a predicate that only ANDs what the caller already decided pins
- * nothing.
- *
- * - [released]: `release()` tore the player down. ExoPlayer's `release` does
- *   not clear `playbackError`, so the identity check is no defence here — and
- *   it must not even be *attempted*, which is why [current] is a lambda and
- *   why this check comes first.
- * - [current] identity: the player is still holding this exact failure.
- *   `prepare()` is the only thing that clears `playbackError`, so this is a
- *   complete test for "somebody already re-prepared" — provided the caller has
- *   first waited out any open still in flight, which is the one re-prepare
- *   that has not happened yet by the time it is decided.
- *
- * Deliberately identity, not equality: `Throwable` does not override `equals`,
- * but a future one might, and two distinct failures of the same code are two
- * failures.
- *
- * Generic over the failure type so the JVM test lane can exercise it. It reads
- * `PlaybackException`s in production; constructing one off-device throws,
- * because media3 stamps every instance with `SystemClock.elapsedRealtime()`.
- */
-internal fun <T : Any> ladderStillOwnsFailure(
-    released: Boolean,
-    failure: T,
-    current: () -> T?,
-): Boolean {
-    if (released) return false
-    return current() === failure
-}
-
 internal fun controlErrorCode(errorCode: Int): ClientErrorCode = when (errorCode) {
     // Media3's 3xxx family is *parsing*, and it splits: the container codes
     // are about the media, the manifest codes are about what the server

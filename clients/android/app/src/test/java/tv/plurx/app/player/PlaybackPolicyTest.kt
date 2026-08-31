@@ -321,78 +321,68 @@ class ControlAskBoundTest {
 
 
 /**
- * The compatibility ladder waits on a verdict now, so it resumes into a
- * player that may have moved. These tests pin the SET of conditions it
- * re-checks and their ORDER, because the hazard is not any one of them being
- * wrong — it is a later edit dropping one, which leaves a ladder that
- * restarts a player somebody else already moved, or one that interrogates a
- * player that has been torn down.
+ * The verdict that ends the compatibility ladder before its last two rungs.
  *
- * The failures here are plain objects rather than `PlaybackException`s: media3
- * stamps every instance with `SystemClock.elapsedRealtime()`, which throws in
- * this lane. The predicate is generic for exactly that reason.
+ * The rule this pins is a carve-out, and a carve-out is the kind of thing a
+ * later edit deletes as redundant: `terminalVerdict` deliberately outlives the
+ * session that earned it, so without the transport check a dropped link would
+ * inherit a sentence written about something else entirely.
  */
-class LadderOwnershipTest {
+class LadderVerdictTest {
 
-    private class Failure(val name: String)
+    private val terminal = ControlAction(type = "terminal", message = "Production stopped.")
 
+    /** The case the slice exists for: a source the producer has ruled out. */
     @Test
-    fun theLadderOwnsAFailureThePlayerIsStillHolding() {
-        val failure = Failure("decoder")
-        assertTrue(
-            ladderStillOwnsFailure(
-                released = false,
-                failure = failure,
-                current = { failure },
+    fun aTerminalVerdictEndsTheLadderForAMediaFailure() {
+        assertEquals(
+            terminal,
+            ladderVerdict(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+                verdict = terminal,
             ),
         )
     }
 
     /**
-     * `release()` tore the player down. ExoPlayer's `release` does not clear
-     * `playbackError`, so the identity check would pass on a dead player —
-     * and the lambda must not even be reached, because everything that reads
-     * a released ExoPlayer is reading freed state. This is what pins the
-     * ORDER: move the released check below the identity read and this fails.
+     * A dropped link keeps the client's own words. The verdict outlives its
+     * session, so it may have been formed for a cause that has nothing to do
+     * with why this socket died.
      */
     @Test
-    fun aReleasedPlayerIsNeverEvenAsked() {
-        val failure = Failure("decoder")
-        var asked = false
-        assertFalse(
-            ladderStillOwnsFailure(
-                released = true,
-                failure = failure,
-                current = { asked = true; failure },
-            ),
-        )
-        assertFalse("a released player must not be interrogated", asked)
-    }
-
-    /** Somebody re-prepared: `prepare()` is the only thing that clears it. */
-    @Test
-    fun aClearedErrorStopsTheLadder() {
-        assertFalse(
-            ladderStillOwnsFailure(
-                released = false,
-                failure = Failure("decoder"),
-                current = { null },
-            ),
-        )
+    fun aTransportFailureNeverBorrowsTheServersWords() {
+        for (code in listOf(2000, 2001, 2002, 2003, 2004, 2007, 2008)) {
+            assertNull(
+                "transport code $code must not inherit a verdict",
+                ladderVerdict(errorCode = code, verdict = terminal),
+            )
+        }
     }
 
     /**
-     * Identity, not equality. Two failures of the same shape are two failures,
-     * and a `Throwable` subclass that grew an `equals` must not start hiding
-     * the second one behind the first.
+     * A `hold` or a `retry_resource` on a dead item would leave the player
+     * with nothing to render and no path forward. The ladder is the only
+     * thing that can still produce a picture, so those keep walking it.
      */
     @Test
-    fun aDistinctFailureOfTheSameShapeIsNotThisOne() {
-        assertFalse(
-            ladderStillOwnsFailure(
-                released = false,
-                failure = Failure("decoder"),
-                current = { Failure("decoder") },
+    fun onlyATerminalVerdictEndsTheLadder() {
+        for (type in listOf("hold", "retry_resource", "none")) {
+            assertNull(
+                "a $type verdict must not end the ladder",
+                ladderVerdict(
+                    errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                    verdict = ControlAction(type = type, reason = "busy"),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun noVerdictKeepsTheLadderWalking() {
+        assertNull(
+            ladderVerdict(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                verdict = null,
             ),
         )
     }

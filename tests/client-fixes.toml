@@ -326,12 +326,12 @@ test = "clients/android/app/src/test/java/tv/plurx/app/player/StallBudgetTest.kt
 test_anchor = "budgetStopsAfterThreeSameRungAnswers"
 
 [[fixes]]
-id = "android.bound-ladder-ownership"
-commits = ["a5143aba", "c739a785"]
+id = "android.bound-ladder-verdict-transport"
+commits = ["a5143aba"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "internal fun <T : Any> ladderStillOwnsFailure("
+source_anchor = "internal fun ladderVerdict(errorCode: Int, verdict: ControlAction?)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
-test_anchor = "aReleasedPlayerIsNeverEvenAsked"
+test_anchor = "aTransportFailureNeverBorrowsTheServersWords"
 
 [[fixes]]
 id = "android.bound-stall-predecessor-alive"

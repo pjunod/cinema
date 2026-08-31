@@ -1,6 +1,6 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-31 · **Baseline:** `main` at `377107c9` ·
+**Updated:** 2026-08-31 · **Baseline:** `main` at `5d80526e` ·
 **Fleet:** nuc3 · nuc4 · m6 serve `v0.2.8-106-g55abad8f`; nynuc serves a
 later untagged build · **Devices:** Android 47 · Apple 86 —
 the tree is Android 57 · Apple 100, and neither has run on hardware
@@ -54,13 +54,47 @@ merge target: two client PRs in flight means the second always fails.
 | M5g | Android: the stall owner asks before it decides | [#718](https://github.com/pjunod/plurx/pull/718) | merged |
 | ask exits | Apple: read the answer slot at every exit | [#719](https://github.com/pjunod/plurx/pull/719) | merged |
 | acceptance | what a fleet run has to show | [#720](https://github.com/pjunod/plurx/pull/720) | merged |
-| M5e ladder | Apple: ask before walking the compatibility ladder | [#721](https://github.com/pjunod/plurx/pull/721) | in review |
-| M5g ladder | Android: ask before walking the compatibility ladder | this change | open |
+| M5e ladder | Apple: ask before walking the compatibility ladder | [#721](https://github.com/pjunod/plurx/pull/721) | merged |
+| M5g ladder | Android: end the ladder on an armed verdict | this change | open |
 
-**What is left in M5, and what each is waiting for.** The two ladder asks are
+**What is left in M5, and what each is waiting for.** The two ladder slices are
 the last buildable M5 work; once they land, M5c and M5h — deleting the web and
 mobile budgets — are all that remains, and both are gated on
 [M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any code.
+
+### Why Android does not await the verdict, and Apple does
+
+The two ladder slices are not mirrors, and the difference is not an oversight.
+
+Apple's `handleItemFailure` was already `async` before this milestone, and it
+already carried the fence that makes a deferred decision safe: `openGeneration`
+for a session open, `currentItem` identity for the media, and
+`isChangingStream` for an open still *in flight*. Adding an `await` there costs
+the ask's bound and nothing structural.
+
+Android's `onPlayerError` is a `Player.Listener` override and cannot suspend,
+so awaiting means launching the ladder on a coroutine — and Android has no
+equivalent of `isChangingStream`. Four adversarial passes over that version
+found, in order: a stall detector racing the ladder for the same evidence slot;
+a fence that cancelled the very session create whose 404 had woken it; a fence
+that stood aside for actions which re-prepare nothing, freezing the picture
+with no error and no affordance for the life of the screen; and a wait that
+could not tell an open which *prepared* from one which had already shown the
+viewer an error, so both outcomes happened. Each fix was correct and each
+exposed the next. The common root is that `openSession` reports its outcome to
+nobody, so "is a re-prepare coming, and did it work" is not a question the
+client can currently answer.
+
+So Android arms rather than awaits. `reportControlEvidence` notifies the
+reporter urgently, the exchange carrying the failure goes out immediately, and
+the verdict it earns lands in `terminalVerdict` — where the *next* rung reads
+it. The ladder ends one rung later than Apple's and saves two prepares of
+three instead of three of three, and it cannot reorder anything.
+
+**What this leaves owed.** Making `openSession` publish its outcome
+(prepared · aborted · already reported) is the prerequisite for any deferred
+decision on Android, and M6's `buffered_break_before_make` will need it too.
+It is not in M5's scope and is recorded here rather than attempted.
 
 ## The gate that blocks every deletion, and what it does not block
 
@@ -116,6 +150,11 @@ blocks the slices now in flight; each shapes M6.
 6. What interruption bound is acceptable for `buffered_break_before_make`?
    Its acceptance criterion is "within its measured interruption bound", and
    nobody has measured or chosen one.
+7. Should Android's session opens publish an outcome, so a client decision can
+   be deferred there at all? Decided *not* to attempt it inside M5 — see
+   §"Why Android does not await the verdict" above. Decided without the
+   operator, and the one worth a second look: it is the difference between the
+   two platforms' ladder slices, and M6 needs it either way.
 
 ## Chronicle
 
