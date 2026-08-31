@@ -222,6 +222,7 @@ class ControlErrorClassTest {
             ClientErrorCode.NETWORK,
             controlErrorCode(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED),
         )
+        assertEquals(ClientErrorCode.NETWORK, controlErrorCode(PlaybackException.ERROR_CODE_TIMEOUT))
         assertEquals(
             ClientErrorCode.MANIFEST,
             controlErrorCode(PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED),
@@ -231,8 +232,37 @@ class ControlErrorClassTest {
             controlErrorCode(PlaybackException.ERROR_CODE_DECODING_FAILED),
         )
         assertEquals(
+            ClientErrorCode.DECODER,
+            controlErrorCode(PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED),
+        )
+        assertEquals(
             ClientErrorCode.DRM,
             controlErrorCode(PlaybackException.ERROR_CODE_DRM_UNSPECIFIED),
+        )
+    }
+
+    /**
+     * The parsing family splits, and getting it wrong tells the arbiter the
+     * opposite of what this client believes. A malformed or unsupported
+     * *container* is what drives the DV-remux and compatibility-transcode
+     * ladder — the client is about to re-encode the file — so reporting it as
+     * a manifest error would say the server produced a bad playlist.
+     */
+    @Test
+    fun aBadContainerIsNotABadPlaylist() {
+        for (code in listOf(
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+        )) {
+            assertEquals(ClientErrorCode.MEDIA, controlErrorCode(code))
+            // The same codes this client's own ladder calls a compatibility
+            // failure. If these two ever disagree, one of them is lying to
+            // somebody.
+            assertEquals(true, isCompatibilityPlaybackError(code))
+        }
+        assertEquals(
+            ClientErrorCode.MANIFEST,
+            controlErrorCode(PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED),
         )
     }
 

@@ -1178,6 +1178,14 @@ class Controller(
      * does not depend on the control plane and never should.
      */
     private fun beginPlaybackControl(hls: HlsStart) {
+        // The override describes the session that just ended. Carrying it into
+        // the replacement would make its very first exchange — a session that
+        // has rendered nothing yet — report a stall belonging to another.
+        // Cleared before the bootstrap is judged, so a reopen against a server
+        // that offers no control plane cannot leave one behind either.
+        controlObservationOverride = null
+        controlRenderOverride = null
+        controlEvidencePositionMs = null
         val bootstrap = hls.control
         if (bootstrap == null || !bootstrap.isValid) {
             playbackControl.end()
@@ -1187,12 +1195,6 @@ class Controller(
         // read, and the protocol requires them on the first request of a
         // generation, so reporting waits for that one probe. Until it lands
         // the reporter has nothing complete to say.
-        // The override describes the session that just ended. Carrying it into
-        // the replacement would make its very first exchange — a session that
-        // has rendered nothing yet — report a stall belonging to another.
-        controlObservationOverride = null
-        controlRenderOverride = null
-        controlEvidencePositionMs = null
         scope.launch {
             controlCapabilityProbe.join()
             playbackControl.begin(bootstrap = bootstrap, observe = ::playbackControlObservation)
@@ -1330,7 +1332,13 @@ class Controller(
 
     private fun expireControlEvidenceIfProgressed() {
         val publishedAt = controlEvidencePositionMs ?: return
-        if (realPosition() <= publishedAt) return
+        // Any movement, not only forward movement. A VOD seek never reopens
+        // the session, so a viewer scrubbing BACK from a stall would otherwise
+        // leave the override in place for the rest of the title — and the
+        // mapper ranks an override above everything the player reports, so
+        // every exchange for the next hour of healthy playback would say
+        // `stalled`.
+        if (realPosition() == publishedAt) return
         controlObservationOverride = null
         controlRenderOverride = null
         controlEvidencePositionMs = null
@@ -1347,9 +1355,20 @@ class Controller(
  * where it has to choose between three different answers.
  */
 internal fun controlErrorCode(errorCode: Int): ClientErrorCode = when (errorCode) {
+    // Media3's 3xxx family is *parsing*, and it splits: the container codes
+    // are about the media, the manifest codes are about what the server
+    // produced. This client's own compatibility ladder already treats 3001
+    // and 3003 as media failures (`isCompatibilityPlaybackError`), so
+    // reporting them as `manifest` would tell the arbiter the playlist was
+    // bad at the moment the client is about to re-encode the file.
+    3001, 3003 -> ClientErrorCode.MEDIA
+    1003 -> ClientErrorCode.NETWORK // ERROR_CODE_TIMEOUT
     in 2000..2999 -> ClientErrorCode.NETWORK
     in 3000..3999 -> ClientErrorCode.MANIFEST
-    in 4000..4999 -> ClientErrorCode.DECODER
+    // 4xxx is decoder/renderer init and decode; 5xxx is the AudioTrack
+    // renderer, which is the same class of answer: this device could not
+    // render this recipe.
+    in 4000..5999 -> ClientErrorCode.DECODER
     in 6000..6999 -> ClientErrorCode.DRM
     else -> ClientErrorCode.UNKNOWN
 }

@@ -501,18 +501,18 @@ class PlaybackControlReporter private constructor(
         value: PlaybackControlSnapshot? = null,
     ) {
         notify(value)
+        // The swap is one critical section on purpose. Releasing the lock
+        // between clearing `pump` and setting it would let a concurrent
+        // `start()` — whose guard is `pump != null` — launch a second run
+        // loop, and `stop()` can only cancel the one it can see. `launch`
+        // does not suspend, so holding the mutex across it is safe.
         val stale = mutex.withLock {
             if (stopped || inFlight || pending == null) return
             val running = pump
-            pump = null
+            pump = scope.launch { run() }
             running
         }
         stale?.cancel()
-        val job = scope.launch { run() }
-        val alreadyStopped = mutex.withLock {
-            if (stopped) true else { pump = job; false }
-        }
-        if (alreadyStopped) job.cancel()
     }
 
     suspend fun stop() {

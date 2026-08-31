@@ -116,6 +116,8 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
 
     private val verdictLock = Any()
     private var verdict: ControlAction? = null
+    private var verdictArmedAtMs = 0L
+    private var verdictLeaseMs = 0L
     private var verdictGeneration = 0
 
     /**
@@ -127,7 +129,20 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
      * at the failure it explains, later.
      */
     val terminalVerdict: ControlAction?
-        get() = synchronized(verdictLock) { verdict }
+        get() = synchronized(verdictLock) {
+            val armed = verdict ?: return@synchronized null
+            // A verdict outlives its reporter and its session, but not the
+            // lease the server gave that session. Past it the session the
+            // verdict described is gone, and a confident sentence about a
+            // production attempt that ended an hour ago would caption an
+            // unrelated failure. The bound is the server's own number rather
+            // than one invented here.
+            if (System.currentTimeMillis() - verdictArmedAtMs > verdictLeaseMs) {
+                verdict = null
+                return@synchronized null
+            }
+            armed
+        }
 
     /**
      * A new title. The old verdict described a source that is no longer
@@ -138,6 +153,9 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     fun clearVerdict() {
         synchronized(verdictLock) { verdict = null }
     }
+
+    /** Test seam: what the verdict's staleness bound is measured against. */
+    internal fun verdictArmedAtMsForTest(): Long = synchronized(verdictLock) { verdictArmedAtMs }
 
     /**
      * Begin reporting for a session the server said is controllable. A
@@ -155,6 +173,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         // this begin — and an old in-flight exchange completing in that window
         // would otherwise carry a previous generation's verdict into this one.
         val generation = synchronized(verdictLock) { ++verdictGeneration }
+        val leaseMs = bootstrap.leaseTimeoutMs
         val subject = PlaybackControlReporter.create(
             bootstrap = bootstrap,
             clientInstanceId = clientInstanceId,
@@ -176,7 +195,11 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                     !action.message.isNullOrEmpty()
                 ) {
                     synchronized(verdictLock) {
-                        if (generation == verdictGeneration) verdict = action
+                        if (generation == verdictGeneration) {
+                            verdict = action
+                            verdictArmedAtMs = System.currentTimeMillis()
+                            verdictLeaseMs = leaseMs
+                        }
                     }
                 }
             },
