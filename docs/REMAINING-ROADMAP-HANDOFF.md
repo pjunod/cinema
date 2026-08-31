@@ -95,6 +95,15 @@ reported honestly rather than hidden under that term."
 
 ### 2.2 Staged generations
 
+**The ground is recced and the plan is written:**
+[M5.5-STAGED-GENERATIONS-HANDOFF.md](M5.5-STAGED-GENERATIONS-HANDOFF.md). Read
+it before touching the store — the short version is that
+`activate_media_session` is the only way to create a durable successor and it
+unconditionally reaps the predecessor and advances the pointer, so prepare
+needs its own entry point rather than a flag. What follows is the summary that
+document expands.
+
+
 - `media_replacement_actions`, prepare-only activation, the one-staged-
   successor constraint, committed-pointer CAS, abort, expiry.
 - **Prove prepare neither calls the legacy supersession reap nor advances
