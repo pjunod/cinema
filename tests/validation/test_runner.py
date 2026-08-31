@@ -113,6 +113,29 @@ class CatalogCase(unittest.TestCase):
         self.assertIn("apple-simulators", check_ids)
         self.assertNotIn("web-layout", check_ids)
 
+    def test_the_browser_gate_selects_the_only_job_that_has_a_browser(self):
+        """A gate that never runs is worse than no gate.
+
+        `scripts/control-reporter-browser-check` needs Playwright and a
+        Chromium, which exist in exactly one job — the one `web_layout`
+        selects. It shipped with a `validation/points.toml` entry and without a
+        `WEB_LAYOUT_PATHS` entry, so its own pull request skipped the job
+        entirely and the gate proved nothing about itself.
+
+        The reporter's own path matters more: a change to
+        `crates/plurxd/src/web/**` has to select the browser job, because that
+        is the diff this gate exists to catch.
+        """
+        catalog = load_catalog(ROOT / "validation/points.toml")
+
+        gate = scope_for_paths(catalog, ("scripts/control-reporter-browser-check",))
+        self.assertTrue(gate["web_layout"])
+
+        reporter = scope_for_paths(
+            catalog, ("crates/plurxd/src/web/playback-control.js",)
+        )
+        self.assertTrue(reporter["web_layout"])
+
     def test_ci_scope_keeps_expensive_jobs_on_their_affected_surfaces(self):
         catalog = load_catalog(ROOT / "validation/points.toml")
 
