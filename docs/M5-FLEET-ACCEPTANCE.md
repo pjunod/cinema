@@ -22,8 +22,8 @@ client build carrying it has ever run on hardware.
 |---|---|---|
 | server (emits the actions) | yes | three nodes on `v0.2.8-106-g55abad8f`, nynuc on a later untagged build |
 | web (served by the node) | yes | **whatever those nodes serve** — a server deploy ships the web client with it |
-| Apple | build **101** | build 86 |
-| Android | versionCode **57** | 47 |
+| Apple | build **101** | build 99 (installed 2026-08-31; no exchange) |
+| Android | versionCode **57** | 56 (installed 2026-08-31; no exchange) |
 
 The web row is the useful one: **deploying the server deploys the web client**,
 so one action gets a full-vocabulary client onto the fleet without touching a
@@ -80,6 +80,25 @@ so its first run is itself an acceptance.
 
 Each of these was decided without the operator and each is falsifiable on
 hardware. They are listed with the observation that would settle them.
+
+### 4.0 Web first, because it needs no device
+
+The 2026-08-31 run settled nothing partly because every device was locked or
+asleep — and partly because the web reporter had never completed an exchange in
+its life (see §"The first fleet run" in
+[PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md)). That is fixed, and
+web needs no hardware.
+
+**Do this before touching a phone.** Open the web player on a deployed node,
+play anything, and confirm two things: the Control panel leaves *"awaiting first
+acceptance"*, and
+`plurx_playback_control_vocabulary_total{complete="true",platform="web"}` on
+that node goes above zero.
+
+**If it does not,** capture the browser console verbatim and stop. Everything
+else in this document is downstream of a client that can complete an exchange,
+and web is the only platform that can prove it without a person holding a
+device.
 
 ### 4.1 Ruling D1 — `terminal` arms the verdict, it does not tear the player down
 
