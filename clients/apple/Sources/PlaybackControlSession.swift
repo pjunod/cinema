@@ -152,6 +152,7 @@ final class PlaybackControlSession {
         // given in, because the failure it explains usually arrives after a
         // reopen; `clearVerdict()` is how a new title starts clean.
         let generation = verdicts.beginGeneration()
+        let lease = TimeInterval(bootstrap.leaseTimeoutMs) / 1_000
         self.observe = observe
         // The reporter takes its first snapshot the moment it starts, so the
         // first one has to be there before it does.
@@ -178,7 +179,7 @@ final class PlaybackControlSession {
                       action.type == "terminal",
                       action.message?.isEmpty == false
                 else { return }
-                verdicts.store(action, generation: generation)
+                verdicts.store(action, generation: generation, lease: lease)
             }
         )
         guard let reporter else {
@@ -263,6 +264,8 @@ final class PlaybackControlSession {
 private final class PlaybackControlLatestVerdict: @unchecked Sendable {
     private let lock = NSLock()
     private var value: ControlAction?
+    private var armedAt = Date.distantPast
+    private var lease: TimeInterval = 0
     private var generation = 0
 
     /// Claim the next generation. Deliberately does not clear the verdict: a
@@ -275,11 +278,13 @@ private final class PlaybackControlLatestVerdict: @unchecked Sendable {
         return generation
     }
 
-    func store(_ action: ControlAction, generation: Int) {
+    func store(_ action: ControlAction, generation: Int, lease: TimeInterval) {
         lock.lock()
         defer { lock.unlock() }
         guard generation == self.generation else { return }
         value = action
+        armedAt = Date()
+        self.lease = lease
     }
 
     func clear() {
@@ -288,9 +293,18 @@ private final class PlaybackControlLatestVerdict: @unchecked Sendable {
         value = nil
     }
 
+    /// A verdict outlives its reporter and its session, but not the lease the
+    /// server gave that session. Past it the session the verdict described is
+    /// gone, and a sentence delivered an hour ago would caption an unrelated
+    /// failure with total confidence. The bound is the server's own number.
     func load() -> ControlAction? {
         lock.lock()
         defer { lock.unlock() }
+        guard value != nil else { return nil }
+        if Date().timeIntervalSince(armedAt) > lease {
+            value = nil
+            return nil
+        }
         return value
     }
 }
