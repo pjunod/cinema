@@ -151,9 +151,11 @@ pub struct StartResponse {
     /// the store mid-request: the client keeps whatever it had.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered_dynamic_range: Option<String>,
-    /// The Dolby Vision profile *this session's* bytes carry, when they carry
-    /// any. Absent for a transcode, a strip, and any source that never had
-    /// Dolby Vision — which is not the same as unknown.
+    /// The Dolby Vision profile *this session's* bytes carry, when it is
+    /// known. Absent for a transcode, a strip, a source that never had Dolby
+    /// Vision — and for a pre-M2 row whose label names no profile, which is
+    /// why absence means "no answer" rather than "not Dolby Vision".
+    /// `delivered_dynamic_range` beside it is the field that answers that.
     ///
     /// The one thing the field above cannot say. A Profile 7 title preserved
     /// for a device that enumerates 7 and the same title converted to 8.1 for
@@ -11819,6 +11821,68 @@ mod tests {
         assert!(review.hdr10, "the caps present PQ on hevc");
         assert!(!review.mismatched);
         assert!(review.notes.is_empty(), "{:?}", review.notes);
+    }
+
+    /// The session's own answer for both badge fields, for every kind of
+    /// session that can carry Dolby Vision.
+    ///
+    /// Read off the session that was built rather than the decision that
+    /// suggested one, because a burn or a forced rung produces a delivery
+    /// `/decision` never promised. The two fields are asserted together
+    /// because they are read together: a session badged `dolby_vision` whose
+    /// profile is absent, or a profile on a session whose range says HDR10,
+    /// is a worse answer than either field alone would be.
+    #[test]
+    fn a_sessions_badge_names_the_range_and_the_profile_it_actually_carries() {
+        use crate::transcode::SessionKind;
+        use plurx_core::transcode::OutputGrade;
+
+        let mut p7 = dolby_vision_p8_file();
+        p7.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".into());
+        p7.dolby_vision.profile = Some(7);
+        p7.dolby_vision.level = Some(6);
+        p7.dolby_vision.bl_compat_id = Some(1);
+
+        let copy = |preserve: bool, convert: bool| SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: preserve,
+            convert_dolby_vision: convert,
+        };
+        let badge = |kind: &SessionKind| {
+            (
+                session_delivered_dynamic_range(Some(&p7), kind, OutputGrade::Sdr),
+                session_delivered_dolby_vision_profile(Some(&p7), kind),
+            )
+        };
+
+        assert_eq!(
+            badge(&copy(true, true)),
+            (Some("dolby_vision"), Some(8)),
+            "a converting session delivers Dolby Vision, and the profile is the \
+             one the conversion made — not the 7 the source row says"
+        );
+        assert_eq!(
+            badge(&copy(true, false)),
+            (Some("dolby_vision"), Some(7)),
+            "the same range as the converting answer, which is why the profile \
+             has to be on the wire at all"
+        );
+        assert_eq!(
+            badge(&copy(false, false)),
+            (Some("hdr10"), None),
+            "a stripped stream carries no Dolby Vision to name"
+        );
+        assert_eq!(
+            badge(&SessionKind::Transcode { height: 1080 }),
+            (Some("sdr"), None),
+            "no plurx encode rung produces Dolby Vision"
+        );
+
+        // A source the store could not load says nothing rather than guessing.
+        assert_eq!(
+            session_delivered_dolby_vision_profile(None, &copy(true, true)),
+            None
+        );
     }
 
     /// A create body with nothing set, to be spread over.

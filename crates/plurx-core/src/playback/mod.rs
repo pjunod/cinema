@@ -878,10 +878,19 @@ pub fn delivered_dynamic_range(
 /// disk, and the badge that says `DV P7` for both is telling one of them
 /// something untrue about its own file (MEDIA-BADGES-PLAN §2.3).
 ///
-/// `None` means there is no Dolby Vision in the delivered bytes at all: a
-/// transcode, a strip, or a source that never had any. That is not the same
-/// as "unknown", and it is why this is separate from
-/// [`dolby_vision_profile`], which answers what the *source* carries.
+/// `None` means **there is no profile to name**, which covers two cases a
+/// reader must not conflate: a delivery that carries no Dolby Vision at all
+/// (a transcode, a strip, a source that never had any), and a Dolby Vision
+/// delivery whose source row does not say which profile — a pre-M2 row whose
+/// label is the bare string "Dolby Vision", which [`dolby_vision_profile`]
+/// documents as producible. A client must therefore read absence as "no
+/// answer", never as "this stream is not Dolby Vision":
+/// [`delivered_dynamic_range`] beside it is the field that answers that.
+///
+/// Narrowing the second case would mean claiming a profile from a row that
+/// does not state one, which is the class of guess this milestone exists to
+/// stop — the conversion is the only delivery whose profile is known without
+/// asking the row, and it is the one case answered outright below.
 pub fn delivered_dolby_vision_profile(
     file: &MediaFile,
     method: PlaybackMethod,
@@ -2889,6 +2898,42 @@ mod tests {
         let mut levelless = described.clone();
         levelless.dolby_vision.level = None;
         assert!(!dolby_vision_converts_to_p81(&levelless, &client, &node));
+
+        // …and so is a level the record cannot hold. `DolbyVisionRecord::new`
+        // refuses 0 and anything past 0x3f because the field is six bits, so a
+        // row outside that range routes to a conversion whose index can never
+        // be built — the same permanent `vod_index_pending` a label-only row
+        // would produce, from a value that merely looks present. Real levels
+        // are 1 to 13; the bounds are asserted rather than the realistic range,
+        // because the bound that matters is the record's.
+        for level in [0i64, 0x40, 255, i64::MAX] {
+            let mut out_of_range = described.clone();
+            out_of_range.dolby_vision.level = Some(level);
+            assert!(
+                !dolby_vision_converts_to_p81(&out_of_range, &client, &node),
+                "level {level} cannot be written into a Dolby Vision record"
+            );
+            assert!(
+                crate::fmp4::DolbyVisionRecord::new(
+                    8,
+                    u8::try_from(level).unwrap_or(0xff),
+                    false,
+                    true,
+                    true,
+                    1
+                )
+                .is_err(),
+                "…which is the reason: level {level} is refused by the writer"
+            );
+        }
+        for level in [1i64, 6, 13, 0x3f] {
+            let mut in_range = described.clone();
+            in_range.dolby_vision.level = Some(level);
+            assert!(
+                dolby_vision_converts_to_p81(&in_range, &client, &node),
+                "level {level} is a level the record can hold"
+            );
+        }
     }
 
     /// The decision a converting client actually receives.

@@ -63,13 +63,20 @@ pub enum IndexOutcome {
 /// Generic over the source for the same reason [`crate::copyseg::run`] is:
 /// everything between the pipe and the index is worth testing and none of it
 /// needs a real child process to be worth testing.
+/// `dolby_vision` is **both** answers, and deliberately one parameter rather
+/// than two: `Some(record)` means "this pass converts Profile 7 to 8.1, and
+/// its output must declare this record". They have to agree — a pass that
+/// converts must store the record its stream needs, and a pass that does not
+/// must store none — and two parameters is how they come to disagree, on a
+/// pair nothing downstream would notice: the rows would be byte counts for
+/// one stream and the served init a description of the other.
 pub async fn index_stream<R: AsyncRead + Unpin>(
     mut src: R,
     identity: SourceIdentity,
     expected_ms: Option<i64>,
     dolby_vision: Option<plurx_core::fmp4::DolbyVisionRecord>,
-    convert: bool,
 ) -> IndexOutcome {
+    let convert = dolby_vision.is_some();
     // A converting identity's index has to describe the CONVERTED bytes. An
     // index is a list of the producer's own output byte counts and the landing
     // matcher compares them, so an index built from the unconverted stream
@@ -266,11 +273,21 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
     // segments cut for a stream that was never converted.
     if convert {
         let report = converter.as_ref().map(|c| c.report()).unwrap_or_default();
-        // The index pass reads every RPU in the file, so its answer is the
-        // whole film's rather than one session's opening fragment's. Recorded
-        // here because it is what the conversion costs a viewer — MEL is
-        // lossless to drop, FEL is not — and nothing else in the pipeline
-        // learns it.
+        if report.rpus == 0 {
+            return IndexOutcome::Unsupported(
+                "this source is recorded as Dolby Vision Profile 7 but its stream carries no \
+                 RPUs to convert"
+                    .into(),
+            );
+        }
+        // After the refusal, not before it. The index pass reads every RPU in
+        // the file, so its answer is the whole film's rather than one
+        // session's opening fragment's — and it is what the conversion costs a
+        // viewer, since MEL carries no picture detail of its own while FEL
+        // carries real residual detail. A line logged on the failure path
+        // would report a default MEL/FEL answer for a pass that read no RPU at
+        // all, which is worse than saying nothing: this is what an operator
+        // reading a "why does this look softer" report has to go on.
         tracing::info!(
             rpus = report.rpus,
             source_profile = report.source_profile,
@@ -278,21 +295,13 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
             "indexed a converted stream: {}",
             report.enhancement_layer.reason()
         );
-        let rpus = report.rpus;
-        if rpus == 0 {
-            return IndexOutcome::Unsupported(
-                "this source is recorded as Dolby Vision Profile 7 but its stream carries no \
-                 RPUs to convert"
-                    .into(),
-            );
-        }
     }
     let mut promotion = promotion.unwrap_or_default();
-    // The record cannot come out of a fragment — the stream this pass reads
-    // has no container to have carried one, which is the whole reason plurx
-    // writes it. It rides in the stored promotion inputs so the served init
-    // this pass validates and the served init a later generation promotes are
-    // produced by the same function from the same facts.
+    // The record cannot come out of a fragment: what the muxer wrote describes
+    // the source, not the converted stream, which is the whole reason plurx
+    // supplies its own. It rides in the stored promotion inputs so the served
+    // init this pass validates and the served init a later generation promotes
+    // are produced by the same function from the same facts.
     promotion.dolby_vision = dolby_vision;
     let Some(mut served_init) = init.clone() else {
         return IndexOutcome::Unsupported(
@@ -578,14 +587,7 @@ async fn build_with_args(
             stdout,
             identity,
             expected_ms,
-            dolby_vision.clone(),
-            // Derived from the record rather than asked a second time. The two
-            // have to agree — a pass that converts must store the record its
-            // output needs, and a pass that does not must store none — and
-            // asking `video` twice is how they come to disagree. `is_some()`
-            // makes that unrepresentable: the record exists exactly when the
-            // pass that produces the stream it describes runs.
-            dolby_vision.is_some(),
+            dolby_vision,
         ),
     )
     .await
@@ -644,6 +646,12 @@ mod tests {
     use super::*;
     use plurx_core::segplan::{self, SEGPLAN_VERSION};
     use plurx_core::testfixtures;
+
+    /// The record a converting pass supplies — and, being `Some`, the way a
+    /// caller says that this pass converts at all.
+    fn converting_record() -> plurx_core::fmp4::DolbyVisionRecord {
+        plurx_core::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("record")
+    }
 
     fn identity() -> SourceIdentity {
         SourceIdentity::new(1, 1, "fingerprint")
@@ -852,7 +860,6 @@ mod tests {
             identity(),
             None,
             None,
-            false,
         )
         .await;
         let IndexOutcome::Built(plain) = plain else {
@@ -865,12 +872,13 @@ mod tests {
 
         let record =
             plurx_core::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("record");
+        // Supplying the record *is* asking for the conversion, so the stream
+        // has to be one there is something to convert in.
         let converted = index_stream(
-            std::io::Cursor::new(bytes),
+            std::io::Cursor::new(testfixtures::with_dolby_vision_rpus(&bytes)),
             identity(),
             None,
             Some(record.clone()),
-            false,
         )
         .await;
         let IndexOutcome::Built(converted) = converted else {
@@ -905,7 +913,6 @@ mod tests {
             identity(),
             None,
             None,
-            false,
         )
         .await;
         let IndexOutcome::Built(unconverted) = unconverted else {
@@ -916,8 +923,7 @@ mod tests {
             std::io::Cursor::new(dv_bytes),
             identity(),
             None,
-            None,
-            true,
+            Some(converting_record()),
         )
         .await;
         let IndexOutcome::Built(converted) = converted else {
@@ -950,8 +956,13 @@ mod tests {
     async fn a_converting_pass_over_a_stream_with_no_rpus_is_not_an_index() {
         testfixtures::require_ffmpeg();
         let bytes = index_pipe_bytes("closed-gop");
-        let outcome =
-            index_stream(std::io::Cursor::new(bytes), identity(), None, None, true).await;
+        let outcome = index_stream(
+            std::io::Cursor::new(bytes),
+            identity(),
+            None,
+            Some(converting_record()),
+        )
+        .await;
         let IndexOutcome::Unsupported(reason) = outcome else {
             panic!("a stream with no RPUs cannot be indexed as converted: {outcome:?}");
         };
@@ -961,7 +972,7 @@ mod tests {
     /// The index pipe over a real fixture, read the way the daemon reads it.
     async fn index_fixture(kind: &str) -> IndexOutcome {
         let bytes = index_pipe_bytes(kind);
-        index_stream(std::io::Cursor::new(bytes), identity(), None, None, false).await
+        index_stream(std::io::Cursor::new(bytes), identity(), None, None).await
     }
 
     /// The video-only pipe's own output, cached beside the fixture.
@@ -1051,7 +1062,7 @@ mod tests {
         // in-band sets, so there is no hidden PPS from which to "succeed".
         replace_hvcc_array_type(&mut bytes, 34, 33);
         let outcome =
-            index_stream(std::io::Cursor::new(bytes), identity(), None, None, false).await;
+            index_stream(std::io::Cursor::new(bytes), identity(), None, None).await;
         let IndexOutcome::Unsupported(reason) = outcome else {
             panic!("an incomplete emitted hvcC must not be indexed: {outcome:?}");
         };
@@ -1065,7 +1076,7 @@ mod tests {
         // per-IDR parameter-set variation. The check still has to work.
         let bytes = index_pipe_bytes("closed-gop");
         let IndexOutcome::Built(index) =
-            index_stream(std::io::Cursor::new(bytes), identity(), None, None, false).await
+            index_stream(std::io::Cursor::new(bytes), identity(), None, None).await
         else {
             panic!("must index");
         };
@@ -1153,7 +1164,6 @@ mod tests {
             identity(),
             None,
             None,
-            false,
         )
         .await;
         assert!(
@@ -1170,7 +1180,6 @@ mod tests {
             identity(),
             None,
             None,
-            false,
         )
         .await
         else {
@@ -1184,7 +1193,6 @@ mod tests {
             identity(),
             Some(60_000 + 12_000),
             None,
-            false,
         )
         .await;
         assert!(
@@ -1297,7 +1305,6 @@ mod equality_tests {
                 SourceIdentity::new(1, 1, "fingerprint"),
                 None,
                 None,
-                false,
             )
             .await
             else {

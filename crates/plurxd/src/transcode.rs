@@ -15389,9 +15389,20 @@ impl TranscodeManager {
         // stream Safari played fine.
         let have_dovi = self.dv_strippable();
         // What this path can actually deliver — see `served_copy_options`.
-        let served = served_copy_options(options);
-        let preserve = served.preserve_dolby_vision;
-        if options.convert_dolby_vision {
+        //
+        // `options` is **shadowed** rather than read alongside the served
+        // value, because reading the wrong one is the bug this exists to
+        // prevent and it shipped once already: the returned `SessionKind` was
+        // built from the asked-for options, and that is what the create
+        // response's badge is computed from, so a stream this path stripped to
+        // HDR10 was badged Dolby Vision. Shadowing makes that unspellable —
+        // every later `options.` in this function is the served answer. `asked`
+        // survives only to log the difference.
+        let asked = options;
+        let options = served_copy_options(asked);
+        let served = options;
+        let preserve = options.preserve_dolby_vision;
+        if asked.convert_dolby_vision {
             tracing::info!(
                 file_id,
                 "this copy cannot convert Dolby Vision, so it strips to the HDR10 base \

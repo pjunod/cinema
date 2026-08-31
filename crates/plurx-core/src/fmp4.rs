@@ -4566,6 +4566,118 @@ mod tests {
         assert_eq!(large.bytes, before);
     }
 
+    /// The model follows the bytes all the way to the `mdat` payload's end,
+    /// and overlapping or out-of-order samples are refused rather than
+    /// panicked on.
+    ///
+    /// Two things nothing else asserts. `mdat_payload.end` is currently
+    /// write-only downstream — the merger reads samples through `tracks` — so
+    /// a wrong value here would sit undetected until the first reader that
+    /// slices by it, and then read past the end of a fragment. And the
+    /// forward build assumes the edits are sorted and disjoint: a model that
+    /// broke either would take the slice at `bytes[copied..edit.at.start]`
+    /// backwards and **panic**, out of a function whose whole contract is to
+    /// return `Result` and whose callers argue their safety from "a refusal
+    /// leaves the fragment exactly as it was".
+    #[test]
+    fn the_payload_range_follows_the_bytes_and_a_tangled_model_is_refused() {
+        let feed = pipe("closed-gop");
+        let (init, frags, _) = read_all(&feed);
+        let video = init.video().expect("video").id;
+
+        let mut shortened = frags[0].clone();
+        let before_len = shortened.bytes.len();
+        let before_end = shortened.mdat_payload.end;
+        let samples = shortened
+            .track(video)
+            .expect("a video track")
+            .sample_count();
+        rewrite_video_samples(&mut shortened, &init.tracks, video, |sample| {
+            Ok(sample[..sample.len() - 4].to_vec())
+        })
+        .expect("rewrite");
+        let dropped = 4 * samples;
+        assert_eq!(shortened.bytes.len(), before_len - dropped);
+        assert_eq!(
+            shortened.mdat_payload.end,
+            before_end - dropped,
+            "the payload range has to shrink with the payload"
+        );
+        assert!(
+            shortened.mdat_payload.end <= shortened.bytes.len(),
+            "and must never point past the fragment"
+        );
+
+        // A model whose samples overlap cannot be applied in one forward pass.
+        // Built by giving the video track a second run over bytes the first
+        // already covers — sizes that still fit, so this reaches the overlap
+        // check rather than the "runs past the end" one above it.
+        let mut overlapping = frags[0].clone();
+        for track in &mut overlapping.tracks {
+            if track.track_id == video {
+                let mut again = track.runs[0].clone();
+                again.samples.truncate(1);
+                track.runs.push(again);
+            }
+        }
+        let untouched = overlapping.bytes.clone();
+        let error = rewrite_video_samples(&mut overlapping, &init.tracks, video, |sample| {
+            Ok(sample[..sample.len() - 4].to_vec())
+        })
+        .expect_err("overlapping samples cannot both be rewritten");
+        assert!(error.to_string().contains("overlap"), "{error}");
+        assert_eq!(overlapping.bytes, untouched);
+
+        // Runs listed out of ascending order are sorted, not sliced
+        // backwards. Ordering is a property of the model, not of the bytes,
+        // and nothing in this file promises `parse_moof` will always produce
+        // it — so the forward build sorts rather than assuming. Without that
+        // this call panics inside a function whose contract is to return
+        // `Result`, taking down a producer that was reading an ffmpeg pipe.
+        let mut reversed = frags[0].clone();
+        for track in &mut reversed.tracks {
+            if track.track_id == video && track.runs[0].samples.len() >= 2 {
+                let run = track.runs[0].clone();
+                let split = run.samples.len() / 2;
+                let head_bytes: usize =
+                    run.samples[..split].iter().map(|s| s.size as usize).sum();
+                let mut tail = run.clone();
+                tail.data_offset = run.data_offset + head_bytes;
+                tail.samples = run.samples[split..].to_vec();
+                let mut head = run;
+                head.samples.truncate(split);
+                track.runs = vec![tail, head];
+            }
+        }
+        let result = rewrite_video_samples(&mut reversed, &init.tracks, video, |sample| {
+            Ok(sample[..sample.len() - 4].to_vec())
+        });
+        assert!(
+            result.is_ok(),
+            "an out-of-order model must be handled, not refused or panicked on: {result:?}"
+        );
+
+        // …and a size field that sits inside the bytes being rewritten cannot
+        // be corrected: writing it would patch a position the rewrite has
+        // already changed the meaning of.
+        let mut inside = frags[0].clone();
+        let payload = inside.mdat_payload.start;
+        for track in &mut inside.tracks {
+            if track.track_id == video {
+                if let Some(sample) = track.runs[0].samples.first_mut() {
+                    sample.size_at = Some(payload + 8);
+                }
+            }
+        }
+        let untouched = inside.bytes.clone();
+        let error = rewrite_video_samples(&mut inside, &init.tracks, video, |sample| {
+            Ok(sample[..sample.len() - 4].to_vec())
+        })
+        .expect_err("a size field inside the rewritten region cannot be corrected");
+        assert!(error.to_string().contains("sits inside"), "{error}");
+        assert_eq!(inside.bytes, untouched);
+    }
+
     /// Every video sample's bytes, in order.
     fn video_samples(fragment: &Fragment, track_id: u32) -> Vec<Vec<u8>> {
         track_samples(fragment, track_id)

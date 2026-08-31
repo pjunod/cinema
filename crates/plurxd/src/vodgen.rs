@@ -696,7 +696,6 @@ mod tests {
             SourceIdentity::new(1, 1, "fingerprint"),
             None,
             None,
-            false,
         )
         .await
         {
@@ -747,7 +746,6 @@ mod tests {
             SourceIdentity::new(1, 1, "fingerprint+p81"),
             None,
             Some(record),
-            true,
         )
         .await
         {
