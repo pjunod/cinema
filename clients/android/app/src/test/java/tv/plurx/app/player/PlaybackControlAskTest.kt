@@ -53,8 +53,8 @@ class PlaybackControlAskTest {
         action: String,
         reason: String? = null,
         message: String? = null,
+        sequence: AtomicLong = AtomicLong(0),
     ): PlaybackControlTransport {
-        val sequence = AtomicLong(0)
         val client = OkHttpClient.Builder().addInterceptor(
             Interceptor { chain ->
                 val accepted = sequence.incrementAndGet()
@@ -95,6 +95,22 @@ class PlaybackControlAskTest {
             },
         ).build()
         return PlaybackControlTransport("https://cinema.example", client, json)
+    }
+
+    /**
+     * The ask's floor is the reporter's own request counter, so it only means
+     * anything once the reporter has built a request. `begin` launches the
+     * pump, so a test that asks immediately reads a floor of zero and settles
+     * on the bootstrap exchange — which in production cannot happen, because
+     * a stall is minutes into a session.
+     */
+    private suspend fun awaitFirstExchange(sequence: AtomicLong) {
+        val deadline = monotonicNowMs() + 5_000
+        while (sequence.get() < 1 && monotonicNowMs() < deadline) {
+            kotlinx.coroutines.delay(10)
+        }
+        assertTrue(sequence.get() >= 1, "the session never exchanged")
+        kotlinx.coroutines.delay(50)
     }
 
     private fun bootstrap() = ControlBootstrap(
@@ -139,7 +155,13 @@ class PlaybackControlAskTest {
         val scope = scope()
         val session = PlaybackControlSession(scope)
         try {
-            session.begin(bootstrap(), ::observation, transport("hold", reason = "no_room"))
+            val sequence = AtomicLong(0)
+            session.begin(
+                bootstrap(),
+                ::observation,
+                transport("hold", reason = "no_room", sequence = sequence),
+            )
+            awaitFirstExchange(sequence)
             var published = false
             val verdict = session.askForAction(
                 boundMs = 5_000,
@@ -160,11 +182,13 @@ class PlaybackControlAskTest {
         val scope = scope()
         val session = PlaybackControlSession(scope)
         try {
+            val sequence = AtomicLong(0)
             session.begin(
                 bootstrap(),
                 ::observation,
-                transport("terminal", message = "No decoder for this."),
+                transport("terminal", message = "No decoder for this.", sequence = sequence),
             )
+            awaitFirstExchange(sequence)
             val verdict = session.askForAction(boundMs = 5_000, capMs = 8_000, publish = {})
             assertEquals("terminal", verdict?.type)
             assertEquals("No decoder for this.", session.terminalVerdict?.message)
