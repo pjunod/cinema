@@ -34,6 +34,61 @@ private final class ControlExchangeLog: @unchecked Sendable {
 
 private let controlExchanges = ControlExchangeLog()
 
+/// What the stub server answers with. `none` unless a test says otherwise,
+/// because every node in the fleet answers `none` today.
+private final class ControlAnswer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = ControlAction(type: "none")
+
+    func set(_ action: ControlAction) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = action
+    }
+
+    func get() -> ControlAction {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+private let controlAnswer = ControlAnswer()
+
+/// Holds one exchange open so a test can stage a race that is otherwise
+/// unstageable: an old reporter's response landing after the next session has
+/// already begun. The answer is captured before the wait, so the held
+/// response carries what the server said when the request arrived.
+private final class ControlGate: @unchecked Sendable {
+    private let semaphore = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var armed = false
+
+    func arm() {
+        lock.lock()
+        defer { lock.unlock() }
+        armed = true
+    }
+
+    func waitIfArmed() {
+        lock.lock()
+        let holding = armed
+        if holding { armed = false }
+        lock.unlock()
+        if holding { _ = semaphore.wait(timeout: .now() + 5) }
+    }
+
+    func release() { semaphore.signal() }
+
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        armed = false
+    }
+}
+
+private let controlGate = ControlGate()
+
 /// Accepts every exchange the way the server does, and records what it carried.
 private final class ControlExchangeURLProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -61,9 +116,12 @@ private final class ControlExchangeURLProtocol: URLProtocol {
             generation: decoded.generation,
             controlEpoch: decoded.controlEpoch,
             acceptedSequence: decoded.sequence,
-            action: ControlAction(type: "none")
+            action: controlAnswer.get()
         )
         let body = (try? PlaybackControl.encoder.encode(response)) ?? Data()
+        // Encoded first, so a held response carries the answer that was
+        // current when the request arrived rather than when it was released.
+        controlGate.waitIfArmed()
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
@@ -214,6 +272,189 @@ final class PlaybackControlSessionTests: XCTestCase {
         XCTAssertEqual(first.generation, "11111111-1111-4111-8111-111111111111")
         XCTAssertEqual(first.controlEpoch, 7)
         XCTAssertNotNil(first.capabilities)
+    }
+
+    /// The return path M5 exists to open. Before this the reporter was built
+    /// without `onExchange`, so it defaulted to a no-op and the server could
+    /// send a verdict the player would never see.
+    func testATerminalVerdictReachesThePlayerAndOutlivesTheReporter() async throws {
+        controlExchanges.reset()
+        controlAnswer.set(ControlAction(
+            type: "terminal",
+            code: "unsupported",
+            message: "This file's audio is not playable here."
+        ))
+        defer { controlAnswer.set(ControlAction(type: "none")) }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        // The reporter stops on a terminal verdict, as it always has. The
+        // verdict must not stop with it: the failure it explains arrives
+        // later, and by then there is nothing left to ask.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(
+            session.terminalVerdict?.message,
+            "This file's audio is not playable here."
+        )
+        XCTAssertEqual(session.terminalVerdict?.code, "unsupported")
+        session.end()
+        XCTAssertNotNil(session.terminalVerdict, "ending reporting does not retract a verdict")
+    }
+
+    func testAnOrdinaryVerdictArmsNothing() async throws {
+        controlExchanges.reset()
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        session.end()
+        XCTAssertNil(session.terminalVerdict)
+    }
+
+    /// A verdict survives a reopen and does not survive a title.
+    ///
+    /// The distinction is the whole design. A reopen is the same viewer on the
+    /// same source, and the failure a verdict explains normally arrives on the
+    /// far side of one — the stall funnel reopens once before it stops, so a
+    /// verdict cleared by `begin` would be gone by the stop that needed it. A
+    /// new title is a different source, and a confident sentence about the
+    /// wrong film is worse than a generic one.
+    func testAVerdictSurvivesAReopenAndIsClearedByANewTitle() async throws {
+        controlExchanges.reset()
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "the old recipe"
+        ))
+        // The answer is file-scope shared state and this class runs its tests
+        // in one process. A throw before the mid-body reset would leave every
+        // later test with a reporter that stops after sequence 1.
+        defer { controlAnswer.set(ControlAction(type: "none")) }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNotNil(session.terminalVerdict)
+
+        controlAnswer.set(ControlAction(type: "none"))
+        controlExchanges.reset()
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        XCTAssertEqual(
+            session.terminalVerdict?.message, "the old recipe",
+            "a reopen keeps the verdict: the failure it explains arrives after one"
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        session.clearVerdict()
+        XCTAssertNil(session.terminalVerdict, "a new title starts clean")
+        session.end()
+    }
+
+    /// A verdict outlives its reporter and its session, but not the lease the
+    /// server gave that session.
+    ///
+    /// Without a bound a sentence delivered at ten o'clock captions an
+    /// unrelated failure at eleven with total confidence, because nothing but
+    /// a new title clears it.
+    func testAVerdictDoesNotOutliveTheLeaseItWasGivenUnder() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "an hour ago"
+        ))
+        defer { controlAnswer.set(ControlAction(type: "none")) }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        // The shortest lease the bootstrap validator accepts — it must be at
+        // least `nextExchangeMs` — so the bound is reachable in a test rather
+        // than in five minutes.
+        var short = sessionBootstrap()
+        short.leaseTimeoutMs = PlaybackControl.minimumExchangeMs
+        session.begin(
+            bootstrap: short,
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(session.terminalVerdict?.message, "an hour ago",
+                       "inside the lease it is the answer")
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertNil(session.terminalVerdict,
+                     "past the lease the session it described is gone")
+        session.end()
+    }
+
+    /// An exchange from the reporter a reopen just replaced must not arm a
+    /// verdict for the session that replaced it.
+    ///
+    /// `end()` stops the old reporter with an unstructured task, so the stop
+    /// does not necessarily land before the next `begin`. The race is real and
+    /// not otherwise stageable, so the stub server holds the first response
+    /// open until the second generation has begun.
+    func testAStaleReporterCannotArmTheNewSessionsVerdict() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        defer { controlGate.reset(); controlAnswer.set(ControlAction(type: "none")) }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        // Generation 1 asks, and the server's terminal answer is held.
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "from the old generation"
+        ))
+        controlGate.arm()
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+
+        // Generation 2 begins while that answer is still in flight.
+        controlAnswer.set(ControlAction(type: "none"))
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        controlGate.release()
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertNil(
+            session.terminalVerdict,
+            "a verdict answered to a generation that has been replaced arms nothing"
+        )
+        session.end()
     }
 
     func testTheNextExchangeCarriesWhereThePlayerMovedTo() async throws {

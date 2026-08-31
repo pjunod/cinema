@@ -114,6 +114,24 @@ final class PlaybackControlSession {
     /// player pushes here, the reporter never pulls from the player.
     private let latest = PlaybackControlLatestSnapshot()
 
+    /// What the reporter writes. The mirror of `latest`, and it exists for the
+    /// same reason: the reporter is an actor and the player is `@MainActor`,
+    /// so the two never call each other. A lock-guarded slot is the whole
+    /// bridge.
+    ///
+    /// `MainActor.assumeIsolated` inside a closure an actor pulls
+    /// synchronously is an assertion, not a bridge, and it killed every play
+    /// on build 90. Nothing here hops.
+    private let verdicts = PlaybackControlLatestVerdict()
+
+    /// The last terminal verdict this session was given, if any.
+    ///
+    /// It deliberately outlives the reporter. A terminal verdict stops
+    /// reporting — correctly, since the reporter owns no recovery — so a
+    /// verdict that died with it would be discarded exactly when it mattered:
+    /// at the failure it explains, minutes later.
+    var terminalVerdict: ControlAction? { verdicts.load() }
+
     /// One identity per player instance, not per session: a reopen is the same
     /// viewer on the same device continuing, and the server reads a new
     /// `client_instance_id` as a different client.
@@ -130,6 +148,11 @@ final class PlaybackControlSession {
         observe: @escaping () -> PlayerControlObservation?
     ) {
         end()
+        // A generation, not a reset. A verdict outlives the session it was
+        // given in, because the failure it explains usually arrives after a
+        // reopen; `clearVerdict()` is how a new title starts clean.
+        let generation = verdicts.beginGeneration()
+        let lease = TimeInterval(bootstrap.leaseTimeoutMs) / 1_000
         self.observe = observe
         // The reporter takes its first snapshot the moment it starts, so the
         // first one has to be there before it does.
@@ -142,7 +165,22 @@ final class PlaybackControlSession {
             sleep: { milliseconds, _ in
                 try await Task.sleep(nanoseconds: UInt64(max(0, milliseconds)) * 1_000_000)
             },
-            now: { Int(Date().timeIntervalSince1970 * 1_000) }
+            now: { Int(Date().timeIntervalSince1970 * 1_000) },
+            // The return path. Until now this defaulted to a no-op, so the
+            // server could send a verdict the player would never see.
+            //
+            // Only `terminal` is retained, and it is retained rather than
+            // acted on: ruling D1 in the M5 handoff. `hold` and
+            // `retry_resource` are exchange-level and the reporter already
+            // honours them; a player that acted on them here would be
+            // deciding, which is M5e.
+            onExchange: { [verdicts] exchange in
+                guard let action = exchange.response?.action,
+                      action.type == "terminal",
+                      action.message?.isEmpty == false
+                else { return }
+                verdicts.store(action, generation: generation, lease: lease)
+            }
         )
         guard let reporter else {
             latest.store(nil)
@@ -159,6 +197,27 @@ final class PlaybackControlSession {
         guard let reporter else { return }
         Task { await reporter.notify() }
     }
+
+    /// A recovery owner published evidence and is about to act on it.
+    ///
+    /// Coalescing is right for a position update and wrong for this. The pump
+    /// sleeps for `next_exchange_ms` — up to a minute — and the owner's own
+    /// reopen normally ends this reporter before it wakes, so the evidence
+    /// would be discarded rather than sent late. The web reporter has always
+    /// drained inline at exactly this call site, for exactly this reason.
+    ///
+    /// Restricted to callers that have evidence rather than a position, so the
+    /// ordinary cadence is unchanged.
+    func reportEvidence() {
+        publish()
+        guard let reporter else { return }
+        Task { await reporter.notifyUrgently() }
+    }
+
+    /// A new title. The old verdict described a source that is no longer
+    /// playing, so keeping it would show a confident sentence about the wrong
+    /// film.
+    func clearVerdict() { verdicts.clear() }
 
     func end() {
         latest.store(nil)
@@ -195,6 +254,63 @@ final class PlaybackControlSession {
 /// The staleness this admits is bounded by how often the player reports that
 /// it changed — once a second from the periodic time observer, plus every
 /// rate change — against an exchange cadence the server never sets faster.
+/// The reporter's half of the bridge: one verdict, written from an actor and
+/// read from `@MainActor`, with a lock rather than an isolation assertion.
+///
+/// The token is not decoration. `end()` stops the old reporter with an
+/// unstructured `Task`, so a reopen can begin the next session before that
+/// stop lands, and an old in-flight exchange completing in that window would
+/// carry a previous generation's verdict into the new one.
+private final class PlaybackControlLatestVerdict: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: ControlAction?
+    private var armedAt = Date.distantPast
+    private var lease: TimeInterval = 0
+    private var generation = 0
+
+    /// Claim the next generation. Deliberately does not clear the verdict: a
+    /// reopen is the same viewer on the same title, and the failure a verdict
+    /// explains usually arrives on the far side of one.
+    func beginGeneration() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        generation += 1
+        return generation
+    }
+
+    func store(_ action: ControlAction, generation: Int, lease: TimeInterval) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard generation == self.generation else { return }
+        value = action
+        armedAt = Date()
+        self.lease = lease
+    }
+
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        value = nil
+    }
+
+    /// A verdict outlives its reporter and its session, but not the lease the
+    /// server gave that session. Past it the session the verdict described is
+    /// gone, and a sentence delivered an hour ago would caption an unrelated
+    /// failure with total confidence. The bound is the server's own number.
+    func load() -> ControlAction? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard value != nil else { return nil }
+        if Date().timeIntervalSince(armedAt) > lease {
+            value = nil
+            return nil
+        }
+        return value
+    }
+}
+
+/// The newest snapshot the player has produced, written by the main actor and
+/// read by the reporter's.
 private final class PlaybackControlLatestSnapshot: @unchecked Sendable {
     private let lock = NSLock()
     private var value: PlaybackControlSnapshot?

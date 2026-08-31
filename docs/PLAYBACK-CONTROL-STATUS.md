@@ -1,66 +1,93 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-30
-**Merged baseline:** `origin/main` at
-`5b7ba9c9` (v0.2.8 release [#661](https://github.com/pjunod/plurx/pull/661)),
-carrying [#642](https://github.com/pjunod/plurx/pull/642) (copy lifetime),
-[#656](https://github.com/pjunod/plurx/pull/656) (M4 item 4, merged as
-`53f8dd50`) and [#662](https://github.com/pjunod/plurx/pull/662) (scheduled
-artifact prune).
-**Deployed:** all four nodes — nynuc, m6, nuc4, nuc3 — serve `5b7ba9c9`,
-`readyz` 200, zero restarts.
-**Current work:** [#663](https://github.com/pjunod/plurx/pull/663), which
-carries both the four re-anchored replacement tests and **M4 item 5**.
+**Updated:** 2026-08-31 · **Baseline:** `main` at `55c6f374` ·
+**Fleet:** nuc3 · nuc4 · m6 serve `v0.2.8-106-g55abad8f`; nynuc serves a
+later untagged build · **Devices:** Android 47 · Apple 86 —
+the tree is Android 54 · Apple 95, and neither has run on hardware
 
-## M4 is one merge from complete
+Companion to
+[PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) (what
+the system must become) and
+[PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md](PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md)
+(the ordered roadmap) — this is *where the work is right now*. Read the
+tables; the chronicle below them is the running record of how each merged
+item got there, kept because its failure modes recur.
 
-Item 4 landed with #656. The desire to hold or resume now occupies a place on
-the actor sequence rather than a caller's stack frame (#652), the actor's reply
-is the only licence to make a signal syscall and one outstanding transaction is
-bounded by a typed `flow_stop_deadline` / `flow_resume_deadline` (#654), and a
-module-wide source contract pins the call site against five reintroductions
-(#655).
+## Roadmap — the ten items of the handoff §6
 
-Item 5 is written and green in #663. Its substance is small because most of it
-was already true: `watch_for_stall`, `watchdog_active`, `SOFTWARE_GRACE`,
-`WATCHDOG_POLL`, `WatchdogClaim` and `playlist_producer_failed` already had
-zero occurrences under `crates/`, surviving only as zero-pinned ledger rows,
-and every remaining `child_transition` lock site serves lifecycle, retirement,
-retention or cleanup rather than replacement. What remained was
-`downgrade_one_step` — the hardware to GPU-tone-map to software ladder — which
-had been `#[cfg(test)]` and test-only since #636. It is now deleted, 173 lines,
-and its ledger row has moved from `[[symbols]]` to the zero-pinned
-`legacy-downgrade-owner` module symbol that guards reintroduction.
+The order below item 6 is not negotiable. Each milestone's prerequisite is
+load-bearing rather than tidy: nothing may consume an action until one client
+can, the acknowledgement contract must be frozen from measured hardware
+behaviour before a recipe handoff is built on it, one node must handle a
+transaction before three do, and the new path must be proven before the old
+one is deleted.
 
-Deleting it was safe because it has a production equivalent:
-`PrepublicationTranscodeRetry::build` reproduces its rung selection line for
-line, and the actor consumes that recipe exactly once. Two behaviour deltas do
-exist relative to the old ladder — a stall *after* publication no longer
-downgrades, and a GPU pipeline with no fallback fails at start rather than at
-fallback time — but both landed with #636, not with this deletion.
+| # | milestone | handoff | state |
+|---|---|---|---|
+| 1-4 | protocol, transport, hold/resume barriers | — | merged |
+| 5 | delete detached recovery loops | — | merged as #663 |
+| 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) | wire complete; **no client acts on an action yet** |
+| — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | both halves written; the spike **needs hardware**, the store half is ready to build |
+| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
+| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | separate track |
+| 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
+| 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
 
-**The deletion could not be a separate PR.** Re-anchoring the four tests onto
-the production retry path removed `downgrade_one_step`'s last caller, so
-`-D dead-code` rejected the tests-only tree. Tests that stop calling a
-`#[cfg(test)]` helper and the deletion of that helper are one change.
+## Slice ledger — every PR in the current push
 
-## Two process failures worth keeping
+Slices are one platform or one durable-state concern each, because the mobile
+build-number gate rejects a bump computed against a commit that is not the
+merge target: two client PRs in flight means the second always fails.
 
-`history-check` rejected two of #663's own commit subjects because they
-contained the words *refuses* and *failure*, which `ISSUE_RE` reads as a
-corrective commit and then requires `regressions.d` evidence for. No defect was
-fixed, so the subjects were reworded rather than given invented evidence. A
-test-only commit that touches `crates/**` is still a runtime commit to the
-classifier, so this will recur for any test-only change whose subject describes
-what the test refuses to allow.
+| slice | what it does | PR | state |
+|---|---|---|---|
+| docs | status page, §7.4 re-verification, Apple/Android recon, ruling D1 | [#705](https://github.com/pjunod/plurx/pull/705) | merged |
+| M5a | web: `persistentWait` asks the server before deciding | [#706](https://github.com/pjunod/plurx/pull/706) | merged |
+| M5.5 spike | the three-platform measurement procedure, ready to run | [#707](https://github.com/pjunod/plurx/pull/707) | merged; **needs a hardware run** |
+| M5d | Apple: the return path, and the verdict that outlives its reporter | [#709](https://github.com/pjunod/plurx/pull/709) | merged |
+| M5b | web: the truncated-stream owner defers too | [#712](https://github.com/pjunod/plurx/pull/712) | merged |
+| M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | in review |
+| M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | in review |
+| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | in review |
 
-The `deploy.yml` playbook still cannot be driven from an agent shell. It
-authenticates, takes the pre-deploy database snapshot and resets the checkout,
-and then dies mid-rebuild when the shell that launched it goes away; `setsid`
-does not save it. Deployment therefore runs a node-side script mirroring
-`media/tasks/app.yml`, launched on each node. The durable fix is a workflow on
-a self-hosted runner that invokes `deploy.yml`, which would also give the
-deploy a readable log.
+## The gate that blocks every deletion, and what it does not block
+
+```
+plurx_playback_control_vocabulary_total{complete="true",platform="…"}
+```
+
+reads **zero on all four nodes** as of 2026-08-31, measured directly off
+`/metrics`. It counts accepted exchanges from clients that declared every
+action this server can send, and the fleet has never run a build that can
+receive one.
+
+**What that gates is deletion, not construction.** Removing a client's own
+recovery while the installed build cannot receive the replacement turns the
+next real stall into a dead player. So every slice below is additive until
+the metric moves: the client gains a path that defers to the server action,
+and keeps its existing path as the `none`-or-timeout fallback. The fallback
+is not a hedge — a server that has not yet decided must not strand a stalled
+viewer.
+
+## Open decisions
+
+Carried from the M5 handoff §8 and the remaining-roadmap handoff §8. None
+blocks the slices now in flight; each shapes M6.
+
+1. How long may a client wait for an action before falling back to its own
+   behaviour?
+2. ~~Does `terminal` end playback outright, or offer the verdict with a *Try
+   again*?~~ **Answered** by ruling D1, M5 handoff §4.6 — it arms the verdict
+   rather than tearing the player down. Decided without the operator.
+3. Does a retry bound belong on the client at all?
+4. Is a bounded admission overcommit proven safe on any of the fleet's
+   hardware? The protocol plan's §5.3 assumes one exists as its first
+   fallback (reached via [remaining](REMAINING-ROADMAP-HANDOFF.md) §3.2); if none does, the
+   one-encoder-slot path is the common case rather than the exception and
+   M6's shape changes.
+5. What interruption bound is acceptable for `buffered_break_before_make`?
+   Its acceptance criterion is "within its measured interruption bound", and
+   nobody has measured or chosen one.
 
 ## Chronicle
 

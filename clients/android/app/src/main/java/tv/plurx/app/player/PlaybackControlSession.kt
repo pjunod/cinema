@@ -114,6 +114,49 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
 
     val isReporting: Boolean get() = reporter != null
 
+    private val verdictLock = Any()
+    private var verdict: ControlAction? = null
+    private var verdictArmedAtMs = 0L
+    private var verdictLeaseMs = 0L
+    private var verdictGeneration = 0
+
+    /**
+     * The last terminal verdict this session was given, if any.
+     *
+     * It deliberately outlives the reporter. A terminal verdict stops
+     * reporting — correctly, since the reporter owns no recovery — so a
+     * verdict that died with it would be discarded exactly when it mattered:
+     * at the failure it explains, later.
+     */
+    val terminalVerdict: ControlAction?
+        get() = synchronized(verdictLock) {
+            val armed = verdict ?: return@synchronized null
+            // A verdict outlives its reporter and its session, but not the
+            // lease the server gave that session. Past it the session the
+            // verdict described is gone, and a confident sentence about a
+            // production attempt that ended an hour ago would caption an
+            // unrelated failure. The bound is the server's own number rather
+            // than one invented here.
+            if (System.currentTimeMillis() - verdictArmedAtMs > verdictLeaseMs) {
+                verdict = null
+                return@synchronized null
+            }
+            armed
+        }
+
+    /**
+     * A new title. The old verdict described a source that is no longer
+     * playing, so keeping it would show a confident sentence about the wrong
+     * film. A reopen deliberately does not clear it: the failure a verdict
+     * explains normally arrives on the far side of one.
+     */
+    fun clearVerdict() {
+        synchronized(verdictLock) { verdict = null }
+    }
+
+    /** Test seam: what the verdict's staleness bound is measured against. */
+    internal fun verdictArmedAtMsForTest(): Long = synchronized(verdictLock) { verdictArmedAtMs }
+
     /**
      * Begin reporting for a session the server said is controllable. A
      * bootstrap this client cannot address leaves it silent, which is the
@@ -125,6 +168,12 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
     ) {
         end()
+        // A generation, not a reset. `end()` stops the old reporter in a
+        // launched coroutine, so the stop does not necessarily land before
+        // this begin — and an old in-flight exchange completing in that window
+        // would otherwise carry a previous generation's verdict into this one.
+        val generation = synchronized(verdictLock) { ++verdictGeneration }
+        val leaseMs = bootstrap.leaseTimeoutMs
         val subject = PlaybackControlReporter.create(
             bootstrap = bootstrap,
             clientInstanceId = clientInstanceId,
@@ -132,6 +181,28 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             send = { path, request -> transport.send(path, request) },
             pace = { kotlinx.coroutines.delay(it) },
             now = { System.currentTimeMillis() },
+            // The return path. Until now this defaulted to a no-op, so the
+            // server could send a verdict the player would never see.
+            //
+            // Only `terminal` is retained, and retained rather than acted on.
+            // `hold` and `retry_resource` are exchange-level and the reporter
+            // already honours them; a player acting on them here would be
+            // deciding, which is the next slice.
+            onExchange = { exchange ->
+                val action = exchange.response?.action
+                if (action != null &&
+                    action.type == "terminal" &&
+                    !action.message.isNullOrEmpty()
+                ) {
+                    synchronized(verdictLock) {
+                        if (generation == verdictGeneration) {
+                            verdict = action
+                            verdictArmedAtMs = System.currentTimeMillis()
+                            verdictLeaseMs = leaseMs
+                        }
+                    }
+                }
+            },
         ) ?: return
         reporter = subject
         scope.launch { subject.start(scope) }
@@ -145,6 +216,20 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     fun playerChanged() {
         val subject = reporter ?: return
         scope.launch { subject.notify() }
+    }
+
+    /**
+     * A recovery owner published evidence and is about to act on it.
+     *
+     * Coalescing is right for a position update and wrong for this: the pump
+     * sleeps for `next_exchange_ms` and the owner's own reopen normally ends
+     * this reporter before it wakes, so the evidence would be discarded rather
+     * than sent late. Restricted to callers holding evidence, so the ordinary
+     * cadence is unchanged.
+     */
+    fun reportEvidence() {
+        val subject = reporter ?: return
+        scope.launch { subject.notifyUrgently(scope) }
     }
 
     fun end() {
