@@ -654,14 +654,31 @@ class OperationsContractCase(unittest.TestCase):
         )
         self.assertIn("id: android_instrumentation", android_device)
         self.assertIn("continue-on-error: true", android_device)
+        self.assertIn(
+            "id: android_instrumentation_first_attempt", android_device
+        )
+        self.assertIn(
+            'echo "started=true" >> "$GITHUB_OUTPUT"', android_device
+        )
+        self.assertIn(
+            'echo "started=false" >> "$GITHUB_OUTPUT"', android_device
+        )
         self.assertIn("Retry a pre-test emulator boot failure once", android_device)
         self.assertIn(
-            "hashFiles('target/validation/android-instrumentation-started') == ''",
+            "steps.android_instrumentation_first_attempt.outputs.started == 'false'",
             android_device,
         )
         self.assertIn(
-            "hashFiles('target/validation/android-instrumentation-started') != ''",
+            "steps.android_instrumentation_first_attempt.outputs.started == 'true'",
             android_device,
+        )
+        self.assertNotIn(
+            "hashFiles('target/validation/android-instrumentation-started')",
+            android_device,
+        )
+        self.assertLess(
+            android_device.index("id: android_instrumentation_first_attempt"),
+            android_device.index("Retry a pre-test emulator boot failure once"),
         )
         self.assertIn("uninstall tv.plurx.app.test", makefile)
         self.assertIn("uninstall tv.plurx.app", makefile)
