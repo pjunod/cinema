@@ -45,11 +45,13 @@ merge target: two client PRs in flight means the second always fails.
 | M5a | web: `persistentWait` asks the server before deciding | [#706](https://github.com/pjunod/plurx/pull/706) | merged |
 | M5.5 spike | the three-platform measurement procedure, ready to run | [#707](https://github.com/pjunod/plurx/pull/707) | merged; **needs a hardware run** |
 | M5d | Apple: the return path, and the verdict that outlives its reporter | [#709](https://github.com/pjunod/plurx/pull/709) | merged |
-| M5b | web: the truncated-stream owner defers too | [#712](https://github.com/pjunod/plurx/pull/712) | merged |
 | M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | merged |
+| M5b | web: the truncated-stream owner defers too | [#712](https://github.com/pjunod/plurx/pull/712) | merged |
 | M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | merged |
 | M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | merged |
-| M5e | Apple: the stall funnel asks before it decides | [#715](https://github.com/pjunod/plurx/pull/715) | in review |
+| M5e | Apple: the stall funnel asks before it decides | [#715](https://github.com/pjunod/plurx/pull/715) | merged |
+| web bound | ruling D3 applied to the web ask | [#717](https://github.com/pjunod/plurx/pull/717) | merged |
+| M5g | Android: the stall owner asks before it decides | [#718](https://github.com/pjunod/plurx/pull/718) | in review |
 
 ## The gate that blocks every deletion, and what it does not block
 
