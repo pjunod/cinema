@@ -1413,6 +1413,179 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
 /// than being interpreted.
 pub const DV_CONVERT_MARKER: &str = "--plurx-dv-convert=p7-to-p81";
 
+/// The **first** ffmpeg of the Profile 7 → 8.1 pipe: the source in, a raw
+/// Annex B elementary stream out, enhancement layer dropped and RPUs kept.
+///
+/// Three differences from [`copy_video_args`], each load-bearing:
+///
+/// - **`filter_units=remove_types=63`, and only 63.** Type 63 is the
+///   enhancement layer, which Profile 8.1 does not have and which no consumer
+///   decoder was ever going to use. Type 62 — the RPUs — must survive: they
+///   are the input to the conversion. This is why the stage cannot reuse
+///   `hevc_copy_bsf_for_client`, whose every Dolby Vision branch either keeps
+///   both or removes both.
+/// - **`hevc_mp4toannexb`,** because `-f hevc` writes an elementary stream and
+///   the Matroska/MP4 demuxer hands over length-prefixed NAL units.
+/// - **Types 32-34 are kept.** VPS/SPS/PPS are the only place the second
+///   ffmpeg can learn the stream's parameters from — there is no container to
+///   carry them in — so the filtering `copy_video_args` does for the muxer's
+///   benefit would leave stage two unable to open its input at all.
+///
+/// Pacing rides here rather than on stage two: this is the ffmpeg that reads
+/// the file, and pacing exists to rate-limit a disk, not a pipe.
+pub fn dv_convert_source_args(input: &str, start_seconds: f64, pacing: Pacing) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+    args.extend(copy_input_seek_args(start_seconds));
+    pacing.push(&mut args);
+    args.push("-i".into());
+    args.push(input.to_owned());
+    args.extend(
+        [
+            "-map_chapters",
+            "-1",
+            "-map",
+            "0:v:0",
+            "-an",
+            "-sn",
+            "-c:v",
+            "copy",
+            "-bsf:v",
+            "hevc_mp4toannexb,filter_units=remove_types=63",
+            "-f",
+            "hevc",
+            "pipe:1",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    args
+}
+
+/// The **second** ffmpeg of the pipe: converted Annex B on stdin, the source
+/// again for its audio, one fragmented MP4 out.
+///
+/// `audio_start_seconds` is deliberately a separate parameter from the
+/// session's requested start, and getting it wrong is the failure mode of this
+/// whole design. An Annex B elementary stream carries **no timestamps at
+/// all**, so stage two synthesizes the video timeline from the framerate
+/// beginning at zero — while the audio input carries the source's real ones.
+/// Stage one seeks with `-noaccurate_seek`, which lands on the keyframe at or
+/// before the request, so the video actually begins somewhere earlier than the
+/// caller asked for. Seeking the audio to the *requested* start would then
+/// offset it against the picture by that keyframe delta — a per-session,
+/// per-title lip-sync error that plays perfectly well and is wrong.
+///
+/// So the caller probes where stage one really landed
+/// ([`keyframe_probe_args`] and [`parse_keyframe_origin`], which exist for
+/// exactly this question on the single-ffmpeg path) and passes that instant
+/// here. Both streams then begin at the same point in the source, and
+/// `-avoid_negative_ts make_zero` puts that point at zero.
+pub fn dv_convert_output_args(
+    source: &MediaFile,
+    audio_input: &str,
+    audio_start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    video: CopyVideoOptions,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+
+    // Input 0: the converted elementary stream. `-f hevc` because a pipe has
+    // no name to probe and no container to read a format out of.
+    args.push("-f".into());
+    args.push("hevc".into());
+    args.push("-i".into());
+    args.push("pipe:0".into());
+
+    // Input 1: the source again, for audio only, seeked to where stage one's
+    // picture actually starts. A per-file A/V correction rides on top of that
+    // when the audio is copied; a transcoded track takes it as a filter below,
+    // the same division `copy_input_args` makes and for the same reason.
+    args.extend(copy_input_seek_args(audio_start_seconds));
+    let has_offset = source.audio_offset_ms != 0 && !source.audio_streams.is_empty();
+    if has_offset && !transcode_audio {
+        args.push("-itsoffset".into());
+        args.push(format!("{:.3}", source.audio_offset_ms as f64 / 1000.0));
+    }
+    args.push("-i".into());
+    args.push(audio_input.to_owned());
+
+    args.push("-map_chapters".into());
+    args.push("-1".into());
+    args.push("-map".into());
+    args.push("0:v:0".into());
+    args.push("-map".into());
+    match audio_index {
+        Some(i) => args.push(format!("1:a:{i}?")),
+        None => args.push("1:a:0?".into()),
+    }
+    args.push("-sn".into());
+
+    // The video is copied verbatim: stage one produced the bytes and the
+    // in-process stage rewrote the RPUs, so anything done to them here would
+    // be undoing work. In particular there is no `-bsf:v` — the parameter sets
+    // are already in band, which is what `extract_extradata` would otherwise
+    // be here to fix.
+    args.push("-c:v".into());
+    args.push("copy".into());
+    // `hvc1`, not the `dvh1` the plan's §4.8 sketch shows. Profile 8.1 is a
+    // backward-compatible enhancement of HDR10 and Apple's contract requires a
+    // compatible stream to keep the base sample entry; the Dolby Vision
+    // profile is declared by `SUPPLEMENTAL-CODECS` in the playlist, which
+    // `copied_hls_codecs` already builds as `hvc1` + `dvh1.08.LL` for a
+    // profile 8 stream over a compatible base. Answering `dvh1` here would put
+    // the sample entry at odds with the playlist describing it.
+    args.push("-tag:v".into());
+    args.push(hevc_copy_tag_for_source(source, video.preserves_dolby_vision()).into());
+    // The Dolby Vision configuration record is guarded behind `unofficial` in
+    // ffmpeg's MOV muxer. There is nothing for it to copy here — a raw Annex B
+    // input has no record — so plurx writes one into the served init itself;
+    // the option stays because the muxer must not refuse the box on the paths
+    // that do have one, and because dropping it would make this argv differ
+    // from the preserving copy's for no reason a reader could find.
+    args.push("-strict".into());
+    args.push("unofficial".into());
+
+    if transcode_audio {
+        if has_offset {
+            if let Some(af) = audio_offset_filter(source.audio_offset_ms) {
+                args.push("-af".into());
+                args.push(af);
+            }
+        }
+        args.push("-c:a".into());
+        args.push("aac".into());
+        args.push("-b:a".into());
+        if copy_audio_channels(source, audio_index) == Some(6) {
+            args.push("320k".into());
+            args.push("-channel_layout:a".into());
+            args.push("5.1".into());
+        } else {
+            args.push("256k".into());
+        }
+    } else {
+        args.push("-c:a".into());
+        args.push("copy".into());
+    }
+
+    args.extend(
+        [
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-use_editlist",
+            "0",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    args
+}
+
 /// Remove plurx's own markers from an argv before it is executed.
 ///
 /// The argv is two things at once: the recipe the fragment index is keyed by,
@@ -3891,6 +4064,210 @@ mod index_pipe_tests {
             converted, preserved,
             "the conversion rewrites every RPU, so it is not the preserved copy"
         );
+    }
+
+    /// Stage one keeps the RPUs and drops only the enhancement layer.
+    ///
+    /// Every other Dolby Vision bitstream filter in this module either keeps
+    /// both type 62 and type 63 or removes both, because every other path is
+    /// either preserving the stream or stripping it. The conversion is the
+    /// only caller that wants exactly one of them, which is why it builds its
+    /// own filter rather than reusing `hevc_copy_bsf_for_client` — and why
+    /// this test exists to catch a future tidy-up that unifies them.
+    #[test]
+    fn the_conversion_source_stage_drops_the_enhancement_layer_and_keeps_the_rpus() {
+        let args = dv_convert_source_args("/library/film.mkv", 0.0, Pacing::unpaced());
+        let rendered = args.join(" ");
+
+        assert!(
+            rendered.contains("-bsf:v hevc_mp4toannexb,filter_units=remove_types=63"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("62"),
+            "type 62 is the RPU — removing it would leave nothing to convert: {rendered}"
+        );
+        assert!(
+            !rendered.contains("32-34"),
+            "an elementary stream has no container to carry parameter sets, so \
+             stage two could not open its input without them: {rendered}"
+        );
+        assert!(!rendered.contains("dovi_rpu=strip"), "{rendered}");
+
+        // Annex B out, video only, and no audio to get out of step with.
+        assert!(rendered.ends_with("-f hevc pipe:1"), "{rendered}");
+        assert!(args.contains(&"-an".to_owned()));
+        assert!(!rendered.contains("-map 0:a"), "{rendered}");
+    }
+
+    /// Stage one seeks and paces; stage two does neither to its video.
+    ///
+    /// Pacing rate-limits a disk. Stage one is the ffmpeg that reads the file;
+    /// stage two reads a pipe, and pacing a pipe only starves the consumer.
+    #[test]
+    fn only_the_stage_that_reads_the_file_seeks_and_paces_it() {
+        let paced = dv_convert_source_args(
+            "/library/film.mkv",
+            61.5,
+            Pacing {
+                readrate: Some(4.0),
+                initial_burst: Some(30.0),
+                legacy_re: false,
+            },
+        );
+        let rendered = paced.join(" ");
+        assert!(
+            rendered.contains("-noaccurate_seek -ss 61.500"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("-readrate"), "{rendered}");
+
+        // …and the seek is absent entirely at zero rather than spelled `0.000`,
+        // which would be a different argv for the same stream.
+        let from_start = dv_convert_source_args("/library/film.mkv", 0.0, Pacing::unpaced());
+        assert!(!from_start.contains(&"-ss".to_owned()));
+        assert!(!from_start.contains(&"-readrate".to_owned()));
+    }
+
+    /// The audio is seeked to where the picture actually starts, not to where
+    /// the viewer asked it to start.
+    ///
+    /// This is the failure mode of the whole two-ffmpeg design. Annex B
+    /// carries no timestamps, so stage two builds the video timeline from
+    /// zero; the audio input carries the source's real ones. Stage one seeks
+    /// with `-noaccurate_seek`, landing on the keyframe at or before the
+    /// request — so the picture begins earlier than asked. Seeking the audio
+    /// to the requested start would offset it against the picture by that
+    /// delta: a lip-sync error that varies per title and per seek, and that
+    /// plays perfectly well while being wrong.
+    #[test]
+    fn the_audio_input_starts_where_the_picture_does_and_not_where_the_viewer_asked() {
+        let file = hevc_dv();
+        let requested = 61.5;
+        // What `parse_keyframe_origin` would report for that request: the
+        // keyframe two seconds earlier.
+        let landed = 59.375;
+
+        let args = dv_convert_output_args(
+            &file,
+            "/library/film.mkv",
+            landed,
+            None,
+            false,
+            CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true),
+        );
+        let rendered = args.join(" ");
+
+        assert!(rendered.contains("-ss 59.375"), "{rendered}");
+        assert!(
+            !rendered.contains(&format!("{requested:.3}")),
+            "the requested start is not where the picture begins: {rendered}"
+        );
+        // The elementary stream is input 0 and gets no seek of its own — there
+        // is nothing in a pipe to seek to.
+        assert!(rendered.contains("-f hevc -i pipe:0"), "{rendered}");
+        assert!(
+            rendered.find("-ss").unwrap() > rendered.find("pipe:0").unwrap(),
+            "the seek belongs to the audio input, not the stream: {rendered}"
+        );
+    }
+
+    /// Stage two copies what it was handed and tags it as HDR10-compatible.
+    #[test]
+    fn the_conversion_output_stage_copies_the_converted_video_verbatim() {
+        let mut file = hevc_dv();
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.bl_compat_id = Some(1);
+        let convert = CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true);
+
+        let args = dv_convert_output_args(&file, "/library/film.mkv", 0.0, Some(2), false, convert);
+        let rendered = args.join(" ");
+
+        assert!(rendered.contains("-c:v copy"), "{rendered}");
+        assert!(
+            !rendered.contains("-bsf:v"),
+            "the bytes are already what they should be: {rendered}"
+        );
+        // `hvc1`, not `dvh1`: 8.1 is a backward-compatible enhancement of
+        // HDR10, and the playlist declares the profile through
+        // SUPPLEMENTAL-CODECS. The plan's §4.8 sketch says `dvh1`; the code
+        // and `copied_hls_codecs` agree on `hvc1`.
+        assert!(rendered.contains("-tag:v hvc1"), "{rendered}");
+        assert!(rendered.contains("-strict unofficial"), "{rendered}");
+        assert!(rendered.contains("-map 0:v:0"), "{rendered}");
+        assert!(
+            rendered.contains("-map 1:a:2?"),
+            "the audio comes from the file, not the pipe: {rendered}"
+        );
+        assert!(rendered.contains("-c:a copy"), "{rendered}");
+        assert!(rendered.ends_with("-f mp4 pipe:1"), "{rendered}");
+
+        // Same fragmentation contract as the single-ffmpeg pipe — the reader
+        // downstream is the same reader.
+        assert!(
+            rendered.contains("frag_keyframe+empty_moov+default_base_moof+delay_moov"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("-avoid_negative_ts make_zero"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("-use_editlist 0"), "{rendered}");
+    }
+
+    /// A transcoded audio track takes the A/V correction as a filter; a copied
+    /// one takes it as an input offset.
+    ///
+    /// The same division `copy_input_args` makes, for the same reason: copy
+    /// moves packets and filters need frames.
+    #[test]
+    fn the_conversion_output_stage_corrects_audio_the_way_the_copy_pipe_does() {
+        let mut file = hevc_dv();
+        file.audio_offset_ms = 120;
+        file.audio_streams = vec![crate::domain::AudioStream {
+            index: 0,
+            codec: "eac3".into(),
+            channels: Some(6),
+            ..Default::default()
+        }];
+        let convert = CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true);
+
+        let copied =
+            dv_convert_output_args(&file, "/library/film.mkv", 0.0, None, false, convert).join(" ");
+        assert!(copied.contains("-itsoffset 0.120"), "{copied}");
+        assert!(!copied.contains("-af"), "{copied}");
+
+        let encoded =
+            dv_convert_output_args(&file, "/library/film.mkv", 0.0, None, true, convert).join(" ");
+        assert!(!encoded.contains("-itsoffset"), "{encoded}");
+        assert!(encoded.contains("-af"), "{encoded}");
+        // Six-channel output keeps the standard AAC layout the copy pipe
+        // settled on: AVPlayer refuses a sample entry that declares two
+        // channels over a six-channel program config element.
+        assert!(encoded.contains("-b:a 320k"), "{encoded}");
+        assert!(encoded.contains("-channel_layout:a 5.1"), "{encoded}");
+    }
+
+    /// Neither stage of the pipe carries a plurx marker.
+    ///
+    /// The marker belongs to the recipe `copy_video_args` renders, which is
+    /// what the fragment index is keyed by. These two argvs are what actually
+    /// reach ffmpeg, and the conversion is the one case where the recipe and
+    /// the command line describe genuinely different things — so this is where
+    /// a leak would be most plausible and least visible.
+    #[test]
+    fn neither_conversion_stage_hands_ffmpeg_a_plurx_marker() {
+        let file = hevc_dv();
+        let convert = CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true);
+        for args in [
+            dv_convert_source_args("/library/film.mkv", 0.0, Pacing::unpaced()),
+            dv_convert_output_args(&file, "/library/film.mkv", 0.0, None, false, convert),
+        ] {
+            assert!(
+                !args.iter().any(|arg| arg.starts_with("--plurx-")),
+                "{args:?}"
+            );
+        }
     }
 
     fn contains_run(haystack: &[String], needle: &[String]) -> bool {
