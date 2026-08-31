@@ -2102,14 +2102,14 @@ catalog|settings@1280x860|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
 catalog|settings@1280x860|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|settings@1280x860|dom|div#pxshell.px-shell > main#main|1
 catalog|settings@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
-catalog|settings@1280x860|dom|div#setbody.adminwrap > div.card|2
+catalog|settings@1280x860|dom|div#setbody.adminwrap > div.card|3
 catalog|settings@1280x860|dom|div.card > button[text]|1
 catalog|settings@1280x860|dom|div.card > div#lerr.err|1
-catalog|settings@1280x860|dom|div.card > div.hint[text]|4
-catalog|settings@1280x860|dom|div.card > div.row.setrow|3
+catalog|settings@1280x860|dom|div.card > div.hint[text]|5
+catalog|settings@1280x860|dom|div.card > div.row.setrow|4
 catalog|settings@1280x860|dom|div.card > div.row|2
-catalog|settings@1280x860|dom|div.card > div.setwarn[text]|1
-catalog|settings@1280x860|dom|div.card > h2.section[text]|5
+catalog|settings@1280x860|dom|div.card > div.setwarn[text]|2
+catalog|settings@1280x860|dom|div.card > h2.section[text]|6
 catalog|settings@1280x860|dom|div.card > table|1
 catalog|settings@1280x860|dom|div.hint[text] > b[text]|8
 catalog|settings@1280x860|dom|div.hint[text] > code[text]|1
@@ -2135,14 +2135,18 @@ catalog|settings@1280x860|dom|div.row > input#ln[aria-label=*]|1
 catalog|settings@1280x860|dom|div.row > input#lp[aria-label=*]|1
 catalog|settings@1280x860|dom|div.row > select#lk|1
 catalog|settings@1280x860|dom|div.row > span.muted[text]|1
-catalog|settings@1280x860|dom|div.row.setrow > button.ghost.sm[text]|3
-catalog|settings@1280x860|dom|div.row.setrow > label.schedpair[text]|1
-catalog|settings@1280x860|dom|div.row.setrow > span.schedpair[text]|6
-catalog|settings@1280x860|dom|div.sched > span.schedpair[text]|9
+catalog|settings@1280x860|dom|div.row.setrow > button.ghost.sm[text]|4
+catalog|settings@1280x860|dom|div.row.setrow > label.schedpair[text]|2
+catalog|settings@1280x860|dom|div.row.setrow > span.schedpair[text]|7
+catalog|settings@1280x860|dom|div.sched > span.muted[text]|3
+catalog|settings@1280x860|dom|div.sched > span.schedpair[text]|12
+catalog|settings@1280x860|dom|div.sched > span.schedpair|3
 catalog|settings@1280x860|dom|div.settabs > button.active.settab[text]|1
 catalog|settings@1280x860|dom|div.settabs > button.settab[text]|6
 catalog|settings@1280x860|dom|div.setwarn[text] > a[text]|1
-catalog|settings@1280x860|dom|div.setwarn[text] > b[text]|2
+catalog|settings@1280x860|dom|div.setwarn[text] > b[text]|3
+catalog|settings@1280x860|dom|label.schedpair[text] > code[text]|1
+catalog|settings@1280x860|dom|label.schedpair[text] > input#dv-keep-original[type=checkbox]|1
 catalog|settings@1280x860|dom|label.schedpair[text] > input#job-boot[type=checkbox]|1
 catalog|settings@1280x860|dom|main#main > div#setbody.adminwrap|1
 catalog|settings@1280x860|dom|main#main > div.settabs|1
@@ -2153,6 +2157,10 @@ catalog|settings@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-exp
 catalog|settings@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|settings@1280x860|dom|select#cache-gb > option[text]|8
 catalog|settings@1280x860|dom|select#cache-produce > option[text]|4
+catalog|settings@1280x860|dom|select#dv-mode-1[disabled] > option[text]|3
+catalog|settings@1280x860|dom|select#dv-mode-2[disabled] > option[text]|3
+catalog|settings@1280x860|dom|select#dv-mode-3[disabled] > option[text]|3
+catalog|settings@1280x860|dom|select#dv-parallel > option[text]|8
 catalog|settings@1280x860|dom|select#job-art > option[text]|5
 catalog|settings@1280x860|dom|select#job-clean > option[text]|4
 catalog|settings@1280x860|dom|select#job-probe > option[text]|5
@@ -2164,9 +2172,14 @@ catalog|settings@1280x860|dom|select#sched-scan-1 > option[text]|8
 catalog|settings@1280x860|dom|select#sched-scan-2 > option[text]|8
 catalog|settings@1280x860|dom|select#sched-scan-3 > option[text]|8
 catalog|settings@1280x860|dom|select#telemetry-retain > option[text]|6
+catalog|settings@1280x860|dom|span.schedpair > button.ghost.sm[disabled text]|6
 catalog|settings@1280x860|dom|span.schedpair[text] > button.ghost.sm[text]|3
 catalog|settings@1280x860|dom|span.schedpair[text] > select#cache-gb|1
 catalog|settings@1280x860|dom|span.schedpair[text] > select#cache-produce|1
+catalog|settings@1280x860|dom|span.schedpair[text] > select#dv-mode-1[disabled]|1
+catalog|settings@1280x860|dom|span.schedpair[text] > select#dv-mode-2[disabled]|1
+catalog|settings@1280x860|dom|span.schedpair[text] > select#dv-mode-3[disabled]|1
+catalog|settings@1280x860|dom|span.schedpair[text] > select#dv-parallel|1
 catalog|settings@1280x860|dom|span.schedpair[text] > select#job-art|1
 catalog|settings@1280x860|dom|span.schedpair[text] > select#job-clean|1
 catalog|settings@1280x860|dom|span.schedpair[text] > select#job-probe|1
@@ -2192,7 +2205,7 @@ catalog|settings@1280x860|dom|td.libname > b[text]|3
 catalog|settings@1280x860|dom|td.muted > div#st-1[text]|1
 catalog|settings@1280x860|dom|td.muted > div#st-2[text]|1
 catalog|settings@1280x860|dom|td.muted > div#st-3[text]|1
-catalog|settings@1280x860|dom|td.muted > div.sched|3
+catalog|settings@1280x860|dom|td.muted > div.sched|6
 catalog|settings@1280x860|dom|td.rowactions > div.row|3
 catalog|settings@1280x860|dom|thead > tr|1
 catalog|settings@1280x860|dom|tr > th[text]|4
@@ -2255,18 +2268,22 @@ catalog|settings@1280x860|focus|039|input#ln "Library name"
 catalog|settings@1280x860|focus|040|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
 catalog|settings@1280x860|focus|041|input#lp "Media paths"
 catalog|settings@1280x860|focus|042|button "Add & scan"
-catalog|settings@1280x860|focus|043|select#job-probe "Re-run ffprobe on files whose media detail
-catalog|settings@1280x860|focus|044|select#job-art "Re-fetch posters for items a provider matche
-catalog|settings@1280x860|focus|045|select#job-clean "Delete leftover transcode working director
-catalog|settings@1280x860|focus|046|input#job-boot
-catalog|settings@1280x860|focus|047|button.ghost.sm "Save"
-catalog|settings@1280x860|focus|048|select#telemetry-retain "How long node-local playback measur
-catalog|settings@1280x860|focus|049|button.ghost.sm "Save"
-catalog|settings@1280x860|focus|050|select#cache-produce "How often to check what's worth encodi
-catalog|settings@1280x860|focus|051|select#cache-gb "How much disk finished pre-transcodes may o
+catalog|settings@1280x860|focus|043|input#dv-keep-original
+catalog|settings@1280x860|focus|044|select#dv-parallel "1 2 3 4 5 6 7 8"
+catalog|settings@1280x860|focus|045|button.ghost.sm "Save"
+catalog|settings@1280x860|focus|046|select#job-probe "Re-run ffprobe on files whose media detail
+catalog|settings@1280x860|focus|047|select#job-art "Re-fetch posters for items a provider matche
+catalog|settings@1280x860|focus|048|select#job-clean "Delete leftover transcode working director
+catalog|settings@1280x860|focus|049|input#job-boot
+catalog|settings@1280x860|focus|050|button.ghost.sm "Save"
+catalog|settings@1280x860|focus|051|select#telemetry-retain "How long node-local playback measur
 catalog|settings@1280x860|focus|052|button.ghost.sm "Save"
-catalog|settings@1280x860|focus|053|<wrap>
+catalog|settings@1280x860|focus|053|select#cache-produce "How often to check what's worth encodi
+catalog|settings@1280x860|focus|054|select#cache-gb "How much disk finished pre-transcodes may o
+catalog|settings@1280x860|focus|055|button.ghost.sm "Save"
+catalog|settings@1280x860|focus|056|<wrap>
 catalog|settings@1280x860|req|GET /api/v1/activity|2
+catalog|settings@1280x860|req|GET /api/v1/dv-conversions|1
 catalog|settings@1280x860|req|GET /api/v1/libraries|1
 catalog|settings@1280x860|req|GET /api/v1/me|1
 catalog|settings@1280x860|req|GET /api/v1/scan/status|3
@@ -2300,14 +2317,14 @@ catalog|settings@390x780|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
 catalog|settings@390x780|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|settings@390x780|dom|div#pxshell.px-shell > main#main|1
 catalog|settings@390x780|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
-catalog|settings@390x780|dom|div#setbody.adminwrap > div.card|2
+catalog|settings@390x780|dom|div#setbody.adminwrap > div.card|3
 catalog|settings@390x780|dom|div.card > button[text]|1
 catalog|settings@390x780|dom|div.card > div#lerr.err|1
-catalog|settings@390x780|dom|div.card > div.hint[text]|4
-catalog|settings@390x780|dom|div.card > div.row.setrow|3
+catalog|settings@390x780|dom|div.card > div.hint[text]|5
+catalog|settings@390x780|dom|div.card > div.row.setrow|4
 catalog|settings@390x780|dom|div.card > div.row|2
-catalog|settings@390x780|dom|div.card > div.setwarn[text]|1
-catalog|settings@390x780|dom|div.card > h2.section[text]|5
+catalog|settings@390x780|dom|div.card > div.setwarn[text]|2
+catalog|settings@390x780|dom|div.card > h2.section[text]|6
 catalog|settings@390x780|dom|div.card > table|1
 catalog|settings@390x780|dom|div.hint[text] > b[text]|8
 catalog|settings@390x780|dom|div.hint[text] > code[text]|1
@@ -2333,14 +2350,18 @@ catalog|settings@390x780|dom|div.row > input#ln[aria-label=*]|1
 catalog|settings@390x780|dom|div.row > input#lp[aria-label=*]|1
 catalog|settings@390x780|dom|div.row > select#lk|1
 catalog|settings@390x780|dom|div.row > span.muted[text]|1
-catalog|settings@390x780|dom|div.row.setrow > button.ghost.sm[text]|3
-catalog|settings@390x780|dom|div.row.setrow > label.schedpair[text]|1
-catalog|settings@390x780|dom|div.row.setrow > span.schedpair[text]|6
-catalog|settings@390x780|dom|div.sched > span.schedpair[text]|9
+catalog|settings@390x780|dom|div.row.setrow > button.ghost.sm[text]|4
+catalog|settings@390x780|dom|div.row.setrow > label.schedpair[text]|2
+catalog|settings@390x780|dom|div.row.setrow > span.schedpair[text]|7
+catalog|settings@390x780|dom|div.sched > span.muted[text]|3
+catalog|settings@390x780|dom|div.sched > span.schedpair[text]|12
+catalog|settings@390x780|dom|div.sched > span.schedpair|3
 catalog|settings@390x780|dom|div.settabs > button.active.settab[text]|1
 catalog|settings@390x780|dom|div.settabs > button.settab[text]|6
 catalog|settings@390x780|dom|div.setwarn[text] > a[text]|1
-catalog|settings@390x780|dom|div.setwarn[text] > b[text]|2
+catalog|settings@390x780|dom|div.setwarn[text] > b[text]|3
+catalog|settings@390x780|dom|label.schedpair[text] > code[text]|1
+catalog|settings@390x780|dom|label.schedpair[text] > input#dv-keep-original[type=checkbox]|1
 catalog|settings@390x780|dom|label.schedpair[text] > input#job-boot[type=checkbox]|1
 catalog|settings@390x780|dom|main#main > div#setbody.adminwrap|1
 catalog|settings@390x780|dom|main#main > div.settabs|1
@@ -2351,6 +2372,10 @@ catalog|settings@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expa
 catalog|settings@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|settings@390x780|dom|select#cache-gb > option[text]|8
 catalog|settings@390x780|dom|select#cache-produce > option[text]|4
+catalog|settings@390x780|dom|select#dv-mode-1[disabled] > option[text]|3
+catalog|settings@390x780|dom|select#dv-mode-2[disabled] > option[text]|3
+catalog|settings@390x780|dom|select#dv-mode-3[disabled] > option[text]|3
+catalog|settings@390x780|dom|select#dv-parallel > option[text]|8
 catalog|settings@390x780|dom|select#job-art > option[text]|5
 catalog|settings@390x780|dom|select#job-clean > option[text]|4
 catalog|settings@390x780|dom|select#job-probe > option[text]|5
@@ -2362,9 +2387,14 @@ catalog|settings@390x780|dom|select#sched-scan-1 > option[text]|8
 catalog|settings@390x780|dom|select#sched-scan-2 > option[text]|8
 catalog|settings@390x780|dom|select#sched-scan-3 > option[text]|8
 catalog|settings@390x780|dom|select#telemetry-retain > option[text]|6
+catalog|settings@390x780|dom|span.schedpair > button.ghost.sm[disabled text]|6
 catalog|settings@390x780|dom|span.schedpair[text] > button.ghost.sm[text]|3
 catalog|settings@390x780|dom|span.schedpair[text] > select#cache-gb|1
 catalog|settings@390x780|dom|span.schedpair[text] > select#cache-produce|1
+catalog|settings@390x780|dom|span.schedpair[text] > select#dv-mode-1[disabled]|1
+catalog|settings@390x780|dom|span.schedpair[text] > select#dv-mode-2[disabled]|1
+catalog|settings@390x780|dom|span.schedpair[text] > select#dv-mode-3[disabled]|1
+catalog|settings@390x780|dom|span.schedpair[text] > select#dv-parallel|1
 catalog|settings@390x780|dom|span.schedpair[text] > select#job-art|1
 catalog|settings@390x780|dom|span.schedpair[text] > select#job-clean|1
 catalog|settings@390x780|dom|span.schedpair[text] > select#job-probe|1
@@ -2390,7 +2420,7 @@ catalog|settings@390x780|dom|td.libname > b[text]|3
 catalog|settings@390x780|dom|td.muted > div#st-1[text]|1
 catalog|settings@390x780|dom|td.muted > div#st-2[text]|1
 catalog|settings@390x780|dom|td.muted > div#st-3[text]|1
-catalog|settings@390x780|dom|td.muted > div.sched|3
+catalog|settings@390x780|dom|td.muted > div.sched|6
 catalog|settings@390x780|dom|td.rowactions > div.row|3
 catalog|settings@390x780|dom|thead > tr|1
 catalog|settings@390x780|dom|tr > th[text]|4
@@ -2450,22 +2480,26 @@ catalog|settings@390x780|focus|036|input#ln "Library name"
 catalog|settings@390x780|focus|037|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
 catalog|settings@390x780|focus|038|input#lp "Media paths"
 catalog|settings@390x780|focus|039|button "Add & scan"
-catalog|settings@390x780|focus|040|select#job-probe "Re-run ffprobe on files whose media detail
-catalog|settings@390x780|focus|041|select#job-art "Re-fetch posters for items a provider matche
-catalog|settings@390x780|focus|042|select#job-clean "Delete leftover transcode working director
-catalog|settings@390x780|focus|043|input#job-boot
-catalog|settings@390x780|focus|044|button.ghost.sm "Save"
-catalog|settings@390x780|focus|045|select#telemetry-retain "How long node-local playback measur
-catalog|settings@390x780|focus|046|button.ghost.sm "Save"
-catalog|settings@390x780|focus|047|select#cache-produce "How often to check what's worth encodi
-catalog|settings@390x780|focus|048|select#cache-gb "How much disk finished pre-transcodes may o
+catalog|settings@390x780|focus|040|input#dv-keep-original
+catalog|settings@390x780|focus|041|select#dv-parallel "1 2 3 4 5 6 7 8"
+catalog|settings@390x780|focus|042|button.ghost.sm "Save"
+catalog|settings@390x780|focus|043|select#job-probe "Re-run ffprobe on files whose media detail
+catalog|settings@390x780|focus|044|select#job-art "Re-fetch posters for items a provider matche
+catalog|settings@390x780|focus|045|select#job-clean "Delete leftover transcode working director
+catalog|settings@390x780|focus|046|input#job-boot
+catalog|settings@390x780|focus|047|button.ghost.sm "Save"
+catalog|settings@390x780|focus|048|select#telemetry-retain "How long node-local playback measur
 catalog|settings@390x780|focus|049|button.ghost.sm "Save"
-catalog|settings@390x780|focus|050|a.px-tab "Home"
-catalog|settings@390x780|focus|051|button.px-tab "Libraries"
-catalog|settings@390x780|focus|052|button.px-tab "Search"
-catalog|settings@390x780|focus|053|a.px-tab "Activity"
-catalog|settings@390x780|focus|054|<wrap>
+catalog|settings@390x780|focus|050|select#cache-produce "How often to check what's worth encodi
+catalog|settings@390x780|focus|051|select#cache-gb "How much disk finished pre-transcodes may o
+catalog|settings@390x780|focus|052|button.ghost.sm "Save"
+catalog|settings@390x780|focus|053|a.px-tab "Home"
+catalog|settings@390x780|focus|054|button.px-tab "Libraries"
+catalog|settings@390x780|focus|055|button.px-tab "Search"
+catalog|settings@390x780|focus|056|a.px-tab "Activity"
+catalog|settings@390x780|focus|057|<wrap>
 catalog|settings@390x780|req|GET /api/v1/activity|2
+catalog|settings@390x780|req|GET /api/v1/dv-conversions|1
 catalog|settings@390x780|req|GET /api/v1/libraries|1
 catalog|settings@390x780|req|GET /api/v1/me|1
 catalog|settings@390x780|req|GET /api/v1/scan/status|3
@@ -3965,14 +3999,14 @@ classic|settings@1280x860|dom|div > div#sizemenu.amenu|1
 classic|settings@1280x860|dom|div > div#thememenu.amenu|1
 classic|settings@1280x860|dom|div#app > header.top|1
 classic|settings@1280x860|dom|div#app > main#main|1
-classic|settings@1280x860|dom|div#setbody.adminwrap > div.card|2
+classic|settings@1280x860|dom|div#setbody.adminwrap > div.card|3
 classic|settings@1280x860|dom|div.card > button[text]|1
 classic|settings@1280x860|dom|div.card > div#lerr.err|1
-classic|settings@1280x860|dom|div.card > div.hint[text]|4
-classic|settings@1280x860|dom|div.card > div.row.setrow|3
+classic|settings@1280x860|dom|div.card > div.hint[text]|5
+classic|settings@1280x860|dom|div.card > div.row.setrow|4
 classic|settings@1280x860|dom|div.card > div.row|2
-classic|settings@1280x860|dom|div.card > div.setwarn[text]|1
-classic|settings@1280x860|dom|div.card > h2.section[text]|5
+classic|settings@1280x860|dom|div.card > div.setwarn[text]|2
+classic|settings@1280x860|dom|div.card > h2.section[text]|6
 classic|settings@1280x860|dom|div.card > table|1
 classic|settings@1280x860|dom|div.hint[text] > b[text]|8
 classic|settings@1280x860|dom|div.hint[text] > code[text]|1
@@ -3982,14 +4016,16 @@ classic|settings@1280x860|dom|div.row > input#ln[aria-label=*]|1
 classic|settings@1280x860|dom|div.row > input#lp[aria-label=*]|1
 classic|settings@1280x860|dom|div.row > select#lk|1
 classic|settings@1280x860|dom|div.row > span.muted[text]|1
-classic|settings@1280x860|dom|div.row.setrow > button.ghost.sm[text]|3
-classic|settings@1280x860|dom|div.row.setrow > label.schedpair[text]|1
-classic|settings@1280x860|dom|div.row.setrow > span.schedpair[text]|6
-classic|settings@1280x860|dom|div.sched > span.schedpair[text]|9
+classic|settings@1280x860|dom|div.row.setrow > button.ghost.sm[text]|4
+classic|settings@1280x860|dom|div.row.setrow > label.schedpair[text]|2
+classic|settings@1280x860|dom|div.row.setrow > span.schedpair[text]|7
+classic|settings@1280x860|dom|div.sched > span.muted[text]|3
+classic|settings@1280x860|dom|div.sched > span.schedpair[text]|12
+classic|settings@1280x860|dom|div.sched > span.schedpair|3
 classic|settings@1280x860|dom|div.settabs > button.active.settab[text]|1
 classic|settings@1280x860|dom|div.settabs > button.settab[text]|6
 classic|settings@1280x860|dom|div.setwarn[text] > a[text]|1
-classic|settings@1280x860|dom|div.setwarn[text] > b[text]|2
+classic|settings@1280x860|dom|div.setwarn[text] > b[text]|3
 classic|settings@1280x860|dom|div.topctl > div|4
 classic|settings@1280x860|dom|header.top > a.logo[text]|1
 classic|settings@1280x860|dom|header.top > div.topctl|1
@@ -3997,6 +4033,8 @@ classic|settings@1280x860|dom|header.top > input#q.search[aria-label=*]|1
 classic|settings@1280x860|dom|header.top > nav|1
 classic|settings@1280x860|dom|header.top > span#activity.activity|1
 classic|settings@1280x860|dom|header.top > span.spacer|1
+classic|settings@1280x860|dom|label.schedpair[text] > code[text]|1
+classic|settings@1280x860|dom|label.schedpair[text] > input#dv-keep-original[type=checkbox]|1
 classic|settings@1280x860|dom|label.schedpair[text] > input#job-boot[type=checkbox]|1
 classic|settings@1280x860|dom|main#main > div#setbody.adminwrap|1
 classic|settings@1280x860|dom|main#main > div.settabs|1
@@ -4004,6 +4042,10 @@ classic|settings@1280x860|dom|nav > a.active[text]|1
 classic|settings@1280x860|dom|nav > a[text]|2
 classic|settings@1280x860|dom|select#cache-gb > option[text]|8
 classic|settings@1280x860|dom|select#cache-produce > option[text]|4
+classic|settings@1280x860|dom|select#dv-mode-1[disabled] > option[text]|3
+classic|settings@1280x860|dom|select#dv-mode-2[disabled] > option[text]|3
+classic|settings@1280x860|dom|select#dv-mode-3[disabled] > option[text]|3
+classic|settings@1280x860|dom|select#dv-parallel > option[text]|8
 classic|settings@1280x860|dom|select#job-art > option[text]|5
 classic|settings@1280x860|dom|select#job-clean > option[text]|4
 classic|settings@1280x860|dom|select#job-probe > option[text]|5
@@ -4015,9 +4057,14 @@ classic|settings@1280x860|dom|select#sched-scan-1 > option[text]|8
 classic|settings@1280x860|dom|select#sched-scan-2 > option[text]|8
 classic|settings@1280x860|dom|select#sched-scan-3 > option[text]|8
 classic|settings@1280x860|dom|select#telemetry-retain > option[text]|6
+classic|settings@1280x860|dom|span.schedpair > button.ghost.sm[disabled text]|6
 classic|settings@1280x860|dom|span.schedpair[text] > button.ghost.sm[text]|3
 classic|settings@1280x860|dom|span.schedpair[text] > select#cache-gb|1
 classic|settings@1280x860|dom|span.schedpair[text] > select#cache-produce|1
+classic|settings@1280x860|dom|span.schedpair[text] > select#dv-mode-1[disabled]|1
+classic|settings@1280x860|dom|span.schedpair[text] > select#dv-mode-2[disabled]|1
+classic|settings@1280x860|dom|span.schedpair[text] > select#dv-mode-3[disabled]|1
+classic|settings@1280x860|dom|span.schedpair[text] > select#dv-parallel|1
 classic|settings@1280x860|dom|span.schedpair[text] > select#job-art|1
 classic|settings@1280x860|dom|span.schedpair[text] > select#job-clean|1
 classic|settings@1280x860|dom|span.schedpair[text] > select#job-probe|1
@@ -4040,7 +4087,7 @@ classic|settings@1280x860|dom|td.libname > b[text]|3
 classic|settings@1280x860|dom|td.muted > div#st-1[text]|1
 classic|settings@1280x860|dom|td.muted > div#st-2[text]|1
 classic|settings@1280x860|dom|td.muted > div#st-3[text]|1
-classic|settings@1280x860|dom|td.muted > div.sched|3
+classic|settings@1280x860|dom|td.muted > div.sched|6
 classic|settings@1280x860|dom|td.rowactions > div.row|3
 classic|settings@1280x860|dom|thead > tr|1
 classic|settings@1280x860|dom|tr > th[text]|4
@@ -4103,18 +4150,22 @@ classic|settings@1280x860|focus|039|input#ln "Library name"
 classic|settings@1280x860|focus|040|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
 classic|settings@1280x860|focus|041|input#lp "Media paths"
 classic|settings@1280x860|focus|042|button "Add & scan"
-classic|settings@1280x860|focus|043|select#job-probe "Re-run ffprobe on files whose media detail
-classic|settings@1280x860|focus|044|select#job-art "Re-fetch posters for items a provider matche
-classic|settings@1280x860|focus|045|select#job-clean "Delete leftover transcode working director
-classic|settings@1280x860|focus|046|input#job-boot
-classic|settings@1280x860|focus|047|button.ghost.sm "Save"
-classic|settings@1280x860|focus|048|select#telemetry-retain "How long node-local playback measur
-classic|settings@1280x860|focus|049|button.ghost.sm "Save"
-classic|settings@1280x860|focus|050|select#cache-produce "How often to check what's worth encodi
-classic|settings@1280x860|focus|051|select#cache-gb "How much disk finished pre-transcodes may o
+classic|settings@1280x860|focus|043|input#dv-keep-original
+classic|settings@1280x860|focus|044|select#dv-parallel "1 2 3 4 5 6 7 8"
+classic|settings@1280x860|focus|045|button.ghost.sm "Save"
+classic|settings@1280x860|focus|046|select#job-probe "Re-run ffprobe on files whose media detail
+classic|settings@1280x860|focus|047|select#job-art "Re-fetch posters for items a provider matche
+classic|settings@1280x860|focus|048|select#job-clean "Delete leftover transcode working director
+classic|settings@1280x860|focus|049|input#job-boot
+classic|settings@1280x860|focus|050|button.ghost.sm "Save"
+classic|settings@1280x860|focus|051|select#telemetry-retain "How long node-local playback measur
 classic|settings@1280x860|focus|052|button.ghost.sm "Save"
-classic|settings@1280x860|focus|053|<wrap>
+classic|settings@1280x860|focus|053|select#cache-produce "How often to check what's worth encodi
+classic|settings@1280x860|focus|054|select#cache-gb "How much disk finished pre-transcodes may o
+classic|settings@1280x860|focus|055|button.ghost.sm "Save"
+classic|settings@1280x860|focus|056|<wrap>
 classic|settings@1280x860|req|GET /api/v1/activity|2
+classic|settings@1280x860|req|GET /api/v1/dv-conversions|1
 classic|settings@1280x860|req|GET /api/v1/libraries|1
 classic|settings@1280x860|req|GET /api/v1/me|1
 classic|settings@1280x860|req|GET /api/v1/scan/status|3
@@ -4137,14 +4188,14 @@ classic|settings@390x780|dom|div > div#sizemenu.amenu|1
 classic|settings@390x780|dom|div > div#thememenu.amenu|1
 classic|settings@390x780|dom|div#app > header.top|1
 classic|settings@390x780|dom|div#app > main#main|1
-classic|settings@390x780|dom|div#setbody.adminwrap > div.card|2
+classic|settings@390x780|dom|div#setbody.adminwrap > div.card|3
 classic|settings@390x780|dom|div.card > button[text]|1
 classic|settings@390x780|dom|div.card > div#lerr.err|1
-classic|settings@390x780|dom|div.card > div.hint[text]|4
-classic|settings@390x780|dom|div.card > div.row.setrow|3
+classic|settings@390x780|dom|div.card > div.hint[text]|5
+classic|settings@390x780|dom|div.card > div.row.setrow|4
 classic|settings@390x780|dom|div.card > div.row|2
-classic|settings@390x780|dom|div.card > div.setwarn[text]|1
-classic|settings@390x780|dom|div.card > h2.section[text]|5
+classic|settings@390x780|dom|div.card > div.setwarn[text]|2
+classic|settings@390x780|dom|div.card > h2.section[text]|6
 classic|settings@390x780|dom|div.card > table|1
 classic|settings@390x780|dom|div.hint[text] > b[text]|8
 classic|settings@390x780|dom|div.hint[text] > code[text]|1
@@ -4154,14 +4205,16 @@ classic|settings@390x780|dom|div.row > input#ln[aria-label=*]|1
 classic|settings@390x780|dom|div.row > input#lp[aria-label=*]|1
 classic|settings@390x780|dom|div.row > select#lk|1
 classic|settings@390x780|dom|div.row > span.muted[text]|1
-classic|settings@390x780|dom|div.row.setrow > button.ghost.sm[text]|3
-classic|settings@390x780|dom|div.row.setrow > label.schedpair[text]|1
-classic|settings@390x780|dom|div.row.setrow > span.schedpair[text]|6
-classic|settings@390x780|dom|div.sched > span.schedpair[text]|9
+classic|settings@390x780|dom|div.row.setrow > button.ghost.sm[text]|4
+classic|settings@390x780|dom|div.row.setrow > label.schedpair[text]|2
+classic|settings@390x780|dom|div.row.setrow > span.schedpair[text]|7
+classic|settings@390x780|dom|div.sched > span.muted[text]|3
+classic|settings@390x780|dom|div.sched > span.schedpair[text]|12
+classic|settings@390x780|dom|div.sched > span.schedpair|3
 classic|settings@390x780|dom|div.settabs > button.active.settab[text]|1
 classic|settings@390x780|dom|div.settabs > button.settab[text]|6
 classic|settings@390x780|dom|div.setwarn[text] > a[text]|1
-classic|settings@390x780|dom|div.setwarn[text] > b[text]|2
+classic|settings@390x780|dom|div.setwarn[text] > b[text]|3
 classic|settings@390x780|dom|div.topctl > div|4
 classic|settings@390x780|dom|header.top > a.logo[text]|1
 classic|settings@390x780|dom|header.top > div.topctl|1
@@ -4169,6 +4222,8 @@ classic|settings@390x780|dom|header.top > input#q.search[aria-label=*]|1
 classic|settings@390x780|dom|header.top > nav|1
 classic|settings@390x780|dom|header.top > span#activity.activity|1
 classic|settings@390x780|dom|header.top > span.spacer|1
+classic|settings@390x780|dom|label.schedpair[text] > code[text]|1
+classic|settings@390x780|dom|label.schedpair[text] > input#dv-keep-original[type=checkbox]|1
 classic|settings@390x780|dom|label.schedpair[text] > input#job-boot[type=checkbox]|1
 classic|settings@390x780|dom|main#main > div#setbody.adminwrap|1
 classic|settings@390x780|dom|main#main > div.settabs|1
@@ -4176,6 +4231,10 @@ classic|settings@390x780|dom|nav > a.active[text]|1
 classic|settings@390x780|dom|nav > a[text]|2
 classic|settings@390x780|dom|select#cache-gb > option[text]|8
 classic|settings@390x780|dom|select#cache-produce > option[text]|4
+classic|settings@390x780|dom|select#dv-mode-1[disabled] > option[text]|3
+classic|settings@390x780|dom|select#dv-mode-2[disabled] > option[text]|3
+classic|settings@390x780|dom|select#dv-mode-3[disabled] > option[text]|3
+classic|settings@390x780|dom|select#dv-parallel > option[text]|8
 classic|settings@390x780|dom|select#job-art > option[text]|5
 classic|settings@390x780|dom|select#job-clean > option[text]|4
 classic|settings@390x780|dom|select#job-probe > option[text]|5
@@ -4187,9 +4246,14 @@ classic|settings@390x780|dom|select#sched-scan-1 > option[text]|8
 classic|settings@390x780|dom|select#sched-scan-2 > option[text]|8
 classic|settings@390x780|dom|select#sched-scan-3 > option[text]|8
 classic|settings@390x780|dom|select#telemetry-retain > option[text]|6
+classic|settings@390x780|dom|span.schedpair > button.ghost.sm[disabled text]|6
 classic|settings@390x780|dom|span.schedpair[text] > button.ghost.sm[text]|3
 classic|settings@390x780|dom|span.schedpair[text] > select#cache-gb|1
 classic|settings@390x780|dom|span.schedpair[text] > select#cache-produce|1
+classic|settings@390x780|dom|span.schedpair[text] > select#dv-mode-1[disabled]|1
+classic|settings@390x780|dom|span.schedpair[text] > select#dv-mode-2[disabled]|1
+classic|settings@390x780|dom|span.schedpair[text] > select#dv-mode-3[disabled]|1
+classic|settings@390x780|dom|span.schedpair[text] > select#dv-parallel|1
 classic|settings@390x780|dom|span.schedpair[text] > select#job-art|1
 classic|settings@390x780|dom|span.schedpair[text] > select#job-clean|1
 classic|settings@390x780|dom|span.schedpair[text] > select#job-probe|1
@@ -4212,7 +4276,7 @@ classic|settings@390x780|dom|td.libname > b[text]|3
 classic|settings@390x780|dom|td.muted > div#st-1[text]|1
 classic|settings@390x780|dom|td.muted > div#st-2[text]|1
 classic|settings@390x780|dom|td.muted > div#st-3[text]|1
-classic|settings@390x780|dom|td.muted > div.sched|3
+classic|settings@390x780|dom|td.muted > div.sched|6
 classic|settings@390x780|dom|td.rowactions > div.row|3
 classic|settings@390x780|dom|thead > tr|1
 classic|settings@390x780|dom|tr > th[text]|4
@@ -4275,18 +4339,22 @@ classic|settings@390x780|focus|039|input#ln "Library name"
 classic|settings@390x780|focus|040|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
 classic|settings@390x780|focus|041|input#lp "Media paths"
 classic|settings@390x780|focus|042|button "Add & scan"
-classic|settings@390x780|focus|043|select#job-probe "Re-run ffprobe on files whose media detail
-classic|settings@390x780|focus|044|select#job-art "Re-fetch posters for items a provider matche
-classic|settings@390x780|focus|045|select#job-clean "Delete leftover transcode working director
-classic|settings@390x780|focus|046|input#job-boot
-classic|settings@390x780|focus|047|button.ghost.sm "Save"
-classic|settings@390x780|focus|048|select#telemetry-retain "How long node-local playback measur
-classic|settings@390x780|focus|049|button.ghost.sm "Save"
-classic|settings@390x780|focus|050|select#cache-produce "How often to check what's worth encodi
-classic|settings@390x780|focus|051|select#cache-gb "How much disk finished pre-transcodes may o
+classic|settings@390x780|focus|043|input#dv-keep-original
+classic|settings@390x780|focus|044|select#dv-parallel "1 2 3 4 5 6 7 8"
+classic|settings@390x780|focus|045|button.ghost.sm "Save"
+classic|settings@390x780|focus|046|select#job-probe "Re-run ffprobe on files whose media detail
+classic|settings@390x780|focus|047|select#job-art "Re-fetch posters for items a provider matche
+classic|settings@390x780|focus|048|select#job-clean "Delete leftover transcode working director
+classic|settings@390x780|focus|049|input#job-boot
+classic|settings@390x780|focus|050|button.ghost.sm "Save"
+classic|settings@390x780|focus|051|select#telemetry-retain "How long node-local playback measur
 classic|settings@390x780|focus|052|button.ghost.sm "Save"
-classic|settings@390x780|focus|053|<wrap>
+classic|settings@390x780|focus|053|select#cache-produce "How often to check what's worth encodi
+classic|settings@390x780|focus|054|select#cache-gb "How much disk finished pre-transcodes may o
+classic|settings@390x780|focus|055|button.ghost.sm "Save"
+classic|settings@390x780|focus|056|<wrap>
 classic|settings@390x780|req|GET /api/v1/activity|2
+classic|settings@390x780|req|GET /api/v1/dv-conversions|1
 classic|settings@390x780|req|GET /api/v1/libraries|1
 classic|settings@390x780|req|GET /api/v1/me|1
 classic|settings@390x780|req|GET /api/v1/scan/status|3
@@ -5893,14 +5961,14 @@ theater|settings@1280x860|dom|button.ghost.sm[aria-label=*] > span.tsw|1
 theater|settings@1280x860|dom|div#app > header.th-top|1
 theater|settings@1280x860|dom|div#app > main#main|1
 theater|settings@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
-theater|settings@1280x860|dom|div#setbody.adminwrap > div.card|2
+theater|settings@1280x860|dom|div#setbody.adminwrap > div.card|3
 theater|settings@1280x860|dom|div.card > button[text]|1
 theater|settings@1280x860|dom|div.card > div#lerr.err|1
-theater|settings@1280x860|dom|div.card > div.hint[text]|4
-theater|settings@1280x860|dom|div.card > div.row.setrow|3
+theater|settings@1280x860|dom|div.card > div.hint[text]|5
+theater|settings@1280x860|dom|div.card > div.row.setrow|4
 theater|settings@1280x860|dom|div.card > div.row|2
-theater|settings@1280x860|dom|div.card > div.setwarn[text]|1
-theater|settings@1280x860|dom|div.card > h2.section[text]|5
+theater|settings@1280x860|dom|div.card > div.setwarn[text]|2
+theater|settings@1280x860|dom|div.card > h2.section[text]|6
 theater|settings@1280x860|dom|div.card > table|1
 theater|settings@1280x860|dom|div.hint[text] > b[text]|8
 theater|settings@1280x860|dom|div.hint[text] > code[text]|1
@@ -5910,14 +5978,16 @@ theater|settings@1280x860|dom|div.row > input#ln[aria-label=*]|1
 theater|settings@1280x860|dom|div.row > input#lp[aria-label=*]|1
 theater|settings@1280x860|dom|div.row > select#lk|1
 theater|settings@1280x860|dom|div.row > span.muted[text]|1
-theater|settings@1280x860|dom|div.row.setrow > button.ghost.sm[text]|3
-theater|settings@1280x860|dom|div.row.setrow > label.schedpair[text]|1
-theater|settings@1280x860|dom|div.row.setrow > span.schedpair[text]|6
-theater|settings@1280x860|dom|div.sched > span.schedpair[text]|9
+theater|settings@1280x860|dom|div.row.setrow > button.ghost.sm[text]|4
+theater|settings@1280x860|dom|div.row.setrow > label.schedpair[text]|2
+theater|settings@1280x860|dom|div.row.setrow > span.schedpair[text]|7
+theater|settings@1280x860|dom|div.sched > span.muted[text]|3
+theater|settings@1280x860|dom|div.sched > span.schedpair[text]|12
+theater|settings@1280x860|dom|div.sched > span.schedpair|3
 theater|settings@1280x860|dom|div.settabs > button.active.settab[text]|1
 theater|settings@1280x860|dom|div.settabs > button.settab[text]|6
 theater|settings@1280x860|dom|div.setwarn[text] > a[text]|1
-theater|settings@1280x860|dom|div.setwarn[text] > b[text]|2
+theater|settings@1280x860|dom|div.setwarn[text] > b[text]|3
 theater|settings@1280x860|dom|div.th-ctl > div.th-pop|4
 theater|settings@1280x860|dom|div.th-pop > button.ghost.profile.sm|1
 theater|settings@1280x860|dom|div.th-pop > button.ghost.sizebtn.sm|1
@@ -5933,6 +6003,8 @@ theater|settings@1280x860|dom|header.th-top > input#q.search[aria-label=*]|1
 theater|settings@1280x860|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|settings@1280x860|dom|header.th-top > span#activity.activity|1
 theater|settings@1280x860|dom|header.th-top > span.spacer|1
+theater|settings@1280x860|dom|label.schedpair[text] > code[text]|1
+theater|settings@1280x860|dom|label.schedpair[text] > input#dv-keep-original[type=checkbox]|1
 theater|settings@1280x860|dom|label.schedpair[text] > input#job-boot[type=checkbox]|1
 theater|settings@1280x860|dom|main#main > div#setbody.adminwrap|1
 theater|settings@1280x860|dom|main#main > div.settabs|1
@@ -5942,6 +6014,10 @@ theater|settings@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=pag
 theater|settings@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|2
 theater|settings@1280x860|dom|select#cache-gb > option[text]|8
 theater|settings@1280x860|dom|select#cache-produce > option[text]|4
+theater|settings@1280x860|dom|select#dv-mode-1[disabled] > option[text]|3
+theater|settings@1280x860|dom|select#dv-mode-2[disabled] > option[text]|3
+theater|settings@1280x860|dom|select#dv-mode-3[disabled] > option[text]|3
+theater|settings@1280x860|dom|select#dv-parallel > option[text]|8
 theater|settings@1280x860|dom|select#job-art > option[text]|5
 theater|settings@1280x860|dom|select#job-clean > option[text]|4
 theater|settings@1280x860|dom|select#job-probe > option[text]|5
@@ -5953,9 +6029,14 @@ theater|settings@1280x860|dom|select#sched-scan-1 > option[text]|8
 theater|settings@1280x860|dom|select#sched-scan-2 > option[text]|8
 theater|settings@1280x860|dom|select#sched-scan-3 > option[text]|8
 theater|settings@1280x860|dom|select#telemetry-retain > option[text]|6
+theater|settings@1280x860|dom|span.schedpair > button.ghost.sm[disabled text]|6
 theater|settings@1280x860|dom|span.schedpair[text] > button.ghost.sm[text]|3
 theater|settings@1280x860|dom|span.schedpair[text] > select#cache-gb|1
 theater|settings@1280x860|dom|span.schedpair[text] > select#cache-produce|1
+theater|settings@1280x860|dom|span.schedpair[text] > select#dv-mode-1[disabled]|1
+theater|settings@1280x860|dom|span.schedpair[text] > select#dv-mode-2[disabled]|1
+theater|settings@1280x860|dom|span.schedpair[text] > select#dv-mode-3[disabled]|1
+theater|settings@1280x860|dom|span.schedpair[text] > select#dv-parallel|1
 theater|settings@1280x860|dom|span.schedpair[text] > select#job-art|1
 theater|settings@1280x860|dom|span.schedpair[text] > select#job-clean|1
 theater|settings@1280x860|dom|span.schedpair[text] > select#job-probe|1
@@ -5978,7 +6059,7 @@ theater|settings@1280x860|dom|td.libname > b[text]|3
 theater|settings@1280x860|dom|td.muted > div#st-1[text]|1
 theater|settings@1280x860|dom|td.muted > div#st-2[text]|1
 theater|settings@1280x860|dom|td.muted > div#st-3[text]|1
-theater|settings@1280x860|dom|td.muted > div.sched|3
+theater|settings@1280x860|dom|td.muted > div.sched|6
 theater|settings@1280x860|dom|td.rowactions > div.row|3
 theater|settings@1280x860|dom|thead > tr|1
 theater|settings@1280x860|dom|tr > th[text]|4
@@ -6041,18 +6122,22 @@ theater|settings@1280x860|focus|039|input#ln "Library name"
 theater|settings@1280x860|focus|040|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
 theater|settings@1280x860|focus|041|input#lp "Media paths"
 theater|settings@1280x860|focus|042|button "Add & scan"
-theater|settings@1280x860|focus|043|select#job-probe "Re-run ffprobe on files whose media detail
-theater|settings@1280x860|focus|044|select#job-art "Re-fetch posters for items a provider matche
-theater|settings@1280x860|focus|045|select#job-clean "Delete leftover transcode working director
-theater|settings@1280x860|focus|046|input#job-boot
-theater|settings@1280x860|focus|047|button.ghost.sm "Save"
-theater|settings@1280x860|focus|048|select#telemetry-retain "How long node-local playback measur
-theater|settings@1280x860|focus|049|button.ghost.sm "Save"
-theater|settings@1280x860|focus|050|select#cache-produce "How often to check what's worth encodi
-theater|settings@1280x860|focus|051|select#cache-gb "How much disk finished pre-transcodes may o
+theater|settings@1280x860|focus|043|input#dv-keep-original
+theater|settings@1280x860|focus|044|select#dv-parallel "1 2 3 4 5 6 7 8"
+theater|settings@1280x860|focus|045|button.ghost.sm "Save"
+theater|settings@1280x860|focus|046|select#job-probe "Re-run ffprobe on files whose media detail
+theater|settings@1280x860|focus|047|select#job-art "Re-fetch posters for items a provider matche
+theater|settings@1280x860|focus|048|select#job-clean "Delete leftover transcode working director
+theater|settings@1280x860|focus|049|input#job-boot
+theater|settings@1280x860|focus|050|button.ghost.sm "Save"
+theater|settings@1280x860|focus|051|select#telemetry-retain "How long node-local playback measur
 theater|settings@1280x860|focus|052|button.ghost.sm "Save"
-theater|settings@1280x860|focus|053|<wrap>
+theater|settings@1280x860|focus|053|select#cache-produce "How often to check what's worth encodi
+theater|settings@1280x860|focus|054|select#cache-gb "How much disk finished pre-transcodes may o
+theater|settings@1280x860|focus|055|button.ghost.sm "Save"
+theater|settings@1280x860|focus|056|<wrap>
 theater|settings@1280x860|req|GET /api/v1/activity|2
+theater|settings@1280x860|req|GET /api/v1/dv-conversions|1
 theater|settings@1280x860|req|GET /api/v1/libraries|1
 theater|settings@1280x860|req|GET /api/v1/me|1
 theater|settings@1280x860|req|GET /api/v1/scan/status|3
@@ -6068,14 +6153,14 @@ theater|settings@390x780|dom|button.ghost.sm[aria-label=*] > span.tsw|1
 theater|settings@390x780|dom|div#app > header.th-top|1
 theater|settings@390x780|dom|div#app > main#main|1
 theater|settings@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
-theater|settings@390x780|dom|div#setbody.adminwrap > div.card|2
+theater|settings@390x780|dom|div#setbody.adminwrap > div.card|3
 theater|settings@390x780|dom|div.card > button[text]|1
 theater|settings@390x780|dom|div.card > div#lerr.err|1
-theater|settings@390x780|dom|div.card > div.hint[text]|4
-theater|settings@390x780|dom|div.card > div.row.setrow|3
+theater|settings@390x780|dom|div.card > div.hint[text]|5
+theater|settings@390x780|dom|div.card > div.row.setrow|4
 theater|settings@390x780|dom|div.card > div.row|2
-theater|settings@390x780|dom|div.card > div.setwarn[text]|1
-theater|settings@390x780|dom|div.card > h2.section[text]|5
+theater|settings@390x780|dom|div.card > div.setwarn[text]|2
+theater|settings@390x780|dom|div.card > h2.section[text]|6
 theater|settings@390x780|dom|div.card > table|1
 theater|settings@390x780|dom|div.hint[text] > b[text]|8
 theater|settings@390x780|dom|div.hint[text] > code[text]|1
@@ -6085,14 +6170,16 @@ theater|settings@390x780|dom|div.row > input#ln[aria-label=*]|1
 theater|settings@390x780|dom|div.row > input#lp[aria-label=*]|1
 theater|settings@390x780|dom|div.row > select#lk|1
 theater|settings@390x780|dom|div.row > span.muted[text]|1
-theater|settings@390x780|dom|div.row.setrow > button.ghost.sm[text]|3
-theater|settings@390x780|dom|div.row.setrow > label.schedpair[text]|1
-theater|settings@390x780|dom|div.row.setrow > span.schedpair[text]|6
-theater|settings@390x780|dom|div.sched > span.schedpair[text]|9
+theater|settings@390x780|dom|div.row.setrow > button.ghost.sm[text]|4
+theater|settings@390x780|dom|div.row.setrow > label.schedpair[text]|2
+theater|settings@390x780|dom|div.row.setrow > span.schedpair[text]|7
+theater|settings@390x780|dom|div.sched > span.muted[text]|3
+theater|settings@390x780|dom|div.sched > span.schedpair[text]|12
+theater|settings@390x780|dom|div.sched > span.schedpair|3
 theater|settings@390x780|dom|div.settabs > button.active.settab[text]|1
 theater|settings@390x780|dom|div.settabs > button.settab[text]|6
 theater|settings@390x780|dom|div.setwarn[text] > a[text]|1
-theater|settings@390x780|dom|div.setwarn[text] > b[text]|2
+theater|settings@390x780|dom|div.setwarn[text] > b[text]|3
 theater|settings@390x780|dom|div.th-ctl > div.th-pop|4
 theater|settings@390x780|dom|div.th-pop > button.ghost.profile.sm|1
 theater|settings@390x780|dom|div.th-pop > button.ghost.sizebtn.sm|1
@@ -6108,6 +6195,8 @@ theater|settings@390x780|dom|header.th-top > input#q.search[aria-label=*]|1
 theater|settings@390x780|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|settings@390x780|dom|header.th-top > span#activity.activity|1
 theater|settings@390x780|dom|header.th-top > span.spacer|1
+theater|settings@390x780|dom|label.schedpair[text] > code[text]|1
+theater|settings@390x780|dom|label.schedpair[text] > input#dv-keep-original[type=checkbox]|1
 theater|settings@390x780|dom|label.schedpair[text] > input#job-boot[type=checkbox]|1
 theater|settings@390x780|dom|main#main > div#setbody.adminwrap|1
 theater|settings@390x780|dom|main#main > div.settabs|1
@@ -6117,6 +6206,10 @@ theater|settings@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page
 theater|settings@390x780|dom|nav.th-pills[aria-label=*] > a[text]|2
 theater|settings@390x780|dom|select#cache-gb > option[text]|8
 theater|settings@390x780|dom|select#cache-produce > option[text]|4
+theater|settings@390x780|dom|select#dv-mode-1[disabled] > option[text]|3
+theater|settings@390x780|dom|select#dv-mode-2[disabled] > option[text]|3
+theater|settings@390x780|dom|select#dv-mode-3[disabled] > option[text]|3
+theater|settings@390x780|dom|select#dv-parallel > option[text]|8
 theater|settings@390x780|dom|select#job-art > option[text]|5
 theater|settings@390x780|dom|select#job-clean > option[text]|4
 theater|settings@390x780|dom|select#job-probe > option[text]|5
@@ -6128,9 +6221,14 @@ theater|settings@390x780|dom|select#sched-scan-1 > option[text]|8
 theater|settings@390x780|dom|select#sched-scan-2 > option[text]|8
 theater|settings@390x780|dom|select#sched-scan-3 > option[text]|8
 theater|settings@390x780|dom|select#telemetry-retain > option[text]|6
+theater|settings@390x780|dom|span.schedpair > button.ghost.sm[disabled text]|6
 theater|settings@390x780|dom|span.schedpair[text] > button.ghost.sm[text]|3
 theater|settings@390x780|dom|span.schedpair[text] > select#cache-gb|1
 theater|settings@390x780|dom|span.schedpair[text] > select#cache-produce|1
+theater|settings@390x780|dom|span.schedpair[text] > select#dv-mode-1[disabled]|1
+theater|settings@390x780|dom|span.schedpair[text] > select#dv-mode-2[disabled]|1
+theater|settings@390x780|dom|span.schedpair[text] > select#dv-mode-3[disabled]|1
+theater|settings@390x780|dom|span.schedpair[text] > select#dv-parallel|1
 theater|settings@390x780|dom|span.schedpair[text] > select#job-art|1
 theater|settings@390x780|dom|span.schedpair[text] > select#job-clean|1
 theater|settings@390x780|dom|span.schedpair[text] > select#job-probe|1
@@ -6153,7 +6251,7 @@ theater|settings@390x780|dom|td.libname > b[text]|3
 theater|settings@390x780|dom|td.muted > div#st-1[text]|1
 theater|settings@390x780|dom|td.muted > div#st-2[text]|1
 theater|settings@390x780|dom|td.muted > div#st-3[text]|1
-theater|settings@390x780|dom|td.muted > div.sched|3
+theater|settings@390x780|dom|td.muted > div.sched|6
 theater|settings@390x780|dom|td.rowactions > div.row|3
 theater|settings@390x780|dom|thead > tr|1
 theater|settings@390x780|dom|tr > th[text]|4
@@ -6213,21 +6311,25 @@ theater|settings@390x780|focus|036|input#ln "Library name"
 theater|settings@390x780|focus|037|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
 theater|settings@390x780|focus|038|input#lp "Media paths"
 theater|settings@390x780|focus|039|button "Add & scan"
-theater|settings@390x780|focus|040|select#job-probe "Re-run ffprobe on files whose media detail
-theater|settings@390x780|focus|041|select#job-art "Re-fetch posters for items a provider matche
-theater|settings@390x780|focus|042|select#job-clean "Delete leftover transcode working director
-theater|settings@390x780|focus|043|input#job-boot
-theater|settings@390x780|focus|044|button.ghost.sm "Save"
-theater|settings@390x780|focus|045|select#telemetry-retain "How long node-local playback measur
-theater|settings@390x780|focus|046|button.ghost.sm "Save"
-theater|settings@390x780|focus|047|select#cache-produce "How often to check what's worth encodi
-theater|settings@390x780|focus|048|select#cache-gb "How much disk finished pre-transcodes may o
+theater|settings@390x780|focus|040|input#dv-keep-original
+theater|settings@390x780|focus|041|select#dv-parallel "1 2 3 4 5 6 7 8"
+theater|settings@390x780|focus|042|button.ghost.sm "Save"
+theater|settings@390x780|focus|043|select#job-probe "Re-run ffprobe on files whose media detail
+theater|settings@390x780|focus|044|select#job-art "Re-fetch posters for items a provider matche
+theater|settings@390x780|focus|045|select#job-clean "Delete leftover transcode working director
+theater|settings@390x780|focus|046|input#job-boot
+theater|settings@390x780|focus|047|button.ghost.sm "Save"
+theater|settings@390x780|focus|048|select#telemetry-retain "How long node-local playback measur
 theater|settings@390x780|focus|049|button.ghost.sm "Save"
-theater|settings@390x780|focus|050|a "Home"
-theater|settings@390x780|focus|051|a "Activity"
-theater|settings@390x780|focus|052|a.on "Settings"
-theater|settings@390x780|focus|053|<wrap>
+theater|settings@390x780|focus|050|select#cache-produce "How often to check what's worth encodi
+theater|settings@390x780|focus|051|select#cache-gb "How much disk finished pre-transcodes may o
+theater|settings@390x780|focus|052|button.ghost.sm "Save"
+theater|settings@390x780|focus|053|a "Home"
+theater|settings@390x780|focus|054|a "Activity"
+theater|settings@390x780|focus|055|a.on "Settings"
+theater|settings@390x780|focus|056|<wrap>
 theater|settings@390x780|req|GET /api/v1/activity|2
+theater|settings@390x780|req|GET /api/v1/dv-conversions|1
 theater|settings@390x780|req|GET /api/v1/libraries|1
 theater|settings@390x780|req|GET /api/v1/me|1
 theater|settings@390x780|req|GET /api/v1/scan/status|3

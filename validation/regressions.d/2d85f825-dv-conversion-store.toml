@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2d85f825"]
+points = ["core.media", "cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained backend-neutral conversion contract drives every queue and terminal transition through the replicated Store, while the three-voter migration and populated-import cases require idempotent fresh bootstrap, exact v5-through-v20 upgrade fixtures, empty history for a pre-ledger source, and preservation of a real current-schema conversion row."

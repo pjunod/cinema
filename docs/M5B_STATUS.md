@@ -23,7 +23,7 @@ a forecast.
 | Conversion worker | Complete | Six-stage sibling-temp pipeline, exact mux verification, scanner-identity plus open-handle source fence, leased parallel queue, fenced state transitions, and crash recovery compile and pass focused unit tests |
 | Operator surface | Complete | Admin-only library modes, progress, settings, file action/ledger, explicit tool refusal, and retry controls pass the embedded-web static contract |
 | Image and probes | Complete | Image installs checksum-pinned `dovi_tool` 2.3.3 assets and exact Bookworm MKVToolNix 74.0.0-1; the boot probe names command, version, availability, and an exact refusal reason |
-| Focused evidence | In progress | Conversion verification unit tests, SQLite Store contract, both backend compilation, embedded-web static contract, validation catalog, and 127 operations contracts pass; replicated Store, UI structure, and API evidence remain |
+| Focused evidence | Complete | Conversion and API unit tests, SQLite and replicated Store contracts, both backend compilation, embedded-web static contracts, 60-layout/view UI capture, validation catalog, and 127 operations contracts pass |
 | Adversarial review | Not started | Independent correctness, destructive-media, cluster, and UI/API review passes after the PR opens |
 | Complete qualification | Not started | Run once after review fixes on the frozen effort-to-main candidate; every promotion job and the exact-tree receipt must pass |
 | Merge | Not started | Merge only while the qualified head and `main` base are unchanged |
@@ -63,12 +63,16 @@ a forecast.
    tab loads one admin snapshot, refreshes it after each mutation, and the
    ordinary page refresh obtains a new one. This keeps the established bounded
    settings read contract while still exposing per-library progress.
+6. **Do not invent ledger history while importing an old backup.** SQLite v14
+   predates the v39 conversion table, so its migration creates an empty ledger;
+   a current-schema import separately proves that a real failed conversion row
+   and its audit error survive SQLite-to-hiqlite activation.
 
 ## Final evidence — fill only from the frozen tree
 
 | Evidence | Result |
 |---|---|
-| Focused local regressions | Store ledger: targeted SQLite migration and queue tests; backend-neutral Store contract; import unit suite; all-target hiqlite-store compile. Worker/operator surface: five conversion verification/capability unit tests; `cargo check -p plurxd --all-targets`; `make web-check`. Packaging: 127 operations contracts, including exact tool pins and both release-asset checksums |
+| Focused local regressions | Store ledger: 69 non-import replicated contracts passed in the complete cluster run, then all three corrected populated-import contracts passed; SQLite migration and queue contracts and both all-target backend builds pass. Worker/operator surface: seven conversion/API tests pass; `make web-check` passes; the intentional Settings golden was reviewed after 60 Chromium captures and 6,306 structural facts with no console/page errors. Packaging: 127 operations contracts pass, including exact tool pins and both release-asset checksums |
 | Adversarial review findings | Pending |
 | Main promotion gate | Pending |
 | Qualification receipt | Pending |
