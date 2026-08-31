@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["2e0024c9"]
+points = []
+checks = []
+reason = "This commit only records the regression evidence for the preceding control-reporter timer correction; it does not change runtime behavior."
+ignore = true
