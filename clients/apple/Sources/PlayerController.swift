@@ -3330,6 +3330,26 @@ final class PlayerController: ObservableObject {
         )
     }
 
+    /// Publish what this failure looks like, and wait briefly for the verdict.
+    ///
+    /// The evidence is the item's own error class rather than a stall's, and
+    /// it is published from inside the ask so the sequence floor is read
+    /// first — see `askForAction`.
+    private func controlVerdictForItemFailure(_ item: AVPlayerItem) async -> ControlAction? {
+        let evidence = ClientObservation(
+            decoderState: .failed,
+            errorCode: .media,
+            errorDetail: "avplayer_item_failed"
+        )
+        return await playbackControl.askForAction(
+            bound: Self.controlAskSeconds,
+            cap: Self.controlAskCapSeconds,
+            publish: { [weak self] in
+                self?.reportControlEvidence(evidence, render: .failed)
+            }
+        )
+    }
+
     /// Nothing to recover for: the player moved on while the ask was out.
     /// Is a stall recovery still the right thing to do?
     ///
@@ -3880,6 +3900,39 @@ final class PlayerController: ObservableObject {
             eventDomain: event?.errorDomain,
             eventStatus: event?.errorStatusCode
         )
+        // The ask goes before rung one, not before rung two. A verdict about
+        // the source does not change by node, so an `unsupported` producer
+        // decision would otherwise walk next-node → established HDR →
+        // compatibility transcode, guessing at retry the whole way and
+        // failing three times to learn what the server already knew.
+        //
+        // Only `terminal` short-circuits here. A `hold` or a `retry_resource`
+        // on a dead item would leave a player with nothing to render and no
+        // path forward, so those fall through to the ladder — the ladder is
+        // the only thing that can still produce a picture.
+        let generation = openGeneration
+        let itemVerdict = await controlVerdictForItemFailure(item)
+        guard openGeneration == generation, player.currentItem === item,
+              !isChangingStream else { return }
+        if let itemVerdict, itemVerdict.type == "terminal" {
+            player.pause()
+            isPlaying = false
+            wantsPlayback = false
+            isChangingStream = false
+            failed = true
+            playbackFailureTitle = currentMs > 0
+                ? Self.playbackStoppedFailureTitle
+                : Self.playbackStartFailureTitle
+            playbackError = itemVerdict.message
+            reportPlaybackFailure(
+                item,
+                step: PlaybackCompatibilityLadderStep(
+                    cause: .itemFailure,
+                    fallback: PlaybackCompatibilityFallback.none
+                )
+            )
+            return
+        }
         var reportedFailure = false
         if started, !isCompatibilityFailure, isTransportFailure {
             // The log goes out before the retry, not after it: a successful
