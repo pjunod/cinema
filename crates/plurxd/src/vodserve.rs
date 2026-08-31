@@ -445,13 +445,6 @@ struct Recipe {
     /// of the rendition directory key so weak legacy metadata cannot alias
     /// segments across an in-place source rewrite.
     cluster_cache_key: Option<String>,
-    /// The source's frame rate as an exact fraction, when the probe named one.
-    ///
-    /// Carried on the recipe because only a converting producer needs it and
-    /// only at spawn time, by which point the probe JSON is long gone: the
-    /// conversion's second ffmpeg reads a raw elementary stream, which has no
-    /// timing of its own beyond whatever the bitstream's VUI carries.
-    video_frame_rate: Option<String>,
 }
 
 /// One attached reader, in plan indexes.
@@ -1032,7 +1025,6 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
-                video_frame_rate: None,
                 file: file.clone(),
                 audio_index: None,
                 aac: true,
@@ -1581,7 +1573,6 @@ impl VodServe {
             video,
             source_object_version,
             cluster_cache_key,
-            video_frame_rate: plurx_core::transcode::source_frame_rate(probe_json.as_deref()),
         };
         let key = rendition_key(&recipe, &identity);
         let attachment = self
@@ -4050,15 +4041,10 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
     let start_seconds = entry.start_ticks as f64 / f64::from(rendition.timescale);
     let recipe = &rendition.recipe;
     let attested = attested_source_setup(rendition);
-    let (mut child, stdout) = if recipe.video.converts_dolby_vision() {
-        match spawn_converting_producer(shared, rendition, start_seconds, attested).await {
-            Ok(pair) => pair,
-            Err(cause) => {
-                record_failure(shared, rendition, cause);
-                return;
-            }
-        }
-    } else {
+    // One ffmpeg, converting or not. The conversion happens on the far side of
+    // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
+    // process writes — so the producer is the producer it always was.
+    let (mut child, stdout) = {
         let mut args = copy_pipe_args_with_dolby_vision(
             &recipe.file,
             start_seconds,
@@ -4177,110 +4163,6 @@ fn attach_attested_descriptor(
     let _ = (command, source);
 }
 
-/// Start the two-ffmpeg Profile 7 → 8.1 producer for this generation.
-///
-/// The one thing this does that the single-ffmpeg path does not is probe where
-/// the video actually starts. Stage one seeks with `-noaccurate_seek` and hands
-/// stage two a raw Annex B stream, which carries no timestamps at all — so
-/// stage two builds the video timeline from zero while its audio input carries
-/// the source's real ones. Seeking the audio to the *requested* start would
-/// then offset it against the picture by the distance back to the keyframe:
-/// lip-sync that varies per title and per seek, plays perfectly well, and is
-/// wrong. `probe_media_origin` answers where the picture really begins, which
-/// is what the audio must be seeked to.
-/// The two argvs a converting producer runs, chosen from the recipe.
-///
-/// Split from the spawn so the choice can be asserted without a process:
-/// which pipe a recipe runs is the whole of what this branch decides, and it
-/// was previously provable only by watching a node.
-fn converting_producer_args(
-    recipe: &Recipe,
-    input: &str,
-    start_seconds: f64,
-    audio_start: f64,
-) -> (Vec<String>, Vec<String>) {
-    (
-        plurx_core::transcode::dv_convert_source_args(input, start_seconds, Pacing::unpaced()),
-        plurx_core::transcode::dv_convert_output_args(
-            &recipe.file,
-            input,
-            audio_start,
-            recipe.audio_index,
-            recipe.aac,
-            recipe.video,
-            recipe.video_frame_rate.as_deref(),
-        ),
-    )
-}
-
-async fn spawn_converting_producer(
-    shared: &Arc<Shared>,
-    rendition: &Arc<Rendition>,
-    start_seconds: f64,
-    attested: bool,
-) -> Result<(tokio::process::Child, tokio::process::ChildStdout), String> {
-    let recipe = &rendition.recipe;
-    let path = recipe.file.path.to_string_lossy().into_owned();
-    let input = if attested { "/dev/fd/3" } else { path.as_str() };
-    let audio_start = crate::transcode::probe_media_origin(&recipe.file.path, start_seconds).await;
-    // A probe that could not answer returns the requested start, which is
-    // where the picture is NOT. On the single-ffmpeg path that fallback costs
-    // a subtitle-cue offset and nothing else, because one ffmpeg reads both
-    // streams off one timeline. Here the two streams are two opens and the
-    // probe is the only thing tying them together: a fallback would seek the
-    // audio up to a full GOP later than the picture — measured at −1.1 s on a
-    // two-second GOP, and a 4K film's GOPs are longer. Silent lip-sync of that
-    // size is worse than a refusal, so refuse.
-    if start_seconds > 0.0 && (audio_start - start_seconds).abs() < f64::EPSILON {
-        return Err(format!(
-            "the media-origin probe could not say where the picture starts at {start_seconds:.3}s, \
-             and a converting producer cannot align its audio without it"
-        ));
-    }
-
-    let (source_args, output_args) =
-        converting_producer_args(recipe, input, start_seconds, audio_start);
-
-    let key = rendition.key.clone();
-    let failed = Arc::clone(shared);
-    let owner = Arc::clone(rendition);
-    let producer = crate::dvpipe::spawn(
-        &ffmpeg_bin(),
-        &source_args,
-        &output_args,
-        |command| attach_attested_descriptor(command, rendition.source.as_ref()),
-        move |outcome| match outcome {
-            crate::dvpipe::Outcome::Converted(report) => tracing::info!(
-                rendition = %key,
-                rpus = report.rpus,
-                enhancement_layer = ?report.enhancement_layer,
-                "this generation's Dolby Vision stream ended"
-            ),
-            // A refusal is terminal for this rendition, not for this
-            // generation. The conversion stops at a particular RPU because
-            // that RPU cannot be converted, so respawning lands on the same
-            // frame and refuses again — a restart loop, and a viewer error
-            // with no cause in it. Recording the failure is what turns that
-            // into one message naming the byte.
-            crate::dvpipe::Outcome::Refused(reason) => {
-                record_failure(
-                    &failed,
-                    &owner,
-                    format!("the Dolby Vision conversion refused this stream: {reason}"),
-                );
-            }
-            // Not a failure: the ordinary end of a killed producer. A session
-            // purge, a suspend that outlived its budget, or the head
-            // regeneration reading an init and stopping all arrive here.
-            crate::dvpipe::Outcome::Interrupted(reason) => tracing::debug!(
-                rendition = %key,
-                "the Dolby Vision conversion ended early: {reason}"
-            ),
-        },
-    )?;
-    Ok((producer.child, producer.stdout))
-}
-
 fn rendition_key_field(at: u32) -> String {
     format!("generation@{at}")
 }
@@ -4343,6 +4225,10 @@ async fn run_generation(
         identity,
         start_entry: at,
         policy: rendition.policy,
+        // The recipe's own answer, which is also the answer the index this
+        // generation is matched against was built with — they share one
+        // `CopyVideoOptions`, so they cannot disagree.
+        convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
     };
     let sink = RenditionSink {
         shared: Arc::clone(&shared),
@@ -4857,69 +4743,32 @@ async fn regenerate_init_head(
             "source changed before head regeneration".to_owned(),
         ));
     }
-    // A converting session's init describes the converted stream — that is
-    // why it is a separate fragment-index identity in the first place — so a
-    // regeneration running the ordinary single-ffmpeg pipe would rebuild the
-    // *unconverted* init and then be refused by the very identity check it
-    // exists to satisfy. Same pipe, same argv, same answer.
-    let (child, stdout) = if recipe.video.converts_dolby_vision() {
-        let path = recipe.file.path.to_string_lossy().into_owned();
-        let input = if cfg!(unix) {
-            "/dev/fd/3"
-        } else {
-            path.as_str()
-        };
-        let source_args =
-            plurx_core::transcode::dv_convert_source_args(input, 0.0, Pacing::unpaced());
-        let output_args = plurx_core::transcode::dv_convert_output_args(
-            &recipe.file,
-            input,
-            // Regeneration always starts at zero, so the picture's origin is
-            // zero too and there is no keyframe lead for the audio to miss.
-            0.0,
-            recipe.audio_index,
-            recipe.aac,
-            recipe.video,
-            recipe.video_frame_rate.as_deref(),
-        );
-        let producer = crate::dvpipe::spawn(
-            &ffmpeg_bin(),
-            &source_args,
-            &output_args,
-            |command| attach_attested_descriptor(command, Some(source)),
-            |_| {},
-        )
-        .map_err(HeadRegenerationError::Failed)?;
-        (producer.child, producer.stdout)
-    } else {
-        let mut args = copy_pipe_args_with_dolby_vision(
-            &recipe.file,
-            0.0,
-            recipe.audio_index,
-            recipe.aac,
-            Pacing::unpaced(),
-            recipe.video,
-        );
-        #[cfg(unix)]
-        replace_inputs_with_attested_descriptor(&mut args);
-        let mut command = tokio::process::Command::new(ffmpeg_bin());
-        attach_attested_descriptor(&mut command, Some(source));
-        let mut child = command
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| {
-                HeadRegenerationError::Failed(format!("spawning the head regeneration: {error}"))
-            })?;
-        let Some(stdout) = child.stdout.take() else {
-            return Err(HeadRegenerationError::Failed(
-                "the head regeneration started without a stdout".to_owned(),
-            ));
-        };
-        (child, stdout)
+    let mut args = copy_pipe_args_with_dolby_vision(
+        &recipe.file,
+        0.0,
+        recipe.audio_index,
+        recipe.aac,
+        Pacing::unpaced(),
+        recipe.video,
+    );
+    #[cfg(unix)]
+    replace_inputs_with_attested_descriptor(&mut args);
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    attach_attested_descriptor(&mut command, Some(source));
+    let mut child = command
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| {
+            HeadRegenerationError::Failed(format!("spawning the head regeneration: {error}"))
+        })?;
+    let Some(stdout) = child.stdout.take() else {
+        return Err(HeadRegenerationError::Failed(
+            "the head regeneration started without a stdout".to_owned(),
+        ));
     };
     let muxer = read_regenerated_head_before(
         child,
@@ -5227,7 +5076,6 @@ mod tests {
         let outcome = crate::fragindex::build(
             file,
             CopyVideoOptions::new(have_dovi, false),
-            None,
             runtime.path(),
             Duration::from_secs(120),
         )
@@ -5251,91 +5099,6 @@ mod tests {
 
     /// A `VodServe` with an empty store, for tests that drive internals
     /// directly against a hand-built rendition.
-    /// A converting recipe runs the two-stage pipe, and an ordinary one does
-    /// not.
-    ///
-    /// The branch this pins is the whole point of the milestone: disable it
-    /// and every Profile 7 title silently goes back to the HDR10 base with
-    /// nothing failing anywhere. It is asserted on the argvs rather than on a
-    /// process because that is where the decision actually shows.
-    #[test]
-    fn a_converting_recipe_runs_the_two_stage_pipe() {
-        let mut file = MediaFile {
-            id: 9,
-            item_id: 1,
-            path: std::path::PathBuf::from("/library/film.mkv"),
-            size: 1,
-            mtime: 1,
-            duration_ms: Some(7_200_000),
-            container: Some("mkv".into()),
-            video_codec: Some("hevc".into()),
-            video_profile: Some("Main 10".into()),
-            width: Some(3840),
-            height: Some(2160),
-            bit_depth: Some(10),
-            hdr: Some("dolby_vision".into()),
-            hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
-            bitrate: Some(60_000_000),
-            audio_streams: Vec::new(),
-            subtitle_streams: Vec::new(),
-            scanned_at: 0,
-            audio_offset_ms: 0,
-            probed: true,
-            dolby_vision: Default::default(),
-        };
-        file.dolby_vision.profile = Some(7);
-        file.dolby_vision.level = Some(6);
-        file.dolby_vision.bl_compat_id = Some(1);
-
-        let recipe = Recipe {
-            file,
-            audio_index: Some(1),
-            aac: false,
-            video: CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true),
-            source_object_version: None,
-            cluster_cache_key: None,
-            video_frame_rate: Some("24000/1001".to_owned()),
-        };
-
-        let (source, output) = converting_producer_args(&recipe, "/dev/fd/3", 61.5, 59.375);
-        let source = source.join(" ");
-        let output = output.join(" ");
-
-        // Stage one: the file in, Annex B out, enhancement layer dropped and
-        // RPUs kept.
-        assert!(source.contains("-i /dev/fd/3"), "{source}");
-        assert!(
-            source.contains("-bsf:v hevc_mp4toannexb,filter_units=remove_types=63"),
-            "{source}"
-        );
-        assert!(source.contains("-noaccurate_seek -ss 61.500"), "{source}");
-        assert!(source.ends_with("-f hevc pipe:1"), "{source}");
-
-        // Stage two: the converted stream plus the source again for audio,
-        // seeked to where the picture actually starts rather than to what was
-        // asked for.
-        assert!(
-            output.contains("-f hevc -r 24000/1001 -i pipe:0"),
-            "{output}"
-        );
-        assert!(output.contains("-ss 59.375"), "{output}");
-        assert!(!output.contains("61.500"), "{output}");
-        assert!(output.contains("-map 1:a:1?"), "{output}");
-        assert!(output.contains("-tag:v hvc1"), "{output}");
-        assert!(output.ends_with("-f mp4 pipe:1"), "{output}");
-
-        // Neither hands ffmpeg the marker the recipe is fingerprinted with.
-        assert!(!source.contains("--plurx-"), "{source}");
-        assert!(!output.contains("--plurx-"), "{output}");
-
-        // And the branch that selects all of this is the recipe's own answer.
-        assert!(recipe.video.converts_dolby_vision());
-        assert!(
-            !CopyVideoOptions::new(true, true).converts_dolby_vision(),
-            "an ordinary preserving copy is one ffmpeg"
-        );
-    }
-
     fn bare_serve(base: &Path) -> Arc<VodServe> {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         VodServe::new(base.to_path_buf(), store)
@@ -5528,7 +5291,6 @@ mod tests {
             key: "synthetic-rendition".to_string(),
             dir,
             recipe: Recipe {
-                video_frame_rate: None,
                 file: media_file_at(PathBuf::from("unused.mkv"), ms),
                 audio_index: None,
                 aac: true,
@@ -5813,7 +5575,6 @@ mod tests {
         let duration_ms = index_video_ms(&index);
         let identity = SourceIdentity::new(1, 1, "fingerprint");
         let recipe = Recipe {
-            video_frame_rate: None,
             file: media_file_at(source_path, duration_ms),
             audio_index: None,
             aac: true,
@@ -7776,7 +7537,6 @@ mod tests {
     fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
         let index = synthetic_index(24);
         let recipe = Recipe {
-            video_frame_rate: None,
             file: media_file_at(PathBuf::from("unused.mkv"), 0),
             audio_index: None,
             aac: true,

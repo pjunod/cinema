@@ -9272,7 +9272,6 @@ mod tests {
         let outcome = crate::fragindex::build(
             &file,
             video,
-            probe_json.as_deref(),
             state.transcode.runtime_cache_dir(),
             std::time::Duration::from_secs(120),
         )

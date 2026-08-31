@@ -89,6 +89,21 @@ pub struct Generation {
     pub plan: SegmentPlan,
     pub index: FragmentIndex,
     pub identity: InitIdentity,
+    /// Rewrite this generation's Dolby Vision RPUs to Profile 8.1 as its
+    /// fragments arrive.
+    ///
+    /// The conversion lives here, after the muxer, because the alternative —
+    /// converting a raw elementary stream between two ffmpegs — destroys the
+    /// video timeline: ffmpeg's raw HEVC demuxer emits packets with no
+    /// timestamps and the muxer fabricates a decode-order grid, so
+    /// presentation order is erased. See `crate::dvpipe`.
+    ///
+    /// It is a property of the generation rather than of the run because the
+    /// index this generation is matched against was built with the same
+    /// answer: a converted stream's fragments are a different size, so an
+    /// index built the other way describes media this generation never
+    /// produces.
+    pub convert_dolby_vision: bool,
     /// Plan entry the spawner positioned this generation at (its `-ss` landed
     /// at or before this entry's start).
     pub start_entry: u32,
@@ -132,6 +147,7 @@ where
         session_log,
         served: None,
         video_id: None,
+        converter: None,
         landing: Vec::new(),
         landing_bytes: 0,
         observed: Vec::new(),
@@ -207,6 +223,10 @@ struct GenerationRun<'a, S> {
     /// until the landing resolves and the segmenter is built from it.
     served: Option<Init>,
     video_id: Option<u32>,
+    /// Built from the served init the first time one arrives, and only when
+    /// this generation converts. Held so every fragment is rewritten with the
+    /// same NAL framing the init declared.
+    converter: Option<crate::dvpipe::Converter>,
     /// Fragments buffered while the landing is undecided.
     landing: Vec<Fragment>,
     landing_bytes: usize,
@@ -234,6 +254,20 @@ impl<S: Sink> GenerationRun<'_, S> {
         match self.generation.identity.served_init_for(&muxer) {
             Ok(served) => {
                 self.video_id = served.video().map(|video| video.id);
+                if self.generation.convert_dolby_vision {
+                    match crate::dvpipe::Converter::for_init(&served) {
+                        Ok(converter) => self.converter = Some(converter),
+                        Err(refused) => {
+                            // Refuse before a single fragment is published.
+                            // Serving unrewritten Profile 7 RPUs under a
+                            // Profile 8.1 label is the one outcome worse than
+                            // failing this generation.
+                            return Err(Outcome::Failed(Failure::Stream(format!(
+                                "this stream cannot be converted: {refused}"
+                            ))));
+                        }
+                    }
+                }
                 self.served = Some(served);
                 Ok(())
             }
@@ -254,6 +288,20 @@ impl<S: Sink> GenerationRun<'_, S> {
     }
 
     async fn on_fragment(&mut self, fragment: Fragment, reader_held: usize) -> Result<(), Outcome> {
+        // Before anything measures it. The landing matcher compares video
+        // byte counts against the index, and the index for a converting
+        // identity was built from converted fragments — so the count taken
+        // here has to be the converted one or the match is against the wrong
+        // stream.
+        let mut fragment = fragment;
+        if let Some(converter) = self.converter.as_mut() {
+            if let Err(refused) = converter.convert(&mut fragment) {
+                return Err(Outcome::Failed(Failure::Stream(format!(
+                    "this stream cannot be converted: {refused}"
+                ))));
+            }
+        }
+        let fragment = fragment;
         if self.segmenter.is_some() {
             self.push_to_segmenter(fragment).await?;
         } else {
@@ -629,6 +677,7 @@ mod tests {
             SourceIdentity::new(1, 1, "fingerprint"),
             None,
             None,
+            false,
         )
         .await
         {
@@ -662,6 +711,7 @@ mod tests {
 
     fn generation(film: &Film, start_entry: u32) -> Generation {
         Generation {
+            convert_dolby_vision: false,
             plan: film.plan.clone(),
             index: film.index.clone(),
             identity: film.identity.clone(),
@@ -1078,6 +1128,7 @@ mod tests {
         let identity = InitIdentity::establish(&init, film.index.promotion.clone())
             .expect("establishing identity");
         let generation = Generation {
+            convert_dolby_vision: false,
             plan: film.plan.clone(),
             index: film.index.clone(),
             identity,

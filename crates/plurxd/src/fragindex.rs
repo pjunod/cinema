@@ -68,7 +68,15 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
     identity: SourceIdentity,
     expected_ms: Option<i64>,
     dolby_vision: Option<plurx_core::fmp4::DolbyVisionRecord>,
+    convert: bool,
 ) -> IndexOutcome {
+    // A converting identity's index has to describe the CONVERTED bytes. An
+    // index is a list of the producer's own output byte counts and the landing
+    // matcher compares them, so an index built from the unconverted stream
+    // would not be stale — it would be confidently wrong about media this
+    // identity never produces. The conversion shortens every RPU, so every
+    // fragment carrying one is a different size.
+    let mut converter: Option<crate::dvpipe::Converter> = None;
     let mut reader = FragmentReader::new();
     let mut init: Option<Init> = None;
     let mut init_sha = String::new();
@@ -144,6 +152,26 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
                             "a fragment arrived before the moov".into(),
                         );
                     };
+                    let mut fragment = fragment;
+                    if convert {
+                        if converter.is_none() {
+                            match crate::dvpipe::Converter::for_init(init) {
+                                Ok(ready) => converter = Some(ready),
+                                Err(refused) => {
+                                    return IndexOutcome::Unsupported(format!(
+                                        "this stream cannot be converted: {refused}"
+                                    ))
+                                }
+                            }
+                        }
+                        let converter = converter.as_mut().expect("just set");
+                        if let Err(refused) = converter.convert(&mut fragment) {
+                            return IndexOutcome::Unsupported(format!(
+                                "this stream cannot be converted: {refused}"
+                            ));
+                        }
+                    }
+                    let fragment = fragment;
                     let Some(video) = init.video() else {
                         return IndexOutcome::Unsupported("the moov lost its video track".into());
                     };
@@ -231,6 +259,21 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
         }
     }
 
+    // A converting pass that rewrote nothing is a pass whose file's stored
+    // facts are wrong: the row says Profile 7 and the stream carries no RPUs
+    // at all. Indexing it as the converted identity would record that lie in
+    // the keyspace, and every session looking that identity up would be served
+    // segments cut for a stream that was never converted.
+    if convert {
+        let rpus = converter.as_ref().map_or(0, |c| c.report().rpus);
+        if rpus == 0 {
+            return IndexOutcome::Unsupported(
+                "this source is recorded as Dolby Vision Profile 7 but its stream carries no \
+                 RPUs to convert"
+                    .into(),
+            );
+        }
+    }
     let mut promotion = promotion.unwrap_or_default();
     // The record cannot come out of a fragment — the stream this pass reads
     // has no container to have carried one, which is the whole reason plurx
@@ -378,60 +421,11 @@ pub fn video_identities(
 pub async fn build(
     file: &MediaFile,
     video: transcode::CopyVideoOptions,
-    probe_json: Option<&str>,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    let input = file.path.to_string_lossy().into_owned();
-    let rate = transcode::source_frame_rate(probe_json);
-    build_with_args(
-        file,
-        index_pipe(file, &input, video, rate.as_deref()),
-        None,
-        video,
-        runtime_cache,
-        budget,
-    )
-    .await
-}
-
-/// Which pipe builds this identity's index.
-///
-/// An index is a list of the producer's own output byte counts, and the
-/// landing matcher compares them — so an index built by a different pipe is
-/// not merely stale, it is confidently wrong. A converted stream's RPUs are
-/// hundreds of bytes smaller per frame than the ones they replace, so its
-/// fragments are a different size from the unconverted stream's, and an index
-/// built from the single-ffmpeg pipe would describe media this identity never
-/// produces.
-fn index_pipe(
-    file: &MediaFile,
-    input: &str,
-    video: transcode::CopyVideoOptions,
-    frame_rate: Option<&str>,
-) -> IndexPipe {
-    if video.converts_dolby_vision() {
-        IndexPipe::Converting {
-            source: transcode::dv_convert_source_args(input, 0.0, transcode::Pacing::unpaced()),
-            // Video only, from zero, and no audio to seek: an index describes
-            // the video fragment sequence, which is the same for every audio
-            // selection (`copy_index_pipe_args`).
-            output: transcode::dv_convert_index_output_args(file, video, frame_rate),
-        }
-    } else {
-        IndexPipe::Single(transcode::copy_index_pipe_args_with_input(
-            file, input, video,
-        ))
-    }
-}
-
-/// One ffmpeg, or two with the conversion between them.
-enum IndexPipe {
-    Single(Vec<String>),
-    Converting {
-        source: Vec<String>,
-        output: Vec<String>,
-    },
+    let args = transcode::copy_index_pipe_args(file, video);
+    build_with_args(file, args, None, video, runtime_cache, budget).await
 }
 
 /// Build from the exact file descriptor whose complete digest was observed.
@@ -441,16 +435,15 @@ pub async fn build_from_attested_file(
     file: &MediaFile,
     source: &std::fs::File,
     video: transcode::CopyVideoOptions,
-    probe_json: Option<&str>,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
     use std::os::fd::AsRawFd;
 
-    let rate = transcode::source_frame_rate(probe_json);
+    let args = transcode::copy_index_pipe_args_with_input(file, "/dev/fd/3", video);
     build_with_args(
         file,
-        index_pipe(file, "/dev/fd/3", video, rate.as_deref()),
+        args,
         Some(source.as_raw_fd()),
         video,
         runtime_cache,
@@ -473,7 +466,7 @@ pub async fn build_from_attested_file(
 #[allow(clippy::too_many_arguments)]
 async fn build_with_args(
     file: &MediaFile,
-    pipe: IndexPipe,
+    args: Vec<String>,
     source_fd: Option<SourceFd>,
     video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
@@ -504,80 +497,52 @@ async fn build_with_args(
     let expected_ms = file.duration_ms.filter(|ms| *ms > 0);
     let started = Instant::now();
 
-    // Both stages get the same treatment, and the conversion needs it on both:
-    // stage one reads the picture and stage two reads nothing from the file at
-    // all for an index (video only, no audio), but the runtime configuration —
-    // the ffmpeg cache layout — applies to any child plurx starts.
-    let configure = |command: &mut tokio::process::Command| {
-        crate::transcode::configure_ffmpeg_runtime(command, runtime_cache);
-        #[cfg(unix)]
-        if let Some(source_fd) = source_fd {
-            unsafe {
-                command.pre_exec(move || {
-                    let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
-                    if duplicate == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if libc::dup2(duplicate, 3) == -1 {
-                        libc::close(duplicate);
-                        return Err(std::io::Error::last_os_error());
-                    }
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    crate::transcode::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    #[cfg(unix)]
+    if let Some(source_fd) = source_fd {
+        unsafe {
+            command.pre_exec(move || {
+                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
+                if duplicate == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(duplicate, 3) == -1 {
                     libc::close(duplicate);
-                    let flags = libc::fcntl(3, libc::F_GETFD);
-                    if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
-                    {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(duplicate);
+                let flags = libc::fcntl(3, libc::F_GETFD);
+                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = match command
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return IndexOutcome::Truncated {
+                reason: format!("spawning the index pipe: {error}"),
+                rows: 0,
             }
         }
+    };
+    let Some(stdout) = child.stdout.take() else {
+        return IndexOutcome::Truncated {
+            reason: "the index pipe started without a stdout".into(),
+            rows: 0,
+        };
     };
 
-    let (mut child, stdout) = match pipe {
-        IndexPipe::Converting { source, output } => {
-            match crate::dvpipe::spawn(&ffmpeg_bin(), &source, &output, configure, |outcome| {
-                if let crate::dvpipe::Outcome::Refused(reason) = outcome {
-                    tracing::warn!("the index pass's Dolby Vision conversion refused: {reason}");
-                }
-            }) {
-                Ok(producer) => (producer.child, producer.stdout),
-                Err(reason) => {
-                    return IndexOutcome::Truncated {
-                        reason: format!("spawning the converting index pipe: {reason}"),
-                        rows: 0,
-                    }
-                }
-            }
-        }
-        IndexPipe::Single(args) => {
-            let mut command = tokio::process::Command::new(ffmpeg_bin());
-            configure(&mut command);
-            let mut child = match command
-                .args(&args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-            {
-                Ok(child) => child,
-                Err(error) => {
-                    return IndexOutcome::Truncated {
-                        reason: format!("spawning the index pipe: {error}"),
-                        rows: 0,
-                    }
-                }
-            };
-            let Some(stdout) = child.stdout.take() else {
-                return IndexOutcome::Truncated {
-                    reason: "the index pipe started without a stdout".into(),
-                    rows: 0,
-                };
-            };
-            (child, stdout)
-        }
-    };
     // stderr must be drained on its own task or ffmpeg blocks on a full pipe
     // and the whole build deadlocks — the same discipline `spawn_ffmpeg_pipe`
     // keeps for a live session.
@@ -594,7 +559,13 @@ async fn build_with_args(
 
     let outcome = match tokio::time::timeout(
         budget,
-        index_stream(stdout, identity, expected_ms, dolby_vision),
+        index_stream(
+            stdout,
+            identity,
+            expected_ms,
+            dolby_vision,
+            video.converts_dolby_vision(),
+        ),
     )
     .await
     {
@@ -775,53 +746,6 @@ mod tests {
         assert_eq!(video_identities(&label_only, None, true, true).len(), 2);
     }
 
-    /// A converting identity is built by the converting pipe, and every other
-    /// one is not.
-    ///
-    /// An index is a list of the producer's own output byte counts and the
-    /// landing matcher compares them, so an index built by a different pipe is
-    /// not stale — it is confidently wrong about media that identity never
-    /// produces. A converted stream's RPUs are hundreds of bytes smaller per
-    /// frame, so every fragment differs.
-    #[test]
-    fn the_index_pass_runs_the_pipe_the_identity_names() {
-        let file = hevc_file(
-            Some("dolby_vision"),
-            Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
-        );
-        let plain = transcode::CopyVideoOptions::new(true, true);
-        assert!(
-            matches!(
-                index_pipe(&file, "/dev/fd/3", plain, None),
-                IndexPipe::Single(_)
-            ),
-            "an ordinary identity is one ffmpeg"
-        );
-
-        let converting = plain.with_dolby_vision_conversion(true);
-        let IndexPipe::Converting { source, output } =
-            index_pipe(&file, "/dev/fd/3", converting, Some("24000/1001"))
-        else {
-            panic!("a converting identity must run the converting pipe");
-        };
-        let source = source.join(" ");
-        assert!(source.contains("filter_units=remove_types=63"), "{source}");
-        assert!(source.ends_with("-f hevc pipe:1"), "{source}");
-        assert!(source.contains("-i /dev/fd/3"), "{source}");
-
-        let output = output.join(" ");
-        assert!(
-            output.contains("-f hevc -r 24000/1001 -i pipe:0"),
-            "{output}"
-        );
-        assert!(output.contains("-an"), "an index is video only: {output}");
-        assert!(output.ends_with("-f mp4 pipe:1"), "{output}");
-
-        // Neither argv carries the marker the recipe is fingerprinted with.
-        assert!(!source.contains("--plurx-"), "{source}");
-        assert!(!output.contains("--plurx-"), "{output}");
-    }
-
     /// The converted stream's configuration record, from the source's facts.
     ///
     /// Its output has none to read — ffmpeg copies the record from the input
@@ -902,7 +826,14 @@ mod tests {
         testfixtures::require_ffmpeg();
         let bytes = index_pipe_bytes("closed-gop");
 
-        let plain = index_stream(std::io::Cursor::new(bytes.clone()), identity(), None, None).await;
+        let plain = index_stream(
+            std::io::Cursor::new(bytes.clone()),
+            identity(),
+            None,
+            None,
+            false,
+        )
+        .await;
         let IndexOutcome::Built(plain) = plain else {
             panic!("{plain:?}");
         };
@@ -918,6 +849,7 @@ mod tests {
             identity(),
             None,
             Some(record.clone()),
+            false,
         )
         .await;
         let IndexOutcome::Built(converted) = converted else {
@@ -934,7 +866,7 @@ mod tests {
     /// The index pipe over a real fixture, read the way the daemon reads it.
     async fn index_fixture(kind: &str) -> IndexOutcome {
         let bytes = index_pipe_bytes(kind);
-        index_stream(std::io::Cursor::new(bytes), identity(), None, None).await
+        index_stream(std::io::Cursor::new(bytes), identity(), None, None, false).await
     }
 
     /// The video-only pipe's own output, cached beside the fixture.
@@ -1023,7 +955,8 @@ mod tests {
         // duplicate SPS array. The ordinary fixture pipe has already removed
         // in-band sets, so there is no hidden PPS from which to "succeed".
         replace_hvcc_array_type(&mut bytes, 34, 33);
-        let outcome = index_stream(std::io::Cursor::new(bytes), identity(), None, None).await;
+        let outcome =
+            index_stream(std::io::Cursor::new(bytes), identity(), None, None, false).await;
         let IndexOutcome::Unsupported(reason) = outcome else {
             panic!("an incomplete emitted hvcC must not be indexed: {outcome:?}");
         };
@@ -1037,7 +970,7 @@ mod tests {
         // per-IDR parameter-set variation. The check still has to work.
         let bytes = index_pipe_bytes("closed-gop");
         let IndexOutcome::Built(index) =
-            index_stream(std::io::Cursor::new(bytes), identity(), None, None).await
+            index_stream(std::io::Cursor::new(bytes), identity(), None, None, false).await
         else {
             panic!("must index");
         };
@@ -1125,6 +1058,7 @@ mod tests {
             identity(),
             None,
             None,
+            false,
         )
         .await;
         assert!(
@@ -1136,8 +1070,14 @@ mod tests {
     #[tokio::test]
     async fn a_pipe_that_stops_short_of_the_probed_duration_is_truncated() {
         let bytes = index_pipe_bytes("closed-gop");
-        let IndexOutcome::Built(full) =
-            index_stream(std::io::Cursor::new(bytes.clone()), identity(), None, None).await
+        let IndexOutcome::Built(full) = index_stream(
+            std::io::Cursor::new(bytes.clone()),
+            identity(),
+            None,
+            None,
+            false,
+        )
+        .await
         else {
             panic!("the full pipe indexes");
         };
@@ -1149,6 +1089,7 @@ mod tests {
             identity(),
             Some(60_000 + 12_000),
             None,
+            false,
         )
         .await;
         assert!(
@@ -1261,6 +1202,7 @@ mod equality_tests {
                 SourceIdentity::new(1, 1, "fingerprint"),
                 None,
                 None,
+                false,
             )
             .await
             else {
