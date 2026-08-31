@@ -72,7 +72,21 @@ M0 reran the storage decision against the contracts the clustering review
 identified as blockers. The semantic proof is
 `make hiqlite-spike`; the optimized cost gate is `make hiqlite-baseline`.
 Both M0 probes run from the standalone, non-shipping `spikes/hiqlite-m0`
-manifest. M1b now resolves Hiqlite in the root workspace only when the
+manifest.
+
+**That separate manifest path-depends on `plurx-core`, so adding a dependency
+to `plurx-core` strands the spike's lockfile.** Nothing that compiles the root
+workspace notices — the spike is a different workspace — so the first thing
+that used to see it was `cargo clippy --locked` in CI, twenty minutes into a
+run, on a PR that had nothing to do with the spike. `make spike-lock-check`
+now runs ahead of `make unit`, `make effort-rust-check` and the CI Rust gate:
+`cargo metadata --locked` resolves without compiling anything, takes under a
+second, and fails with the same "cannot update the lock file" message. The fix
+when it fires is one command:
+
+```bash
+cargo update --manifest-path spikes/hiqlite-m0/Cargo.toml --workspace
+``` M1b now resolves Hiqlite in the root workspace only when the
 `hiqlite-store` feature is enabled by `plurx-cluster-check`; an ordinary
 `plurxd` build excludes that feature and retains its pre-M1b dependency
 closure while it still runs `SqliteStore`.
