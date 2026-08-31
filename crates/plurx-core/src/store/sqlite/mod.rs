@@ -885,6 +885,26 @@ const MIGRATIONS: &[&str] = &[
     crate::store::timeline_annotations::TIMELINE_MANUAL_OVERRIDES_SCHEMA,
     // v41: make semantic skip-marker work a first-class request component.
     crate::store::fragment_index_cluster::ANALYSIS_COMPONENTS_SCHEMA,
+    // v42: a successor that exists without being current. `media_sessions`
+    // alone cannot express one — it has no `created_at`, and the only thing
+    // that says which of a playback's rows is current is
+    // `media_playback_pointers`. A staged row therefore holds no pointer and
+    // is invisible to `media_session_route_for_playback` for free; this table
+    // is what remembers that it exists, whose successor it is, and when it
+    // stops being one.
+    //
+    // `PRIMARY KEY (user_id, playback_id)` is the "one staged successor per
+    // playback" rule, enforced by the schema rather than by a read-then-write.
+    // `staged_incarnation_id` is globally unique for the same reason the
+    // pointer's `current_incarnation_id` is: an incarnation may be staged by
+    // at most one playback.
+    //
+    // `expected_predecessor_incarnation_id` is stored rather than re-derived
+    // at commit. Commit must advance the pointer from the exact predecessor
+    // the preparation was made against — a pointer that moved underneath it
+    // means a newer player generation exists, and the staged successor must
+    // abort rather than reap it.
+    super::MEDIA_SESSION_PREPARATIONS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1945,7 +1965,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 41,
+            version, 42,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -1998,6 +2018,34 @@ mod tests {
             "v37 re-keys the table on the copy pipeline as well as the file, \
              or a Dolby Vision title's second identity silently overwrites its \
              first: {fragment_indexes}"
+        );
+
+        let preparations: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                  WHERE type = 'table' AND name = 'media_session_preparations'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("preparation ledger");
+        assert!(
+            preparations.contains("PRIMARY KEY (user_id, playback_id)"),
+            "v39 enforces one staged successor per playback in the schema \
+             rather than in a read-then-write, which is the only place a \
+             concurrent second prepare cannot slip past: {preparations}"
+        );
+        assert!(
+            preparations.contains("staged_incarnation_id              TEXT NOT NULL UNIQUE"),
+            "an incarnation may be staged by at most one playback, for the \
+             same reason a pointer's current_incarnation_id is unique: \
+             {preparations}"
+        );
+        assert!(
+            preparations.contains("expected_predecessor_incarnation_id TEXT NOT NULL"),
+            "the predecessor is recorded at prepare time and never re-derived \
+             at commit — a pointer that moved means a newer generation exists \
+             and the staged successor must abort rather than reap it: \
+             {preparations}"
         );
 
         // Every row survives, values identical.

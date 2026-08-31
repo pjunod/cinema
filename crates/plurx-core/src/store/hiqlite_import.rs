@@ -632,6 +632,26 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "media_session_preparations",
+        columns: &[
+            "user_id",
+            "playback_id",
+            "staged_incarnation_id",
+            "expected_predecessor_incarnation_id",
+            "deadline_ms",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "user_id, playback_id",
+        // A brand-new table, so `minimum_schema` is the whole story: a source
+        // older than v42 simply has no rows to carry and needs no arm in
+        // `value_projection`.
+        minimum_schema: 42,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "media_sessions",
         columns: &[
             "incarnation_id",
@@ -2355,7 +2375,7 @@ mod tests {
         assert!(names.contains(&"analysis_lifecycle_counters"));
         assert!(names.contains(&"timeline_annotation_sets"));
         assert!(names.contains(&"timeline_manual_overrides"));
-        assert_eq!(names.len(), 36, "review every imported durable table");
+        assert_eq!(names.len(), 37, "review every imported durable table");
     }
 
     #[test]

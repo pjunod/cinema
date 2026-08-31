@@ -46,7 +46,9 @@ use crate::error::StoreError;
 // fence; v18 installs the atomic request-claim trigger for that fence on
 // clusters which had already reached v17; v20 adds replicated semantic
 // timeline annotations; v21 adds separately fenced manual overrides; v22
-// admits semantic marker jobs to the analysis queue. Every additive
+// admits semantic marker jobs to the analysis queue; v23 adds the
+// staged-generation ledger, which is what lets a successor session exist
+// without being current. Every additive
 // step is applied through Raft before the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
@@ -64,7 +66,8 @@ const DOLBY_VISION_COLUMNS_SCHEMA_VERSION: i64 = 19;
 const TIMELINE_ANNOTATIONS_SCHEMA_VERSION: i64 = 20;
 const TIMELINE_MANUAL_OVERRIDES_SCHEMA_VERSION: i64 = 21;
 const ANALYSIS_COMPONENT_SCHEMA_VERSION: i64 = 22;
-pub const AUTH_SCHEMA_VERSION: i64 = ANALYSIS_COMPONENT_SCHEMA_VERSION;
+const STAGED_GENERATION_SCHEMA_VERSION: i64 = 23;
+pub const AUTH_SCHEMA_VERSION: i64 = STAGED_GENERATION_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -84,6 +87,7 @@ const DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE: i64 = PUBLICATION_CLAIM_SCHE
 const TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE: i64 = DOLBY_VISION_COLUMNS_SCHEMA_VERSION;
 const TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE: i64 = TIMELINE_ANNOTATIONS_SCHEMA_VERSION;
 const ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE: i64 = TIMELINE_MANUAL_OVERRIDES_SCHEMA_VERSION;
+const STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_COMPONENT_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1768,6 +1772,29 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::MEDIA_SESSION_PREPARATIONS_SCHEMA, params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    STAGED_GENERATION_SCHEMA_VERSION,
+                                    now,
+                                    STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(
+                        STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -1947,6 +1974,10 @@ impl HiqliteAuthStore {
             ),
             ("DELETE FROM media_playback_pointers".to_owned(), params!()),
             (
+                "DELETE FROM media_session_preparations".to_owned(),
+                params!(),
+            ),
+            (
                 "DELETE FROM media_session_terminal_acks".to_owned(),
                 params!(),
             ),
@@ -2020,6 +2051,7 @@ impl HiqliteAuthStore {
             "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms FROM media_playback_pointers ORDER BY user_id, playback_id",
             "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms FROM media_sessions ORDER BY incarnation_id",
             "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, client_instance_id, sequence, request_fingerprint, response_json, expires_at_ms, updated_at_ms FROM media_session_terminal_acks ORDER BY session_id",
+            "SELECT user_id, playback_id, staged_incarnation_id, expected_predecessor_incarnation_id, deadline_ms, created_at_ms, updated_at_ms FROM media_session_preparations ORDER BY user_id, playback_id",
         ] {
             validate_sql(sql)?;
         }
@@ -2104,6 +2136,14 @@ impl HiqliteAuthStore {
                         client_instance_id, sequence, request_fingerprint, response_json, \
                         expires_at_ms, updated_at_ms \
                    FROM media_session_terminal_acks ORDER BY session_id",
+                params!(),
+            )
+            .await?,
+            media_session_preparations: self.client().query_map(
+                "SELECT user_id, playback_id, staged_incarnation_id, \
+                        expected_predecessor_incarnation_id, deadline_ms, \
+                        created_at_ms, updated_at_ms \
+                   FROM media_session_preparations ORDER BY user_id, playback_id",
                 params!(),
             )
             .await?,
@@ -3117,7 +3157,8 @@ fn schema_migration_action(
         | DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE
         | TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE
         | TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE
-        | ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE => {
+        | ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE
+        | STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -3165,6 +3206,7 @@ struct AuthStoreDump {
     media_playback_pointers: Vec<MediaPlaybackPointerDumpRow>,
     media_sessions: Vec<MediaSessionDumpRow>,
     media_session_terminal_acks: Vec<MediaSessionTerminalAckDumpRow>,
+    media_session_preparations: Vec<MediaSessionPreparationDumpRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3517,6 +3559,15 @@ dump_row!(MediaSessionDumpRow {
     media_origin_ms: i64,
     media_sequence: i64,
     discontinuity_sequence: i64,
+    updated_at_ms: i64,
+});
+dump_row!(MediaSessionPreparationDumpRow {
+    user_id: i64,
+    playback_id: String,
+    staged_incarnation_id: String,
+    expected_predecessor_incarnation_id: String,
+    deadline_ms: i64,
+    created_at_ms: i64,
     updated_at_ms: i64,
 });
 dump_row!(MediaSessionTerminalAckDumpRow {
@@ -4655,9 +4706,18 @@ mod tests {
             "v21 must advance exactly one step to the analysis-component schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 17,
+            STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE, ANALYSIS_COMPONENT_SCHEMA_VERSION,
+            "the staged-generation migration must start from the exact v22 shape"
+        );
+        assert_eq!(
+            STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE + 1,
+            STAGED_GENERATION_SCHEMA_VERSION,
+            "v22 must advance exactly one step to the staged-generation schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 18,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v22 step"
+            "this implementation contains every additive v5→v23 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
