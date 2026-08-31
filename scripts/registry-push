@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+REG=192.168.4.7:3000
+REF="$(git describe --tags --always --dirty)"
+SHA="$(git rev-parse --short=12 HEAD)"
+docker build --build-arg PLURX_BUILD_REF="$REF" \
+  -t "$REG/noirr/plurxd:sha-$SHA" -t "$REG/noirr/plurxd:latest" .
+docker push "$REG/noirr/plurxd:sha-$SHA"
+docker push "$REG/noirr/plurxd:latest"
+echo "pushed $REG/noirr/plurxd:{latest,sha-$SHA} = $REF"
