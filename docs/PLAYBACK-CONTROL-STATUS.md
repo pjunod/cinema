@@ -27,7 +27,7 @@ one is deleted.
 | 1-4 | protocol, transport, hold/resume barriers | — | merged |
 | 5 | delete detached recovery loops | — | merged as #663 |
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) | wire complete; **no client acts on an action yet** |
-| — | M5.5 — preparation feasibility | [remaining](REMAINING-ROADMAP-HANDOFF.md) §2 · [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) | spike written, **needs hardware**; staged generations not started |
+| — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | both halves written; the spike **needs hardware**, the store half is ready to build |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | separate track |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
@@ -43,8 +43,12 @@ merge target: two client PRs in flight means the second always fails.
 |---|---|---|---|
 | docs | status page, §7.4 re-verification, Apple/Android recon, ruling D1 | [#705](https://github.com/pjunod/plurx/pull/705) | merged |
 | M5a | web: `persistentWait` asks the server before deciding | [#706](https://github.com/pjunod/plurx/pull/706) | merged |
-| M5.5 spike | the three-platform measurement procedure, ready to run | [#707](https://github.com/pjunod/plurx/pull/707) | in review; **needs a hardware run** |
-| M5d | Apple: the return path, and the verdict that outlives its reporter | [#709](https://github.com/pjunod/plurx/pull/709) | in review |
+| M5.5 spike | the three-platform measurement procedure, ready to run | [#707](https://github.com/pjunod/plurx/pull/707) | merged; **needs a hardware run** |
+| M5b | web: the truncated-stream owner defers too | [#712](https://github.com/pjunod/plurx/pull/712) | in review |
+| M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | in review |
+| M5d follow-ups | Apple: bound the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | in review |
+| M5.5 store | the staged-generations recon and plan | — | this change |
+| M5d | Apple: the return path, and the verdict that outlives its reporter | [#709](https://github.com/pjunod/plurx/pull/709) | merged |
 
 ## The gate that blocks every deletion, and what it does not block
 
