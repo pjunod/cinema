@@ -39,7 +39,16 @@ class PlaybackControlAskTest {
 
     private fun scope() = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    /** Answers every exchange with [action], in the request's own sequence. */
+    /**
+     * Answers the bootstrap exchange with `none` and everything after it with
+     * [action].
+     *
+     * Answering the first one with the verdict under test would stop the
+     * reporter before the ask exists — a terminal ends reporting, correctly —
+     * and the ask would then be measuring that rather than the verdict. It is
+     * also the real shape: the ask provokes a *later* exchange, which is what
+     * the sequence floor is for.
+     */
     private fun transport(
         action: String,
         reason: String? = null,
@@ -49,14 +58,15 @@ class PlaybackControlAskTest {
         val client = OkHttpClient.Builder().addInterceptor(
             Interceptor { chain ->
                 val accepted = sequence.incrementAndGet()
-                val extra = buildString {
+                val answered = if (accepted == 1L) "none" else action
+                val extra = if (accepted == 1L) "" else buildString {
                     if (reason != null) append(""","reason":"$reason"""")
                     if (message != null) append(""","code":"unsupported","message":"$message"""")
                 }
                 val body = """{"protocol":"${PlaybackControl.PROTOCOL}",""" +
                     """"generation":"$GENERATION","control_epoch":7,""" +
                     """"accepted_sequence":$accepted,""" +
-                    """"action":{"type":"$action"$extra}}"""
+                    """"action":{"type":"$answered"$extra}}"""
                 Response.Builder()
                     .request(chain.request())
                     .protocol(Protocol.HTTP_1_1)
