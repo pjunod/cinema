@@ -1,9 +1,9 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-31 · **Baseline:** `main` at `5d80526e` ·
+**Updated:** 2026-08-31 · **Baseline:** `main` at `c571a50d` ·
 **Fleet:** nuc3 · nuc4 · m6 serve `v0.2.8-106-g55abad8f`; nynuc serves a
 later untagged build · **Devices:** Android 47 · Apple 86 —
-the tree is Android 57 · Apple 100, and neither has run on hardware
+the tree is Android 57 · Apple 101, and neither has run on hardware
 
 Companion to
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) (what
@@ -55,12 +55,15 @@ merge target: two client PRs in flight means the second always fails.
 | ask exits | Apple: read the answer slot at every exit | [#719](https://github.com/pjunod/plurx/pull/719) | merged |
 | acceptance | what a fleet run has to show | [#720](https://github.com/pjunod/plurx/pull/720) | merged |
 | M5e ladder | Apple: ask before walking the compatibility ladder | [#721](https://github.com/pjunod/plurx/pull/721) | merged |
-| M5g ladder | Android: skip the unchanged retry on an armed verdict | this change | open |
+| M5g ladder | Android: skip the unchanged retry on an armed verdict | [#722](https://github.com/pjunod/plurx/pull/722) | merged |
+| verdict scope | Apple: narrow #721 to the retry the verdict rules out | [#723](https://github.com/pjunod/plurx/pull/723) | merged |
+| status | close out M5's buildable work | — | this change |
 
-**What is left in M5, and what each is waiting for.** The two ladder slices are
-the last buildable M5 work; once they land, M5c and M5h — deleting the web and
+**What is left in M5.** Nothing buildable. M5c and M5h — deleting the web and
 mobile budgets — are all that remains, and both are gated on
-[M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any code.
+[M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any code. The
+next thing that has to happen is a fleet run, and it is not a thing this side
+can do: the gpt prompt is §4.1 of that document.
 
 ### Why Android does not await the verdict, and Apple does
 
@@ -118,13 +121,14 @@ failure with a sentence about a pipeline nobody is proposing any more.
 Only `RetrySameHDRDelivery` re-prepares the identical recipe, so that is the
 one rung the verdict licenses skipping. This slice is scoped to it.
 
-**Owed on Apple.** [#721](https://github.com/pjunod/plurx/pull/721) merged with
-the short-circuit ahead of the whole ladder, so it has this defect: an
-`unsupported` copy exit now ends playback on Apple where the compatibility
-transcode would have played. It is a two-line narrowing — move the check into
-the ladder step that retries unchanged — and it should land before the fleet
-run, because the acceptance procedure's item 3 is precisely a source the
-producer refuses.
+**Settled on both platforms.**
+[#723](https://github.com/pjunod/plurx/pull/723) narrowed Apple's, which had
+merged with the short-circuit ahead of the whole ladder. Its review found the
+second half of the answer: the verdict rules out the established-HDR
+*reconnect*, but not whether that rung runs at all — the rung also carries the
+stop that keeps an established HDR delivery from descending to SDR, and
+skipping the call handed the compatibility ladder a stream it has always been
+vetoed from. The gate sits inside the rung, on the reconnect only.
 
 ## The gate that blocks every deletion, and what it does not block
 
@@ -182,9 +186,10 @@ blocks the slices now in flight; each shapes M6.
    nobody has measured or chosen one.
 7. Should the two ladder slices short-circuit anything but the unchanged
    retry? **Answered: no** — a `terminal` verdict is recipe-scoped, see above.
-   Android is scoped to `RetrySameHDRDelivery`; **Apple is not yet, and #721 is
-   already merged**. Decided without the operator, and the one to look at
-   first.
+   Android is scoped to `RetrySameHDRDelivery`, Apple to the established-HDR
+   reconnect. Decided without the operator, and the one to look at first: it
+   is a claim about what the server means by `is_permanent`, and if that
+   reading is wrong then both slices are scoped too narrowly.
 8. Should Android's session opens publish an outcome, so a client decision can
    be deferred there at all? Decided *not* to attempt it inside M5 — see
    §"Why Android does not await the verdict" above. Decided without the
