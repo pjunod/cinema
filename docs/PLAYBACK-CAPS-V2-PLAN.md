@@ -1,8 +1,8 @@
 # Playback capabilities v2 — highest deliverable grade, negotiated not guessed
 
-**Status:** building — M0, M1, M2, M3a–M3d, M4 and M6 merged; M5a's
-conversion merged (#688) and its wiring in review (#716); M5b in review
-(#710) · **Executes:** fable's rulings of 2026-08-29 on opus's DV-delivery
+**Status:** building — M0, M1, M2, M3a–M3d, M4, M5a and M6 merged (M5a as
+#688 + #716); M5b in review (#710). M5a's badge remains for the Apple and
+Android clients, and the §7 timeline check remains for nuc4 · **Executes:** fable's rulings of 2026-08-29 on opus's DV-delivery
 findings · **Analysed:** `main` @ `4ba8bb48` · **Written:** 2026-08-29 ·
 **Updated:** 2026-08-31 · **Builder:** opus
 
