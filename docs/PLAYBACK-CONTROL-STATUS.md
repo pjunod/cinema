@@ -28,9 +28,9 @@ one is deleted.
 | 1-4 | protocol, transport, hold/resume barriers | — | merged |
 | 5 | delete detached recovery loops | — | merged as #663 |
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **complete in source on all three clients**; the deletions wait on a fleet run |
-| — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | both halves written; the spike **needs hardware**, the store half is ready to build |
+| — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike still **needs hardware**, and items 7, 9, and 10 wait on its numbers |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
-| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | separate track |
+| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | M1-M4 **merged as [#700](https://github.com/pjunod/plurx/pull/700)**; detector development is deliberately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
 
@@ -49,7 +49,7 @@ merge target: two client PRs in flight means the second always fails.
 | M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | merged |
 | M5b | web: the truncated-stream owner defers too | [#712](https://github.com/pjunod/plurx/pull/712) | merged |
 | M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | merged |
-| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | merged; **ready to build** |
+| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | merged; built as [#726](https://github.com/pjunod/plurx/pull/726) |
 | M5e | Apple: the stall funnel asks before it decides | [#715](https://github.com/pjunod/plurx/pull/715) | merged |
 | web bound | ruling D3 applied to the web ask | [#717](https://github.com/pjunod/plurx/pull/717) | merged |
 | M5g | Android: the stall owner asks before it decides | [#718](https://github.com/pjunod/plurx/pull/718) | merged |
@@ -58,7 +58,18 @@ merge target: two client PRs in flight means the second always fails.
 | M5e ladder | Apple: ask before walking the compatibility ladder | [#721](https://github.com/pjunod/plurx/pull/721) | merged |
 | M5g ladder | Android: skip the unchanged retry on an armed verdict | [#722](https://github.com/pjunod/plurx/pull/722) | merged |
 | verdict scope | Apple: narrow #721 to the retry the verdict rules out | [#723](https://github.com/pjunod/plurx/pull/723) | merged |
-| status | close out M5's buildable work | — | this change |
+| status | close out M5's buildable work | [#724](https://github.com/pjunod/plurx/pull/724) | merged |
+| acceptance | refresh the roster, and state what item 3 settles | [#725](https://github.com/pjunod/plurx/pull/725) | merged |
+| web P0 | the reporter's timers, which never fired in a browser | [#727](https://github.com/pjunod/plurx/pull/727) | merged |
+| content index | M1-M4 of the shared analysis index — not this lane | [#700](https://github.com/pjunod/plurx/pull/700) | merged |
+| fleet run 1 | what the first run settled, and what it did not | [#731](https://github.com/pjunod/plurx/pull/731) | merged |
+| M5.5 store | staged generations: prepare, commit, abort | [#726](https://github.com/pjunod/plurx/pull/726) | merged |
+| M5a wire | web caps v2: the conversion, and the release claims | [#716](https://github.com/pjunod/plurx/pull/716) | merged |
+| status | M5a is merged | [#732](https://github.com/pjunod/plurx/pull/732) | merged |
+| spike lock | catch the stranded lockfile in the fast lane, not in CI | [#733](https://github.com/pjunod/plurx/pull/733) | merged |
+| browser gate | two real exchanges, in real Chromium, in CI | [#729](https://github.com/pjunod/plurx/pull/729) | merged |
+| acceptance | read the commit and the builds, do not quote them | [#734](https://github.com/pjunod/plurx/pull/734) | merged |
+| status | item 8 is complete, and the M5.5 store half is built | — | this change |
 
 **What is left in M5.** Nothing buildable. M5c and M5h — deleting the web and
 mobile budgets — are all that remains, and both are gated on
@@ -660,9 +671,12 @@ not playback watchdogs.
    `action:none`; active action consumption follows in separate client PRs.
 4. Complete M5/M5.5/M6 so quality, codec, dynamic range, tracks, subtitles, and
    node placement use the same prepare/commit/abort transaction.
-5. Complete semantic indexing: exact intro/credits destinations with
+5. ~~Complete semantic indexing: exact intro/credits destinations with
    provenance/confidence, manual overrides, subtitle readiness, queue metrics,
-   and marker-destination prewarm.
+   and marker-destination prewarm.~~ Merged as
+   [#700](https://github.com/pjunod/plurx/pull/700). Detection itself —
+   deciding where an intro *is* — is deliberately not in it; see
+   [CONTENT-ANALYSIS-INDEX-HANDOFF.md](CONTENT-ANALYSIS-INDEX-HANDOFF.md).
 6. Complete clustered planned/hard handoff, mixed-fleet cutover, compatibility
    deletion, playback-lab fault injection, and physical web/Apple/Android
    acceptance.
