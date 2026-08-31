@@ -1081,6 +1081,7 @@ impl VodServe {
                 kind: SessionKind::Copy {
                     aac: true,
                     preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
                 },
                 supersession_user: "[\"user_id\",1]".to_owned(),
                 block_budget: Duration::from_secs(1),
@@ -1456,6 +1457,7 @@ impl VodServe {
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
+            convert_dolby_vision,
         } = req.kind
         else {
             return Err(crate::transcode::vod_refusal_error(
@@ -1485,12 +1487,18 @@ impl VodServe {
             .get_file_probe_json(file.id)
             .await
             .map_err(|error| format!("reading the file probe: {error}"))?;
+        // The conversion rides in the options, not beside them, so it reaches
+        // the argv fingerprint and therefore the identity below. A converted
+        // stream has different bytes and different segment boundaries; sharing
+        // an identity with the unconverted one would hand this session a
+        // playlist whose cut points describe different media.
         let video = CopyVideoOptions::from_probe(
             file,
             probe_json.as_deref(),
             have_dovi,
             preserve_dolby_vision,
-        );
+        )
+        .with_dolby_vision_conversion(convert_dolby_vision);
         let identity = crate::fragindex::identity_for(file, video);
         let cluster_cache_enabled = self
             .shared
@@ -5126,6 +5134,7 @@ mod tests {
             kind: SessionKind::Copy {
                 aac: true,
                 preserve_dolby_vision: false,
+                convert_dolby_vision: false,
             },
             start_seconds,
             audio_index: None,

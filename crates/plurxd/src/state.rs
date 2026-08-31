@@ -518,6 +518,7 @@ impl AppState {
             )
             .with_decoders(system.decoders.clone())
             .with_dv_strippable(system.dovi_rpu)
+            .with_dv_convertible(system.dolby_vision_convert)
             .with_dovi_reshape(system.dovi_reshape)
             .with_dovi_passthrough(system.dovi_passthrough)
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
@@ -1222,12 +1223,14 @@ async fn fragment_index_video_identities(
     store: &dyn Store,
     file: &MediaFile,
     have_dovi: bool,
+    convert: bool,
 ) -> Result<Vec<plurx_core::transcode::CopyVideoOptions>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
     Ok(crate::fragindex::video_identities(
         file,
         probe_json.as_deref(),
         have_dovi,
+        convert,
     ))
 }
 
@@ -1250,9 +1253,11 @@ async fn fragment_index_requested_video_options(
     store: &dyn Store,
     file: &MediaFile,
     have_dovi: bool,
+    convert: bool,
 ) -> Result<plurx_core::transcode::CopyVideoOptions, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
-    let videos = crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi);
+    let videos =
+        crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi, convert);
     for video in &videos {
         let identity = crate::fragindex::identity_for(file, *video);
         if store.fragment_index(file.id, &identity).await?.is_none() {
@@ -3590,6 +3595,7 @@ impl JobManager {
 
         let deadline = std::time::Instant::now() + INDEX_WINDOW;
         let have_dovi = transcode.dv_strippable();
+        let convert = transcode.dv_convertible();
         let runtime_cache = transcode.runtime_cache_dir().to_path_buf();
         let libraries = match self.store.list_libraries().await {
             Ok(libraries) => libraries,
@@ -3642,6 +3648,7 @@ impl JobManager {
                 self.store.as_ref(),
                 &file,
                 have_dovi,
+                convert,
             )
             .await
             {
@@ -3781,6 +3788,7 @@ impl JobManager {
             return;
         }
         let have_dovi = transcode.dv_strippable();
+        let convert = transcode.dv_convertible();
         let cache_root = crate::fragment_index_cluster::cache_root(transcode.runtime_cache_dir());
         const RETAIN_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
         let prune_before = clock_ms().saturating_sub(RETAIN_MS);
@@ -3864,6 +3872,7 @@ impl JobManager {
                 self.store.as_ref(),
                 &file,
                 have_dovi,
+                convert,
             )
             .await
             {
@@ -4281,13 +4290,18 @@ impl JobManager {
                 })
             }
         };
-        let video = fragment_index_requested_video_options(self.store.as_ref(), &file, have_dovi)
-            .await
-            .map_err(|_| AnalysisResolutionError::Retry {
-                code: "source_catalog_read_failed",
-                delay_ms: 10_000,
-                charge_attempt: true,
-            })?;
+        let video = fragment_index_requested_video_options(
+            self.store.as_ref(),
+            &file,
+            have_dovi,
+            transcode.dv_convertible(),
+        )
+        .await
+        .map_err(|_| AnalysisResolutionError::Retry {
+            code: "source_catalog_read_failed",
+            delay_ms: 10_000,
+            charge_attempt: true,
+        })?;
         let object_version = crate::fragment_index_cluster::inspect_source(&file)
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
@@ -4580,8 +4594,13 @@ impl JobManager {
                 return false;
             }
         };
-        let videos = match fragment_index_video_identities(self.store.as_ref(), &file, have_dovi)
-            .await
+        let videos = match fragment_index_video_identities(
+            self.store.as_ref(),
+            &file,
+            have_dovi,
+            transcode.dv_convertible(),
+        )
+        .await
         {
             Ok(videos) => videos,
             Err(error) => {

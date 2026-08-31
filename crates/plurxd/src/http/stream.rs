@@ -2531,6 +2531,7 @@ mod tests {
 
     fn planned(method: playback::PlaybackMethod) -> Decision {
         Decision {
+            convert_dolby_vision: false,
             method,
             reasons: Vec::new(),
             transcode_audio: true,
@@ -2717,7 +2718,13 @@ mod tests {
         let english = caps.decide(&file, &playback::RenderCaps::proven(true), NOW_MS);
         assert_eq!(english.method, playback::PlaybackMethod::Remux);
         assert!(english.transcode_audio, "TrueHD must become AAC in MP4");
-        assert_eq!(english.delivered_dynamic_range, "hdr10");
+        // Since M5a a Profile 7 source over an HDR10 base reaches a client
+        // that decodes profile 8 as a conversion rather than a strip. This
+        // test is about the audio; the range is asserted because the audio
+        // decision must not disturb the video one — a track swap re-encoding
+        // the picture's grade would be the bug worth catching here.
+        assert!(english.convert_dolby_vision);
+        assert_eq!(english.delivered_dynamic_range, "dolby_vision");
         assert!(english
             .reasons
             .iter()

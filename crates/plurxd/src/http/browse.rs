@@ -364,6 +364,7 @@ pub async fn item_detail(
                 &f,
                 raw_probe.as_deref(),
                 crate::ffmpeg::has_dovi_rpu().await,
+                state.system.dolby_vision_convert,
             );
             let mut present = 0_usize;
             for video in &videos {

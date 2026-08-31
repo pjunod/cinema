@@ -290,33 +290,39 @@ pub fn identity_for(file: &MediaFile, video: transcode::CopyVideoOptions) -> Sou
 /// copy, but `decide_forced` with `Force::Original` does, and that copy is
 /// indexed today — dropping it would regress a path that works.
 ///
-/// **The Profile 7 → 8.1 conversion is a third identity, and it is not here
-/// yet.** `copy_video_args` already carries `DV_CONVERT_MARKER` for a
-/// converting copy, so that pipeline's fingerprint exists and differs — but
-/// nothing sets `dv_convert` outside tests, so no session can ask for it, and
-/// adding the identity now would spend a third full pass over every Profile 7
-/// remux in the library to index a stream nothing plays. It belongs in the
-/// commit that wires the conversion into a session, keyed on the same file
-/// facts `plurx_core::playback::dolby_vision_converts_to_p81` reads (Profile 7
-/// with an HDR10 base) — and it has to land in that commit, not after it, or a
-/// converting session looks up an index nothing built, gets
-/// `vod_index_pending`, and falls through to the live-HLS recovery path on
-/// every play. That is exactly the regression the paragraph above describes,
-/// and it is the reason this note is here rather than in a plan document.
+/// **The Profile 7 → 8.1 conversion is the third identity**, and it is here
+/// for the same reason the preserved one is: a converting session builds its
+/// identity from its own `CopyVideoOptions`, so an index built only for the
+/// other two would leave it looking up something nothing built. It is added
+/// only when the *file* could convert — Profile 7 over an HDR10 base — because
+/// which clients convert is a per-session question and an index is per-file.
+///
+/// `convert` is the node's answer, not the file's: an operator who turned the
+/// conversion off (`PLURX_DV_CONVERT=0`) has no converting sessions to serve,
+/// and indexing for them would spend a third full pass over every Profile 7
+/// remux in the library on a stream nothing can ask for.
 pub fn video_identities(
     file: &MediaFile,
     probe_json: Option<&str>,
     have_dovi: bool,
+    convert: bool,
 ) -> Vec<transcode::CopyVideoOptions> {
     let preserve_choices: &[bool] = if plurx_core::playback::is_dolby_vision(file) {
         &[false, true]
     } else {
         &[false]
     };
-    let mut identities = Vec::with_capacity(preserve_choices.len());
+    let mut identities = Vec::with_capacity(preserve_choices.len() + 1);
     let mut seen = std::collections::HashSet::new();
     for preserve in preserve_choices {
         let video = transcode::CopyVideoOptions::from_probe(file, probe_json, have_dovi, *preserve);
+        if seen.insert(identity_for(file, video).argv_fingerprint) {
+            identities.push(video);
+        }
+    }
+    if convert && plurx_core::playback::file_can_convert_to_p81(file) {
+        let video = transcode::CopyVideoOptions::from_probe(file, probe_json, have_dovi, true)
+            .with_dolby_vision_conversion(true);
         if seen.insert(identity_for(file, video).argv_fingerprint) {
             identities.push(video);
         }
@@ -537,7 +543,7 @@ mod tests {
     }
 
     fn fingerprints_of(file: &MediaFile, have_dovi: bool) -> Vec<String> {
-        video_identities(file, None, have_dovi)
+        video_identities(file, None, have_dovi, false)
             .into_iter()
             .map(|video| identity_for(file, video).argv_fingerprint)
             .collect()
@@ -546,9 +552,9 @@ mod tests {
     #[test]
     fn a_plain_file_has_one_pipeline_to_index() {
         let file = hevc_file(None, None);
-        assert_eq!(video_identities(&file, None, true).len(), 1);
+        assert_eq!(video_identities(&file, None, true, false).len(), 1);
         assert!(
-            !video_identities(&file, None, true)[0].preserves_dolby_vision(),
+            !video_identities(&file, None, true, false)[0].preserves_dolby_vision(),
             "the stripped identity stays first, so a fully indexed library \
              does not re-order its work to adopt the identity set"
         );
@@ -560,7 +566,7 @@ mod tests {
             Some("dolby_vision"),
             Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
         );
-        let videos = video_identities(&file, None, true);
+        let videos = video_identities(&file, None, true, false);
         assert_eq!(videos.len(), 2);
         assert!(!videos[0].preserves_dolby_vision());
         assert!(videos[1].preserves_dolby_vision());
@@ -580,7 +586,7 @@ mod tests {
         // that copy is indexed today. The plan's M1 acceptance check expects
         // one row here; dropping the second would regress a live path.
         let file = hevc_file(Some("dolby_vision"), Some("Dolby Vision · Profile 5"));
-        assert_eq!(video_identities(&file, None, true).len(), 2);
+        assert_eq!(video_identities(&file, None, true, false).len(), 2);
     }
 
     #[test]

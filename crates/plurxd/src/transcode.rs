@@ -7503,6 +7503,15 @@ pub enum SessionKind {
     Copy {
         aac: bool,
         preserve_dolby_vision: bool,
+        /// Rewrite Profile 7 RPUs to Profile 8.1 on the way through.
+        ///
+        /// Beside `preserve_dolby_vision` rather than inside it because they
+        /// answer different questions of the same copy: preserving decides
+        /// whether the RPU NAL units survive the bitstream filter, converting
+        /// decides whether they are rewritten between the two ffmpegs. Only
+        /// ever true when preserving is — there is nothing to rewrite in a
+        /// stream the filter removed.
+        convert_dolby_vision: bool,
     },
 }
 
@@ -7527,6 +7536,9 @@ impl ReopenReason {
 struct CopySessionOptions {
     transcode_audio: bool,
     preserve_dolby_vision: bool,
+    /// Rewrite Profile 7 RPUs to Profile 8.1 between the two ffmpegs of the
+    /// copy pipe. Only ever set beside `preserve_dolby_vision`.
+    convert_dolby_vision: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -7557,7 +7569,20 @@ impl SessionRequest {
             SessionKind::Copy {
                 aac,
                 preserve_dolby_vision,
-            } => format!("c{}d{}", u8::from(aac), u8::from(preserve_dolby_vision)),
+                convert_dolby_vision,
+            } => {
+                // A converted stream is different bytes, so it must not answer
+                // a replay for an unconverted one. Appended rather than folded
+                // into the existing digits so an unconverted request
+                // fingerprints to exactly the string it always did — a replay
+                // in flight across a deploy still recovers its session.
+                let base = format!("c{}d{}", u8::from(aac), u8::from(preserve_dolby_vision));
+                if convert_dolby_vision {
+                    format!("{base}+p81")
+                } else {
+                    base
+                }
+            }
         };
         // A different grade is different bytes, so it cannot share an
         // idempotency identity. Appended rather than folded into every arm so
@@ -9141,6 +9166,11 @@ pub struct TranscodeManager {
     /// whatever ffmpeg it was running, leave the DV configuration in every
     /// remux, and have browsers that cannot decode DV refuse the stream.
     dv_strippable: bool,
+    /// Whether this node converts Dolby Vision Profile 7 to 8.1 in the copy
+    /// pipe. Not a probe — the conversion is plurx's own code — but an
+    /// operator switch, and it sits beside `dv_strippable` because the two
+    /// answer the same shape of question about the same pipeline.
+    dv_convertible: bool,
     /// Whether boot proved the exact software/tonemapx/software renderer used
     /// for non-backward-compatible Dolby Vision.
     dovi_reshape: bool,
@@ -9391,6 +9421,7 @@ impl TranscodeManager {
             background_producer: Mutex::new(()),
             offline_waiting: AtomicBool::new(false),
             dv_strippable: false,
+            dv_convertible: false,
             dovi_reshape: false,
             dovi_passthrough: false,
             dovi_passthrough_qsv: false,
@@ -9419,6 +9450,11 @@ impl TranscodeManager {
     /// not the cache's.
     pub fn with_dv_strippable(mut self, dv_strippable: bool) -> Self {
         self.dv_strippable = dv_strippable;
+        self
+    }
+
+    pub fn with_dv_convertible(mut self, dv_convertible: bool) -> Self {
+        self.dv_convertible = dv_convertible;
         self
     }
 
@@ -9481,6 +9517,15 @@ impl TranscodeManager {
     /// (`dovi_rpu`, ffmpeg 7.1+).
     pub fn dv_strippable(&self) -> bool {
         self.dv_strippable
+    }
+
+    /// Whether a Profile 7 source on this node can be indexed and served as a
+    /// conversion. The fragment indexer asks it: an operator who turned the
+    /// conversion off has no converting sessions to serve, and indexing for
+    /// them would spend a third full pass over every Profile 7 remux in the
+    /// library on a stream nothing can ask for.
+    pub fn dv_convertible(&self) -> bool {
+        self.dv_convertible
     }
 
     #[cfg(test)]
@@ -13185,6 +13230,7 @@ impl TranscodeManager {
             SessionKind::Copy {
                 aac,
                 preserve_dolby_vision,
+                convert_dolby_vision,
             } => {
                 self.start_copy_with_audio_offset(
                     req.file_id,
@@ -13192,6 +13238,7 @@ impl TranscodeManager {
                     req.audio_index,
                     req.audio_offset_ms,
                     CopySessionOptions {
+                        convert_dolby_vision,
                         transcode_audio: aac,
                         preserve_dolby_vision,
                     },
@@ -15371,6 +15418,7 @@ impl TranscodeManager {
         let copy_kind = SessionKind::Copy {
             aac: options.transcode_audio,
             preserve_dolby_vision: options.preserve_dolby_vision,
+            convert_dolby_vision: options.convert_dolby_vision,
         };
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
@@ -15680,6 +15728,7 @@ impl TranscodeManager {
             kind: SessionKind::Copy {
                 aac: options.transcode_audio,
                 preserve_dolby_vision: options.preserve_dolby_vision,
+                convert_dolby_vision: options.convert_dolby_vision,
             },
             encoder: "copy",
             // A copy session encodes nothing; its dynamic range is the
@@ -18046,8 +18095,13 @@ impl TranscodeManager {
                 &facts.file,
                 facts.audio_index,
                 CopySessionOptions {
+                    convert_dolby_vision: false,
                     transcode_audio: facts.aac,
                     preserve_dolby_vision: facts.preserve_dolby_vision,
+                    // Only the codec strings are wanted here, and a converted
+                    // stream advertises exactly what a preserved profile 8 one
+                    // does — `copied_hls_codecs` reads the profile from the
+                    // source's own facts, which the conversion does not change.
                 },
                 probe_json.as_deref(),
             );
@@ -25648,6 +25702,7 @@ mod tests {
                 &file,
                 None,
                 CopySessionOptions {
+                    convert_dolby_vision: false,
                     transcode_audio: false,
                     preserve_dolby_vision: true,
                 },
@@ -25665,6 +25720,7 @@ mod tests {
                 &file,
                 None,
                 CopySessionOptions {
+                    convert_dolby_vision: false,
                     transcode_audio: true,
                     preserve_dolby_vision: false,
                 },
@@ -25680,6 +25736,7 @@ mod tests {
                 &file,
                 None,
                 CopySessionOptions {
+                    convert_dolby_vision: false,
                     transcode_audio: true,
                     preserve_dolby_vision: false,
                 },
@@ -27679,6 +27736,7 @@ mod tests {
                 0.0,
                 None,
                 CopySessionOptions {
+                    convert_dolby_vision: false,
                     transcode_audio: false,
                     preserve_dolby_vision: false,
                 },
@@ -32444,6 +32502,7 @@ mod tests {
                 5.0,
                 Some(1),
                 CopySessionOptions {
+                    convert_dolby_vision: false,
                     transcode_audio: true,
                     preserve_dolby_vision: false,
                 },
@@ -32530,6 +32589,7 @@ mod tests {
                 0.0,
                 None,
                 CopySessionOptions {
+                    convert_dolby_vision: false,
                     transcode_audio: false,
                     preserve_dolby_vision: false,
                 },

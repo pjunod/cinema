@@ -625,6 +625,12 @@ impl CreateSession {
             SessionKind::Copy {
                 aac: self.aac == Some(true),
                 preserve_dolby_vision: self.preserve_dolby_vision == Some(true),
+                // Never taken from the body. A client cannot ask to be handed
+                // a conversion — whether one happens is decided from its caps
+                // and the node's, and create overwrites this from the plan it
+                // re-derives (`review_client_plan`). A wire field here would
+                // be a claim the client has no way to be right about.
+                convert_dolby_vision: false,
             }
         } else {
             SessionKind::Transcode { height }
@@ -738,6 +744,15 @@ pub struct CreateOverrides {
 pub(crate) struct PlanReview {
     /// The value create must use, whatever the body asked for.
     pub preserve_dolby_vision: bool,
+    /// Whether the copy converts Profile 7 to 8.1 on the way through.
+    ///
+    /// Not clamped against anything the client asked for, because there is
+    /// nothing to clamp: the conversion is not a wire field and a client has
+    /// no way to be right or wrong about it. It follows
+    /// `preserve_dolby_vision` instead — a client that declines Dolby Vision
+    /// declines the converted kind too, and there is no such thing as
+    /// converting RPUs a stripping filter has already removed.
+    pub convert_dolby_vision: bool,
     /// Likewise for the HDR10 re-encode request. Still only a *request*:
     /// `TranscodeManager::hdr10_grade_for` refuses it for any source, rung, or
     /// build that did not prove the chain, and that refusal is unchanged.
@@ -807,6 +822,7 @@ pub(crate) fn review_client_plan(
     let derived = decide_forced(file, &profile, force, node);
     let mut review = PlanReview {
         preserve_dolby_vision: derived.preserve_dolby_vision,
+        convert_dolby_vision: derived.convert_dolby_vision,
         hdr10: asked_hdr10 && profile.supports_hdr10_transcode,
         notes: Vec::new(),
         mismatched: false,
@@ -868,6 +884,11 @@ pub(crate) fn review_client_plan(
             *derived = false;
         }
     }
+    // Whatever the clamps and the overrides settled, the conversion follows
+    // the preservation. A `compatible_hdr_base` retry that declined Dolby
+    // Vision, or a client that never asked for it, must not be handed a
+    // converted stream by a flag nobody looked at.
+    review.convert_dolby_vision &= review.preserve_dolby_vision;
     if review.mismatched {
         plan_derivation::count_mismatched();
     }
@@ -1162,10 +1183,15 @@ pub async fn create(
         Some(review) => {
             if let crate::transcode::SessionKind::Copy {
                 preserve_dolby_vision,
+                convert_dolby_vision,
                 ..
             } = &mut request.kind
             {
                 *preserve_dolby_vision = review.preserve_dolby_vision;
+                // The only place this is ever set. It is derived, never
+                // echoed: `into_request` leaves it false because a client has
+                // no way to ask for it.
+                *convert_dolby_vision = review.convert_dolby_vision;
             }
             request.hdr10 = review.hdr10;
             review.notes
@@ -12234,6 +12260,7 @@ mod tests {
     fn a_session_reports_the_dynamic_range_of_the_stream_it_just_built() {
         let file = hls_file(vec![]);
         let copy = |preserve: bool| crate::transcode::SessionKind::Copy {
+            convert_dolby_vision: false,
             aac: false,
             preserve_dolby_vision: preserve,
         };

@@ -5488,6 +5488,7 @@ mod tests {
         route.fetched_through_ms = 600_000;
 
         let copy = SessionKind::Copy {
+            convert_dolby_vision: false,
             aac: false,
             preserve_dolby_vision: false,
         };
@@ -6378,6 +6379,7 @@ mod tests {
 
         let mut unknown_copy = valid_start_response();
         unknown_copy.kind = SessionKind::Copy {
+            convert_dolby_vision: false,
             aac: false,
             preserve_dolby_vision: false,
         };
