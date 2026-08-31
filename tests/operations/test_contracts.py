@@ -866,6 +866,15 @@ class OperationsContractCase(unittest.TestCase):
                 ]
                 self.assertEqual([], missing, f"jobs without timeouts in {path}")
 
+    def test_rust_audit_can_report_informational_advisories(self):
+        workflow = read(".github/workflows/rust-audit.yml")
+        permissions = workflow.split("permissions:\n", 1)[1].split("\njobs:\n", 1)[0]
+
+        self.assertIn("  contents: read\n", permissions)
+        self.assertIn("  checks: write\n", permissions)
+        self.assertIn("  issues: write\n", permissions)
+        self.assertEqual(workflow.count("token: ${{ secrets.GITHUB_TOKEN }}"), 2)
+
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
         def choose(hosted, labels):
             return (

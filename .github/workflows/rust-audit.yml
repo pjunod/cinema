@@ -20,6 +20,7 @@ on:
 permissions:
   contents: read
   checks: write
+  issues: write
 
 jobs:
   # Release artifacts resolve from the root workspace; the standalone M0
