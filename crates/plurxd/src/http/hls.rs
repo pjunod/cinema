@@ -11760,6 +11760,76 @@ mod tests {
         assert!(review.notes.is_empty(), "{:?}", review.notes);
     }
 
+    /// A Profile 7 title reaches a Profile-8 client as a conversion, and the
+    /// conversion follows the preservation wherever that goes.
+    ///
+    /// The two flags are set together and clamped together. `convert` is not a
+    /// wire field — a client has no way to be right or wrong about it — so it
+    /// is never compared against anything the body asked for; it follows
+    /// `preserve_dolby_vision`, and the `compatible_hdr_base` retry is the
+    /// case that makes it matter. A client that decoded Dolby Vision, failed
+    /// on this title, and asked for the plain HDR10 base must not be handed a
+    /// *converted* Dolby Vision stream instead: that is the same stream it
+    /// just failed on, wearing a different profile number.
+    #[test]
+    fn a_declined_dolby_vision_plan_declines_the_converted_kind_too() {
+        let mut file = dolby_vision_p8_file();
+        file.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".into());
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(6);
+        file.dolby_vision.bl_compat_id = Some(1);
+
+        // The ordinary answer for a client that takes 8 and not 7.
+        let converted = review_client_plan(
+            &dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            true,
+            false,
+            NOW_MS,
+        );
+        assert!(converted.convert_dolby_vision);
+        assert!(
+            converted.preserve_dolby_vision,
+            "there is nothing to convert in a stream the filter removed"
+        );
+
+        // The client declines Dolby Vision by not asking for it. The
+        // conversion goes with it.
+        let declined = review_client_plan(
+            &dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            false,
+            false,
+            NOW_MS,
+        );
+        assert!(!declined.preserve_dolby_vision);
+        assert!(
+            !declined.convert_dolby_vision,
+            "a client that declined Dolby Vision declined the converted kind"
+        );
+
+        // And the same through the named override, which is the path Apple's
+        // retry actually takes.
+        let overridden = review_client_plan(
+            &dolby_vision_client(),
+            Some(&CreateOverrides {
+                compatible_hdr_base: Some(true),
+                ..Default::default()
+            }),
+            &file,
+            &capable_node(),
+            true,
+            false,
+            NOW_MS,
+        );
+        assert!(!overridden.preserve_dolby_vision);
+        assert!(!overridden.convert_dolby_vision);
+    }
+
     /// Apple's `forceCompatibleHDRBase` retry, and why it needs a name.
     ///
     /// The client decoded the Dolby Vision stream, failed on this title, and

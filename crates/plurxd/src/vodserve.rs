@@ -4188,6 +4188,31 @@ fn attach_attested_descriptor(
 /// lip-sync that varies per title and per seek, plays perfectly well, and is
 /// wrong. `probe_media_origin` answers where the picture really begins, which
 /// is what the audio must be seeked to.
+/// The two argvs a converting producer runs, chosen from the recipe.
+///
+/// Split from the spawn so the choice can be asserted without a process:
+/// which pipe a recipe runs is the whole of what this branch decides, and it
+/// was previously provable only by watching a node.
+fn converting_producer_args(
+    recipe: &Recipe,
+    input: &str,
+    start_seconds: f64,
+    audio_start: f64,
+) -> (Vec<String>, Vec<String>) {
+    (
+        plurx_core::transcode::dv_convert_source_args(input, start_seconds, Pacing::unpaced()),
+        plurx_core::transcode::dv_convert_output_args(
+            &recipe.file,
+            input,
+            audio_start,
+            recipe.audio_index,
+            recipe.aac,
+            recipe.video,
+            recipe.video_frame_rate.as_deref(),
+        ),
+    )
+}
+
 async fn spawn_converting_producer(
     rendition: &Arc<Rendition>,
     start_seconds: f64,
@@ -4212,17 +4237,8 @@ async fn spawn_converting_producer(
         ));
     }
 
-    let source_args =
-        plurx_core::transcode::dv_convert_source_args(input, start_seconds, Pacing::unpaced());
-    let output_args = plurx_core::transcode::dv_convert_output_args(
-        &recipe.file,
-        input,
-        audio_start,
-        recipe.audio_index,
-        recipe.aac,
-        recipe.video,
-        recipe.video_frame_rate.as_deref(),
-    );
+    let (source_args, output_args) =
+        converting_producer_args(recipe, input, start_seconds, audio_start);
 
     let key = rendition.key.clone();
     let producer = crate::dvpipe::spawn(
@@ -5220,6 +5236,91 @@ mod tests {
 
     /// A `VodServe` with an empty store, for tests that drive internals
     /// directly against a hand-built rendition.
+    /// A converting recipe runs the two-stage pipe, and an ordinary one does
+    /// not.
+    ///
+    /// The branch this pins is the whole point of the milestone: disable it
+    /// and every Profile 7 title silently goes back to the HDR10 base with
+    /// nothing failing anywhere. It is asserted on the argvs rather than on a
+    /// process because that is where the decision actually shows.
+    #[test]
+    fn a_converting_recipe_runs_the_two_stage_pipe() {
+        let mut file = MediaFile {
+            id: 9,
+            item_id: 1,
+            path: std::path::PathBuf::from("/library/film.mkv"),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(7_200_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            video_profile: Some("Main 10".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            hdr: Some("dolby_vision".into()),
+            hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
+            bitrate: Some(60_000_000),
+            audio_streams: Vec::new(),
+            subtitle_streams: Vec::new(),
+            scanned_at: 0,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        };
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(6);
+        file.dolby_vision.bl_compat_id = Some(1);
+
+        let recipe = Recipe {
+            file,
+            audio_index: Some(1),
+            aac: false,
+            video: CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true),
+            source_object_version: None,
+            cluster_cache_key: None,
+            video_frame_rate: Some("24000/1001".to_owned()),
+        };
+
+        let (source, output) = converting_producer_args(&recipe, "/dev/fd/3", 61.5, 59.375);
+        let source = source.join(" ");
+        let output = output.join(" ");
+
+        // Stage one: the file in, Annex B out, enhancement layer dropped and
+        // RPUs kept.
+        assert!(source.contains("-i /dev/fd/3"), "{source}");
+        assert!(
+            source.contains("-bsf:v hevc_mp4toannexb,filter_units=remove_types=63"),
+            "{source}"
+        );
+        assert!(source.contains("-noaccurate_seek -ss 61.500"), "{source}");
+        assert!(source.ends_with("-f hevc pipe:1"), "{source}");
+
+        // Stage two: the converted stream plus the source again for audio,
+        // seeked to where the picture actually starts rather than to what was
+        // asked for.
+        assert!(
+            output.contains("-f hevc -r 24000/1001 -i pipe:0"),
+            "{output}"
+        );
+        assert!(output.contains("-ss 59.375"), "{output}");
+        assert!(!output.contains("61.500"), "{output}");
+        assert!(output.contains("-map 1:a:1?"), "{output}");
+        assert!(output.contains("-tag:v hvc1"), "{output}");
+        assert!(output.ends_with("-f mp4 pipe:1"), "{output}");
+
+        // Neither hands ffmpeg the marker the recipe is fingerprinted with.
+        assert!(!source.contains("--plurx-"), "{source}");
+        assert!(!output.contains("--plurx-"), "{output}");
+
+        // And the branch that selects all of this is the recipe's own answer.
+        assert!(recipe.video.converts_dolby_vision());
+        assert!(
+            !CopyVideoOptions::new(true, true).converts_dolby_vision(),
+            "an ordinary preserving copy is one ffmpeg"
+        );
+    }
+
     fn bare_serve(base: &Path) -> Arc<VodServe> {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         VodServe::new(base.to_path_buf(), store)

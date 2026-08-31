@@ -830,7 +830,7 @@ impl PromotionInputs {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.parameter_sets.is_empty() && self.hdr10_sei.is_empty()
+        self.parameter_sets.is_empty() && self.hdr10_sei.is_empty() && self.dolby_vision.is_none()
     }
 }
 

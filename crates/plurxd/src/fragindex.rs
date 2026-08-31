@@ -720,6 +720,148 @@ mod tests {
         );
     }
 
+    /// The converting identity is added only for a file that can actually be
+    /// converted, and only on a node that will.
+    ///
+    /// Both halves are load-bearing in opposite directions. Dropping the file
+    /// check would index a third pipeline for every Dolby Vision title in the
+    /// library — a full extra pass over a 60 GB remux each — for a stream no
+    /// session can ask for. Dropping the node check would do the same on a
+    /// node where an operator turned the conversion off.
+    #[test]
+    fn the_converting_identity_is_indexed_only_when_it_can_be_served() {
+        let mut p7 = hevc_file(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        );
+        p7.dolby_vision.profile = Some(7);
+        p7.dolby_vision.level = Some(6);
+        p7.dolby_vision.bl_compat_id = Some(1);
+
+        let converting = video_identities(&p7, None, true, true);
+        assert_eq!(converting.len(), 3, "strip, preserve, convert");
+        assert!(converting[2].converts_dolby_vision());
+        assert!(
+            converting[0..2].iter().all(|v| !v.converts_dolby_vision()),
+            "the stripped identity stays first so a fully indexed library does \
+             not re-order its work to adopt this"
+        );
+
+        // Three different byte streams, so three different indexes. Sharing
+        // one would hand a session a playlist whose cut points describe media
+        // it never produces.
+        let fingerprints: std::collections::HashSet<_> = converting
+            .iter()
+            .map(|video| identity_for(&p7, *video).argv_fingerprint)
+            .collect();
+        assert_eq!(fingerprints.len(), 3);
+
+        // The node switch stands it down.
+        assert_eq!(video_identities(&p7, None, true, false).len(), 2);
+
+        // …and so does a file the conversion cannot describe. A Profile 8
+        // source is already what the conversion produces; a row with no
+        // columns cannot have its configuration record built at all.
+        let p8 = {
+            let mut file = p7.clone();
+            file.dolby_vision.profile = Some(8);
+            file
+        };
+        assert_eq!(video_identities(&p8, None, true, true).len(), 2);
+        let label_only = hevc_file(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        );
+        assert_eq!(video_identities(&label_only, None, true, true).len(), 2);
+    }
+
+    /// A converting identity is built by the converting pipe, and every other
+    /// one is not.
+    ///
+    /// An index is a list of the producer's own output byte counts and the
+    /// landing matcher compares them, so an index built by a different pipe is
+    /// not stale — it is confidently wrong about media that identity never
+    /// produces. A converted stream's RPUs are hundreds of bytes smaller per
+    /// frame, so every fragment differs.
+    #[test]
+    fn the_index_pass_runs_the_pipe_the_identity_names() {
+        let file = hevc_file(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        );
+        let plain = transcode::CopyVideoOptions::new(true, true);
+        assert!(
+            matches!(
+                index_pipe(&file, "/dev/fd/3", plain, None),
+                IndexPipe::Single(_)
+            ),
+            "an ordinary identity is one ffmpeg"
+        );
+
+        let converting = plain.with_dolby_vision_conversion(true);
+        let IndexPipe::Converting { source, output } =
+            index_pipe(&file, "/dev/fd/3", converting, Some("24000/1001"))
+        else {
+            panic!("a converting identity must run the converting pipe");
+        };
+        let source = source.join(" ");
+        assert!(source.contains("filter_units=remove_types=63"), "{source}");
+        assert!(source.ends_with("-f hevc pipe:1"), "{source}");
+        assert!(source.contains("-i /dev/fd/3"), "{source}");
+
+        let output = output.join(" ");
+        assert!(
+            output.contains("-f hevc -r 24000/1001 -i pipe:0"),
+            "{output}"
+        );
+        assert!(output.contains("-an"), "an index is video only: {output}");
+        assert!(output.ends_with("-f mp4 pipe:1"), "{output}");
+
+        // Neither argv carries the marker the recipe is fingerprinted with.
+        assert!(!source.contains("--plurx-"), "{source}");
+        assert!(!output.contains("--plurx-"), "{output}");
+    }
+
+    /// The converted stream's configuration record, from the source's facts.
+    ///
+    /// Its output has none to read — ffmpeg copies the record from the input
+    /// container and a raw elementary stream has none — so every field here is
+    /// either changed deliberately or carried deliberately, and getting either
+    /// wrong is a stream that describes itself incorrectly with nothing to
+    /// catch it.
+    #[test]
+    fn the_converted_record_says_profile_eight_with_no_enhancement_layer() {
+        let mut file = hevc_file(Some("dolby_vision"), None);
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(9);
+        file.dolby_vision.bl_compat_id = Some(6);
+
+        let record = converted_dolby_vision_record(&file).expect("describable");
+        assert_eq!(record.profile, 8, "the RPUs now say 8.1");
+        assert!(
+            !record.el_present,
+            "stage one dropped the enhancement layer; a record still declaring \
+             one tells a decoder to expect what is not there"
+        );
+        assert!(record.rpu_present, "the RPUs are the point");
+        assert!(record.bl_present);
+        assert_eq!(
+            record.level, 9,
+            "the level bounds resolution and frame rate, neither of which the \
+             conversion touches"
+        );
+        assert_eq!(
+            record.bl_signal_compatibility_id, 6,
+            "the base layer is copied byte for byte, so what a non-DV client \
+             sees of it is unchanged"
+        );
+
+        // A row that cannot describe one refuses rather than inventing values.
+        let mut levelless = file.clone();
+        levelless.dolby_vision.level = None;
+        assert!(converted_dolby_vision_record(&levelless).is_err());
+    }
+
     #[test]
     fn profile_five_keeps_its_stripping_identity_too() {
         // `decide` never routes a Profile 5 source to a stripping copy -- it
@@ -745,6 +887,48 @@ mod tests {
         let held = fingerprints_of(&file, false);
         assert_eq!(held.len(), 2);
         assert_ne!(held[0], held[1]);
+    }
+
+    /// The record the caller supplies reaches the stored promotion inputs, and
+    /// therefore the served init every later generation is promoted to.
+    ///
+    /// This is the wire between "plurx builds a Dolby Vision record because
+    /// ffmpeg cannot" and "every served init carries it". Without it the
+    /// record is built, discarded, and the converted stream tells every client
+    /// it is plain HDR10 — the whole milestone delivering nothing, with no
+    /// error anywhere.
+    #[tokio::test]
+    async fn the_supplied_dolby_vision_record_reaches_the_stored_promotion() {
+        testfixtures::require_ffmpeg();
+        let bytes = index_pipe_bytes("closed-gop");
+
+        let plain = index_stream(std::io::Cursor::new(bytes.clone()), identity(), None, None).await;
+        let IndexOutcome::Built(plain) = plain else {
+            panic!("{plain:?}");
+        };
+        assert!(
+            plain.promotion.dolby_vision.is_none(),
+            "an ordinary pass supplies none"
+        );
+
+        let record =
+            plurx_core::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("record");
+        let converted = index_stream(
+            std::io::Cursor::new(bytes),
+            identity(),
+            None,
+            Some(record.clone()),
+        )
+        .await;
+        let IndexOutcome::Built(converted) = converted else {
+            panic!("{converted:?}");
+        };
+        assert_eq!(
+            converted.promotion.dolby_vision,
+            Some(record),
+            "the record is stored, so a regenerated init is promoted from it too"
+        );
+        assert!(!converted.promotion.is_empty());
     }
 
     /// The index pipe over a real fixture, read the way the daemon reads it.

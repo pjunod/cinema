@@ -22720,6 +22720,56 @@ mod tests {
         );
     }
 
+    /// A converted copy cannot answer an idempotency replay meant for an
+    /// unconverted one.
+    ///
+    /// The fingerprint is what `claim_request` compares when a `request_id` is
+    /// replayed, so every field that changes the output bytes has to be in it.
+    /// A converted stream's RPUs are rewritten and its configuration record is
+    /// different; answering a replay with the other one hands a client a
+    /// stream it never asked for and that its decoder may refuse.
+    ///
+    /// The suffix is appended rather than folded into the existing digits so
+    /// an unconverted request fingerprints to exactly the string it always
+    /// did — a replay in flight across a deploy still recovers its session.
+    #[test]
+    fn a_converting_copy_fingerprints_apart_from_the_copy_it_replaces() {
+        let copy = |convert: bool| SessionRequest {
+            file_id: 1,
+            playback_id: "p".to_owned(),
+            request_id: Some("r".to_owned()),
+            start_seconds: 0.0,
+            audio_index: None,
+            kind: SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: true,
+                convert_dolby_vision: convert,
+            },
+            automatic: false,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
+            previous_session_id: None,
+            reopen_reason: None,
+        };
+
+        let plain = copy(false);
+        let converting = copy(true);
+        assert_ne!(
+            plain.durable_intent_fingerprint(7),
+            converting.durable_intent_fingerprint(7)
+        );
+        assert!(converting.intent_fingerprint("paul").contains("+p81"));
+        assert!(
+            plain.intent_fingerprint("paul").contains("c0d1"),
+            "an unconverted copy keeps the exact string it always had: {}",
+            plain.intent_fingerprint("paul")
+        );
+        assert!(!plain.intent_fingerprint("paul").contains("p81"));
+    }
+
     #[test]
     fn ffmpeg_gets_the_app_owned_runtime_cache() {
         use plurx_core::store::SqliteStore;
