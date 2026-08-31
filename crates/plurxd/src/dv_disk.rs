@@ -948,6 +948,13 @@ static RENAME_REOPEN_FAILURE_HOOKS: std::sync::Mutex<Vec<RenameReopenFailureHook
     std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
+#[allow(clippy::unnecessary_cast)]
+fn stat_device_id(stat: &libc::stat) -> u64 {
+    // `dev_t` is already `u64` on Linux but has a different width on macOS.
+    stat.st_dev as u64
+}
+
+#[cfg(test)]
 fn reset_hash_passes() {
     HASH_ROLES.with(|roles| roles.borrow_mut().clear());
 }
@@ -2436,7 +2443,7 @@ async fn rename_expected_noreplace_between(
                     return Err(io::Error::last_os_error());
                 }
                 let stat = unsafe { stat.assume_init() };
-                Ok((stat.st_dev as u64, stat.st_ino))
+                Ok((stat_device_id(&stat), stat.st_ino))
             };
             let (from_device, from_inode) = directory_identity(from_parent.raw_fd())?;
             let (to_device, to_inode) = directory_identity(to_parent.raw_fd())?;
@@ -3007,7 +3014,7 @@ async fn unlink_expected_child(
                 .lock()
                 .expect("final unlink hook mutex");
             if let Some(position) = hooks.iter().position(|hook| {
-                hook.device == stat.st_dev as u64
+                hook.device == stat_device_id(&stat)
                     && hook.inode == stat.st_ino
                     && hook.target == target
             }) {
@@ -3127,10 +3134,9 @@ async fn link_public_replacement_proof_once(
             let mut hook = PROOF_CREATION_SWAP_HOOK
                 .lock()
                 .expect("proof creation hook mutex");
-            if hook
-                .as_ref()
-                .is_some_and(|hook| hook.device == stat.st_dev as u64 && hook.inode == stat.st_ino)
-            {
+            if hook.as_ref().is_some_and(|hook| {
+                hook.device == stat_device_id(&stat) && hook.inode == stat.st_ino
+            }) {
                 let hook = hook.take().expect("matched proof creation hook exists");
                 (hook.action)();
             }
@@ -3272,10 +3278,9 @@ async fn restore_public_from_recovery_guard(
             let mut hook = PUBLIC_RESTORE_SWAP_HOOK
                 .lock()
                 .expect("public restore hook mutex");
-            if hook
-                .as_ref()
-                .is_some_and(|hook| hook.device == stat.st_dev as u64 && hook.inode == stat.st_ino)
-            {
+            if hook.as_ref().is_some_and(|hook| {
+                hook.device == stat_device_id(&stat) && hook.inode == stat.st_ino
+            }) {
                 let hook = hook.take().expect("matched public restore hook exists");
                 (hook.action)();
             }
@@ -3388,7 +3393,7 @@ async fn unlink_original_if_public_matches(
                 let stat = unsafe { stat.assume_init() };
                 let mut hooks = FINALIZE_SWAP_HOOKS.lock().expect("finalize hook mutex");
                 if let Some(position) = hooks.iter().position(|hook| {
-                    hook.device == stat.st_dev as u64
+                    hook.device == stat_device_id(&stat)
                         && hook.inode == stat.st_ino
                         && hook.target == hook_target
                 }) {
@@ -3554,7 +3559,7 @@ async fn remove_flat_tree_expected(
                 .lock()
                 .expect("final rmdir hook mutex");
             if let Some(position) = hooks.iter().position(|hook| {
-                hook.device == stat.st_dev as u64
+                hook.device == stat_device_id(&stat)
                     && hook.inode == stat.st_ino
                     && hook.target == target
             }) {
