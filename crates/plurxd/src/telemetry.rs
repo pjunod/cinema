@@ -237,7 +237,9 @@ impl PlaybackMetrics {
         render_counters(
             &mut out,
             "plurx_playback_marker_prewarm_total",
-            "Skip-destination prewarm outcomes.",
+            "Skip-destination prewarm outcomes. No producer emits \"hit\": \
+             prewarming marker destinations is unbuilt, so this reads all-miss \
+             by construction, not by failure.",
             "result",
             &MARKER_PREWARM_RESULTS,
             &self.marker_prewarm,
@@ -245,7 +247,9 @@ impl PlaybackMetrics {
         let hits = self.marker_prewarm[0].load(Ordering::Relaxed);
         let total = hits.saturating_add(self.marker_prewarm[1].load(Ordering::Relaxed));
         out.push_str(&format!(
-            "# HELP plurx_playback_marker_prewarm_hit_ratio Skip-destination prewarm hit rate.\n\
+            "# HELP plurx_playback_marker_prewarm_hit_ratio Skip-destination prewarm hit rate. \
+             Zero until marker-destination prewarming is built; see PLAYBACK-CONTROL-PROTOCOL-PLAN section 13.8. \
+             A zero here is an absent feature, not a broken one.\n\
              # TYPE plurx_playback_marker_prewarm_hit_ratio gauge\n\
              plurx_playback_marker_prewarm_hit_ratio {:.6}\n",
             if total == 0 {
@@ -469,6 +473,21 @@ mod tests {
         assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"hit\"} 1"));
         assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"miss\"} 1"));
         assert!(text.contains("plurx_playback_marker_prewarm_hit_ratio 0.500000"));
+        // The counter can be fed synthetically, as it is directly above; no
+        // producer in the product emits "hit". A dashboard reading the real
+        // fleet therefore sees a permanent 0.000000, and the only thing
+        // standing between an operator and a hunt for a bug that does not
+        // exist is the HELP text saying so. Assert it, because a help string
+        // is exactly the kind of thing a later edit tidies away.
+        assert!(text.contains(
+            "# HELP plurx_playback_marker_prewarm_hit_ratio Skip-destination prewarm hit rate. \
+             Zero until marker-destination prewarming is built; \
+             see PLAYBACK-CONTROL-PROTOCOL-PLAN section 13.8. \
+             A zero here is an absent feature, not a broken one."
+        ));
+        assert!(text.contains(
+            "prewarming marker destinations is unbuilt, so this reads all-miss by construction"
+        ));
         assert!(!text.contains("title="));
         assert!(!text.contains("user="));
         assert!(!text.contains("path="));

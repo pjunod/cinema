@@ -944,14 +944,7 @@ private fun PlayerContent(
         if (preferences.autoSkip && marker?.isAutoSkipEligible == true && marker.start_ms != lastAutoSkipped) {
             lastAutoSkipped = marker.start_ms
             recordMarkerEvent("marker_automatic_skip", marker.kind, "playback marker skipped")
-            controller.markerPrewarm(marker.end_ms).let { prewarm ->
-                recordMarkerEvent(
-                    "marker_prewarm",
-                    prewarm,
-                    if (prewarm == "hit") "skip destination was already buffered"
-                    else "skip destination was not prewarmed",
-                )
-            }
+            recordMarkerEvent("marker_prewarm", "miss", "skip destination was not prewarmed")
             lastMarkerSkipEndMs = marker.end_ms
             seekWithMarkerUndo(marker.end_ms)
         }
@@ -1076,14 +1069,7 @@ private fun PlayerContent(
             TvButton(
                 onClick = {
                     recordMarkerEvent("marker_manual_skip", activeMarker.kind, "playback marker skipped")
-                    controller.markerPrewarm(activeMarker.end_ms).let { prewarm ->
-                        recordMarkerEvent(
-                            "marker_prewarm",
-                            prewarm,
-                            if (prewarm == "hit") "skip destination was already buffered"
-                            else "skip destination was not prewarmed",
-                        )
-                    }
+                    recordMarkerEvent("marker_prewarm", "miss", "skip destination was not prewarmed")
                     lastMarkerSkipEndMs = activeMarker.end_ms
                     seekWithMarkerUndo(activeMarker.end_ms)
                     poke()

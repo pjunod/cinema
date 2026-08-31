@@ -2004,23 +2004,10 @@ final class PlayerController: ObservableObject {
             detail: marker.kind,
             message: "playback marker skipped"
         )
-        let prewarm = Self.markerPrewarmResult(
-            route: Self.seekRoute(
-                targetMs: marker.endMs,
-                baseMs: baseMs,
-                usesDirectTimeline: usesDirectTimeline,
-                isVOD: isVOD,
-                isChangingStream: isChangingStream,
-                seekableRangesMs: currentItemSeekableRangesMs()
-            ),
-            loadedRangesMs: currentItemLoadedRangesMs()
-        )
         reportMarkerEvent(
             "marker_prewarm",
-            detail: prewarm,
-            message: prewarm == "hit"
-                ? "skip destination was already buffered"
-                : "skip destination was not prewarmed"
+            detail: "miss",
+            message: "skip destination was not prewarmed"
         )
         lastMarkerSkipEndMs = marker.endMs
         seek(toMs: marker.endMs)
@@ -2111,17 +2098,6 @@ final class PlayerController: ObservableObject {
     /// The current item's seekable windows, in its own local clock. Empty
     /// while no item is attached or the playlist has not loaded yet — both
     /// route a seek to the reopen path.
-    private func currentItemLoadedRangesMs() -> [ClosedRange<Int>] {
-        guard let item = player.currentItem else { return [] }
-        return item.loadedTimeRanges.compactMap { value in
-            let range = value.timeRangeValue
-            let start = range.start.seconds
-            let end = CMTimeRangeGetEnd(range).seconds
-            guard start.isFinite, end.isFinite, end > start else { return nil }
-            return Int(start * 1000)...Int(end * 1000)
-        }
-    }
-
     private func currentItemSeekableRangesMs() -> [ClosedRange<Int>] {
         guard let item = player.currentItem else { return [] }
         return item.seekableTimeRanges.compactMap { value in
@@ -4379,25 +4355,6 @@ final class PlayerController: ObservableObject {
     /// The holdback keeps a native landing short of the live edge, where no
     /// future media exists yet; a target just past the edge snaps to the
     /// holdback instead of paying a whole reopen for a couple of seconds.
-    /// Whether a skip destination is already prewarmed.
-    ///
-    /// It is a hit only when the seek will be served natively *and* the
-    /// destination is inside a loaded range. A reopen re-requests the stream,
-    /// so for that route "miss" is a fact about the delivery method rather
-    /// than a measurement — which is exactly why this takes the route the
-    /// seek will actually use instead of re-deriving one that could drift.
-    ///
-    /// The counter this feeds shipped before anything could produce a hit, so
-    /// `plurx_playback_marker_prewarm_hit_ratio` read zero permanently and an
-    /// absent feature looked like a broken one on a dashboard.
-    nonisolated static func markerPrewarmResult(
-        route: PlayerSeekRoute,
-        loadedRangesMs: [ClosedRange<Int>]
-    ) -> String {
-        guard case let .native(itemMs) = route else { return "miss" }
-        return loadedRangesMs.contains(where: { $0.contains(itemMs) }) ? "hit" : "miss"
-    }
-
     nonisolated static func seekRoute(
         targetMs: Int,
         baseMs: Int,

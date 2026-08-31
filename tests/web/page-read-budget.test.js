@@ -1255,8 +1255,7 @@ test("marker actions emit bounded playback telemetry at the shipped controls", (
   assert.match(offer, /_markerOffers\.has\(offerKey\)/);
   assert.match(skip, /marker_automatic_skip/);
   assert.match(skip, /marker_manual_skip/);
-  assert.match(skip, /event:"marker_prewarm",detail:prewarm/);
-  assert.match(skip, /markerPrewarmResult\(m\.end_ms\)/);
+  assert.match(skip, /event:"marker_prewarm",detail:"miss"/);
   assert.match(seek, /event:"marker_seek_back",detail:"undo"/);
 });
 

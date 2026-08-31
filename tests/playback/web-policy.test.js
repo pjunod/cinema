@@ -402,64 +402,6 @@ return checkMarkers;`,
   assert.equal(skipped.length, 2);
 });
 
-test("a skip destination reports a prewarm hit only when the seek is local and buffered", () => {
-  // The counter this feeds was shipped before anything could produce a "hit",
-  // so plurx_playback_marker_prewarm_hit_ratio read 0.000000 permanently and
-  // an absent feature looked like a broken one. The point of this test is that
-  // the hit branch is reachable at all -- and that it stays honest about the
-  // two cases where a buffered destination still is not a prewarmed one.
-  const build = (player, buffered) => {
-    const ranges = {
-      length: buffered.length,
-      start: (i) => buffered[i][0],
-      end: (i) => buffered[i][1],
-    };
-    return new Function(
-      "PLAYER",
-      "document",
-      `${shippedSource("markerPrewarmResult")}
-return markerPrewarmResult;`,
-    )(player, {
-      getElementById: (id) => (id === "video" ? { buffered: ranges } : null),
-    });
-  };
-
-  const direct = { method: "direct_play", offset: 0 };
-  assert.equal(build(direct, [[0, 120]])(60_000), "hit");
-  assert.equal(build(direct, [[0, 30]])(60_000), "miss");
-  assert.equal(build(direct, [])(60_000), "miss");
-  // A gap between ranges is not coverage.
-  assert.equal(build(direct, [[0, 30], [90, 200]])(60_000), "miss");
-  assert.equal(build(direct, [[0, 30], [50, 200]])(60_000), "hit");
-
-  // Every non-direct seek restarts the server stream, so the client buffer
-  // says nothing about the destination.
-  assert.equal(build({ method: "remux", offset: 0 }, [[0, 120]])(60_000), "miss");
-  assert.equal(build({ method: "transcode", offset: 0 }, [[0, 120]])(60_000), "miss");
-  // Film-addressed VOD seeks locally like direct play does.
-  assert.equal(build({ method: "remux", vod: true, offset: 0 }, [[0, 120]])(60_000), "hit");
-
-  // The element's timeline starts at the session offset, so the buffer must be
-  // asked about element time rather than film time.
-  assert.equal(build({ method: "direct_play", offset: 50 }, [[0, 20]])(60_000), "hit");
-  assert.equal(build({ method: "direct_play", offset: 0 }, [[0, 20]])(60_000), "miss");
-
-  // Crossing an audiobook part boundary changes files, which is a reopen
-  // however well buffered the current part is.
-  const parts = [
-    { id: "a", part_offset_ms: 0, duration_ms: 40_000 },
-    { id: "b", part_offset_ms: 40_000, duration_ms: 40_000 },
-  ];
-  assert.equal(
-    build({ method: "direct_play", offset: 0, fileId: "a", bookParts: parts }, [[0, 200]])(60_000),
-    "miss",
-  );
-  assert.equal(
-    build({ method: "direct_play", offset: 0, fileId: "b", bookParts: parts }, [[0, 200]])(60_000),
-    "hit",
-  );
-});
-
 test("every server verdict reaches exactly one initial web transport", () => {
   const rows = [
     [{ method: "direct_play" }, "direct"],

@@ -9027,40 +9027,6 @@ function skipCurrent(){
   const m=(PLAYER.markers||[]).find(mk=> pos>=mk.start_ms && pos<mk.end_ms);
   if(m) skipMarker(m,false);
 }
-function markerPrewarmResult(destMs){
-  // A skip destination counts as prewarmed only if the seek will be served
-  // from the element's own buffer. Every non-direct seek restarts the server
-  // stream (see seekTo), so for those the destination cannot have been
-  // prepared in advance and "miss" is a fact about the delivery method rather
-  // than a measurement. Reporting it as a measurement is what pinned
-  // plurx_playback_marker_prewarm_hit_ratio at zero: the counter was written
-  // before anything could produce a hit, so an absent feature read on a
-  // dashboard as a broken one.
-  const v=document.getElementById("video");
-  if(!v||!PLAYER) return "miss";
-  if(!(PLAYER.method==='direct_play'||PLAYER.vod)) return "miss";
-  let destSec=destMs/1000;
-  if(PLAYER.bookParts&&PLAYER.bookParts.length){
-    // Crossing a part boundary changes files through play(), which is a reopen
-    // however well buffered the current part is.
-    let part=PLAYER.bookParts[0];
-    for(const q of PLAYER.bookParts){
-      const off=(q.part_offset_ms||0)/1000, end=off+(q.duration_ms||0)/1000;
-      if(destSec>=off && (!end||destSec<end)){ part=q; break; }
-      if(destSec>=off) part=q;
-    }
-    if(part.id!==PLAYER.fileId) return "miss";
-    destSec=Math.max(0,destSec-(part.part_offset_ms||0)/1000);
-  }
-  // seekTo assigns targetSec-offset, so the buffer is asked about element time.
-  const t=Math.max(0,destSec-(PLAYER.offset||0));
-  let ranges=null; try{ ranges=v.buffered; }catch(e){ return "miss"; }
-  if(!ranges||!ranges.length) return "miss";
-  for(let i=0;i<ranges.length;i++){
-    if(t>=ranges.start(i) && t<ranges.end(i)) return "hit";
-  }
-  return "miss";
-}
 function skipMarker(m,automatic=false){
   const c=document.getElementById("pskip"); if(c){ c.innerHTML=""; c.dataset.k=""; }
   clientLog({level:"info",event:automatic?"marker_automatic_skip":"marker_manual_skip",
@@ -9069,10 +9035,8 @@ function skipMarker(m,automatic=false){
   if(m.kind==="credits" && PLAYER.durMs && m.end_ms>=PLAYER.durMs-2500){
     reportProgress(PLAYER.fileId,true); return finishPlayback(true);
   }
-  const prewarm=markerPrewarmResult(m.end_ms);
-  clientLog({level:"info",event:"marker_prewarm",detail:prewarm,
-    message:prewarm==="hit"?"skip destination was already buffered"
-      :"skip destination was not prewarmed"});
+  clientLog({level:"info",event:"marker_prewarm",detail:"miss",
+    message:"skip destination was not prewarmed"});
   PLAYER._lastMarkerSkipEndMs=m.end_ms;
   seekTo(m.end_ms/1000);
 }

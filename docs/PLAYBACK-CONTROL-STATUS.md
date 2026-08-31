@@ -100,6 +100,18 @@ index side — [CONTENT-ANALYSIS-INDEX-HANDOFF.md](CONTENT-ANALYSIS-INDEX-HANDOF
 actor-side consumption to this programme. The counter is waiting for a consumer
 this programme owes it.
 
+The zero now explains itself: `/metrics` says in its `HELP` text that no
+producer emits `"hit"` and that a zero here is an absent feature rather than a
+broken one, and a unit test asserts that sentence so a later tidy-up cannot
+quietly remove it. **That is a label on the trap, not a fix for it** — the
+consumer is still unbuilt. An earlier attempt to make the gauge move by
+redefining `"hit"` as "the destination was already in the client's ordinary
+forward playback buffer" was rejected in review and is worth recording as a
+non-goal: on direct play the browser buffers minutes ahead, so the ratio
+degenerates into a proxy for which transport served the skip, and an unbuilt
+feature would have started reading as a working one — worse than the zero, by
+exactly the argument that motivated changing it.
+
 **What is left in M5.** Nothing buildable. M5c and M5h — deleting the web and
 mobile budgets — are all that remains, and both are gated on
 [M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any code. The

@@ -583,27 +583,6 @@ class Controller(
         return playbackTelemetry.begin(reason, observedAtMs)
     }
 
-    /**
-     * Whether [seekTo] would seek the player's own clock instead of reopening
-     * the stream. The `when` below mirrors [seekTo]'s branch order exactly and
-     * must stay in step with it: a wrong answer here does not break playback,
-     * it silently reports prewarm outcomes for a seek that never happened.
-     */
-    private val seekIsNative: Boolean
-        get() = when {
-            directTransport -> true
-            subtitleDelivery.usesPlanTransport && planMode == "remux" -> false
-            sessionIsVod -> true
-            else -> false
-        }
-
-    fun markerPrewarm(destinationMs: Long): String = markerPrewarmResult(
-        nativeSeek = seekIsNative,
-        destinationMs = destinationMs,
-        positionMs = realPosition(),
-        bufferedPositionMs = player.bufferedPosition,
-    )
-
     fun seekTo(targetMs: Long) {
         val t = targetMs.coerceIn(0, if (plan.durationMs > 0) plan.durationMs else Long.MAX_VALUE)
         when {
@@ -1488,33 +1467,6 @@ internal const val CONTROL_ASK_CAP_MS = 3_000L
  * transport failure is a different cause with a different answer, and the
  * client's own sentence is the honest one for it.
  */
-/**
- * Whether a skip destination is already prewarmed.
- *
- * A hit needs both halves: the seek must be served natively, and the
- * destination must be inside what is already buffered. A reopen re-requests
- * the stream, so for that route "miss" is a fact about the delivery method
- * rather than a measurement.
- *
- * The counter this feeds shipped before any callsite could produce a hit, so
- * `plurx_playback_marker_prewarm_hit_ratio` read zero permanently and an
- * absent feature looked like a broken one on a dashboard.
- *
- * A destination behind the playhead is never a prewarm: ExoPlayer's buffer is
- * a forward window, and a marker skip goes forward by construction.
- */
-internal fun markerPrewarmResult(
-    nativeSeek: Boolean,
-    destinationMs: Long,
-    positionMs: Long,
-    bufferedPositionMs: Long,
-): String = when {
-    !nativeSeek -> "miss"
-    destinationMs < positionMs -> "miss"
-    destinationMs <= bufferedPositionMs -> "hit"
-    else -> "miss"
-}
-
 internal fun ladderVerdict(errorCode: Int, verdict: ControlAction?): ControlAction? = when {
     verdict == null -> null
     verdict.type != "terminal" -> null
