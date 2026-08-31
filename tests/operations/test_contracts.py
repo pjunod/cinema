@@ -28,6 +28,16 @@ def workflow_job_blocks(path: str) -> dict[str, str]:
     }
 
 
+def workflow_step_blocks(job: str) -> dict[str, str]:
+    starts = list(re.finditer(r"(?m)^      - name: (.+)\n", job))
+    return {
+        match.group(1): job[match.start() : starts[index + 1].start()]
+        if index + 1 < len(starts)
+        else job[match.start() :]
+        for index, match in enumerate(starts)
+    }
+
+
 class OperationsContractCase(unittest.TestCase):
     def test_browser_validation_never_claims_host_audio_or_media_controls(self):
         for path in ("scripts/playback-lab", "scripts/ui-baseline"):
@@ -652,26 +662,42 @@ class OperationsContractCase(unittest.TestCase):
             android_device.count("uses: reactivecircus/android-emulator-runner@v2"),
             2,
         )
-        self.assertIn("id: android_instrumentation", android_device)
-        self.assertIn("continue-on-error: true", android_device)
+        android_steps = workflow_step_blocks(android_device)
+        first_attempt = android_steps[
+            "Run the Compose and TV focus suite on a disposable emulator"
+        ]
+        freeze_attempt = android_steps[
+            "Freeze whether the first instrumentation script started"
+        ]
+        retry_attempt = android_steps["Retry a pre-test emulator boot failure once"]
+        propagate_failure = android_steps[
+            "Propagate an instrumented-test failure without retrying it"
+        ]
+
+        self.assertIn("id: android_instrumentation", first_attempt)
+        self.assertIn("continue-on-error: true", first_attempt)
         self.assertIn(
-            "id: android_instrumentation_first_attempt", android_device
+            "id: android_instrumentation_first_attempt", freeze_attempt
+        )
+        self.assertIn("if: always()", freeze_attempt)
+        self.assertIn(
+            'echo "started=true" >> "$GITHUB_OUTPUT"', freeze_attempt
         )
         self.assertIn(
-            'echo "started=true" >> "$GITHUB_OUTPUT"', android_device
+            'echo "started=false" >> "$GITHUB_OUTPUT"', freeze_attempt
         )
         self.assertIn(
-            'echo "started=false" >> "$GITHUB_OUTPUT"', android_device
-        )
-        self.assertIn("Retry a pre-test emulator boot failure once", android_device)
-        self.assertIn(
+            "if: steps.android_instrumentation.outcome == 'failure' && "
             "steps.android_instrumentation_first_attempt.outputs.started == 'false'",
-            android_device,
+            retry_attempt,
         )
+        self.assertNotIn("continue-on-error:", retry_attempt)
         self.assertIn(
+            "if: steps.android_instrumentation.outcome == 'failure' && "
             "steps.android_instrumentation_first_attempt.outputs.started == 'true'",
-            android_device,
+            propagate_failure,
         )
+        self.assertIn("run: exit 1", propagate_failure)
         self.assertNotIn(
             "hashFiles('target/validation/android-instrumentation-started')",
             android_device,
