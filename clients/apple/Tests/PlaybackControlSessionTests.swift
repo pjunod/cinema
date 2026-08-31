@@ -55,6 +55,40 @@ private final class ControlAnswer: @unchecked Sendable {
 
 private let controlAnswer = ControlAnswer()
 
+/// Holds one exchange open so a test can stage a race that is otherwise
+/// unstageable: an old reporter's response landing after the next session has
+/// already begun. The answer is captured before the wait, so the held
+/// response carries what the server said when the request arrived.
+private final class ControlGate: @unchecked Sendable {
+    private let semaphore = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var armed = false
+
+    func arm() {
+        lock.lock()
+        defer { lock.unlock() }
+        armed = true
+    }
+
+    func waitIfArmed() {
+        lock.lock()
+        let holding = armed
+        if holding { armed = false }
+        lock.unlock()
+        if holding { _ = semaphore.wait(timeout: .now() + 5) }
+    }
+
+    func release() { semaphore.signal() }
+
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        armed = false
+    }
+}
+
+private let controlGate = ControlGate()
+
 /// Accepts every exchange the way the server does, and records what it carried.
 private final class ControlExchangeURLProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -85,6 +119,9 @@ private final class ControlExchangeURLProtocol: URLProtocol {
             action: controlAnswer.get()
         )
         let body = (try? PlaybackControl.encoder.encode(response)) ?? Data()
+        // Encoded first, so a held response carries the answer that was
+        // current when the request arrived rather than when it was released.
+        controlGate.waitIfArmed()
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
@@ -337,41 +374,47 @@ final class PlaybackControlSessionTests: XCTestCase {
         session.end()
     }
 
-    /// An exchange from the reporter a reopen just replaced must not re-arm a
+    /// An exchange from the reporter a reopen just replaced must not arm a
     /// verdict for the session that replaced it.
     ///
     /// `end()` stops the old reporter with an unstructured task, so the stop
-    /// does not necessarily land before the next `begin`. Without the
-    /// generation token an old in-flight exchange completing in that window
-    /// carries a previous generation's verdict into the new session.
+    /// does not necessarily land before the next `begin`. The race is real and
+    /// not otherwise stageable, so the stub server holds the first response
+    /// open until the second generation has begun.
     func testAStaleReporterCannotArmTheNewSessionsVerdict() async throws {
         controlExchanges.reset()
+        controlGate.reset()
+        defer { controlGate.reset(); controlAnswer.set(ControlAction(type: "none")) }
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         defer { urlSession.invalidateAndCancel() }
         let session = PlaybackControlSession()
 
+        // Generation 1 asks, and the server's terminal answer is held.
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "from the old generation"
+        ))
+        controlGate.arm()
         session.begin(
             bootstrap: sessionBootstrap(),
             transport: transport,
             observe: { player.observation() }
         )
         _ = try await waitForExchange { $0.sequence == 1 }
-        // The next generation begins, and only then does a terminal arrive
-        // from a reporter belonging to the previous one.
+
+        // Generation 2 begins while that answer is still in flight.
+        controlAnswer.set(ControlAction(type: "none"))
         session.begin(
             bootstrap: sessionBootstrap(),
             transport: transport,
             observe: { player.observation() }
         )
-        controlAnswer.set(ControlAction(
-            type: "terminal", code: "unsupported", message: "from the old generation"
-        ))
-        defer { controlAnswer.set(ControlAction(type: "none")) }
-        try await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertNotEqual(
-            session.terminalVerdict?.message, "from the old generation",
-            "a stale generation cannot arm this session's verdict"
+        controlGate.release()
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertNil(
+            session.terminalVerdict,
+            "a verdict answered to a generation that has been replaced arms nothing"
         )
         session.end()
     }
