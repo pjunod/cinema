@@ -143,8 +143,18 @@
       this.clientInstanceId = value.clientInstanceId;
       this.snapshot = value.snapshot;
       this.send = value.send;
-      this.setTimer = value.setTimer || setTimeout;
-      this.clearTimer = value.clearTimer || clearTimeout;
+      // Wrapped, not assigned. `setTimeout` and `clearTimeout` are
+      // WindowTimers methods and every browser brand-checks their receiver:
+      // stored on an object and invoked as `this.setTimer(...)`, the receiver
+      // is the reporter and the call throws `TypeError: Illegal invocation`.
+      // Node does not brand-check, which is why this survived a test suite
+      // that injects its own timer in every case and never exercised the
+      // default at all — and why the web control plane completed exactly zero
+      // exchanges on real hardware while every unit test passed.
+      const scheduleDefault = (run, ms) => globalThis.setTimeout(run, ms);
+      const cancelDefault = (handle) => globalThis.clearTimeout(handle);
+      this.setTimer = value.setTimer || scheduleDefault;
+      this.clearTimer = value.clearTimer || cancelDefault;
       this.now = value.now || defaultNow;
       this.onExchange = typeof value.onExchange === "function" ? value.onExchange : function () {};
       this.sequence = 0;
