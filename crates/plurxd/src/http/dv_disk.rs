@@ -3,7 +3,9 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use plurx_core::store::{QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX};
+use plurx_core::store::{
+    QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_RECOVERY_GUARD_READ_MAX,
+};
 use serde::Deserialize;
 
 use super::error::ApiError;
@@ -27,7 +29,14 @@ pub struct StatusQuery {
 
 fn parse_file_ids(raw: &str) -> Result<Vec<i64>, ApiError> {
     let mut ids = std::collections::BTreeSet::new();
+    let mut submitted = 0;
     for value in raw.split(',').filter(|value| !value.trim().is_empty()) {
+        submitted += 1;
+        if submitted > DV_CONVERSION_LEDGER_READ_MAX {
+            return Err(ApiError::BadRequest(format!(
+                "file_ids accepts at most {DV_CONVERSION_LEDGER_READ_MAX} ids"
+            )));
+        }
         let id = value
             .trim()
             .parse::<i64>()
@@ -37,11 +46,6 @@ fn parse_file_ids(raw: &str) -> Result<Vec<i64>, ApiError> {
                 ApiError::BadRequest("file_ids must contain positive integers".to_owned())
             })?;
         ids.insert(id);
-        if ids.len() > DV_CONVERSION_LEDGER_READ_MAX {
-            return Err(ApiError::BadRequest(format!(
-                "file_ids accepts at most {DV_CONVERSION_LEDGER_READ_MAX} ids"
-            )));
-        }
     }
     Ok(ids.into_iter().collect())
 }
@@ -68,7 +72,14 @@ pub async fn status(
             "capabilities": state.jobs.dv_disk_capabilities(),
         })));
     }
-    let progress_snapshot = state.store.dv_conversion_progress_snapshot().await?;
+    let (progress_snapshot, recovery_guards) = tokio::try_join!(
+        state.store.dv_conversion_progress_snapshot(),
+        state
+            .store
+            .dv_recovery_guard_snapshot("", DV_RECOVERY_GUARD_READ_MAX),
+    )?;
+    let recovery_guard_orphans_truncated =
+        recovery_guards.summary.orphaned > recovery_guards.orphans.len() as i64;
     let progress = query.library_id.map_or_else(
         || progress_snapshot.global.clone(),
         |library_id| {
@@ -96,6 +107,12 @@ pub async fn status(
         "parallel": parallel,
         "progress": progress,
         "progress_by_library": progress_by_library.unwrap_or_default(),
+        "recovery_guards": {
+            "summary": recovery_guards.summary,
+            "orphans": recovery_guards.orphans,
+            "orphan_limit": DV_RECOVERY_GUARD_READ_MAX,
+            "orphans_truncated": recovery_guard_orphans_truncated,
+        },
     })))
 }
 

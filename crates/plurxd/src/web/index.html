@@ -5486,6 +5486,7 @@ function bookByline(it){
     ? `<div class="muted" style="margin-top:4px">By ${esc(it.author)}</div>` : '';
 }
 const DV_PROGRESS_POLL_MS=10000, DV_CONVERSION_LEDGER_READ_MAX=256;
+const DV_CONVERSION_LEDGER_BATCH_MAX=4;
 let DV_FILE_PAGE_FILES=[], DV_FILE_POLLING=false, DV_SETTINGS_POLL_AT=0;
 function dvConversionIsActive(conversion){
   return !!conversion&&["queued","running","verified"].includes(conversion.state);
@@ -5493,6 +5494,19 @@ function dvConversionIsActive(conversion){
 function dvSnapshotHasActive(snapshot){
   const progress=snapshot&&snapshot.progress;
   return !!progress&&(Number(progress.queued||0)+Number(progress.running||0)+Number(progress.verified||0)>0);
+}
+function dvRecoveryGuardStatusHtml(guard){
+  if(!guard) return "";
+  const state=String(guard.state||"");
+  if(state==="intent"){
+    return ` · recovery protection is being recorded for <code>${esc(guard.recovery_path||"unknown path")}</code>`;
+  }
+  if(state==="active"){
+    return ` · recovery guard active at <code>${esc(guard.recovery_path||"unknown path")}</code>`;
+  }
+  if(state==="guard_removed") return " · recovery guard removed; private scratch cleanup pending";
+  if(state==="scratch_removed") return " · recovery cleanup complete";
+  return ` · recovery cleanup state ${esc(state||"unknown")}`;
 }
 function dvFileActionMount(file){
   if(!ME||!ME.is_admin||![7,8].includes(Number(file&&file.dv_profile))) return "";
@@ -5516,41 +5530,58 @@ function dvConversionStateHtml(file,snapshot){
   if(state==="committed"){
     const layer=conversion.el_type?` · source ${String(conversion.el_type).toUpperCase()}`:"";
     const original=conversion.original_path?` · original retained at <code>${esc(conversion.original_path)}</code>`:" · original deleted by policy";
-    return `<div class="muted" style="margin-top:8px">✓ Converted to Profile 8.1${layer}${bytes}${original}</div>`;
+    return `<div class="muted" style="margin-top:8px">✓ Converted to Profile 8.1${layer}${bytes}${original}${dvRecoveryGuardStatusHtml(conversion.recovery_guard)}</div>`;
   }
   if(state==="failed"){
     const unavailable=capability.available===false;
-    const reason=unavailable?capability.reason||"conversion tools unavailable":"";
-    return `<div style="margin-top:8px"><div class="problem">Conversion failed: ${esc(conversion.error||"unknown error")}</div>
-      <button class="ghost sm" aria-label="Retry on-disk Dolby Vision conversion for file ${esc(id)}" onclick='queueDvFile(${JSON.stringify(id)},this)'${unavailable?' disabled':''}>Retry conversion</button>${reason?` <span class="muted">${esc(reason)}</span>`:""}</div>`;
+    const ineligible=snapshot.eligible===false;
+    const reason=unavailable?capability.reason||"conversion tools unavailable"
+      :ineligible?"the current scan no longer meets the Profile 7 conversion requirements":"";
+    const retry=ineligible
+      ?`<span class="problem">Retry unavailable: ${esc(reason)}.</span>`
+      :`<button class="ghost sm" aria-label="Retry on-disk Dolby Vision conversion for file ${esc(id)}" onclick='queueDvFile(${JSON.stringify(id)},this)'${unavailable?' disabled':''}>Retry conversion</button>${reason?` <span class="muted">${esc(reason)}</span>`:""}`;
+    return `<div style="margin-top:8px"><div class="problem">Conversion failed: ${esc(conversion.error||"unknown error")}${dvRecoveryGuardStatusHtml(conversion.recovery_guard)}</div>
+      ${retry}</div>`;
   }
   const labels={queued:"Queued for on-disk conversion",running:"Converting Profile 7",verified:"Replacement verified; publishing"};
-  return `<div class="muted" style="margin-top:8px">${esc(labels[state]||state)}${bytes}</div>`;
+  return `<div class="muted" style="margin-top:8px">${esc(labels[state]||state)}${bytes}${dvRecoveryGuardStatusHtml(conversion.recovery_guard)}</div>`;
 }
 async function hydrateDvFileActions(files){
   if(!ME||!ME.is_admin) return false;
   const targets=(files||[]).filter(file=>document.getElementById(`dv-file-${exactWireId(file)}`));
   if(!targets.length) return false;
-  const ids=[...new Set(targets.map(exactWireId))];
+  const uniqueIds=[...new Set(targets.map(exactWireId))];
+  const cap=DV_CONVERSION_LEDGER_READ_MAX*DV_CONVERSION_LEDGER_BATCH_MAX;
+  const ids=uniqueIds.slice(0,cap), selectedIds=new Set(ids);
+  const selectedTargets=targets.filter(file=>selectedIds.has(exactWireId(file)));
+  const cappedTargets=targets.filter(file=>!selectedIds.has(exactWireId(file)));
+  for(const file of cappedTargets){
+    const mount=document.getElementById(`dv-file-${exactWireId(file)}`);
+    if(!mount) continue;
+    mount.innerHTML=`<div class="problem">Conversion status not loaded for this file: this item exposes ${uniqueIds.length} Dolby Vision file actions; this page checks at most ${cap}.</div>`;
+    mount.dataset.dvActive="false";
+  }
   try{
     const batches=[];
     for(let at=0;at<ids.length;at+=DV_CONVERSION_LEDGER_READ_MAX){
       batches.push(ids.slice(at,at+DV_CONVERSION_LEDGER_READ_MAX));
     }
-    // Promise.all preserves batch order and rejects the whole snapshot if any
-    // bounded read fails, so the page never renders a misleading partial view.
-    const snapshots=await Promise.all(batches.map(batch=>
-      api(`/dv-conversions?file_ids=${encodeURIComponent(batch.join(","))}`)));
+    // At most four sequential reads bound both the page's total Store work and
+    // its request concurrency. Results stay private until every read succeeds.
+    const snapshots=[];
+    for(const batch of batches){
+      snapshots.push(await api(`/dv-conversions?file_ids=${encodeURIComponent(batch.join(","))}`));
+    }
     const conversions={}, eligibility={};
     for(const snapshot of snapshots){
       Object.assign(conversions,snapshot.conversions_by_file||{});
       Object.assign(eligibility,snapshot.eligible_by_file||{});
     }
-    // Tool capability is process-wide; choosing the first ID-ordered batch
-    // makes the result independent of which concurrent request finishes first.
+    // Tool capability is process-wide; choosing the first input-ordered batch
+    // makes the result independent of later batch responses.
     const capabilities=snapshots[0].capabilities||{};
     let anyActive=false;
-    for(const file of targets){
+    for(const file of selectedTargets){
       const id=exactWireId(file), mount=document.getElementById(`dv-file-${id}`);
       if(!mount) continue;
       const conversion=conversions[id]||null;
@@ -5566,7 +5597,7 @@ async function hydrateDvFileActions(files){
     return anyActive;
   }catch(e){
     let anyActive=false;
-    for(const file of targets){
+    for(const file of selectedTargets){
       const mount=document.getElementById(`dv-file-${exactWireId(file)}`);
       if(!mount) continue;
       mount.innerHTML=`<div class="problem">Conversion status unavailable: ${esc(e.message||"request failed")}</div>`;
@@ -5598,13 +5629,15 @@ async function queueDvFile(id,btn){
     const file=DV_FILE_PAGE_FILES.find(candidate=>exactWireId(candidate)===String(id));
     const mount=document.getElementById(`dv-file-${id}`);
     const active=dvConversionIsActive(result&&result.conversion);
+    const queued=result&&result.queued===true;
     if(file&&mount&&result&&result.conversion){
       mount.innerHTML=dvConversionStateHtml(file,{
-        conversion:result.conversion,eligible:true,capabilities:{available:true},
+        conversion:result.conversion,eligible:queued||active,capabilities:{available:true},
       });
       mount.dataset.dvActive=active?"true":"false";
     }
-    toast("Dolby Vision conversion queued");
+    toast(queued?"Dolby Vision conversion queued":active
+      ?"Dolby Vision conversion is already active":"Dolby Vision conversion was not queued");
     if(active) armDvFilePoll(DV_FILE_PAGE_FILES);
   }catch(e){ toast(e.message||"Couldn't queue conversion"); }
   finally{ btn.disabled=false; }
@@ -11639,6 +11672,8 @@ function paintDvConversionProgress(snapshot){
     const mount=document.getElementById(`dv-progress-${library.id}`);
     if(mount) mount.textContent=unavailable?`Unavailable: ${reason}`:dvProgressText(snapshot.progress_by_library&&snapshot.progress_by_library[String(library.id)]);
   }
+  const recovery=document.getElementById("dv-recovery-guards");
+  if(recovery) recovery.innerHTML=dvRecoveryGuardsHtml(snapshot);
 }
 async function saveDvMode(id,btn){
   const mode=document.getElementById(`dv-mode-${id}`).value;
@@ -11698,6 +11733,26 @@ async function saveDvDiskSettings(btn){
   }catch(e){ toast(e.message||"Couldn't save Dolby Vision settings"); }
   finally{ btn.disabled=false; }
 }
+function dvRecoveryGuardsHtml(dv){
+  const guards=dv&&dv.recovery_guards||{}, summary=guards.summary||{};
+  const pending=Number(summary.intent||0)+Number(summary.guard_removed||0);
+  const orphaned=Math.max(0,Number(summary.orphaned||0));
+  const orphans=Array.isArray(guards.orphans)?guards.orphans:[];
+  // The server supplies these from one Store snapshot. Keep the renderer
+  // fail-visible as well: a future projection regression must never hide a
+  // concrete recovery record merely because its count disagrees.
+  const visibleOrphaned=Math.max(orphaned,orphans.length);
+  const orphanRows=orphans.map(guard=>`<li><b>${esc(guard.state||"unknown")}</b> · former source <code>${esc(guard.source_path||"unknown")}</code><br>
+      <span class="muted">Recorded recovery path <code>${esc(guard.recovery_path||"unknown")}</code> · guard <code>${esc(guard.guard_id||"unknown")}</code></span></li>`).join("");
+  const orphanList=visibleOrphaned?`<details open><summary>Review orphaned recovery records (${visibleOrphaned})</summary>
+      <p class="hint">An orphan no longer belongs to a conversion row. Leave its recorded path alone while the recovery worker automatically verifies and retires it; deleting it manually can remove the last verified link.</p>
+      ${orphanRows?`<ul>${orphanRows}</ul>`:`<div class="problem">The orphan count is non-zero, but this bounded snapshot returned no records.</div>`}
+      ${guards.orphans_truncated?`<div class="muted">Showing ${orphans.length} of ${visibleOrphaned} orphaned records in this bounded snapshot.</div>`:""}</details>`
+    :`<div class="hint">No orphaned recovery records.</div>`;
+  return `<h3 class="section">Recovery guard lifecycle</h3>
+    <div aria-live="polite"><b>${Number(summary.active||0)}</b> active guards · <b>${pending}</b> transitions pending · ${Number(summary.intent||0)} recording · ${Number(summary.guard_removed||0)} awaiting scratch cleanup · ${Number(summary.scratch_removed||0)} ready for ledger retirement</div>
+    ${orphanList}`;
+}
 function dvDiskPanel(settings,dv){
   const capabilities=dv&&dv.capabilities;
   const reason=capabilities&&!capabilities.available?capabilities.reason:"";
@@ -11707,7 +11762,8 @@ function dvDiskPanel(settings,dv){
       <label class="schedpair"><input type="checkbox" id="dv-keep-original"${settings&&settings.dv_disk_keep_original?' checked':''}> Keep the Profile 7 original as <code>.p7.orig</code></label>
       <label class="schedpair" for="dv-parallel">Parallel files <select id="dv-parallel">${[1,2,3,4,5,6,7,8].map(n=>`<option value="${n}"${Number(settings&&settings.dv_disk_convert_parallel||1)===n?' selected':''}>${n}</option>`).join("")}</select></label>
       <button class="ghost sm" aria-label="Save Dolby Vision conversion settings" onclick="saveDvDiskSettings(this)">Save</button></div>
-    <div class="hint">Profile 7 files are copied to a verified Profile 8.1 replacement before their public path changes. Keeping the original is safest and is on by default. Each file is leased cluster-wide, while parallelism limits work on this node.</div></div>`;
+    <div class="hint">Profile 7 files are copied to a verified Profile 8.1 replacement before their public path changes. Keeping the original is safest and is on by default. Each file is leased cluster-wide, while parallelism limits work on this node.</div>
+    <div id="dv-recovery-guards">${dvRecoveryGuardsHtml(dv)}</div></div>`;
 }
 function libRow(l,status,dv){
   const paths=(l.paths||[]).map(p=>`<span class="pathchip">${esc(p)}</span>`).join(" ")||'<span class="muted">—</span>';

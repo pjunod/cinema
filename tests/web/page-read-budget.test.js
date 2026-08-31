@@ -728,8 +728,13 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
   assert.equal(snapshotActive({ progress: { committed: 4, failed: 1 } }), false);
 
   const hydrate = shippedSource("hydrateDvFileActions");
+  assert.match(hydrate,
+    /const cap=DV_CONVERSION_LEDGER_READ_MAX\*DV_CONVERSION_LEDGER_BATCH_MAX/);
+  assert.match(hydrate, /const ids=uniqueIds\.slice\(0,cap\)/);
   assert.match(hydrate, /at\+=DV_CONVERSION_LEDGER_READ_MAX/);
-  assert.match(hydrate, /Promise\.all\(batches\.map\(batch=>/);
+  assert.match(hydrate, /for\(const batch of batches\)/);
+  assert.doesNotMatch(hydrate, /Promise\.all/,
+    "ledger batches execute with request concurrency one");
   assert.match(hydrate,
     /api\(`\/dv-conversions\?file_ids=\$\{encodeURIComponent\(batch\.join\(","\)\)\}`\)/);
   assert.equal((hydrate.match(/api\(/g)||[]).length, 1,
@@ -766,6 +771,7 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
   const hydrate257 = new Function(
     "ME", "document", "exactWireId", "api", "dvConversionIsActive",
     "dvConversionStateHtml", "esc", "DV_CONVERSION_LEDGER_READ_MAX",
+    "DV_CONVERSION_LEDGER_BATCH_MAX",
     `${hydrate}; return hydrateDvFileActions;`,
   )(
     { is_admin: true },
@@ -776,6 +782,7 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     (file, snapshot) => `${file.id}:${snapshot.conversion?.state || "none"}:${snapshot.eligible}`,
     String,
     256,
+    4,
   );
   assert.equal(await hydrate257(files), true);
   assert.equal(requests.length, 2, "257 visible files use exactly two bounded reads");
@@ -788,31 +795,76 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
   assert.equal(mounts.get("dv-file-257").innerHTML, "257:none:true",
     "the final batch survives the deterministic merge");
 
-  for (const mount of mounts.values()) mount.dataset.dvActive = "false";
-  let calls = 0;
-  const rejectSecondBatch = new Function(
+  const cappedFiles = Array.from({ length: 1025 }, (_, index) => ({ id: index + 1 }));
+  const cappedMounts = new Map(cappedFiles.map((file) => [`dv-file-${file.id}`, {
+    dataset: { dvActive: "false" }, innerHTML: "Checking",
+  }]));
+  const cappedRequests = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const hydrateAboveCap = new Function(
     "ME", "document", "exactWireId", "api", "dvConversionIsActive",
     "dvConversionStateHtml", "esc", "DV_CONVERSION_LEDGER_READ_MAX",
+    "DV_CONVERSION_LEDGER_BATCH_MAX",
     `${hydrate}; return hydrateDvFileActions;`,
   )(
     { is_admin: true },
-    { getElementById: (id) => mounts.get(id) || null },
+    { getElementById: (id) => cappedMounts.get(id) || null },
+    (file) => String(file.id),
+    async (url) => {
+      cappedRequests.push(url);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await nextTurn();
+      inFlight -= 1;
+      return { conversions_by_file: {}, eligible_by_file: {}, capabilities: {} };
+    },
+    () => false,
+    (file) => `loaded ${file.id}`,
+    String,
+    256,
+    4,
+  );
+  assert.equal(await hydrateAboveCap(cappedFiles), false);
+  assert.equal(cappedRequests.length, 4, "the page never exceeds four ledger reads");
+  assert.equal(maxInFlight, 1, "ledger reads execute sequentially");
+  const cappedRequestIds = cappedRequests.map((url) => new URL(url, "http://plurx.test")
+    .searchParams.get("file_ids").split(","));
+  assert.deepEqual(cappedRequestIds.map((ids) => ids.length), [256, 256, 256, 256]);
+  assert.equal(cappedRequestIds.flat().at(-1), "1024");
+  assert.equal(cappedMounts.get("dv-file-1024").innerHTML, "loaded 1024");
+  assert.match(cappedMounts.get("dv-file-1025").innerHTML, /checks at most 1024/,
+    "files beyond the fixed page budget get an explicit state");
+
+  for (const mount of cappedMounts.values()) mount.innerHTML = "Checking";
+  let failedCalls = 0;
+  const rejectFinalBatch = new Function(
+    "ME", "document", "exactWireId", "api", "dvConversionIsActive",
+    "dvConversionStateHtml", "esc", "DV_CONVERSION_LEDGER_READ_MAX",
+    "DV_CONVERSION_LEDGER_BATCH_MAX",
+    `${hydrate}; return hydrateDvFileActions;`,
+  )(
+    { is_admin: true },
+    { getElementById: (id) => cappedMounts.get(id) || null },
     (file) => String(file.id),
     async () => {
-      calls += 1;
-      if (calls === 2) throw new Error("second batch failed");
+      failedCalls += 1;
+      if (failedCalls === 4) throw new Error("final bounded batch failed");
       return { conversions_by_file: { 1: { state: "queued" } } };
     },
     () => true,
     () => "partial result must not paint",
     String,
     256,
+    4,
   );
-  assert.equal(await rejectSecondBatch(files), false);
-  assert.equal(calls, 2);
-  assert.match(mounts.get("dv-file-1").innerHTML, /second batch failed/,
-    "one failed batch makes the whole visible snapshot explicitly unavailable");
-  assert.doesNotMatch(mounts.get("dv-file-1").innerHTML, /partial result must not paint/);
+  assert.equal(await rejectFinalBatch(cappedFiles), false);
+  assert.equal(failedCalls, 4);
+  assert.match(cappedMounts.get("dv-file-1").innerHTML, /final bounded batch failed/,
+    "one failed batch makes every selected result explicitly unavailable");
+  assert.match(cappedMounts.get("dv-file-1024").innerHTML, /final bounded batch failed/);
+  assert.match(cappedMounts.get("dv-file-1025").innerHTML, /checks at most 1024/);
+  assert.doesNotMatch(cappedMounts.get("dv-file-1").innerHTML, /partial result must not paint/);
 
   const refresh = shippedSource("refreshDvConversions");
   assert.match(refresh, /DV_SETTINGS_POLL_AT=Date\.now\(\)\+DV_PROGRESS_POLL_MS/,
@@ -834,7 +886,15 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     "a cap-hit batch tells the operator another bounded pass may be needed");
 
   const fileMount = { innerHTML: "", dataset: {} };
+  const fileEvents = [];
+  const fileResults = [
+    { queued: true, conversion: { state: "queued" } },
+    { queued: false, conversion: { state: "running" } },
+    { queued: false, conversion: { state: "failed" } },
+    new Error("file is not Dolby Vision Profile 7"),
+  ];
   let fileApiCalls = 0;
+  let filePollArms = 0;
   const fileHarness = new Function(
     "api", "toast", "document", "exactWireId", "dvConversionStateHtml", "armDvFilePoll",
     `let DV_FILE_PAGE_FILES=[{id:"42"}];
@@ -844,22 +904,42 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
   )(
     async () => {
       fileApiCalls += 1;
-      return { queued: true, conversion: { state: "queued" } };
+      const result = fileResults.shift();
+      if (result instanceof Error) throw result;
+      return result;
     },
-    () => {},
+    (message) => fileEvents.push(message),
     { getElementById: () => fileMount },
     (file) => String(file.id),
-    (_file, snapshot) => snapshot.conversion.state,
-    () => { fileMount.armed = true; },
+    (_file, snapshot) => `${snapshot.conversion.state}:${snapshot.eligible}`,
+    () => { filePollArms += 1; },
   );
   await fileHarness.queue("42", { disabled: false });
-  assert.equal(fileMount.innerHTML, "queued",
+  assert.equal(fileMount.innerHTML, "queued:true",
     "the file mutation response paints success without a follow-up read");
   assert.equal(fileMount.dataset.dvActive, "true");
   assert.equal(fileApiCalls, 1,
     "file queue success never depends on a second status request");
-  assert.equal(fileMount.armed, true,
+  assert.equal(filePollArms, 1,
     "the active mutation response arms terminal-bounded item polling");
+  assert.deepEqual(fileEvents, ["Dolby Vision conversion queued"]);
+
+  await fileHarness.queue("42", { disabled: false });
+  assert.equal(fileMount.innerHTML, "running:true");
+  assert.equal(fileEvents.at(-1), "Dolby Vision conversion is already active",
+    "an idempotent active response is never announced as newly queued");
+  assert.equal(filePollArms, 2);
+
+  await fileHarness.queue("42", { disabled: false });
+  assert.equal(fileMount.innerHTML, "failed:false");
+  assert.equal(fileEvents.at(-1), "Dolby Vision conversion was not queued",
+    "a defensive non-active queued:false response cannot claim success");
+  assert.equal(filePollArms, 2, "a terminal response does not arm polling");
+
+  await fileHarness.queue("42", { disabled: false });
+  assert.equal(fileEvents.at(-1), "file is not Dolby Vision Profile 7",
+    "the API's ineligible refusal remains visible rather than becoming a queued toast");
+  assert.equal(fileApiCalls, 4);
 
   const libraryEvents = [];
   let libraryApiCalls = 0;
@@ -894,6 +974,8 @@ test("Dolby Vision settings controls have accessible names", () => {
   const file = shippedSource("dvConversionStateHtml");
   assert.match(file, /aria-label="Convert file .* from Dolby Vision Profile 7 to Profile 8\.1 on disk"/);
   assert.match(file, /aria-label="Retry on-disk Dolby Vision conversion for file/);
+  assert.ok((file.match(/dvRecoveryGuardStatusHtml\(conversion\.recovery_guard\)/g)||[]).length>=3,
+    "attached guard state is visible before commit, after failure, and at the terminal row");
   const mode = shippedSource("dvModeSelect");
   assert.match(mode, /aria-label="Dolby Vision conversion mode for/);
   assert.match(mode, /aria-label="Save Dolby Vision conversion mode for/);
@@ -933,6 +1015,92 @@ test("Dolby Vision settings controls have accessible names", () => {
   const panel = shippedSource("dvDiskPanel");
   assert.match(panel, /<label class="schedpair" for="dv-parallel">Parallel files/);
   assert.match(panel, /aria-label="Save Dolby Vision conversion settings"/);
+
+  const escapeHtml = (value) => String(value)
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+  const renderFile = new Function(
+    "exactWireId", "fmtBytes", "dvRecoveryGuardStatusHtml", "esc",
+    `${file}; return dvConversionStateHtml;`,
+  )(
+    (value) => String(value.id),
+    () => "0 B",
+    () => "",
+    escapeHtml,
+  );
+  const failedIneligible = renderFile(
+    { id: 42 },
+    {
+      conversion: { state: "failed", error: "controlled failure" },
+      eligible: false,
+      capabilities: { available: true },
+    },
+  );
+  assert.match(failedIneligible,
+    /Retry unavailable: the current scan no longer meets the Profile 7 conversion requirements/);
+  assert.doesNotMatch(failedIneligible, /<button[^>]*>Retry conversion<\/button>/,
+    "a failed row that is no longer eligible offers no false retry action");
+  const failedEligible = renderFile(
+    { id: 42 },
+    {
+      conversion: { state: "failed", error: "controlled failure" },
+      eligible: true,
+      capabilities: { available: true },
+    },
+  );
+  assert.match(failedEligible, /<button[^>]*>Retry conversion<\/button>/,
+    "a still-eligible failed row keeps its retry action");
+  const guardStatus = new Function(
+    "esc",
+    `${shippedSource("dvRecoveryGuardStatusHtml")}; return dvRecoveryGuardStatusHtml;`,
+  )(escapeHtml);
+  assert.match(guardStatus({ state: "active", recovery_path: "</code><script>" }),
+    /&lt;\/code&gt;&lt;script&gt;/,
+    "file detail escapes the operator-visible recovery path");
+  assert.equal(guardStatus({ state: "guard_removed" }),
+    " · recovery guard removed; private scratch cleanup pending");
+  assert.equal(guardStatus({ state: "scratch_removed" }),
+    " · recovery cleanup complete");
+
+  const renderRecovery = new Function(
+    "esc",
+    `${shippedSource("dvRecoveryGuardsHtml")}; return dvRecoveryGuardsHtml;`,
+  )(escapeHtml);
+  const recovery = renderRecovery(
+    {
+      capabilities: { available: true },
+      recovery_guards: {
+        summary: { intent: 1, active: 2, guard_removed: 3, scratch_removed: 4, orphaned: 9 },
+        orphans: [{
+          guard_id: "guard-<1>",
+          state: "active",
+          source_path: "/media/<former>.mkv",
+          recovery_path: "/media/.<guard>.mkv",
+        }],
+        orphans_truncated: true,
+      },
+    }
+  );
+  assert.match(recovery, /<b>2<\/b> active guards · <b>4<\/b> transitions pending · 1 recording · 3 awaiting scratch cleanup · 4 ready for ledger retirement/);
+  assert.match(recovery, /Review orphaned recovery records \(9\)/);
+  assert.match(recovery, /Showing 1 of 9 orphaned records in this bounded snapshot/);
+  for (const escaped of ["guard-&lt;1&gt;", "/media/&lt;former&gt;.mkv", "/media/.&lt;guard&gt;.mkv"])
+    assert.match(recovery, new RegExp(escaped));
+  assert.doesNotMatch(recovery, /<former>|<guard>/,
+    "guard ids and paths remain inert admin text");
+  const failVisibleRecovery = renderRecovery({
+    recovery_guards: {
+      summary: { orphaned: 0 },
+      orphans: [{ guard_id: "visible", state: "active", source_path: "/former" }],
+    },
+  });
+  assert.match(failVisibleRecovery, /Review orphaned recovery records \(1\)/,
+    "a concrete orphan row remains visible even if a future projection regresses its count");
+  assert.doesNotMatch(failVisibleRecovery, /No orphaned recovery records/);
+  assert.match(panel, /id="dv-recovery-guards"/);
+  const paint = shippedSource("paintDvConversionProgress");
+  assert.match(paint, /recovery\.innerHTML=dvRecoveryGuardsHtml\(snapshot\)/,
+    "an already-bounded active conversion refresh also repaints its guard lifecycle");
 });
 
 test("Analysis workspace uses server pages and separates expected outcomes", () => {

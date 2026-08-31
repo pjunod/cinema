@@ -4928,6 +4928,34 @@ mod tests {
             call(&app, get("/api/v1/dv-conversions", None)).await.0,
             StatusCode::UNAUTHORIZED
         );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, viewer_login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{viewer_login}");
+        let viewer = viewer_login["token"].as_str().expect("viewer token");
+        assert_eq!(
+            call(&app, get("/api/v1/dv-conversions", Some(viewer)))
+                .await
+                .0,
+            StatusCode::FORBIDDEN,
+            "recovery paths remain admin-only"
+        );
         let (status, initial) = call(&app, get("/api/v1/dv-conversions", Some(&admin))).await;
         assert_eq!(status, StatusCode::OK, "{initial}");
         assert_eq!(initial["capabilities"]["available"], true);
@@ -4952,6 +4980,69 @@ mod tests {
         let (status, idempotent) = call(&app, post(&file_uri, Some(&admin), json!({}))).await;
         assert_eq!(status, StatusCode::OK, "{idempotent}");
         assert_eq!(idempotent["queued"], false);
+        assert!(state
+            .store
+            .mark_dv_conversion_failed(file, "controlled retry failure", 110)
+            .await
+            .expect("mark controlled conversion failure"));
+        let rescanned = state
+            .store
+            .upsert_file(
+                movie,
+                "/dv-api/profile7.mkv",
+                8_000,
+                100,
+                &ProbeResult {
+                    container: Some("mkv".into()),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(8),
+                        bl_compat_id: Some(1),
+                        el_present: Some(false),
+                        rpu_present: Some(true),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("rescan failed source as ineligible");
+        assert_eq!(rescanned, file);
+        let (status, ineligible_retry) = call(&app, post(&file_uri, Some(&admin), json!({}))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{ineligible_retry}"
+        );
+        assert_eq!(
+            ineligible_retry["error"],
+            "file is not Dolby Vision Profile 7"
+        );
+        let rescanned = state
+            .store
+            .upsert_file(movie, "/dv-api/profile7.mkv", 8_000, 100, &probe)
+            .await
+            .expect("restore eligible retry source");
+        assert_eq!(rescanned, file);
+        let (status, retried) = call(&app, post(&file_uri, Some(&admin), json!({}))).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{retried}");
+        assert_eq!(retried["queued"], true);
+        assert!(state
+            .store
+            .mark_dv_conversion_running(file, 8_000)
+            .await
+            .expect("mark conversion running"));
+        assert!(state
+            .store
+            .mark_dv_conversion_verified(file, Some("fel"), 6_000)
+            .await
+            .expect("mark conversion verified"));
+        let recovery_path =
+            format!("/dv-api/.profile7.mkv.plurx-dv-{file}/replacement.p81.public-proof");
+        assert!(state
+            .store
+            .begin_dv_recovery_guard(file, "api-guard-1", &recovery_path, 123,)
+            .await
+            .expect("record recovery guard intent"));
 
         let batch_uri = format!("/api/v1/dv-conversions?file_ids={file},9223372036854775807");
         let (status, batch) = call(&app, get(&batch_uri, Some(&admin))).await;
@@ -4959,10 +5050,59 @@ mod tests {
         assert_eq!(batch["eligible_by_file"][file.to_string()], true);
         assert_eq!(
             batch["conversions_by_file"][file.to_string()]["state"],
-            "queued"
+            "verified"
         );
         assert_eq!(batch["capabilities"]["available"], true);
+        assert_eq!(
+            batch["conversions_by_file"][file.to_string()]["recovery_guard"]["state"],
+            "intent"
+        );
+        assert_eq!(
+            batch["conversions_by_file"][file.to_string()]["recovery_guard"]["recovery_path"],
+            recovery_path
+        );
         assert!(batch["eligible_by_file"]["9223372036854775807"].is_null());
+
+        let read_max = plurx_core::store::DV_CONVERSION_LEDGER_READ_MAX;
+        let repeated_at_limit = vec![file.to_string(); read_max].join(",");
+        let (status, repeated_batch) = call(
+            &app,
+            get(
+                &format!("/api/v1/dv-conversions?file_ids={repeated_at_limit}"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{repeated_batch}");
+        assert_eq!(
+            repeated_batch["conversions_by_file"]
+                .as_object()
+                .expect("bounded repeated-id response"),
+            batch["conversions_by_file"]
+                .as_object()
+                .expect("ordinary batch response")
+        );
+        let repeated_over_limit = vec![file.to_string(); read_max + 1].join(",");
+        let (status, repeated_overflow) = call(
+            &app,
+            get(
+                &format!("/api/v1/dv-conversions?file_ids={repeated_over_limit}"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{repeated_overflow}");
+        assert_eq!(
+            repeated_overflow["error"],
+            format!("file_ids accepts at most {read_max} ids")
+        );
+
+        let (status, guarded_file) = call(&app, get(&file_uri, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{guarded_file}");
+        assert_eq!(
+            guarded_file["conversion"]["recovery_guard"]["guard_id"],
+            "api-guard-1"
+        );
 
         let (status, invalid_batch) =
             call(&app, get("/api/v1/dv-conversions?file_ids=0", Some(&admin))).await;
@@ -4997,7 +5137,39 @@ mod tests {
         assert_eq!(current["library_modes"][library.id.to_string()], "manual");
         assert_eq!(current["keep_original"], false);
         assert_eq!(current["parallel"], 2);
-        assert_eq!(current["progress"]["queued"], 1);
+        assert_eq!(current["progress"]["verified"], 1);
+        assert_eq!(current["recovery_guards"]["summary"]["intent"], 1);
+        assert_eq!(current["recovery_guards"]["summary"]["orphaned"], 0);
+        assert_eq!(current["recovery_guards"]["orphans"], json!([]));
+        assert_eq!(
+            current["recovery_guards"]["orphan_limit"],
+            plurx_core::store::DV_RECOVERY_GUARD_READ_MAX
+        );
+        assert_eq!(current["recovery_guards"]["orphans_truncated"], false);
+
+        assert_eq!(
+            state
+                .store
+                .delete_files(&[file])
+                .await
+                .expect("delete guarded file"),
+            1
+        );
+        let (status, orphaned) = call(&app, get("/api/v1/dv-conversions", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{orphaned}");
+        assert_eq!(orphaned["recovery_guards"]["summary"]["orphaned"], 1);
+        assert_eq!(
+            orphaned["recovery_guards"]["orphans"][0]["guard_id"],
+            "api-guard-1"
+        );
+        assert_eq!(
+            orphaned["recovery_guards"]["orphans"][0]["source_path"],
+            "/dv-api/profile7.mkv"
+        );
+        assert_eq!(
+            orphaned["recovery_guards"]["orphans"][0]["recovery_path"],
+            recovery_path
+        );
     }
 
     #[tokio::test]
