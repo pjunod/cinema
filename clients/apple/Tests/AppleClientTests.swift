@@ -1929,6 +1929,24 @@ final class AppleClientTests: XCTestCase {
     ///
     /// Collapsing them would hand the arbiter one word — "stalled" — which is
     /// exactly the ambiguity M5 exists to remove.
+    /// The server's seven hold reasons, in the viewer's words.
+    ///
+    /// A viewer reading `working_set` learns less than one reading a sentence,
+    /// and a reason this client has never heard of is a newer server rather
+    /// than a broken one — so it falls back to the generic line instead of
+    /// showing the wire name or nothing at all.
+    func testEveryHoldReasonHasSomethingAViewerCanRead() {
+        for reason in ["demand", "time", "bytes", "global", "ahead", "working_set", "no_room"] {
+            let notice = PlayerController.holdNotice(reason)
+            XCTAssertFalse(notice.isEmpty, "\(reason) has no viewer-facing text")
+            XCTAssertFalse(notice.contains(reason.replacingOccurrences(of: "_", with: " ")),
+                           "\(reason) shows its wire name")
+        }
+        XCTAssertEqual(PlayerController.holdNotice("a reason from a newer server"),
+                       "Waiting for the server.")
+        XCTAssertEqual(PlayerController.holdNotice(nil), "Waiting for the server.")
+    }
+
     func testStallEvidenceNamesWhichConditionTheServerIsBeingToldAbout() {
         let buffering = PlayerController.stallEvidence(for: .buffering)
         XCTAssertEqual(buffering.decoderState, .starved)

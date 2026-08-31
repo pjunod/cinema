@@ -46,9 +46,10 @@ merge target: two client PRs in flight means the second always fails.
 | M5.5 spike | the three-platform measurement procedure, ready to run | [#707](https://github.com/pjunod/plurx/pull/707) | merged; **needs a hardware run** |
 | M5d | Apple: the return path, and the verdict that outlives its reporter | [#709](https://github.com/pjunod/plurx/pull/709) | merged |
 | M5b | web: the truncated-stream owner defers too | [#712](https://github.com/pjunod/plurx/pull/712) | merged |
-| M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | in review |
-| M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | in review |
-| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | in review |
+| M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | merged |
+| M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | merged |
+| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | merged |
+| M5e | Apple: the stall funnel asks before it decides | — | this change |
 
 ## The gate that blocks every deletion, and what it does not block
 
@@ -60,6 +61,14 @@ reads **zero on all four nodes** as of 2026-08-31, measured directly off
 `/metrics`. It counts accepted exchanges from clients that declared every
 action this server can send, and the fleet has never run a build that can
 receive one.
+
+**The server does emit actions.** `resolve_action` is called from
+`local_control_response` (`crates/plurxd/src/http/hls.rs:3525`) on the live
+control endpoint, not only from tests — a grep confined to
+`playback_control.rs` finds only test call sites, because the production one
+is fully qualified, and that mistake has been made once already in review.
+What has never happened is a *client* completing an exchange that declares
+the whole vocabulary.
 
 **What that gates is deletion, not construction.** Removing a client's own
 recovery while the installed build cannot receive the replacement turns the

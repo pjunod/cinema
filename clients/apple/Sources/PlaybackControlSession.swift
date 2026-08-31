@@ -124,6 +124,10 @@ final class PlaybackControlSession {
     /// on build 90. Nothing here hops.
     private let verdicts = PlaybackControlLatestVerdict()
 
+    /// Every exchange's action, counted. The ask reads the count, waits for it
+    /// to move, and takes whatever the exchange that moved it carried.
+    private let answers = PlaybackControlAnswers()
+
     /// The last terminal verdict this session was given, if any.
     ///
     /// It deliberately outlives the reporter. A terminal verdict stops
@@ -152,6 +156,7 @@ final class PlaybackControlSession {
         // given in, because the failure it explains usually arrives after a
         // reopen; `clearVerdict()` is how a new title starts clean.
         let generation = verdicts.beginGeneration()
+        answers.begin(generation: generation)
         let lease = TimeInterval(bootstrap.leaseTimeoutMs) / 1_000
         self.observe = observe
         // The reporter takes its first snapshot the moment it starts, so the
@@ -174,7 +179,15 @@ final class PlaybackControlSession {
             // `retry_resource` are exchange-level and the reporter already
             // honours them; a player that acted on them here would be
             // deciding, which is M5e.
-            onExchange: { [verdicts] exchange in
+            onExchange: { [verdicts, answers] exchange in
+                // Every exchange advances the counter, including a failed one:
+                // an owner that asked must not wait out its whole bound for an
+                // exchange that has already come back with nothing.
+                answers.record(
+                    exchange.response?.action,
+                    requestSequence: exchange.request.sequence,
+                    generation: generation
+                )
                 guard let action = exchange.response?.action,
                       action.type == "terminal",
                       action.message?.isEmpty == false
@@ -213,6 +226,62 @@ final class PlaybackControlSession {
         guard let reporter else { return }
         Task { await reporter.notifyUrgently() }
     }
+
+    /// Publish what a recovery owner is about to act on, then wait — briefly —
+    /// for the verdict that evidence earns.
+    ///
+    /// `reportEvidence` tells the server. This tells the server and listens.
+    /// The difference is the whole milestone: an owner that only reports still
+    /// decides for itself, and every one of them decides by guessing toward
+    /// retry.
+    ///
+    /// Returns `nil` when the reporter is gone, the exchange failed, or nothing
+    /// arrived in time — and every caller must fall through to its existing
+    /// behaviour on it. That fallback is not a hedge: a server that has not yet
+    /// decided must not strand a stalled viewer.
+    ///
+    /// Polled rather than continuation-based on purpose. A continuation resumed
+    /// twice traps and one never resumed hangs the caller forever, and this is
+    /// resumed from an actor's closure on one side and a deadline on the other.
+    /// A counter and a sleep cannot do either.
+    func askForAction(bound: TimeInterval, cap: TimeInterval) async -> ControlAction? {
+        guard let reporter else { return nil }
+        // The request that carries this evidence is the next NEW one, so the
+        // floor is the reporter's own counter plus one. Settling on an
+        // exchange that was already in flight would hand this stall the
+        // verdict for an observation taken before the stall existed.
+        let floor = await reporter.sequence + 1
+        var seen = answers.count()
+        reportEvidence()
+        var deadline = Date().addingTimeInterval(bound)
+        let hardDeadline = Date().addingTimeInterval(cap)
+        var extended = false
+        while Date() < deadline {
+            if let answer = answers.answer(atOrAfter: floor) { return answer.action }
+            let count = answers.count()
+            if count > seen {
+                seen = count
+                // An exchange finished and it was not ours, which means the
+                // reporter could not have started ours until now: `drain`
+                // returns immediately while one is in flight. One window from
+                // this instant, once, or the bound would expire at the moment
+                // an answer first became possible.
+                if !extended {
+                    extended = true
+                    deadline = min(Date().addingTimeInterval(bound), hardDeadline)
+                }
+            }
+            try? await Task.sleep(nanoseconds: PlaybackControlSession.askPollNanoseconds)
+            // A reporter that stopped will never exchange again, so waiting out
+            // the rest of the bound would add it to a stall for nothing.
+            if self.reporter == nil { return nil }
+        }
+        return nil
+    }
+
+    /// How often the ask looks. Short enough that it costs a stalled viewer
+    /// nothing measurable, long enough that it is not a spin.
+    static let askPollNanoseconds: UInt64 = 25_000_000
 
     /// A new title. The old verdict described a source that is no longer
     /// playing, so keeping it would show a confident sentence about the wrong
@@ -254,6 +323,57 @@ final class PlaybackControlSession {
 /// The staleness this admits is bounded by how often the player reports that
 /// it changed — once a second from the periodic time observer, plus every
 /// rate change — against an exchange cadence the server never sets faster.
+/// One slot per exchange outcome, counted so an ask can tell "the answer I was
+/// waiting for" from "an answer that was already there".
+///
+/// The generation is checked on write for the same reason the verdict slot
+/// checks it: `end()` stops the old reporter in an unstructured task, so an old
+/// exchange can land after the next session has begun.
+private final class PlaybackControlAnswers: @unchecked Sendable {
+    struct Answer {
+        /// The sequence of the REQUEST this answered, not a count of answers.
+        var requestSequence: Int
+        var action: ControlAction?
+    }
+
+    private let lock = NSLock()
+    private var latest: Answer?
+    private var answered = 0
+    private var generation = 0
+
+    /// Adopt the verdict slot's generation rather than keeping a second one.
+    /// Two counters that must agree are a bug waiting for a reason.
+    func begin(generation: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.generation = generation
+        latest = nil
+        answered = 0
+    }
+
+    func record(_ action: ControlAction?, requestSequence: Int, generation: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard generation == self.generation else { return }
+        answered += 1
+        latest = Answer(requestSequence: requestSequence, action: action)
+    }
+
+    /// How many exchanges have come back at all, ours or not.
+    func count() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return answered
+    }
+
+    func answer(atOrAfter sequence: Int) -> Answer? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let latest, latest.requestSequence >= sequence else { return nil }
+        return latest
+    }
+}
+
 /// The reporter's half of the bridge: one verdict, written from an actor and
 /// read from `@MainActor`, with a lock rather than an isolation assertion.
 ///
