@@ -443,6 +443,41 @@ class Controller(
             )
             when (action) {
                 PlaybackErrorAction.RetrySameHDRDelivery -> {
+                    // The one rung an armed verdict licenses skipping, and it
+                    // is licensed by the server's own definition rather than
+                    // by an argument made here. `is_permanent` is documented
+                    // as "whether retrying this source, *unchanged*, can ever
+                    // succeed", and this rung is the only one that retries it
+                    // unchanged: it re-prepares the identical recipe and hopes.
+                    //
+                    // The other two rungs change the recipe, which is exactly
+                    // what the verdict does not rule out. `unsupported` means
+                    // "this source cannot be carried by *this delivery
+                    // pipeline*" — a copy-producer exit — and
+                    // `RetryAsCompatibilityTranscode` asks for a different
+                    // pipeline; the server admits its own retry for the same
+                    // reason. Skipping those would delete the rung most likely
+                    // to produce a picture and caption it with a sentence
+                    // about a pipeline nobody is proposing any more.
+                    val armed = ladderVerdict(
+                        errorCode = error.errorCode,
+                        verdict = playbackControl.terminalVerdict,
+                    )
+                    if (armed != null) {
+                        playbackTelemetry.report(
+                            event = "playback_ladder_verdict",
+                            level = "warn",
+                            message = error.errorCodeName,
+                            code = error.errorCode,
+                            detail = "skipped=retry_same_hdr delivery=$deliveryMode " +
+                                "verdict=${armed.type}",
+                        )
+                        onError(
+                            armed.message
+                                ?: error.errorCodeName.let { "Playback stopped ($it)." },
+                        )
+                        return
+                    }
                     val position = realPosition()
                     sameHdrRetryUsed = true
                     restartAt(position, "fallback")
@@ -1417,6 +1452,27 @@ class Controller(
  */
 internal const val CONTROL_ASK_MS = 1_500L
 internal const val CONTROL_ASK_CAP_MS = 3_000L
+
+/**
+ * The verdict that ends an unchanged retry, or null to take it anyway.
+ *
+ * Scoped to the one rung that retries the source *unchanged*, because that is
+ * the exact scope of the server's `is_permanent` — see the call site. It is a
+ * function rather than an inline `if` so that the rule it encodes is pinned by
+ * a test: a transport failure never borrows the server's words.
+ *
+ * [verdict] is `terminalVerdict`, which deliberately outlives the session that
+ * earned it — that is what lets a verdict explain a failure that arrives after
+ * a reopen, and it is also exactly why a dropped link must not inherit it. A
+ * transport failure is a different cause with a different answer, and the
+ * client's own sentence is the honest one for it.
+ */
+internal fun ladderVerdict(errorCode: Int, verdict: ControlAction?): ControlAction? = when {
+    verdict == null -> null
+    verdict.type != "terminal" -> null
+    isTransportPlaybackError(errorCode) -> null
+    else -> verdict
+}
 
 /**
  * Which class of failure Media3 reported, in the protocol's vocabulary.

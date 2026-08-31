@@ -3900,39 +3900,35 @@ final class PlayerController: ObservableObject {
             eventDomain: event?.errorDomain,
             eventStatus: event?.errorStatusCode
         )
-        // The ask goes before rung one, not before rung two. A verdict about
-        // the source does not change by node, so an `unsupported` producer
-        // decision would otherwise walk next-node → established HDR →
-        // compatibility transcode, guessing at retry the whole way and
-        // failing three times to learn what the server already knew.
+        // Publish this failure and wait briefly for the verdict it earns. The
+        // ask goes here, ahead of every rung, because the answer governs one
+        // of them and the exchange has to be out before any reopen replaces
+        // the item it describes.
         //
-        // Only `terminal` short-circuits here. A `hold` or a `retry_resource`
-        // on a dead item would leave a player with nothing to render and no
-        // path forward, so those fall through to the ladder — the ladder is
-        // the only thing that can still produce a picture.
+        // What the answer does NOT do is end the ladder, which is what this
+        // originally shipped doing and what #722's review corrected. `terminal`
+        // is emitted only for `unsupported` and `invalid_configuration`, and
+        // the server documents `is_permanent` as "whether retrying this
+        // source, *unchanged*, can ever succeed" — `unsupported`'s own
+        // sentence is "this source cannot be carried by *this delivery
+        // pipeline*". It is a verdict about the recipe, not the source: the
+        // compatibility fallback asks for a different pipeline, which is
+        // exactly what the verdict leaves open, and the server admits its own
+        // `execute_prepublication_copy_retry` for the same reason. Ending the
+        // ladder on it deleted the rung most likely to still produce a picture
+        // and captioned the failure with a sentence about a pipeline nobody
+        // was proposing any more.
+        //
+        // So it governs one thing: whether the established-HDR rung spends its
+        // reconnect. It does not govern whether that rung *runs* — that rung
+        // also carries a stop, and a stop is not a retry. And it does not
+        // govern the compatibility fallback below it, which changes the
+        // recipe. A `hold` or a `retry_resource` governs nothing at all: on a
+        // dead item they would leave a player with no path forward.
         let generation = openGeneration
         let itemVerdict = await controlVerdictForItemFailure(item)
         guard openGeneration == generation, player.currentItem === item,
               !isChangingStream else { return }
-        if let itemVerdict, itemVerdict.type == "terminal" {
-            player.pause()
-            isPlaying = false
-            wantsPlayback = false
-            isChangingStream = false
-            failed = true
-            playbackFailureTitle = currentMs > 0
-                ? Self.playbackStoppedFailureTitle
-                : Self.playbackStartFailureTitle
-            playbackError = itemVerdict.message
-            reportPlaybackFailure(
-                item,
-                step: PlaybackCompatibilityLadderStep(
-                    cause: .itemFailure,
-                    fallback: PlaybackCompatibilityFallback.none
-                )
-            )
-            return
-        }
         var reportedFailure = false
         if started, !isCompatibilityFailure, isTransportFailure {
             // The log goes out before the retry, not after it: a successful
@@ -3977,7 +3973,12 @@ final class PlayerController: ObservableObject {
             // intent survives in `wantsPlayback`, so a viewer who was
             // paused when the item failed stays paused.
             let position = Self.compatibilityRetryPositionMs(lastObservedMs: currentMs)
-            if await retryEstablishedHDRDelivery(at: position) { return }
+            if await retryEstablishedHDRDelivery(
+                at: position,
+                unchangedRetryRuledOut: unchangedRetryRuledOut(
+                    isTransportFailure: isTransportFailure
+                )
+            ) { return }
             if isCompatibilityFailure,
                await retryWithNextCompatibilityFallback(at: position) { return }
         }
@@ -4636,15 +4637,45 @@ final class PlayerController: ObservableObject {
         establishedPlayback && isHDRDelivery(deliveredRange)
     }
 
+    /// Has the server ruled out retrying this recipe unchanged?
+    ///
+    /// Reads the *retained* verdict rather than any one ask's answer, so that
+    /// it agrees with the failure sentence `handleItemFailure` shows. Those
+    /// two must not disagree: a `terminal` response stops the reporter the
+    /// instant it arrives, so a second item failure in the same control
+    /// session gets `nil` from a fresh ask while the retained slot — which
+    /// deliberately outlives the reporter — still has the verdict. That second
+    /// failure is reachable, because a node failover replaces the item without
+    /// starting a new control session.
+    ///
+    /// The transport carve-out is the failure sentence's, for its reason: a
+    /// verdict outlives the session that earned it, and a dropped link is a
+    /// different cause with a different answer.
+    private func unchangedRetryRuledOut(isTransportFailure: Bool) -> Bool {
+        guard !isTransportFailure else { return false }
+        return playbackControl.terminalVerdict?.type == "terminal"
+    }
+
     /// A stream that has already rendered real HDR did not fail capability
     /// negotiation. Reconnect the same recipe once; if it immediately fails
     /// again, stop visibly instead of hiding the transport fault behind SDR.
-    private func retryEstablishedHDRDelivery(at position: Int) async -> Bool {
+    ///
+    /// [unchangedRetryRuledOut] skips the reconnect and nothing else. The
+    /// server's `is_permanent` is scoped to "retrying this source, *unchanged*"
+    /// and that reconnect is the only unchanged retry there is — but the stop
+    /// below is this rung's real job, and it is the reason an established HDR
+    /// delivery never descends to SDR. Skipping the whole rung would hand the
+    /// compatibility ladder a stream it has always been vetoed from, and
+    /// tone-map a picture that was rendering real HDR a second ago.
+    private func retryEstablishedHDRDelivery(
+        at position: Int,
+        unchangedRetryRuledOut: Bool = false
+    ) async -> Bool {
         guard Self.shouldPreserveEstablishedHDRDelivery(
             deliveredRange: deliveredRange,
             establishedPlayback: attachmentRecovery.establishedPlayback
         ) else { return false }
-        guard !establishedHDRRetryAttempted else {
+        guard !establishedHDRRetryAttempted, !unchangedRetryRuledOut else {
             player.pause()
             isPlaying = false
             wantsPlayback = false
