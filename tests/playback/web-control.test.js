@@ -799,47 +799,73 @@ async function main() {
 
   // ---- the ask: persistentWait defers to the server's verdict --------------
   //
-  // Driven through the SHIPPED persistentWait, not through a helper. A test on
-  // an extracted arbiter would leave the call site free to keep deciding for
-  // itself, which is the only thing this milestone changes.
-  const askConstant = SHIPPED_UI.match(/const CONTROL_ASK_MS=\d+;/);
-  assert.notEqual(askConstant, null, "index.html no longer declares CONTROL_ASK_MS");
+  // Driven through the SHIPPED persistentWait AND the shipped
+  // startPlaybackControl, over a real Reporter. An earlier version of this
+  // block called settlePlaybackControlWaiters directly; deleting the one line
+  // in onExchange that connects the reporter to the waiters — which would make
+  // every ask time out and add the whole bound to every persistent stall in
+  // the browser — stayed green. Nothing here settles a waiter by hand.
+  const askConstants = ["CONTROL_ASK_MS", "CONTROL_ASK_CAP_MS", "CONTROL_MIN_EXCHANGE_MS",
+    "CONTROL_DEFER_LIMIT"].map((name) => {
+      const found = SHIPPED_UI.match(new RegExp(`const ${name}=\\d+;`));
+      assert.notEqual(found, null, `index.html no longer declares ${name}`);
+      return found[0];
+    }).join("\n");
 
-  function stallHarness() {
+  const harnessCleanup = [];
+  function stallHarness(options = {}) {
     const timers = new Map();
     let nextTimer = 1;
     const log = [];
     const loading = [];
     const reopened = [];
+    const stalls = [];
+    const sent = [];
+    let answer = options.answer || (() => ({ type: "none" }));
+    let hold = null;
+    let snapshotFn = null;
     const stub = new Function(
       "setTimeout", "clearTimeout", "SUPPLY_RUNWAY_SECS", "PERSISTENT_STALL_MS",
       "PlaybackPolicy", "playQuality", "recordWaitStall", "pbPosSec", "clientLog",
       "setLoading", "startTranscodeFallback", "seekTo", "endWait", "playbackContext",
-      "clockFromSec",
+      "clockFromSec", "CONTROL_CLIENT_ID", "playbackControlSnapshot",
+      "sendPlaybackControl", "window", "PlurxPlaybackControl", "performance",
       [
         "let PLAYER=null;",
-        askConstant[0],
+        askConstants,
+        shippedSource("holdReasonText"),
+        shippedSource("controlVerdictText"),
         shippedSource("playbackControlObservationOverride"),
         shippedSource("notifyPlaybackControl"),
         shippedSource("askPlaybackControl"),
         shippedSource("settlePlaybackControlWaiters"),
         shippedSource("clearPlaybackControlWaiters"),
+        shippedSource("stopPlaybackControl"),
+        shippedSource("startPlaybackControl"),
         shippedSource("persistentWait"),
-        "return {settle:settlePlaybackControlWaiters,",
+        "return {",
+        " attach(player,video,bootstrap){PLAYER=player;",
+        "   return startPlaybackControl(video,player,bootstrap);},",
+        " detach(player){PLAYER=player; stopPlaybackControl(player); PLAYER=null;},",
         " stall(player,video,began,generation){PLAYER=player;",
-        "  return persistentWait(video,player,began,generation);}};",
+        "   return persistentWait(video,player,began,generation);},",
+        " verdictText:controlVerdictText,",
+        " askProbe(player){PLAYER=player;",
+        "  try{ const a=askPlaybackControl('stalled',{decoder_state:'starved'});",
+        "   return {trigger:a.trigger, w:(player.controlWaiters||[]).length}; }",
+        "  catch(e){ return {err:String(e&&e.message||e)}; }}, ",
+        " probe(player,video){PLAYER=player; const r=player.controlReporter;",
+        "  return {hasReporter:!!r, stopped:r&&r.stopped, seq:r&&r.sequence,",
+        "   snap:!!(r&&r.snapshot()), notify:r&&r.notify()};}};",
       ].join("\n"),
     )(
       (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
       (id) => { timers.delete(id); },
       6,
       8_000,
-      {
-        stallRecoveryAction: () => "reconnect",
-        stallRecoveryTargetHeight: () => 720,
-      },
+      { stallRecoveryAction: () => "reconnect", stallRecoveryTargetHeight: () => 720 },
       () => "auto",
-      () => {},
+      (player, kind, ms, runway, detail) => stalls.push(detail),
       () => 12,
       (entry) => log.push(entry),
       (on, title, detail, buttons) => loading.push({ on, title, detail, buttons }),
@@ -848,50 +874,101 @@ async function main() {
       () => {},
       () => ({}),
       (sec) => `0:${sec}`,
+      "33333333-3333-4333-8333-333333333333",
+      (...args) => (snapshotFn ? snapshotFn(...args) : snapshot(1_000, "stalled")),
+      async (_url, request) => {
+        sent.push(request);
+        const held = hold && hold(request);
+        if (held) return held;
+        return Object.assign(response(request), { action: answer(request) });
+      },
+      { PlurxPlaybackControl: control },
+      control,
+      performance,
     );
-    return { stub, timers, log, loading, reopened };
+    const made = {
+      stub, timers, log, loading, reopened, stalls, sent,
+      answerWith(next) { answer = next; },
+      holdWith(next) { hold = next; },
+      snapshotWith(next) { snapshotFn = next; },
+      // Run every timer the shipped code armed, newest first, once.
+      fire() {
+        for (const [id, timer] of Array.from(timers)) { timers.delete(id); timer.fn(); }
+      },
+      attached: [],
+    };
+    harnessCleanup.push(made);
+    return made;
   }
 
-  function stalledPlayer(sequence = 0) {
+  function stalledPlayer() {
     return {
       started: true, waitAt: 100, waitRunway: 1, waitReported: false, waitTimer: null,
-      method: "remux", stallRecoveries: 0, _seekToken: 3,
-      controlReporter: { sequence, stopped: false, notify: () => ({ trigger: true }) },
+      method: "remux", stallRecoveries: 0, _seekToken: 3, stallPrompt: false,
     };
   }
   const stalledVideo = { paused: false, seeking: false };
 
-  // A verdict of `none` — and, identically, an exchange that fails — leaves
-  // today's behaviour exactly as it was. This is the branch every node in the
-  // fleet actually takes, because none of them has ever answered one.
-  for (const [label, answered] of [
-    ["a none verdict", (h, player) => h.stub.settle(player, { sequence: 1 },
-      { action: { type: "none" } })],
-    ["a failed exchange", (h, player) => h.stub.settle(player, { sequence: 1 }, null)],
-  ]) {
-    const h = stallHarness();
-    const player = stalledPlayer();
-    const running = h.stub.stall(player, stalledVideo, 100, 3);
+  // Resolves to true only if the promise settles without any fake timer being
+  // fired — i.e. something in the shipped code settled it, not its own bound.
+  async function settledPromptly(promise) {
+    const pending = Symbol("pending");
+    for (let i = 0; i < 4; i += 1) await flush();
+    await new Promise((done) => setTimeout(done, 400));
     await flush();
-    answered(h, player);
+    return (await Promise.race([promise, Promise.resolve(pending)])) !== pending;
+  }
+
+  // The shipped startPlaybackControl builds the Reporter on real timers, and
+  // the Reporter rate-limits consecutive exchanges by MIN_EXCHANGE_MS. Waiting
+  // that out is the price of driving the real wiring instead of a stub.
+  async function settleExchange() {
+    await new Promise((done) => setTimeout(done, 320));
+    await flush(); await flush();
+  }
+
+  async function askWith(action, options = {}) {
+    // The bootstrap exchange answers `none`. Answering it with the verdict
+    // under test would stop the reporter before the ask exists — which is
+    // real behaviour, and has its own test below.
+    const h = stallHarness({ answer: () => ({ type: "none" }) });
+    const player = Object.assign(stalledPlayer(), options.player || {});
+    h.stub.attach(player, stalledVideo, bootstrap());
+    h.attached.push(player);
+    await flush();
+    h.answerWith(() => action);
+    // start() already spent sequence 1; the ask must be answered by its own.
+    const before = h.sent.length;
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await settleExchange();
+    // Settled by its own exchange, not by its bound: the line in onExchange
+    // that connects the reporter to the waiters is what makes that true, and
+    // deleting it would otherwise only show up as six extra seconds of stall.
+    assert.equal(await settledPromptly(running), true,
+      "the ask is answered by its exchange rather than timing out");
     await running;
-    assert.equal(h.reopened.length, 1, `${label} falls through to the legacy reopen`);
-    assert.equal(h.reopened[0].kind, "seek", label);
-    assert.equal(player.stallRecoveries, 1, `${label} still spends the legacy attempt`);
+    assert.ok(h.sent.length > before, "the ask put a request on the wire");
+    h.stub.detach(player);
+    return { h, player };
+  }
+
+  // A none verdict leaves today's behaviour exactly as it was. This is the
+  // branch every node in the fleet actually takes: vocabulary_total is zero.
+  {
+    const { h, player } = await askWith({ type: "none" });
+    assert.equal(h.reopened.length, 1, "a none verdict falls through to the legacy reopen");
+    assert.equal(h.reopened[0].kind, "seek");
+    assert.equal(player.stallRecoveries, 1, "and still spends the legacy attempt");
   }
 
   // A terminal verdict replaces the client's invented words with the server's
   // and nothing else. Ruling D1: the player is not torn down, and the viewer
   // keeps every option they had — a terminal recipe is not a terminal file.
   {
-    const h = stallHarness();
-    const player = stalledPlayer();
-    const running = h.stub.stall(player, stalledVideo, 100, 3);
-    await flush();
-    h.stub.settle(player, { sequence: 1 }, { action: {
-      type: "terminal", code: "unsupported", message: "This file's audio is not playable here.",
-    } });
-    await running;
+    const { h, player } = await askWith({
+      type: "terminal", code: "unsupported",
+      message: "This file's audio is not playable here.",
+    });
     assert.equal(h.reopened.length, 0, "a terminal verdict reopens nothing");
     assert.equal(player.stallRecoveries, 0, "a terminal verdict spends no legacy attempt");
     assert.equal(h.loading.length, 1);
@@ -899,63 +976,234 @@ async function main() {
       "the viewer reads the server's verdict, not the client's guess");
     assert.match(h.loading[0].buttons, /retryPlayback/, "Try again survives a terminal verdict");
     assert.match(h.loading[0].buttons, /startTranscodeFallback/,
-      "Force transcode survives a terminal verdict — it is a different recipe");
+      "Force transcode survives it — it is a different recipe");
   }
 
-  // A hold means the server is deliberately not advancing. The client waits
-  // silently and re-arms, so a hold that is never lifted still reaches the
-  // prompt: `began` never moves, so the elapsed stall keeps growing.
+  // Server text is bounded and stripped on the way in, the way the outbound
+  // error_detail beside it already is — and at the call site, not only in the
+  // helper. A helper the overlay does not use bounds nothing.
   {
     const h = stallHarness();
-    const player = stalledPlayer();
-    const running = h.stub.stall(player, stalledVideo, 100, 3);
-    await flush();
-    h.stub.settle(player, { sequence: 1 },
-      { action: { type: "hold", reason: "awaiting_admission" } });
-    await running;
-    assert.equal(h.reopened.length, 0, "a hold reopens nothing");
-    assert.equal(h.loading.length, 0, "a hold does not prompt the viewer");
-    assert.equal(player.stallRecoveries, 0, "a hold spends no legacy attempt");
-    assert.equal(player.waitReported, false, "the wait is re-armed, not abandoned");
-    assert.equal(h.timers.get(player.waitTimer).ms, 8_000,
-      "a hold re-arms at the ordinary deadline");
+    assert.equal(h.stub.verdictText("a\r\nb"), "a b");
+    assert.equal(h.stub.verdictText("   "), "Playback stopped.");
+    assert.equal(h.stub.verdictText("x".repeat(400)).length, 160);
+  }
+  {
+    const { h } = await askWith({
+      type: "terminal", code: "unsupported", message: "line\r\nbreak " + "x".repeat(400),
+    });
+    assert.equal(h.loading[0].title.includes("\n"), false,
+      "the overlay title carries no server-supplied line breaks");
+    assert.equal(h.loading[0].title.length, 160,
+      "and is bounded where it is shown, not only where it is computed");
   }
 
-  // retry_resource paces the next look at the server's own interval, clamped
-  // so a server that names a longer one cannot park a stalled viewer past the
-  // deadline that would otherwise have prompted them.
+  // A hold defers the reopen and NOT the viewer's information. A hold is never
+  // lifted by anything the client does, so a client that only waited would
+  // leave a viewer eight seconds into a frozen picture with no UI, forever.
+  {
+    const { h, player } = await askWith({ type: "hold", reason: "no_room" });
+    assert.equal(h.reopened.length, 0, "a hold reopens nothing");
+    assert.equal(player.stallRecoveries, 0, "a hold spends no legacy attempt");
+    assert.equal(h.loading.length, 1, "a hold tells the viewer what is happening");
+    assert.equal(h.loading[0].detail, "The server is short of space.",
+      "in the viewer's words, not the wire's");
+    assert.equal(h.loading[0].buttons.includes("startTranscodeFallback"), false,
+      "a hold offers no recipe change: the server said the recipe is not the problem");
+    assert.equal(h.stalls.length, 1,
+      "the stall is recorded once, not once per deferral");
+    assert.equal(player.waitReported, true,
+      "the wait stays reported, so resuming does not emit a second record for it");
+    assert.equal(h.timers.get(player.waitTimer).ms, 8_000, "and the deadline comes round again");
+  }
+
+  // retry_resource paces to the server's interval, clamped, and bounded: a
+  // server that keeps saying "soon" is not distinguishable from here from one
+  // that is never going to be ready.
   for (const [afterMs, expected, label] of [
     [1_500, 1_500, "the server's interval is honoured"],
-    [90_000, 8_000, "an interval past the deadline is clamped to it"],
-    [1, 250, "an interval below the floor is raised to it"],
+    [59_000, 8_000, "an interval past the deadline is clamped to it"],
+    [1, 250, "an interval below the exchange floor is raised to it"],
   ]) {
-    const h = stallHarness();
-    const player = stalledPlayer();
-    const running = h.stub.stall(player, stalledVideo, 100, 3);
-    await flush();
-    h.stub.settle(player, { sequence: 1 }, { action: {
+    const { h, player } = await askWith({
       type: "retry_resource", reason: "reader_failed", after_ms: afterMs,
-    } });
-    await running;
+    });
     assert.equal(h.reopened.length, 0, label);
     assert.equal(h.timers.get(player.waitTimer).ms, expected, label);
+    assert.equal(player.stallDeferrals, 1, label);
+  }
+  {
+    const { h, player } = await askWith({
+      type: "retry_resource", reason: "reader_failed", after_ms: 1_000,
+    }, { player: { stallDeferrals: 3, stallDeferralsAt: 100 } });
+    assert.equal(h.reopened.length, 1,
+      "past the deferral bound the legacy path is taken anyway");
+    assert.equal(player.stallRecoveries, 1);
   }
 
-  // A replayed retry keeps its old sequence, so the floor skips it. Settling on
-  // it would hand this stall the verdict for an observation taken before the
-  // stall existed.
+  // The floor is only meaningful inside one owner: resetForOwner zeroes the
+  // sequence, so a later unrelated request can reach it carrying a verdict
+  // decided for a different observation, generation and epoch.
   {
-    const h = stallHarness();
-    const player = stalledPlayer(4);
+    const h = stallHarness({ answer: () => ({ type: "none" }) });
+    const player = stalledPlayer();
+    h.stub.attach(player, stalledVideo, bootstrap());
+    h.attached.push(player);
+    await flush();
+    // A hold, so nothing is armed: the only way it can reach the viewer is
+    // through this ask's own waiter.
+    h.answerWith(() => ({ type: "hold", reason: "global" }));
     const running = h.stub.stall(player, stalledVideo, 100, 3);
     await flush();
-    h.stub.settle(player, { sequence: 4 }, { action: { type: "terminal",
-      code: "unsupported", message: "stale" } });
-    assert.equal(h.loading.length, 0, "a replayed older sequence settles nothing");
-    h.stub.settle(player, { sequence: 5 }, { action: { type: "hold", reason: "x" } });
+    for (const waiter of player.controlWaiters || []) waiter.generation = "other";
+    await settleExchange();
+    // Nothing settled it, so only its own timer can — fire the fake timers.
+    h.fire();
     await running;
-    assert.equal(h.loading.length, 0, "the ask is answered by its own sequence");
-    assert.equal(player.waitReported, false);
+    assert.equal(h.loading.filter((l) => /server/i.test(l.title || "")).length, 0,
+      "a verdict from another generation never reaches the viewer");
+    assert.equal(h.reopened.length, 1, "the ask times out into today's path");
+    assert.equal(player.stallRecoveries, 1, "and spends the legacy attempt, as today");
+    h.stub.detach(player);
+  }
+
+  // A terminal verdict can arrive on any exchange, and the reporter stops on
+  // it. Ruling D1 says the verdict is armed, not executed — so the stall an
+  // hour later must still read the server's words, even though there is no
+  // longer a reporter to ask.
+  {
+    const h = stallHarness({
+      answer: () => ({ type: "terminal", code: "unsupported", message: "No decoder for this." }),
+    });
+    const player = stalledPlayer();
+    h.stub.attach(player, stalledVideo, bootstrap());
+    h.attached.push(player);
+    await settleExchange();
+    assert.equal(player.controlReporter.stopped, true,
+      "the reporter stops on a terminal verdict, as it always has");
+    assert.deepEqual(player.controlVerdict,
+      { type: "terminal", code: "unsupported", message: "No decoder for this." },
+      "and the verdict outlives it");
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await flush(); await flush();
+    await running;
+    assert.equal(h.reopened.length, 0, "the armed verdict still suppresses the guess");
+    assert.equal(h.loading[0].title, "No decoder for this.",
+      "and the viewer reads it rather than the client's invention");
+    h.stub.detach(player);
+  }
+
+  // The floor must be > the sequence already spent, not >=. An exchange that
+  // was ALREADY IN FLIGHT when the stall happened carries an observation taken
+  // before the stall existed; settling on it hands this stall someone else's
+  // verdict. This is the case a counting correlator gets wrong, and it is only
+  // visible while an exchange is outstanding.
+  {
+    const held = deferred();
+    let first = true;
+    const h = stallHarness({ answer: () => ({ type: "none" }) });
+    const player = stalledPlayer();
+    h.attached.push(player);
+    h.answerWith(() => ({ type: "none" }));
+    // Request 1 is the one already in flight when the stall happens; it
+    // answers `hold`. Request 2 is this ask's own, and never answers — so the
+    // only verdict available to settle the waiter is one it must refuse.
+    h.holdWith((request) => {
+      if (first) {
+        first = false;
+        return held.promise.then(() => Object.assign(response(request), {
+          action: { type: "hold", reason: "ahead" },
+        }));
+      }
+      return new Promise(() => {});
+    });
+    h.stub.attach(player, stalledVideo, bootstrap());
+    await flush();
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await flush();
+    held.resolve();
+    assert.equal(await settledPromptly(running), false,
+      "the in-flight exchange's verdict does not answer this ask");
+    h.fire();
+    await running;
+    assert.equal(h.loading.filter((l) => /Waiting for the server/.test(l.title || "")).length, 0,
+      "and never reaches the viewer");
+    assert.equal(h.reopened.length, 1, "the ask times out into today's path");
+    h.stub.detach(player);
+  }
+
+  // Every ask settles even when nothing answers it. Without its own bound a
+  // stalled viewer would wait on a promise no exchange is going to resolve.
+  {
+    const h = stallHarness({ answer: () => ({ type: "none" }) });
+    const player = stalledPlayer();
+    h.attached.push(player);
+    h.holdWith(() => new Promise(() => {}));
+    h.stub.attach(player, stalledVideo, bootstrap());
+    await flush();
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    assert.equal(await settledPromptly(running), false, "nothing has answered it");
+    assert.equal(h.timers.size >= 1, true, "so the ask armed its own bound");
+    h.fire();
+    assert.equal(await settledPromptly(running), true, "and that bound settles it");
+    h.stub.detach(player);
+  }
+
+  // A notify that enqueued nothing — an invalid snapshot — will never produce
+  // a request carrying this evidence, so waiting the bound out for it would
+  // add the whole bound to a stall for an exchange that is not going to happen.
+  {
+    const h = stallHarness({ answer: () => ({ type: "none" }) });
+    const player = stalledPlayer();
+    h.attached.push(player);
+    h.holdWith(() => new Promise(() => {}));
+    h.stub.attach(player, stalledVideo, bootstrap());
+    await flush();
+    h.snapshotWith(() => null);
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    assert.equal(await settledPromptly(running), true,
+      "an ask that enqueued nothing answers at once rather than after the bound");
+    assert.equal((player.controlWaiters || []).length, 0, "and registers no waiter");
+    h.stub.detach(player);
+  }
+
+  // A reporter that goes away mid-ask settles its waiters at once. Leaving
+  // them to time out would add the whole bound to a stall whose exchange can
+  // no longer happen.
+  {
+    const h = stallHarness({ answer: () => ({ type: "none" }) });
+    const player = stalledPlayer();
+    h.attached.push(player);
+    h.holdWith(() => new Promise(() => {}));
+    h.stub.attach(player, stalledVideo, bootstrap());
+    await flush();
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await flush();
+    h.stub.detach(player);
+    assert.equal(await settledPromptly(running), true,
+      "closing the reporter settles the ask rather than stranding it");
+    assert.equal((player.controlWaiters || []).length, 0, "no waiter is left behind");
+    assert.equal(h.timers.size, 0,
+      "and its timer is cleared rather than left to fire into a closed player");
+  }
+
+  // And an ask made after the reporter has already stopped never registers a
+  // waiter at all.
+  {
+    const h = stallHarness({
+      answer: () => ({ type: "terminal", code: "unsupported", message: "done" }),
+    });
+    const player = stalledPlayer();
+    h.attached.push(player);
+    h.stub.attach(player, stalledVideo, bootstrap());
+    await settleExchange();
+    assert.equal(player.controlReporter.stopped, true);
+    player.controlVerdict = null;
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    assert.equal(await settledPromptly(running), true,
+      "a stopped reporter answers immediately rather than after the bound");
+    assert.equal((player.controlWaiters || []).length, 0);
+    h.stub.detach(player);
   }
 
   // The viewer had the whole ask window to leave. Every condition the entry
@@ -967,14 +1215,23 @@ async function main() {
   ]) {
     const h = stallHarness();
     const player = stalledPlayer();
-    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    h.stub.attach(player, stalledVideo, bootstrap());
+    h.attached.push(player);
     await flush();
-    leave(player);
-    h.stub.settle(player, { sequence: 1 }, { action: { type: "none" } });
+    h.answerWith(() => { leave(player); return { type: "none" }; });
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await settleExchange();
     await running;
     stalledVideo.paused = false;
     assert.equal(h.reopened.length, 0, `${label}: nothing acts on the stale generation`);
     assert.equal(h.loading.length, 0, label);
+    h.stub.detach(player);
+  }
+
+  // Every harness reporter runs on real timers; a live one keeps the process
+  // alive after the last assertion and reads in CI as a hung suite.
+  for (const harness of harnessCleanup) {
+    for (const player of harness.attached) harness.stub.detach(player);
   }
 
   reporter.stop();

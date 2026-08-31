@@ -3375,7 +3375,7 @@ function beginWait(v){
   p.waitReported=false;
   const began=p.waitAt;
   const generation=p._seekToken||0;
-  p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation),PERSISTENT_STALL_MS);
+  p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation).catch(()=>{}),PERSISTENT_STALL_MS);
 }
 function noteAutoStall(p,kind,episodeAtMs){
   const abr=p&&p.abr; if(!abr||!(kind==='supply'||kind==='decode')) return;
@@ -3438,7 +3438,9 @@ async function persistentWait(v,p,began,generation){
   const controlTrigger=ask.trigger;
   recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began,controlTrigger);
   p.stallFrom=pbPosSec();
-  const verdict=await ask.action;
+  // An armed verdict is used only when this ask produced none of its own: a
+  // fresh answer is always better evidence than a remembered one.
+  const verdict=(await ask.action)||p.controlVerdict||null;
   // The viewer had up to CONTROL_ASK_MS to seek, pause or close. Re-check
   // every condition the entry guard checked, because none of them survived
   // the await on their own — acting on a stale generation here would reopen
@@ -3452,29 +3454,51 @@ async function persistentWait(v,p,began,generation){
     // The viewer's own options are untouched: a terminal recipe is not a
     // terminal file, and Force transcode is a different recipe.
     p.stallPrompt=true;
+    const verdictText=controlVerdictText(verdict.message);
     clientLog({level:"warn",event:"stall_recovery",detail:"terminal:"+verdict.code,
-      message:"server verdict ended this recipe — "+verdict.message,
+      message:"server verdict ended this recipe — "+verdictText,
       control_trigger:controlTrigger});
-    setLoading(true,verdict.message,"Your place is saved.",
+    setLoading(true,verdictText,"Your place is saved.",
       `<button onclick="retryPlayback()">Try again</button>`+
       (p.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-terminal')">Force transcode</button>`:``)+
       `<button onclick="closePlayer()">Close</button>`);
     return;
   }
-  if(verdict&&(verdict.type==="hold"||verdict.type==="retry_resource")){
-    // Production is deliberately not advancing, or stopped for something that
-    // may not recur. Either way the client's reopen would race a server that
-    // already knows better. Keep waiting, silently, and let the deadline come
-    // round again — a hold that is never lifted still reaches the prompt,
-    // because `began` never moves and the elapsed time keeps growing.
-    const again=verdict.type==="retry_resource"
-      ? Math.min(Math.max(verdict.after_ms,250),PERSISTENT_STALL_MS)
-      : PERSISTENT_STALL_MS;
-    clientLog({level:"info",event:"stall_recovery",detail:"deferred:"+verdict.type,
-      message:`server owns this stall (${verdict.reason}) — waiting ${(again/1000).toFixed(1)}s`,
+  if(p.stallDeferralsAt!==began){ p.stallDeferralsAt=began; p.stallDeferrals=0; }
+  if(verdict&&verdict.type==="hold"){
+    // Production is deliberately not advancing, so the client's reopen would
+    // churn against a server that already knows better. Defer the reopen —
+    // but not the viewer's information. A hold is never lifted by anything the
+    // client does, so a client that only waited would leave a viewer eight
+    // seconds into a frozen picture with no UI and no bound, forever. The
+    // reopen is what a hold suppresses; the explanation is what it earns.
+    p.stallDeferrals=(p.stallDeferrals||0)+1;
+    clientLog({level:"info",event:"stall_recovery",detail:"deferred:hold",
+      message:`server holds this stall (${verdict.reason}) — reopen deferred`,
       control_trigger:controlTrigger});
-    p.waitReported=false;
-    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation),again);
+    if(!p.stallPrompt){
+      p.stallPrompt=true;
+      setLoading(true,"Waiting for the server.",holdReasonText(verdict.reason),
+        `<button onclick="retryPlayback()">Try again</button>`+
+        `<button onclick="closePlayer()">Close</button>`);
+    }
+    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation).catch(()=>{}),
+      PERSISTENT_STALL_MS);
+    return;
+  }
+  if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT){
+    // Production stopped for something that may not recur, and named when to
+    // look again. Pace to it rather than reopening — but bounded, because a
+    // server that keeps saying "soon" is not distinguishable, from here, from
+    // one that is never going to be ready, and today's path is better than an
+    // unbounded wait.
+    p.stallDeferrals=(p.stallDeferrals||0)+1;
+    const again=Math.min(Math.max(verdict.after_ms,CONTROL_MIN_EXCHANGE_MS),PERSISTENT_STALL_MS);
+    clientLog({level:"info",event:"stall_recovery",detail:"deferred:retry_resource",
+      message:`server paces this stall (${verdict.reason}) — waiting ${(again/1000).toFixed(1)}s`+
+        ` (${p.stallDeferrals}/${CONTROL_DEFER_LIMIT})`,
+      control_trigger:controlTrigger});
+    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation).catch(()=>{}),again);
     return;
   }
   const action=PlaybackPolicy.stallRecoveryAction({
@@ -6323,10 +6347,50 @@ function notifyPlaybackControl(renderOverride,observationOverride){
   return p.controlReporter?p.controlReporter.notify():null;
 }
 // How long a recovery owner waits for the server's verdict before deciding for
-// itself. It is the exchange's own deadline and not a new number: waiting
-// longer than one exchange can possibly take is pure delay for a viewer who is
-// already stalled, and waiting less abandons an answer still in flight.
+// itself. One exchange deadline — not a new number, and not a guess.
+//
+// But the ask does not wait for *an* exchange, it waits for the *next* one:
+// `drain` returns immediately while a request is in flight, so this ask's own
+// request cannot start until that one finishes. Whenever an exchange is
+// already running at ask time — precisely the busy case a stall correlates
+// with — a single window would expire at the instant an answer first became
+// possible. So the window is extended once, and only when an exchange that is
+// NOT this ask's completes, which is the observable moment ours became next.
+// CONTROL_ASK_CAP_MS is the hard stop: past it the viewer has waited longer
+// for the verdict than for the stall itself, and today's path is better than
+// a better answer that never arrives.
 const CONTROL_ASK_MS=6000;
+const CONTROL_ASK_CAP_MS=12000;
+// The reporter's own exchange floor. Named here because the retry clamp below
+// must not pace an ask faster than the transport will carry it.
+const CONTROL_MIN_EXCHANGE_MS=250;
+// How many times running a paced verdict may push the legacy path back before
+// the client takes it anyway. A `hold` is exempt: it is not a pacing hint, it
+// is a statement that reopening is pointless, and it earns an explanation
+// instead of a bound.
+const CONTROL_DEFER_LIMIT=3;
+// The seven hold reasons the server can send, in the viewer's words. An
+// unknown reason is shown as nothing rather than as its wire name: a viewer
+// reading `working_set` learns less than a viewer reading one plain sentence.
+// The wire validates `message` as a string and nothing more, while the
+// outbound `error_detail` beside it is bounded and stripped. Server text lands
+// in the overlay title and in the log ring, so it gets the same treatment on
+// the way in. `setLoading` assigns it through textContent, so this is a
+// legibility bound rather than an injection guard.
+function controlVerdictText(message){
+  const text=String(message==null?"":message).replace(/[\r\n\0]+/g," ").trim();
+  if(!text) return "Playback stopped.";
+  return text.length>160?text.slice(0,159)+"\u2026":text;
+}
+function holdReasonText(reason){
+  return {demand:"Another player is using this stream.",
+    time:"The server is pacing this stream.",
+    bytes:"The server is pacing this stream.",
+    global:"The server is busy.",
+    ahead:"The stream is already far enough ahead.",
+    working_set:"The server is short of space.",
+    no_room:"The server is short of space."}[reason]||"Your place is saved.";
+}
 // Submit evidence, then wait — briefly — for the action it earns.
 //
 // `notifyPlaybackControl` tells the server. This tells the server and listens.
@@ -6351,20 +6415,43 @@ function askPlaybackControl(renderOverride,observationOverride){
   // The request carrying this evidence is the next NEW one the reporter starts.
   // A replayed retry keeps its old sequence, so a floor on the sequence skips
   // the replay without skipping ours.
+  //
+  // The floor is only meaningful inside one owner: `resetForOwner` zeroes the
+  // counter on a 409, so after an owner change a *later, unrelated* request can
+  // reach this floor carrying a verdict decided for a different observation,
+  // generation and epoch. If that verdict were `terminal` the viewer would read
+  // a verdict this ask never asked for. So the identity is pinned too.
   const minSequence=(Number(reporter.sequence)||0)+1;
+  const generation=reporter.bootstrap&&reporter.bootstrap.generation;
+  const controlEpoch=reporter.bootstrap&&reporter.bootstrap.control_epoch;
   const trigger=notifyPlaybackControl(renderOverride,observationOverride);
+  // A notify that enqueued nothing — an invalid snapshot — will never produce a
+  // request carrying this evidence, so waiting the full window for it would add
+  // the whole bound to a stall for an exchange that is not going to happen.
+  if(!trigger) return {trigger:null,action:Promise.resolve(null)};
   if(!p.controlWaiters) p.controlWaiters=[];
   const waiters=p.controlWaiters;
   let settle=null;
   const action=new Promise((resolve)=>{
-    const waiter={minSequence,settle:(value)=>{
-      if(waiter.settled) return;
-      waiter.settled=true;
-      clearTimeout(waiter.timer);
-      const at=waiters.indexOf(waiter);
-      if(at!==-1) waiters.splice(at,1);
-      resolve(value||null);
-    }};
+    const waiter={minSequence,generation,controlEpoch,
+      hardExpiry:performance.now()+CONTROL_ASK_CAP_MS,
+      settle:(value)=>{
+        if(waiter.settled) return;
+        waiter.settled=true;
+        clearTimeout(waiter.timer);
+        const at=waiters.indexOf(waiter);
+        if(at!==-1) waiters.splice(at,1);
+        resolve(value||null);
+      },
+      // Called when an exchange that is not this ask's completes: ours is now
+      // the next one, so it gets a fresh window — up to the hard cap.
+      extend:()=>{
+        if(waiter.settled) return;
+        const left=waiter.hardExpiry-performance.now();
+        if(left<=0){ waiter.settle(null); return; }
+        clearTimeout(waiter.timer);
+        waiter.timer=setTimeout(()=>waiter.settle(null),Math.min(CONTROL_ASK_MS,left));
+      }};
     waiter.timer=setTimeout(()=>waiter.settle(null),CONTROL_ASK_MS);
     waiters.push(waiter);
     settle=waiter.settle;
@@ -6385,8 +6472,14 @@ function settlePlaybackControlWaiters(p,request,response){
   if(!Number.isSafeInteger(sequence)) return;
   const action=(response&&response.action)||null;
   for(const waiter of waiters.slice()){
-    if(sequence>=waiter.minSequence) waiter.settle(action);
+    const mine=sequence>=waiter.minSequence
+      && request.generation===waiter.generation
+      && request.control_epoch===waiter.controlEpoch;
+    if(mine) waiter.settle(action); else waiter.extend();
   }
+  // A stop that follows its own last exchange leaves a reporter that will never
+  // exchange again; anything still waiting on it is waiting on nothing.
+  if(p.controlReporter&&p.controlReporter.stopped) clearPlaybackControlWaiters(p);
 }
 // Abandon every outstanding ask. Called when the reporter goes away, so a
 // stalled owner falls through to its own behaviour at once rather than waiting
@@ -6413,6 +6506,15 @@ function startPlaybackControl(v,p,bootstrap){
         if(PLAYER!==p||p.controlReporter!==reporter) return;
         p.controlLastRequest=request;
         settlePlaybackControlWaiters(p,request,response);
+        // A terminal verdict can arrive on any exchange, and the reporter
+        // stops on it — correctly, since it owns no recovery. But a stall an
+        // hour later would then find no reporter to ask and fall through to
+        // the client's own guess, discarding the one answer the server was
+        // sure of. Ruling D1 says the verdict is armed rather than executed;
+        // this is where it is armed. It outlives the reporter deliberately.
+        if(response&&response.action&&response.action.type==="terminal"){
+          p.controlVerdict=response.action;
+        }
         if(response){
           const recovered=p.controlLastError;
           p.controlLastResponse=response;
@@ -6463,6 +6565,7 @@ function attachSession(v, t, info, wantSec){
   stopPlaybackControl(t);
   t.controlRenderOverride=null;
   t.controlObservationOverride=null;
+  t.controlVerdict=null;
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
