@@ -23,7 +23,7 @@ enum PlaybackControl {
     /// The actions this client will accept, and therefore the only ones the
     /// server will send it. An action that is never declared is never sent, so
     /// a client cannot be silenced by one it does not understand.
-    static let supportedActions = ["hold"]
+    static let supportedActions = ["hold", "retry_resource", "terminal"]
     static let minimumExchangeMs = 250
     static let maximumExchangeMs = 60_000
     static let exchangeDeadlineMs = 6_000
@@ -315,9 +315,16 @@ struct ControlRequest: Codable, Equatable {
 
 struct ControlAction: Codable, Equatable {
     var type: String
-    /// Present on `hold`, and diagnostic rather than dispositive: a reason
-    /// this client has never heard of is a newer server, not a broken one.
+    /// Present on `hold` and `retry_resource`, and diagnostic rather than
+    /// dispositive: a reason this client has never heard of is a newer server,
+    /// not a broken one.
     var reason: String? = nil
+    /// `retry_resource` only: when the server wants to be asked again.
+    var afterMs: Int? = nil
+    /// `terminal` only: which producer decision ended this session, and a
+    /// bounded sentence explaining it.
+    var code: String? = nil
+    var message: String? = nil
 }
 
 struct ControlResponse: Codable, Equatable {
@@ -546,8 +553,19 @@ actor PlaybackControlReporter {
             retryRequest = nil
             if let capabilities = request.capabilities { acceptedCapabilities = capabilities }
             acceptedSequence = max(acceptedSequence, response.acceptedSequence)
+            // `retry_resource` paces the next exchange from the server's own
+            // cadence rather than this client's guess. The exchange succeeded;
+            // the server only said when to ask again, so this does not touch
+            // the retry path.
+            if response.action.type == "retry_resource", let afterMs = response.action.afterMs {
+                nextAllowedAt = now() + max(PlaybackControl.minimumExchangeMs, afterMs)
+            }
             onExchange(Exchange(request: request, response: response, failure: nil))
-            if request.demand == .end { stop() }
+            // A terminal verdict ends reporting. It does not tear the player
+            // down: this reporter still owns no recovery, and buffer already
+            // fetched is still worth playing. The milestone that moves that
+            // authority is the one that acts on this.
+            if request.demand == .end || response.action.type == "terminal" { stop() }
         } catch {
             if stopped { return }
             handle(failure: error, for: request)
@@ -578,6 +596,21 @@ actor PlaybackControlReporter {
             break
         case "hold":
             guard response.action.reason != nil else {
+                throw ControlProtocolError(reason: "action")
+            }
+        case "terminal":
+            // An action inside the declared vocabulary but missing the field
+            // this client acts on is worse than one it has never heard of,
+            // because it would be acted on.
+            guard response.action.code != nil, response.action.message != nil else {
+                throw ControlProtocolError(reason: "action")
+            }
+        case "retry_resource":
+            guard response.action.reason != nil,
+                let afterMs = response.action.afterMs,
+                afterMs > 0,
+                afterMs <= PlaybackControl.maximumExchangeMs
+            else {
                 throw ControlProtocolError(reason: "action")
             }
         default:
