@@ -556,3 +556,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlR
 source_anchor = '@SerialName("supported_actions") val supportedActions: List<String>,'
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "the request encodes the server's field names"
+
+[[fixes]]
+id = "native.caps-decision-session-binding"
+commits = ["08447df6"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
+source_anchor = "internal fun bindDecisionPlan("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "decisionPlanBindingRepeatsCapsAndRequestsOnlyAnHdr10Transcode"
