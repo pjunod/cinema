@@ -2380,6 +2380,44 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
+    func testMarkerPrewarmReportsAHitOnlyForALoadedNativeDestination() {
+        // The counter this feeds shipped before any callsite could produce a
+        // hit, so plurx_playback_marker_prewarm_hit_ratio read zero forever
+        // and an absent feature looked like a broken one. These assertions
+        // exist to keep the hit branch reachable.
+        XCTAssertEqual(
+            PlayerController.markerPrewarmResult(
+                route: .native(itemMs: 40_000),
+                loadedRangesMs: [0...90_000]
+            ),
+            "hit"
+        )
+        // Loaded, but not where the seek is going.
+        XCTAssertEqual(
+            PlayerController.markerPrewarmResult(
+                route: .native(itemMs: 40_000),
+                loadedRangesMs: [0...10_000, 60_000...90_000]
+            ),
+            "miss"
+        )
+        // A reopen re-requests the stream, so a full buffer says nothing about
+        // the destination.
+        XCTAssertEqual(
+            PlayerController.markerPrewarmResult(
+                route: .reopen,
+                loadedRangesMs: [0...90_000]
+            ),
+            "miss"
+        )
+        XCTAssertEqual(
+            PlayerController.markerPrewarmResult(
+                route: .native(itemMs: 40_000),
+                loadedRangesMs: []
+            ),
+            "miss"
+        )
+    }
+
     func testSeekRoutePrefersTheNativeClockInsideTheAdvertisedWindow() {
         // Growing HLS session that began at film-time 60 s; the served
         // window currently spans item-local 0 s .. 90 s (film 60 s .. 150 s).
