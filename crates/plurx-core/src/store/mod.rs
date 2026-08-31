@@ -54,8 +54,9 @@ mod hiqlite_shared_cache;
 pub mod replicated;
 
 pub use dv_conversion::{
-    DvConversion, DvConversionCandidate, DvConversionProgress, DvConversionState,
-    DvConversionStore, QueueDvConversionOutcome,
+    DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
+    DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
+    QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_CONVERSION_QUEUE_BATCH_MAX,
 };
 
 use std::collections::BTreeMap;
@@ -502,6 +503,10 @@ pub mod keys {
     pub const LIBRARY_DV_DISK_CONVERT_PARALLEL: &str = "library.dv_disk_convert_parallel";
     /// Highest file id examined by this node's bounded queue walk.
     pub const JOB_DV_DISK_CONVERT_CURSOR: &str = "jobs.dv_disk_convert_cursor";
+    /// Last auto-enabled library examined by this node. Discovery itself is
+    /// cluster-leased, but the cursor keeps a repeatedly busy library from
+    /// hiding later libraries when each tick admits only one bounded batch.
+    pub const JOB_DV_DISK_AUTO_LIBRARY_CURSOR: &str = "jobs.dv_disk_auto_library_cursor";
 }
 
 #[async_trait]

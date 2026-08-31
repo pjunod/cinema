@@ -257,6 +257,12 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("PLURX_DOVI_TOOL=/usr/local/bin/dovi_tool", dockerfile)
         self.assertIn("PLURX_MKVMERGE=/usr/bin/mkvmerge", dockerfile)
 
+        workflow = read(".github/workflows/ci.yml")
+        self.assertIn("docker/setup-qemu-action@v3", workflow)
+        self.assertIn("Build arm64 runtime and verify pinned conversion tools", workflow)
+        self.assertIn("platforms: linux/arm64", workflow)
+        self.assertIn("outputs: type=cacheonly", workflow)
+
     def test_docker_build_keeps_cluster_validation_features_out_of_plurxd(self):
         dockerfile = read("Dockerfile")
         self.assertNotIn(

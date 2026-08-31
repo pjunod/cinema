@@ -4908,6 +4908,7 @@ mod tests {
             .await
             .expect("movie");
         let probe = ProbeResult {
+            container: Some("mkv".into()),
             dolby_vision: DolbyVisionFacts {
                 profile: Some(7),
                 bl_compat_id: Some(6),
@@ -4952,6 +4953,21 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{idempotent}");
         assert_eq!(idempotent["queued"], false);
 
+        let batch_uri = format!("/api/v1/dv-conversions?file_ids={file},9223372036854775807");
+        let (status, batch) = call(&app, get(&batch_uri, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{batch}");
+        assert_eq!(batch["eligible_by_file"][file.to_string()], true);
+        assert_eq!(
+            batch["conversions_by_file"][file.to_string()]["state"],
+            "queued"
+        );
+        assert_eq!(batch["capabilities"]["available"], true);
+        assert!(batch["eligible_by_file"]["9223372036854775807"].is_null());
+
+        let (status, invalid_batch) =
+            call(&app, get("/api/v1/dv-conversions?file_ids=0", Some(&admin))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid_batch}");
+
         let mode_uri = format!("/api/v1/libraries/{}/dv-conversion", library.id);
         let (status, mode) = call(
             &app,
@@ -4985,6 +5001,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dv_disk_settings_reject_invalid_parallel_before_changing_retention() {
+        let (app, _) = test_state_with_dv_disk_tools();
+        let admin = setup_admin(&app).await;
+
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "dv_disk_keep_original": false,
+                    "dv_disk_convert_parallel": 9
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["dv_disk_keep_original"], true);
+        assert_eq!(settings["dv_disk_convert_parallel"], 1);
+    }
+
+    #[tokio::test]
     async fn dv_disk_queue_refuses_missing_tools_before_media_lookup() {
         let app = test_app();
         let admin = setup_admin(&app).await;
@@ -5004,6 +5045,35 @@ mod tests {
                 .is_some_and(|message| message.contains("library.dv_disk_convert unavailable")),
             "{body}"
         );
+    }
+
+    #[tokio::test]
+    async fn dv_disk_library_mutations_return_not_found_for_missing_library() {
+        let (app, _) = test_state_with_dv_disk_tools();
+        let admin = setup_admin(&app).await;
+        let missing = 9_223_372_036_854_775_807_i64;
+
+        let (status, body) = call(
+            &app,
+            put(
+                &format!("/api/v1/libraries/{missing}/dv-conversion"),
+                Some(&admin),
+                json!({ "mode": "manual" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/libraries/{missing}/dv-conversions"),
+                Some(&admin),
+                json!({ "retry_failed": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     }
 
     #[tokio::test]

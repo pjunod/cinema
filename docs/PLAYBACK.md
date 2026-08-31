@@ -154,6 +154,35 @@ bytes or transport is incomplete until it has a new ID, a source anchor, a
 behavior test, and a row here. Changing an existing rule means changing its
 unit test and this prose in the same commit.
 
+## Permanent Profile 8 conversion — the source becomes ordinary media
+
+The routing inventory above owns what happens when you press Play. Permanent
+Profile 7 → 8.1 conversion happens earlier, as explicit admin library
+maintenance, so it is not another playback fork. An unconverted Profile 7
+title still uses `server.dolby-vision-convert`; a committed title no longer
+needs that route because the scanner sees a native Profile 8 source.
+
+```text
+eligible Profile 7 source
+        │
+        ├─ build sibling replacement · preserve every non-video track
+        ├─ prove Profile 8 · no EL · duration and track counts unchanged
+        ├─ fence the unchanged source · publish by same-filesystem rename
+        └─ re-probe and commit ledger
+                         │
+                         ▼
+             ordinary Profile 8 source row
+```
+
+The original is retained as `<source>.p7.orig` by default. A failed probe or
+source-identity fence leaves the public source untouched; a committed ledger
+row is terminal. After commit, `/decision` evaluates `dv_profile = 8` like any
+other native Profile 8 file. A compatible Dolby Vision client therefore gets
+`delivered_dynamic_range: "dolby_vision"` with no conversion reason—the
+absence of that reason is the playback proof that no per-session rewrite
+remains. The operator workflow, recovery states, and dependency diagnostics
+are in [OPERATIONS.md](OPERATIONS.md#permanent-dolby-vision-profile-7--81-conversion).
+
 ## Runtime caps — what each client tells the server
 
 On every `/decision`, each player reports what that device can decode and what

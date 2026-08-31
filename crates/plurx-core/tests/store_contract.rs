@@ -55,9 +55,9 @@ use plurx_core::segplan::{
 use plurx_core::store::{
     cluster_fragment_index_key, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery,
     ArtworkRepairFence, ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation,
-    DvConversionState, LibraryStore, MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob,
-    OutboxEntry, PublicationStore, QueueDvConversionOutcome, ReconcileOutcome,
-    RootFingerprintStatus, SqliteStore, Store,
+    DvConversionMode, DvConversionState, LibraryStore, MediaStore, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, OutboxEntry, PublicationStore, QueueDvConversionOutcome,
+    ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store, DV_CONVERSION_LEDGER_READ_MAX,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
@@ -169,10 +169,15 @@ const SETTINGS_METHODS: &[&str] = &[
 ];
 const DV_CONVERSION_METHODS: &[&str] = &[
     "dv_conversion",
+    "dv_conversions_for_files",
+    "dv_conversion_eligibility_for_files",
+    "dv_conversion_eligible",
     "queue_dv_conversion",
-    "queue_library_dv_conversions",
+    "queue_library_dv_conversion_batch",
     "dv_conversion_candidates",
     "dv_conversion_progress",
+    "dv_conversion_progress_snapshot",
+    "set_library_dv_conversion_mode",
     "mark_dv_conversion_running",
     "mark_dv_conversion_verified",
     "mark_dv_conversion_committed",
@@ -6707,16 +6712,45 @@ async fn replicated_v19_store_migrates_the_conversion_ledger_on_daemon_open() {
         .txn([
             ("DROP TABLE dv_conversions", hiqlite::params!()),
             (
+                "CREATE TABLE dv_conversions (
+                    file_id INTEGER PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    queued_at_ms INTEGER NOT NULL
+                 ) STRICT",
+                hiqlite::params!(),
+            ),
+            (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
                 hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
             ),
         ])
         .await
-        .expect("construct exact v19 fixture");
+        .expect("construct malformed v19 fixture");
     results
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .expect("commit exact v19 fixture");
+        .expect("commit malformed v19 fixture");
+
+    let malformed = match HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await {
+        Ok(_) => panic!("v20 migration must reject a pre-existing malformed ledger"),
+        Err(error) => error,
+    };
+    assert!(
+        malformed.to_string().contains("already exists"),
+        "{malformed}"
+    );
+    let marker: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read marker after refused malformed migration");
+    assert_eq!(marker[0].value, AUTH_SCHEMA_VERSION - 1);
+    client
+        .execute("DROP TABLE dv_conversions", hiqlite::params!())
+        .await
+        .expect("remove malformed ledger for exact retry");
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
@@ -13285,6 +13319,7 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
                 80_000,
                 7,
                 &ProbeResult {
+                    container: Some("mkv".to_owned()),
                     dolby_vision: DolbyVisionFacts {
                         profile: Some(7),
                         level: Some(6),
@@ -13305,6 +13340,7 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
                 70_000,
                 8,
                 &ProbeResult {
+                    container: Some("mkv".to_owned()),
                     dolby_vision: DolbyVisionFacts {
                         profile: Some(7),
                         level: Some(6),
@@ -13318,6 +13354,69 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             )
             .await
             .expect("HLG file");
+        let non_mkv = store
+            .upsert_file(
+                item,
+                &format!("/contract/dv-{backend}/p7.mp4"),
+                71_000,
+                11,
+                &ProbeResult {
+                    container: Some("MP4".to_owned()),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(7),
+                        level: Some(6),
+                        bl_compat_id: Some(6),
+                        el_present: Some(true),
+                        rpu_present: Some(true),
+                    },
+                    raw_json: Some("{}".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("non-MKV P7 file");
+        let p7_second = store
+            .upsert_file(
+                item,
+                &format!("/contract/dv-{backend}/p7-second.mkv"),
+                81_000,
+                9,
+                &ProbeResult {
+                    container: Some("MKV".to_owned()),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(7),
+                        level: Some(6),
+                        bl_compat_id: Some(1),
+                        el_present: Some(true),
+                        rpu_present: Some(true),
+                    },
+                    raw_json: Some("{}".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("second P7 file");
+        let p7_race = store
+            .upsert_file(
+                item,
+                &format!("/contract/dv-{backend}/p7-race.mkv"),
+                82_000,
+                10,
+                &ProbeResult {
+                    container: Some("mkv".to_owned()),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(7),
+                        level: Some(6),
+                        bl_compat_id: Some(6),
+                        el_present: Some(true),
+                        rpu_present: Some(true),
+                    },
+                    raw_json: Some("{}".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("racing P7 file");
 
         assert!(matches!(
             store
@@ -13326,20 +13425,123 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
                 .expect("reject HLG"),
             QueueDvConversionOutcome::Ineligible(_)
         ));
-        assert_eq!(
+        assert!(matches!(
             store
-                .queue_library_dv_conversions(library.id, 101, false)
+                .queue_dv_conversion(non_mkv, 100)
                 .await
-                .expect("auto queue"),
+                .expect("reject non-MKV"),
+            QueueDvConversionOutcome::Ineligible(_)
+        ));
+        assert!(store.dv_conversion_eligible(p7).await.expect("eligible P7"));
+        assert!(!store
+            .dv_conversion_eligible(hlg)
+            .await
+            .expect("ineligible HLG"));
+
+        let first = store
+            .queue_library_dv_conversion_batch(library.id, 101, false, 1)
+            .await
+            .expect("first bounded auto queue");
+        assert_eq!(first.queued, 1, "{backend}");
+        assert!(first.saturated, "{backend}");
+        let second = store
+            .queue_library_dv_conversion_batch(library.id, 101, false, 1)
+            .await
+            .expect("second bounded auto queue");
+        assert_eq!(second.queued, 1, "{backend}");
+        assert!(second.saturated, "{backend}");
+
+        let left = Arc::clone(&store);
+        let right = Arc::clone(&store);
+        let (left_outcome, right_outcome) = tokio::join!(
+            left.queue_dv_conversion(p7_race, 101),
+            right.queue_dv_conversion(p7_race, 101)
+        );
+        let outcomes = [
+            left_outcome.expect("left concurrent admission"),
+            right_outcome.expect("right concurrent admission"),
+        ];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, QueueDvConversionOutcome::Queued(_)))
+                .count(),
             1,
-            "{backend}: only numeric HDR10-compatible P7 is eligible"
+            "{backend}: exactly one concurrent caller owns admission"
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, QueueDvConversionOutcome::AlreadyActive(_)))
+                .count(),
+            1,
+            "{backend}: the losing concurrent caller observes active work"
         );
         let candidates = store
             .dv_conversion_candidates(0, 8)
             .await
             .expect("candidates");
-        assert_eq!(candidates.len(), 1, "{backend}");
+        assert_eq!(candidates.len(), 3, "{backend}");
         assert_eq!(candidates[0].file_id, p7, "{backend}");
+
+        let ledgers = store
+            .dv_conversions_for_files(&[p7_race, non_mkv, hlg, p7_second, p7])
+            .await
+            .expect("bounded ledger projection");
+        assert_eq!(ledgers.len(), 3, "{backend}");
+        assert!(ledgers
+            .windows(2)
+            .all(|rows| rows[0].file_id < rows[1].file_id));
+        let eligibility = store
+            .dv_conversion_eligibility_for_files(&[p7_race, non_mkv, hlg, p7_second, p7])
+            .await
+            .expect("bounded eligibility projection");
+        assert_eq!(eligibility.len(), 5, "{backend}");
+        assert!(eligibility[&p7], "{backend}");
+        assert!(!eligibility[&hlg], "{backend}");
+        assert!(!eligibility[&non_mkv], "{backend}");
+        assert!(store
+            .dv_conversions_for_files(&vec![0; DV_CONVERSION_LEDGER_READ_MAX + 1])
+            .await
+            .is_err());
+
+        let empty_library = store
+            .create_library(&NewLibrary {
+                name: format!("DV mode sibling {backend}"),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from(format!("/contract/dv-mode-{backend}"))],
+                anime: false,
+            })
+            .await
+            .expect("mode sibling library");
+        let left = Arc::clone(&store);
+        let right = Arc::clone(&store);
+        let (left_mode, right_mode) = tokio::join!(
+            left.set_library_dv_conversion_mode(library.id, DvConversionMode::Auto),
+            right.set_library_dv_conversion_mode(empty_library.id, DvConversionMode::Manual)
+        );
+        assert!(left_mode.expect("left atomic mode update"), "{backend}");
+        assert!(right_mode.expect("right atomic mode update"), "{backend}");
+        let modes = store
+            .get_setting(plurx_core::store::keys::LIBRARY_DV_DISK_CONVERT)
+            .await
+            .expect("mode document")
+            .expect("mode setting");
+        let modes: serde_json::Value = serde_json::from_str(&modes).expect("valid mode document");
+        assert_eq!(modes[library.id.to_string()], "auto", "{backend}");
+        assert_eq!(modes[empty_library.id.to_string()], "manual", "{backend}");
+
+        let progress = store
+            .dv_conversion_progress_snapshot()
+            .await
+            .expect("grouped progress");
+        assert_eq!(progress.global.eligible, 3, "{backend}");
+        assert_eq!(progress.global.queued, 3, "{backend}");
+        assert_eq!(progress.by_library[&library.id].eligible, 3, "{backend}");
+        assert_eq!(
+            progress.by_library[&empty_library.id].eligible, 0,
+            "{backend}"
+        );
 
         assert!(store
             .mark_dv_conversion_running(p7, 80_000)
@@ -13351,17 +13553,19 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .expect("failed"));
         assert_eq!(
             store
-                .queue_library_dv_conversions(library.id, 103, false)
+                .queue_library_dv_conversion_batch(library.id, 103, false, 64)
                 .await
-                .expect("auto does not retry"),
+                .expect("auto does not retry")
+                .queued,
             0,
             "{backend}: automatic discovery must not loop failed media"
         );
         assert_eq!(
             store
-                .queue_library_dv_conversions(library.id, 104, true)
+                .queue_library_dv_conversion_batch(library.id, 104, true, 64)
                 .await
-                .expect("manual retry"),
+                .expect("manual retry")
+                .queued,
             1,
             "{backend}: the operator can retry a corrected source"
         );

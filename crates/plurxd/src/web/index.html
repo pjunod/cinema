@@ -5421,6 +5421,15 @@ function bookByline(it){
   return (it.kind==='book'||it.kind==='audiobook')&&it.author
     ? `<div class="muted" style="margin-top:4px">By ${esc(it.author)}</div>` : '';
 }
+const DV_PROGRESS_POLL_MS=10000;
+let DV_FILE_PAGE_FILES=[], DV_FILE_POLLING=false, DV_SETTINGS_POLL_AT=0;
+function dvConversionIsActive(conversion){
+  return !!conversion&&["queued","running","verified"].includes(conversion.state);
+}
+function dvSnapshotHasActive(snapshot){
+  const progress=snapshot&&snapshot.progress;
+  return !!progress&&(Number(progress.queued||0)+Number(progress.running||0)+Number(progress.verified||0)>0);
+}
 function dvFileActionMount(file){
   if(!ME||!ME.is_admin||![7,8].includes(Number(file&&file.dv_profile))) return "";
   const id=exactWireId(file);
@@ -5432,9 +5441,9 @@ function dvConversionStateHtml(file,snapshot){
   const id=exactWireId(file);
   if(!conversion){
     if(!snapshot.eligible) return "";
-    const reason=capability.available?"":capability.reason||"dovi_tool or mkvmerge is unavailable";
+    const reason=capability.available===false?capability.reason||"dovi_tool or mkvmerge is unavailable":"";
     return `<div class="row" style="margin-top:8px;gap:8px"><span class="muted">Profile 7 can be permanently converted to Profile 8.1.</span>
-      <button class="ghost sm" onclick='queueDvFile(${JSON.stringify(id)},this)'${reason?' disabled':''}>Convert on disk</button>
+      <button class="ghost sm" aria-label="Convert file ${esc(id)} from Dolby Vision Profile 7 to Profile 8.1 on disk" onclick='queueDvFile(${JSON.stringify(id)},this)'${reason?' disabled':''}>Convert on disk</button>
       ${reason?`<span class="problem">Unavailable: ${esc(reason)}</span>`:""}</div>`;
   }
   const state=conversion.state;
@@ -5446,35 +5455,70 @@ function dvConversionStateHtml(file,snapshot){
     return `<div class="muted" style="margin-top:8px">✓ Converted to Profile 8.1${layer}${bytes}${original}</div>`;
   }
   if(state==="failed"){
-    const unavailable=!capability.available;
+    const unavailable=capability.available===false;
     const reason=unavailable?capability.reason||"conversion tools unavailable":"";
     return `<div style="margin-top:8px"><div class="problem">Conversion failed: ${esc(conversion.error||"unknown error")}</div>
-      <button class="ghost sm" onclick='queueDvFile(${JSON.stringify(id)},this)'${unavailable?' disabled':''}>Retry conversion</button>${reason?` <span class="muted">${esc(reason)}</span>`:""}</div>`;
+      <button class="ghost sm" aria-label="Retry on-disk Dolby Vision conversion for file ${esc(id)}" onclick='queueDvFile(${JSON.stringify(id)},this)'${unavailable?' disabled':''}>Retry conversion</button>${reason?` <span class="muted">${esc(reason)}</span>`:""}</div>`;
   }
   const labels={queued:"Queued for on-disk conversion",running:"Converting Profile 7",verified:"Replacement verified; publishing"};
   return `<div class="muted" style="margin-top:8px">${esc(labels[state]||state)}${bytes}</div>`;
 }
-async function hydrateDvFileAction(file){
-  const id=exactWireId(file), mount=document.getElementById(`dv-file-${id}`);
-  if(!mount) return;
+async function hydrateDvFileActions(files){
+  if(!ME||!ME.is_admin) return false;
+  const targets=(files||[]).filter(file=>document.getElementById(`dv-file-${exactWireId(file)}`));
+  if(!targets.length) return false;
+  const ids=targets.map(exactWireId);
   try{
-    const snapshot=await api(`/files/${id}/dv-conversion`);
-    if(document.getElementById(`dv-file-${id}`)===mount) mount.innerHTML=dvConversionStateHtml(file,snapshot);
+    const snapshot=await api(`/dv-conversions?file_ids=${encodeURIComponent(ids.join(","))}`);
+    const conversions=snapshot.conversions_by_file||{};
+    const eligibility=snapshot.eligible_by_file||{};
+    const capabilities=snapshot.capabilities||{};
+    let anyActive=false;
+    for(const file of targets){
+      const id=exactWireId(file), mount=document.getElementById(`dv-file-${id}`);
+      if(!mount) continue;
+      const conversion=conversions[id]||null;
+      const active=dvConversionIsActive(conversion);
+      anyActive=anyActive||active;
+      mount.innerHTML=dvConversionStateHtml(file,{
+        conversion,
+        eligible:eligibility[id]===true,
+        capabilities,
+      });
+      mount.dataset.dvActive=active?"true":"false";
+    }
+    return anyActive;
   }catch(e){
-    if(document.getElementById(`dv-file-${id}`)===mount) mount.innerHTML=`<div class="problem">Conversion status unavailable: ${esc(e.message||"request failed")}</div>`;
+    let anyActive=false;
+    for(const file of targets){
+      const mount=document.getElementById(`dv-file-${exactWireId(file)}`);
+      if(!mount) continue;
+      mount.innerHTML=`<div class="problem">Conversion status unavailable: ${esc(e.message||"request failed")}</div>`;
+      anyActive=anyActive||mount.dataset.dvActive==="true";
+    }
+    return anyActive;
   }
 }
-function hydrateDvFileActions(files){
-  if(!ME||!ME.is_admin) return;
-  for(const file of files||[]) hydrateDvFileAction(file);
+async function pollDvFileActions(files,generation){
+  if(DV_FILE_POLLING||generation!==PAGE_RENDER_GENERATION||!location.hash.startsWith("#/item/")||document.visibilityState==="hidden") return;
+  DV_FILE_POLLING=true;
+  try{
+    const active=await hydrateDvFileActions(files);
+    if(!active&&generation===PAGE_RENDER_GENERATION&&location.hash.startsWith("#/item/")){
+      clearInterval(PAGE_TIMER); PAGE_TIMER=null;
+    }
+  }finally{ DV_FILE_POLLING=false; }
+}
+function armDvFilePoll(files,generation=PAGE_RENDER_GENERATION){
+  DV_FILE_PAGE_FILES=files||[];
+  setPageTimer(()=>pollDvFileActions(DV_FILE_PAGE_FILES,generation),DV_PROGRESS_POLL_MS,generation);
 }
 async function queueDvFile(id,btn){
   btn.disabled=true;
   try{
     await api(`/files/${id}/dv-conversion`,{method:"POST"});
     toast("Dolby Vision conversion queued");
-    const file={id_text:String(id),dv_profile:7};
-    await hydrateDvFileAction(file);
+    if(await hydrateDvFileActions(DV_FILE_PAGE_FILES)) armDvFilePoll(DV_FILE_PAGE_FILES);
   }catch(e){ toast(e.message||"Couldn't queue conversion"); }
   finally{ btn.disabled=false; }
 }
@@ -5489,10 +5533,14 @@ function chapterList(p){
   return rows.length?`<div class="chapters"><h2 class="section">Chapters</h2><div class="row" style="align-items:flex-start">${rows.join('')}</div></div>`:'';
 }
 async function viewItem(id){
+  const generation=PAGE_RENDER_GENERATION;
   layoutChrome("home",`<div class="empty">Loading…</div>`);
   const page=await loadItem(id);
   document.getElementById("main").innerHTML=layoutView("item",page);
-  hydrateDvFileActions(page.files);
+  DV_FILE_PAGE_FILES=page.files||[];
+  hydrateDvFileActions(DV_FILE_PAGE_FILES).then(active=>{
+    if(active&&generation===PAGE_RENDER_GENERATION&&location.hash.startsWith("#/item/")) armDvFilePoll(DV_FILE_PAGE_FILES,generation);
+  });
   restoreScroll();
   // One-click play from an episode list lands here and starts immediately.
   if(AUTOPLAY===String(id)){
@@ -10974,6 +11022,7 @@ function loadSettingsKey(key,generation){
   return transport.then(value=>{
     if(generation!==PAGE_RENDER_GENERATION) return value;
     SETTINGS_DATA[key]=value; SETTINGS_LOADED.add(key);
+    if(key==="dvConversions") DV_SETTINGS_POLL_AT=Date.now()+DV_PROGRESS_POLL_MS;
     if(key==="settings") cacheSettings(value);
     if(key==="trakt") cacheTrakt(value);
     if(key==="cluster") CLUSTER_LOADED=true;
@@ -11051,6 +11100,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   if(reset){
     SETTINGS=null; TRAKT=null; TRAKT_EDIT=false; SETTINGS_DATA={};
     SETTINGS_LOADED.clear(); SETTINGS_LOADS.clear();
+    DV_SETTINGS_POLL_AT=0;
     CLUSTER_LOADED=false; forgetJoinToken();
   }
   const tab=settingsTab();
@@ -11245,17 +11295,28 @@ function dvModeSelect(l,dv){
   const unavailable=!(dv&&dv.capabilities&&dv.capabilities.available);
   const reason=unavailable?(dv&&dv.capabilities&&dv.capabilities.reason)||"dovi_tool or mkvmerge is unavailable":"";
   return `<div class="sched" title="${esc(reason)}"><span class="schedpair">Dolby Vision
-    <select id="dv-mode-${l.id}" style="max-width:105px;font-size:12px;padding:3px 6px"${unavailable?' disabled':''}>
+    <select id="dv-mode-${l.id}" aria-label="Dolby Vision conversion mode for ${esc(l.name)}" style="max-width:105px;font-size:12px;padding:3px 6px"${unavailable?' disabled':''}>
       ${[["off","Off"],["manual","Manual"],["auto","Automatic"]].map(([v,label])=>`<option value="${v}"${mode===v?' selected':''}>${label}</option>`).join("")}
     </select></span>
-    <span class="schedpair"><button class="ghost sm" onclick="saveDvMode(${l.id},this)"${unavailable?' disabled':''}>Save</button>
-    <button class="ghost sm" onclick="convertDvLibrary(${l.id},this)"${unavailable||mode==="off"?' disabled':''}>Convert now</button></span>
-    <span class="muted">${esc(unavailable?`Unavailable: ${reason}`:dvProgressText(dv.progress_by_library&&dv.progress_by_library[String(l.id)]))}</span></div>`;
+    <span class="schedpair"><button class="ghost sm" aria-label="Save Dolby Vision conversion mode for ${esc(l.name)}" onclick="saveDvMode(${l.id},this)"${unavailable?' disabled':''}>Save</button>
+    <button class="ghost sm" aria-label="Convert Dolby Vision files in ${esc(l.name)} now" onclick="convertDvLibrary(${l.id},this)"${unavailable||mode==="off"?' disabled':''}>Convert now</button></span>
+    <span class="muted" id="dv-progress-${l.id}" aria-live="polite">${esc(unavailable?`Unavailable: ${reason}`:dvProgressText(dv.progress_by_library&&dv.progress_by_library[String(l.id)]))}</span></div>`;
 }
 async function refreshDvConversions(){
+  // Stamp before the request so a slow or failed read cannot stack another
+  // conversion snapshot behind itself on the two-second settings tick.
+  DV_SETTINGS_POLL_AT=Date.now()+DV_PROGRESS_POLL_MS;
   const snapshot=await api("/dv-conversions");
   SETTINGS_DATA.dvConversions=snapshot; SETTINGS_LOADED.add("dvConversions");
   return snapshot;
+}
+function paintDvConversionProgress(snapshot){
+  const unavailable=!(snapshot&&snapshot.capabilities&&snapshot.capabilities.available);
+  const reason=unavailable?(snapshot&&snapshot.capabilities&&snapshot.capabilities.reason)||"dovi_tool or mkvmerge is unavailable":"";
+  for(const library of SETTINGS_DATA.libs||[]){
+    const mount=document.getElementById(`dv-progress-${library.id}`);
+    if(mount) mount.textContent=unavailable?`Unavailable: ${reason}`:dvProgressText(snapshot.progress_by_library&&snapshot.progress_by_library[String(library.id)]);
+  }
 }
 async function saveDvMode(id,btn){
   const mode=document.getElementById(`dv-mode-${id}`).value;
@@ -11273,7 +11334,8 @@ async function convertDvLibrary(id,btn){
   try{
     const result=await api(`/libraries/${id}/dv-conversions`,{method:"POST",body:{retry_failed:true}});
     await refreshDvConversions();
-    toast(`${result.queued||0} Dolby Vision file${Number(result.queued)===1?'':'s'} queued`);
+    const more=result.saturated?"; more eligible files may remain — run Convert now again":"";
+    toast(`${result.queued||0} Dolby Vision file${Number(result.queued)===1?'':'s'} queued${more}`);
     renderSettings();
   }catch(e){ toast(e.message||"Couldn't queue Dolby Vision conversion"); }
   finally{ btn.disabled=false; }
@@ -11298,8 +11360,8 @@ function dvDiskPanel(settings,dv){
     ${reason?`<div class="setwarn">⚠ <b>Conversion unavailable.</b> ${esc(reason)}</div>`:""}
     <div class="row setrow" style="gap:14px 18px">
       <label class="schedpair"><input type="checkbox" id="dv-keep-original"${settings&&settings.dv_disk_keep_original?' checked':''}> Keep the Profile 7 original as <code>.p7.orig</code></label>
-      <span class="schedpair">Parallel files <select id="dv-parallel">${[1,2,3,4,5,6,7,8].map(n=>`<option value="${n}"${Number(settings&&settings.dv_disk_convert_parallel||1)===n?' selected':''}>${n}</option>`).join("")}</select></span>
-      <button class="ghost sm" onclick="saveDvDiskSettings(this)">Save</button></div>
+      <label class="schedpair" for="dv-parallel">Parallel files <select id="dv-parallel">${[1,2,3,4,5,6,7,8].map(n=>`<option value="${n}"${Number(settings&&settings.dv_disk_convert_parallel||1)===n?' selected':''}>${n}</option>`).join("")}</select></label>
+      <button class="ghost sm" aria-label="Save Dolby Vision conversion settings" onclick="saveDvDiskSettings(this)">Save</button></div>
     <div class="hint">Profile 7 files are copied to a verified Profile 8.1 replacement before their public path changes. Keeping the original is safest and is on by default. Each file is leased cluster-wide, while parallelism limits work on this node.</div></div>`;
 }
 function libRow(l,status,dv){
@@ -12645,6 +12707,16 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
       for(const [id,st] of Object.entries(status)){
         const el=document.getElementById("st-"+id);
         if(el) el.innerHTML=statusText(st,lastScans.get(String(id)));
+      }
+      // Conversion progress is deliberately colder than scan status. Refresh
+      // only while durable work is active, and stop spending the extra request
+      // as soon as the next snapshot is terminal.
+      if(dvSnapshotHasActive(SETTINGS_DATA.dvConversions)&&Date.now()>=DV_SETTINGS_POLL_AT){
+        try{
+          const snapshot=await refreshDvConversions();
+          if(!settingsCurrent(generation,tab)) return;
+          paintDvConversionProgress(snapshot);
+        }catch(error){ if(error&&error.status===401) throw error; }
       }
     }
     const secondary=[];

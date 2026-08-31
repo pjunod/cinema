@@ -713,6 +713,71 @@ test("Settings loads only the active tab manifest", () => {
   }
 });
 
+test("Dolby Vision progress polling runs only for active durable work", () => {
+  const conversionActive = new Function(
+    `${shippedSource("dvConversionIsActive")}; return dvConversionIsActive;`,
+  )();
+  const snapshotActive = new Function(
+    `${shippedSource("dvSnapshotHasActive")}; return dvSnapshotHasActive;`,
+  )();
+  for (const state of ["queued", "running", "verified"])
+    assert.equal(conversionActive({ state }), true, `${state} remains pollable`);
+  for (const state of ["committed", "failed"])
+    assert.equal(conversionActive({ state }), false, `${state} stops polling`);
+  assert.equal(snapshotActive({ progress: { queued: 1 } }), true);
+  assert.equal(snapshotActive({ progress: { committed: 4, failed: 1 } }), false);
+
+  const hydrate = shippedSource("hydrateDvFileActions");
+  assert.match(hydrate,
+    /api\(`\/dv-conversions\?file_ids=\$\{encodeURIComponent\(ids\.join\(","\)\)\}`\)/);
+  assert.equal((hydrate.match(/api\(/g)||[]).length, 1,
+    "an item detail hydrates every conversion ledger in one bounded request");
+  assert.match(hydrate, /const eligibility=snapshot\.eligible_by_file\|\|\{\}/,
+    "item actions consume server-computed Dolby Vision eligibility");
+  assert.match(hydrate, /eligible:eligibility\[id\]===true/,
+    "the client never infers Profile 7 conversion eligibility from its item DTO");
+  assert.match(hydrate, /const capabilities=snapshot\.capabilities\|\|\{\}/,
+    "item actions consume the shared conversion-tool capability snapshot");
+  assert.match(hydrate, /capabilities,/,
+    "the batch response supplies one shared tool capability snapshot");
+  assert.doesNotMatch(hydrate, /Number\(file\.dv_profile\)===7/,
+    "the UI does not enable an action from the numeric profile alone");
+  assert.doesNotMatch(hydrate, /\/files\/\$\{id\}\/dv-conversion/,
+    "item hydration never falls back to one request per file");
+
+  const refresh = shippedSource("refreshDvConversions");
+  assert.match(refresh, /DV_SETTINGS_POLL_AT=Date\.now\(\)\+DV_PROGRESS_POLL_MS/,
+    "the next gate is stamped before the network request");
+  const tick = shippedSource("settingsTick");
+  assert.match(tick, /dvSnapshotHasActive\(SETTINGS_DATA\.dvConversions\)/);
+  assert.match(tick, /Date\.now\(\)>=DV_SETTINGS_POLL_AT/);
+  assert.match(tick, /paintDvConversionProgress\(snapshot\)/);
+
+  const item = shippedSource("viewItem");
+  assert.match(item, /hydrateDvFileActions\(DV_FILE_PAGE_FILES\)\.then\(active=>/);
+  assert.match(item, /if\(active[\s\S]*armDvFilePoll/,
+    "the item timer starts only after an active ledger row is observed");
+  const poll = shippedSource("pollDvFileActions");
+  assert.match(poll, /if\(!active[\s\S]*clearInterval\(PAGE_TIMER\)/,
+    "the item timer stops after the first all-terminal snapshot");
+  const queueLibrary = shippedSource("convertDvLibrary");
+  assert.match(queueLibrary, /result\.saturated/,
+    "a cap-hit batch tells the operator another bounded pass may be needed");
+});
+
+test("Dolby Vision settings controls have accessible names", () => {
+  const file = shippedSource("dvConversionStateHtml");
+  assert.match(file, /aria-label="Convert file .* from Dolby Vision Profile 7 to Profile 8\.1 on disk"/);
+  assert.match(file, /aria-label="Retry on-disk Dolby Vision conversion for file/);
+  const mode = shippedSource("dvModeSelect");
+  assert.match(mode, /aria-label="Dolby Vision conversion mode for/);
+  assert.match(mode, /aria-label="Save Dolby Vision conversion mode for/);
+  assert.match(mode, /aria-label="Convert Dolby Vision files in/);
+  const panel = shippedSource("dvDiskPanel");
+  assert.match(panel, /<label class="schedpair" for="dv-parallel">Parallel files/);
+  assert.match(panel, /aria-label="Save Dolby Vision conversion settings"/);
+});
+
 test("Analysis workspace uses server pages and separates expected outcomes", () => {
   const main={innerHTML:"",querySelectorAll:()=>[]};
   const document={activeElement:null,body:{contains:()=>true},getElementById:(id)=>id==="main"?main:null};

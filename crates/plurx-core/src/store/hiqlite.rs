@@ -1680,8 +1680,14 @@ impl HiqliteAuthStore {
                     let attempt = self
                         .client()
                         .txn([
-                            (super::dv_conversion::DV_CONVERSIONS_SCHEMA, params!()),
-                            (super::dv_conversion::DV_CONVERSIONS_QUEUE_INDEX, params!()),
+                            (
+                                super::dv_conversion::DV_CONVERSIONS_MIGRATION_SCHEMA,
+                                params!(),
+                            ),
+                            (
+                                super::dv_conversion::DV_CONVERSIONS_MIGRATION_QUEUE_INDEX,
+                                params!(),
+                            ),
                             (
                                 "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
                                  WHERE singleton = 1 AND schema_version = $3",

@@ -3,7 +3,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use plurx_core::store::QueueDvConversionOutcome;
+use plurx_core::store::{QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX};
 use serde::Deserialize;
 
 use super::error::ApiError;
@@ -22,6 +22,28 @@ fn queue_error(error: plurx_core::error::StoreError) -> ApiError {
 #[derive(Default, Deserialize)]
 pub struct StatusQuery {
     library_id: Option<i64>,
+    file_ids: Option<String>,
+}
+
+fn parse_file_ids(raw: &str) -> Result<Vec<i64>, ApiError> {
+    let mut ids = std::collections::BTreeSet::new();
+    for value in raw.split(',').filter(|value| !value.trim().is_empty()) {
+        let id = value
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| {
+                ApiError::BadRequest("file_ids must contain positive integers".to_owned())
+            })?;
+        ids.insert(id);
+        if ids.len() > DV_CONVERSION_LEDGER_READ_MAX {
+            return Err(ApiError::BadRequest(format!(
+                "file_ids accepts at most {DV_CONVERSION_LEDGER_READ_MAX} ids"
+            )));
+        }
+    }
+    Ok(ids.into_iter().collect())
 }
 
 pub async fn status(
@@ -29,26 +51,51 @@ pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let progress = state.store.dv_conversion_progress(query.library_id).await?;
-    let modes = state.jobs.dv_disk_modes().await?;
-    let mut progress_by_library = std::collections::BTreeMap::new();
-    if query.library_id.is_none() {
-        for library in state.store.list_libraries().await? {
-            progress_by_library.insert(
-                library.id.to_string(),
-                state.store.dv_conversion_progress(Some(library.id)).await?,
-            );
-        }
+    if let Some(raw) = query.file_ids.as_deref() {
+        let ids = parse_file_ids(raw)?;
+        let conversions = state.store.dv_conversions_for_files(&ids).await?;
+        let eligibility = state
+            .store
+            .dv_conversion_eligibility_for_files(&ids)
+            .await?;
+        return Ok(Json(serde_json::json!({
+            "conversions_by_file": conversions.into_iter().map(|row| {
+                (row.file_id.to_string(), row)
+            }).collect::<std::collections::BTreeMap<_, _>>(),
+            "eligible_by_file": eligibility.into_iter().map(|(file_id, eligible)| {
+                (file_id.to_string(), eligible)
+            }).collect::<std::collections::BTreeMap<_, _>>(),
+            "capabilities": state.jobs.dv_disk_capabilities(),
+        })));
     }
+    let progress_snapshot = state.store.dv_conversion_progress_snapshot().await?;
+    let progress = query.library_id.map_or_else(
+        || progress_snapshot.global.clone(),
+        |library_id| {
+            progress_snapshot
+                .by_library
+                .get(&library_id)
+                .cloned()
+                .unwrap_or_default()
+        },
+    );
+    let progress_by_library = query.library_id.is_none().then(|| {
+        progress_snapshot
+            .by_library
+            .into_iter()
+            .map(|(id, progress)| (id.to_string(), progress))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    });
+    let (modes, keep_original, parallel) = state.jobs.dv_disk_settings_snapshot().await?;
     Ok(Json(serde_json::json!({
         "capabilities": state.jobs.dv_disk_capabilities(),
         "library_modes": modes.into_iter().map(|(id, mode)| {
             (id.to_string(), mode.as_str())
         }).collect::<std::collections::BTreeMap<_, _>>(),
-        "keep_original": state.jobs.dv_disk_keep_original().await,
-        "parallel": state.jobs.dv_disk_parallel().await,
+        "keep_original": keep_original,
+        "parallel": parallel,
         "progress": progress,
-        "progress_by_library": progress_by_library,
+        "progress_by_library": progress_by_library.unwrap_or_default(),
     })))
 }
 
@@ -62,7 +109,11 @@ pub async fn file_status(
         .get_file(file_id)
         .await?
         .ok_or(ApiError::NotFound("file"))?;
-    let eligible = file.dolby_vision.profile == Some(7)
+    let eligible = file
+        .container
+        .as_deref()
+        .is_some_and(|container| container.eq_ignore_ascii_case("mkv"))
+        && file.dolby_vision.profile == Some(7)
         && matches!(file.dolby_vision.bl_compat_id, Some(1 | 6))
         && file.dolby_vision.el_present == Some(true)
         && file.dolby_vision.rpu_present == Some(true);
@@ -124,8 +175,13 @@ pub async fn queue_library(
     Path(library_id): Path<i64>,
     body: Option<Json<QueueLibraryBody>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    state
+        .store
+        .get_library(library_id)
+        .await?
+        .ok_or(ApiError::NotFound("library"))?;
     let retry_failed = body.map(|Json(body)| body.retry_failed).unwrap_or(true);
-    let queued = state
+    let batch = state
         .jobs
         .queue_dv_library(library_id, retry_failed)
         .await
@@ -134,7 +190,8 @@ pub async fn queue_library(
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
             "library_id": library_id.to_string(),
-            "queued": queued,
+            "queued": batch.queued,
+            "saturated": batch.saturated,
         })),
     ))
 }
@@ -152,6 +209,11 @@ pub async fn set_mode(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mode = DvDiskMode::parse(body.mode.trim())
         .ok_or_else(|| ApiError::BadRequest("mode must be off, manual, or auto".to_owned()))?;
+    state
+        .store
+        .get_library(library_id)
+        .await?
+        .ok_or(ApiError::NotFound("library"))?;
     state
         .jobs
         .set_dv_disk_mode(library_id, mode)

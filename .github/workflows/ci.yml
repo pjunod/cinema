@@ -713,9 +713,10 @@ jobs:
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
     needs: [scope, preflight]
     if: needs.scope.outputs.container == 'true' && !startsWith(github.ref, 'refs/tags/v')
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
@@ -732,6 +733,18 @@ jobs:
           cache-to: type=gha,mode=min
       - name: Start, probe, restart, and re-probe the image
         run: scripts/container-smoke plurx/plurxd:ci
+      # Release publication ships amd64 and arm64. The ordinary smoke loads
+      # amd64 into Docker, while this non-loading build exercises the other
+      # asset/checksum branch and its dovi_tool/mkvmerge version assertions
+      # under QEMU before a tag can be the first place arm64 fails.
+      - name: Build arm64 runtime and verify pinned conversion tools
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: linux/arm64
+          outputs: type=cacheonly
+          cache-from: type=gha
 
   # Configure this as the single required check for main-bound PRs and the
   # merge queue when repository protections become available. Until then it is

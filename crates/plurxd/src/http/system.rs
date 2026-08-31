@@ -1743,6 +1743,17 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateSettings>,
 ) -> Result<Json<SettingsDto>, ApiError> {
+    // Reject the whole request before any setting is persisted. In particular,
+    // `keep_original = false` is a destructive-policy change: a bad parallel
+    // value in the same request must not return 400 after silently applying it.
+    if req
+        .dv_disk_convert_parallel
+        .is_some_and(|parallel| !(1..=8).contains(&parallel))
+    {
+        return Err(ApiError::BadRequest(
+            "dv_disk_convert_parallel must be between 1 and 8".into(),
+        ));
+    }
     if let Some(name) = &req.server_name {
         let name = name.trim();
         if name.is_empty() {
@@ -1846,11 +1857,6 @@ pub async fn update_settings(
             .await?;
     }
     if let Some(parallel) = req.dv_disk_convert_parallel {
-        if !(1..=8).contains(&parallel) {
-            return Err(ApiError::BadRequest(
-                "dv_disk_convert_parallel must be between 1 and 8".into(),
-            ));
-        }
         state
             .store
             .put_setting(

@@ -1,5 +1,7 @@
 //! SQLite permanent Dolby Vision conversion ledger.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use rusqlite::types::Type;
 use rusqlite::{params, OptionalExtension, Row};
@@ -8,8 +10,9 @@ use super::SqliteStore;
 use crate::error::StoreError;
 use crate::store::dv_conversion::eligibility_reason;
 use crate::store::{
-    DvConversion, DvConversionCandidate, DvConversionProgress, DvConversionState,
-    DvConversionStore, QueueDvConversionOutcome,
+    keys, DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
+    DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
+    QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_CONVERSION_QUEUE_BATCH_MAX,
 };
 
 const CONVERSION_COLS: &str = "file_id, state, el_type, original_path, bytes_before,
@@ -57,91 +60,189 @@ impl DvConversionStore for SqliteStore {
             .await
     }
 
+    async fn dv_conversions_for_files(
+        &self,
+        file_ids: &[i64],
+    ) -> Result<Vec<DvConversion>, StoreError> {
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if file_ids.len() > DV_CONVERSION_LEDGER_READ_MAX {
+            return Err(StoreError::Task(format!(
+                "Dolby Vision ledger read has {} ids, maximum is {DV_CONVERSION_LEDGER_READ_MAX}",
+                file_ids.len()
+            )));
+        }
+        let encoded = serde_json::to_string(file_ids)
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT {CONVERSION_COLS} FROM dv_conversions
+                  WHERE file_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?1))
+                  ORDER BY file_id"
+            ))?;
+            let rows = statement.query_map([encoded], conversion_from_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    async fn dv_conversion_eligibility_for_files(
+        &self,
+        file_ids: &[i64],
+    ) -> Result<BTreeMap<i64, bool>, StoreError> {
+        if file_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        if file_ids.len() > DV_CONVERSION_LEDGER_READ_MAX {
+            return Err(StoreError::Task(format!(
+                "Dolby Vision eligibility read has {} ids, maximum is {DV_CONVERSION_LEDGER_READ_MAX}",
+                file_ids.len()
+            )));
+        }
+        let encoded = serde_json::to_string(file_ids)
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id,
+                        CASE WHEN LOWER(container) = 'mkv'
+                                   AND dv_profile = 7
+                                   AND dv_bl_compat_id IN (1, 6)
+                                   AND dv_el_present = 1 AND dv_rpu_present = 1
+                             THEN 1 ELSE 0 END
+                   FROM files
+                  WHERE id IN (SELECT CAST(value AS INTEGER) FROM json_each(?1))
+                  ORDER BY id",
+            )?;
+            let rows = statement.query_map([encoded], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? != 0))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()?)
+        })
+        .await
+    }
+
+    async fn dv_conversion_eligible(&self, file_id: i64) -> Result<bool, StoreError> {
+        self.with_read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT 1 FROM files
+                      WHERE id = ?1 AND LOWER(container) = 'mkv' AND dv_profile = 7
+                        AND dv_bl_compat_id IN (1, 6)
+                        AND dv_el_present = 1 AND dv_rpu_present = 1",
+                    [file_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some())
+        })
+        .await
+    }
+
     async fn queue_dv_conversion(
         &self,
         file_id: i64,
         queued_at_ms: i64,
     ) -> Result<QueueDvConversionOutcome, StoreError> {
         self.with_conn(move |conn| {
-            let facts = conn
+            let queued = conn
                 .query_row(
-                    "SELECT dv_profile, dv_bl_compat_id, dv_el_present, dv_rpu_present
-                       FROM files WHERE id = ?1",
-                    [file_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<i64>>(0)?,
-                            row.get::<_, Option<i64>>(1)?,
-                            row.get::<_, Option<i64>>(2)?.map(|value| value != 0),
-                            row.get::<_, Option<i64>>(3)?.map(|value| value != 0),
-                        ))
-                    },
-                )
-                .optional()?;
-            let Some((profile, bl_compat_id, el_present, rpu_present)) = facts else {
-                return Ok(QueueDvConversionOutcome::FileMissing);
-            };
-            if let Some(reason) = eligibility_reason(profile, bl_compat_id, el_present, rpu_present)
-            {
-                return Ok(QueueDvConversionOutcome::Ineligible(reason));
-            }
-
-            if let Some(existing) = read_conversion(conn, file_id)? {
-                match existing.state {
-                    DvConversionState::Committed => {
-                        return Ok(QueueDvConversionOutcome::AlreadyCommitted(existing));
-                    }
-                    DvConversionState::Queued
-                    | DvConversionState::Running
-                    | DvConversionState::Verified => {
-                        return Ok(QueueDvConversionOutcome::AlreadyActive(existing));
-                    }
-                    DvConversionState::Failed => {}
-                }
-            }
-
-            conn.execute(
-                "INSERT INTO dv_conversions
+                    "INSERT INTO dv_conversions
                    (file_id, state, queued_at_ms)
-                 VALUES (?1, 'queued', ?2)
+                 SELECT id, 'queued', ?2 FROM files
+                  WHERE id = ?1 AND LOWER(container) = 'mkv' AND dv_profile = 7
+                    AND dv_bl_compat_id IN (1, 6)
+                    AND dv_el_present = 1 AND dv_rpu_present = 1
                  ON CONFLICT(file_id) DO UPDATE SET
                    state = 'queued', el_type = NULL, original_path = NULL,
                    bytes_before = NULL, bytes_after = NULL, error = NULL,
                    queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL
-                 WHERE dv_conversions.state = 'failed'",
-                params![file_id, queued_at_ms],
-            )?;
-            let queued =
-                read_conversion(conn, file_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-            Ok(QueueDvConversionOutcome::Queued(queued))
+                 WHERE dv_conversions.state = 'failed'
+                 RETURNING file_id, state, el_type, original_path, bytes_before,
+                           bytes_after, error, queued_at_ms, finished_at_ms",
+                    params![file_id, queued_at_ms],
+                    conversion_from_row,
+                )
+                .optional()?;
+            if let Some(queued) = queued {
+                return Ok(QueueDvConversionOutcome::Queued(queued));
+            }
+            if let Some(existing) = read_conversion(conn, file_id)? {
+                return Ok(match existing.state {
+                    DvConversionState::Committed => {
+                        QueueDvConversionOutcome::AlreadyCommitted(existing)
+                    }
+                    _ => QueueDvConversionOutcome::AlreadyActive(existing),
+                });
+            }
+            let facts = conn
+                .query_row(
+                    "SELECT container, dv_profile, dv_bl_compat_id, dv_el_present, dv_rpu_present
+                       FROM files WHERE id = ?1",
+                    [file_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<i64>>(3)?.map(|value| value != 0),
+                            row.get::<_, Option<i64>>(4)?.map(|value| value != 0),
+                        ))
+                    },
+                )
+                .optional()?;
+            Ok(match facts {
+                None => QueueDvConversionOutcome::FileMissing,
+                Some((container, profile, compat, el, rpu)) => {
+                    QueueDvConversionOutcome::Ineligible(
+                        eligibility_reason(container.as_deref(), profile, compat, el, rpu)
+                            .unwrap_or("eligible file was not admitted"),
+                    )
+                }
+            })
         })
         .await
     }
 
-    async fn queue_library_dv_conversions(
+    async fn queue_library_dv_conversion_batch(
         &self,
         library_id: i64,
         queued_at_ms: i64,
         retry_failed: bool,
-    ) -> Result<u64, StoreError> {
+        limit: i64,
+    ) -> Result<DvConversionQueueBatch, StoreError> {
+        let limit = limit.clamp(0, DV_CONVERSION_QUEUE_BATCH_MAX);
+        if limit == 0 {
+            return Ok(DvConversionQueueBatch::default());
+        }
         self.with_conn(move |conn| {
             let changed = conn.execute(
-                "INSERT INTO dv_conversions (file_id, state, queued_at_ms)
-                 SELECT f.id, 'queued', ?2
+                "WITH candidates(file_id) AS (
+                   SELECT f.id
                    FROM files f JOIN items i ON i.id = f.item_id
+                   LEFT JOIN dv_conversions d ON d.file_id = f.id
                   WHERE i.library_id = ?1
+                    AND LOWER(f.container) = 'mkv'
                     AND f.dv_profile = 7
                     AND f.dv_bl_compat_id IN (1, 6)
                     AND f.dv_el_present = 1
                     AND f.dv_rpu_present = 1
+                    AND (d.file_id IS NULL OR (?3 AND d.state = 'failed'))
+                   ORDER BY f.id LIMIT ?4
+                 )
+                 INSERT INTO dv_conversions (file_id, state, queued_at_ms)
+                 SELECT file_id, 'queued', ?2 FROM candidates WHERE true
                  ON CONFLICT(file_id) DO UPDATE SET
                    state = 'queued', el_type = NULL, original_path = NULL,
                    bytes_before = NULL, bytes_after = NULL, error = NULL,
                    queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL
                  WHERE ?3 AND dv_conversions.state = 'failed'",
-                params![library_id, queued_at_ms, retry_failed],
+                params![library_id, queued_at_ms, retry_failed, limit],
             )?;
-            Ok(changed as u64)
+            Ok(DvConversionQueueBatch {
+                queued: changed as u64,
+                saturated: changed as i64 == limit,
+            })
         })
         .await
     }
@@ -186,7 +287,8 @@ impl DvConversionStore for SqliteStore {
         self.with_read(move |conn| {
             Ok(conn.query_row(
                 "SELECT
-                   COALESCE(SUM(CASE WHEN f.dv_profile = 7
+                   COALESCE(SUM(CASE WHEN LOWER(f.container) = 'mkv'
+                                          AND f.dv_profile = 7
                                           AND f.dv_bl_compat_id IN (1, 6)
                                           AND f.dv_el_present = 1
                                           AND f.dv_rpu_present = 1
@@ -212,6 +314,92 @@ impl DvConversionStore for SqliteStore {
                     })
                 },
             )?)
+        })
+        .await
+    }
+
+    async fn dv_conversion_progress_snapshot(
+        &self,
+    ) -> Result<DvConversionProgressSnapshot, StoreError> {
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT l.id,
+                   COALESCE(SUM(CASE WHEN LOWER(f.container) = 'mkv'
+                                          AND f.dv_profile = 7
+                                          AND f.dv_bl_compat_id IN (1, 6)
+                                          AND f.dv_el_present = 1
+                                          AND f.dv_rpu_present = 1
+                                     THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN d.state = 'queued' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN d.state = 'running' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN d.state = 'verified' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN d.state = 'committed' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN d.state = 'failed' THEN 1 ELSE 0 END), 0)
+                 FROM libraries l
+                 LEFT JOIN items i ON i.library_id = l.id
+                 LEFT JOIN files f ON f.item_id = i.id
+                 LEFT JOIN dv_conversions d ON d.file_id = f.id
+                 GROUP BY l.id ORDER BY l.id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    DvConversionProgress {
+                        eligible: row.get(1)?,
+                        queued: row.get(2)?,
+                        running: row.get(3)?,
+                        verified: row.get(4)?,
+                        committed: row.get(5)?,
+                        failed: row.get(6)?,
+                    },
+                ))
+            })?;
+            let by_library = rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+            Ok(DvConversionProgressSnapshot::from_libraries(by_library))
+        })
+        .await
+    }
+
+    async fn set_library_dv_conversion_mode(
+        &self,
+        library_id: i64,
+        mode: DvConversionMode,
+    ) -> Result<bool, StoreError> {
+        let library_key = library_id.to_string();
+        let path = format!("$.\"{library_id}\"");
+        let mode = mode.as_str().to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "INSERT INTO settings (key, value, updated_at)
+                 SELECT ?1,
+                        CASE WHEN ?3 = 'off' THEN '{}'
+                             ELSE json_object(?2, ?3) END,
+                        unixepoch()
+                   FROM libraries WHERE id = ?4
+                 ON CONFLICT(key) DO UPDATE SET
+                   value = CASE WHEN ?3 = 'off'
+                     THEN json_remove(
+                       CASE WHEN json_valid(settings.value)
+                             THEN CASE WHEN json_type(settings.value) = 'object'
+                                       THEN settings.value ELSE '{}' END
+                             ELSE '{}' END,
+                       ?5)
+                     ELSE json_set(
+                       CASE WHEN json_valid(settings.value)
+                             THEN CASE WHEN json_type(settings.value) = 'object'
+                                       THEN settings.value ELSE '{}' END
+                             ELSE '{}' END,
+                       ?5, ?3)
+                   END,
+                   updated_at = excluded.updated_at",
+                params![
+                    keys::LIBRARY_DV_DISK_CONVERT,
+                    library_key,
+                    mode,
+                    library_id,
+                    path
+                ],
+            )? == 1)
         })
         .await
     }
@@ -334,6 +522,7 @@ mod tests {
                 80_000,
                 7,
                 &ProbeResult {
+                    container: Some("mkv".to_owned()),
                     dolby_vision: DolbyVisionFacts {
                         profile: Some(7),
                         level: Some(6),

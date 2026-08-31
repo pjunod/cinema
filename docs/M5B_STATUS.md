@@ -1,7 +1,8 @@
 # M5b status — permanent Dolby Vision Profile 7 conversion
 
-**Status:** implementation in progress · **Branch:**
-`effort/playback-caps-v2-m5b` · **Updated:** 2026-08-31
+**Status:** adversarial fixes integrated · **Branch:**
+`effort/playback-caps-v2-m5b` · **PR:**
+[#710](https://github.com/pjunod/plurx/pull/710) · **Updated:** 2026-08-31
 
 Companion to [PLAYBACK-CAPS-V2-PLAN.md](PLAYBACK-CAPS-V2-PLAN.md), which owns
 the contract, and [OPERATIONS.md](OPERATIONS.md), which will own the finished
@@ -24,7 +25,7 @@ a forecast.
 | Operator surface | Complete | Admin-only library modes, progress, settings, file action/ledger, explicit tool refusal, and retry controls pass the embedded-web static contract |
 | Image and probes | Complete | Image installs checksum-pinned `dovi_tool` 2.3.3 assets and exact Bookworm MKVToolNix 74.0.0-1; the boot probe names command, version, availability, and an exact refusal reason |
 | Focused evidence | Complete | Conversion and API unit tests, SQLite and replicated Store contracts, both backend compilation, embedded-web static contracts, 60-layout/view UI capture, validation catalog, and 127 operations contracts pass |
-| Adversarial review | Not started | Independent correctness, destructive-media, cluster, and UI/API review passes after the PR opens |
+| Adversarial review | In progress | Three independent first-pass reviews completed; destructive-media, clustered-store, API/UI, documentation, and packaging findings are fixed and focused regressions pass. Re-review the integrated commit before freezing it |
 | Complete qualification | Not started | Run once after review fixes on the frozen effort-to-main candidate; every promotion job and the exact-tree receipt must pass |
 | Merge | Not started | Merge only while the qualified head and `main` base are unchanged |
 
@@ -59,21 +60,30 @@ a forecast.
    Profile 7 and HDR10 compatibility remain the primary eligibility contract,
    but a destructive rewrite also refuses an incomplete or not-yet-backfilled
    probe row. A later successful scan makes it eligible without an exception.
-5. **Do not continuously poll conversion state from Settings.** The Libraries
-   tab loads one admin snapshot, refreshes it after each mutation, and the
-   ordinary page refresh obtains a new one. This keeps the established bounded
-   settings read contract while still exposing per-library progress.
+5. **Poll conversion state only while durable work is active.** The Libraries
+   tab and an admin file detail load one bounded snapshot, then refresh at most
+   once every ten seconds while a row is `queued`, `running`, or `verified`.
+   The first all-terminal snapshot stops the timer, so an idle page spends no
+   continuing ledger reads. File detail uses one batch read for all visible
+   files, including server-computed eligibility and one shared tool-capability
+   snapshot; it never fans out one request per file.
 6. **Do not invent ledger history while importing an old backup.** SQLite v14
    predates the v39 conversion table, so its migration creates an empty ledger;
    a current-schema import separately proves that a real failed conversion row
    and its audit error survive SQLite-to-hiqlite activation.
+7. **Bound every admission mutation.** A manual or automatic library pass
+   admits at most 64 rows in one Store transaction. `saturated` is deliberately
+   a cap-hit hint rather than a racy remaining-work count; Settings tells the
+   operator to run another bounded pass, while automatic mode advances one
+   library per leased tick. Admin batch reads are separately capped at 256
+   file IDs.
 
 ## Final evidence — fill only from the frozen tree
 
 | Evidence | Result |
 |---|---|
 | Focused local regressions | Store ledger: 69 non-import replicated contracts passed in the complete cluster run, then all three corrected populated-import contracts passed; SQLite migration and queue contracts and both all-target backend builds pass. Worker/operator surface: seven conversion/API tests pass; `make web-check` passes; the intentional Settings golden was reviewed after 60 Chromium captures and 6,306 structural facts with no console/page errors. Packaging: 127 operations contracts pass, including exact tool pins and both release-asset checksums |
-| Adversarial review findings | Pending |
+| Adversarial review findings | First pass found and fixed crash-publication, no-clobber/source-swap, scratch ownership, durability, MKV eligibility, lease-loss cancellation, unbounded admission, replicated queue races, migration strictness, N+1/batch-read, concurrent mode update, settings partial-write, probe timeout/version, API 404, polling/accessibility, documentation, and arm64-build gaps. Integrated re-review pending |
 | Main promotion gate | Pending |
 | Qualification receipt | Pending |
 | Merge commit | Pending |
