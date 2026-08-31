@@ -3187,7 +3187,7 @@ final class PlayerController: ObservableObject {
         let generation = openGeneration
         let verdict = await controlVerdictForStall(event)
         // Everything the caller checked may have changed across that await.
-        guard openGeneration == generation, started, !retiredForStall else { return }
+        guard openGeneration == generation, started, stallRecoveryStillEligible else { return }
         if let verdict, applyStallVerdict(verdict, event: event) { return }
         var decision = sameDeliveryStallRecovery.next(for: event.kind)
         #if os(iOS)
@@ -3231,30 +3231,61 @@ final class PlayerController: ObservableObject {
     }
 
     /// How long a recovery owner waits for the server's verdict before
-    /// deciding for itself. One exchange deadline, extended once because the
-    /// reporter cannot start this ask's request while another is in flight —
-    /// the same shape and the same reason as the web client's bound.
-    static let controlAskSeconds: TimeInterval = 6
-    static let controlAskCapSeconds: TimeInterval = 12
+    /// deciding for itself.
+    ///
+    /// Deliberately far shorter than the exchange deadline. The fallback is
+    /// the branch the entire fleet takes — no installed build answers with
+    /// anything but `none` — so this number is added to every real stall on
+    /// every device, on top of the sixteen-second idle threshold the delivery
+    /// detector already waits out. A server that cannot answer inside a second
+    /// and a half is a server whose answer is not worth more frozen picture
+    /// than the recovery it would have replaced.
+    ///
+    /// Extended once, because the reporter cannot start this ask's request
+    /// while another is in flight.
+    static let controlAskSeconds: TimeInterval = 1.5
+    static let controlAskCapSeconds: TimeInterval = 3
 
     /// Publish this owner's evidence and wait, briefly, for the verdict.
     ///
     /// A remembered verdict is used only when this ask produced none of its
     /// own: a fresh answer is always better evidence than an armed one.
     private func controlVerdictForStall(_ event: PlaybackStallEvent) async -> ControlAction? {
-        reportControlEvidence(Self.stallEvidence(for: event.kind), render: .stalled)
-        if let answer = await playbackControl.askForAction(
+        // The evidence is published from inside the ask, after it has read the
+        // sequence floor. Publishing first lets the pump start the next
+        // request before that read lands, which makes the floor one too high
+        // and rejects the very exchange that carried this stall's evidence.
+        //
+        // A remembered verdict is deliberately NOT consulted here. It arms the
+        // words a failure carries; letting it decide would make the first
+        // stall of every later session instantly fatal with no retry, because
+        // a terminal stops the reporter and no fresher answer can ever
+        // override it. Ruling D1 says armed, not executed.
+        let evidence = Self.stallEvidence(for: event.kind)
+        return await playbackControl.askForAction(
             bound: Self.controlAskSeconds,
-            cap: Self.controlAskCapSeconds
-        ) {
-            return answer
-        }
-        return playbackControl.terminalVerdict
+            cap: Self.controlAskCapSeconds,
+            publish: { [weak self] in
+                self?.reportControlEvidence(evidence, render: .stalled)
+            }
+        )
     }
 
     /// Nothing to recover for: the player moved on while the ask was out.
-    private var retiredForStall: Bool {
-        isChangingStream || finished
+    /// Is a stall recovery still the right thing to do?
+    ///
+    /// Both call sites gated on all of this before entering, and none of it
+    /// survives an await. Seconds pass in the ask, and a viewer who paused,
+    /// seeked or hit an unrelated failure in that window must not have a
+    /// session reopened under them — a native seek in particular changes no
+    /// generation and sets no flag, so `openGeneration` alone does not see it.
+    private var stallRecoveryStillEligible: Bool {
+        wantsPlayback
+            && !finished
+            && !failed
+            && !isChangingStream
+            && seekState.pendingMs == nil
+            && player.currentItem != nil
     }
 
     /// Act on a server verdict, or say it did not decide this stall.
@@ -3294,7 +3325,8 @@ final class PlayerController: ObservableObject {
             // leave a viewer in front of a frozen picture with no bound and
             // nothing said. The notice is transient and the monitor re-shows
             // it, which is the right shape: it disappears when the hold does.
-            showPlaybackNotice(Self.holdNotice(verdict.reason))
+            showPlaybackNotice(Self.holdNotice(verdict.reason), duration: .seconds(30))
+            restartDeliveryPollAfterDeferral(event)
             reportPlaybackStall(event, outcome: .serverHold)
             return true
         case "retry_resource":
@@ -3302,12 +3334,30 @@ final class PlayerController: ObservableObject {
             // when to look again. The monitor is already a loop, so the honest
             // response is to spend nothing and let it come round — the pacing
             // this client can honour is "not now", not a precise interval.
-            showPlaybackNotice(Self.holdNotice(verdict.reason))
+            showPlaybackNotice(Self.holdNotice(verdict.reason), duration: .seconds(30))
+            restartDeliveryPollAfterDeferral(event)
             reportPlaybackStall(event, outcome: .serverRetryResource)
             return true
         default:
             return false
         }
+    }
+
+    /// A deferred delivery stall leaves the poll that found it dead.
+    ///
+    /// `startStatusPolling`'s task ends itself the moment
+    /// `observeDeliveryStarvation` fires, on the documented assumption that a
+    /// reopen follows and `open()` will start a fresh one. A deferral breaks
+    /// that assumption: nothing reopens, so the server-truth wedge detector —
+    /// the one that exists because AVPlayer froze on tvOS 2160p without ever
+    /// tripping the position-clock ladder — would stay dead for the rest of
+    /// the session, long after the hold lifted.
+    private func restartDeliveryPollAfterDeferral(_ event: PlaybackStallEvent) {
+        // The task object outlives its own `return`, so there is nothing to
+        // test for. `startStatusPolling` cancels whatever is there first, and
+        // for any other stall kind the poll was never the thing that ended.
+        guard event.kind == .delivery else { return }
+        startStatusPolling()
     }
 
     /// The server's seven hold reasons, in the viewer's words. An unknown

@@ -244,20 +244,40 @@ final class PlaybackControlSession {
     /// twice traps and one never resumed hangs the caller forever, and this is
     /// resumed from an actor's closure on one side and a deadline on the other.
     /// A counter and a sleep cannot do either.
-    func askForAction(bound: TimeInterval, cap: TimeInterval) async -> ControlAction? {
+    func askForAction(
+        bound: TimeInterval,
+        cap: TimeInterval,
+        publish: () -> Void
+    ) async -> ControlAction? {
         guard let reporter else { return nil }
-        // The request that carries this evidence is the next NEW one, so the
-        // floor is the reporter's own counter plus one. Settling on an
-        // exchange that was already in flight would hand this stall the
-        // verdict for an observation taken before the stall existed.
+        // A reporter that has stopped will never exchange again — a terminal
+        // verdict or a non-retryable failure ends it — and the session keeps
+        // holding it. Waiting out the bound for one is pure frozen picture.
+        if await reporter.stopped { return nil }
+        // The floor is read BEFORE the evidence is published, and the caller
+        // hands the publish in for exactly that reason. Publishing first lets
+        // the pump reach `nextRequest()` — and increment `sequence` — before
+        // this hop lands, which makes the floor one too high and rejects the
+        // very exchange that carried this stall's evidence.
         let floor = await reporter.sequence + 1
-        var seen = answers.count()
-        reportEvidence()
-        var deadline = Date().addingTimeInterval(bound)
-        let hardDeadline = Date().addingTimeInterval(cap)
+        let seenAtStart = answers.count()
+        var seen = seenAtStart
+        publish()
+        // Monotonic, because this file's own stall policy is monotonic: a
+        // wall-clock adjustment mid-ask would lengthen or truncate the bound.
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        var deadline = startedAt + bound
+        let hardDeadline = startedAt + cap
         var extended = false
-        while Date() < deadline {
-            if let answer = answers.answer(atOrAfter: floor) { return answer.action }
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            // Both conditions, not just the floor. `adoptNewOwner` resets the
+            // reporter's sequence on a 409, so a floor read after one can sit
+            // BELOW an answer already in the slot from before this ask — and
+            // an answer that arrived before the ask cannot be its answer.
+            if answers.count() > seenAtStart,
+               let answer = answers.answer(atOrAfter: floor) {
+                return answer.action
+            }
             let count = answers.count()
             if count > seen {
                 seen = count
@@ -268,13 +288,15 @@ final class PlaybackControlSession {
                 // an answer first became possible.
                 if !extended {
                     extended = true
-                    deadline = min(Date().addingTimeInterval(bound), hardDeadline)
+                    deadline = min(ProcessInfo.processInfo.systemUptime + bound, hardDeadline)
                 }
             }
             try? await Task.sleep(nanoseconds: PlaybackControlSession.askPollNanoseconds)
-            // A reporter that stopped will never exchange again, so waiting out
-            // the rest of the bound would add it to a stall for nothing.
-            if self.reporter == nil { return nil }
+            // A reporter that went away or stopped mid-ask will never exchange
+            // again, so waiting out the rest of the bound would add it to a
+            // stall for nothing.
+            guard let current = self.reporter else { return nil }
+            if await current.stopped { return nil }
         }
         return nil
     }
@@ -309,20 +331,7 @@ final class PlaybackControlSession {
     }
 }
 
-/// The newest snapshot the player has produced, written by the main actor and
-/// read by the reporter's.
-///
-/// `PlaybackControlReporter` is an actor and pulls its snapshot synchronously
-/// from inside itself, so the closure it holds runs on the reporter's
-/// executor — never the main actor's. A closure cannot *assume* main-actor
-/// isolation there: `MainActor.assumeIsolated` traps rather than falling back,
-/// and doing it here crashed the app on the first exchange of every session
-/// the server considered controllable (build 90). Sending the snapshot the
-/// other way removes the assumption instead of checking it.
-///
-/// The staleness this admits is bounded by how often the player reports that
-/// it changed — once a second from the periodic time observer, plus every
-/// rate change — against an exchange cadence the server never sets faster.
+
 /// One slot per exchange outcome, counted so an ask can tell "the answer I was
 /// waiting for" from "an answer that was already there".
 ///
@@ -431,6 +440,18 @@ private final class PlaybackControlLatestVerdict: @unchecked Sendable {
 
 /// The newest snapshot the player has produced, written by the main actor and
 /// read by the reporter's.
+///
+/// `PlaybackControlReporter` is an actor and pulls its snapshot synchronously
+/// from inside itself, so the closure it holds runs on the reporter's
+/// executor — never the main actor's. A closure cannot *assume* main-actor
+/// isolation there: `MainActor.assumeIsolated` traps rather than falling back,
+/// and doing it here crashed the app on the first exchange of every session
+/// the server considered controllable (build 90). Sending the snapshot the
+/// other way removes the assumption instead of checking it.
+///
+/// The staleness this admits is bounded by how often the player reports that
+/// it changed — once a second from the periodic time observer, plus every
+/// rate change — against an exchange cadence the server never sets faster.
 private final class PlaybackControlLatestSnapshot: @unchecked Sendable {
     private let lock = NSLock()
     private var value: PlaybackControlSnapshot?

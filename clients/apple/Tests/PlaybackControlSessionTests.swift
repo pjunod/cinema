@@ -391,7 +391,7 @@ final class PlaybackControlSessionTests: XCTestCase {
             observe: { player.observation() }
         )
         _ = try await waitForExchange { $0.sequence == 1 }
-        let verdict = await session.askForAction(bound: 5, cap: 8)
+        let verdict = await session.askForAction(bound: 5, cap: 8, publish: {})
         XCTAssertEqual(verdict?.type, "hold")
         XCTAssertEqual(verdict?.reason, "no_room")
         session.end()
@@ -424,7 +424,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         // Everything after it answers `none`, so the only way to see the held
         // verdict is to have taken the wrong exchange.
         controlAnswer.set(ControlAction(type: "none"))
-        async let asked = session.askForAction(bound: 4, cap: 6)
+        async let asked = session.askForAction(bound: 4, cap: 6, publish: {})
         try await Task.sleep(nanoseconds: 150_000_000)
         controlGate.release()
         let verdict = await asked
@@ -452,7 +452,7 @@ final class PlaybackControlSessionTests: XCTestCase {
         _ = try await waitForExchange { $0.sequence == 1 }
         controlGate.arm()
         let started = Date()
-        let verdict = await session.askForAction(bound: 0.3, cap: 0.5)
+        let verdict = await session.askForAction(bound: 0.3, cap: 0.5, publish: {})
         controlGate.release()
         XCTAssertNil(verdict)
         XCTAssertLessThan(Date().timeIntervalSince(started), 3,
@@ -465,7 +465,7 @@ final class PlaybackControlSessionTests: XCTestCase {
     func testAnAskWithNoReporterAnswersImmediately() async throws {
         let session = PlaybackControlSession()
         let started = Date()
-        let verdict = await session.askForAction(bound: 5, cap: 8)
+        let verdict = await session.askForAction(bound: 5, cap: 8, publish: {})
         XCTAssertNil(verdict)
         XCTAssertLessThan(Date().timeIntervalSince(started), 1)
     }

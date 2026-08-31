@@ -1929,6 +1929,10 @@ final class AppleClientTests: XCTestCase {
     ///
     /// Collapsing them would hand the arbiter one word — "stalled" — which is
     /// exactly the ambiguity M5 exists to remove.
+    ///
+    /// (The test this documents is
+    /// `testStallEvidenceNamesWhichConditionTheServerIsBeingToldAbout`, below.)
+
     /// The server's seven hold reasons, in the viewer's words.
     ///
     /// A viewer reading `working_set` learns less than one reading a sentence,
