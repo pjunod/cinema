@@ -449,21 +449,31 @@ decoding shows what the file is versus what your browser is actually rendering.
   Audio, Subtitles and Sync menus — which slide clear of it rather than over
   it — so you can watch what a quality change does to the numbers. On a touch
   screen the two still take turns, there being room for one.
-- **Skip Intro / Skip Credits** buttons appear when playback enters a marked
-  region. Markers come from real **chapters** (MakeMKV, anime OP/ED, hand-
-  authored titles), read from the scan-time probe rather than by re-probing the
-  file every time you press Play — and a chapter has to sit where its title
-  claims, so a scene called "Closing Time" halfway through an episode does not
-  become a Skip Credits button. When no chapter title names the credits, the
-  window is inferred: from the file's final chapter boundary when that lands in
-  a plausible tail, and from the runtime alone when it does not — about 2.5% of
-  it, so a 22-minute episode gets roughly the last 30 seconds and a two-hour
-  film three minutes, which is where it caps. The inference errs late on
-  purpose: a button that opens a little way into the credits costs you a few
-  seconds, one that opens early interrupts the show. Skipping credits that run
-  to the end finishes the item.
-- **Auto-skip** intro & credits — an opt-in, per-user, persisted toggle in the
-  preferences menu (default off).
+- **Skip Intro / Skip Credits / Skip Preview** buttons appear when playback
+  enters a marked region. Markers come from real **chapters** (MakeMKV, anime
+  OP/ED, hand-authored titles), read from the scan-time probe rather than by
+  re-probing the file every time you press Play — and a chapter has to sit
+  where its title claims, so a scene called "Closing Time" halfway through an
+  episode does not become a Skip Credits button. When no chapter title names
+  the credits, the window is inferred: from the file's final chapter boundary
+  when that lands in a plausible tail, and from the runtime alone when it does
+  not — about 2.5% of it, so a 22-minute episode gets roughly the last 30
+  seconds and a two-hour film three minutes, which is where it caps. The
+  inference errs late on purpose: a button that opens a little way into the
+  credits costs you a few seconds, one that opens early interrupts the show.
+  Skipping a tail region that runs to the end finishes the item.
+- **A trailing preview is not the credits** (since 2026-08-31). A chapter
+  called "Next Episode Preview" used to produce a Skip Credits button over
+  next week's footage. The two regions want opposite treatment — the credits
+  are the same every week and the preview is new each time — so they are now
+  separate kinds with their own buttons. A title naming both is credits, because
+  such a chapter starts there. Where the file labels the preview but nothing
+  labels the credits, the inferred credits window stops where the preview
+  begins rather than running over it, and is not invented at all when that
+  leaves no room. "Trailers" is deliberately not a preview: on a disc rip that
+  is the bonus reel, not a region inside the episode.
+- **Auto-skip** intro, credits & preview — an opt-in, per-user, persisted toggle
+  in the preferences menu (default off).
 - **Method-aware seek:** direct play seeks natively; remux and transcode restart
   the server stream at the new offset.
 
