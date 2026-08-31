@@ -8300,6 +8300,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decision_rereads_a_manual_override_that_commits_during_fallback_publication() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let file = state
+            .store
+            .get_file(seeded.file)
+            .await
+            .expect("read seeded file")
+            .expect("seeded file");
+        let pause = stream::pause_next_marker_fallback_for_test(&file.path);
+
+        let decision_app = app.clone();
+        let decision_admin = admin.clone();
+        let decision = tokio::spawn(async move {
+            call(
+                &decision_app,
+                get(
+                    &format!(
+                        "/api/v1/files/{}/decision?vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0",
+                        seeded.file
+                    ),
+                    Some(&decision_admin),
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), pause.wait())
+            .await
+            .expect("decision reached its authoritative annotation miss");
+
+        let manual_url = format!("/api/v1/files/{}/timeline-annotations/credits", file.id);
+        let (status, manual) = call(
+            &app,
+            put(
+                &manual_url,
+                Some(&admin),
+                json!({
+                    "start_ticks": 8_500_000,
+                    "end_ticks": 9_000_000,
+                    "timescale": 1000,
+                    "start_ms": 8_500_000,
+                    "end_ms": 9_000_000,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{manual}");
+        assert_eq!(manual["provenance"], "manual");
+
+        pause.wait().await;
+        let (status, decision) = tokio::time::timeout(std::time::Duration::from_secs(5), decision)
+            .await
+            .expect("decision completed after fallback release")
+            .expect("decision task");
+        assert_eq!(status, StatusCode::OK, "{decision}");
+        let credits = decision["markers"]
+            .as_array()
+            .expect("decision markers")
+            .iter()
+            .find(|marker| marker["kind"] == "credits")
+            .expect("credits marker");
+        assert_eq!(credits["start_ms"], 8_500_000);
+        assert_eq!(credits["provenance"], "manual");
+        assert_eq!(credits["confidence"], 1_000);
+    }
+
+    #[tokio::test]
     async fn seeded_write_surface() {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;

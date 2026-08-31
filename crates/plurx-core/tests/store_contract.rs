@@ -8319,6 +8319,130 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idempotent() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect analysis schema retry client");
+
+    let first_telemetry = cluster._root.path().join("analysis-schema-first.db");
+    let first = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &first_telemetry)
+        .await
+        .expect("bootstrap analysis schema first time");
+    assert_eq!(
+        first.instance_id().await.expect("first bootstrap identity"),
+        CONTRACT_INSTANCE_ID
+    );
+    drop(first);
+
+    // A lost acknowledgement can make the same coordinator retry the entire
+    // bootstrap. The current-shape predicate must skip non-idempotent v22 DDL.
+    let retry_telemetry = cluster._root.path().join("analysis-schema-retry.db");
+    let retried =
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &retry_telemetry)
+            .await
+            .expect("retry the same bootstrap identity");
+    assert_eq!(
+        retried
+            .instance_id()
+            .await
+            .expect("retried bootstrap identity"),
+        CONTRACT_INSTANCE_ID
+    );
+    drop(retried);
+
+    // Model a committed v22 shape whose marker acknowledgement was lost. The
+    // daemon must advance only the marker instead of replaying ALTER/rename
+    // statements against the already-current tables.
+    assert_eq!(
+        client
+            .execute(
+                "UPDATE cluster_meta SET schema_version = 21 WHERE singleton = 1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("stamp stale analysis schema marker"),
+        1
+    );
+    let migrated_telemetry = cluster._root.path().join("analysis-schema-migrated.db");
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &migrated_telemetry)
+        .await
+        .expect("settle current v22 shape from a stale v21 marker");
+    assert_eq!(
+        migrated
+            .instance_id()
+            .await
+            .expect("identity after stale-marker settlement"),
+        CONTRACT_INSTANCE_ID
+    );
+
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT
+                ((SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+                   WHERE name IN ('priority','trigger','target_node_id'))
+               + (SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+                   WHERE (name = 'cache_key' AND pk = 1)
+                      OR (name = 'target_node_id' AND pk = 2))
+               + (SELECT COUNT(*) FROM pragma_table_info('timeline_annotation_sets')
+                   WHERE name = 'publication_priority')
+               + (SELECT COUNT(*) FROM pragma_table_info('analysis_requests')
+                   WHERE name IN ('pipeline_version','requested_generation',
+                                  'expected_predecessor_generation','priority','trigger',
+                                  'cancel_requested'))
+               + (SELECT COUNT(*) FROM sqlite_master
+                   WHERE type = 'table' AND name IN
+                     ('analysis_attempts','cluster_fragment_index_heads',
+                      'analysis_lifecycle_counters'))) AS value",
+            15,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'trigger'
+             AND name IN ('cluster_fragment_indexes_cancel_source',
+                          'analysis_requests_cancel_source',
+                          'analysis_requests_supersede_source',
+                          'analysis_requests_lifecycle_counters',
+                          'cluster_fragment_index_lifecycle_counters')",
+            5,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index'
+             AND name IN ('cluster_fragment_index_jobs_due',
+                          'analysis_requests_one_active_source',
+                          'analysis_requests_one_active_forced_successor',
+                          'analysis_attempts_recent')",
+            4,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('cluster_fragment_index_jobs')
+             WHERE (name = 'cache_key' AND pk = 1)
+                OR (name = 'target_node_id' AND pk = 2)",
+            2,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect retried analysis schema");
+        assert_eq!(rows.len(), 1, "{sql}");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_analysis_handoff_is_atomic_and_fenced() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
@@ -11513,6 +11637,263 @@ async fn analysis_history_contract_runs_through_dyn_store() {
         assert_eq!(summary.total, 2, "backend {backend}");
         assert_eq!(summary.working, 1, "backend {backend}");
         assert_eq!(summary.ready, 1, "backend {backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fragment_location_retention_is_bounded_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, retained_file_id) = seed_file(&store, "retained-exact-failure").await;
+        let retained_source_sha256 = "3".repeat(64);
+        let retained_pipeline_sha256 = "4".repeat(64);
+        let retained_cache_key = cluster_fragment_index_key(
+            retained_file_id,
+            10_000,
+            1,
+            &retained_source_sha256,
+            &retained_pipeline_sha256,
+        )
+        .expect("retained exact-failure cache key");
+        let retained_job = NewClusterFragmentIndexJob {
+            cache_key: retained_cache_key.clone(),
+            file_id: retained_file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: retained_source_sha256,
+            pipeline_sha256: retained_pipeline_sha256,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: "retained-node".to_owned(),
+            not_before_ms: 1,
+            created_at_ms: 1,
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&retained_job)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue retained failure: {error}")));
+        let retained_claim = store
+            .claim_cluster_fragment_index("retained-node", &[], 1, 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim retained failure: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retained failure claim"));
+        assert!(store
+            .fail_cluster_fragment_index(
+                &retained_claim.cache_key,
+                &retained_claim.target_node_id,
+                &retained_claim.owner_node_id,
+                retained_claim.fence,
+                "unsupported",
+                false,
+                2,
+                3,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: terminalize retained failure: {error}")));
+
+        let (_, file_id) = seed_file(&store, "bounded-fragment-location-retention").await;
+        let source_sha256 = "5".repeat(64);
+        let pipeline_sha256 = "6".repeat(64);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("bounded retention cache key");
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: "analysis-node".to_owned(),
+            not_before_ms: 1,
+            created_at_ms: 1,
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&job)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue retention fixture: {error}")));
+        let targets = ["analysis-node", "node-1", "node-2"];
+        for target_node_id in targets.iter().skip(1) {
+            assert!(store
+                .enqueue_cluster_fragment_index(&NewClusterFragmentIndexJob {
+                    target_node_id: (*target_node_id).to_owned(),
+                    ..job.clone()
+                })
+                .await
+                .unwrap_or_else(|error| panic!(
+                    "{backend}: seed target job {target_node_id}: {error}"
+                )));
+        }
+        let claim = store
+            .claim_cluster_fragment_index("analysis-node", &[], 1, 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim retention fixture: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retention fixture claim"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            blob_sha256: "7".repeat(64),
+            bytes: 128,
+            built_by_node_id: claim.owner_node_id.clone(),
+            built_at_ms: 10,
+        };
+        let first_location = ClusterFragmentIndexLocation {
+            cache_key: cache_key.clone(),
+            node_id: claim.owner_node_id.clone(),
+            bytes: 128,
+            verified_at_ms: 1,
+            last_seen_at_ms: 1,
+        };
+        assert!(store
+            .complete_cluster_fragment_index(&claim, &artifact, &first_location, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete retention fixture: {error}")));
+        for index in 1..3 {
+            store
+                .put_cluster_fragment_index_location(&ClusterFragmentIndexLocation {
+                    cache_key: cache_key.clone(),
+                    node_id: format!("node-{index}"),
+                    bytes: 128,
+                    verified_at_ms: index + 1,
+                    last_seen_at_ms: index + 1,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: seed stale location {index}: {error}"));
+        }
+        assert_eq!(
+            store
+                .delete_files(&[file_id])
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: cancel target jobs: {error}")),
+            1,
+            "backend {backend}"
+        );
+        assert_eq!(
+            store
+                .cluster_fragment_index_locations(&cache_key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list seeded locations: {error}"))
+                .len(),
+            3,
+            "backend {backend}"
+        );
+        let cutoff = i64::MAX / 4;
+
+        assert!(store
+            .prune_cluster_fragment_indexes(cutoff, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first bounded prune: {error}"))
+            .is_empty());
+        let after_first = store
+            .cluster_fragment_index_locations(&cache_key)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: locations after first prune: {error}"));
+        assert_eq!(after_first.len(), 2, "backend {backend}");
+        assert_eq!(
+            after_first
+                .iter()
+                .map(|location| location.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["node-2", "node-1"],
+            "backend {backend}: the oldest deterministic page is removed first"
+        );
+        assert!(store
+            .cluster_fragment_index_artifact(&cache_key)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: artifact after first page: {error}"))
+            .is_some());
+        for target in targets {
+            assert!(store
+                .cluster_fragment_index_job(&cache_key, target)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: job {target} after first page: {error}"))
+                .is_some());
+        }
+
+        assert!(store
+            .prune_cluster_fragment_indexes(cutoff, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second bounded prune: {error}"))
+            .is_empty());
+        let after_second = store
+            .cluster_fragment_index_locations(&cache_key)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: locations after second prune: {error}"));
+        assert_eq!(after_second.len(), 1, "backend {backend}");
+        assert_eq!(after_second[0].node_id, "node-2", "backend {backend}");
+        assert!(store
+            .cluster_fragment_index_artifact(&cache_key)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: artifact after second page: {error}"))
+            .is_some());
+
+        assert_eq!(
+            store
+                .prune_cluster_fragment_indexes(cutoff, 1)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: final location page: {error}")),
+            vec![cache_key.clone()],
+            "backend {backend}: the artifact is pruned only after the last location page"
+        );
+        assert!(store
+            .cluster_fragment_index_locations(&cache_key)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: locations after artifact prune: {error}"))
+            .is_empty());
+        assert!(store
+            .cluster_fragment_index_artifact(&cache_key)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: artifact after final page: {error}"))
+            .is_none());
+
+        let mut remaining_jobs = 0;
+        for target in targets {
+            remaining_jobs += usize::from(
+                store
+                    .cluster_fragment_index_job(&cache_key, target)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{backend}: job {target} after artifact prune: {error}")
+                    })
+                    .is_some(),
+            );
+        }
+        assert_eq!(remaining_jobs, 2, "backend {backend}");
+        for expected_remaining in [1, 0] {
+            assert!(store
+                .prune_cluster_fragment_indexes(cutoff, 1)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: bounded job drain: {error}"))
+                .is_empty());
+            let mut remaining_jobs = 0;
+            for target in targets {
+                remaining_jobs += usize::from(
+                    store
+                        .cluster_fragment_index_job(&cache_key, target)
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{backend}: job {target} during bounded drain: {error}")
+                        })
+                        .is_some(),
+                );
+            }
+            assert_eq!(remaining_jobs, expected_remaining, "backend {backend}");
+        }
+        assert_eq!(
+            store
+                .cluster_fragment_index_job(&retained_cache_key, "retained-node")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: retained exact failure: {error}"))
+                .map(|job| job.state),
+            Some("failed".to_owned()),
+            "backend {backend}: a current exact failure is retained without starving later work"
+        );
     })
     .await;
 }

@@ -2496,14 +2496,29 @@ impl ClusterFragmentIndexStore for SqliteStore {
             let transaction = conn.unchecked_transaction()?;
             transaction.execute(
                 "DELETE FROM cluster_fragment_index_locations
-                  WHERE last_seen_at_ms < ?1",
-                params![older_than_ms],
+                  WHERE (cache_key, node_id) IN (
+                    SELECT cache_key, node_id
+                      FROM cluster_fragment_index_locations
+                     WHERE last_seen_at_ms < ?1
+                     ORDER BY last_seen_at_ms, cache_key, node_id
+                     LIMIT ?2
+                  )",
+                params![older_than_ms, limit],
             )?;
             let candidates = {
                 let mut statement = transaction.prepare(
                     "SELECT j.cache_key
                        FROM cluster_fragment_index_jobs j
-                      WHERE j.state IN ('ready', 'failed', 'cancelled')
+                      WHERE (j.state IN ('ready', 'cancelled') OR (
+                        j.state = 'failed' AND (
+                          NOT EXISTS (SELECT 1 FROM files current_file
+                            WHERE current_file.id = j.file_id
+                              AND current_file.size = j.source_size
+                              AND current_file.mtime = j.source_mtime)
+                          OR EXISTS (SELECT 1 FROM analysis_requests request
+                            WHERE request.result_cache_key = j.cache_key
+                              AND request.target_node_id = j.target_node_id
+                              AND request.force_rebuild = 1))))
                         AND j.updated_at_ms < ?1
                         AND NOT EXISTS (
                           SELECT 1 FROM cluster_fragment_index_jobs active_job
@@ -2516,7 +2531,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                              AND active_request.state IN ('queued', 'running', 'submitted'))
                         AND NOT EXISTS (
                           SELECT 1 FROM cluster_fragment_index_locations l
-                           WHERE l.cache_key = j.cache_key AND l.last_seen_at_ms >= ?1)
+                           WHERE l.cache_key = j.cache_key)
                       GROUP BY j.cache_key
                       ORDER BY MIN(j.updated_at_ms), j.cache_key LIMIT ?2",
                 )?;
@@ -2537,7 +2552,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                           WHERE result_cache_key = ?1
                             AND state IN ('queued', 'running', 'submitted'))
                         AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations
-                          WHERE cache_key = ?1 AND last_seen_at_ms >= ?2)",
+                          WHERE cache_key = ?1)",
                     params![cache_key, older_than_ms],
                 )?;
                 let artifact = transaction.execute(
@@ -2554,42 +2569,50 @@ impl ClusterFragmentIndexStore for SqliteStore {
                           WHERE result_cache_key = ?1
                             AND state IN ('queued', 'running', 'submitted'))
                         AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations
-                          WHERE cache_key = ?1 AND last_seen_at_ms >= ?2)
+                          WHERE cache_key = ?1)
                         AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_heads
                           WHERE generation_cache_key = ?1)",
-                    params![cache_key, older_than_ms],
-                )?;
-                transaction.execute(
-                    "DELETE FROM cluster_fragment_index_locations
-                      WHERE cache_key = ?1 AND last_seen_at_ms < ?2
-                        AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                         WHERE cache_key = ?1)",
-                    params![cache_key, older_than_ms],
-                )?;
-                transaction.execute(
-                    "DELETE FROM cluster_fragment_index_jobs
-                      WHERE cache_key = ?1
-                        AND (state IN ('ready', 'cancelled') OR (
-                          state = 'failed' AND (
-                            NOT EXISTS (SELECT 1 FROM files current_file
-                              WHERE current_file.id = cluster_fragment_index_jobs.file_id
-                                AND current_file.size = cluster_fragment_index_jobs.source_size
-                                AND current_file.mtime = cluster_fragment_index_jobs.source_mtime)
-                            OR EXISTS (SELECT 1 FROM analysis_requests request
-                              WHERE request.result_cache_key = cluster_fragment_index_jobs.cache_key
-                                AND request.target_node_id = cluster_fragment_index_jobs.target_node_id
-                                AND request.force_rebuild = 1))))
-                        AND updated_at_ms < ?2
-                        AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                         WHERE cache_key = ?1)
-                        AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations
-                          WHERE cache_key = ?1 AND last_seen_at_ms >= ?2)",
                     params![cache_key, older_than_ms],
                 )?;
                 if artifact == 1 {
                     pruned_artifacts.push(cache_key);
                 }
             }
+            transaction.execute(
+                "DELETE FROM cluster_fragment_index_jobs
+                  WHERE (cache_key, target_node_id) IN (
+                    SELECT terminal_job.cache_key, terminal_job.target_node_id
+                      FROM cluster_fragment_index_jobs terminal_job
+                     WHERE (terminal_job.state IN ('ready', 'cancelled') OR (
+                       terminal_job.state = 'failed' AND (
+                         NOT EXISTS (SELECT 1 FROM files current_file
+                           WHERE current_file.id = terminal_job.file_id
+                             AND current_file.size = terminal_job.source_size
+                             AND current_file.mtime = terminal_job.source_mtime)
+                         OR EXISTS (SELECT 1 FROM analysis_requests request
+                           WHERE request.result_cache_key = terminal_job.cache_key
+                             AND request.target_node_id = terminal_job.target_node_id
+                             AND request.force_rebuild = 1))))
+                       AND terminal_job.updated_at_ms < ?1
+                       AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts artifact
+                         WHERE artifact.cache_key = terminal_job.cache_key)
+                       AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_heads head
+                         WHERE head.generation_cache_key = terminal_job.cache_key)
+                       AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations location
+                         WHERE location.cache_key = terminal_job.cache_key)
+                       AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs active_job
+                         WHERE active_job.cache_key = terminal_job.cache_key
+                           AND (active_job.state IN ('queued', 'running')
+                             OR active_job.updated_at_ms >= ?1))
+                       AND NOT EXISTS (SELECT 1 FROM analysis_requests active_request
+                         WHERE active_request.result_cache_key = terminal_job.cache_key
+                           AND active_request.state IN ('queued', 'running', 'submitted'))
+                     ORDER BY terminal_job.updated_at_ms, terminal_job.cache_key,
+                              terminal_job.target_node_id
+                     LIMIT ?2
+                  )",
+                params![older_than_ms, limit],
+            )?;
             transaction.commit()?;
             Ok(pruned_artifacts)
         })

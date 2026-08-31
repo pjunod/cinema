@@ -1283,6 +1283,52 @@ fn markers_from_annotation_set(set: plurx_core::segplan::TimelineAnnotationSet) 
         .collect()
 }
 
+#[cfg(test)]
+fn marker_fallback_pauses() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, std::sync::Arc<tokio::sync::Barrier>>,
+> {
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Barrier>>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+
+/// Pause one request after its authoritative miss and before fallback
+/// publication. Keying by the unique fixture path keeps parallel HTTP tests
+/// isolated even though their in-memory stores reuse file ids.
+#[cfg(test)]
+pub(super) fn pause_next_marker_fallback_for_test(
+    path: &Path,
+) -> std::sync::Arc<tokio::sync::Barrier> {
+    let pause = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    marker_fallback_pauses()
+        .lock()
+        .expect("marker fallback pause registry")
+        .insert(
+            path.to_string_lossy().into_owned(),
+            std::sync::Arc::clone(&pause),
+        );
+    pause
+}
+
+#[cfg(test)]
+async fn pause_marker_fallback_for_test(path: &Path) {
+    let key = path.to_string_lossy().into_owned();
+    let pause = marker_fallback_pauses()
+        .lock()
+        .expect("marker fallback pause registry")
+        .get(&key)
+        .cloned();
+    if let Some(pause) = pause {
+        pause.wait().await;
+        pause.wait().await;
+        marker_fallback_pauses()
+            .lock()
+            .expect("marker fallback pause registry")
+            .remove(&key);
+    }
+}
+
 async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
     let source_identity = annotation_source_identity(file);
     match state
@@ -1294,8 +1340,15 @@ async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
         Ok(None) => {}
         Err(error) => {
             tracing::warn!(file_id = file.id, %error, "could not read timeline annotations");
+            // The read composes automatic evidence with the manual authority.
+            // On uncertainty, offering a derived automatic boundary could
+            // silently skip over a manual correction that we failed to read.
+            return Vec::new();
         }
     }
+
+    #[cfg(test)]
+    pause_marker_fallback_for_test(&file.path).await;
 
     let markers = if let Some(chapters) = stored_chapters(state, file.id).await {
         markers_from_chapters(&chapters, file.duration_ms)
@@ -1322,8 +1375,7 @@ async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
         .put_timeline_annotation_set_if_missing(file.id, duration_ms, &set)
         .await
     {
-        Ok(true) => markers_from_annotation_set(set),
-        Ok(false) => match state
+        Ok(_) => match state
             .store
             .timeline_annotation_set(file.id, &set.source_identity)
             .await
@@ -1347,12 +1399,12 @@ async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
             }
             Err(error) => {
                 tracing::warn!(file_id = file.id, %error, "could not read winning timeline annotations");
-                markers
+                Vec::new()
             }
         },
         Err(error) => {
             tracing::warn!(file_id = file.id, %error, "could not persist timeline annotations");
-            markers
+            Vec::new()
         }
     }
 }
