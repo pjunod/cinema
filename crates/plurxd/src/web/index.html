@@ -3421,7 +3421,7 @@ function endWait(resumed){
 // only reporter and therefore never ran. Record it at a fixed deadline, then
 // make one method-aware attempt. Auto remuxes move to a smaller transcode;
 // explicit quality choices and already-compatible streams simply reconnect.
-function persistentWait(v,p,began,generation){
+async function persistentWait(v,p,began,generation){
   if(PLAYER!==p || p.waitAt!==began || !p.started ||
      (p._seekToken||0)!==generation || v.paused || v.seeking) return;
   p.waitTimer=null;
@@ -3434,9 +3434,49 @@ function persistentWait(v,p,began,generation){
   const controlObservation=kind==="supply"
     ? {decoder_state:"starved"}
     : {decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall"};
-  const controlTrigger=notifyPlaybackControl("stalled",controlObservation);
+  const ask=askPlaybackControl("stalled",controlObservation);
+  const controlTrigger=ask.trigger;
   recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began,controlTrigger);
   p.stallFrom=pbPosSec();
+  const verdict=await ask.action;
+  // The viewer had up to CONTROL_ASK_MS to seek, pause or close. Re-check
+  // every condition the entry guard checked, because none of them survived
+  // the await on their own — acting on a stale generation here would reopen
+  // a stream the viewer already left.
+  if(PLAYER!==p || p.waitAt!==began || !p.started ||
+     (p._seekToken||0)!==generation || v.paused || v.seeking) return;
+  if(verdict&&verdict.type==="terminal"){
+    // Ruling D1: the verdict is armed, not executed. Everything this player
+    // had buffered is already spent — that is what a persistent wait means —
+    // so the only thing the verdict changes is whose words the viewer reads.
+    // The viewer's own options are untouched: a terminal recipe is not a
+    // terminal file, and Force transcode is a different recipe.
+    p.stallPrompt=true;
+    clientLog({level:"warn",event:"stall_recovery",detail:"terminal:"+verdict.code,
+      message:"server verdict ended this recipe — "+verdict.message,
+      control_trigger:controlTrigger});
+    setLoading(true,verdict.message,"Your place is saved.",
+      `<button onclick="retryPlayback()">Try again</button>`+
+      (p.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-terminal')">Force transcode</button>`:``)+
+      `<button onclick="closePlayer()">Close</button>`);
+    return;
+  }
+  if(verdict&&(verdict.type==="hold"||verdict.type==="retry_resource")){
+    // Production is deliberately not advancing, or stopped for something that
+    // may not recur. Either way the client's reopen would race a server that
+    // already knows better. Keep waiting, silently, and let the deadline come
+    // round again — a hold that is never lifted still reaches the prompt,
+    // because `began` never moves and the elapsed time keeps growing.
+    const again=verdict.type==="retry_resource"
+      ? Math.min(Math.max(verdict.after_ms,250),PERSISTENT_STALL_MS)
+      : PERSISTENT_STALL_MS;
+    clientLog({level:"info",event:"stall_recovery",detail:"deferred:"+verdict.type,
+      message:`server owns this stall (${verdict.reason}) — waiting ${(again/1000).toFixed(1)}s`,
+      control_trigger:controlTrigger});
+    p.waitReported=false;
+    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation),again);
+    return;
+  }
   const action=PlaybackPolicy.stallRecoveryAction({
     method:p.method, quality:playQuality(),
     alreadyRecovered:(p.stallRecoveries||0)>0
@@ -6272,6 +6312,7 @@ async function sendPlaybackControl(url,body,signal){
 }
 function stopPlaybackControl(p){
   if(p&&p.controlReporter){ p.controlReporter.stop(); p.controlReporter=null; }
+  clearPlaybackControlWaiters(p);
 }
 function notifyPlaybackControl(renderOverride,observationOverride){
   const p=PLAYER;
@@ -6280,6 +6321,80 @@ function notifyPlaybackControl(renderOverride,observationOverride){
   const observation=playbackControlObservationOverride(observationOverride);
   if(observation) p.controlObservationOverride=observation;
   return p.controlReporter?p.controlReporter.notify():null;
+}
+// How long a recovery owner waits for the server's verdict before deciding for
+// itself. It is the exchange's own deadline and not a new number: waiting
+// longer than one exchange can possibly take is pure delay for a viewer who is
+// already stalled, and waiting less abandons an answer still in flight.
+const CONTROL_ASK_MS=6000;
+// Submit evidence, then wait — briefly — for the action it earns.
+//
+// `notifyPlaybackControl` tells the server. This tells the server and listens.
+// The difference is the whole milestone: an owner that only reports still
+// decides for itself, and every one of them decides by guessing toward retry.
+//
+// Returns the trigger synchronously so the caller can log it at the moment it
+// observed the fault, and a promise for the action. The promise ALWAYS settles
+// — with `null` when the reporter is gone, the exchange failed, or nothing
+// arrived in time. A null verdict means "the server did not answer", and every
+// caller must fall through to its existing behaviour on it. That fallback is
+// not a hedge: a server that has not yet decided must not strand a stalled
+// viewer, and no node has ever answered one of these.
+function askPlaybackControl(renderOverride,observationOverride){
+  const p=PLAYER;
+  if(!p) return {trigger:null,action:Promise.resolve(null)};
+  const reporter=p.controlReporter;
+  if(!reporter||reporter.stopped){
+    return {trigger:notifyPlaybackControl(renderOverride,observationOverride),
+      action:Promise.resolve(null)};
+  }
+  // The request carrying this evidence is the next NEW one the reporter starts.
+  // A replayed retry keeps its old sequence, so a floor on the sequence skips
+  // the replay without skipping ours.
+  const minSequence=(Number(reporter.sequence)||0)+1;
+  const trigger=notifyPlaybackControl(renderOverride,observationOverride);
+  if(!p.controlWaiters) p.controlWaiters=[];
+  const waiters=p.controlWaiters;
+  let settle=null;
+  const action=new Promise((resolve)=>{
+    const waiter={minSequence,settle:(value)=>{
+      if(waiter.settled) return;
+      waiter.settled=true;
+      clearTimeout(waiter.timer);
+      const at=waiters.indexOf(waiter);
+      if(at!==-1) waiters.splice(at,1);
+      resolve(value||null);
+    }};
+    waiter.timer=setTimeout(()=>waiter.settle(null),CONTROL_ASK_MS);
+    waiters.push(waiter);
+    settle=waiter.settle;
+  });
+  // A reporter that stopped between the notify and here will never exchange
+  // again, so nothing would ever settle this waiter but its timer.
+  if(reporter.stopped) settle(null);
+  return {trigger,action};
+}
+// Settle every waiter whose request has now been answered. An exchange that
+// failed settles them too, with null: "no answer" is an answer a stalled
+// viewer can act on immediately, and making them wait out the full bound for
+// it would add six seconds to a stall for nothing.
+function settlePlaybackControlWaiters(p,request,response){
+  const waiters=p&&p.controlWaiters;
+  if(!waiters||!waiters.length) return;
+  const sequence=Number(request&&request.sequence);
+  if(!Number.isSafeInteger(sequence)) return;
+  const action=(response&&response.action)||null;
+  for(const waiter of waiters.slice()){
+    if(sequence>=waiter.minSequence) waiter.settle(action);
+  }
+}
+// Abandon every outstanding ask. Called when the reporter goes away, so a
+// stalled owner falls through to its own behaviour at once rather than waiting
+// out a bound for an exchange that can no longer happen.
+function clearPlaybackControlWaiters(p){
+  const waiters=p&&p.controlWaiters;
+  if(!waiters) return;
+  for(const waiter of waiters.slice()) waiter.settle(null);
 }
 function startPlaybackControl(v,p,bootstrap){
   stopPlaybackControl(p);
@@ -6297,6 +6412,7 @@ function startPlaybackControl(v,p,bootstrap){
       onExchange:({request,response,error})=>{
         if(PLAYER!==p||p.controlReporter!==reporter) return;
         p.controlLastRequest=request;
+        settlePlaybackControlWaiters(p,request,response);
         if(response){
           const recovered=p.controlLastError;
           p.controlLastResponse=response;

@@ -634,7 +634,7 @@ async function main() {
 
   assert.match(shippedSource("wirePlayer"),/visibilitychange[^\n]*notifyPlaybackControl/);
   assert.match(shippedSource("persistentWait"),/error_code:"decoder"/);
-  assert.match(shippedSource("persistentWait"),/notifyPlaybackControl\("stalled",controlObservation\)/);
+  assert.match(shippedSource("persistentWait"),/askPlaybackControl\("stalled",controlObservation\)/);
   assert.match(shippedSource("attachHls"),/notifyPlaybackControl\("failed",hlsFailure\.observation\)/);
   assert.match(shippedSource("stallDiagnose"),/notifyPlaybackControl\("stalled"\)/);
   assert.match(shippedSource("handleEnded"),/control_trigger:controlTrigger/);
@@ -795,6 +795,186 @@ async function main() {
     await flush();
     assert.equal(refused, 1, label);
     bad.stop();
+  }
+
+  // ---- the ask: persistentWait defers to the server's verdict --------------
+  //
+  // Driven through the SHIPPED persistentWait, not through a helper. A test on
+  // an extracted arbiter would leave the call site free to keep deciding for
+  // itself, which is the only thing this milestone changes.
+  const askConstant = SHIPPED_UI.match(/const CONTROL_ASK_MS=\d+;/);
+  assert.notEqual(askConstant, null, "index.html no longer declares CONTROL_ASK_MS");
+
+  function stallHarness() {
+    const timers = new Map();
+    let nextTimer = 1;
+    const log = [];
+    const loading = [];
+    const reopened = [];
+    const stub = new Function(
+      "setTimeout", "clearTimeout", "SUPPLY_RUNWAY_SECS", "PERSISTENT_STALL_MS",
+      "PlaybackPolicy", "playQuality", "recordWaitStall", "pbPosSec", "clientLog",
+      "setLoading", "startTranscodeFallback", "seekTo", "endWait", "playbackContext",
+      "clockFromSec",
+      [
+        "let PLAYER=null;",
+        askConstant[0],
+        shippedSource("playbackControlObservationOverride"),
+        shippedSource("notifyPlaybackControl"),
+        shippedSource("askPlaybackControl"),
+        shippedSource("settlePlaybackControlWaiters"),
+        shippedSource("clearPlaybackControlWaiters"),
+        shippedSource("persistentWait"),
+        "return {settle:settlePlaybackControlWaiters,",
+        " stall(player,video,began,generation){PLAYER=player;",
+        "  return persistentWait(video,player,began,generation);}};",
+      ].join("\n"),
+    )(
+      (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
+      (id) => { timers.delete(id); },
+      6,
+      8_000,
+      {
+        stallRecoveryAction: () => "reconnect",
+        stallRecoveryTargetHeight: () => 720,
+      },
+      () => "auto",
+      () => {},
+      () => 12,
+      (entry) => log.push(entry),
+      (on, title, detail, buttons) => loading.push({ on, title, detail, buttons }),
+      (why) => reopened.push({ kind: "transcode", why }),
+      (position) => reopened.push({ kind: "seek", position }),
+      () => {},
+      () => ({}),
+      (sec) => `0:${sec}`,
+    );
+    return { stub, timers, log, loading, reopened };
+  }
+
+  function stalledPlayer(sequence = 0) {
+    return {
+      started: true, waitAt: 100, waitRunway: 1, waitReported: false, waitTimer: null,
+      method: "remux", stallRecoveries: 0, _seekToken: 3,
+      controlReporter: { sequence, stopped: false, notify: () => ({ trigger: true }) },
+    };
+  }
+  const stalledVideo = { paused: false, seeking: false };
+
+  // A verdict of `none` — and, identically, an exchange that fails — leaves
+  // today's behaviour exactly as it was. This is the branch every node in the
+  // fleet actually takes, because none of them has ever answered one.
+  for (const [label, answered] of [
+    ["a none verdict", (h, player) => h.stub.settle(player, { sequence: 1 },
+      { action: { type: "none" } })],
+    ["a failed exchange", (h, player) => h.stub.settle(player, { sequence: 1 }, null)],
+  ]) {
+    const h = stallHarness();
+    const player = stalledPlayer();
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await flush();
+    answered(h, player);
+    await running;
+    assert.equal(h.reopened.length, 1, `${label} falls through to the legacy reopen`);
+    assert.equal(h.reopened[0].kind, "seek", label);
+    assert.equal(player.stallRecoveries, 1, `${label} still spends the legacy attempt`);
+  }
+
+  // A terminal verdict replaces the client's invented words with the server's
+  // and nothing else. Ruling D1: the player is not torn down, and the viewer
+  // keeps every option they had — a terminal recipe is not a terminal file.
+  {
+    const h = stallHarness();
+    const player = stalledPlayer();
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await flush();
+    h.stub.settle(player, { sequence: 1 }, { action: {
+      type: "terminal", code: "unsupported", message: "This file's audio is not playable here.",
+    } });
+    await running;
+    assert.equal(h.reopened.length, 0, "a terminal verdict reopens nothing");
+    assert.equal(player.stallRecoveries, 0, "a terminal verdict spends no legacy attempt");
+    assert.equal(h.loading.length, 1);
+    assert.equal(h.loading[0].title, "This file's audio is not playable here.",
+      "the viewer reads the server's verdict, not the client's guess");
+    assert.match(h.loading[0].buttons, /retryPlayback/, "Try again survives a terminal verdict");
+    assert.match(h.loading[0].buttons, /startTranscodeFallback/,
+      "Force transcode survives a terminal verdict — it is a different recipe");
+  }
+
+  // A hold means the server is deliberately not advancing. The client waits
+  // silently and re-arms, so a hold that is never lifted still reaches the
+  // prompt: `began` never moves, so the elapsed stall keeps growing.
+  {
+    const h = stallHarness();
+    const player = stalledPlayer();
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await flush();
+    h.stub.settle(player, { sequence: 1 },
+      { action: { type: "hold", reason: "awaiting_admission" } });
+    await running;
+    assert.equal(h.reopened.length, 0, "a hold reopens nothing");
+    assert.equal(h.loading.length, 0, "a hold does not prompt the viewer");
+    assert.equal(player.stallRecoveries, 0, "a hold spends no legacy attempt");
+    assert.equal(player.waitReported, false, "the wait is re-armed, not abandoned");
+    assert.equal(h.timers.get(player.waitTimer).ms, 8_000,
+      "a hold re-arms at the ordinary deadline");
+  }
+
+  // retry_resource paces the next look at the server's own interval, clamped
+  // so a server that names a longer one cannot park a stalled viewer past the
+  // deadline that would otherwise have prompted them.
+  for (const [afterMs, expected, label] of [
+    [1_500, 1_500, "the server's interval is honoured"],
+    [90_000, 8_000, "an interval past the deadline is clamped to it"],
+    [1, 250, "an interval below the floor is raised to it"],
+  ]) {
+    const h = stallHarness();
+    const player = stalledPlayer();
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await flush();
+    h.stub.settle(player, { sequence: 1 }, { action: {
+      type: "retry_resource", reason: "reader_failed", after_ms: afterMs,
+    } });
+    await running;
+    assert.equal(h.reopened.length, 0, label);
+    assert.equal(h.timers.get(player.waitTimer).ms, expected, label);
+  }
+
+  // A replayed retry keeps its old sequence, so the floor skips it. Settling on
+  // it would hand this stall the verdict for an observation taken before the
+  // stall existed.
+  {
+    const h = stallHarness();
+    const player = stalledPlayer(4);
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await flush();
+    h.stub.settle(player, { sequence: 4 }, { action: { type: "terminal",
+      code: "unsupported", message: "stale" } });
+    assert.equal(h.loading.length, 0, "a replayed older sequence settles nothing");
+    h.stub.settle(player, { sequence: 5 }, { action: { type: "hold", reason: "x" } });
+    await running;
+    assert.equal(h.loading.length, 0, "the ask is answered by its own sequence");
+    assert.equal(player.waitReported, false);
+  }
+
+  // The viewer had the whole ask window to leave. Every condition the entry
+  // guard checked is re-checked, because none of them survived the await.
+  for (const [label, leave] of [
+    ["the viewer seeked", (player) => { player._seekToken = 4; }],
+    ["the viewer paused", () => { stalledVideo.paused = true; }],
+    ["the wait already ended", (player) => { player.waitAt = null; }],
+  ]) {
+    const h = stallHarness();
+    const player = stalledPlayer();
+    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await flush();
+    leave(player);
+    h.stub.settle(player, { sequence: 1 }, { action: { type: "none" } });
+    await running;
+    stalledVideo.paused = false;
+    assert.equal(h.reopened.length, 0, `${label}: nothing acts on the stale generation`);
+    assert.equal(h.loading.length, 0, label);
   }
 
   reporter.stop();
