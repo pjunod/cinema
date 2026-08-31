@@ -397,6 +397,39 @@ final class PlaybackControlSessionTests: XCTestCase {
         session.end()
     }
 
+    /// A terminal verdict is answered and then stops the reporter in the same
+    /// instant, so an ask that gives up on `stopped` without reading the slot
+    /// again discards the one verdict it most needed to see — and the client
+    /// falls through to its own guess for the exact case where the server was
+    /// certain.
+    func testATerminalVerdictReachesTheAskThatProvokedIt() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        defer { controlAnswer.set(ControlAction(type: "none")) }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        // The bootstrap exchange answers `none`, or the reporter stops before
+        // the ask exists and the test measures that instead.
+        controlAnswer.set(ControlAction(type: "none"))
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "Nothing more to send."
+        ))
+        let verdict = await session.askForAction(bound: 5, cap: 8, publish: {})
+        XCTAssertEqual(verdict?.type, "terminal",
+                       "the verdict that stopped the reporter still answers the ask")
+        XCTAssertEqual(verdict?.message, "Nothing more to send.")
+        session.end()
+    }
+
     /// An exchange that was already in flight when the ask was made carries an
     /// observation taken before the stall existed. Settling on it would hand
     /// this stall somebody else's verdict.
