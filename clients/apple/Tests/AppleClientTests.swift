@@ -4630,27 +4630,27 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual((caps["display"] as? [String: Any])?["dolby_vision"] as? Bool, false)
     }
 
-    func testSessionCreateRequestsOnlyTheDecisionsHDR10Transcode() throws {
+    func testSessionCreateRequestsHDR10OnlyForAnActualHDR10Transcode() throws {
         XCTAssertEqual(
             PlayerController.sessionHDR10Request(
-                decisionMode: "transcode",
+                copy: false,
                 deliveredRange: "HDR10",
                 forcesSDR: false
             ),
             true
         )
         XCTAssertNil(PlayerController.sessionHDR10Request(
-            decisionMode: "transcode",
+            copy: false,
             deliveredRange: "sdr",
             forcesSDR: false
         ))
         XCTAssertNil(PlayerController.sessionHDR10Request(
-            decisionMode: "remux",
+            copy: true,
             deliveredRange: "hdr10",
             forcesSDR: false
-        ))
+        ), "a copy create must not repeat a transcode-only HDR10 request")
         XCTAssertNil(PlayerController.sessionHDR10Request(
-            decisionMode: "transcode",
+            copy: false,
             deliveredRange: "hdr10",
             forcesSDR: true
         ))
@@ -4674,17 +4674,26 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNotNil(json["caps"])
     }
 
-    func testCompatibilityRescueNeverRepeatsTheReplacedHDR10Plan() {
-        XCTAssertNil(PlayerController.sessionHDR10Request(
-            decisionMode: "direct",
-            deliveredRange: "hdr10",
-            forcesSDR: true
-        ))
-        XCTAssertNil(PlayerController.sessionHDR10Request(
-            decisionMode: "remux",
-            deliveredRange: "hdr10",
-            forcesSDR: true
-        ))
+    func testCompatibilityRescueAndBurnNeverRepeatTheReplacedHDR10Plan() {
+        for fallback in ["direct rescue", "remux rescue", "subtitle burn"] {
+            XCTAssertNil(PlayerController.sessionHDR10Request(
+                copy: false,
+                deliveredRange: "hdr10",
+                forcesSDR: true
+            ), fallback)
+        }
+    }
+
+    func testManualQualityTranscodePreservesDirectOrRemuxHDR10Decision() {
+        // A selected height makes either original decision a non-copy create;
+        // `/decision` is not repeated before this session request.
+        for originalMode in ["direct", "remux"] {
+            XCTAssertEqual(PlayerController.sessionHDR10Request(
+                copy: false,
+                deliveredRange: "hdr10",
+                forcesSDR: false
+            ), true, originalMode)
+        }
     }
 
     func testPictureInPictureCommandStartsStopsAndWaitsForAvailability() {

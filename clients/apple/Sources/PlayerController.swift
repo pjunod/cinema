@@ -2488,7 +2488,7 @@ final class PlayerController: ObservableObject {
                     aac: copy ? aac : nil,
                     preserveDolbyVision: copy ? preserveDolbyVision : nil,
                     hdr10: Self.sessionHDR10Request(
-                        decisionMode: normalMode,
+                        copy: copy,
                         deliveredRange: decision.deliveredDynamicRange,
                         forcesSDR: forceCompatibilityTranscode || burnSubtitle != nil
                     ),
@@ -3316,16 +3316,18 @@ final class PlayerController: ObservableObject {
     static let stallReopenReason = "stall"
 
     /// The document says whether HDR10 output is allowed; this echo says the
-    /// current title's decision actually selected that transcode rung. A
-    /// compatibility rescue and a subtitle burn are explicitly SDR, even when
-    /// the decision they replace described HDR10 source bytes.
+    /// session create actually requests an HDR10 transcode. Manual quality
+    /// selection can turn a direct/remux decision into a non-copy create
+    /// without re-running `/decision`, while a compatibility rescue and a
+    /// subtitle burn are explicitly SDR even when the decision they replace
+    /// described HDR10 source bytes.
     nonisolated static func sessionHDR10Request(
-        decisionMode: String,
+        copy: Bool,
         deliveredRange: String?,
         forcesSDR: Bool
     ) -> Bool? {
-        !forcesSDR
-            && decisionMode.lowercased() == "transcode"
+        !copy
+            && !forcesSDR
             && deliveredRange?.lowercased() == "hdr10"
             ? true
             : nil
