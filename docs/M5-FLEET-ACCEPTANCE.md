@@ -3,7 +3,7 @@
 **Status:** ready to run · needs the operator's fleet, not a branch ·
 **Gates:** M5c and M5h (every deletion in
 [M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md)
-§7) · **Written:** 2026-08-31 · **Baseline:** `main` at `943d8a9a`
+§7) · **Written:** 2026-08-31 · **Baseline:** `main` at `c571a50d`
 
 Companion to [PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md) (where
 the work is) — this is *the one thing standing between M5 being written and
@@ -22,7 +22,7 @@ client build carrying it has ever run on hardware.
 |---|---|---|
 | server (emits the actions) | yes | three nodes on `v0.2.8-106-g55abad8f`, nynuc on a later untagged build |
 | web (served by the node) | yes | **whatever those nodes serve** — a server deploy ships the web client with it |
-| Apple | build **100** | build 86 |
+| Apple | build **101** | build 86 |
 | Android | versionCode **57** | 47 |
 
 The web row is the useful one: **deploying the server deploys the web client**,
@@ -63,13 +63,13 @@ a dead player.
 
 Two independent halves; the first is cheap and proves most of the protocol.
 
-**Server, which also ships the web client.** `main` at `943d8a9a`, to all four
+**Server, which also ships the web client.** `main` at `c571a50d`, to all four
 nodes, `serial: 1` with each node's `readyz` passing before the next is
 touched — that is the cluster quorum boundary and it is not optional. Deploy
 after the tag exists, or each node stamps itself `v0.2.8-N-g…` instead of the
 release.
 
-**Mobile.** Apple build 100 and Android versionCode 57, to the named roster:
+**Mobile.** Apple build 101 and Android versionCode 57, to the named roster:
 Pixel 11 Pro XL · Motorola razr ultra 2025 · Xiaomi 25019PNF3C, plus the TCL
 9445X when it is online, and whatever `xcrun devicectl list devices` reports.
 `scripts/ship-physical` is the path that works when the Ansible controller
@@ -92,6 +92,21 @@ mismatch inference; *Try again* and *Force transcode* are both still offered.
 
 **Would falsify it:** playback ending the instant the verdict arrives, or the
 viewer reading a generic message while `/metrics` shows a `terminal` was sent.
+
+**Also settled by the same file, and the reason this item matters more than it
+did when it was written.** A `terminal` is emitted only for `unsupported` and
+`invalid_configuration`, and the server scopes `is_permanent` to *"retrying
+this source, **unchanged**"*. Both clients now act on that reading: the verdict
+skips the retry that re-attaches the identical recipe and leaves the
+compatibility fallback — which asks for a different pipeline — alone.
+
+**Expect, additionally:** if the source is one AVFoundation or Media3 itself
+rejects, the compatibility transcode still runs and still produces a picture,
+and the client logs a ladder step naming it. **Would falsify the reading:**
+playback stopping with the server's sentence on a file the transcode can play.
+That would mean `terminal` is source-scoped after all and both clients are
+scoped too narrowly — open decision 7 in
+[PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md).
 
 ### 4.2 Ruling D3 — the ask costs 1.5 s, extended once to 3 s
 
