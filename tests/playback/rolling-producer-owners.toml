@@ -1003,7 +1003,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # that direct execution path as well.
 # 505 with the HTTP marker race fixture: two test-only timeouts bound the two
 # halves of its deterministic barrier, and the spawned handle is always joined.
-expected_occurrences = 505
+# 506 with the detached marker telemetry assertion: one test-only sleep yields
+# to the handler's bounded background recorder; it owns no process or producer.
+expected_occurrences = 506
 
 [[module_structures]]
 id = "bare-time-constructor"
