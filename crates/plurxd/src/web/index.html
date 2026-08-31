@@ -5403,7 +5403,13 @@ async function loadItem(id){
   // French audio track chosen for one film quietly applying to the next.
   clearPrePlay();
   const lib=libs.find(l=>l.id===it.library_id);
-  d.files.forEach(f=>ITEM_FOR_FILE[f.id]=String(id));
+  d.files.forEach(f=>{
+    ITEM_FOR_FILE[f.id]=String(id);
+    // File DTOs are item-scoped and do not repeat their library id. The
+    // conversion status endpoint publishes modes per library, so bind the
+    // already-loaded item authority once instead of issuing per-file reads.
+    f.library_id=it.library_id;
+  });
   const files=d.files, children=d.children||[], ancestors=d.ancestors||[];
   const best=files[0], multi=files.length>1;
   const runtime=it.runtime_ms||(best&&best.duration_ms)||0;
@@ -5563,9 +5569,13 @@ function dvConversionStateHtml(file,snapshot){
   const conversion=snapshot.conversion;
   const capability=snapshot.capabilities||{};
   const id=exactWireId(file);
+  const mode=(snapshot.library_modes||{})[String(file.library_id)]||"off";
+  const modeOff=mode==="off";
+  const modeReason="library Dolby Vision conversion mode is Off — choose Manual or Automatic in Settings → Libraries";
   if(!conversion){
     if(!snapshot.eligible) return "";
-    const reason=capability.available===false?capability.reason||"dovi_tool or mkvmerge is unavailable":"";
+    const reason=modeOff?modeReason
+      :capability.available===false?capability.reason||"dovi_tool or mkvmerge is unavailable":"";
     return `<div class="row" style="margin-top:8px;gap:8px"><span class="muted">Profile 7 can be permanently converted to Profile 8.1.</span>
       <button class="ghost sm" aria-label="Convert file ${esc(id)} from Dolby Vision Profile 7 to Profile 8.1 on disk" onclick='queueDvFile(${JSON.stringify(id)},this)'${reason?' disabled':''}>Convert on disk</button>
       ${reason?`<span class="problem">Unavailable: ${esc(reason)}</span>`:""}</div>`;
@@ -5581,11 +5591,12 @@ function dvConversionStateHtml(file,snapshot){
   if(state==="failed"){
     const unavailable=capability.available===false;
     const ineligible=snapshot.eligible===false;
-    const reason=unavailable?capability.reason||"conversion tools unavailable"
-      :ineligible?"the current scan no longer meets the Profile 7 conversion requirements":"";
+    const reason=ineligible?"the current scan no longer meets the Profile 7 conversion requirements"
+      :modeOff?modeReason:unavailable?capability.reason||"conversion tools unavailable":"";
+    const blocked=modeOff||unavailable;
     const retry=ineligible
       ?`<span class="problem">Retry unavailable: ${esc(reason)}.</span>`
-      :`<button class="ghost sm" aria-label="Retry on-disk Dolby Vision conversion for file ${esc(id)}" onclick='queueDvFile(${JSON.stringify(id)},this)'${unavailable?' disabled':''}>Retry conversion</button>${reason?` <span class="muted">${esc(reason)}</span>`:""}`;
+      :`<button class="ghost sm" aria-label="Retry on-disk Dolby Vision conversion for file ${esc(id)}" onclick='queueDvFile(${JSON.stringify(id)},this)'${blocked?' disabled':''}>Retry conversion</button>${reason?` <span class="muted">${esc(reason)}</span>`:""}`;
     return `<div style="margin-top:8px"><div class="problem">Conversion failed: ${esc(conversion.error||"unknown error")}${dvRecoveryGuardStatusHtml(conversion.recovery_guard)}</div>
       ${retry}</div>`;
   }
@@ -5623,9 +5634,11 @@ async function hydrateDvFileActions(files){
       Object.assign(conversions,snapshot.conversions_by_file||{});
       Object.assign(eligibility,snapshot.eligible_by_file||{});
     }
-    // Tool capability is process-wide; choosing the first input-ordered batch
-    // makes the result independent of later batch responses.
+    // Tool capability and configured library modes are process-wide; choosing
+    // the first input-ordered batch makes the result independent of later
+    // batch responses.
     const capabilities=snapshots[0].capabilities||{};
+    const libraryModes=snapshots[0].library_modes||{};
     let anyActive=false;
     for(const file of selectedTargets){
       const id=exactWireId(file), mount=document.getElementById(`dv-file-${id}`);
@@ -5637,6 +5650,7 @@ async function hydrateDvFileActions(files){
         conversion,
         eligible:eligibility[id]===true,
         capabilities,
+        library_modes:libraryModes,
       });
       mount.dataset.dvActive=active?"true":"false";
     }

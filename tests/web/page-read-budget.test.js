@@ -745,15 +745,22 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     "the client never infers Profile 7 conversion eligibility from its item DTO");
   assert.match(hydrate, /const capabilities=snapshots\[0\]\.capabilities\|\|\{\}/,
     "item actions consume the shared conversion-tool capability snapshot");
+  assert.match(hydrate, /const libraryModes=snapshots\[0\]\.library_modes\|\|\{\}/,
+    "item actions consume the shared per-library conversion mode snapshot");
   assert.match(hydrate, /capabilities,/,
     "the batch response supplies one shared tool capability snapshot");
+  assert.match(hydrate, /library_modes:libraryModes/,
+    "each file action receives the authoritative library mode map");
   assert.doesNotMatch(hydrate, /Number\(file\.dv_profile\)===7/,
     "the UI does not enable an action from the numeric profile alone");
   assert.doesNotMatch(hydrate, /\/files\/\$\{id\}\/dv-conversion/,
     "item hydration never falls back to one request per file");
 
   const mounts = new Map();
-  const files = Array.from({ length: 257 }, (_, index) => ({ id: index + 1 }));
+  const files = Array.from(
+    { length: 257 },
+    (_, index) => ({ id: index + 1, library_id: 7 }),
+  );
   for (const file of files) mounts.set(`dv-file-${file.id}`, {
     dataset: { dvActive: "false" }, innerHTML: "Checking",
   });
@@ -766,6 +773,7 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
       conversions_by_file: ids.includes("1") ? { 1: { state: "queued" } } : {},
       eligible_by_file: Object.fromEntries(ids.map((id) => [id, id === "257"])),
       capabilities: { available: true },
+      library_modes: { "7": "manual" },
     };
   };
   const hydrate257 = new Function(
@@ -779,7 +787,7 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     (file) => String(file.id),
     api,
     (conversion) => conversion && ["queued", "running", "verified"].includes(conversion.state),
-    (file, snapshot) => `${file.id}:${snapshot.conversion?.state || "none"}:${snapshot.eligible}`,
+    (file, snapshot) => `${file.id}:${snapshot.conversion?.state || "none"}:${snapshot.eligible}:${snapshot.library_modes[String(file.library_id)]}`,
     String,
     256,
     4,
@@ -790,9 +798,9 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     .searchParams.get("file_ids").split(","));
   assert.deepEqual(requestedIds.map((ids) => ids.length), [256, 1]);
   assert.deepEqual(requestedIds.flat(), files.map((file) => String(file.id)));
-  assert.equal(mounts.get("dv-file-1").innerHTML, "1:queued:false",
+  assert.equal(mounts.get("dv-file-1").innerHTML, "1:queued:false:manual",
     "the first batch survives the deterministic merge");
-  assert.equal(mounts.get("dv-file-257").innerHTML, "257:none:true",
+  assert.equal(mounts.get("dv-file-257").innerHTML, "257:none:true:manual",
     "the final batch survives the deterministic merge");
 
   const cappedFiles = Array.from({ length: 1025 }, (_, index) => ({ id: index + 1 }));
@@ -881,6 +889,9 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
   const poll = shippedSource("pollDvFileActions");
   assert.match(poll, /if\(!active[\s\S]*clearInterval\(PAGE_TIMER\)/,
     "the item timer stops after the first all-terminal snapshot");
+  const loadItem = shippedSource("loadItem");
+  assert.match(loadItem, /f\.library_id=it\.library_id/,
+    "item detail binds its already-loaded library id to every file action");
   const queueLibrary = shippedSource("convertDvLibrary");
   assert.match(queueLibrary, /result\.saturated/,
     "a cap-hit batch tells the operator another bounded pass may be needed");
@@ -1028,8 +1039,34 @@ test("Dolby Vision settings controls have accessible names", () => {
     () => "",
     escapeHtml,
   );
+  const eligibleOff = renderFile(
+    { id: 42, library_id: 7 },
+    {
+      conversion: null,
+      eligible: true,
+      capabilities: { available: true },
+      library_modes: {},
+    },
+  );
+  assert.match(eligibleOff, /<button[^>]* disabled>Convert on disk<\/button>/,
+    "an eligible file cannot bypass its library's default-Off mutation gate");
+  assert.match(eligibleOff, /library Dolby Vision conversion mode is Off/,
+    "the disabled file action explains the exact policy gate");
+  for (const mode of ["manual", "auto"]) {
+    const eligibleEnabled = renderFile(
+      { id: 42, library_id: 7 },
+      {
+        conversion: null,
+        eligible: true,
+        capabilities: { available: true },
+        library_modes: { "7": mode },
+      },
+    );
+    assert.doesNotMatch(eligibleEnabled, /<button[^>]* disabled>Convert on disk<\/button>/,
+      `${mode} enables an eligible file when the required tools are available`);
+  }
   const failedIneligible = renderFile(
-    { id: 42 },
+    { id: 42, library_id: 7 },
     {
       conversion: { state: "failed", error: "controlled failure" },
       eligible: false,
@@ -1041,15 +1078,28 @@ test("Dolby Vision settings controls have accessible names", () => {
   assert.doesNotMatch(failedIneligible, /<button[^>]*>Retry conversion<\/button>/,
     "a failed row that is no longer eligible offers no false retry action");
   const failedEligible = renderFile(
-    { id: 42 },
+    { id: 42, library_id: 7 },
     {
       conversion: { state: "failed", error: "controlled failure" },
       eligible: true,
       capabilities: { available: true },
+      library_modes: { "7": "manual" },
     },
   );
   assert.match(failedEligible, /<button[^>]*>Retry conversion<\/button>/,
     "a still-eligible failed row keeps its retry action");
+  const failedOff = renderFile(
+    { id: 42, library_id: 7 },
+    {
+      conversion: { state: "failed", error: "controlled failure" },
+      eligible: true,
+      capabilities: { available: true },
+      library_modes: {},
+    },
+  );
+  assert.match(failedOff, /<button[^>]* disabled>Retry conversion<\/button>/,
+    "a failed row cannot retry while its library mode is Off");
+  assert.match(failedOff, /library Dolby Vision conversion mode is Off/);
   const guardStatus = new Function(
     "esc",
     `${shippedSource("dvRecoveryGuardStatusHtml")}; return dvRecoveryGuardStatusHtml;`,

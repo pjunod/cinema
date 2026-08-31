@@ -5040,6 +5040,7 @@ mod tests {
         assert_eq!(initial["keep_original"], true);
         assert_eq!(initial["parallel"], 1);
         assert_eq!(initial["progress"]["eligible"], 1);
+        assert!(initial["library_modes"][library.id.to_string()].is_null());
         assert_eq!(
             initial["progress_by_library"][library.id.to_string()]["eligible"],
             1
@@ -5051,10 +5052,52 @@ mod tests {
         assert_eq!(file_status["eligible"], true);
         assert!(file_status["conversion"].is_null());
 
+        let mode_uri = format!("/api/v1/libraries/{}/dv-conversion", library.id);
+        let library_queue_uri = format!("/api/v1/libraries/{}/dv-conversions", library.id);
+        let (status, off_file) = call(&app, post(&file_uri, Some(&admin), json!({}))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{off_file}");
+        assert_eq!(
+            off_file["error"],
+            plurx_core::store::DV_CONVERSION_MODE_DISABLED_REASON
+        );
+        let (status, off_library) = call(
+            &app,
+            post(
+                &library_queue_uri,
+                Some(&admin),
+                json!({ "retry_failed": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{off_library}");
+        assert_eq!(
+            off_library["error"],
+            plurx_core::store::DV_CONVERSION_MODE_DISABLED_REASON
+        );
+
+        let (status, mode) = call(
+            &app,
+            put(&mode_uri, Some(&admin), json!({ "mode": "manual" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{mode}");
+        assert_eq!(mode["mode"], "manual");
+
         let (status, queued) = call(&app, post(&file_uri, Some(&admin), json!({}))).await;
         assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
         assert_eq!(queued["queued"], true);
         assert_eq!(queued["conversion"]["state"], "queued");
+        let (status, manual_library) = call(
+            &app,
+            post(
+                &library_queue_uri,
+                Some(&admin),
+                json!({ "retry_failed": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{manual_library}");
+        assert_eq!(manual_library["queued"], 0);
         let (status, idempotent) = call(&app, post(&file_uri, Some(&admin), json!({}))).await;
         assert_eq!(status, StatusCode::OK, "{idempotent}");
         assert_eq!(idempotent["queued"], false);
@@ -5131,6 +5174,7 @@ mod tests {
             "verified"
         );
         assert_eq!(batch["capabilities"]["available"], true);
+        assert_eq!(batch["library_modes"][library.id.to_string()], "manual");
         assert_eq!(
             batch["conversions_by_file"][file.to_string()]["recovery_guard"]["state"],
             "intent"
@@ -5174,6 +5218,38 @@ mod tests {
             repeated_overflow["error"],
             format!("file_ids accepts at most {read_max} ids")
         );
+        let oversized_raw = "1".repeat(dv_disk::DV_CONVERSION_FILE_IDS_RAW_MAX + 1);
+        let (status, oversized_raw_body) = call(
+            &app,
+            get(
+                &format!("/api/v1/dv-conversions?file_ids={oversized_raw}"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{oversized_raw_body}");
+        assert_eq!(
+            oversized_raw_body["error"],
+            format!(
+                "file_ids accepts at most {} bytes",
+                dv_disk::DV_CONVERSION_FILE_IDS_RAW_MAX
+            )
+        );
+        for stuffed in [format!("{file},,{file}"), format!("{file},%20,%20{file}")] {
+            let (status, empty_value) = call(
+                &app,
+                get(
+                    &format!("/api/v1/dv-conversions?file_ids={stuffed}"),
+                    Some(&admin),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{empty_value}");
+            assert_eq!(
+                empty_value["error"],
+                "file_ids must not contain empty values"
+            );
+        }
 
         let (status, guarded_file) = call(&app, get(&file_uri, Some(&admin))).await;
         assert_eq!(status, StatusCode::OK, "{guarded_file}");
@@ -5185,15 +5261,6 @@ mod tests {
         let (status, invalid_batch) =
             call(&app, get("/api/v1/dv-conversions?file_ids=0", Some(&admin))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid_batch}");
-
-        let mode_uri = format!("/api/v1/libraries/{}/dv-conversion", library.id);
-        let (status, mode) = call(
-            &app,
-            put(&mode_uri, Some(&admin), json!({ "mode": "manual" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{mode}");
-        assert_eq!(mode["mode"], "manual");
 
         let (status, settings) = call(
             &app,

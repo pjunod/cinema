@@ -4,7 +4,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use plurx_core::store::{
-    QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_RECOVERY_GUARD_READ_MAX,
+    QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_CONVERSION_MODE_DISABLED_REASON,
+    DV_RECOVERY_GUARD_READ_MAX,
 };
 use serde::Deserialize;
 
@@ -14,7 +15,9 @@ use crate::state::{AppState, DvDiskMode};
 
 fn queue_error(error: plurx_core::error::StoreError) -> ApiError {
     let message = error.to_string();
-    if message.contains("library.dv_disk_convert unavailable") {
+    if message.contains(DV_CONVERSION_MODE_DISABLED_REASON) {
+        ApiError::Conflict(DV_CONVERSION_MODE_DISABLED_REASON.to_owned())
+    } else if message.contains("library.dv_disk_convert unavailable") {
         ApiError::ServiceUnavailable(message)
     } else {
         ApiError::from(error)
@@ -27,18 +30,32 @@ pub struct StatusQuery {
     file_ids: Option<String>,
 }
 
+/// Enough room for 256 positive i64s, separators, and surrounding whitespace.
+/// The count limit bounds Store work; this byte limit also bounds parsing work
+/// before malformed comma-separated input reaches the Store.
+pub(crate) const DV_CONVERSION_FILE_IDS_RAW_MAX: usize = DV_CONVERSION_LEDGER_READ_MAX * 24;
+
 fn parse_file_ids(raw: &str) -> Result<Vec<i64>, ApiError> {
+    if raw.len() > DV_CONVERSION_FILE_IDS_RAW_MAX {
+        return Err(ApiError::BadRequest(format!(
+            "file_ids accepts at most {DV_CONVERSION_FILE_IDS_RAW_MAX} bytes"
+        )));
+    }
     let mut ids = std::collections::BTreeSet::new();
-    let mut submitted = 0;
-    for value in raw.split(',').filter(|value| !value.trim().is_empty()) {
-        submitted += 1;
+    for (submitted, value) in raw.split(',').enumerate() {
+        let submitted = submitted + 1;
         if submitted > DV_CONVERSION_LEDGER_READ_MAX {
             return Err(ApiError::BadRequest(format!(
                 "file_ids accepts at most {DV_CONVERSION_LEDGER_READ_MAX} ids"
             )));
         }
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(ApiError::BadRequest(
+                "file_ids must not contain empty values".to_owned(),
+            ));
+        }
         let id = value
-            .trim()
             .parse::<i64>()
             .ok()
             .filter(|id| *id > 0)
@@ -57,17 +74,20 @@ pub async fn status(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if let Some(raw) = query.file_ids.as_deref() {
         let ids = parse_file_ids(raw)?;
-        let conversions = state.store.dv_conversions_for_files(&ids).await?;
-        let eligibility = state
-            .store
-            .dv_conversion_eligibility_for_files(&ids)
-            .await?;
+        let (conversions, eligibility, modes) = tokio::try_join!(
+            state.store.dv_conversions_for_files(&ids),
+            state.store.dv_conversion_eligibility_for_files(&ids),
+            state.jobs.dv_disk_modes(),
+        )?;
         return Ok(Json(serde_json::json!({
             "conversions_by_file": conversions.into_iter().map(|row| {
                 (row.file_id.to_string(), row)
             }).collect::<std::collections::BTreeMap<_, _>>(),
             "eligible_by_file": eligibility.into_iter().map(|(file_id, eligible)| {
                 (file_id.to_string(), eligible)
+            }).collect::<std::collections::BTreeMap<_, _>>(),
+            "library_modes": modes.into_iter().map(|(id, mode)| {
+                (id.to_string(), mode.as_str())
             }).collect::<std::collections::BTreeMap<_, _>>(),
             "capabilities": state.jobs.dv_disk_capabilities(),
         })));
@@ -166,6 +186,11 @@ pub async fn queue_file(
             "file {} was already committed and cannot be re-queued",
             row.file_id
         ))),
+        QueueDvConversionOutcome::Ineligible(reason)
+            if reason == DV_CONVERSION_MODE_DISABLED_REASON =>
+        {
+            Err(ApiError::Conflict(reason.to_owned()))
+        }
         QueueDvConversionOutcome::Ineligible(reason) => {
             Err(ApiError::Unprocessable(serde_json::json!({
                 "error": reason,
@@ -240,4 +265,47 @@ pub async fn set_mode(
         "library_id": library_id.to_string(),
         "mode": mode.as_str(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bad_request(error: ApiError) -> String {
+        match error {
+            ApiError::BadRequest(message) => message,
+            other => panic!("expected bad request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_id_parser_bounds_bytes_count_and_empty_tokens() {
+        let largest = i64::MAX.to_string();
+        let mut at_byte_limit =
+            vec![format!("    {largest}"); DV_CONVERSION_LEDGER_READ_MAX].join(",");
+        at_byte_limit.push(' ');
+        assert_eq!(at_byte_limit.len(), DV_CONVERSION_FILE_IDS_RAW_MAX);
+        assert_eq!(
+            parse_file_ids(&at_byte_limit).expect("at byte limit"),
+            vec![i64::MAX]
+        );
+
+        let over_byte_limit = format!("{at_byte_limit} ");
+        assert_eq!(
+            bad_request(parse_file_ids(&over_byte_limit).expect_err("over byte limit")),
+            format!("file_ids accepts at most {DV_CONVERSION_FILE_IDS_RAW_MAX} bytes")
+        );
+        for stuffed in ["1,,2", "1,   ,2", ""] {
+            assert_eq!(
+                bad_request(parse_file_ids(stuffed).expect_err("empty token")),
+                "file_ids must not contain empty values"
+            );
+        }
+
+        let over_count = vec!["1"; DV_CONVERSION_LEDGER_READ_MAX + 1].join(",");
+        assert_eq!(
+            bad_request(parse_file_ids(&over_count).expect_err("over id count")),
+            format!("file_ids accepts at most {DV_CONVERSION_LEDGER_READ_MAX} ids")
+        );
+    }
 }
