@@ -1,6 +1,8 @@
 package tv.plurx.app.player
 
 import androidx.media3.common.PlaybackException
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -297,5 +299,22 @@ class ControlErrorClassTest {
             assertEquals(controlErrorCode(code), bounded?.errorCode)
             assertEquals(DecoderState.FAILED, bounded?.decoderState)
         }
+    }
+}
+
+
+/**
+ * Ruling D3. The fallback is the branch the whole fleet takes, so the ask
+ * bound is added to every real stall on every device — and the three platforms
+ * carry the same pair of numbers, so a drift is visible here rather than
+ * silent.
+ */
+class ControlAskBoundTest {
+
+    @Test
+    fun theAskBoundIsShortAndItsCapIsLonger() {
+        assertEquals(1_500L, CONTROL_ASK_MS)
+        assertEquals(3_000L, CONTROL_ASK_CAP_MS)
+        assertTrue(CONTROL_ASK_CAP_MS > CONTROL_ASK_MS)
     }
 }
