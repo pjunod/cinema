@@ -96,6 +96,7 @@ WEB_LAYOUT_PATHS = (
     "crates/plurxd/src/http/web.rs",
     "crates/plurxd/src/web/**",
     "scripts/contrast-*",
+    "scripts/control-reporter-browser-check",
     "scripts/js-check",
     "scripts/themes-proposed.json",
     "scripts/ui-baseline",

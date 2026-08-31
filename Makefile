@@ -363,6 +363,14 @@ ui-baseline: ## Capture the UI baseline for every layout (both tiers, into targe
 ui-check: ## Sweep every layout and fail if the structural golden moved
 	@scripts/ui-baseline --self-host --check
 
+# Every other web test reads the reporter as text. This one runs it. The M5
+# fleet run was the first execution the web control plane ever had, and it
+# threw before exchange one on a receiver every browser brand-checks and Node
+# does not — with the whole suite green.
+.PHONY: control-browser-check
+control-browser-check: ## Run the shipped playback-control reporter in a real browser
+	@scripts/control-reporter-browser-check
+
 # Regenerating the golden is a deliberate act that shows up in a git diff, never
 # a side effect of a normal run — a golden that rewrites itself asserts nothing.
 # Run this when you MEANT to change the UI, then read the diff before committing.
