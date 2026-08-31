@@ -15,6 +15,7 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+mod dv_conversion;
 mod fragindex;
 mod fragment_index_cluster;
 mod renditionplan;
@@ -31,6 +32,8 @@ mod hiqlite_catalog;
 mod hiqlite_coordination;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_durable;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_dv_conversion;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
@@ -49,6 +52,11 @@ mod hiqlite_sessions;
 mod hiqlite_shared_cache;
 
 pub mod replicated;
+
+pub use dv_conversion::{
+    DvConversion, DvConversionCandidate, DvConversionProgress, DvConversionState,
+    DvConversionStore, QueueDvConversionOutcome,
+};
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -2419,6 +2427,7 @@ pub trait RenditionPlanStore: Send + Sync + 'static {
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
+    + DvConversionStore
     + MetricsStore
     + UserStore
     + ApiKeyStore
@@ -2448,6 +2457,7 @@ pub trait Store:
 
 impl<T> Store for T where
     T: SettingsStore
+        + DvConversionStore
         + MetricsStore
         + UserStore
         + ApiKeyStore

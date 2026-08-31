@@ -19,7 +19,7 @@ a forecast.
 |---|---|---|
 | Isolated workspace | Complete | Fresh clone at `/private/tmp/plurx-m5b.lQcDxU/repo`; the user's existing checkouts are untouched |
 | Integration line | Complete | One `effort/playback-caps-v2-m5b` branch from current `main`; development commits use `PLURX_EFFORT_COMMIT=1` |
-| Store ledger | Not started | Add `dv_conversions` to SQLite and replicated migrations, including every old-schema fixture |
+| Store ledger | Complete | SQLite v39 and replicated v20 implement the same terminal ledger; queue/transition contracts, historical fixtures, and SQLite-to-hiqlite import coverage pass |
 | Conversion worker | Not started | Add the six-stage temp-file pipeline, exact verification, and source fence without changing M5a files |
 | Operator surface | Not started | Add library/file actions, progress, availability reasons, settings, and admin UI |
 | Image and probes | Not started | Pin `dovi_tool` and MKVToolNix, then report exact boot capability |
@@ -60,9 +60,8 @@ a forecast.
 
 | Evidence | Result |
 |---|---|
-| Focused local regressions | Pending |
+| Focused local regressions | Store ledger: targeted SQLite migration and queue tests; backend-neutral store contract; import unit suite; all-target hiqlite-store compile |
 | Adversarial review findings | Pending |
 | Main promotion gate | Pending |
 | Qualification receipt | Pending |
 | Merge commit | Pending |
-

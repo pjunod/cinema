@@ -44,7 +44,8 @@ use crate::error::StoreError;
 // indexes that keep the analysis operations projection cheap under polling;
 // v16 persists the first terminal cause; v17 adds the replacement-publication
 // fence; v18 installs the atomic request-claim trigger for that fence on
-// clusters which had already reached v17. Every additive
+// clusters which had already reached v17; v19 stores the Dolby Vision record
+// columns; v20 adds the permanent Profile 7 conversion ledger. Every additive
 // step is applied through Raft before the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
@@ -59,7 +60,8 @@ const TERMINAL_REASON_SCHEMA_VERSION: i64 = 16;
 const PUBLICATION_FENCE_SCHEMA_VERSION: i64 = 17;
 const PUBLICATION_CLAIM_SCHEMA_VERSION: i64 = 18;
 const DOLBY_VISION_COLUMNS_SCHEMA_VERSION: i64 = 19;
-pub const AUTH_SCHEMA_VERSION: i64 = DOLBY_VISION_COLUMNS_SCHEMA_VERSION;
+const DV_CONVERSIONS_SCHEMA_VERSION: i64 = 20;
+pub const AUTH_SCHEMA_VERSION: i64 = DV_CONVERSIONS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -76,6 +78,7 @@ const TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_HISTORY_INDEX_SCHE
 const PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = TERMINAL_REASON_SCHEMA_VERSION;
 const PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = PUBLICATION_FENCE_SCHEMA_VERSION;
 const DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE: i64 = PUBLICATION_CLAIM_SCHEMA_VERSION;
+const DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE: i64 = DOLBY_VISION_COLUMNS_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1202,6 +1205,7 @@ impl HiqliteAuthStore {
         }
         super::hiqlite_catalog::install_schema(&client).await?;
         super::hiqlite_durable::install_schema(&client).await?;
+        super::hiqlite_dv_conversion::install_schema(&client).await?;
         super::hiqlite_pretranscode::install_schema(&client).await?;
         super::hiqlite_sessions::install_schema(&client).await?;
         super::hiqlite_shared_cache::install_schema(&client).await?;
@@ -1670,6 +1674,27 @@ impl HiqliteAuthStore {
                         attempt,
                     )
                     .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::dv_conversion::DV_CONVERSIONS_SCHEMA, params!()),
+                            (super::dv_conversion::DV_CONVERSIONS_QUEUE_INDEX, params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    DV_CONVERSIONS_SCHEMA_VERSION,
+                                    now,
+                                    DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
@@ -2944,7 +2969,8 @@ fn schema_migration_action(
         | TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE
         | PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE
         | PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE
-        | DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE => {
+        | DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE
+        | DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -4444,9 +4470,18 @@ mod tests {
             "v18 must advance exactly one step to the Dolby Vision column schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 14,
+            DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE, DOLBY_VISION_COLUMNS_SCHEMA_VERSION,
+            "the conversion-ledger migration must start from the exact v19 shape"
+        );
+        assert_eq!(
+            DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE + 1,
+            DV_CONVERSIONS_SCHEMA_VERSION,
+            "v19 must advance exactly one step to the conversion-ledger schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 15,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v19 step"
+            "this implementation contains every additive v5→v20 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

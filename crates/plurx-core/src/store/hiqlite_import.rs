@@ -526,6 +526,25 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "dv_conversions",
+        columns: &[
+            "file_id",
+            "state",
+            "el_type",
+            "original_path",
+            "bytes_before",
+            "bytes_after",
+            "error",
+            "queued_at_ms",
+            "finished_at_ms",
+        ],
+        order_by: "file_id",
+        minimum_schema: 39,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "watch_state",
         columns: &[
             "user_id",
@@ -2162,7 +2181,8 @@ mod tests {
         assert!(names.contains(&"cluster_fragment_index_jobs"));
         assert!(names.contains(&"cluster_fragment_index_artifacts"));
         assert!(names.contains(&"cluster_fragment_index_locations"));
-        assert_eq!(names.len(), 30, "review every imported durable table");
+        assert!(names.contains(&"dv_conversions"));
+        assert_eq!(names.len(), 31, "review every imported durable table");
     }
 
     #[test]

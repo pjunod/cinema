@@ -54,8 +54,9 @@ use plurx_core::segplan::{
 };
 use plurx_core::store::{
     cluster_fragment_index_key, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery,
-    ArtworkRepairFence, ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation, LibraryStore,
-    MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
+    ArtworkRepairFence, ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation,
+    DvConversionState, DvConversionStore, LibraryStore, MediaStore, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, OutboxEntry, PublicationStore, QueueDvConversionOutcome,
     ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -165,6 +166,17 @@ const SETTINGS_METHODS: &[&str] = &[
     "prune_unreferenced_book_cover_origins",
     "put_settings",
     "instance_id",
+];
+const DV_CONVERSION_METHODS: &[&str] = &[
+    "dv_conversion",
+    "queue_dv_conversion",
+    "queue_library_dv_conversions",
+    "dv_conversion_candidates",
+    "dv_conversion_progress",
+    "mark_dv_conversion_running",
+    "mark_dv_conversion_verified",
+    "mark_dv_conversion_committed",
+    "mark_dv_conversion_failed",
 ];
 const USER_METHODS: &[&str] = &[
     "count_users",
@@ -6557,6 +6569,38 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
                 hiqlite::params!(),
             ),
             ("DROP TABLE IF EXISTS reading_state", hiqlite::params!()),
+            // The conversion ledger is v20's. These fixtures bootstrap the
+            // current schema, so leaving the table behind would make the v20
+            // migration create a table on top of a fixture that was never old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
+            // The conversion ledger is v20's. These fixtures bootstrap the
+            // current schema, so leaving the table behind would make the v20
+            // migration create a table on top of a fixture that was never old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
+            // The conversion ledger is v20's. These fixtures bootstrap the
+            // current schema, so leaving the table behind would make the v20
+            // migration create a table on top of a fixture that was never old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
+            // The conversion ledger is v20's. These fixtures bootstrap the
+            // current schema, so leaving the table behind would make the v20
+            // migration create a table on top of a fixture that was never old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
+            // The conversion ledger is v20's. These fixtures bootstrap the
+            // current schema, so leaving the table behind would make the v20
+            // migration create a table on top of a fixture that was never old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
+            // The conversion ledger is v20's. These fixtures bootstrap the
+            // current schema, so leaving the table behind would make the v20
+            // migration create a table on top of a fixture that was never old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
+            // The conversion ledger is v20's. These fixtures bootstrap the
+            // current schema, so leaving the table behind would make the v20
+            // migration create a table on top of a fixture that was never old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
+            // The conversion ledger is v20's. These fixtures bootstrap the
+            // current schema, so leaving the table behind would make the v20
+            // migration create a table on top of a fixture that was never old.
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
             // The Dolby Vision columns are v19's, so a fixture claiming an
             // earlier version has to give them back. Every fixture here is
             // built by bootstrapping the CURRENT schema and undoing what each
@@ -6653,6 +6697,71 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v19_store_migrates_the_conversion_ledger_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect v19 migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v19-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current schema");
+    current
+        .put_setting("migration.v19.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    let results = client
+        .txn([
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
+            (
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+            ),
+        ])
+        .await
+        .expect("construct exact v19 fixture");
+    results
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit exact v19 fixture");
+
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v19 through v20 migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v19.proof")
+            .await
+            .expect("read migration proof")
+            .as_deref(),
+        Some("survives")
+    );
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("inspect conversion ledger");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].value, 9);
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -8762,6 +8871,11 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                   audio_streams, subtitle_streams, scanned_at, audio_offset_ms)
                  VALUES (30, 10, '/fixture/shows/season-1.mkv', 4096, 115, 3600000,
                          'matroska', 'h264', '[]', '[]', 116, 25);
+             INSERT INTO dv_conversions
+                 (file_id, state, source_size, source_mtime, el_type, error,
+                  created_at, started_at, updated_at)
+                 VALUES (30, 'failed', 4096, 115, NULL, 'fixture interruption',
+                         116, 117, 118);
              INSERT INTO watch_state
                  (user_id, item_id, position_ms, duration_ms, watched, updated_at)
                  VALUES (7, 10, 120000, 3600000, 0, 117);
@@ -9065,13 +9179,15 @@ fn make_trakt_fixture_row_cleartext(path: &std::path::Path) {
 fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     let path = populated_current_import_fixture(data_dir);
     let connection = rusqlite::Connection::open(&path).expect("open current SQLite fixture");
-    // Recreate the exact v15-v19 schema differences so this is also a valid
+    // Recreate the exact v15-v20 schema differences so this is also a valid
     // input to ordinary SQLite startup migration, not merely a current-schema
     // database carrying an older user_version. The activation coordinator now
     // runs that ordinary upgrade before publishing its immutable backup.
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
+             -- v39's permanent Dolby Vision conversion ledger.
+             DROP TABLE dv_conversions;
              -- v38's Dolby Vision columns. A fixture that stamps user_version
              -- back to 14 without removing them is not a v14 database: the
              -- ordinary startup migration would re-run its own ALTER TABLE ADD
@@ -9174,6 +9290,23 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
     assert_eq!(report.tables.len(), 30);
     assert_eq!(report.search_rows, 2);
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .find(|digest| digest.table == "dv_conversions")
+            .expect("Dolby Vision conversion digest")
+            .row_count,
+        1,
+        "the permanent-media ledger must survive SQLite-to-hiqlite activation"
+    );
+    let conversion = store
+        .dv_conversion(30)
+        .await
+        .expect("read imported Dolby Vision conversion")
+        .expect("imported Dolby Vision conversion");
+    assert_eq!(conversion.state, DvConversionState::Failed);
+    assert_eq!(conversion.error.as_deref(), Some("fixture interruption"));
     assert_eq!(
         report
             .tables
@@ -10550,17 +10683,19 @@ async fn sqlite_import_verification_refusals_have_teeth() {
 
 #[test]
 fn contract_inventory_matches_every_store_method() {
-    let source = include_str!("../src/store/mod.rs")
+    let store_source = include_str!("../src/store/mod.rs")
         .split_once("pub trait Store:")
         .expect("Store composite boundary")
         .0;
-    let declared = source
+    let declared = store_source
         .lines()
+        .chain(include_str!("../src/store/dv_conversion.rs").lines())
         .filter_map(|line| line.strip_prefix("    async fn "))
         .filter_map(|line| line.split_once('(').map(|(name, _)| name))
         .collect::<BTreeSet<_>>();
     let covered = [
         SETTINGS_METHODS,
+        DV_CONVERSION_METHODS,
         USER_METHODS,
         LIBRARY_METHODS,
         MEDIA_METHODS,
@@ -10587,7 +10722,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 244, "review the Store method count");
+    assert_eq!(declared.len(), 253, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -13124,6 +13259,141 @@ async fn media_contract_runs_through_dyn_store() {
                 .is_some(),
             "backend {backend}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn dv_conversion_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("DV conversion {backend}"),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from(format!("/contract/dv-{backend}"))],
+                anime: false,
+            })
+            .await
+            .expect("DV library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "DV Contract Movie".to_owned(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("DV item");
+        let p7 = store
+            .upsert_file(
+                item,
+                &format!("/contract/dv-{backend}/p7.mkv"),
+                80_000,
+                7,
+                &ProbeResult {
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(7),
+                        level: Some(6),
+                        bl_compat_id: Some(6),
+                        el_present: Some(true),
+                        rpu_present: Some(true),
+                    },
+                    raw_json: Some("{}".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("P7 file");
+        let hlg = store
+            .upsert_file(
+                item,
+                &format!("/contract/dv-{backend}/hlg.mkv"),
+                70_000,
+                8,
+                &ProbeResult {
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(7),
+                        level: Some(6),
+                        bl_compat_id: Some(4),
+                        el_present: Some(true),
+                        rpu_present: Some(true),
+                    },
+                    raw_json: Some("{}".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("HLG file");
+
+        assert!(matches!(
+            store
+                .queue_dv_conversion(hlg, 100)
+                .await
+                .expect("reject HLG"),
+            QueueDvConversionOutcome::Ineligible(_)
+        ));
+        assert_eq!(
+            store
+                .queue_library_dv_conversions(library.id, 101, false)
+                .await
+                .expect("auto queue"),
+            1,
+            "{backend}: only numeric HDR10-compatible P7 is eligible"
+        );
+        let candidates = store
+            .dv_conversion_candidates(0, 8)
+            .await
+            .expect("candidates");
+        assert_eq!(candidates.len(), 1, "{backend}");
+        assert_eq!(candidates[0].file_id, p7, "{backend}");
+
+        assert!(store
+            .mark_dv_conversion_running(p7, 80_000)
+            .await
+            .expect("running"));
+        assert!(store
+            .mark_dv_conversion_failed(p7, "deliberately truncated", 102)
+            .await
+            .expect("failed"));
+        assert_eq!(
+            store
+                .queue_library_dv_conversions(library.id, 103, false)
+                .await
+                .expect("auto does not retry"),
+            0,
+            "{backend}: automatic discovery must not loop failed media"
+        );
+        assert_eq!(
+            store
+                .queue_library_dv_conversions(library.id, 104, true)
+                .await
+                .expect("manual retry"),
+            1,
+            "{backend}: the operator can retry a corrected source"
+        );
+        assert!(store
+            .mark_dv_conversion_running(p7, 80_000)
+            .await
+            .expect("retry running"));
+        assert!(store
+            .mark_dv_conversion_verified(p7, Some("mel"), 60_000)
+            .await
+            .expect("verified"));
+        assert!(store
+            .mark_dv_conversion_committed(p7, Some("/contract/dv/p7.mkv.p7.orig"), 60_000, 105,)
+            .await
+            .expect("committed"));
+
+        let row = store.dv_conversion(p7).await.expect("ledger").expect("row");
+        assert_eq!(row.state, DvConversionState::Committed, "{backend}");
+        assert_eq!(row.el_type.as_deref(), Some("mel"), "{backend}");
+        assert!(!store
+            .mark_dv_conversion_failed(p7, "stale worker", 106)
+            .await
+            .expect("terminal row"));
     })
     .await;
 }

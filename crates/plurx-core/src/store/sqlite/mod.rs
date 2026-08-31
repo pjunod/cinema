@@ -11,6 +11,7 @@
 mod apikeys;
 mod cache;
 mod coordination;
+mod dv_conversion;
 mod fragindex;
 mod fragment_index_cluster;
 mod library;
@@ -876,6 +877,23 @@ const MIGRATIONS: &[&str] = &[
     // that genuinely reported zero must stay distinguishable, or the fallback
     // to the label can never know when to stop.
     super::FILES_DOLBY_VISION_COLUMNS_BATCH,
+    // v39: permanent Profile 7 -> 8.1 conversion ledger. The media pipeline
+    // never touches the source before this row reaches `verified`; keeping the
+    // audit row under the file foreign key also makes a library deletion clean
+    // up bookkeeping without following or deleting the renamed original.
+    "CREATE TABLE dv_conversions (
+        file_id        INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        state          TEXT NOT NULL,
+        el_type        TEXT,
+        original_path  TEXT,
+        bytes_before   INTEGER,
+        bytes_after    INTEGER,
+        error          TEXT,
+        queued_at_ms   INTEGER NOT NULL,
+        finished_at_ms INTEGER
+    ) STRICT;
+    CREATE INDEX dv_conversions_queue
+        ON dv_conversions(state, queued_at_ms, file_id);",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
