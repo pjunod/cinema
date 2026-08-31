@@ -869,11 +869,21 @@ class OperationsContractCase(unittest.TestCase):
     def test_rust_audit_can_report_informational_advisories(self):
         workflow = read(".github/workflows/rust-audit.yml")
         permissions = workflow.split("permissions:\n", 1)[1].split("\njobs:\n", 1)[0]
+        jobs = workflow_job_blocks(".github/workflows/rust-audit.yml")
 
-        self.assertIn("  contents: read\n", permissions)
-        self.assertIn("  checks: write\n", permissions)
-        self.assertIn("  issues: write\n", permissions)
-        self.assertEqual(workflow.count("token: ${{ secrets.GITHUB_TOKEN }}"), 2)
+        self.assertEqual(permissions, "  contents: read\n")
+        for name in ("workspace", "fuzz"):
+            with self.subTest(name=name):
+                self.assertIn("if: github.event_name != 'schedule'", jobs[name])
+                self.assertIn("      checks: write", jobs[name])
+                self.assertNotIn("      issues: write", jobs[name])
+        scheduled = jobs["scheduled"]
+        self.assertIn("if: github.event_name == 'schedule'", scheduled)
+        self.assertIn("      issues: write", scheduled)
+        self.assertNotIn("      checks: write", scheduled)
+        self.assertEqual(scheduled.count("uses: rustsec/audit-check@"), 1)
+        self.assertIn("run: cargo audit --file fuzz/Cargo.lock", scheduled)
+        self.assertEqual(workflow.count("token: ${{ secrets.GITHUB_TOKEN }}"), 3)
 
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
         def choose(hosted, labels):
@@ -1013,7 +1023,7 @@ class OperationsContractCase(unittest.TestCase):
 
         self.assertIn("CI_RUNNER_MODE must be self-hosted or github", ci)
         self.assertIn("vars.CI_RUNNER_MODE == 'github'", ci)
-        self.assertEqual(audit.count("vars.CI_RUNNER_MODE == 'github'"), 2)
+        self.assertEqual(audit.count("vars.CI_RUNNER_MODE == 'github'"), 3)
         self.assertTrue(script.stat().st_mode & 0o111)
         subprocess.run(
             [str(script), "--help"],

@@ -19,8 +19,6 @@ on:
 
 permissions:
   contents: read
-  checks: write
-  issues: write
 
 jobs:
   # Release artifacts resolve from the root workspace; the standalone M0
@@ -29,6 +27,10 @@ jobs:
   # cleared before any dependency moves into this audited workspace.
   workspace:
     name: RustSec workspace advisory scan
+    if: github.event_name != 'schedule'
+    permissions:
+      contents: read
+      checks: write
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 10
     steps:
@@ -53,6 +55,10 @@ jobs:
 
   fuzz:
     name: RustSec fuzz advisory scan
+    if: github.event_name != 'schedule'
+    permissions:
+      contents: read
+      checks: write
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 10
     steps:
@@ -63,3 +69,28 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           working-directory: fuzz
+
+  scheduled:
+    name: RustSec scheduled advisory report
+    if: github.event_name == 'schedule'
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Restore patched crates to registry provenance for advisory matching
+        run: scripts/vendor-audit-lock --output target/vendor-audit/Cargo.lock
+      # Keep exactly one issue publisher. Running one reporter per lockfile can
+      # race when the same advisory affects dependencies shared by both locks.
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      # The action above installs the pinned cargo-audit binary. These scans
+      # remain blocking for vulnerabilities without creating duplicate issues.
+      - name: Audit synthesized vendor lockfile
+        run: cargo audit --file target/vendor-audit/Cargo.lock
+      - name: Audit fuzz lockfile
+        run: cargo audit --file fuzz/Cargo.lock
