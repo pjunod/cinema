@@ -45,13 +45,13 @@ merge target: two client PRs in flight means the second always fails.
 | M5a | web: `persistentWait` asks the server before deciding | [#706](https://github.com/pjunod/plurx/pull/706) | merged |
 | M5.5 spike | the three-platform measurement procedure, ready to run | [#707](https://github.com/pjunod/plurx/pull/707) | merged; **needs a hardware run** |
 | M5d | Apple: the return path, and the verdict that outlives its reporter | [#709](https://github.com/pjunod/plurx/pull/709) | merged |
+| M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | merged |
 | M5b | web: the truncated-stream owner defers too | [#712](https://github.com/pjunod/plurx/pull/712) | merged |
-| M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | in review |
-| M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | in review |
-| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | in review |
-| M5e | Apple: the stall funnel asks before it decides | [#715](https://github.com/pjunod/plurx/pull/715) | in review |
-| web bound | ruling D3 applied to the web ask | [#717](https://github.com/pjunod/plurx/pull/717) | in review |
-| M5g | Android: the stall owner asks before it decides | — | this change |
+| M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | merged |
+| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | merged |
+| M5e | Apple: the stall funnel asks before it decides | [#715](https://github.com/pjunod/plurx/pull/715) | merged |
+| web bound | ruling D3 applied to the web ask | [#717](https://github.com/pjunod/plurx/pull/717) | merged |
+| M5g | Android: the stall owner asks before it decides | [#718](https://github.com/pjunod/plurx/pull/718) | in review |
 
 ## The gate that blocks every deletion, and what it does not block
 
@@ -63,6 +63,14 @@ reads **zero on all four nodes** as of 2026-08-31, measured directly off
 `/metrics`. It counts accepted exchanges from clients that declared every
 action this server can send, and the fleet has never run a build that can
 receive one.
+
+**The server does emit actions.** `resolve_action` is called from
+`local_control_response` (`crates/plurxd/src/http/hls.rs:3525`) on the live
+control endpoint, not only from tests — a grep confined to
+`playback_control.rs` finds only test call sites, because the production one
+is fully qualified, and that mistake has been made once already in review.
+What has never happened is a *client* completing an exchange that declares
+the whole vocabulary.
 
 **What that gates is deletion, not construction.** Removing a client's own
 recovery while the installed build cannot receive the replacement turns the
@@ -88,7 +96,15 @@ blocks the slices now in flight; each shapes M6.
    fallback (reached via [remaining](REMAINING-ROADMAP-HANDOFF.md) §3.2); if none does, the
    one-encoder-slot path is the common case rather than the exception and
    M6's shape changes.
-5. What interruption bound is acceptable for `buffered_break_before_make`?
+5. ~~How long may a client wait for an action?~~ **Answered by ruling D3.**
+   1.5 s, extended once to at most 3 s when an exchange was already in flight.
+   The fallback is the branch the entire fleet takes, so the bound is added to
+   every real stall on every device; a server that cannot answer inside a
+   second and a half is a server whose answer is not worth more frozen picture
+   than the recovery it would have replaced. Web's 6 s/12 s predates this and
+   should be brought down to match — it is the one place the three platforms
+   now disagree. Decided without the operator.
+6. What interruption bound is acceptable for `buffered_break_before_make`?
    Its acceptance criterion is "within its measured interruption bound", and
    nobody has measured or chosen one.
 
