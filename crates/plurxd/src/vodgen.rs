@@ -628,6 +628,7 @@ mod tests {
             std::io::Cursor::new(index_pipe_bytes("clean-cra")),
             SourceIdentity::new(1, 1, "fingerprint"),
             None,
+            None,
         )
         .await
         {

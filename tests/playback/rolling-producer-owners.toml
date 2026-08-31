@@ -970,7 +970,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 #     killing stage one closes its stdout, the conversion reaches EOF, stage
 #     two's stdin closes, and stage two exits. There is no timer and nothing
 #     for a reaper to find.
-expected_occurrences = 350
+#
+# 351 since the index pass converts too: an index describes the producer's own
+# output byte counts, and a converted stream's RPUs are hundreds of bytes
+# smaller per frame — so an index built by the single-ffmpeg pipe would not be
+# stale, it would be confidently wrong about media this identity never
+# produces. The pass therefore runs the same two stages and the same bridging
+# task, under the same ownership as above.
+expected_occurrences = 351
 
 [[module_structures]]
 id = "method-spawn"

@@ -1461,6 +1461,55 @@ pub fn dv_convert_source_args(input: &str, start_seconds: f64, pacing: Pacing) -
     args
 }
 
+/// The output stage for an **index** pass: converted Annex B in, one video-only
+/// fragmented MP4 out.
+///
+/// The three differences from a session's output stage are the same three
+/// [`copy_index_pipe_args`] makes, for the same reasons: video only, because
+/// the fragment sequence is identical for every audio selection and one index
+/// serves them all; from zero, because an index describes the whole file; and
+/// unpaced, which the source stage handles.
+///
+/// It is a separate function rather than a flag because the audio-only
+/// parameters — the second input, its seek, its offset, its codec choice —
+/// have no meaning here at all, and a caller passing `None` and `false` to
+/// four of them would be a caller working out which arguments are inert.
+pub fn dv_convert_index_output_args(source: &MediaFile, video: CopyVideoOptions) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+    args.push("-f".into());
+    args.push("hevc".into());
+    args.push("-i".into());
+    args.push("pipe:0".into());
+    args.push("-map_chapters".into());
+    args.push("-1".into());
+    args.push("-map".into());
+    args.push("0:v:0".into());
+    args.push("-an".into());
+    args.push("-sn".into());
+    args.push("-c:v".into());
+    args.push("copy".into());
+    args.push("-tag:v".into());
+    args.push(hevc_copy_tag_for_source(source, video.preserves_dolby_vision()).into());
+    args.push("-strict".into());
+    args.push("unofficial".into());
+    args.extend(
+        [
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-use_editlist",
+            "0",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    args
+}
+
 /// The **second** ffmpeg of the pipe: converted Annex B on stdin, the source
 /// again for its audio, one fragmented MP4 out.
 ///

@@ -777,6 +777,25 @@ pub struct PromotionInputs {
     pub parameter_sets: Vec<Vec<u8>>,
     /// Prefix-SEI NAL units carrying HDR10 static metadata.
     pub hdr10_sei: Vec<Vec<u8>>,
+    /// The Dolby Vision configuration record to write into the served init.
+    ///
+    /// Unlike the two above, this does not come out of a fragment — it comes
+    /// out of the *source file's* stored facts, because the stream it
+    /// describes has no container to have carried one. A Profile 7 → 8.1
+    /// conversion feeds its second ffmpeg a raw Annex B elementary stream, and
+    /// ffmpeg does not derive this record from the RPUs: it copies the one its
+    /// input container had, and a pipe has none (measured,
+    /// `docs/PLAYBACK-CAPS-V2-M0.md` §8). So the muxer writes correct 8.1 RPUs
+    /// into `mdat` and nothing in the sample entry to say so, and every client
+    /// reads the stream as plain HDR10.
+    ///
+    /// It belongs *here*, in the stored promotion inputs, for the reason the
+    /// type exists at all: promotion has to be a pure function of facts that
+    /// do not depend on where a producer started, or a regenerated init
+    /// differs from the stored one and the generation is refused. A record
+    /// written anywhere else would be written on one path and not the other.
+    #[serde(default)]
+    pub dolby_vision: Option<DolbyVisionRecord>,
 }
 
 impl PromotionInputs {
@@ -796,6 +815,9 @@ impl PromotionInputs {
             return PromotionInputs::default();
         };
         PromotionInputs {
+            // Never from a fragment: a fragment has no record and no facts to
+            // build one from. The caller supplies it from the source file.
+            dolby_vision: None,
             parameter_sets: hevc_parameter_set_nals(sample, video.nal_length_size)
                 .into_iter()
                 .map(<[u8]>::to_vec)
@@ -820,7 +842,17 @@ impl PromotionInputs {
 pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, Fmp4Error> {
     let hevc = promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)?;
     let hdr10 = promote_hdr10_static_metadata_from(init, &inputs.hdr10_sei)?;
-    Ok(hevc || hdr10)
+    // Last, and deliberately so. The HDR10 promotion above refuses to run on a
+    // sample entry that already carries a Dolby Vision configuration, and
+    // writing the record first would make it refuse on the one stream that
+    // most needs it — a converted 8.1 stream over an HDR10 base, whose
+    // mastering-display metadata is exactly as worth promoting as any other
+    // HDR10 title's.
+    let dolby_vision = match inputs.dolby_vision.as_ref() {
+        Some(record) => set_dolby_vision_record(init, record)?,
+        None => false,
+    };
+    Ok(hevc || hdr10 || dolby_vision)
 }
 
 pub fn promote_hevc_parameter_sets(init: &mut Init, first: &Fragment) -> Result<bool, Fmp4Error> {
@@ -938,7 +970,7 @@ pub fn promote_hevc_parameter_sets_from(
 ///
 /// The box has two names for one payload: `dvcC` for profiles up to 7 and
 /// `dvvC` for 8 and above.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DolbyVisionRecord {
     /// 5, 7, 8, 9, 10 — what the stream actually is.
     pub profile: u8,
@@ -3924,6 +3956,49 @@ mod tests {
         assert!(DolbyVisionRecord::new(8, 6, false, true, true, 6).is_ok());
     }
 
+    /// The record reaches the served init through the same funnel everything
+    /// else does.
+    ///
+    /// Promotion is the single place a muxer init becomes a served one, and
+    /// that is load-bearing rather than tidy: the live path and the head
+    /// regeneration both call it, so a served init built on one and rebuilt on
+    /// the other is byte-identical by construction. A record written anywhere
+    /// else would be written on one path and not the other, and the
+    /// regeneration would be refused for drift against an init it produced
+    /// correctly.
+    #[test]
+    fn the_dolby_vision_record_rides_the_promotion_that_every_path_shares() {
+        let feed = pipe("open-gop");
+        let (muxer, _, _) = read_all(&feed);
+        assert_eq!(dolby_vision_record(&muxer).expect("read"), None);
+
+        let converted =
+            DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("a representable record");
+        let inputs = PromotionInputs {
+            dolby_vision: Some(converted.clone()),
+            ..PromotionInputs::default()
+        };
+
+        let mut live = muxer.clone();
+        assert!(promote_from(&mut live, &inputs).expect("promote"));
+        assert_eq!(
+            dolby_vision_record(&live).expect("read back"),
+            Some(converted.clone())
+        );
+
+        // The second path, from the same stored inputs. Byte-identical is the
+        // property the whole promotion design exists for.
+        let mut regenerated = muxer.clone();
+        assert!(promote_from(&mut regenerated, &inputs).expect("promote"));
+        assert_eq!(regenerated.bytes, live.bytes);
+
+        // …and with no record in the inputs, promotion leaves the init alone,
+        // which is every non-converting session.
+        let mut untouched = muxer.clone();
+        promote_from(&mut untouched, &PromotionInputs::default()).expect("promote");
+        assert_eq!(dolby_vision_record(&untouched).expect("read"), None);
+    }
+
     /// Rewriting a record in place and inserting one where there is none —
     /// the two shapes the writer has to get right — both leaving a parseable
     /// init.
@@ -4947,6 +5022,7 @@ mod tests {
         // promotes from the stored copy rather than a live one.
         let init = muxed_init();
         let inputs = PromotionInputs {
+            dolby_vision: None,
             parameter_sets: vec![vec![0x40, 0x01, 0x0c], vec![0x42, 0x01, 0x01]],
             hdr10_sei: vec![vec![0x4e, 0x01, 0x89]],
         };
