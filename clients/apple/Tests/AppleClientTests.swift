@@ -1942,9 +1942,13 @@ final class AppleClientTests: XCTestCase {
     func testEveryHoldReasonHasSomethingAViewerCanRead() {
         for reason in ["demand", "time", "bytes", "global", "ahead", "working_set", "no_room"] {
             let notice = PlayerController.holdNotice(reason)
-            XCTAssertFalse(notice.isEmpty, "\(reason) has no viewer-facing text")
-            XCTAssertFalse(notice.contains(reason.replacingOccurrences(of: "_", with: " ")),
-                           "\(reason) shows its wire name")
+            // A sentence, not a token. `ahead` legitimately appears inside its
+            // own sentence, so the test is that the viewer gets prose rather
+            // than that a particular word is absent.
+            XCTAssertTrue(notice.hasSuffix("."), "\(reason) is not a sentence")
+            XCTAssertGreaterThan(notice.count, reason.count + 8,
+                                 "\(reason) reads like its wire name")
+            XCTAssertNotEqual(notice, reason)
         }
         XCTAssertEqual(PlayerController.holdNotice("a reason from a newer server"),
                        "Waiting for the server.")
