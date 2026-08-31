@@ -443,6 +443,41 @@ class Controller(
             )
             when (action) {
                 PlaybackErrorAction.RetrySameHDRDelivery -> {
+                    // The one rung an armed verdict licenses skipping, and it
+                    // is licensed by the server's own definition rather than
+                    // by an argument made here. `is_permanent` is documented
+                    // as "whether retrying this source, *unchanged*, can ever
+                    // succeed", and this rung is the only one that retries it
+                    // unchanged: it re-prepares the identical recipe and hopes.
+                    //
+                    // The other two rungs change the recipe, which is exactly
+                    // what the verdict does not rule out. `unsupported` means
+                    // "this source cannot be carried by *this delivery
+                    // pipeline*" — a copy-producer exit — and
+                    // `RetryAsCompatibilityTranscode` asks for a different
+                    // pipeline; the server admits its own retry for the same
+                    // reason. Skipping those would delete the rung most likely
+                    // to produce a picture and caption it with a sentence
+                    // about a pipeline nobody is proposing any more.
+                    val armed = ladderVerdict(
+                        errorCode = error.errorCode,
+                        verdict = playbackControl.terminalVerdict,
+                    )
+                    if (armed != null) {
+                        playbackTelemetry.report(
+                            event = "playback_ladder_verdict",
+                            level = "warn",
+                            message = error.errorCodeName,
+                            code = error.errorCode,
+                            detail = "skipped=retry_same_hdr delivery=$deliveryMode " +
+                                "verdict=${armed.type}",
+                        )
+                        onError(
+                            armed.message
+                                ?: error.errorCodeName.let { "Playback stopped ($it)." },
+                        )
+                        return
+                    }
                     val position = realPosition()
                     sameHdrRetryUsed = true
                     restartAt(position, "fallback")
@@ -792,6 +827,41 @@ class Controller(
     }
 
     /**
+     * Act on a server verdict, or say it did not decide this stall.
+     *
+     * Returns true when the verdict is the decision, so the caller returns
+     * without spending its own budget. False means today's path, unchanged —
+     * which is the branch every node in the fleet takes.
+     */
+    private fun applyStallVerdict(verdict: ControlAction): Boolean = when (verdict.type) {
+        "terminal" -> {
+            // Ruling D1: the verdict is armed, not executed. This player is
+            // stalled with nothing left to render, so the only thing the
+            // verdict changes is whose words the viewer reads.
+            onError(verdict.message ?: "Playback stopped.")
+            true
+        }
+        "hold", "retry_resource" -> {
+            // Production is deliberately not advancing, or stopped for
+            // something that may not recur. Either way a reopen would churn
+            // against a server that already knows better, and it must not
+            // spend the budget either.
+            //
+            // And unlike web and Apple, this one says nothing to the viewer,
+            // because of what this detector actually is. `sampleStall` emits
+            // a measurement when a stall ENDS — the playhead has moved again
+            // by the time control reaches here — so the viewer is watching,
+            // not staring at a frozen picture. A banner reading "the server is
+            // busy" over playback that just resumed is noise, and the case the
+            // banner exists for on the other two platforms cannot reach this
+            // function at all: during an open-ended freeze `sampleStall`
+            // returns null forever.
+            true
+        }
+        else -> false
+    }
+
+    /**
      * Called when a detected stall measurement is available. Reopens with the
      * stall-specific fields (previous_session_id, reopen_reason) and enforces
      * the client-side retry budget: the budget counts consecutive reopen
@@ -801,29 +871,58 @@ class Controller(
      * stopped early.  Once the budget is exhausted at the ladder floor the
      * session stays on that rung without further reopen attempts.
      */
-    private fun onStall(positionMs: Long) {
+    private suspend fun onStall(positionMs: Long) {
         if (sessionId == null) return
-        // Publish this owner's evidence before it decides anything. The
-        // server's picture of a stall is otherwise whatever the one-second
-        // tick happened to catch. M5g asks for a verdict here; this only
-        // tells. Note the limit: this detector cannot fire during an
-        // open-ended freeze at all, so a frozen playhead stays invisible to
-        // the control plane either way.
-        reportControlEvidence(
-            ClientObservation(decoderState = DecoderState.STARVED),
-            render = RenderState.STALLED,
+        // The ask goes before the budget is consulted, and before anything
+        // else this function does. The evidence is published from INSIDE it,
+        // after it has read the sequence floor — publishing first lets the
+        // pump start the next request before that read lands, which makes the
+        // floor one too high and rejects the very exchange that carried this
+        // stall's evidence.
+        //
+        // The limit this does not close: the detector that got us here cannot
+        // fire during an open-ended freeze at all, so a frozen playhead stays
+        // invisible to the control plane either way.
+        val session = sessionId
+        // The token is taken BEFORE the ask, not after, and it is the token
+        // the reopen goes on to use. A VOD seek or an in-place subtitle change
+        // invalidates through `stallGuard` and changes no session id, so a
+        // token minted after the wait would not merely miss the viewer's
+        // action — `beginRequest` increments the version, so it would
+        // overwrite the invalidation and make a stale stall current again.
+        val requestVersion = stallGuard.beginRequest()
+        // Measured before the wait, so the stall-recovery beacon includes the
+        // time this ask itself costs. M5.5 exists to measure exactly that, and
+        // an instrument that excludes it cannot.
+        val observedAtMs = monotonicNowMs()
+        val verdict = playbackControl.askForAction(
+            boundMs = CONTROL_ASK_MS,
+            capMs = CONTROL_ASK_CAP_MS,
+            publish = {
+                reportControlEvidence(
+                    ClientObservation(decoderState = DecoderState.STARVED),
+                    render = RenderState.STALLED,
+                )
+            },
         )
+        // Seconds passed, and one session-id comparison is not enough to
+        // notice. The predicate that let control in here was
+        // `playWhenReady && establishedPlayback`; a viewer who paused, or a
+        // transport failover that started on the same session, or any seek
+        // that invalidated the guard, all leave the id alone.
+        if (sessionId != session || sessionId == null) return
+        if (!stallGuard.isCurrent(requestVersion)) return
+        if (!player.playWhenReady || !establishedPlayback) return
+        if (verdict != null && applyStallVerdict(verdict)) return
         // If we have already exhausted the budget at the current floor rung,
         // stop reopening — the server cannot step further down and the client
         // must not churn forever.
         if (!stallReopenBudget.canReopen()) return
         val reason = "stall"
-        val observedAtMs = monotonicNowMs()
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
         // Use the stall-specific session body that carries the predecessor
         // info. `sessionBody` is also called for seeks and track switches;
         // those paths must NOT carry stall fields.
-        val requestVersion = stallGuard.beginRequest()
         val prevId = sessionId
         // Capture the predecessor height for the same-rung budget
         // before nulling the session ID.  The first stall reopen
@@ -1343,6 +1442,36 @@ class Controller(
         controlRenderOverride = null
         controlEvidencePositionMs = null
     }
+}
+
+/**
+ * How long a recovery owner waits for the server's verdict before deciding for
+ * itself. Ruling D3, and the same pair of numbers the web and Apple clients
+ * carry: the fallback is the branch the whole fleet takes, so this is added to
+ * every real stall on every device.
+ */
+internal const val CONTROL_ASK_MS = 1_500L
+internal const val CONTROL_ASK_CAP_MS = 3_000L
+
+/**
+ * The verdict that ends an unchanged retry, or null to take it anyway.
+ *
+ * Scoped to the one rung that retries the source *unchanged*, because that is
+ * the exact scope of the server's `is_permanent` — see the call site. It is a
+ * function rather than an inline `if` so that the rule it encodes is pinned by
+ * a test: a transport failure never borrows the server's words.
+ *
+ * [verdict] is `terminalVerdict`, which deliberately outlives the session that
+ * earned it — that is what lets a verdict explain a failure that arrives after
+ * a reopen, and it is also exactly why a dropped link must not inherit it. A
+ * transport failure is a different cause with a different answer, and the
+ * client's own sentence is the honest one for it.
+ */
+internal fun ladderVerdict(errorCode: Int, verdict: ControlAction?): ControlAction? = when {
+    verdict == null -> null
+    verdict.type != "terminal" -> null
+    isTransportPlaybackError(errorCode) -> null
+    else -> verdict
 }
 
 /**

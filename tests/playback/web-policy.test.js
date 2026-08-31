@@ -279,6 +279,7 @@ test("analysis controls are first-class settings separate from playback mode con
 
 test("estimated skip markers are hedged without rebuilding each tick", () => {
   let writes = 0;
+  const markerEvents = [];
   const skip = {
     dataset: {},
     value: "",
@@ -290,14 +291,21 @@ test("estimated skip markers are hedged without rebuilding each tick", () => {
       this.value = value;
     },
   };
+  const player = { autoskip: false, _markerOffers: new Set() };
   const renderSkip = new Function(
     "document",
     "esc",
-    `${shippedSource("renderSkip")}
+    "PLAYER",
+    "clientLog",
+    `${shippedSource("markerIsEstimated")}
+${shippedSource("markerAutoSkipEligible")}
+${shippedSource("renderSkip")}
 return renderSkip;`,
   )(
     { getElementById: (id) => (id === "pskip" ? skip : null) },
     (value) => value,
+    player,
+    (event) => markerEvents.push(event),
   );
   const exact = {
     kind: "credits",
@@ -311,15 +319,87 @@ return renderSkip;`,
   );
   renderSkip(exact);
   assert.equal(writes, 1, "the exact marker should not rebuild on timeupdate");
+  assert.deepEqual(markerEvents.map((event) => event.event), ["marker_offer"]);
 
-  const estimated = { ...exact, chapter: false };
+  const estimated = { ...exact, chapter: false, provenance: "estimated" };
   renderSkip(estimated);
   assert.equal(
     skip.innerHTML,
     '<button onclick="skipCurrent()">Skip Credits · Estimated ›</button>',
   );
+  assert.equal(markerEvents.length, 1, "one boundary is offered once per playback");
   renderSkip(estimated);
   assert.equal(writes, 2, "the estimated marker should not rebuild on timeupdate");
+
+  const manual = {
+    ...exact,
+    start_ms: 7_000,
+    chapter: false,
+    provenance: "manual",
+    confidence: 1_000,
+  };
+  renderSkip(manual);
+  assert.equal(
+    skip.innerHTML,
+    '<button onclick="skipCurrent()">Skip Credits ›</button>',
+    "manual corrections are exact even though their legacy chapter bit may be false",
+  );
+
+  player.autoskip = true;
+  const ineligible = { ...estimated, start_ms: 8_000 };
+  renderSkip(ineligible);
+  assert.equal(
+    markerEvents.at(-1).event,
+    "marker_offer",
+    "an ineligible marker stays manually offerable when global auto-skip is on",
+  );
+});
+
+test("auto-skip only seeks exact marker provenance", () => {
+  const markerAutoSkipEligible = new Function(
+    `${shippedSource("markerAutoSkipEligible")}
+return markerAutoSkipEligible;`,
+  )();
+  const skipped = [];
+  const player = { autoskip: true, markers: [] };
+  const checkMarkers = new Function(
+    "PLAYER",
+    "markerNowMs",
+    "renderSkip",
+    "skipMarker",
+    "markerAutoSkipEligible",
+    `${shippedSource("checkMarkers")}
+return checkMarkers;`,
+  )(
+    player,
+    () => 1_500,
+    () => {},
+    (marker, automatic) => skipped.push({ marker, automatic }),
+    markerAutoSkipEligible,
+  );
+  const marker = (provenance, chapter = false) => ({
+    kind: "credits",
+    label: "Skip Credits",
+    start_ms: 1_000,
+    end_ms: 2_000,
+    chapter,
+    provenance,
+  });
+
+  player.markers = [marker("estimated")];
+  checkMarkers();
+  player.markers = [marker("detected")];
+  checkMarkers();
+  assert.equal(skipped.length, 0);
+
+  player.markers = [marker("manual")];
+  checkMarkers();
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].automatic, true);
+
+  player.markers = [marker("authored", true)];
+  checkMarkers();
+  assert.equal(skipped.length, 2);
 });
 
 test("every server verdict reaches exactly one initial web transport", () => {
@@ -2814,6 +2894,137 @@ asyncTest("the Dolby Vision probe is unchanged by the tiering", async () => {
   assert.match(safari.capsQuery(caps), /&dv=1&dvprofile=5,8&/);
 });
 
+test("a converted Dolby Vision stream names the profile it is playing as", () => {
+  // The badge state PLAYBACK-CAPS-V2-PLAN §4.8 adds and MEDIA-BADGES-PLAN
+  // §2.3 spells out. A Profile 7 disc remux converted to 8.1 for a browser
+  // that takes 8 and not 7 is delivered `dolby_vision` — the same value a
+  // preserved Profile 7 answers — so the range alone cannot tell the two
+  // apart, and a chip reading plain `DV P7` for both is describing the file
+  // rather than the picture.
+  //
+  // Neither half dims. The base layer is copied byte for byte and nothing is
+  // re-encoded, so the source capability is active; dimming it would say the
+  // opposite of what happened.
+  const build = new Function(
+    "RANGE_SHORT",
+    "RANGE_LONG",
+    [
+      shippedSource("hdrChip"),
+      shippedSource("sourceDynamicRange"),
+      shippedSource("sourceDolbyVisionProfile"),
+      shippedSource("dynamicRangeReason"),
+      shippedSource("dynamicRangeBadge"),
+      "return {dynamicRangeBadge};",
+    ].join("\n"),
+  );
+  const { dynamicRangeBadge } = build(
+    { dolby_vision: "DV", hdr10: "HDR10", hlg: "HLG", sdr: "SDR" },
+    { dolby_vision: "Dolby Vision", hdr10: "HDR10", hlg: "HLG", sdr: "SDR" },
+  );
+
+  const p7 = {
+    hdr: "dolby_vision",
+    hdr_format: "Dolby Vision · Profile 7 (HDR10-compatible)",
+  };
+
+  const converted = dynamicRangeBadge(p7, "dolby_vision", true, 8);
+  assert.equal(converted.text, "DV P7 → DV P8");
+  assert.equal(converted.base, "DV P7", "the source half still names the source");
+  assert.equal(converted.arrow, "DV P8");
+  assert.equal(converted.off, false, "nothing about the grade was lost");
+  assert.equal(converted.rendered, "dolby_vision");
+  assert.match(converted.aria, /Profile 7, playing as Dolby Vision Profile 8/);
+  assert.match(converted.panel, /Profile 8/, "the stats overlay reads this one");
+  assert.match(converted.full, /converted for this browser/);
+
+  // The profile is read, not assumed: a future rung that delivered some other
+  // profile must name that one.
+  assert.equal(dynamicRangeBadge(p7, "dolby_vision", true, 5).arrow, "DV P5");
+
+  // A client that decodes Profile 7 gets it untouched, and the arrow would be
+  // a lie: the profile on screen is the profile on disk.
+  const preserved = dynamicRangeBadge(p7, "dolby_vision", true, 7);
+  assert.equal(preserved.text, "DV P7");
+  assert.equal(preserved.arrow, null);
+
+  // A server too old to send the field, or a session that carries no Dolby
+  // Vision, degrades to exactly the chip that shipped before this.
+  assert.equal(dynamicRangeBadge(p7, "dolby_vision", true).text, "DV P7");
+  assert.equal(dynamicRangeBadge(p7, "dolby_vision", true, null).text, "DV P7");
+
+  // A stripped stream is a different grade and keeps the dimmed state it had:
+  // there the source capability really is unavailable.
+  const stripped = dynamicRangeBadge(p7, "hdr10", true, null);
+  assert.equal(stripped.text, "DV P7 → HDR10");
+  assert.equal(stripped.off, true);
+
+  // A row scanned before the profile columns existed has no number to compare
+  // against, so it stays as it was rather than inventing an arrow.
+  const unlabelled = { hdr: "dolby_vision", hdr_format: "Dolby Vision" };
+  assert.equal(dynamicRangeBadge(unlabelled, "dolby_vision", true, 8).text, "DV");
+
+  // The source profile comes from the column when there is one, because the
+  // delivered profile beside it does. A row whose column and prose disagree
+  // would otherwise invent `DV P7 → DV P8` over a preserved Profile 8 stream
+  // that nothing converted.
+  const columned = {
+    hdr: "dolby_vision",
+    hdr_format: "Dolby Vision · Profile 7 (HDR10-compatible)",
+    dolby_vision: { profile: 8 },
+  };
+  const agreeing = dynamicRangeBadge(columned, "dolby_vision", true, 8);
+  assert.equal(agreeing.text, "DV P8", "the column wins, and 8 → 8 is no arrow");
+});
+
+test("every surface paints the badge from the same four answers", () => {
+  // The four surfaces that show this chip — the fact badges, the play overlay,
+  // the stats panel and the debug ledger — used to call dynamicRangeBadge()
+  // themselves, and a call site that dropped one argument would degrade
+  // silently to the badge that shipped before that argument existed: a
+  // correct-looking chip for the wrong delivery, on one surface out of four.
+  // `playerRangeBadge` is the single reader, so there is one place to get it
+  // wrong and this is the test of that place.
+  const built = new Function(
+    "PLAYER",
+    "RANGE_SHORT",
+    "RANGE_LONG",
+    // node has no matchMedia, so the shipped `displayIsHdr` would answer no
+    // and every case below would collapse to the display-loss branch. The
+    // display answer is not what this test is about.
+    "displayIsHdr",
+    [
+      shippedSource("hdrChip"),
+      shippedSource("sourceDynamicRange"),
+      shippedSource("sourceDolbyVisionProfile"),
+      shippedSource("dynamicRangeReason"),
+      shippedSource("dynamicRangeBadge"),
+      shippedSource("playerRangeBadge"),
+      "return {playerRangeBadge};",
+    ].join("\n"),
+  );
+  const player = { deliveredRange: "dolby_vision", deliveredDvProfile: 8 };
+  const { playerRangeBadge } = built(
+    player,
+    { dolby_vision: "DV", hdr10: "HDR10", hlg: "HLG", sdr: "SDR" },
+    { dolby_vision: "Dolby Vision", hdr10: "HDR10", hlg: "HLG", sdr: "SDR" },
+    () => true,
+  );
+
+  const p7 = {
+    hdr: "dolby_vision",
+    hdr_format: "Dolby Vision · Profile 7 (HDR10-compatible)",
+  };
+  assert.equal(playerRangeBadge(p7).text, "DV P7 → DV P8",
+    "the profile the session reported has to reach the chip");
+
+  player.deliveredDvProfile = null;
+  assert.equal(playerRangeBadge(p7).text, "DV P7",
+    "and clearing it has to reach the chip too");
+
+  player.deliveredRange = "hdr10";
+  assert.equal(playerRangeBadge(p7).text, "DV P7 → HDR10");
+});
+
 test("a session that lands on a different range repaints the badge", () => {
   // The field bug: on a tone-mapped Dexter episode the chip read "DV P7 →
   // HDR10" while the stats panel one line below read "Dynamic range: SDR".
@@ -2842,6 +3053,33 @@ test("a session that lands on a different range repaints the badge", () => {
   }, 0);
   assert.equal(player.deliveredRange, "sdr", "the session is the source of truth");
   assert.equal(repaints, 1, "the chip must be repainted, not left at the decision's guess");
+
+  // The Dolby Vision profile follows the same rule and needs the stricter
+  // half of it: absence is an answer. A decision that promised a conversion
+  // followed by a session that stripped must CLEAR the profile, or the chip
+  // reads `DV P7 → DV P8` over the HDR10 base — which is the shape the
+  // legacy single-ffmpeg copy actually produces on a converting title's
+  // first watch, before its third fragment index exists.
+  const converting = { deliveredRange: "dolby_vision", deliveredDvProfile: 8 };
+  attachSession({}, converting, {
+    start_seconds: 0,
+    playlist_url: "/x.m3u8",
+    delivered_dynamic_range: "hdr10",
+  }, 0);
+  assert.equal(converting.deliveredRange, "hdr10");
+  assert.equal(converting.deliveredDvProfile, null,
+    "a session that carries no Dolby Vision must not leave a profile behind");
+
+  // …and the other direction: a session that does convert reports the
+  // profile the decision could not know.
+  const landed = { deliveredRange: "dolby_vision", deliveredDvProfile: null };
+  attachSession({}, landed, {
+    start_seconds: 0,
+    playlist_url: "/x.m3u8",
+    delivered_dynamic_range: "dolby_vision",
+    delivered_dolby_vision_profile: 8,
+  }, 0);
+  assert.equal(landed.deliveredDvProfile, 8);
 
   // A response with no range keeps the decision's answer — and still must not
   // leave a stale chip behind, because other fields it paints moved too.

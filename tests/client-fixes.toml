@@ -6,6 +6,14 @@ enforce_after = "e8a910f"
 # that evidence from an unrelated test edit in the same patch.
 
 [[fixes]]
+id = "web.control-reporter-timer-receiver"
+commits = ["893ec4fd"]
+source = "crates/plurxd/src/web/playback-control.js"
+source_anchor = "const scheduleDefault = (run, ms) => globalThis.setTimeout(run, ms);"
+test = "tests/playback/web-control.test.js"
+test_anchor = "the reporter must not invoke setTimeout or clearTimeout as its own"
+
+[[fixes]]
 id = "apple.marker-button-label"
 commits = ["b06f78b0"]
 source = "clients/apple/Sources/PlayerView.swift"
@@ -321,9 +329,17 @@ test_anchor = "test_repository_build_claims_match_release_inputs"
 id = "android.bound-stall-downgrade"
 commits = ["c54f9411"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "private fun onStall(positionMs: Long)"
+source_anchor = "private suspend fun onStall(positionMs: Long)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/StallBudgetTest.kt"
 test_anchor = "budgetStopsAfterThreeSameRungAnswers"
+
+[[fixes]]
+id = "android.bound-ladder-verdict-transport"
+commits = ["a5143aba"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun ladderVerdict(errorCode: Int, verdict: ControlAction?)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
+test_anchor = "aTransportFailureNeverBorrowsTheServersWords"
 
 [[fixes]]
 id = "android.bound-stall-predecessor-alive"
@@ -596,3 +612,11 @@ source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
+
+[[fixes]]
+id = "clients.marker-provenance-auto-skip"
+commits = ["ce253a55"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "val isAutoSkipEligible: Boolean"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/MarkerLabelTest.kt"
+test_anchor = "provenanceControlsExactnessAndAutomaticEligibility"

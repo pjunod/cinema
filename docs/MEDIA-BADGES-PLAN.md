@@ -142,8 +142,26 @@ function `(source_grade, rendered_grade)`:
 | State | Condition | Visual | Example |
 |---|---|---|---|
 | **lit** | rendered == source grade | today's full-colour chip (gold DV / teal HDR) | `DV P7` |
+| **converted** | rendered grade == source grade, profile changed | **both halves lit** — nothing was lost from the grade | `DV P7 → DV P8` |
 | **different grade** | rendered ≠ source grade | source half dimmed; arrow suffix stays lit and names what's on screen | `DV P7 → HDR10`, `HDR10 → SDR` |
 | **source-only** | no active session (detail screens) | today's rendering, unchanged (M5 adds capability dimming) | `DV P7` |
+
+**Converted is not a dimmed state**, and that is the whole reason it is its
+own row rather than a spelling of the one below it. PLAYBACK-CAPS-V2-PLAN
+§4.8's conversion rewrites a Profile 7 title's per-frame metadata to Profile
+8.1 while the copy streams: the HDR10-compatible base layer is copied byte for
+byte, nothing is re-encoded, and what reaches the client is Dolby Vision. The
+source capability is *active*, so dimming its half would say the opposite of
+what happened. The arrow is there because the profile on screen is not the
+profile on disk, and a viewer comparing two players deserves to know which.
+
+What the conversion does cost is the dual-layer enhancement layer, which no
+consumer decoder has ever taken — so for a **MEL** source it costs nothing at
+all, and for a **FEL** source it costs real residual detail. That distinction
+is not in any column: it lives in the RPU and is only known once the stream is
+running. It belongs in the hover/long-press detail, in the same sentence
+`EnhancementLayer::reason()` already produces server-side, not in the chip
+text.
 
 The `DV P7` in that last column is the **web** chip. The profile number is
 a web-only refinement — `hdrChip` regexes it out of `hdr_format`, and
@@ -634,14 +652,23 @@ overlay after M1–M4; ✱ marks cells that flip when known open items land.
 
 | Client | Expected badge | Why |
 |---|---|---|
-| Safari, HDR Mac | 6045: `DV P8` lit · 6041: `DV P7 → HDR10` | web probe asks only profiles 5/8 (`dvCan("05.06")`/`("08.07")`), so P8 preserves and P7 strips to its base |
+| Safari, HDR Mac | 6045: `DV P8` lit · 6041: `DV P7 → DV P8` | web probe asks only profiles 5/8 (`dvCan("05.06")`/`("08.07")`), so P8 preserves; P7 is converted to 8.1 in the copy rather than stripped (M5a). With `PLURX_DV_CONVERT=0`, or on a node whose ffmpeg cannot copy the base, 6041 falls back to `DV P7 → HDR10` |
 | Chrome, HDR display | `DV Px → SDR` ✱ | strip-remux refused (open MSE parser bug) → transcode rescue; becomes `→ HDR10` when the parser bug is fixed |
 | Chrome, SDR display | `DV Px → SDR` | server tone-maps (hdr=0 caps) |
-| Android TV, HDR panel | 6041: `DV → HDR10` · 6045 on a DV-claiming panel: `DV` lit | `Caps.kt` now sends `dvprofile` for the profiles the decoder lists and the panel shows, never 7 — so P8 preserves where the device claims it and P7 always strips |
-| Apple TV 4K, DV output on | 6045: `DV` lit · 6041: `DV → HDR10` | Caps.swift sends `dvprofile=5,8`; P8 → dvh1 copy engages the DV pipeline, P7 is not claimed → strip |
+| Android TV, HDR panel | 6041: `DV → DV P8` · 6045 on a DV-claiming panel: `DV` lit | `Caps.kt` sends `dvprofile` for the profiles the decoder lists and the panel shows. A device that enumerates 7 (`DolbyVisionProfileDvheDtb`) gets 6041 preserved and `DV` lit with no arrow; one that does not gets it converted |
+| Apple TV 4K, DV output on | 6045: `DV` lit · 6041: `DV → DV P8` | Caps.swift sends `dvprofile=5,8`; P8 → dvh1 copy engages the DV pipeline, P7 is not claimed → converted to 8.1 |
 | Apple TV 4K, forced 1080p rung | `DV → SDR` | transcode session; badge follows the session, not the decision |
 | Any client, HDR10 (non-DV) source, HDR display, remux/direct | `HDR10` lit | video copied untouched |
 | Any client, HDR10 source, transcode for bitrate/subs burn | `HDR10 → SDR` | every transcode tone-maps to H.264 8-bit |
+
+**Corrected (M5a):** the P7 rows said `→ HDR10`. That was right until the
+conversion existed and is wrong now — a client that takes Profile 8 and not 7
+gets Dolby Vision, not the HDR10 base, and the badge that says otherwise is
+under-claiming a grade the viewer is actually watching. The `→ HDR10` answer
+survives only where the conversion cannot run: the node switch off, an
+ffmpeg that cannot copy the base, a source with no HDR10-compatible base (an
+HLG base is 8.4, a different conversion with no rung here), or a verdict that
+ended up a transcode.
 
 **Corrected:** the Android and Apple rows spelled the mark `DV Px`. Only
 the web chip carries a profile number (`hdrChip` regexes it out of

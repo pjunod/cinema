@@ -3,6 +3,7 @@ mod cachekeep;
 mod copyseg;
 mod delivery;
 mod dv_disk;
+mod dvpipe;
 mod ffmpeg;
 mod fragindex;
 mod fragment_index_cluster;

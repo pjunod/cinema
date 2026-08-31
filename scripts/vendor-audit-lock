@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Restore registry metadata for patched crates before a RustSec scan."""
+"""Build a complete, deduplicated lockfile inventory for a RustSec scan."""
 
 from __future__ import annotations
 
 import argparse
 import re
+import tomllib
 from pathlib import Path
 
 
@@ -14,6 +15,8 @@ VENDORED = (
     ("s3-simple", "0.8.0"),
     ("rust_decimal", "1.42.1"),
 )
+PACKAGE_HEADER = re.compile(r"(?m)^\[\[package\]\]\n")
+NON_PACKAGE_TABLE = re.compile(r"(?m)^\[(?!\[package\]\])")
 
 
 def package_block(text: str, name: str, version: str) -> str:
@@ -52,6 +55,55 @@ def synthesize(root_lock: str, registry_lock: str) -> str:
     return result
 
 
+def package_inventory(lock: str) -> tuple[str, list[str], str, list[tuple[str, str, str]]]:
+    parsed = tomllib.loads(lock)
+    packages = parsed.get("package", [])
+    headers = list(PACKAGE_HEADER.finditer(lock))
+    if len(headers) != len(packages):
+        raise ValueError(
+            f"lockfile declared {len(packages)} packages but exposed {len(headers)} blocks"
+        )
+    if not headers:
+        raise ValueError("lockfile has no package inventory")
+
+    suffix_match = NON_PACKAGE_TABLE.search(lock, headers[-1].end())
+    package_end = suffix_match.start() if suffix_match else len(lock)
+    blocks = [
+        lock[header.start() : headers[index + 1].start() if index + 1 < len(headers) else package_end]
+        for index, header in enumerate(headers)
+    ]
+    identities = [
+        (
+            str(package["name"]),
+            str(package["version"]),
+            str(package.get("source", "")),
+        )
+        for package in packages
+    ]
+    if len(set(identities)) != len(identities):
+        raise ValueError("lockfile contains duplicate package identities")
+    return lock[: headers[0].start()], blocks, lock[package_end:], identities
+
+
+def merge_package_inventories(primary: str, additions: list[str]) -> str:
+    preamble, blocks, suffix, identities = package_inventory(primary)
+    known = set(identities)
+    merged = list(blocks)
+    primary_version = tomllib.loads(primary).get("version")
+
+    for addition in additions:
+        if tomllib.loads(addition).get("version") != primary_version:
+            raise ValueError("lockfile versions do not match")
+        _, extra_blocks, _, extra_identities = package_inventory(addition)
+        for block, identity in zip(extra_blocks, extra_identities, strict=True):
+            if identity in known:
+                continue
+            known.add(identity)
+            merged.append(block)
+
+    return preamble + "".join(merged).rstrip() + "\n" + suffix.lstrip("\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("Cargo.lock"))
@@ -60,12 +112,23 @@ def main() -> None:
         type=Path,
         default=Path("spikes/hiqlite-m0/Cargo.lock"),
     )
+    parser.add_argument(
+        "--additional-lock",
+        action="append",
+        default=[],
+        type=Path,
+        help="merge another lockfile's packages into the audit inventory",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
     output = synthesize(
         args.root.read_text(encoding="utf-8"),
         args.registry_evidence.read_text(encoding="utf-8"),
+    )
+    output = merge_package_inventories(
+        output,
+        [path.read_text(encoding="utf-8") for path in args.additional_lock],
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(output, encoding="utf-8")

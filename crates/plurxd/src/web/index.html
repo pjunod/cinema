@@ -4829,8 +4829,8 @@ function codecLabel(c){ if(!c) return null; return ({hevc:'HEVC',h265:'HEVC',h26
 function hdrChip(f){
   const s=f.hdr_format||"", cls=(f.hdr==='dolby_vision'?'dv':'hdr');
   if(f.hdr==='dolby_vision'||/dolby/i.test(s)){
-    const m=/profile\s*(\d+)/i.exec(s);
-    return {cls:'dv', text:m?('DV P'+m[1]):'DV', full:s||'Dolby Vision'};
+    const p=sourceDolbyVisionProfile(f);
+    return {cls:'dv', text:p?('DV P'+p):'DV', full:s||'Dolby Vision'};
   }
   if(s) return {cls, text:s, full:s};                    // HDR10+ / HDR10 / HLG are already short
   if(f.hdr) return {cls, text:hdrLabel(f.hdr), full:hdrLabel(f.hdr)};
@@ -4861,6 +4861,24 @@ function sourceDynamicRange(f){
   if(/hlg/i.test(s)) return 'hlg';
   return s?'hdr10':null;                                 // "HDR10+" / "HDR10"
 }
+// The source's Dolby Vision profile as a number.
+//
+// Column first, label second — the same order `playback::dolby_vision_profile`
+// asks on the server, and it has to be the same order: the delivered profile
+// beside it is derived from the column, so reading the label here would let a
+// row whose two disagree invent an arrow ("DV P7 → DV P8") over a stream
+// nothing converted. The label stays as the fallback for rows scanned before
+// the columns existed.
+//
+// Null means no profile is known — a pre-column row, or a file that is not
+// Dolby Vision — in which case there is nothing to compare against and the
+// chip stays as it was rather than guessing.
+function sourceDolbyVisionProfile(f){
+  const column=f&&f.dolby_vision&&f.dolby_vision.profile;
+  if(column) return Number(column);
+  const m=/profile\s*(\d+)/i.exec((f&&f.hdr_format)||"");
+  return m?Number(m[1]):null;
+}
 const RANGE_SHORT={dolby_vision:'DV',hdr10:'HDR10',hlg:'HLG',sdr:'SDR'};
 const RANGE_LONG={dolby_vision:'Dolby Vision',hdr10:'HDR10',hlg:'HLG',sdr:'SDR'};
 // The server's reason string already says *why* ("Dolby Vision metadata
@@ -4879,7 +4897,7 @@ function dynamicRangeReason(){
 //
 // `delivered` falsy — no session yet, an old server, or a session the store
 // could not resolve (§3.2) — degrades to exactly today's source-only chip.
-function dynamicRangeBadge(f, delivered, displayHdr){
+function dynamicRangeBadge(f, delivered, displayHdr, deliveredDvProfile){
   f=f||{};
   const chip=hdrChip(f); if(!chip) return null;
   const source=sourceDynamicRange(f);
@@ -4891,7 +4909,25 @@ function dynamicRangeBadge(f, delivered, displayHdr){
   // delivered HDR and rendered SDR.
   const displayLoss = delivered!=='sdr' && !displayHdr;
   const rendered = displayLoss ? 'sdr' : delivered;
-  if(rendered===source) return {...lit, rendered, panel:`${RANGE_LONG[source]} (rendering)`};
+  if(rendered===source){
+    // Same grade, different profile: the Profile 7 → 8.1 conversion
+    // (PLAYBACK-CAPS-V2-PLAN §4.8). Neither half dims — the base layer is
+    // copied byte for byte, nothing is re-encoded, and what reaches this
+    // browser really is Dolby Vision — but the profile on screen is not the
+    // profile on disk, and a chip that said plain `DV P7` would be describing
+    // the file rather than the picture (MEDIA-BADGES-PLAN §2.3).
+    const sourceDv=sourceDolbyVisionProfile(f);
+    if(source==='dolby_vision' && deliveredDvProfile && sourceDv && deliveredDvProfile!==sourceDv){
+      const arrow=`DV P${deliveredDvProfile}`;
+      return {cls:chip.cls, text:`${chip.text} → ${arrow}`, base:chip.text, arrow,
+        full:`${chip.full} — playing as Dolby Vision Profile ${deliveredDvProfile} `
+          +`(converted for this browser; the HDR10-compatible base layer is copied untouched)`,
+        aria:`Dolby Vision Profile ${sourceDv}, playing as Dolby Vision Profile ${deliveredDvProfile}`,
+        panel:`Dolby Vision Profile ${deliveredDvProfile} — converted for this browser`,
+        off:false, source, rendered};
+    }
+    return {...lit, rendered, panel:`${RANGE_LONG[source]} (rendering)`};
+  }
   const note = displayLoss ? "this browser did not expose HDR presentation"
     : (dynamicRangeReason()
       || (rendered==='sdr' ? `tone-mapped from ${RANGE_LONG[source]||'the source grade'}`
@@ -4903,6 +4939,16 @@ function dynamicRangeBadge(f, delivered, displayHdr){
     full:`${chip.full} — playing as ${long} (${note})`,
     aria:`${RANGE_LONG[source]||chip.text}, playing as ${long}`,
     panel:`${long} — ${note}`, off:true, source, rendered};
+}
+// The badge for whatever this player is doing right now.
+//
+// One reader of `PLAYER`, so the four surfaces that paint the chip — the fact
+// badges, the play overlay, the stats panel and the debug ledger — cannot pass
+// `dynamicRangeBadge` three of its four arguments between them. Dropping one
+// silently degrades the chip to the state it had before that argument existed,
+// which is a correct-looking badge for the wrong delivery.
+function playerRangeBadge(f){
+  return dynamicRangeBadge(f, PLAYER.deliveredRange, displayIsHdr(), PLAYER.deliveredDvProfile);
 }
 function premiumAudio(f){ const cs=(f.audio_streams||[]).map(a=>(a.codec||'').toLowerCase());
   if(cs.some(c=>c.includes('truehd'))) return 'TrueHD';
@@ -4943,7 +4989,7 @@ function playerFactBadges(){
   // during playback, where "what am I getting?" is the question. The detail
   // page's specBadges() deliberately stays source-only: there is no session to
   // report on there.
-  const h=dynamicRangeBadge(s, PLAYER.deliveredRange, displayIsHdr());
+  const h=playerRangeBadge(s);
   if(h) b.push(`<span class="vbadge ${h.cls}${h.off?' off':''}" title="${esc(h.full||h.text)}" aria-label="${
     esc(h.aria||h.text)}">${mediaIcon('dynamic')}<span class="vsrc">${esc(h.base)}</span>${
     h.arrow?`<span class="varrow">→ ${esc(h.arrow)}</span>`:''}</span>`);
@@ -5080,7 +5126,7 @@ function analysisFileControl(f){
     :"VOD analysis pending";
   return `<div class="analysis-brief px-admin th-admin" style="margin-top:12px">
     <div class="analysis-brief-head"><div><h2>Content analysis</h2>
-      <p><b>${esc(state)}</b> · Build and inspect the fragment index that enables fixed-timeline VOD HLS.</p></div>
+      <p><b>${esc(state)}</b> · Build and inspect the structural index and exact skip markers for this file.</p></div>
       <div class="analysis-actions">${unsupported?"":`<button class="ghost sm" onclick='requestAnalysis(${esc(JSON.stringify(fileId))},${rebuild?'true':'false'},this)'>${rebuild?'Rebuild analysis':'Analyze now'}</button>`}
       <a class="ghost sm" href="#/analysis">View queue</a></div></div></div>`;
 }
@@ -5088,7 +5134,7 @@ async function requestAnalysis(fileId,force,btn,stay=false){
   const label=btn&&btn.textContent;
   if(btn){ btn.disabled=true; btn.textContent=force?"Queueing rebuild…":"Queueing…"; }
   try{
-    const response=await api(`/files/${fileId}/analysis`,{method:"POST",body:{force:!!force,components:["fragment_index"]}});
+    const response=await api(`/files/${fileId}/analysis`,{method:"POST",body:{force:!!force,components:["fragment_index","skip_markers"]}});
     toast(response.joined?"Analysis is already queued":"Analysis queued");
     if(stay&&location.hash==="#/analysis") await renderAnalysis(PAGE_RENDER_GENERATION,true);
     else location.hash="#/analysis";
@@ -5899,7 +5945,7 @@ async function setWatched(id, watched){
 //  direct_play → native <video>, client-side seek/resume
 //  remux       → progressive fMP4 from ffmpeg, server fast-seek for resume
 //  transcode   → HLS via hls.js (ffmpeg tone-maps/re-encodes), offset resume
-let PLAYER={fileId:null,timer:null,offset:0,hls:null,knownDur:0,durMs:0,markers:[],source:null,started:false,idleTimer:null,autoskip:false,deliveredRange:null,waitTimer:null,bookOffset:0,bookDuration:0,bookParts:null};
+let PLAYER={fileId:null,timer:null,offset:0,hls:null,knownDur:0,durMs:0,markers:[],source:null,started:false,idleTimer:null,autoskip:false,deliveredRange:null,deliveredDvProfile:null,waitTimer:null,bookOffset:0,bookDuration:0,bookParts:null};
 let PLAYER_WIRED=false;
 // Native HLS (`video.src = playlist.m3u8`) is for real Safari ONLY — it's what
 // makes AirPlay work (an MSE stream can't be flung to an Apple TV). The trap:
@@ -6509,20 +6555,24 @@ function notifyPlaybackControl(renderOverride,observationOverride){
   return p.controlReporter?p.controlReporter.notify():null;
 }
 // How long a recovery owner waits for the server's verdict before deciding for
-// itself. One exchange deadline — not a new number, and not a guess.
+// itself.
 //
-// But the ask does not wait for *an* exchange, it waits for the *next* one:
-// `drain` returns immediately while a request is in flight, so this ask's own
-// request cannot start until that one finishes. Whenever an exchange is
-// already running at ask time — precisely the busy case a stall correlates
-// with — a single window would expire at the instant an answer first became
-// possible. So the window is extended once, and only when an exchange that is
-// NOT this ask's completes, which is the observable moment ours became next.
-// CONTROL_ASK_CAP_MS is the hard stop: past it the viewer has waited longer
-// for the verdict than for the stall itself, and today's path is better than
-// a better answer that never arrives.
-const CONTROL_ASK_MS=6000;
-const CONTROL_ASK_CAP_MS=12000;
+// This was one exchange deadline, on the reasoning that waiting longer than an
+// exchange can take is pure delay. That was the wrong end to measure from. The
+// fallback is the branch the entire fleet takes — no node has ever answered a
+// full-vocabulary exchange — so the bound is added to every real stall for
+// every viewer, on top of the eight seconds `persistentWait` has already
+// waited. A server that cannot answer inside a second and a half is a server
+// whose answer is not worth more frozen picture than the recovery it would
+// have replaced.
+//
+// The window is still extended once, and only when an exchange that is NOT
+// this ask's completes: `drain` returns immediately while a request is in
+// flight, so this ask's own request cannot start until that one finishes, and
+// a single window would otherwise expire at the instant an answer first became
+// possible. CONTROL_ASK_CAP_MS is the hard stop.
+const CONTROL_ASK_MS=1500;
+const CONTROL_ASK_CAP_MS=3000;
 // The reporter's own exchange floor. Named here because the retry clamp below
 // must not pace an ask faster than the transport will carry it.
 const CONTROL_MIN_EXCHANGE_MS=250;
@@ -6741,6 +6791,10 @@ function attachSession(v, t, info, wantSec){
   // create whose source lookup came back None) keeps whatever we had: the
   // decision's value is still the best answer. MEDIA-BADGES-PLAN.md §3.2.
   if(info.delivered_dynamic_range) t.deliveredRange=info.delivered_dynamic_range;
+  // Absent means "this session carries no Dolby Vision", which is an answer,
+  // so it is written unconditionally where the range beside it is not: a
+  // session that stripped must clear a profile an earlier decision reported.
+  if(info.delivered_dynamic_range) t.deliveredDvProfile=info.delivered_dolby_vision_profile||null;
   // …and repaint, or the chip keeps its pre-session HTML forever while the
   // one-second stats panel follows the new truth. That is how "DV P7 → HDR10"
   // sat beside "Dynamic range: SDR" on a tone-mapped Dexter episode: both
@@ -7296,6 +7350,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     // current by the in-player Audio and Subtitles menus.
     preplay:selection||null,
     markers:(decision.markers||[]).map(m=>({...m})), source:src, started:false,
+    _markerOffers:new Set(),
     idleTimer:null, autoskip:autoskipOn(), stallTimer:null, probeUrl:null, directUrl:null,
     triedFallback:false,
     refusedOriginal:false,
@@ -7318,6 +7373,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     // decision never promised); direct play has no session, so this stands for
     // the whole playback. MEDIA-BADGES-PLAN.md §3.2.
     deliveredRange:decision.delivered_dynamic_range||null,
+    deliveredDvProfile:decision.delivered_dolby_vision_profile||null,
     playStartedAt:clickedAt, ttffMs:null, stalls:0, sessionId:null, streamId:null, health:null,
     attemptId:null, attemptReason:null, bufferLimits:null,
     ladder, priorKbps, autoHeight:autoStartHeight,
@@ -9093,34 +9149,57 @@ function wirePlayer(){
   if(document.pictureInPictureEnabled){ const pip=document.getElementById("pbpip"); if(pip) pip.style.display=""; }
 }
 function markerNowMs(){ const v=document.getElementById("video"); return ((PLAYER.offset||0)+(v?v.currentTime||0:0))*1000; }
+function markerIsEstimated(m){
+  if(m&&m.provenance!=null) return m.provenance==="estimated";
+  return !!m&&m.chapter===false;
+}
+function markerAutoSkipEligible(m){
+  if(!m) return false;
+  // M1-M4 has no configured detector confidence floor. Keep automatic seeks
+  // to exact authored/manual evidence; old servers fall back to `chapter`.
+  if(m.provenance!=null) return m.provenance==="authored"||m.provenance==="manual";
+  return m.chapter!==false;
+}
 function checkMarkers(){
   if(!PLAYER.markers||!PLAYER.markers.length) return;
   const pos=markerNowMs();
   const m=PLAYER.markers.find(mk=> pos>=mk.start_ms && pos < mk.end_ms-400);
   renderSkip(m||null);
-  if(m && PLAYER.autoskip && !m._auto){ m._auto=true; skipMarker(m); }
+  if(m && PLAYER.autoskip && markerAutoSkipEligible(m) && !m._auto){ m._auto=true; skipMarker(m,true); }
 }
 function renderSkip(m){
   const c=document.getElementById("pskip"); if(!c) return;
   if(!m){ if(c.dataset.k){ c.innerHTML=""; c.dataset.k=""; } return; }
-  const estimated=m.chapter===false;
+  const estimated=markerIsEstimated(m);
   const key=m.kind+m.start_ms+(estimated?"e":"");
   if(c.dataset.k===key) return; // avoid rebuilding every timeupdate tick
   c.dataset.k=key;
   const label=m.label||(m.kind==="intro"?"Skip Intro":"Skip Credits");
   c.innerHTML=`<button onclick="skipCurrent()">${esc(label)}${estimated?" · Estimated":""} ›</button>`;
+  const offerKey=(m.kind||"unknown")+":"+m.start_ms;
+  const automatic=PLAYER.autoskip&&markerAutoSkipEligible(m);
+  if(!automatic&&!PLAYER._markerOffers.has(offerKey)){
+    PLAYER._markerOffers.add(offerKey);
+    clientLog({level:"info",event:"marker_offer",detail:m.kind||"unknown",
+      message:"playback marker offered"});
+  }
 }
 function skipCurrent(){
   const pos=markerNowMs();
   const m=(PLAYER.markers||[]).find(mk=> pos>=mk.start_ms && pos<mk.end_ms);
-  if(m) skipMarker(m);
+  if(m) skipMarker(m,false);
 }
-function skipMarker(m){
+function skipMarker(m,automatic=false){
   const c=document.getElementById("pskip"); if(c){ c.innerHTML=""; c.dataset.k=""; }
+  clientLog({level:"info",event:automatic?"marker_automatic_skip":"marker_manual_skip",
+    detail:m.kind||"unknown",message:"playback marker skipped"});
   // Credits that run to the very end → treat "skip" as "finished".
   if(m.kind==="credits" && PLAYER.durMs && m.end_ms>=PLAYER.durMs-2500){
     reportProgress(PLAYER.fileId,true); return finishPlayback(true);
   }
+  clientLog({level:"info",event:"marker_prewarm",detail:"miss",
+    message:"skip destination was not prewarmed"});
+  PLAYER._lastMarkerSkipEndMs=m.end_ms;
   seekTo(m.end_ms/1000);
 }
 // Seek that works for every method: direct play seeks natively; remux/transcode
@@ -9129,6 +9208,12 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
   endWait(false);
   targetSec=Math.max(0,targetSec);
+  const markerEnd=Number(PLAYER._lastMarkerSkipEndMs)||0;
+  if(markerEnd && targetSec*1000<markerEnd-1000 && markerNowMs()>=markerEnd-1000){
+    clientLog({level:"info",event:"marker_seek_back",detail:"undo",
+      message:"viewer sought behind the last marker destination"});
+    PLAYER._lastMarkerSkipEndMs=0;
+  }
   // Never aim past the end: a stream started beyond the last frame produces no
   // packets, so it would "buffer" forever with nothing wrong on either side.
   const total=pbTotalSec();
@@ -10393,7 +10478,7 @@ function updateStats(){
     // sentence, with the server's own reason. Same pure function, same parts —
     // the two can never drift into disagreeing. Absent for an SDR source:
     // there is no grade to have an opinion about.
-    (()=>{ const d=dynamicRangeBadge(PLAYER.source||{}, PLAYER.deliveredRange, displayIsHdr());
+    (()=>{ const d=playerRangeBadge(PLAYER.source||{});
       return d?{l:"Dynamic range",note:true,c:d.off?"stat-muted":"",v:`${esc(d.panel)}`}:null; })(),
     {l:"Dropped",c:statsToneClass(droppedCount==null?'muted':droppedCount===0?'good':droppedCount<3?'warn':'bad'),
       v:`${dropped} frames`},
@@ -10477,7 +10562,7 @@ function updateStats(){
   ];
   const debugHtml=panelHtml(debugSections);
 
-  const rangeBadge=dynamicRangeBadge(PLAYER.source||{}, PLAYER.deliveredRange, displayIsHdr());
+  const rangeBadge=playerRangeBadge(PLAYER.source||{});
   // Two forms, two audiences. `.panel` is the full sentence ("SDR — this
   // browser did not expose HDR presentation") and it belongs in the standard
   // and debug ledgers, where there is a column for a sentence. `.text` is the
@@ -10797,9 +10882,11 @@ async function renderAnalysisSummary(generation=PAGE_RENDER_GENERATION){
   }finally{ if(ANALYSIS_SUMMARY_BUSY===run) ANALYSIS_SUMMARY_BUSY=null; }
 }
 function analysisStateLabel(state){
-  return ({queued:"Queued",running:"Running",submitted:"Publishing",ready:"Ready",failed:"Failed",cancelled:"Canceled"})[state]||state;
+  return ({queued:"Queued",claimed:"Claimed",running:"Running",retry_wait:"Retry wait",staged:"Staged",submitted:"Publishing",published:"Ready",ready:"Ready",failed:"Failed",canceled:"Canceled",cancelled:"Canceled",stale:"Stale"})[state]||state;
 }
 function analysisPhase(row){
+  if(row.component==="skip_markers"&&row.request_state==="running") return "Correlating and persisting timeline markers";
+  if(row.component==="skip_markers"&&row.state==="ready") return "Timeline markers verified and published";
   if(row.request_state==="running") return "Hashing and verifying the source file";
   if(row.job_state==="running") return "Building the fragment index";
   if(row.job_state==="queued") return "Waiting for an idle media worker";
@@ -10870,6 +10957,21 @@ function analysisSummaryCard(value,context="activity"){
       <span class="analysis-state ready">${s.ready||0} recent ready</span>
       <span class="analysis-state ${s.enabled?'ready':'cancelled'}">Queue ${s.enabled?'enabled':'paused'}</span>
     </div>${latest&&attention?`<div class="analysis-sub">Latest problem: <b>${esc(latest.title)}</b></div>`:""}</div>`;
+}
+function analysisLiveProgress(value,names){
+  const rows=(value&&value.progress)||[];
+  if(!rows.length) return "";
+  return `<div class="analysis-table-wrap"><table class="analysis-table"><thead><tr><th>File</th><th>Stage</th><th>Progress</th><th>Node</th></tr></thead><tbody>${rows.map(row=>{
+    const title=row.item_id?`<a href="#/item/${row.item_id}">${esc(row.title||`File ${row.file_id}`)}</a>`:esc(row.title||`File ${row.file_id}`);
+    const bytes=`${fmtBytes(row.bytes_read)||"0 B"}${row.total_bytes?` / ${fmtBytes(row.total_bytes)}`:""}`;
+    const media=row.total_media_ms?`${fmtDur(row.media_ms_examined)||"0s"} / ${fmtDur(row.total_media_ms)}`:(fmtDur(row.media_ms_examined)||"—");
+    const rate=row.throughput_bps?`${fmtBytes(row.throughput_bps)}/s`:"—";
+    const eta=row.eta_ms!=null?fmtDur(row.eta_ms):"—";
+    return `<tr><td><b>${title}</b><div class="analysis-sub">File ${row.file_id} · ${esc(row.component||"analysis")}</div></td>
+      <td><span class="analysis-state running">${esc((row.stage||"running").replace(/_/g," "))}</span><div class="analysis-sub">${row.fragments_indexed||0} fragments</div></td>
+      <td><b>${bytes}</b><div class="analysis-sub">Media ${media} · ${rate} · elapsed ${fmtDur(row.elapsed_ms)||"0s"} · ETA ${eta}</div></td>
+      <td>${analysisNodeCell(names,row.node_id)}</td></tr>`;
+  }).join("")}</tbody></table></div>`;
 }
 // The analysis workspace attributes every row to a node, and printed the id
 // raw in three places. It shares `nodeLabel` with the Now playing table but not
@@ -10966,11 +11068,40 @@ async function retryFailedAnalysis(){
   if(!rows.length||!confirm(`Retry ${rows.length} analysis ${rows.length===1?'item':'items'} needing attention on this page?`)) return;
   let queued=0;
   for(const row of rows){
-    try{ await api(`/files/${row.file_id}/analysis`,{method:"POST",body:{force:true,components:["fragment_index"]}}); queued++; }
+    try{
+      if(row.request_id) await api(`/analysis/jobs/${row.request_id}/retry`,{method:"POST",body:{}});
+      else await api(`/files/${row.file_id}/analysis`,{method:"POST",body:{force:true,components:[row.component||"fragment_index"]}});
+      queued++;
+    }
     catch(error){}
   }
   toast(`${queued} of ${rows.length} ${queued===1?'item':'items'} queued`);
   await renderAnalysis(PAGE_RENDER_GENERATION,true);
+}
+async function actOnAnalysisRow(key,btn){
+  const row=ANALYSIS_ROW_LOOKUP.get(key); if(!row) return;
+  const action=analysisAction(row); if(!action||action==="none") return;
+  const label=btn&&btn.textContent;
+  if(btn){btn.disabled=true;btn.textContent=action==="retry"?"Retrying…":"Queueing…";}
+  try{
+    if(action==="retry"&&row.request_id){
+      await api(`/analysis/jobs/${row.request_id}/retry`,{method:"POST",body:{}});
+      toast("Analysis retry queued");
+    }else{
+      await api(`/files/${row.file_id}/analysis`,{method:"POST",body:{
+        force:action==="rebuild"||(action==="retry"&&!row.request_id),components:[row.component||"fragment_index"]}});
+      toast("Analysis queued");
+    }
+    await renderAnalysis(PAGE_RENDER_GENERATION,true);
+  }catch(error){ toast(error.message||"Couldn’t queue analysis"); }
+  finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }
+}
+async function cancelAnalysisRow(key,btn){
+  const row=ANALYSIS_ROW_LOOKUP.get(key); if(!row||!row.request_id) return;
+  const label=btn&&btn.textContent; if(btn){btn.disabled=true;btn.textContent="Canceling…";}
+  try{ await api(`/analysis/jobs/${row.request_id}`,{method:"DELETE",body:{}}); toast("Analysis canceled"); await renderAnalysis(PAGE_RENDER_GENERATION,true); }
+  catch(error){ toast(error.message||"Couldn’t cancel analysis"); }
+  finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }
 }
 function paintAnalysis(snapshot){
   const main=document.getElementById("main"); if(!main) return;
@@ -10988,29 +11119,31 @@ function paintAnalysis(snapshot){
     const owner=row.owner_node_id||row.target_node_id||"";
     const attempt=row.attempts||0, lease=row.lease_expires_ms||0, retryAt=row.not_before_ms||0;
     const pipeline=row.pipeline_version?` · pipeline ${esc(row.pipeline_version)}`:"";
-    const key=analysisRowKey(row), action=analysisAction(row);
+    const key=analysisRowKey(row), action=analysisAction(row), displayState=row.durable_state||row.state;
     const actionLabel={retry:"Retry",rebuild:"Rebuild",analyze_current:"Analyze current file"}[action]||"";
     const title=row.item_id?`<a data-analysis-focus="item:${esc(key)}" href="#/item/${row.item_id}">${esc(row.title||`File ${row.file_id}`)}</a>`:esc(row.title||`File ${row.file_id}`);
-    const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator request"):"Background build";
+    const priorityLabel=({normal:"Normal",forced:"Forced",foreground:"Foreground"})[row.priority]||row.priority||"Normal";
+    const triggerLabel=({admin:"Admin",background:"Background",foreground:"Foreground"})[row.trigger]||row.trigger||"Background";
     const details=[
       ["Request",row.request_id],["Worker job",row.job_id],
       ["Target node",analysisNodeDetail(nodeNames,row.target_node_id)],
       ["Owner",analysisNodeDetail(nodeNames,row.owner_node_id)],
       ["Lease",lease?(lease>snapshot.now_ms?`expires in ${Math.ceil((lease-snapshot.now_ms)/1000)}s`:"expired"):null],
       ["Retry",row.state==="queued"&&retryAt>snapshot.now_ms?`in ${Math.ceil((retryAt-snapshot.now_ms)/1000)}s`:null],
+      ["Priority",priorityLabel],["Trigger",triggerLabel],
       ["Source size",row.source_size!=null?fmtBytes(row.source_size):null],
       ["Pipeline",row.pipeline_version],
     ].filter(([,value])=>value!=null&&value!=="");
     const errorHtml=analysisErrors(row).map(error=>analysisErrorHtml(error.code,error.stage)).join("");
     return `<tr>
-      <td><span class="analysis-file">${title}</span><div class="analysis-sub">File ${row.file_id} · ${esc(trigger)}${pipeline}</div></td>
-      <td><span class="analysis-state ${esc(row.state)}">${esc(analysisStateLabel(row.state))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}
+      <td><span class="analysis-file">${title}</span><div class="analysis-sub">File ${row.file_id} · Priority ${esc(priorityLabel)} · Trigger ${esc(triggerLabel)}${pipeline}</div></td>
+      <td><span class="analysis-state ${esc(displayState)}">${esc(analysisStateLabel(displayState))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}
         <details class="analysis-diag" data-analysis-key="${esc(key)}"${open.has(key)?" open":""}><summary data-analysis-focus="details:${esc(key)}">Technical details</summary><div class="analysis-diag-grid">
           ${details.map(([label,value])=>`<b>${esc(label)}</b><span>${esc(value)}</span>`).join("")}
           <b>Disposition</b><span>${esc(analysisDisposition(row))}</span><b>Attempts</b><span>${attempt}</span><b>Updated</b><span>${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</span>
         </div></details></td>
       <td>${analysisNodeCell(nodeNames,owner)}<div class="analysis-sub">${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</div></td>
-      <td style="text-align:right"><div class="analysis-actions">${actionLabel?`<button class="ghost sm" data-analysis-focus="action:${esc(key)}" onclick='requestAnalysis(${esc(JSON.stringify(String(row.file_id)))},true,this,true)'>${actionLabel}</button>`:""}<button class="ghost sm" data-analysis-focus="copy:${esc(key)}" onclick='copyAnalysisDetails(${esc(JSON.stringify(key))},this)'>Copy details</button></div></td></tr>`;
+      <td style="text-align:right"><div class="analysis-actions">${actionLabel?`<button class="ghost sm" data-analysis-focus="action:${esc(key)}" onclick='actOnAnalysisRow(${esc(JSON.stringify(key))},this)'>${actionLabel}</button>`:""}${row.request_id&&["queued","running","submitted"].includes(row.state)?`<button class="ghost sm" data-analysis-focus="cancel:${esc(key)}" onclick='cancelAnalysisRow(${esc(JSON.stringify(key))},this)'>Cancel</button>`:""}<button class="ghost sm" data-analysis-focus="copy:${esc(key)}" onclick='copyAnalysisDetails(${esc(JSON.stringify(key))},this)'>Copy details</button></div></td></tr>`;
   }).join("");
   const attention=counts.attention||0, working=counts.active||0, expected=counts.expected||0;
   const filterButton=(id,label)=>`<button class="${ANALYSIS_VIEW.filter===id?'on':''}" data-analysis-focus="filter:${id}" aria-pressed="${ANALYSIS_VIEW.filter===id}" onclick="setAnalysisFilter('${id}')">${label}${ANALYSIS_VIEW.filter===id?` <b>${filteredTotal}</b>`:""}</button>`;
@@ -11223,7 +11356,7 @@ function paintActivityBody(d){
     ${dels.length
       ? `<table><thead><tr><th>Title</th><th>User</th>${attributed?"<th>Node</th>":""}<th>Stream</th><th>Started</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="empty">Nothing streaming right now. Every delivery is listed here — direct play, remux and both HLS kinds.</div>`}
-    ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}`:""}
+    ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}${analysisLiveProgress(d.analysis,nodeNames)}`:""}
     <h2 class="section">Pre-transcoding</h2>
     ${produce}
     <h2 class="section">Offline downloads</h2>
@@ -11876,6 +12009,13 @@ function analysisSettingsPanel(settings,snapshot){
       <label class="row" style="margin:0 0 16px;font-size:14px;color:var(--text)"><input type="checkbox" id="an-enabled" ${settings.vod_index_cluster_cache?'checked':''} style="width:auto;margin-right:9px"> Enable the durable analysis queue and shared index cache</label>
       <div class="row" style="align-items:end">
         <div><label>Background analysis</label><select id="an-every" style="width:auto;min-width:220px">${presetOpts([["0","Paused"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
+      </div>
+      <h3 class="section">Retry policy</h3>
+      <div class="row" style="align-items:end">
+        <div><label>Maximum attempts</label><input id="an-attempts" type="number" min="1" max="20" value="${esc(settings.analysis_max_attempts||5)}"></div>
+        <div><label>Claim lease (seconds)</label><input id="an-lease" type="number" min="15" max="600" value="${esc(settings.analysis_lease_secs||60)}"></div>
+        <div><label>Initial backoff (seconds)</label><input id="an-backoff-base" type="number" min="1" max="300" value="${esc(settings.analysis_backoff_base_secs||5)}"></div>
+        <div><label>Maximum backoff (seconds)</label><input id="an-backoff-max" type="number" min="1" max="3600" value="${esc(settings.analysis_backoff_max_secs||300)}"></div>
       </div>
       <div class="hint">Manual Analyze and Retry actions use the durable queue. Background analysis discovers eligible files on this cadence. Pausing either does not remove completed indexes; titles without one use Live HLS when live recovery is enabled in Playback.</div>
       <div class="err" id="an-error"></div><div class="analysis-actions" style="justify-content:flex-start;margin-top:10px"><button onclick="saveAnalysisSettings()">Save analysis settings</button><a class="ghost sm" href="#/analysis">Open analysis workspace</a></div>
@@ -13304,6 +13444,10 @@ async function saveAnalysisSettings(){
     cacheSettings(await api("/settings",{method:"PUT",body:{
       vod_index_mins:Number(document.getElementById("an-every").value),
       vod_index_cluster_cache:document.getElementById("an-enabled").checked,
+      analysis_max_attempts:Number(document.getElementById("an-attempts").value),
+      analysis_lease_secs:Number(document.getElementById("an-lease").value),
+      analysis_backoff_base_secs:Number(document.getElementById("an-backoff-base").value),
+      analysis_backoff_max_secs:Number(document.getElementById("an-backoff-max").value),
     }}));
     const snapshot=await api("/analysis/summary");
     SETTINGS_DATA.analysis=snapshot; SETTINGS_LOADED.add("analysis");

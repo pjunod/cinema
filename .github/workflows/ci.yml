@@ -288,6 +288,11 @@ jobs:
           version: "1.62.0"
       - name: Check every affected web layout
         run: make ui-check
+      # Cheap (one page, no server, no media) and it covers the one thing the
+      # Node web tests structurally cannot: that the shipped reporter actually
+      # runs in a browser.
+      - name: Run the playback-control reporter in a real browser
+        run: make control-browser-check
 
   vod_web:
     name: film-addressed VOD browser acceptance

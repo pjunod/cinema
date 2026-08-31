@@ -5,10 +5,11 @@ use super::SqliteStore;
 use crate::cluster::coordination::removed_job_owner_key;
 use crate::domain::{
     MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionActivationSettlement,
-    MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor,
-    MediaSessionTerminalAck, OwnedMediaSessionLease, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
-    MEDIA_SESSION_PUBLICATION_BLOCKED,
+    MediaSessionEnd, MediaSessionPreparation, MediaSessionPreparationCommit,
+    MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
+    MediaSessionRoute, MediaSessionStagedGeneration, MediaSessionTakeover,
+    MediaSessionTakeoverCursor, MediaSessionTerminalAck, OwnedMediaSessionLease,
+    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use crate::error::StoreError;
 use crate::store::MediaSessionStore;
@@ -156,6 +157,141 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
         ))
     }
 }
+
+fn validate_preparation(preparation: &MediaSessionPreparation) -> Result<(), StoreError> {
+    let valid = valid_uuid(&preparation.incarnation_id)
+        && valid_uuid(&preparation.session_id)
+        && valid_uuid(&preparation.expected_predecessor_incarnation_id)
+        // A successor staged against itself is not a successor. The pointer
+        // CAS below would pass for it, because the pointer would name it.
+        && preparation.expected_predecessor_incarnation_id != preparation.incarnation_id
+        && preparation.user_id > 0
+        && !preparation.playback_id.is_empty()
+        && preparation.playback_id.len() <= 128
+        && valid_fingerprint(&preparation.request_fingerprint)
+        && !preparation.owner_node_id.is_empty()
+        && preparation.owner_node_id.len() <= 256
+        && preparation.recipe_json.len() <= 32 * 1024
+        && preparation.response_json.len() <= 64 * 1024
+        && (0..=MAX_MEDIA_MILLIS).contains(&preparation.media_origin_ms)
+        && preparation.now_ms > 0
+        && preparation.deadline_ms > preparation.now_ms;
+    if valid {
+        Ok(())
+    } else {
+        Err(StoreError::Task(
+            "invalid media-session preparation".to_owned(),
+        ))
+    }
+}
+
+/// End one staged successor, every write gated on its ledger row.
+///
+/// The gating is the safety property and it has to be in the SQL, not in a
+/// predicate applied to the result: the incarnation id alone names any session
+/// in the database, so an `UPDATE … WHERE incarnation_id = ?` would end a
+/// stranger's live stream and then report that it had lost. `playback_id` is
+/// caller-supplied and `user_id` is not otherwise consulted, so there is no
+/// boundary here except this one.
+///
+/// The ledger row is deleted LAST, because the three writes before it read it.
+///
+/// Deliberately says nothing about whether it did anything. The caller derives
+/// that from a re-read plus a predicate, never from `rows_affected`, so an
+/// owner retrying an abort after a crash reads the same answer as the first
+/// attempt rather than a spurious loss.
+fn abort_staged_generation(
+    tx: &rusqlite::Transaction<'_>,
+    user_id: i64,
+    playback_id: &str,
+    staged_incarnation_id: &str,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE media_sessions
+            SET state = 'ended', terminal_reason = 'replaced',
+                lease_expires_at_ms = ?1, updated_at_ms = ?1
+          WHERE incarnation_id = ?2 AND state != 'ended'
+            AND EXISTS (SELECT 1 FROM media_session_preparations
+              WHERE user_id = ?3 AND playback_id = ?4
+                AND staged_incarnation_id = ?2)",
+        params![now_ms, staged_incarnation_id, user_id, playback_id],
+    )?;
+    // The next two carry BOTH guards. "Ended at this instant" alone is not
+    // proof the retirement above fired: `now_ms` is the caller's, not the
+    // retirement's, so a row that happened to be ended at exactly that
+    // millisecond by anything else would satisfy it — and an incarnation id
+    // names any session in the database. The ledger EXISTS is what makes this
+    // a staged successor of this playback; the timestamp is what makes it
+    // this abort's own work.
+    tx.execute(
+        "DELETE FROM cache_consumer_pins
+          WHERE consumer_kind = 'media_session' AND consumer_id = ?1
+            AND EXISTS (SELECT 1 FROM media_sessions
+              WHERE incarnation_id = ?1 AND state = 'ended' AND updated_at_ms = ?2)
+            AND EXISTS (SELECT 1 FROM media_session_preparations
+              WHERE user_id = ?3 AND playback_id = ?4 AND staged_incarnation_id = ?1)",
+        params![staged_incarnation_id, now_ms, user_id, playback_id],
+    )?;
+    tx.execute(
+        "UPDATE job_leases
+            SET expires_at_ms = CASE
+                  WHEN expires_at_ms < ?1 THEN expires_at_ms ELSE ?1 END,
+                revision = revision + 1, updated_at_ms = ?1
+          WHERE resource = ?2 AND revision < 9223372036854775807
+            AND EXISTS (SELECT 1 FROM media_sessions
+              WHERE incarnation_id = ?3 AND state = 'ended' AND updated_at_ms = ?1)
+            AND EXISTS (SELECT 1 FROM media_session_preparations
+              WHERE user_id = ?4 AND playback_id = ?5 AND staged_incarnation_id = ?3)",
+        params![
+            now_ms,
+            format!("session:{staged_incarnation_id}"),
+            staged_incarnation_id,
+            user_id,
+            playback_id,
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM media_session_preparations
+          WHERE user_id = ?1 AND playback_id = ?2 AND staged_incarnation_id = ?3",
+        params![user_id, playback_id, staged_incarnation_id],
+    )?;
+    Ok(())
+}
+
+/// Exact immutable identity for a preparation replay.
+///
+/// Kept identical to the replicated twin's, because a replay that reads back
+/// on one backend and loses on the other is the §2.4 failure mode with a
+/// different name. Progress and lease coordinates are deliberately absent:
+/// they are monotone durable state a replay must read back, never restore.
+fn preparation_route_matches(
+    route: &MediaSessionRoute,
+    preparation: &MediaSessionPreparation,
+) -> bool {
+    route.session_id == preparation.session_id
+        && route.user_id == preparation.user_id
+        && route.playback_id == preparation.playback_id
+        && route.request_fingerprint == preparation.request_fingerprint
+        && route.owner_node_id == preparation.owner_node_id
+        && route.state == "active"
+        && route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
+}
+
+fn staged_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionStagedGeneration> {
+    Ok(MediaSessionStagedGeneration {
+        user_id: row.get(0)?,
+        playback_id: row.get(1)?,
+        staged_incarnation_id: row.get(2)?,
+        expected_predecessor_incarnation_id: row.get(3)?,
+        deadline_ms: row.get(4)?,
+        created_at_ms: row.get(5)?,
+        updated_at_ms: row.get(6)?,
+    })
+}
+
+const STAGED_COLS: &str = "user_id, playback_id, staged_incarnation_id, \
+    expected_predecessor_incarnation_id, deadline_ms, created_at_ms, updated_at_ms";
 
 /// Exact immutable identity for an activation replay. Lease, progress,
 /// publication, and update coordinates are deliberately absent: those are
@@ -1139,6 +1275,518 @@ impl MediaSessionStore for SqliteStore {
                         && route.owner_epoch == owner_epoch
                         && route.state == "active"
                         && route.publication_ready_at_ms == 0
+                });
+            tx.commit()?;
+            Ok(route)
+        })
+        .await
+    }
+
+    async fn prepare_media_session(
+        &self,
+        preparation: &MediaSessionPreparation,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        validate_preparation(preparation)?;
+        let preparation = preparation.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            // Replay first, and by exact identity. An owner that lost its
+            // response to a crash must be able to ask again and get the same
+            // staged successor rather than a refusal from its own earlier
+            // attempt — the ledger's primary key would otherwise turn the
+            // retry into "one staged successor per playback, and you already
+            // have one".
+            let existing = tx
+                .query_row(
+                    &format!(
+                        "SELECT {STAGED_COLS} FROM media_session_preparations
+                          WHERE user_id = ?1 AND playback_id = ?2"
+                    ),
+                    params![preparation.user_id, preparation.playback_id],
+                    staged_from_row,
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                let replay = existing.staged_incarnation_id == preparation.incarnation_id
+                    && existing.expected_predecessor_incarnation_id
+                        == preparation.expected_predecessor_incarnation_id;
+                let route = if replay {
+                    tx.query_row(
+                        &format!(
+                            "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
+                        ),
+                        [preparation.incarnation_id.as_str()],
+                        route_from_row,
+                    )
+                    .optional()?
+                    .filter(|route| preparation_route_matches(route, &preparation))
+                } else {
+                    None
+                };
+                tx.commit()?;
+                return Ok(route);
+            }
+            // The pointer must name the predecessor this preparation was made
+            // against. Not "must exist" — must be exactly this one.
+            let current_pointer = tx
+                .query_row(
+                    "SELECT current_incarnation_id FROM media_playback_pointers
+                      WHERE user_id = ?1 AND playback_id = ?2",
+                    params![preparation.user_id, preparation.playback_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if current_pointer.as_deref()
+                != Some(preparation.expected_predecessor_incarnation_id.as_str())
+            {
+                tx.commit()?;
+                return Ok(None);
+            }
+            // The same admission bounds an activation faces, and read the same
+            // way: the pointed-at incarnation is excluded because it is the
+            // one being replaced, and a staged successor is neither it nor the
+            // activating row, so it counts. See the trait doc — that is a
+            // decision, not an oversight.
+            // No pointer exclusion, deliberately, and this is the one place
+            // it differs from activation's four counting queries. Those
+            // exclude the pointed-at incarnation because the same transaction
+            // is about to reap it. A preparation reaps nothing — the
+            // predecessor stays current and active — so discounting it would
+            // count a slot that is not being freed and admit one session past
+            // the cap.
+            let current: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM media_sessions
+                  WHERE user_id = ?1 AND state IN ('starting', 'active')
+                    AND lease_expires_at_ms > ?2 AND incarnation_id != ?3",
+                params![
+                    preparation.user_id,
+                    preparation.now_ms,
+                    preparation.incarnation_id,
+                ],
+                |row| row.get(0),
+            )?;
+            let session_rows: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM media_sessions
+                  WHERE user_id = ?1 AND incarnation_id != ?2",
+                params![preparation.user_id, preparation.incarnation_id],
+                |row| row.get(0),
+            )?;
+            let owner_current: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM media_sessions
+                  WHERE owner_node_id = ?1 AND state = 'active'
+                    AND lease_expires_at_ms > ?2 AND incarnation_id != ?3",
+                params![
+                    preparation.owner_node_id,
+                    preparation.now_ms,
+                    preparation.incarnation_id,
+                ],
+                |row| row.get(0),
+            )?;
+            if current >= MAX_CURRENT_PER_USER
+                || session_rows >= MAX_SESSION_ROWS_PER_USER
+                || owner_current >= MAX_OWNED
+            {
+                tx.commit()?;
+                return Ok(None);
+            }
+            // Pre-empt the ledger's UNIQUE rather than letting the constraint
+            // fire: a violation surfaces as `Err`, and §4.1's contract is that
+            // `Err` means malformed input or a real database fault while a
+            // lost race is `Ok(None)`. The replicated twin inlines the same
+            // check into its INSERT for the same reason.
+            // A node the cluster has fenced off cannot activate or renew a
+            // session; it must not be able to prepare one either, or it would
+            // go on to commit and move the playback pointer to a session
+            // owned by a node nobody can reach.
+            let removed_owner: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM settings WHERE key = ?1",
+                params![removed_job_owner_key(&preparation.owner_node_id)],
+                |row| row.get(0),
+            )?;
+            if removed_owner > 0 {
+                tx.commit()?;
+                return Ok(None);
+            }
+            let staged_elsewhere: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM media_session_preparations
+                  WHERE staged_incarnation_id = ?1",
+                params![preparation.incarnation_id],
+                |row| row.get(0),
+            )?;
+            if staged_elsewhere > 0 {
+                tx.commit()?;
+                return Ok(None);
+            }
+            // An ordinary active row. The two things that make it staged are
+            // both absences: no pointer, and the publication sentinel it is
+            // born with and does not arm.
+            //
+            // `lease_expires_at_ms` is the preparation deadline, which is what
+            // makes `maintain_media_sessions` the backstop rather than a
+            // competing clock: 60 s past it, maintenance ends this row as
+            // `replaced`, which is precisely the abort an owner that died
+            // would otherwise never issue.
+            // The staged row's own session lease, taken before the row like
+            // activation does. Without it the successor can never be renewed
+            // or taken over: renewal's first statement is an UPDATE on this
+            // exact resource and takeover requires it to exist.
+            if tx.execute(
+                "INSERT INTO job_leases
+                    (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 1, 1, ?3, ?4)
+                 ON CONFLICT(resource) DO UPDATE SET
+                    expires_at_ms = excluded.expires_at_ms,
+                    revision = job_leases.revision + 1,
+                    updated_at_ms = excluded.updated_at_ms
+                 WHERE job_leases.owner_node_id = excluded.owner_node_id
+                   AND job_leases.fence = 1 AND job_leases.expires_at_ms > ?4
+                   AND job_leases.revision < 9223372036854775807",
+                params![
+                    format!("session:{}", preparation.incarnation_id),
+                    preparation.owner_node_id,
+                    preparation.deadline_ms,
+                    preparation.now_ms,
+                ],
+            )? != 1
+            {
+                tx.rollback()?;
+                return Ok(None);
+            }
+            tx.execute(
+                "INSERT INTO media_sessions
+                    (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
+                     owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
+                     response_json, produced_playable_through_ms, fetched_through_ms,
+                     media_origin_ms, media_sequence, discontinuity_sequence,
+                     publication_ready_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, 'active', ?8, ?9,
+                         0, 0, ?10, 0, 0, ?11, ?12)",
+                params![
+                    preparation.incarnation_id,
+                    preparation.session_id,
+                    preparation.user_id,
+                    preparation.playback_id,
+                    preparation.request_fingerprint,
+                    preparation.owner_node_id,
+                    preparation.deadline_ms,
+                    preparation.recipe_json,
+                    preparation.response_json,
+                    preparation.media_origin_ms,
+                    MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    preparation.now_ms,
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO media_session_preparations
+                    (user_id, playback_id, staged_incarnation_id,
+                     expected_predecessor_incarnation_id, deadline_ms,
+                     created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![
+                    preparation.user_id,
+                    preparation.playback_id,
+                    preparation.incarnation_id,
+                    preparation.expected_predecessor_incarnation_id,
+                    preparation.deadline_ms,
+                    preparation.now_ms,
+                ],
+            )?;
+            let route = tx
+                .query_row(
+                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    [preparation.incarnation_id.as_str()],
+                    route_from_row,
+                )
+                .optional()?
+                .filter(|route| preparation_route_matches(route, &preparation));
+            let Some(route) = route else {
+                tx.rollback()?;
+                return Ok(None);
+            };
+            tx.commit()?;
+            Ok(Some(route))
+        })
+        .await
+    }
+
+    async fn staged_media_session_for_playback(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<MediaSessionStagedGeneration>, StoreError> {
+        if user_id <= 0 || playback_id.is_empty() || playback_id.len() > 128 {
+            return Err(StoreError::Task(
+                "invalid staged media-session lookup".to_owned(),
+            ));
+        }
+        let playback_id = playback_id.to_owned();
+        self.with_read(move |conn| {
+            Ok(conn
+                .query_row(
+                    &format!(
+                        "SELECT {STAGED_COLS} FROM media_session_preparations
+                          WHERE user_id = ?1 AND playback_id = ?2"
+                    ),
+                    params![user_id, playback_id],
+                    staged_from_row,
+                )
+                .optional()?)
+        })
+        .await
+    }
+
+    async fn commit_media_session_preparation(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<MediaSessionPreparationCommit>, StoreError> {
+        if user_id <= 0
+            || playback_id.is_empty()
+            || playback_id.len() > 128
+            || !valid_uuid(staged_incarnation_id)
+            || now_ms <= 0
+            || lease_expires_at_ms <= now_ms
+        {
+            return Err(StoreError::Task(
+                "invalid media-session preparation commit".to_owned(),
+            ));
+        }
+        let playback_id = playback_id.to_owned();
+        let staged_incarnation_id = staged_incarnation_id.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let staged = tx
+                .query_row(
+                    &format!(
+                        "SELECT {STAGED_COLS} FROM media_session_preparations
+                          WHERE user_id = ?1 AND playback_id = ?2
+                            AND staged_incarnation_id = ?3"
+                    ),
+                    params![user_id, playback_id, staged_incarnation_id],
+                    staged_from_row,
+                )
+                .optional()?;
+            let Some(staged) = staged else {
+                // Either it was never staged, or an earlier commit already
+                // moved it. The replay is the pointer itself: if this
+                // incarnation is what the pointer names, this exact commit
+                // already happened and its outcome is the truthful answer.
+                let route = tx
+                    .query_row(
+                        &format!(
+                            "SELECT {ROUTE_COLS} FROM media_sessions
+                              WHERE incarnation_id = (SELECT current_incarnation_id
+                                FROM media_playback_pointers
+                                 WHERE user_id = ?1 AND playback_id = ?2)
+                                AND incarnation_id = ?3"
+                        ),
+                        params![user_id, playback_id, staged_incarnation_id],
+                        route_from_row,
+                    )
+                    .optional()?;
+                tx.commit()?;
+                return Ok(route.map(|route| MediaSessionPreparationCommit {
+                    route,
+                    predecessor: None,
+                }));
+            };
+            // The CAS this whole milestone exists for. The predecessor comes
+            // from the ledger, never from a fresh read of the pointer: a
+            // pointer that moved since the preparation means a newer player
+            // generation is current, and reaping it would be the exact bug
+            // that made a flag on `activate_media_session` unacceptable.
+            let pointer_advanced = tx.execute(
+                "UPDATE media_playback_pointers
+                    SET current_incarnation_id = ?1, updated_at_ms = ?2
+                  WHERE user_id = ?3 AND playback_id = ?4
+                    AND current_incarnation_id = ?5
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = ?1 AND user_id = ?3
+                        AND playback_id = ?4 AND state = 'active')",
+                params![
+                    staged.staged_incarnation_id,
+                    now_ms,
+                    user_id,
+                    playback_id,
+                    staged.expected_predecessor_incarnation_id,
+                ],
+            )?;
+            if pointer_advanced != 1 {
+                // A newer generation exists. Abort the staged successor rather
+                // than reap it — see the trait doc; this branch is the reason
+                // that doc is as long as it is.
+                //
+                // The same body an explicit abort runs, rather than a second
+                // spelling of it: the first version of this branch ended the
+                // row and dropped the ledger entry but left the successor's
+                // cache pins and job lease behind, which is a divergence from
+                // the replicated twin for the same input.
+                abort_staged_generation(
+                    &tx,
+                    user_id,
+                    &playback_id,
+                    &staged.staged_incarnation_id,
+                    now_ms,
+                )?;
+                tx.commit()?;
+                return Ok(None);
+            }
+            let staged_owner: String = tx.query_row(
+                "SELECT owner_node_id FROM media_sessions WHERE incarnation_id = ?1",
+                [staged.staged_incarnation_id.as_str()],
+                |row| row.get(0),
+            )?;
+            let predecessor = tx
+                .query_row(
+                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    [staged.expected_predecessor_incarnation_id.as_str()],
+                    route_from_row,
+                )
+                .optional()?;
+            // The same retirement an activation performs, against an exact
+            // named incarnation rather than whatever the pointer held. That
+            // difference is the one the two backends disagreed about, and it
+            // is settled here by not consulting the pointer at all.
+            tx.execute(
+                "UPDATE media_sessions
+                    SET state = 'ended', terminal_reason = 'superseded',
+                        lease_expires_at_ms = ?1, publication_ready_at_ms = ?3,
+                        updated_at_ms = ?1
+                  WHERE incarnation_id = ?2 AND state != 'ended'",
+                params![
+                    now_ms,
+                    staged.expected_predecessor_incarnation_id,
+                    MEDIA_SESSION_PUBLICATION_BLOCKED,
+                ],
+            )?;
+            tx.execute(
+                "DELETE FROM cache_consumer_pins
+                  WHERE consumer_kind = 'media_session' AND consumer_id = ?1",
+                params![staged.expected_predecessor_incarnation_id],
+            )?;
+            tx.execute(
+                "UPDATE job_leases
+                    SET expires_at_ms = CASE
+                          WHEN expires_at_ms < ?1 THEN expires_at_ms ELSE ?1 END,
+                        revision = revision + 1, updated_at_ms = ?1
+                  WHERE resource = ?2 AND revision < 9223372036854775807",
+                params![
+                    now_ms,
+                    format!("session:{}", staged.expected_predecessor_incarnation_id),
+                ],
+            )?;
+            // The successor stops being a candidate and starts being a
+            // stream, so it stops carrying the candidate's clock. Both halves
+            // move: the row, and the `job_leases` fence renewal reads.
+            tx.execute(
+                "UPDATE media_sessions
+                    SET lease_expires_at_ms = ?1, updated_at_ms = ?2
+                  WHERE incarnation_id = ?3 AND state = 'active'",
+                params![lease_expires_at_ms, now_ms, staged.staged_incarnation_id],
+            )?;
+            tx.execute(
+                "UPDATE job_leases
+                    SET expires_at_ms = ?1, revision = revision + 1, updated_at_ms = ?2
+                  WHERE resource = ?3 AND owner_node_id = ?4 AND fence = 1
+                    AND revision < 9223372036854775807",
+                params![
+                    lease_expires_at_ms,
+                    now_ms,
+                    format!("session:{}", staged.staged_incarnation_id),
+                    staged_owner,
+                ],
+            )?;
+            tx.execute(
+                "DELETE FROM media_session_preparations
+                  WHERE user_id = ?1 AND playback_id = ?2 AND staged_incarnation_id = ?3",
+                params![user_id, playback_id, staged.staged_incarnation_id],
+            )?;
+            // The exact post-commit projection: the route, and the pointer
+            // that now names it. Derived from a re-read rather than from
+            // `rows_affected`, so a replay reads the same as a first commit.
+            let route = tx
+                .query_row(
+                    &format!(
+                        "SELECT {ROUTE_COLS} FROM media_sessions
+                          WHERE incarnation_id = (SELECT current_incarnation_id
+                            FROM media_playback_pointers
+                             WHERE user_id = ?1 AND playback_id = ?2)
+                            AND incarnation_id = ?3"
+                    ),
+                    params![user_id, playback_id, staged.staged_incarnation_id],
+                    route_from_row,
+                )
+                .optional()?
+                .filter(|route| route.state == "active");
+            let Some(route) = route else {
+                // Unreachable in practice: the pointer CAS above already
+                // required the staged row to be `active`, and that branch
+                // aborts. Kept because a projection that cannot be read back
+                // must never commit — and a rollback here is the right
+                // outcome, since it also restores the ledger row rather than
+                // leaving a preparation half-consumed.
+                tx.rollback()?;
+                return Ok(None);
+            };
+            let predecessor = match predecessor {
+                Some(previous) => tx
+                    .query_row(
+                        &format!(
+                            "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
+                        ),
+                        [previous.incarnation_id.as_str()],
+                        route_from_row,
+                    )
+                    .optional()?,
+                None => None,
+            };
+            tx.commit()?;
+            Ok(Some(MediaSessionPreparationCommit { route, predecessor }))
+        })
+        .await
+    }
+
+    async fn abort_media_session_preparation(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        if user_id <= 0
+            || playback_id.is_empty()
+            || playback_id.len() > 128
+            || !valid_uuid(staged_incarnation_id)
+            || now_ms <= 0
+        {
+            return Err(StoreError::Task(
+                "invalid media-session preparation abort".to_owned(),
+            ));
+        }
+        let playback_id = playback_id.to_owned();
+        let staged_incarnation_id = staged_incarnation_id.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            abort_staged_generation(&tx, user_id, &playback_id, &staged_incarnation_id, now_ms)?;
+            // The predicate is a second line, not the first: every write above
+            // is itself ledger-gated. This reports success only for a row that
+            // is ended, carries the abort's own terminal cause, and belongs to
+            // the playback the caller named.
+            let route = tx
+                .query_row(
+                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    [staged_incarnation_id.as_str()],
+                    route_from_row,
+                )
+                .optional()?
+                .filter(|route| {
+                    route.state == "ended"
+                        && route.terminal_reason.as_deref() == Some("replaced")
+                        && route.user_id == user_id
+                        && route.playback_id == playback_id
                 });
             tx.commit()?;
             Ok(route)
@@ -2194,6 +2842,25 @@ impl MediaSessionStore for SqliteStore {
                      OR session.lease_expires_at_ms <= ?3
                   ORDER BY pointer.updated_at_ms, pointer.rowid LIMIT ?2)",
                 params![now_ms, MAINTENANCE_BATCH, retire_before],
+            )?;
+            // The ledger's own reaper, and the reason the preparation deadline
+            // can be a single clock. The retirement above already ended any
+            // staged row whose deadline passed — a staged row is `active`, so
+            // it is in that sweep like any other — and this clears the ledger
+            // entry it left behind. Without it a dead owner's preparation
+            // would hold the one-per-playback slot forever and refuse every
+            // future prepare for that player.
+            //
+            // Keyed on the successor's state, never on the deadline, so it can
+            // never race a live preparation whose owner is still renewing.
+            tx.execute(
+                "DELETE FROM media_session_preparations WHERE rowid IN (
+                   SELECT preparation.rowid FROM media_session_preparations preparation
+                   LEFT JOIN media_sessions session
+                     ON session.incarnation_id = preparation.staged_incarnation_id
+                  WHERE session.incarnation_id IS NULL OR session.state != 'active'
+                  ORDER BY preparation.updated_at_ms, preparation.rowid LIMIT ?1)",
+                params![MAINTENANCE_BATCH],
             )?;
             tx.execute(
                 "DELETE FROM media_session_requests WHERE rowid IN (

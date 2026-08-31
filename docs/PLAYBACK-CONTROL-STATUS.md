@@ -1,9 +1,10 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-31 · **Baseline:** `main` at `55c6f374` ·
+**Updated:** 2026-08-31 · **Baseline:** `main` at `8f9f7cee` ·
 **Fleet:** nuc3 · nuc4 · m6 serve `v0.2.8-106-g55abad8f`; nynuc serves a
-later untagged build · **Devices:** Android 47 · Apple 86 —
-the tree is Android 54 · Apple 95, and neither has run on hardware
+later untagged build · **Devices:** Apple 99 and Android 56 were **installed**
+on 2026-08-31 and neither has produced a control exchange — see
+§"The first fleet run" · the tree is Android 57 · Apple 101
 
 Companion to
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) (what
@@ -26,7 +27,7 @@ one is deleted.
 |---|---|---|---|
 | 1-4 | protocol, transport, hold/resume barriers | — | merged |
 | 5 | delete detached recovery loops | — | merged as #663 |
-| 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) | wire complete; **no client acts on an action yet** |
+| 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **complete in source on all three clients**; the deletions wait on a fleet run |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | both halves written; the spike **needs hardware**, the store half is ready to build |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | separate track |
@@ -43,12 +44,136 @@ merge target: two client PRs in flight means the second always fails.
 |---|---|---|---|
 | docs | status page, §7.4 re-verification, Apple/Android recon, ruling D1 | [#705](https://github.com/pjunod/plurx/pull/705) | merged |
 | M5a | web: `persistentWait` asks the server before deciding | [#706](https://github.com/pjunod/plurx/pull/706) | merged |
-| M5.5 spike | the three-platform measurement procedure, ready to run | [#707](https://github.com/pjunod/plurx/pull/707) | merged; **needs a hardware run** |
-| M5d | Apple: the return path, and the verdict that outlives its reporter | [#709](https://github.com/pjunod/plurx/pull/709) | merged |
+| M5.5 spike | the three-platform measurement procedure | [#707](https://github.com/pjunod/plurx/pull/707) | merged; **needs a hardware run** |
+| M5d | Apple: the return path, and a verdict that outlives its reporter | [#709](https://github.com/pjunod/plurx/pull/709) | merged |
+| M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | merged |
 | M5b | web: the truncated-stream owner defers too | [#712](https://github.com/pjunod/plurx/pull/712) | merged |
-| M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | in review |
-| M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | in review |
-| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | in review |
+| M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | merged |
+| M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | merged; **ready to build** |
+| M5e | Apple: the stall funnel asks before it decides | [#715](https://github.com/pjunod/plurx/pull/715) | merged |
+| web bound | ruling D3 applied to the web ask | [#717](https://github.com/pjunod/plurx/pull/717) | merged |
+| M5g | Android: the stall owner asks before it decides | [#718](https://github.com/pjunod/plurx/pull/718) | merged |
+| ask exits | Apple: read the answer slot at every exit | [#719](https://github.com/pjunod/plurx/pull/719) | merged |
+| acceptance | what a fleet run has to show | [#720](https://github.com/pjunod/plurx/pull/720) | merged |
+| M5e ladder | Apple: ask before walking the compatibility ladder | [#721](https://github.com/pjunod/plurx/pull/721) | merged |
+| M5g ladder | Android: skip the unchanged retry on an armed verdict | [#722](https://github.com/pjunod/plurx/pull/722) | merged |
+| verdict scope | Apple: narrow #721 to the retry the verdict rules out | [#723](https://github.com/pjunod/plurx/pull/723) | merged |
+| status | close out M5's buildable work | — | this change |
+
+**What is left in M5.** Nothing buildable. M5c and M5h — deleting the web and
+mobile budgets — are all that remains, and both are gated on
+[M5-FLEET-ACCEPTANCE.md](M5-FLEET-ACCEPTANCE.md) rather than on any code. The
+next thing that has to happen is a fleet run, and it is not a thing this side
+can do: the gpt prompt is §4.1 of that document.
+
+### Why Android does not await the verdict, and Apple does
+
+The two ladder slices are not mirrors, and the difference is not an oversight.
+
+Apple's `handleItemFailure` was already `async` before this milestone, and it
+already carried the fence that makes a deferred decision safe: `openGeneration`
+for a session open, `currentItem` identity for the media, and
+`isChangingStream` for an open still *in flight*. Adding an `await` there costs
+the ask's bound and nothing structural.
+
+Android's `onPlayerError` is a `Player.Listener` override and cannot suspend,
+so awaiting means launching the ladder on a coroutine — and Android has no
+equivalent of `isChangingStream`. Four adversarial passes over that version
+found, in order: a stall detector racing the ladder for the same evidence slot;
+a fence that cancelled the very session create whose 404 had woken it; a fence
+that stood aside for actions which re-prepare nothing, freezing the picture
+with no error and no affordance for the life of the screen; and a wait that
+could not tell an open which *prepared* from one which had already shown the
+viewer an error, so both outcomes happened. Each fix was correct and each
+exposed the next. The common root is that `openSession` reports its outcome to
+nobody, so "is a re-prepare coming, and did it work" is not a question the
+client can currently answer.
+
+So Android arms rather than awaits. `reportControlEvidence` notifies the
+reporter urgently, the exchange carrying the failure goes out immediately, and
+the verdict it earns lands in `terminalVerdict`, where a later rung reads it —
+without a coroutine, and without reordering anything.
+
+**What this leaves owed.** Making `openSession` publish its outcome
+(prepared · aborted · already reported) is the prerequisite for any deferred
+decision on Android, and M6's `buffered_break_before_make` will need it too.
+It is not in M5's scope and is recorded here rather than attempted.
+
+### A terminal verdict is recipe-scoped, and both ladder slices assumed source-scoped
+
+Found by the fifth review pass, and the more consequential of the two findings
+in this section.
+
+`terminal` is emitted only for `Unsupported` and `InvalidConfiguration`
+(`playback_control.rs` `resolve_action` → `is_permanent`), and `is_permanent`
+documents itself as *"whether retrying this source, **unchanged**, can ever
+succeed"*. `unsupported`'s own sentence is "this source cannot be carried by
+**this delivery pipeline**" — a copy-producer exit. The server treats it as
+recoverable by changing the pipeline: `execute_prepublication_copy_retry` is
+admitted for exactly this reason.
+
+The compatibility ladder's last two rungs *change the recipe*. A Dolby Vision
+remux and a compatibility transcode both ask the server for a different
+pipeline, and `forceCompatibilityTranscode` flips `copyableVideo` to false. So
+a `terminal` verdict does not rule them out — and a client that short-circuits
+them deletes the rung most likely to still produce a picture, then captions the
+failure with a sentence about a pipeline nobody is proposing any more.
+
+Only `RetrySameHDRDelivery` re-prepares the identical recipe, so that is the
+one rung the verdict licenses skipping. This slice is scoped to it.
+
+**Settled on both platforms.**
+[#723](https://github.com/pjunod/plurx/pull/723) narrowed Apple's, which had
+merged with the short-circuit ahead of the whole ladder. Its review found the
+second half of the answer: the verdict rules out the established-HDR
+*reconnect*, but not whether that rung runs at all — the rung also carries the
+stop that keeps an established HDR delivery from descending to SDR, and
+skipping the call handed the compatibility ladder a stream it has always been
+vetoed from. The gate sits inside the rung, on the reconnect only.
+
+## The first fleet run — installation passed, acceptance did not
+
+2026-08-31, against `943d8a9a`, Apple 99 / Android 56. `scripts/ship-physical`
+completed its first end-to-end run and installed on every reachable device.
+**It settled none of the rulings**, and the reason it settled none of them is
+worth more than the run cost.
+
+**Web: the control plane had never run.** The player rendered VOD HLS in about
+2.9 s and its Control panel sat at *"awaiting first acceptance · exchange in
+flight"* forever, because the reporter threw before exchange one:
+
+```
+TypeError: Illegal invocation
+    at Reporter.drain (.../assets/playback-control.js:237:35)
+```
+
+`setTimeout` is a WindowTimers method, every browser brand-checks its receiver,
+and the reporter stored it on itself and called `this.setTimer(...)`. **No web
+control request has ever reached the server.** That is the whole explanation for
+`vocabulary_total{platform="web"}` reading zero — not a deployment gap, a dead
+runtime. Fixed in [#727](https://github.com/pjunod/plurx/pull/727).
+
+Node does not brand-check, and every unit test injected its own timer, so the
+only branch a browser takes was covered by nothing.
+[#729](https://github.com/pjunod/plurx/pull/729) adds the gate that would have
+caught it: the shipped module, a real browser, two real exchanges required.
+
+**Apple and Android: the devices were locked.** Every reachable iOS device and
+the Apple TV refused a foreground launch (asleep or locked); the Pixel installed
+and stayed on the keyguard. No title played on either platform, so §4.1, §4.2
+and §4.3 are all still unobserved.
+
+**The old counters are not partial credit.** m6 held 4,657 Apple exchanges and
+nynuc 3 Android, all `complete="false"` — incomplete older clients, which is
+what that label means. They cannot settle a ruling about the full vocabulary,
+and they predate the requested builds.
+
+**What the run did prove:** `scripts/ship-physical` works end to end, and the
+signed artifacts reach hardware. Also that the fleet was further ahead than this
+page claimed — devices were on Apple 94 / Android 53, not 86 / 47.
+
+**What the next run needs, beyond a deploy:** an unlocked, awake device with
+auto-lock disabled. Web can be settled without one, and should be settled first.
 
 ## The gate that blocks every deletion, and what it does not block
 
@@ -60,6 +185,14 @@ reads **zero on all four nodes** as of 2026-08-31, measured directly off
 `/metrics`. It counts accepted exchanges from clients that declared every
 action this server can send, and the fleet has never run a build that can
 receive one.
+
+**The server does emit actions.** `resolve_action` is called from
+`local_control_response` (`crates/plurxd/src/http/hls.rs:3525`) on the live
+control endpoint, not only from tests — a grep confined to
+`playback_control.rs` finds only test call sites, because the production one
+is fully qualified, and that mistake has been made once already in review.
+What has never happened is a *client* completing an exchange that declares
+the whole vocabulary.
 
 **What that gates is deletion, not construction.** Removing a client's own
 recovery while the installed build cannot receive the replacement turns the
@@ -85,9 +218,28 @@ blocks the slices now in flight; each shapes M6.
    fallback (reached via [remaining](REMAINING-ROADMAP-HANDOFF.md) §3.2); if none does, the
    one-encoder-slot path is the common case rather than the exception and
    M6's shape changes.
-5. What interruption bound is acceptable for `buffered_break_before_make`?
+5. ~~How long may a client wait for an action?~~ **Answered by ruling D3.**
+   1.5 s, extended once to at most 3 s when an exchange was already in flight.
+   The fallback is the branch the entire fleet takes, so the bound is added to
+   every real stall on every device; a server that cannot answer inside a
+   second and a half is a server whose answer is not worth more frozen picture
+   than the recovery it would have replaced. Web's 6 s/12 s predates this and
+   should be brought down to match — it is the one place the three platforms
+   now disagree. Decided without the operator.
+6. What interruption bound is acceptable for `buffered_break_before_make`?
    Its acceptance criterion is "within its measured interruption bound", and
    nobody has measured or chosen one.
+7. Should the two ladder slices short-circuit anything but the unchanged
+   retry? **Answered: no** — a `terminal` verdict is recipe-scoped, see above.
+   Android is scoped to `RetrySameHDRDelivery`, Apple to the established-HDR
+   reconnect. Decided without the operator, and the one to look at first: it
+   is a claim about what the server means by `is_permanent`, and if that
+   reading is wrong then both slices are scoped too narrowly.
+8. Should Android's session opens publish an outcome, so a client decision can
+   be deferred there at all? Decided *not* to attempt it inside M5 — see
+   §"Why Android does not await the verdict" above. Decided without the
+   operator, and the one worth a second look: it is the difference between the
+   two platforms' ladder slices, and M6 needs it either way.
 
 ## Chronicle
 

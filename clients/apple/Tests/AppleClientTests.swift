@@ -443,6 +443,24 @@ final class AppleClientTests: XCTestCase {
     }
     #endif
 
+    func testMarkerOffersAreReportedOncePerPlaybackGenerationAndBoundary() {
+        let intro = Marker(kind: "intro", label: "Skip Intro", startMs: 1_000, endMs: 9_000)
+        var ledger = MarkerOfferLedger()
+
+        XCTAssertTrue(ledger.shouldReport(generation: "generation-a", marker: intro))
+        XCTAssertFalse(ledger.shouldReport(generation: "generation-a", marker: intro))
+        XCTAssertTrue(ledger.shouldReport(generation: "generation-b", marker: intro))
+        XCTAssertTrue(ledger.shouldReport(
+            generation: "generation-b",
+            marker: Marker(
+                kind: "credits",
+                label: "Skip Credits",
+                startMs: 80_000,
+                endMs: 90_000
+            )
+        ))
+    }
+
     func testLateOfflineProgressCannotRegressACompletedCatalogItem() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("offline-catalog-\(UUID().uuidString)", isDirectory: true)
@@ -1929,6 +1947,32 @@ final class AppleClientTests: XCTestCase {
     ///
     /// Collapsing them would hand the arbiter one word — "stalled" — which is
     /// exactly the ambiguity M5 exists to remove.
+    ///
+    /// (The test this documents is
+    /// `testStallEvidenceNamesWhichConditionTheServerIsBeingToldAbout`, below.)
+
+    /// The server's seven hold reasons, in the viewer's words.
+    ///
+    /// A viewer reading `working_set` learns less than one reading a sentence,
+    /// and a reason this client has never heard of is a newer server rather
+    /// than a broken one — so it falls back to the generic line instead of
+    /// showing the wire name or nothing at all.
+    func testEveryHoldReasonHasSomethingAViewerCanRead() {
+        for reason in ["demand", "time", "bytes", "global", "ahead", "working_set", "no_room"] {
+            let notice = PlayerController.holdNotice(reason)
+            // A sentence, not a token. `ahead` legitimately appears inside its
+            // own sentence, so the test is that the viewer gets prose rather
+            // than that a particular word is absent.
+            XCTAssertTrue(notice.hasSuffix("."), "\(reason) is not a sentence")
+            XCTAssertGreaterThan(notice.count, reason.count + 8,
+                                 "\(reason) reads like its wire name")
+            XCTAssertNotEqual(notice, reason)
+        }
+        XCTAssertEqual(PlayerController.holdNotice("a reason from a newer server"),
+                       "Waiting for the server.")
+        XCTAssertEqual(PlayerController.holdNotice(nil), "Waiting for the server.")
+    }
+
     func testStallEvidenceNamesWhichConditionTheServerIsBeingToldAbout() {
         let buffering = PlayerController.stallEvidence(for: .buffering)
         XCTAssertEqual(buffering.decoderState, .starved)
@@ -5889,13 +5933,15 @@ final class AppleClientTests: XCTestCase {
     /// (docs/ARCHITECTURE.md §6, docs/FEATURES.md). Rendering it exactly like a
     /// chapter-derived marker makes a guess read as a fact, so flattening the
     /// two presentations back together fails here — on both platforms.
-    func testEstimatedCreditsMarkerReadsAsAGuessAndChapterMarkersStayExact() {
+    func testMarkerProvenanceControlsExactnessAndAutomaticEligibility() throws {
         let estimate = Marker(
             kind: "credits",
             label: "Skip Credits",
             startMs: 80_000,
             endMs: 90_000,
-            chapter: false
+            chapter: false,
+            provenance: "estimated",
+            confidence: 250
         )
         let chapterDerived = Marker(
             kind: "credits",
@@ -5910,13 +5956,53 @@ final class AppleClientTests: XCTestCase {
             startMs: 80_000,
             endMs: 90_000
         )
+        let manual = Marker(
+            kind: "credits",
+            label: "Skip Credits",
+            startMs: 80_000,
+            endMs: 90_000,
+            chapter: false,
+            provenance: "manual",
+            confidence: 1_000
+        )
+        let detected = Marker(
+            kind: "credits",
+            label: "Skip Credits",
+            startMs: 80_000,
+            endMs: 90_000,
+            chapter: false,
+            provenance: "detected",
+            confidence: 1_000
+        )
 
         XCTAssertTrue(PlayerMarkerButtonLabel.isEstimated(estimate))
         XCTAssertFalse(PlayerMarkerButtonLabel.isEstimated(chapterDerived))
+        XCTAssertFalse(PlayerMarkerButtonLabel.isEstimated(manual))
         XCTAssertFalse(
             PlayerMarkerButtonLabel.isEstimated(olderServer),
             "a missing chapter flag is not evidence of an estimate"
         )
+        XCTAssertFalse(estimate.isAutoSkipEligible)
+        XCTAssertTrue(chapterDerived.isAutoSkipEligible)
+        XCTAssertTrue(manual.isAutoSkipEligible)
+        XCTAssertFalse(
+            detected.isAutoSkipEligible,
+            "M1-M4 has no configured detector confidence floor"
+        )
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let decoded = try decoder.decode(
+            Marker.self,
+            from: Data(
+                #"{"kind":"credits","label":"Skip Credits","start_ms":80000,"end_ms":90000,"chapter":true,"provenance":"manual","confidence":1000,"generation":"g1","detector_version":"manual-v1"}"#.utf8
+            )
+        )
+        XCTAssertEqual(decoded.provenance, "manual")
+        XCTAssertEqual(decoded.confidence, 1_000)
+        XCTAssertEqual(decoded.generation, "g1")
+        XCTAssertEqual(decoded.detectorVersion, "manual-v1")
+        XCTAssertTrue(decoded.isAutoSkipEligible)
 
         let hedged = PlayerMarkerButtonLabel.displayTitle(
             estimate.label,

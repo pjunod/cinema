@@ -1,9 +1,19 @@
 # Playback capabilities v2 — highest deliverable grade, negotiated not guessed
 
 **Status:** building — M0, M1, M2, M3a–M3d, M4, M5a and M6 merged;
-M5b implementation complete in #710 · **Executes:** fable's rulings
-of 2026-08-29 on opus's DV-delivery findings · **Analysed:** `main` @ `4ba8bb48` ·
-**Written:** 2026-08-29 · **Updated:** 2026-08-31 · **Builder:** opus
+M5a is #688 + #716; M5b implementation is complete in #710, with exact-tree
+qualification and promotion still pending. M5a's badge remains for the Apple
+and Android clients, and the §7 timeline check remains for nuc4 · **Executes:**
+fable's rulings of 2026-08-29 on opus's DV-delivery findings · **Analysed:**
+`main` @ `4ba8bb48` · **Written:** 2026-08-29 · **Updated:** 2026-08-31 ·
+**Builder:** opus
+
+Two handoffs carry what is left of M5a:
+[M5A-CLIENT-BADGE-HANDOFF.md](M5A-CLIENT-BADGE-HANDOFF.md) (the
+`DV P7 → DV P8` state in the Apple and Android clients; server and web are
+done) and [M5A-VERIFICATION-ON-NUC4.md](M5A-VERIFICATION-ON-NUC4.md) (the
+container-truth timeline check against a real Profile 7 remux, which needs
+the node and the media).
 
 Companion to [MEDIA-BADGES-PLAN.md](MEDIA-BADGES-PLAN.md) (what the badge
 promises) and [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) (how a
@@ -738,9 +748,27 @@ identity); the two-ffmpeg pipe with the in-process RPU rewrite in the copy
 session **and** in the index pipe (`fragindex::build`) so the index
 describes the converted bytes; the `dvcC` insertion if the spike said so,
 with its golden test; `playback.dv_convert` setting + boot probe; badge
-state `DV P7 → DV P8` in web, Apple and Android (MEDIA-BADGES-PLAN §4 gains
-the row; fix the stale P7 row at ~line 340 in the same commit); MEL/FEL in
-the session's `reasons`. Same PR, Android side: `CapsPolicy.kt` maps
+state `DV P7 → DV P8` in web, Apple and Android (MEDIA-BADGES-PLAN §2.3
+gains the row; fix the stale P7 rows in §11's matrix in the same commit);
+MEL/FEL in the session's `reasons`.
+
+**Corrected 2026-08-31 (§4.8's pipe was withdrawn).** "The two-ffmpeg pipe"
+above is not what shipped: feeding a raw Annex B elementary stream between
+two ffmpegs destroys the video timeline, because ffmpeg's raw HEVC demuxer
+emits packets with no timestamps and the muxer then fabricates a
+decode-order grid. Measured: ~410 display-order inversions in 819 frames on
+an ordinary three-B-frame encode, on every GOP, seek or no seek. The
+conversion runs on the **far side of the muxer** instead — one ffmpeg, one
+timeline, plurx rewriting the RPU NAL units inside the fragments it already
+parses. `crates/plurxd/src/dvpipe.rs` carries the full account.
+
+**And MEL/FEL is not in `reasons`.** It cannot be: the distinction lives in
+the RPU, so it is not known until the stream is running, while `reasons` is
+a decision-time list. The server reads it off the first RPU and logs it —
+`converting Dolby Vision to Profile 8.1: …` per session,
+`indexed a converted stream: …` per index pass — and the badge's
+hover/long-press detail is where it belongs on the wire. That is the client
+handoff's, not this milestone's. Same PR, Android side: `CapsPolicy.kt` maps
 `DolbyVisionProfileDvheDtb` → 7 when the decoder enumeration declares it,
 and the server treats 7 like any other listed profile (it already does —
 `allows_dolby_vision` is list membership; just delete any assumption that

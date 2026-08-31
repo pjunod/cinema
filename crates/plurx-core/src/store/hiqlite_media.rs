@@ -2446,6 +2446,27 @@ impl MediaStore for HiqliteAuthStore {
             .and_then(|row| row.probe_json))
     }
 
+    async fn get_file_probe_chapters_json(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .client()
+            .query_consistent_map::<ProbeJsonRow, _>(
+                "SELECT CASE
+                   WHEN probe_json IS NOT NULL AND json_valid(probe_json)
+                    AND json_type(probe_json, '$.chapters') = 'array'
+                   THEN json_extract(probe_json, '$.chapters') END AS probe_json
+                   FROM files WHERE id = $1",
+                params!(file_id),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .next()
+            .and_then(|row| row.probe_json))
+    }
+
     async fn merge_file_probe_chapters(
         &self,
         file_id: i64,

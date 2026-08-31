@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Container-truth timeline check for the DV P7->P8.1 conversion pipeline.
+
+Usage: verify_dv_timeline.py SOURCE OUTPUT
+  SOURCE = the original file the pipeline read (mkv/mp4/ts)
+  OUTPUT = what the pipeline served (fMP4: init+fragments concatenated, or any
+           file ffprobe can read as one mp4 stream)
+
+Asserts, from container timestamps only (no decode, player-faithful):
+  1. display order preserved (zero inversions past the leading-picture head)
+  2. A/V skew: |median| <= 5 ms, spread <= 1.5 frame durations over the tail
+  3. ctts pattern (pts-dts) matches the source from the seek keyframe onward
+
+Matching is positional: stream copy preserves packet order and count, so
+output packet i corresponds to source packet (N_src - N_out + i), per stream.
+Exit 0 = pass. Stdlib only; needs ffprobe on PATH.
+"""
+import json, subprocess, sys, statistics
+
+def packets(path, sel):
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", sel, "-show_packets",
+         "-show_entries", "packet=pts_time,dts_time,flags", "-of", "json", path],
+        capture_output=True)
+    if r.returncode != 0:
+        sys.exit(f"ffprobe failed on {path}: {r.stderr.decode()[-500:]}")
+    return json.loads(r.stdout)["packets"]
+
+def f(p, k="pts_time"):
+    return float(p[k])
+
+def main(src, out):
+    sv, ov = packets(src, "v:0"), packets(out, "v:0")
+    sa, oa = packets(src, "a:0"), packets(out, "a:0")
+    kv, ka = len(sv) - len(ov), len(sa) - len(oa)
+    if kv < 0 or ka < 0:
+        sys.exit(f"FAIL: output has more packets than source (video {kv}, audio {ka})")
+    if "K" not in sv[kv].get("flags", ""):
+        print(f"WARN: source packet {kv} not flagged keyframe — positional match may be off")
+
+    fdur = statistics.median(f(sv[i+1], "dts_time") - f(sv[i], "dts_time")
+                             for i in range(kv, min(kv+200, len(sv)-1)))
+
+    # 1. display order: sort output by pts; source pts must be sorted the same way
+    order = sorted(range(len(ov)), key=lambda i: f(ov[i]))
+    seq = [f(sv[kv+i]) for i in order]
+    inv = [i for i in range(1, len(seq)) if seq[i] < seq[i-1]]
+    # The head window forgives inversions in the first 32 display positions,
+    # because an open-GOP seek really does emit leading pictures that reorder
+    # there. `head_ok` is what stops that forgiveness being a blanket amnesty:
+    # each of the first eight output packets must still land near the front.
+    # Without it a stream whose whole timeline was rebuilt in decode order --
+    # the exact failure that withdrew the two-ffmpeg design -- passes the head
+    # window by having its damage start inside it.
+    head_ok = all(order.index(j) < 3*8 for j in range(min(8, len(ov))))  # tolerate head RASLs
+    real_inv = [i for i in inv if i > 32]
+    print(f"inversions: {len(inv)} total, {len(real_inv)} beyond the head window, "
+          f"head {'ok' if head_ok else 'DISPLACED'}")
+
+    # 2. skew
+    S_a = f(sa[ka]) - f(oa[0])
+    skews = [ (f(sv[kv+i]) - S_a) - f(ov[i]) for i in range(len(ov)) ]
+    tail = skews[len(skews)//2:]
+    med = statistics.median(tail)
+    spread = max(tail) - min(tail)
+    print(f"skew: median {med*1000:+.1f} ms, tail spread {spread*1000:.1f} ms, frame {fdur*1000:.1f} ms")
+
+    # 3. ctts pattern
+    bad = sum(1 for i in range(len(ov))
+              if abs((f(ov[i]) - f(ov[i], "dts_time")) -
+                     (f(sv[kv+i]) - f(sv[kv+i], "dts_time"))) > fdur*0.25)
+    print(f"ctts (pts-dts) mismatches: {bad}/{len(ov)}")
+
+    ok = (not real_inv) and head_ok and abs(med) <= 0.005 and spread <= 1.5*fdur and bad == 0
+    print("PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        sys.exit(__doc__)
+    sys.exit(main(sys.argv[1], sys.argv[2]))

@@ -214,6 +214,11 @@ pub struct VodHlsFacts {
     pub audio_index: Option<i64>,
     pub aac: bool,
     pub preserve_dolby_vision: bool,
+    /// Whether this session's copy rewrites Profile 7 RPUs to 8.1. Carried
+    /// beside the preservation because the playlist has to describe what the
+    /// copy produces — `hvc1` plus `SUPPLEMENTAL-CODECS: dvh1.08.LL` — and
+    /// the source's own Dolby Vision record says profile 7.
+    pub convert_dolby_vision: bool,
     pub(crate) response_owner: ResponseOwner,
 }
 
@@ -664,10 +669,6 @@ impl HeadChildOwner {
         }
     }
 
-    fn child_mut(&mut self) -> Option<&mut tokio::process::Child> {
-        self.child.as_mut()
-    }
-
     fn begin_reap(&mut self) -> Option<tokio::task::JoinHandle<()>> {
         let mut child = self.child.take()?;
         let _ = child.start_kill();
@@ -969,6 +970,17 @@ pub struct VodServe {
     shared: Arc<Shared>,
 }
 
+fn repair_job_for_artifact(
+    mut repair: plurx_core::store::NewClusterFragmentIndexJob,
+    artifact: &plurx_core::store::ClusterFragmentIndexArtifact,
+) -> plurx_core::store::NewClusterFragmentIndexJob {
+    // Serving resolves a logical key through the durable head. Repair must
+    // rebuild that resolved immutable generation, not the pre-resolution
+    // logical key, or the head would continue pointing at an unavailable blob.
+    repair.cache_key.clone_from(&artifact.cache_key);
+    repair
+}
+
 impl VodServe {
     /// `base` is the renditions root directory (created lazily).
     pub fn new(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
@@ -1085,6 +1097,7 @@ impl VodServe {
                 kind: SessionKind::Copy {
                     aac: true,
                     preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
                 },
                 supersession_user: "[\"user_id\",1]".to_owned(),
                 block_budget: Duration::from_secs(1),
@@ -1217,9 +1230,14 @@ impl VodServe {
             .ok_or_else(|| "this node has not attested the current source object".to_owned())?;
         let engine = crate::ffmpeg::fragment_index_engine_digest().await;
         let pipeline = crate::fragment_index_cluster::pipeline_digest(file, &engine, video);
-        let cache_key =
-            plurx_core::store::cluster_fragment_index_key(&observation.source_sha256, &pipeline)
-                .ok_or_else(|| "source attestation contained an invalid digest".to_owned())?;
+        let cache_key = plurx_core::store::cluster_fragment_index_key(
+            file.id,
+            file.size,
+            file.mtime,
+            &observation.source_sha256,
+            &pipeline,
+        )
+        .ok_or_else(|| "source attestation contained an invalid digest".to_owned())?;
         let now = crate::fragment_index_cluster::unix_ms();
         let repair = plurx_core::store::NewClusterFragmentIndexJob {
             cache_key: cache_key.clone(),
@@ -1228,6 +1246,9 @@ impl VodServe {
             source_mtime: file.mtime,
             source_sha256: observation.source_sha256.clone(),
             pipeline_sha256: pipeline.clone(),
+            priority: "foreground".to_owned(),
+            trigger: "foreground".to_owned(),
+            target_node_id: node_id.to_owned(),
             not_before_ms: now,
             created_at_ms: now,
         };
@@ -1264,6 +1285,7 @@ impl VodServe {
         )
         .await?;
         let Some(index) = index else {
+            let repair = repair_job_for_artifact(repair, &artifact);
             let _ = self
                 .shared
                 .store
@@ -1460,6 +1482,7 @@ impl VodServe {
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
+            convert_dolby_vision,
         } = req.kind
         else {
             return Err(crate::transcode::vod_refusal_error(
@@ -1489,11 +1512,12 @@ impl VodServe {
             .get_file_probe_json(file.id)
             .await
             .map_err(|error| format!("reading the file probe: {error}"))?;
-        let video = CopyVideoOptions::from_probe(
+        let video = copy_video_pipeline(
             file,
             probe_json.as_deref(),
             have_dovi,
             preserve_dolby_vision,
+            convert_dolby_vision,
         );
         let identity = crate::fragindex::identity_for(file, video);
         let cluster_cache_enabled = self
@@ -2715,6 +2739,7 @@ impl VodServe {
             audio_index: rendition.recipe.audio_index,
             aac: rendition.recipe.aac,
             preserve_dolby_vision: rendition.recipe.video.preserves_dolby_vision(),
+            convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
             response_owner: publication.owner,
         })
     }
@@ -4030,25 +4055,127 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
     };
     let start_seconds = entry.start_ticks as f64 / f64::from(rendition.timescale);
     let recipe = &rendition.recipe;
-    let mut args = copy_pipe_args_with_dolby_vision(
-        &recipe.file,
-        start_seconds,
-        recipe.audio_index,
-        recipe.aac,
-        Pacing::unpaced(),
-        recipe.video,
-    );
-    #[cfg(unix)]
-    if rendition.source.is_some() {
-        for index in 0..args.len().saturating_sub(1) {
-            if args[index] == "-i" {
-                args[index + 1] = "/dev/fd/3".to_owned();
+    let attested = attested_source_setup(rendition);
+    // One ffmpeg, converting or not. The conversion happens on the far side of
+    // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
+    // process writes — so the producer is the producer it always was.
+    let (mut child, stdout) = {
+        let mut args = copy_pipe_args_with_dolby_vision(
+            &recipe.file,
+            start_seconds,
+            recipe.audio_index,
+            recipe.aac,
+            Pacing::unpaced(),
+            recipe.video,
+        );
+        if attested {
+            replace_inputs_with_attested_descriptor(&mut args);
+        }
+        let mut command = tokio::process::Command::new(ffmpeg_bin());
+        attach_attested_descriptor(&mut command, rendition.source.as_ref());
+        let mut child = match command
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let cause = format!("spawning the producer: {error}");
+                record_failure(shared, rendition, cause);
+                return;
             }
+        };
+        let Some(stdout) = child.stdout.take() else {
+            record_failure(
+                shared,
+                rendition,
+                "the producer started without a stdout".to_string(),
+            );
+            return;
+        };
+        (child, stdout)
+    };
+    // The rendition can be closed between the spawn above and the attach
+    // below (a purge committing on the maintain task). Attaching would leave
+    // a live ffmpeg in a slot whose driver has already exited — a child
+    // nothing reaps until the Arc drops.
+    if rendition.closed.load(Relaxed) {
+        let _ = child.kill().await;
+        return;
+    }
+    rendition
+        .last_child_pid
+        .store(child.id().unwrap_or(0), Relaxed);
+    rendition.slot.attach(child, at).await;
+    let epoch = rendition.gen_epoch.load(Relaxed);
+    let shared = Arc::clone(shared);
+    let rendition = Arc::clone(rendition);
+    tokio::spawn(async move {
+        run_generation(shared, rendition, stdout, at, epoch).await;
+    });
+    tracing::info!(rendition = %rendition_key_field(at), "spawned a producer generation");
+}
+
+/// Whether this rendition's producers read the source through the attested
+/// file descriptor rather than by name.
+///
+/// The attestation is what makes a session's video and its audio provably the
+/// same bytes: a path can be replaced between two opens, a descriptor cannot.
+fn attested_source_setup(rendition: &Rendition) -> bool {
+    cfg!(unix) && rendition.source.is_some()
+}
+
+/// Point every `-i` at the inherited descriptor.
+///
+/// Every input in a copy argv is the same source — the video, and the second
+/// open a copied audio track's A/V correction needs — so they all become fd 3.
+#[allow(clippy::needless_range_loop)]
+fn replace_inputs_with_attested_descriptor(args: &mut [String]) {
+    for index in 0..args.len().saturating_sub(1) {
+        if args[index] == "-i" {
+            args[index + 1] = "/dev/fd/3".to_owned();
         }
     }
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
+}
+
+/// The video pipeline one copy session runs, from what that session asked for.
+///
+/// The conversion rides **in** the options rather than beside them, so it
+/// reaches `copy_video_args` and therefore the argv fingerprint and the
+/// fragment-index identity. A converted stream has different bytes and
+/// different segment boundaries; sharing an identity with the unconverted one
+/// would hand a session a playlist whose cut points describe different media,
+/// and the session would fail its landing on every fragment.
+///
+/// Every later reader — the rendition's generation, its playlist facts, its
+/// index pass — asks these options rather than carrying a second copy of the
+/// answer, which is why this is the one place the two flags meet.
+fn copy_video_pipeline(
+    file: &MediaFile,
+    probe_json: Option<&str>,
+    have_dovi: bool,
+    preserve_dolby_vision: bool,
+    convert_dolby_vision: bool,
+) -> CopyVideoOptions {
+    CopyVideoOptions::from_probe(file, probe_json, have_dovi, preserve_dolby_vision)
+        .with_dolby_vision_conversion(convert_dolby_vision)
+}
+
+/// Hand a child the attested source as fd 3, if there is one.
+///
+/// Factored out because two spawn sites need it — the producer and head
+/// regeneration — and a child that opened the file by name rather than by the
+/// attested descriptor could read a file that had been replaced since the
+/// fence was taken, pairing a playlist with media from a different film.
+fn attach_attested_descriptor(
+    command: &mut tokio::process::Command,
+    source: Option<&crate::fragment_index_cluster::SourceFence>,
+) {
     #[cfg(unix)]
-    if let Some(source) = rendition.source.as_ref() {
+    if let Some(source) = source {
         use std::os::fd::AsRawFd;
         let source_fd = source.handle.as_raw_fd();
         unsafe {
@@ -4070,48 +4197,8 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
             });
         }
     }
-    let mut child = match command
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            let cause = format!("spawning the producer: {error}");
-            record_failure(shared, rendition, cause);
-            return;
-        }
-    };
-    let Some(stdout) = child.stdout.take() else {
-        record_failure(
-            shared,
-            rendition,
-            "the producer started without a stdout".to_string(),
-        );
-        return;
-    };
-    // The rendition can be closed between the spawn above and the attach
-    // below (a purge committing on the maintain task). Attaching would leave
-    // a live ffmpeg in a slot whose driver has already exited — a child
-    // nothing reaps until the Arc drops.
-    if rendition.closed.load(Relaxed) {
-        let _ = child.kill().await;
-        return;
-    }
-    rendition
-        .last_child_pid
-        .store(child.id().unwrap_or(0), Relaxed);
-    rendition.slot.attach(child, at).await;
-    let epoch = rendition.gen_epoch.load(Relaxed);
-    let shared = Arc::clone(shared);
-    let rendition = Arc::clone(rendition);
-    tokio::spawn(async move {
-        run_generation(shared, rendition, stdout, at, epoch).await;
-    });
-    tracing::info!(rendition = %rendition_key_field(at), "spawned a producer generation");
+    #[cfg(not(unix))]
+    let _ = (command, source);
 }
 
 fn rendition_key_field(at: u32) -> String {
@@ -4176,6 +4263,10 @@ async fn run_generation(
         identity,
         start_entry: at,
         policy: rendition.policy,
+        // The recipe's own answer, which is also the answer the index this
+        // generation is matched against was built with — they share one
+        // `CopyVideoOptions`, so they cannot disagree.
+        convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
     };
     let sink = RenditionSink {
         shared: Arc::clone(&shared),
@@ -4699,36 +4790,10 @@ async fn regenerate_init_head(
         recipe.video,
     );
     #[cfg(unix)]
-    for index in 0..args.len().saturating_sub(1) {
-        if args[index] == "-i" {
-            args[index + 1] = "/dev/fd/3".to_owned();
-        }
-    }
+    replace_inputs_with_attested_descriptor(&mut args);
     let mut command = tokio::process::Command::new(ffmpeg_bin());
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let source_fd = source.handle.as_raw_fd();
-        unsafe {
-            command.pre_exec(move || {
-                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
-                if duplicate == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::dup2(duplicate, 3) == -1 {
-                    libc::close(duplicate);
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(duplicate);
-                let flags = libc::fcntl(3, libc::F_GETFD);
-                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    let child = command
+    attach_attested_descriptor(&mut command, Some(source));
+    let mut child = command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -4738,8 +4803,14 @@ async fn regenerate_init_head(
         .map_err(|error| {
             HeadRegenerationError::Failed(format!("spawning the head regeneration: {error}"))
         })?;
+    let Some(stdout) = child.stdout.take() else {
+        return Err(HeadRegenerationError::Failed(
+            "the head regeneration started without a stdout".to_owned(),
+        ));
+    };
     let muxer = read_regenerated_head_before(
         child,
+        stdout,
         HEAD_REGENERATION_TIMEOUT,
         HEAD_REGENERATION_MAX_BYTES,
     )
@@ -4766,16 +4837,14 @@ async fn regenerate_init_head(
 /// owner also transfers reap to a detached task if this future is cancelled.
 async fn read_regenerated_head_before(
     child: tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
     budget: Duration,
     max_bytes: usize,
 ) -> Result<Init, HeadRegenerationError> {
+    // The stdout arrives separately from the child because the owner below
+    // takes the child by value, and the read needs the pipe after that move.
     let mut child = HeadChildOwner::new(child);
-    let Some(mut stdout) = child.child_mut().and_then(|child| child.stdout.take()) else {
-        child.terminate_and_reap().await;
-        return Err(HeadRegenerationError::Failed(
-            "the head regeneration started without a stdout".to_string(),
-        ));
-    };
+    let mut stdout = stdout;
     let head = tokio::time::timeout(budget, read_muxer_init_bounded(&mut stdout, max_bytes)).await;
     // Only the head is wanted; the rest of the pipe is not read.
     drop(stdout);
@@ -4971,6 +5040,47 @@ mod tests {
         }
     }
 
+    /// The conversion reaches the pipeline, and therefore the identity.
+    ///
+    /// This is the join between "the plan review said convert" and everything
+    /// downstream: the generation, the playlist facts and the index pass all
+    /// read these options rather than carrying their own copy of the answer,
+    /// so the flag arriving here is what makes them agree — and the argv
+    /// fingerprint is what stops a converting session ever landing on the
+    /// unconverted stream's index.
+    #[test]
+    fn a_converting_session_gets_a_converting_pipeline_and_its_own_identity() {
+        let mut file = fixture_file();
+        file.hdr = Some("dolby_vision".into());
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(6);
+        file.dolby_vision.bl_compat_id = Some(1);
+
+        let converting = copy_video_pipeline(&file, None, true, true, true);
+        assert!(converting.converts_dolby_vision());
+        assert!(
+            converting.preserves_dolby_vision(),
+            "there is nothing to convert in a stream the filter removed"
+        );
+
+        let preserving = copy_video_pipeline(&file, None, true, true, false);
+        assert!(!preserving.converts_dolby_vision());
+        assert!(preserving.preserves_dolby_vision());
+
+        let stripping = copy_video_pipeline(&file, None, true, false, false);
+        assert!(!stripping.preserves_dolby_vision());
+
+        // Three pipelines, three identities. Two of them sharing one would
+        // hand a session a playlist whose cut points describe media it never
+        // produces — the failure the whole third-identity design exists to
+        // prevent.
+        let fingerprints: std::collections::HashSet<_> = [converting, preserving, stripping]
+            .into_iter()
+            .map(|video| crate::fragindex::identity_for(&file, video).argv_fingerprint)
+            .collect();
+        assert_eq!(fingerprints.len(), 3, "{fingerprints:?}");
+    }
+
     fn fixture_file() -> MediaFile {
         media_file_at(testfixtures::source("clean-cra"), 12_000)
     }
@@ -5012,6 +5122,7 @@ mod tests {
             kind: SessionKind::Copy {
                 aac: true,
                 preserve_dolby_vision: false,
+                convert_dolby_vision: false,
             },
             start_seconds,
             audio_index: None,
@@ -5030,6 +5141,43 @@ mod tests {
             block_budget: Duration::from_secs(30),
             materialize_budget: Duration::from_secs(30),
         }
+    }
+
+    #[test]
+    fn forced_generation_holder_repair_targets_the_resolved_artifact() {
+        let logical_key = "a".repeat(64);
+        let generation_key = "b".repeat(64);
+        let repair = plurx_core::store::NewClusterFragmentIndexJob {
+            cache_key: logical_key,
+            file_id: 1,
+            source_size: 10,
+            source_mtime: 20,
+            source_sha256: "c".repeat(64),
+            pipeline_sha256: "d".repeat(64),
+            priority: "foreground".to_owned(),
+            trigger: "foreground".to_owned(),
+            target_node_id: "node-a".to_owned(),
+            not_before_ms: 30,
+            created_at_ms: 30,
+        };
+        let artifact = plurx_core::store::ClusterFragmentIndexArtifact {
+            cache_key: generation_key.clone(),
+            file_id: 1,
+            source_size: 10,
+            source_mtime: 20,
+            source_sha256: repair.source_sha256.clone(),
+            pipeline_sha256: repair.pipeline_sha256.clone(),
+            blob_sha256: "e".repeat(64),
+            bytes: 40,
+            built_by_node_id: "node-a".to_owned(),
+            built_at_ms: 30,
+        };
+
+        let resolved = repair_job_for_artifact(repair, &artifact);
+
+        assert_eq!(resolved.cache_key, generation_key);
+        assert_eq!(resolved.source_sha256, artifact.source_sha256);
+        assert_eq!(resolved.pipeline_sha256, artifact.pipeline_sha256);
     }
 
     /// A store holding the fixture's real fragment index, built by the real
@@ -5870,15 +6018,16 @@ mod tests {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let timed = tokio::spawn(async move {
             let _build_guard = gate.lock_owned().await;
-            let child = tokio::process::Command::new("sleep")
+            let mut child = tokio::process::Command::new("sleep")
                 .arg("60")
                 .stdout(std::process::Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()
                 .expect("deterministic head-regeneration child");
+            let stdout = child.stdout.take().expect("child stdout");
             let pid = child.id().expect("child pid");
             let _ = started_tx.send(pid);
-            read_regenerated_head_before(child, Duration::from_millis(25), 1024).await
+            read_regenerated_head_before(child, stdout, Duration::from_millis(25), 1024).await
         });
         let pid = started_rx
             .await

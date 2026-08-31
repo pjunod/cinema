@@ -1180,6 +1180,18 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
   assert.match(unknown.next,/Copy the diagnostics/);
 });
 
+test("Analysis row Retry targets the exact durable request", () => {
+  const action=shippedSource("actOnAnalysisRow");
+  assert.match(action,/action==="retry"&&row\.request_id/);
+  assert.match(action,/`\/analysis\/jobs\/\$\{row\.request_id\}\/retry`/);
+  assert.match(action,/components:\[row\.component\|\|"fragment_index"\]/,
+    "non-retry row actions stay scoped to the row component");
+  const paint=shippedSource("paintAnalysis");
+  assert.match(paint,/onclick='actOnAnalysisRow\(/);
+  assert.doesNotMatch(paint,/onclick='requestAnalysis\(/,
+    "row Retry never falls through to a broad forced file request");
+});
+
 test("Analysis refresh preserves stale data, focus, and accessible state", () => {
   const refresh=shippedSource("renderAnalysis");
   assert.match(refresh,/if\(main&&ANALYSIS_SNAPSHOT\)/);
@@ -1616,6 +1628,25 @@ test("Page phases are generation-fenced, ordered, and wired to measured routes",
   const activity = shippedSource("renderActivityBody");
   assert.match(activity, /setPagePhase\("#\/activity",generation,"content"\)/);
   assert.match(activity, /setPagePhase\("#\/activity",generation,"settled"\)/);
+});
+
+test("marker actions emit bounded playback telemetry at the shipped controls", () => {
+  const check = shippedSource("checkMarkers");
+  const eligibility = shippedSource("markerAutoSkipEligible");
+  const offer = shippedSource("renderSkip");
+  const current = shippedSource("skipCurrent");
+  const skip = shippedSource("skipMarker");
+  const seek = shippedSource("seekTo");
+  assert.match(check, /skipMarker\(m,true\)/);
+  assert.match(check, /markerAutoSkipEligible\(m\)/);
+  assert.match(eligibility, /provenance==="authored"\|\|m\.provenance==="manual"/);
+  assert.match(current, /skipMarker\(m,false\)/);
+  assert.match(offer, /event:"marker_offer"/);
+  assert.match(offer, /_markerOffers\.has\(offerKey\)/);
+  assert.match(skip, /marker_automatic_skip/);
+  assert.match(skip, /marker_manual_skip/);
+  assert.match(skip, /event:"marker_prewarm",detail:"miss"/);
+  assert.match(seek, /event:"marker_seek_back",detail:"undo"/);
 });
 
 main().catch((error) => {

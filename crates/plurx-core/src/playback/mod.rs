@@ -623,6 +623,19 @@ pub struct Decision {
     /// False means the client cannot take this source profile and the remux
     /// must expose a compatible HDR base instead.
     pub preserve_dolby_vision: bool,
+    /// Rewrite this source's Profile 7 RPUs to Profile 8.1 on the way through.
+    ///
+    /// Only ever true beside `preserve_dolby_vision`, and the pair is not
+    /// redundant: preserving alone means "hand the RPUs over untouched", which
+    /// is what a client that decodes Profile 7 gets. Converting means "hand
+    /// over rewritten ones", which is what a client that decodes only 8 gets
+    /// instead of the HDR10 base it used to be given.
+    ///
+    /// `#[serde(default)]` because clients built before this field existed
+    /// send decisions back on the create path, and a missing key there means
+    /// "no conversion" — the answer every one of them was already getting.
+    #[serde(default)]
+    pub convert_dolby_vision: bool,
     /// Target container for remux/transcode delivery.
     pub container: &'static str,
     /// The dynamic range this plan actually delivers — see
@@ -631,6 +644,15 @@ pub struct Decision {
     /// instead of claiming the source's grade for a stripped remux. A session
     /// created later overrides it (MEDIA-BADGES-PLAN §3.2).
     pub delivered_dynamic_range: &'static str,
+    /// The Dolby Vision profile the delivered bytes carry, when they carry
+    /// any — see [`delivered_dolby_vision_profile`].
+    ///
+    /// The one thing `delivered_dynamic_range` cannot say: a preserved
+    /// Profile 7 and a Profile 7 converted to 8.1 are both `"dolby_vision"`,
+    /// and only this separates them. Absent on the wire when the delivery
+    /// carries no Dolby Vision at all, which is not the same as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_dolby_vision_profile: Option<u8>,
     /// The grade a re-encode would target. Meaningless for direct play and
     /// remux, where nothing is encoded — [`OutputGrade::Sdr`] there, which is
     /// what every method answered before M5.
@@ -846,6 +868,52 @@ pub fn delivered_dynamic_range(
     }
 }
 
+/// The Dolby Vision profile the delivered *bytes* carry, when they carry any.
+///
+/// A companion to [`delivered_dynamic_range`], and the field that separates
+/// two deliveries it cannot: a Profile 7 title preserved for a device that
+/// enumerates 7, and the same title converted to 8.1 for a device that does
+/// not, both answer `"dolby_vision"`. The grade is the same — that is the
+/// point of the conversion — but the profile on screen is not the profile on
+/// disk, and the badge that says `DV P7` for both is telling one of them
+/// something untrue about its own file (MEDIA-BADGES-PLAN §2.3).
+///
+/// `None` means **there is no profile to name**, which covers two cases a
+/// reader must not conflate: a delivery that carries no Dolby Vision at all
+/// (a transcode, a strip, a source that never had any), and a Dolby Vision
+/// delivery whose source row does not say which profile — a pre-M2 row whose
+/// label is the bare string "Dolby Vision", which [`dolby_vision_profile`]
+/// documents as producible. A client must therefore read absence as "no
+/// answer", never as "this stream is not Dolby Vision":
+/// [`delivered_dynamic_range`] beside it is the field that answers that.
+///
+/// Narrowing the second case would mean claiming a profile from a row that
+/// does not state one, which is the class of guess this milestone exists to
+/// stop — the conversion is the only delivery whose profile is known without
+/// asking the row, and it is the one case answered outright below.
+pub fn delivered_dolby_vision_profile(
+    file: &MediaFile,
+    method: PlaybackMethod,
+    preserve_dolby_vision: bool,
+    convert_dolby_vision: bool,
+) -> Option<u8> {
+    // Every transcode re-encodes the picture, and no plurx encode rung
+    // produces Dolby Vision.
+    if method == PlaybackMethod::Transcode || !preserve_dolby_vision {
+        return None;
+    }
+    if !is_dolby_vision(file) {
+        return None;
+    }
+    if convert_dolby_vision {
+        // Not read back from the file: the conversion's output is 8.1 by
+        // construction, and the source row says 7. Reading the row here would
+        // report the profile the conversion exists to replace.
+        return Some(8);
+    }
+    dolby_vision_profile(file)
+}
+
 /// Profile number from the Dolby Vision configuration record, or from the
 /// scan's rich label for a row the M2 backfill has not reached.
 ///
@@ -888,24 +956,6 @@ fn has_compatible_dv_base(file: &MediaFile) -> bool {
         .is_some_and(|label| label.contains("HDR10-compatible") || label.contains("HLG-compatible"))
 }
 
-/// Narrower than [`has_compatible_dv_base`]: is the base layer specifically
-/// **HDR10**?
-///
-/// Compatibility ids 1 and 6 are HDR10 bases; 4 is HLG. The distinction does
-/// not matter to the strip, which hands over whatever the base is and lets
-/// `delivered_dynamic_range` report it — but it matters to the Profile 7
-/// conversion, which produces Profile **8.1**, and 8.1 means an HDR10 base
-/// specifically. The HLG spelling is 8.4, a different conversion with a
-/// different target that plurx has no rung for.
-fn has_hdr10_dv_base(file: &MediaFile) -> bool {
-    if let Some(compat) = file.dolby_vision.bl_compat_id {
-        return matches!(compat, 1 | 6);
-    }
-    file.hdr_format
-        .as_deref()
-        .is_some_and(|label| label.contains("HDR10-compatible"))
-}
-
 /// Does this source need the RPU-driven renderer rather than the ordinary
 /// HDR10 base-layer route — i.e. is it the Profile 5 case?
 ///
@@ -938,6 +988,15 @@ enum DvHandling {
     /// base — which only ffmpeg can do, so direct play (the raw file) is out
     /// and a remux is the minimum.
     Strip,
+    /// The client can't take Profile 7 but does take Profile 8, the source's
+    /// base layer is HDR10, and this build can convert. The RPUs are rewritten
+    /// on the way through and the client gets Dolby Vision rather than the
+    /// HDR10 base it would otherwise be handed.
+    ///
+    /// Checked before [`DvHandling::Strip`], because every source that
+    /// converts also strips and stripping is the strictly worse answer: it
+    /// throws away metadata the client could have used.
+    Convert,
     /// The client can't take DV and the server can't remove it. The only
     /// stream this client will play is a re-encoded one — at the carried
     /// [`OutputGrade`].
@@ -980,11 +1039,55 @@ pub fn dolby_vision_converts_to_p81(
     node: &RenderCaps,
 ) -> bool {
     node.dolby_vision_convert
-        && is_dolby_vision(file)
-        && dolby_vision_profile(file) == Some(7)
-        && has_hdr10_dv_base(file)
+        && file_can_convert_to_p81(file)
         && profile.dolby_vision_profiles.contains(&8)
         && !profile.dolby_vision_profiles.contains(&7)
+}
+
+/// The half of [`dolby_vision_converts_to_p81`] that is about the **file**
+/// alone: Profile 7 over an HDR10 base, described by columns rather than
+/// prose.
+///
+/// Split out because the fragment index needs it without a client. Which
+/// clients convert is a per-session question and an index is per-file, so the
+/// indexer asks "could any client want this pipeline for this file", and the
+/// decider asks "does this client want it now". Two questions, one predicate
+/// for the part they share — a file the indexer skipped and the decider then
+/// routed to a conversion is a session looking up an index nothing built.
+///
+/// **The columns are required here, and the label fallback is not enough.**
+/// Everywhere else in this module a row scanned before M2 can answer from its
+/// `hdr_format` prose, and that is right: the question is what to deliver, and
+/// a label that says "Profile 7 (HDR10-compatible)" answers it. The conversion
+/// asks something the prose cannot answer. Its output must declare a Dolby
+/// Vision configuration record that describes the converted stream, plurx
+/// writes that record itself (ffmpeg copies one from the input container, and
+/// a converting copy's input container is the Profile 7 source), and building
+/// one needs the *level* and the *compatibility id* as numbers. A label-only row would be routed to
+/// a conversion whose index could never be built — a permanent
+/// `vod_index_pending`, and a fall through to live recovery on every play.
+///
+/// So the rule is: no columns, no conversion. Such a row keeps the strip it
+/// has always had until a rescan fills them in, which is a working delivery
+/// rather than a broken one.
+pub fn file_can_convert_to_p81(file: &MediaFile) -> bool {
+    is_dolby_vision(file)
+        && file.dolby_vision.profile == Some(7)
+        && file
+            .dolby_vision
+            .bl_compat_id
+            .is_some_and(|compat| matches!(compat, 1 | 6))
+        // The range the record can actually hold, not merely "present".
+        // `DolbyVisionRecord::new` caps the level at 0x3f because the field is
+        // six bits, so a row whose scan produced anything larger would route
+        // here, reach the converting index pass, and fail to have its record
+        // built at all — a permanent `vod_index_pending` and a fall through to
+        // live recovery on every play, which is the exact outcome the column
+        // requirement above exists to prevent. Real levels are 1 to 13.
+        && file
+            .dolby_vision
+            .level
+            .is_some_and(|level| (1..=0x3f).contains(&level))
 }
 
 fn dv_handling(
@@ -995,6 +1098,8 @@ fn dv_handling(
 ) -> DvHandling {
     if !is_dolby_vision(file) || profile.allows_dolby_vision(file) {
         DvHandling::None
+    } else if dolby_vision_converts_to_p81(file, profile, node) {
+        DvHandling::Convert
     } else if node.dv_strippable && has_compatible_dv_base(file) {
         DvHandling::Strip
     } else {
@@ -1015,7 +1120,15 @@ fn dv_handling(
 /// ([`target_grade`]).
 pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> Decision {
     let (mut c, mut reasons) = evaluate(file, profile);
-    let preserve_dolby_vision = is_dolby_vision(file) && profile.allows_dolby_vision(file);
+    // A converted stream carries Dolby Vision too, so it preserves. The two
+    // flags are set together and read together: `preserve` decides whether the
+    // copy's bitstream filter keeps the RPU NAL units, and `convert` decides
+    // whether they are rewritten in the fragments it writes. Keeping them without
+    // rewriting them would hand a Profile 7 stream to a decoder that asked for
+    // 8; rewriting them without keeping them would rewrite nothing.
+    let convert_dolby_vision = dolby_vision_converts_to_p81(file, profile, node);
+    let preserve_dolby_vision =
+        convert_dolby_vision || (is_dolby_vision(file) && profile.allows_dolby_vision(file));
     let (target, grade_reason) = target_grade(file, profile, node);
     // Whether the Dolby Vision branch below has already explained the grade in
     // its own words. It gets to speak first because its reason carries the
@@ -1031,6 +1144,24 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
 
     match dv_handling(file, profile, node, target) {
         DvHandling::None => {}
+        DvHandling::Convert => {
+            // Not a transcode and not a strip: the base layer and every
+            // picture byte are copied, and only the per-frame metadata is
+            // rewritten. It takes ffmpeg, so the file cannot be handed over
+            // as-is — but nothing is re-encoded and nothing of the picture is
+            // lost. What *is* lost is the enhancement layer, which is why the
+            // reason says so rather than claiming a free upgrade: on a
+            // full-enhancement-layer source that layer carried real residual
+            // detail. The session's own reasons name which kind it was, once
+            // the first RPU has been read and the answer is known.
+            c.container_ok = false;
+            reasons.push(
+                "Dolby Vision Profile 7 converted to Profile 8.1 for this device; the \
+                 HDR10-compatible base layer is copied untouched and the dual-layer \
+                 enhancement layer, which no consumer decoder takes, is dropped"
+                    .to_owned(),
+            );
+        }
         DvHandling::Strip => {
             // Not a transcode: the base layer is kept untouched and only the
             // DV configuration goes. But it takes ffmpeg, so the raw file
@@ -1182,17 +1313,27 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
         reasons.push(grade_reason.to_owned());
     }
 
+    // A verdict that ended up a transcode re-encodes the picture, so there is
+    // no copy pipe left to convert RPUs in and nothing to convert them for.
+    let convert_dolby_vision = convert_dolby_vision && method != PlaybackMethod::Transcode;
     Decision {
         method,
         reasons,
         transcode_audio: !c.audio_ok,
-        preserve_dolby_vision,
+        preserve_dolby_vision: preserve_dolby_vision && method != PlaybackMethod::Transcode,
+        convert_dolby_vision,
         container: "mp4",
         delivered_dynamic_range: delivered_dynamic_range(
             file,
             method,
-            preserve_dolby_vision,
+            preserve_dolby_vision && method != PlaybackMethod::Transcode,
             transcode_grade,
+        ),
+        delivered_dolby_vision_profile: delivered_dolby_vision_profile(
+            file,
+            method,
+            preserve_dolby_vision && method != PlaybackMethod::Transcode,
+            convert_dolby_vision,
         ),
         transcode_grade,
     }
@@ -1226,6 +1367,9 @@ pub fn decide_forced(
                 reasons,
                 transcode_audio: true,
                 preserve_dolby_vision: false,
+                // A forced transcode re-encodes the picture: there is no copy
+                // pipe left for a conversion to sit inside.
+                convert_dolby_vision: false,
                 container: "mp4",
                 delivered_dynamic_range: delivered_dynamic_range(
                     file,
@@ -1233,6 +1377,7 @@ pub fn decide_forced(
                     false,
                     grade,
                 ),
+                delivered_dolby_vision_profile: None,
                 transcode_grade: grade,
             }
         }
@@ -1261,12 +1406,28 @@ pub fn decide_forced(
                         .to_owned(),
                 );
             }
-            let preserve_dolby_vision = is_dolby_vision(file) && profile.allows_dolby_vision(file);
+            if dv == DvHandling::Convert {
+                reasons.push(
+                    "Dolby Vision Profile 7 converted to Profile 8.1 for this device; the \
+                     HDR10-compatible base layer is copied untouched and the dual-layer \
+                     enhancement layer, which no consumer decoder takes, is dropped"
+                        .to_owned(),
+                );
+            }
+            // Original means "no video re-encode", which the conversion
+            // honours: it copies every picture byte and rewrites only the
+            // per-frame metadata. So a forced-Original session on a client
+            // that takes Profile 8 gets the conversion too, and `dv_handling`
+            // above has already answered `Convert` for it.
+            let convert_dolby_vision = dv == DvHandling::Convert;
+            let preserve_dolby_vision = convert_dolby_vision
+                || (is_dolby_vision(file) && profile.allows_dolby_vision(file));
             Decision {
                 method,
                 reasons,
                 transcode_audio: !c.audio_ok,
                 preserve_dolby_vision,
+                convert_dolby_vision,
                 container: "mp4",
                 // Original never re-encodes video, so there is no grade: the
                 // method is DirectPlay or Remux and this argument is inert.
@@ -1275,6 +1436,12 @@ pub fn decide_forced(
                     method,
                     preserve_dolby_vision,
                     OutputGrade::Sdr,
+                ),
+                delivered_dolby_vision_profile: delivered_dolby_vision_profile(
+                    file,
+                    method,
+                    preserve_dolby_vision,
+                    convert_dolby_vision,
                 ),
                 transcode_grade: OutputGrade::Sdr,
             }
@@ -2587,6 +2754,12 @@ mod tests {
             let mut file = file("mkv", "hevc", "aac");
             file.hdr = Some("dolby_vision".to_owned());
             file.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".to_owned());
+            // The columns, not only the label: the conversion needs the level
+            // and the compatibility id as numbers to build the configuration
+            // record its output has to declare.
+            file.dolby_vision.profile = Some(7);
+            file.dolby_vision.level = Some(6);
+            file.dolby_vision.bl_compat_id = Some(1);
             file
         };
         let client = |profiles: Vec<u8>| {
@@ -2688,9 +2861,19 @@ mod tests {
             );
         }
 
-        // …and the one that is converted, so the list above is a set of
-        // exclusions rather than a function that always says no.
-        assert!(dolby_vision_converts_to_p81(
+        // A row whose label says Profile 7 over an HDR10 base and whose
+        // columns say nothing is NOT converted, even though every other
+        // routing question in this module would answer it from that label.
+        //
+        // The conversion asks something prose cannot answer: its output has to
+        // declare a Dolby Vision configuration record, plurx writes that
+        // record itself, and building one needs the level and the
+        // compatibility id as numbers. Converting on a label alone would route
+        // the session to an index that can never be built — a permanent
+        // `vod_index_pending` and a fall through to live recovery on every
+        // play. Such a row keeps the strip until a rescan fills the columns
+        // in, which is a working delivery rather than a broken one.
+        assert!(!dolby_vision_converts_to_p81(
             &source(
                 Some("dolby_vision"),
                 Some("Dolby Vision · Profile 7 (HDR10-compatible)")
@@ -2698,6 +2881,187 @@ mod tests {
             &client,
             &node
         ));
+
+        // …and with the columns it converts, so the list above is a set of
+        // exclusions rather than a function that always says no.
+        let mut described = source(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        );
+        described.dolby_vision.profile = Some(7);
+        described.dolby_vision.level = Some(6);
+        described.dolby_vision.bl_compat_id = Some(1);
+        assert!(dolby_vision_converts_to_p81(&described, &client, &node));
+
+        // A level column missing on its own is enough to stand the conversion
+        // down, because the record cannot be built without it.
+        let mut levelless = described.clone();
+        levelless.dolby_vision.level = None;
+        assert!(!dolby_vision_converts_to_p81(&levelless, &client, &node));
+
+        // …and so is a level the record cannot hold. `DolbyVisionRecord::new`
+        // refuses 0 and anything past 0x3f because the field is six bits, so a
+        // row outside that range routes to a conversion whose index can never
+        // be built — the same permanent `vod_index_pending` a label-only row
+        // would produce, from a value that merely looks present. Real levels
+        // are 1 to 13; the bounds are asserted rather than the realistic range,
+        // because the bound that matters is the record's.
+        for level in [0i64, 0x40, 255, i64::MAX] {
+            let mut out_of_range = described.clone();
+            out_of_range.dolby_vision.level = Some(level);
+            assert!(
+                !dolby_vision_converts_to_p81(&out_of_range, &client, &node),
+                "level {level} cannot be written into a Dolby Vision record"
+            );
+            assert!(
+                crate::fmp4::DolbyVisionRecord::new(
+                    8,
+                    u8::try_from(level).unwrap_or(0xff),
+                    false,
+                    true,
+                    true,
+                    1
+                )
+                .is_err(),
+                "…which is the reason: level {level} is refused by the writer"
+            );
+        }
+        for level in [1i64, 6, 13, 0x3f] {
+            let mut in_range = described.clone();
+            in_range.dolby_vision.level = Some(level);
+            assert!(
+                dolby_vision_converts_to_p81(&in_range, &client, &node),
+                "level {level} is a level the record can hold"
+            );
+        }
+    }
+
+    /// The decision a converting client actually receives.
+    ///
+    /// The three flags have to move together or the badge lies: a converted
+    /// stream preserves Dolby Vision (the RPUs survive the bitstream filter),
+    /// converts it (they are rewritten in the fragments), and delivers
+    /// Dolby Vision (which is the whole point — before this, the same client
+    /// on the same title was handed the HDR10 base).
+    #[test]
+    fn a_converting_client_is_told_it_is_getting_dolby_vision() {
+        let mut p7 = file("mkv", "hevc", "aac");
+        p7.hdr = Some("dolby_vision".into());
+        p7.dolby_vision.profile = Some(7);
+        p7.dolby_vision.bl_compat_id = Some(1);
+        p7.dolby_vision.level = Some(6);
+
+        let client = |profiles: Vec<u8>| {
+            let mut profile = caps_profile(
+                vec!["mkv".into(), "mp4".into()],
+                vec!["hevc".into()],
+                vec!["aac".into()],
+                None,
+                true,
+                false,
+            );
+            profile.dolby_vision_profiles = profiles;
+            profile
+        };
+        let node = RenderCaps::proven(true);
+
+        // Safari and Apple TV: profile 8, not 7.
+        let converted = decide(&p7, &client(vec![5, 8]), &node);
+        assert!(converted.convert_dolby_vision);
+        assert!(
+            converted.preserve_dolby_vision,
+            "there is nothing to convert in a stream the filter removed"
+        );
+        assert_eq!(converted.delivered_dynamic_range, "dolby_vision");
+        assert_eq!(
+            converted.delivered_dolby_vision_profile,
+            Some(8),
+            "the badge has to be able to say `DV P7 → DV P8`; the range alone \
+             cannot, because a preserved P7 answers `dolby_vision` too"
+        );
+        assert_eq!(
+            converted.method,
+            PlaybackMethod::Remux,
+            "the picture is copied; only the per-frame metadata is rewritten"
+        );
+        assert!(
+            converted
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("Profile 7 converted to Profile 8.1")),
+            "{:?}",
+            converted.reasons
+        );
+
+        // A client that decodes Profile 7 takes the stream untouched:
+        // converting would discard an enhancement layer it asked for.
+        let native = decide(&p7, &client(vec![7, 8]), &node);
+        assert!(!native.convert_dolby_vision);
+        assert!(native.preserve_dolby_vision);
+        assert_eq!(
+            native.delivered_dolby_vision_profile,
+            Some(7),
+            "the same range as the converted answer, and this is what tells \
+             them apart"
+        );
+
+        // A client that decodes neither still gets the ordinary strip.
+        let stripped = decide(&p7, &client(vec![]), &node);
+        assert!(!stripped.convert_dolby_vision);
+        assert!(!stripped.preserve_dolby_vision);
+        assert_eq!(stripped.delivered_dynamic_range, "hdr10");
+        assert_eq!(
+            stripped.delivered_dolby_vision_profile, None,
+            "a stripped stream carries no Dolby Vision to name"
+        );
+
+        // And an operator can turn it off, which puts that client back on the
+        // strip rather than on a refusal.
+        let off = decide(
+            &p7,
+            &client(vec![5, 8]),
+            &RenderCaps {
+                dolby_vision_convert: false,
+                ..node
+            },
+        );
+        assert!(!off.convert_dolby_vision);
+        assert_eq!(off.delivered_dynamic_range, "hdr10");
+        assert_eq!(off.delivered_dolby_vision_profile, None);
+    }
+
+    /// A verdict that re-encodes the picture converts nothing.
+    ///
+    /// The conversion lives inside a copy pipe. Once the video is being
+    /// re-encoded there is no copy left for it to sit in, and a decision still
+    /// claiming it would put a Dolby Vision badge on a transcode.
+    #[test]
+    fn a_transcode_never_claims_to_convert() {
+        let mut p7 = file("mkv", "hevc", "aac");
+        p7.hdr = Some("dolby_vision".into());
+        p7.dolby_vision.profile = Some(7);
+        p7.dolby_vision.bl_compat_id = Some(1);
+        p7.dolby_vision.level = Some(6);
+        p7.height = Some(2160);
+
+        // A client that takes profile 8 but caps height below the source:
+        // the height check forces a transcode, and the conversion falls away
+        // with it.
+        let mut profile = caps_profile(
+            vec!["mkv".into()],
+            vec!["hevc".into()],
+            vec!["aac".into()],
+            Some(1080),
+            true,
+            false,
+        );
+        profile.dolby_vision_profiles = vec![5, 8];
+        let decision = decide(&p7, &profile, &RenderCaps::proven(true));
+
+        assert_eq!(decision.method, PlaybackMethod::Transcode);
+        assert!(!decision.convert_dolby_vision);
+        assert!(!decision.preserve_dolby_vision);
+        assert_ne!(decision.delivered_dynamic_range, "dolby_vision");
     }
 
     /// The same exclusions, decided from the stored columns rather than the
@@ -2734,6 +3098,7 @@ mod tests {
             file.hdr_format = None;
             file.dolby_vision.profile = Some(dv_profile);
             file.dolby_vision.bl_compat_id = Some(compat);
+            file.dolby_vision.level = Some(6);
             file
         };
 
@@ -3152,15 +3517,40 @@ mod tests {
         let mut p7 = file("mp4", "hevc", "aac");
         p7.hdr = Some("dolby_vision".to_owned());
         p7.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".to_owned());
-        let fallback = decide(&p7, &apple, &RenderCaps::proven(true));
-        assert_eq!(fallback.method, PlaybackMethod::Remux);
-        assert!(!fallback.preserve_dolby_vision);
-        assert_eq!(fallback.delivered_dynamic_range, "hdr10");
-        assert!(fallback
+        p7.dolby_vision.profile = Some(7);
+        p7.dolby_vision.level = Some(6);
+        p7.dolby_vision.bl_compat_id = Some(1);
+        // Profile 7 on a client that decodes 8 but not 7. Since M5a this is
+        // the conversion rather than the strip: the same client on the same
+        // title used to be handed the HDR10 base, and now gets Dolby Vision.
+        let converted = decide(&p7, &apple, &RenderCaps::proven(true));
+        assert_eq!(converted.method, PlaybackMethod::Remux);
+        assert!(converted.convert_dolby_vision);
+        assert!(converted.preserve_dolby_vision);
+        assert_eq!(converted.delivered_dynamic_range, "dolby_vision");
+        assert!(converted
             .reasons
             .iter()
             .all(|reason| !reason.contains("browser")));
-        let android_fallback = decide(&p7, &android, &RenderCaps::proven(true));
+        let android_converted = decide(&p7, &android, &RenderCaps::proven(true));
+        assert_eq!(android_converted.method, PlaybackMethod::Remux);
+        assert!(android_converted.convert_dolby_vision);
+        assert_eq!(android_converted.delivered_dynamic_range, "dolby_vision");
+
+        // The pre-M5a answer is still the answer on a node where an operator
+        // turned the conversion off. Kept rather than replaced, because it is
+        // the behaviour every deployed node had until this milestone and the
+        // switch is what an operator uses to get it back.
+        let unconverted = RenderCaps {
+            dolby_vision_convert: false,
+            ..RenderCaps::proven(true)
+        };
+        let fallback = decide(&p7, &apple, &unconverted);
+        assert_eq!(fallback.method, PlaybackMethod::Remux);
+        assert!(!fallback.preserve_dolby_vision);
+        assert!(!fallback.convert_dolby_vision);
+        assert_eq!(fallback.delivered_dynamic_range, "hdr10");
+        let android_fallback = decide(&p7, &android, &unconverted);
         assert_eq!(android_fallback.method, PlaybackMethod::Remux);
         assert!(!android_fallback.preserve_dolby_vision);
         assert_eq!(android_fallback.delivered_dynamic_range, "hdr10");

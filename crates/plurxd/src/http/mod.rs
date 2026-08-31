@@ -223,8 +223,17 @@ pub fn router(state: AppState) -> Router {
             get(dv_disk::file_status).post(dv_disk::queue_file),
         )
         .route("/dv-conversions", get(dv_disk::status))
+        .route(
+            "/files/{id}/timeline-annotations/{kind}",
+            put(analysis::set_manual_annotation).delete(analysis::discard_manual_annotation),
+        )
         .route("/analysis/summary", get(analysis::summary))
         .route("/analysis/jobs", get(analysis::jobs))
+        .route(
+            "/analysis/jobs/{id}",
+            get(analysis::job).delete(analysis::cancel_job),
+        )
+        .route("/analysis/jobs/{id}/retry", post(analysis::retry_job))
         .route("/hubs", get(browse::hubs))
         .route("/home/previews", get(browse::home_previews))
         .route("/search", get(browse::search))
@@ -3364,6 +3373,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn analysis_retry_settings_are_bounded_and_publish_atomically() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["analysis_max_attempts"], 5);
+        assert_eq!(initial["analysis_lease_secs"], 60);
+        assert_eq!(initial["analysis_backoff_base_secs"], 5);
+        assert_eq!(initial["analysis_backoff_max_secs"], 300);
+
+        let (status, updated) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "analysis_max_attempts": 3,
+                    "analysis_lease_secs": 90,
+                    "analysis_backoff_base_secs": 7,
+                    "analysis_backoff_max_secs": 77
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        assert_eq!(updated["analysis_max_attempts"], 3);
+        assert_eq!(updated["analysis_lease_secs"], 90);
+        assert_eq!(updated["analysis_backoff_base_secs"], 7);
+        assert_eq!(updated["analysis_backoff_max_secs"], 77);
+
+        let (status, invalid) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "analysis_backoff_base_secs": 100,
+                    "analysis_backoff_max_secs": 50
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+        assert_eq!(
+            state
+                .store
+                .get_setting_pair(
+                    plurx_core::store::keys::ANALYSIS_BACKOFF_BASE_SECS,
+                    plurx_core::store::keys::ANALYSIS_BACKOFF_MAX_SECS,
+                )
+                .await
+                .expect("retry settings"),
+            (Some("7".to_owned()), Some("77".to_owned())),
+            "an invalid pair cannot partially replace the durable policy"
+        );
+    }
+
+    #[tokio::test]
     async fn an_unknown_request_id_is_a_404() {
         let app = test_app();
         let admin = setup_admin(&app).await;
@@ -3488,6 +3555,17 @@ mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).expect("req")
+    }
+
+    fn delete_json(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            b = b.header("authorization", format!("Bearer {t}"));
+        }
+        b.body(Body::from(body.to_string())).expect("req")
     }
 
     #[tokio::test]
@@ -4256,7 +4334,7 @@ mod tests {
                 rows = body;
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
         let row = rows
             .as_array()
@@ -6525,6 +6603,10 @@ mod tests {
                 language: Some("eng".into()),
                 ..Default::default()
             }],
+            raw_json: Some(
+                r#"{"chapters":[{"start_time":"0.000","end_time":"90.000","tags":{"title":"Opening"}},{"start_time":"8700.000","end_time":"9000.000","tags":{"title":"End Credits"}}]}"#
+                    .to_owned(),
+            ),
             ..Default::default()
         };
         let file = state
@@ -8657,6 +8739,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decision_rereads_a_manual_override_that_commits_during_fallback_publication() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let file = state
+            .store
+            .get_file(seeded.file)
+            .await
+            .expect("read seeded file")
+            .expect("seeded file");
+        let pause = stream::pause_next_marker_fallback_for_test(&file.path);
+
+        let decision_app = app.clone();
+        let decision_admin = admin.clone();
+        let decision = tokio::spawn(async move {
+            call(
+                &decision_app,
+                get(
+                    &format!(
+                        "/api/v1/files/{}/decision?vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0",
+                        seeded.file
+                    ),
+                    Some(&decision_admin),
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), pause.wait())
+            .await
+            .expect("decision reached its authoritative annotation miss");
+
+        let manual_url = format!("/api/v1/files/{}/timeline-annotations/credits", file.id);
+        let (status, manual) = call(
+            &app,
+            put(
+                &manual_url,
+                Some(&admin),
+                json!({
+                    "start_ticks": 8_500_000,
+                    "end_ticks": 9_000_000,
+                    "timescale": 1000,
+                    "start_ms": 8_500_000,
+                    "end_ms": 9_000_000,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{manual}");
+        assert_eq!(manual["provenance"], "manual");
+
+        pause.wait().await;
+        let (status, decision) = tokio::time::timeout(std::time::Duration::from_secs(5), decision)
+            .await
+            .expect("decision completed after fallback release")
+            .expect("decision task");
+        assert_eq!(status, StatusCode::OK, "{decision}");
+        let credits = decision["markers"]
+            .as_array()
+            .expect("decision markers")
+            .iter()
+            .find(|marker| marker["kind"] == "credits")
+            .expect("credits marker");
+        assert_eq!(credits["start_ms"], 8_500_000);
+        assert_eq!(credits["provenance"], "manual");
+        assert_eq!(credits["confidence"], 1_000);
+    }
+
+    #[tokio::test]
     async fn seeded_write_surface() {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
@@ -8823,7 +8973,222 @@ mod tests {
         assert_eq!(activity["analysis"]["queued"], 1);
         assert_eq!(activity["analysis"]["active"], 1);
         assert_eq!(activity["analysis"]["total"], 1);
+        let job_url = format!(
+            "/api/v1/analysis/jobs/{}",
+            requested["request_id"].as_str().expect("request id")
+        );
+        assert_eq!(
+            call(&app, get(&job_url, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, job) = call(&app, get(&job_url, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{job}");
+        assert_eq!(job["state"], "queued");
+        assert_eq!(job["component"], "fragment_index");
+        let (status, canceled) = call(&app, delete(&job_url, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{canceled}");
+        assert_eq!(canceled["state"], "canceled");
+        assert!(canceled["cancel_requested"].as_bool().unwrap_or(false));
+        let (status, retried) = call(
+            &app,
+            post(&format!("{job_url}/retry"), Some(&admin), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retried}");
+        assert_eq!(retried["state"], "queued");
+        assert_ne!(
+            retried["request_id"], requested["request_id"],
+            "an explicit retry is a successor generation, not a mutation of its tombstone"
+        );
+        // Manual semantic boundaries are a separate, revision-fenced admin
+        // action. A rebuild cannot implicitly opt into discarding one.
+        let manual_url = format!("/api/v1/files/{}/timeline-annotations/credits", s.file);
+        let manual_body = json!({
+            "start_ticks": 8_500_000,
+            "end_ticks": 9_000_000,
+            "timescale": 1000,
+            "start_ms": 8_500_000,
+            "end_ms": 9_000_000,
+        });
+        assert_eq!(
+            call(&app, put(&manual_url, None, manual_body.clone()))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, manual) =
+            call(&app, put(&manual_url, Some(&admin), manual_body.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{manual}");
+        assert_eq!(manual["revision"], 1);
+        assert_eq!(manual["provenance"], "manual");
+
+        // A forced semantic rebuild is a new queued generation and must not
+        // clear the manual correction above.
+        let (status, marker_rebuild) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/analysis", s.file),
+                Some(&admin),
+                json!({ "force": true, "components": ["skip_markers"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{marker_rebuild}");
+        assert_eq!(marker_rebuild["jobs"][0]["component"], "skip_markers");
+        let marker_job = marker_rebuild["jobs"][0]["job_id"]
+            .as_str()
+            .expect("marker job id")
+            .to_owned();
         drop(_waiting_viewer);
+        state
+            .jobs
+            .clone()
+            .work_cluster_fragment_index_queue(state.transcode.clone())
+            .await;
+        let marker_url = format!("/api/v1/analysis/jobs/{marker_job}");
+        let mut marker_status = serde_json::Value::Null;
+        for _ in 0..50 {
+            state
+                .jobs
+                .clone()
+                .work_cluster_fragment_index_queue(state.transcode.clone())
+                .await;
+            marker_status = call(&app, get(&marker_url, Some(&admin))).await.1;
+            if marker_status["state"] == "published" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(marker_status["state"], "published", "{marker_status}");
+        let marker_offers = || {
+            crate::telemetry::prometheus()
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("plurx_playback_marker_actions_total{action=\"offer\"} ")
+                })
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("marker offer metric")
+        };
+        let offers_before_decision = marker_offers();
+        let (status, decision) = call(
+            &app,
+            get(
+                &format!(
+                    "/api/v1/files/{}/decision?vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0",
+                    s.file
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{decision}");
+        assert_eq!(
+            marker_offers(),
+            offers_before_decision,
+            "returning a marker decision is not a user-visible offer"
+        );
+        let credits = decision["markers"]
+            .as_array()
+            .expect("markers")
+            .iter()
+            .find(|marker| marker["kind"] == "credits")
+            .expect("credits marker");
+        assert_eq!(credits["start_ms"], 8_500_000);
+        assert_eq!(credits["provenance"], "manual");
+        assert_eq!(credits["confidence"], 1_000);
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    "/api/v1/client-log",
+                    Some(&admin),
+                    json!({
+                        "level": "info",
+                        "event": "marker_offer",
+                        "message": "playback marker offered",
+                        "detail": "credits",
+                        "ua": "contract client"
+                    }),
+                ),
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        for _ in 0..50 {
+            if marker_offers() == offers_before_decision + 1 {
+                break;
+            }
+            // The handler records telemetry in a detached task. A bare yield
+            // does not guarantee that task is polled, especially when LLVM
+            // coverage instrumentation changes the scheduler's timing.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(marker_offers(), offers_before_decision + 1);
+        state
+            .refresh_store_metrics()
+            .await
+            .expect("refresh analysis metrics");
+        let (_, metrics) = call_text(&app, get("/metrics", None)).await;
+        assert!(metrics.contains(
+            "plurx_analysis_queue_depth{state=\"published\",component=\"skip_markers\",priority=\"forced\",trigger=\"admin\"} 1"
+        ));
+        assert!(metrics.contains(
+            "plurx_analysis_markers{kind=\"credits\",provenance=\"manual\",confidence=\"high\"} 1"
+        ));
+
+        assert_eq!(
+            call(
+                &app,
+                delete_json(
+                    &manual_url,
+                    Some(&admin),
+                    json!({
+                        "revision": 1,
+                        "confirm_discard_manual_override": false,
+                    }),
+                ),
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (status, corrected) = call(&app, put(&manual_url, Some(&admin), manual_body)).await;
+        assert_eq!(status, StatusCode::OK, "{corrected}");
+        assert_eq!(corrected["revision"], 2);
+        assert_eq!(
+            call(
+                &app,
+                delete_json(
+                    &manual_url,
+                    Some(&admin),
+                    json!({
+                        "revision": 1,
+                        "confirm_discard_manual_override": true,
+                    }),
+                ),
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT,
+            "a stale confirmation cannot erase the corrected revision"
+        );
+        assert_eq!(
+            call(
+                &app,
+                delete_json(
+                    &manual_url,
+                    Some(&admin),
+                    json!({
+                        "revision": 2,
+                        "confirm_discard_manual_override": true,
+                    }),
+                ),
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
 
         // Progress on a missing item → 404.
         assert_eq!(
@@ -9079,6 +9444,63 @@ mod tests {
             .0,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn analysis_job_retry_refuses_a_changed_source_revision() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("enable analysis queue");
+        let (status, requested) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/analysis", seeded.file),
+                Some(&admin),
+                json!({ "force": false, "components": ["fragment_index"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{requested}");
+        let job_url = format!(
+            "/api/v1/analysis/jobs/{}",
+            requested["request_id"].as_str().expect("request id")
+        );
+        assert_eq!(
+            call(&app, delete(&job_url, Some(&admin))).await.0,
+            StatusCode::OK
+        );
+
+        let current = state
+            .store
+            .get_file(seeded.file)
+            .await
+            .expect("read source")
+            .expect("source");
+        assert_eq!(
+            state
+                .store
+                .upsert_file(
+                    current.item_id,
+                    &current.path.to_string_lossy(),
+                    current.size + 1,
+                    current.mtime + 1,
+                    &plurx_core::domain::ProbeResult::default(),
+                )
+                .await
+                .expect("replace source revision"),
+            seeded.file
+        );
+        let (status, conflict) = call(
+            &app,
+            post(&format!("{job_url}/retry"), Some(&admin), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
     }
 
     #[tokio::test]

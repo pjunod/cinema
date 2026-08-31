@@ -995,18 +995,18 @@ mod tests {
 
     #[cfg(feature = "hiqlite-store")]
     #[test]
-    fn sqlite_v38_fixture_migrates_conversion_and_guard_ledgers_once() {
+    fn sqlite_v42_fixture_migrates_conversion_and_guard_ledgers_once() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("v38.db");
+        let path = dir.path().join("v42.db");
         let connection = rusqlite::Connection::open(&path).expect("fixture");
         SqliteStore::apply_migrations_for_test(
             &connection,
             crate::store::SQLITE_SCHEMA_VERSION - 2,
         )
-        .expect("v38 schema");
+        .expect("v42 schema");
         drop(connection);
 
-        let _store = SqliteStore::open(&path).expect("migrate v38");
+        let _store = SqliteStore::open(&path).expect("migrate v42");
         let connection = rusqlite::Connection::open(&path).expect("inspect");
         let tables: i64 = connection
             .query_row(
@@ -1038,15 +1038,15 @@ mod tests {
 
     #[cfg(feature = "hiqlite-store")]
     #[test]
-    fn sqlite_v39_guard_migration_rejects_a_malformed_preexisting_ledger() {
+    fn sqlite_v43_guard_migration_rejects_a_malformed_preexisting_ledger() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("v39-malformed-guard.db");
+        let path = dir.path().join("v43-malformed-guard.db");
         let connection = rusqlite::Connection::open(&path).expect("fixture");
         SqliteStore::apply_migrations_for_test(
             &connection,
             crate::store::SQLITE_SCHEMA_VERSION - 1,
         )
-        .expect("v39 schema");
+        .expect("v43 schema");
         connection
             .execute_batch(
                 "CREATE TABLE dv_recovery_guards (
@@ -1058,7 +1058,7 @@ mod tests {
         drop(connection);
 
         let error = match SqliteStore::open(&path) {
-            Ok(_) => panic!("malformed v40 guard ledger must refuse"),
+            Ok(_) => panic!("malformed v44 guard ledger must refuse"),
             Err(error) => error,
         };
         assert!(error.to_string().contains("already exists"), "{error}");
@@ -1080,14 +1080,14 @@ mod tests {
             .expect("remove malformed guard ledger");
         drop(connection);
 
-        let _store = SqliteStore::open(&path).expect("retry exact v40 migration");
+        let _store = SqliteStore::open(&path).expect("retry exact v44 migration");
     }
 
     #[cfg(feature = "hiqlite-store")]
     #[tokio::test]
-    async fn sqlite_v39_guard_migration_refuses_an_unrecoverable_committed_claim() {
+    async fn sqlite_v43_guard_migration_refuses_an_unrecoverable_committed_claim() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("v39-unrecoverable-commit.db");
+        let path = dir.path().join("v43-unrecoverable-commit.db");
         let store = SqliteStore::open(&path).expect("current store");
         let (_, file_id) = p7_file(&store, "Unrecoverable", 6).await;
         assert!(matches!(
@@ -1119,19 +1119,19 @@ mod tests {
                 "DROP INDEX dv_conversions_recovery_guard;
                  DROP TABLE dv_recovery_guards;
                  ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
-                 PRAGMA user_version = 39;",
+                 PRAGMA user_version = 43;",
             )
-            .expect("construct unrecoverable v39 commit");
+            .expect("construct unrecoverable v43 commit");
         connection
             .execute(
                 "UPDATE dv_conversions SET original_path = NULL WHERE file_id = ?1",
                 [file_id],
             )
-            .expect("remove the only recovery path from the v39 claim");
+            .expect("remove the only recovery path from the v43 claim");
         drop(connection);
 
         let error = match SqliteStore::open(&path) {
-            Ok(_) => panic!("v39 unrecoverable committed claim must refuse"),
+            Ok(_) => panic!("v43 unrecoverable committed claim must refuse"),
             Err(error) => error,
         };
         assert!(
@@ -1143,7 +1143,7 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .expect("schema version"),
-            39
+            43
         );
         assert_eq!(
             connection
@@ -1176,6 +1176,6 @@ mod tests {
             .expect("repair source recovery claim");
         drop(connection);
 
-        let _store = SqliteStore::open(&path).expect("retry repaired v40 migration");
+        let _store = SqliteStore::open(&path).expect("retry repaired v44 migration");
     }
 }

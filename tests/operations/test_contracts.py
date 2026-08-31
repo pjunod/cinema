@@ -637,7 +637,14 @@ class OperationsContractCase(unittest.TestCase):
         # independently selected replicated/daemon jobs.
         gate = makefile.split(".PHONY: ci-rust-gate", 1)[1].split(".PHONY:", 1)[0]
         self.assertIn("--workspace --locked --exclude plurx-cluster-check", gate)
-        self.assertIn("ci-rust-gate: fmt-check lint", gate)
+        # The lockfile check sits in front of Clippy on purpose. `spikes/
+        # hiqlite-m0` is a separate workspace that path-depends on plurx-core,
+        # so adding a dependency to plurx-core strands its lockfile — and the
+        # thing that used to notice was `cargo clippy --locked` in a different
+        # job, twenty minutes in. Running it first costs under a second and
+        # fails with the same message.
+        self.assertIn("ci-rust-gate: fmt-check spike-lock-check lint", gate)
+        self.assertIn("spike-lock-check", makefile.split("\nunit:", 1)[1].split("\n\n", 1)[0])
         self.assertIn("run: make ci-rust-gate", workflow)
         self.assertIn("make fmt-check lint", lint)
         self.assertIn("run: make cluster-store-check cluster-harness-check", workflow)
@@ -891,6 +898,26 @@ class OperationsContractCase(unittest.TestCase):
                 ]
                 self.assertEqual([], missing, f"jobs without timeouts in {path}")
 
+    def test_rust_audit_can_report_informational_advisories(self):
+        workflow = read(".github/workflows/rust-audit.yml")
+        permissions = workflow.split("permissions:\n", 1)[1].split("\njobs:\n", 1)[0]
+        jobs = workflow_job_blocks(".github/workflows/rust-audit.yml")
+
+        self.assertEqual(permissions, "  contents: read\n")
+        for name in ("workspace", "fuzz"):
+            with self.subTest(name=name):
+                self.assertIn("if: github.event_name != 'schedule'", jobs[name])
+                self.assertIn("      checks: write", jobs[name])
+                self.assertNotIn("      issues: write", jobs[name])
+        scheduled = jobs["scheduled"]
+        self.assertIn("if: github.event_name == 'schedule'", scheduled)
+        self.assertIn("      issues: write", scheduled)
+        self.assertNotIn("      checks: write", scheduled)
+        self.assertEqual(scheduled.count("uses: rustsec/audit-check@"), 1)
+        self.assertIn("--additional-lock fuzz/Cargo.lock", scheduled)
+        self.assertIn("working-directory: target/rust-audit", scheduled)
+        self.assertEqual(workflow.count("token: ${{ secrets.GITHUB_TOKEN }}"), 3)
+
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
         def choose(hosted, labels):
             return (
@@ -1029,7 +1056,7 @@ class OperationsContractCase(unittest.TestCase):
 
         self.assertIn("CI_RUNNER_MODE must be self-hosted or github", ci)
         self.assertIn("vars.CI_RUNNER_MODE == 'github'", ci)
-        self.assertEqual(audit.count("vars.CI_RUNNER_MODE == 'github'"), 2)
+        self.assertEqual(audit.count("vars.CI_RUNNER_MODE == 'github'"), 3)
         self.assertTrue(script.stat().st_mode & 0o111)
         subprocess.run(
             [str(script), "--help"],

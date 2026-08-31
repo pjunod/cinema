@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5b09b37b"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The subject reads as corrective because it withdraws a design, and it is: the two-ffmpeg pipe it replaces destroyed the video timeline, since ffmpeg's raw HEVC demuxer emits packets with no timestamps and the muxer then fabricates a decode-order grid. That pipe never shipped — the whole conversion is unmerged — so this repairs a branch rather than a release. Mapped to the playback pipeline, which owns the copy path, the fragment index and the segmenter, and covered by the rust gate, which runs the fragment-rewrite and argv tests that hold the replacement."

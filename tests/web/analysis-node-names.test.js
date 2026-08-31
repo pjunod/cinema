@@ -218,6 +218,32 @@ test("the column falls back to the target when no owner has claimed the row", ()
   assert.match(html, /<span class="nodename">m6<\/span>/);
 });
 
+test("analysis rows render their stored priority and trigger", () => {
+  const background = row({
+    row_key: "request:background",
+    request_id: "background",
+    job_id: "",
+    priority: "normal",
+    trigger: "background",
+  });
+  const foreground = row({
+    row_key: "job:foreground",
+    request_id: "",
+    job_id: "foreground",
+    priority: "foreground",
+    trigger: "foreground",
+  });
+  const html = paint(
+    snapshot({ filtered_total: 2, rows: [background, foreground] }),
+  );
+  assert.match(html, /Priority Normal · Trigger Background/);
+  assert.match(html, /Priority Foreground · Trigger Foreground/);
+  assert.match(html, /<b>Priority<\/b><span>Foreground<\/span>/);
+  assert.match(html, /<b>Trigger<\/b><span>Foreground<\/span>/);
+  assert.doesNotMatch(html, /Operator request/);
+  assert.doesNotMatch(html, /Background build/);
+});
+
 test("Copy details carries the name and the id an operator will quote", async () => {
   paint(snapshot({ node_hostnames: { [OWNER]: "nuc3", [TARGET]: "m6" } }));
   const text = await copyText("job:job-1");

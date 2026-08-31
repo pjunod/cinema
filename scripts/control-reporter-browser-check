@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""Run the shipped playback-control reporter in a real browser.
+
+Every other web test in this repo reads `playback-control.js` as *text* and
+asserts on its source. That is why the M5 fleet run was the first thing ever to
+execute it: `setTimeout` is a WindowTimers method, browsers brand-check its
+receiver, and the reporter stored it on itself and called `this.setTimer(...)`.
+Node does not brand-check. Every unit test injected its own timer. The web
+control plane completed zero exchanges and the whole suite was green.
+
+So this gate does the one thing none of them did — it drives the real module in
+a real browser and requires a real exchange to complete. No server, no media, no
+`<video>`: the defect was in the reporter's own runtime path, and a stub `send`
+reaches it. That keeps the gate fast and deterministic while covering the thing
+that actually broke.
+
+    scripts/control-reporter-browser-check          # headless chromium
+    scripts/control-reporter-browser-check --browser /path/to/chrome
+"""
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+MODULE = ROOT / "crates" / "plurxd" / "src" / "web" / "playback-control.js"
+
+# Long enough that a slow cold browser is not a false failure, short enough that
+# a wedged reporter fails the run rather than hanging it.
+EXCHANGE_TIMEOUT_MS = 20_000
+
+
+def find_browser(explicit):
+    """Path to a headless Chromium, or None to let Playwright resolve its own.
+
+    The same glob `ui-baseline` uses, and for the same reason: the sandbox's
+    build number moves every time the image is rebuilt, and on a Mac Playwright
+    finds its own cache without help.
+    """
+    if explicit:
+        return explicit
+    root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers"))
+    if not root.is_dir():
+        return None
+    for pattern in (
+        "chromium-*/chrome-linux/chrome",
+        "chromium_headless_shell-*/chrome-linux/headless_shell",
+    ):
+        found = sorted(root.glob(pattern))
+        if found:
+            return str(found[-1])
+    return None
+
+
+# The page is deliberately tiny. It builds a reporter exactly as `index.html`
+# does — no injected `setTimer`, no injected `now`, which is the whole point —
+# and reports what happened rather than asserting in the page, so a failure
+# arrives here as data instead of a stack trace in a console nobody reads.
+PAGE = """
+<!doctype html><meta charset="utf-8"><title>control reporter</title>
+<script>%(module)s</script>
+<script>
+window.__settled = undefined;
+const settle = (value) => { window.__settled = value; };
+(() => {
+  const seen = [];
+  const fail = (stage, error) => settle({
+    ok: false, stage,
+    error: String((error && (error.stack || error.message)) || error),
+    seen,
+  });
+  window.addEventListener("error", (event) => fail("window", event.error || event.message));
+  window.addEventListener("unhandledrejection", (event) => fail("rejection", event.reason));
+  let reporter;
+  try {
+    reporter = new PlurxPlaybackControl.Reporter({
+      bootstrap: {
+        protocol: PlurxPlaybackControl.PROTOCOL,
+        url: "/api/v1/hls/browser-check/control",
+        generation: "11111111-1111-4111-8111-111111111111",
+        control_epoch: 7,
+        // The protocol's own floor, so the reporter's scheduling runs inside
+        // this gate rather than after it, and still through the real timer.
+        next_exchange_ms: 250,
+        lease_timeout_ms: 300000,
+      },
+      clientInstanceId: "22222222-2222-4222-8222-222222222222",
+      // The shape `tests/playback/web-control.test.js` uses, verbatim. The
+      // reporter silently drops a snapshot it does not recognise — `notify`
+      // returns null and nothing is queued — so a drifted shape here would
+      // make this gate pass by never running the reporter at all.
+      snapshot: () => ({
+        demand: "active",
+        position_ms: 1000,
+        buffered_from_ms: 1000,
+        buffered_through_ms: 11000,
+        playback_rate: 1,
+        render_state: "rendering",
+        seek_target_ms: null,
+        observed_download_bps: 8000000,
+        selection: {
+          quality: { mode: "auto" },
+          audio_track: 0,
+          subtitle: { mode: "off", track: null },
+          audio_offset_ms: 0,
+          codec: "auto",
+          dynamic_range: "auto",
+        },
+        capabilities: {
+          platform: "web",
+          max_height: 1080,
+          codecs: ["h264"],
+          dynamic_ranges: ["sdr"],
+          dual_player_preparation: false,
+        },
+        observation: null,
+        acknowledgement: null,
+      }),
+      // A real network round trip is not what broke; the reporter's own
+      // runtime was. Resolving here keeps the gate hermetic — but the response
+      // has to be *valid*, echoing the request's generation, epoch and
+      // sequence, or the reporter rejects it and stops. That refusal is
+      // correct protocol behaviour and it would masquerade here as the defect
+      // this gate exists to catch.
+      send: async (url, request) => ({
+        protocol: PlurxPlaybackControl.PROTOCOL,
+        generation: request.generation,
+        control_epoch: request.control_epoch,
+        accepted_sequence: request.sequence,
+        action: { type: "none" },
+      }),
+      onExchange: ({ request, response, error }) => {
+        seen.push({
+          sequence: request && request.sequence,
+          accepted: !!(response && response.accepted),
+          action: response && response.action && response.action.type,
+          error: error ? String(error.message || error) : null,
+        });
+        // Two, so this proves the reporter SCHEDULES the next exchange through
+        // the default timer as well as sending the first. The defect killed
+        // the first; a regression in `schedule` would kill only the second.
+        if (seen.length >= 2) {
+          reporter.stop();
+          settle({ ok: true, seen });
+        }
+      },
+    });
+  } catch (error) {
+    fail("construct", error);
+    return;
+  }
+  try {
+    // `notify` returns null for a snapshot it rejects, and then nothing is
+    // ever scheduled. Without this the gate's own drift would read as a
+    // timeout blamed on the reporter.
+    if (reporter.notify() === null) {
+      fail("snapshot", "the reporter rejected this gate's snapshot shape");
+    }
+  } catch (error) {
+    fail("notify", error);
+  }
+})();
+</script>
+"""
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--browser", default=None, help="explicit browser executable")
+    args = parser.parse_args(argv)
+
+    try:
+        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    except ImportError:
+        print("SKIP  playwright is not installed; this gate needs a real browser")
+        return 0
+
+    module = MODULE.read_text(encoding="utf-8")
+    page_html = PAGE % {"module": module}
+    executable = find_browser(args.browser)
+
+    console = []
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            executable_path=executable,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        try:
+            page = browser.new_page()
+            page.on("console", lambda message: console.append(f"{message.type}: {message.text}"))
+            page.set_content(page_html, wait_until="load")
+            try:
+                # `wait_for_function` is what carries the timeout; `evaluate`
+                # would hang on a promise that never settles, which is exactly
+                # the shape a wedged reporter has.
+                page.wait_for_function(
+                    "() => window.__settled !== undefined",
+                    timeout=EXCHANGE_TIMEOUT_MS,
+                )
+                result = page.evaluate("() => window.__settled")
+            except PlaywrightTimeoutError:
+                result = {
+                    "ok": False,
+                    "stage": "timeout",
+                    "error": (
+                        "no exchange completed within "
+                        f"{EXCHANGE_TIMEOUT_MS} ms — the reporter never ran"
+                    ),
+                    "seen": [],
+                }
+        finally:
+            browser.close()
+
+    if result.get("ok"):
+        print(f"PASS  reporter completed {len(result['seen'])} exchanges in a real browser")
+        return 0
+
+    print("FAIL  the shipped playback-control reporter does not run in a browser")
+    print(f"  stage:  {result.get('stage')}")
+    print(f"  error:  {result.get('error')}")
+    print(f"  seen:   {json.dumps(result.get('seen'))}")
+    for line in console[:20]:
+        print(f"  console: {line}")
+    print(
+        "\n  This is the M5 fleet failure mode: the module's source can be "
+        "perfect\n  and every Node test green while the browser refuses it at "
+        "exchange one."
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
