@@ -2209,12 +2209,21 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// [`Self::activate_media_session`] does unconditionally, which is why a
     /// preparation cannot be built on it.
     ///
-    /// A staged successor counts against the per-user admission cap for the
-    /// whole preparation window. That is deliberate rather than incidental: a
-    /// prepared successor holds a real encoder slot, and a preparation that
-    /// did not count would let a heavy user hold twice the sessions the cap
-    /// names by keeping one staged forever. The cost is that preparing halves
-    /// a saturated user's headroom, which is the honest price of the resource.
+    /// A staged successor counts against the per-user admission cap, and —
+    /// unlike an activation — nothing is discounted against it. Activation's
+    /// counting queries exclude the incarnation the pointer names because that
+    /// one is about to be reaped by the same transaction; a preparation reaps
+    /// nothing, so discounting the predecessor would count a slot that is not
+    /// being freed and admit one session past the cap. A prepared successor
+    /// holds a real encoder slot for the whole preparation window; the price
+    /// is that preparing costs a saturated user real headroom, which is the
+    /// honest cost of the resource.
+    ///
+    /// A staged successor also takes its own `job_leases` row at prepare time,
+    /// exactly as an activation does. Without one the row can never be renewed
+    /// or taken over, so a committed successor would die at the preparation
+    /// deadline with no recovery path — acceptance 7 has no answer for that
+    /// phase otherwise.
     async fn prepare_media_session(
         &self,
         preparation: &crate::domain::MediaSessionPreparation,
@@ -2239,12 +2248,20 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// newer player generation exists, and the correct outcome is to **abort
     /// the staged generation, not reap the newer one**. A commit that read the
     /// pointer fresh would do the opposite and would look correct doing it.
+    ///
+    /// `lease_expires_at_ms` is the successor's boundary as a *serving*
+    /// session, and commit is where it has to be supplied. Until now the row
+    /// carried the preparation deadline, which is a much shorter clock chosen
+    /// for a candidate nobody is watching; a successor promoted without a new
+    /// boundary would be ended by maintenance at the moment the preparation
+    /// would have expired, taking the playback's pointer with it.
     async fn commit_media_session_preparation(
         &self,
         user_id: i64,
         playback_id: &str,
         staged_incarnation_id: &str,
         now_ms: i64,
+        lease_expires_at_ms: i64,
     ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError>;
 
     /// Discard the staged successor and leave the current stream authoritative.

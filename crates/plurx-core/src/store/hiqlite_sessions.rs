@@ -280,6 +280,40 @@ impl From<&mut Row<'_>> for StagedRow {
 const STAGED_COLS: &str = "user_id, playback_id, staged_incarnation_id,
     expected_predecessor_incarnation_id, deadline_ms, created_at_ms, updated_at_ms";
 
+/// Is this commit an exact replay?
+///
+/// The pointer is the discriminator: if it names the incarnation the caller
+/// asked about, this commit already happened and its outcome is the truthful
+/// answer. `predecessor` is `None` because the retirement it reports belongs
+/// to the transaction that actually ran.
+async fn commit_replay(
+    store: &HiqliteAuthStore,
+    user_id: i64,
+    playback_id: &str,
+    staged_incarnation_id: &str,
+) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError> {
+    let pointer = store
+        .client()
+        .query_consistent_map::<PointerRow, _>(
+            "SELECT current_incarnation_id FROM media_playback_pointers
+              WHERE user_id = $1 AND playback_id = $2",
+            params!(user_id, playback_id),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(|row| row.0);
+    if pointer.as_deref() != Some(staged_incarnation_id) {
+        return Ok(None);
+    }
+    Ok(route_by(store, "incarnation_id", staged_incarnation_id)
+        .await?
+        .map(|route| crate::domain::MediaSessionPreparationCommit {
+            route,
+            predecessor: None,
+        }))
+}
+
 async fn staged_row(
     store: &HiqliteAuthStore,
     user_id: i64,
@@ -1168,7 +1202,24 @@ impl MediaSessionStore for HiqliteAuthStore {
         // `txn` takes a fixed statement list and cannot read, branch or
         // RETURNING. The pointer identity, the ledger's emptiness and all
         // three admission bounds therefore appear inside the INSERT itself.
+        let prepare_lease_resource = format!("session:{}", preparation.incarnation_id);
         let statements: Vec<(&str, hiqlite::Params)> = vec![
+            (
+                // The staged row's own session lease, taken before the row as
+                // activation does. Without it the successor can never be
+                // renewed or taken over: renewal's first statement is an
+                // UPDATE on this exact resource, and takeover requires it.
+                "INSERT INTO job_leases
+                    (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
+                 SELECT $1, $2, 1, 1, $3, $4
+                  WHERE NOT EXISTS (SELECT 1 FROM job_leases WHERE resource = $1)",
+                params!(
+                    prepare_lease_resource.as_str(),
+                    preparation.owner_node_id.as_str(),
+                    preparation.deadline_ms,
+                    preparation.now_ms
+                ),
+            ),
             (
                 "INSERT INTO media_sessions
                     (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
@@ -1177,7 +1228,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                      media_origin_ms, media_sequence, discontinuity_sequence,
                      publication_ready_at_ms, updated_at_ms)
                  SELECT $1, $2, $3, $4, $5, $6, 1, $7, 'active', $8, $9, 0, 0, $10, 0, 0, $11, $12
-                  WHERE EXISTS (SELECT 1 FROM media_playback_pointers
+                  WHERE EXISTS (SELECT 1 FROM job_leases
+                      WHERE resource = 'session:' || $1 AND owner_node_id = $6
+                        AND fence = 1 AND expires_at_ms = $7 AND expires_at_ms > $12)
+                    AND EXISTS (SELECT 1 FROM media_playback_pointers
                       WHERE user_id = $3 AND playback_id = $4
                         AND current_incarnation_id = $13)
                     AND NOT EXISTS (SELECT 1 FROM media_session_preparations
@@ -1186,10 +1240,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                       WHERE staged_incarnation_id = $1)
                     AND (SELECT COUNT(*) FROM media_sessions
                           WHERE user_id = $3 AND state IN ('starting', 'active')
-                            AND lease_expires_at_ms > $12 AND incarnation_id != $1
-                            AND incarnation_id != COALESCE((
-                              SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE user_id = $3 AND playback_id = $4), '')) < $14
+                            AND lease_expires_at_ms > $12 AND incarnation_id != $1) < $14
                     AND (SELECT COUNT(*) FROM media_sessions
                           WHERE user_id = $3 AND incarnation_id != $1) < $15
                     AND (SELECT COUNT(*) FROM media_sessions
@@ -1250,7 +1301,10 @@ impl MediaSessionStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        if changed.first().copied() != Some(1) || changed.get(1).copied() != Some(1) {
+        if changed.first().copied() != Some(1)
+            || changed.get(1).copied() != Some(1)
+            || changed.get(2).copied() != Some(1)
+        {
             return Ok(None);
         }
         // The exact post-commit projection. `route_by` alone would accept a
@@ -1290,12 +1344,14 @@ impl MediaSessionStore for HiqliteAuthStore {
         playback_id: &str,
         staged_incarnation_id: &str,
         now_ms: i64,
+        lease_expires_at_ms: i64,
     ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError> {
         if user_id <= 0
             || playback_id.is_empty()
             || playback_id.len() > 128
             || !valid_uuid(staged_incarnation_id)
             || now_ms <= 0
+            || lease_expires_at_ms <= now_ms
         {
             return Err(StoreError::Task(
                 "invalid media-session preparation commit".to_owned(),
@@ -1303,35 +1359,21 @@ impl MediaSessionStore for HiqliteAuthStore {
         }
         let Some(staged) = staged_row(self, user_id, playback_id).await? else {
             // No ledger row. Either it was never staged, or an earlier commit
-            // already consumed it — and the pointer is the discriminator: if
-            // it names this incarnation, this exact commit already happened.
-            let route = route_by(self, "incarnation_id", staged_incarnation_id).await?;
-            let pointer = self
-                .client()
-                .query_consistent_map::<PointerRow, _>(
-                    "SELECT current_incarnation_id FROM media_playback_pointers
-                      WHERE user_id = $1 AND playback_id = $2",
-                    params!(user_id, playback_id),
-                )
-                .await?
-                .into_iter()
-                .next()
-                .map(|row| row.0);
-            if pointer.as_deref() != Some(staged_incarnation_id) {
-                return Ok(None);
-            }
-            return Ok(
-                route.map(|route| crate::domain::MediaSessionPreparationCommit {
-                    route,
-                    predecessor: None,
-                }),
-            );
+            // already consumed it — and the pointer is the discriminator.
+            return commit_replay(self, user_id, playback_id, staged_incarnation_id).await;
         };
         if staged.staged_incarnation_id != staged_incarnation_id {
-            return Ok(None);
+            // A later preparation holds the slot, which does not make this
+            // commit a loss: if the pointer names the incarnation the caller
+            // asked about, this exact commit already happened and the replay
+            // must read back. Returning `None` here made a retry of a lost
+            // response read as "you lost" on this backend and "here is your
+            // route" on SQLite.
+            return commit_replay(self, user_id, playback_id, staged_incarnation_id).await;
         }
         let predecessor_incarnation = staged.expected_predecessor_incarnation_id.clone();
         let lease_resource = format!("session:{predecessor_incarnation}");
+        let staged_lease_resource = format!("session:{}", staged.staged_incarnation_id);
         // The pointer advance and the predecessor's retirement in one
         // transaction, both fenced on the exact recorded predecessor. Nothing
         // here reads the pointer to decide what to reap; a pointer that no
@@ -1389,6 +1431,44 @@ impl MediaSessionStore for HiqliteAuthStore {
                     now_ms,
                     lease_resource.as_str(),
                     predecessor_incarnation.as_str()
+                ),
+            ),
+            (
+                // The successor stops being a candidate and starts being a
+                // stream, so it stops carrying the candidate's clock. Both
+                // halves move: the row, and the `job_leases` fence renewal
+                // reads. Without this it would be ended by maintenance at the
+                // moment the preparation would have expired, taking the
+                // playback's pointer with it.
+                "UPDATE media_sessions
+                    SET lease_expires_at_ms = $1, updated_at_ms = $2
+                  WHERE incarnation_id = $3 AND state = 'active'
+                    AND EXISTS (SELECT 1 FROM media_playback_pointers
+                      WHERE user_id = $4 AND playback_id = $5
+                        AND current_incarnation_id = $3)",
+                params!(
+                    lease_expires_at_ms,
+                    now_ms,
+                    staged.staged_incarnation_id.as_str(),
+                    user_id,
+                    playback_id
+                ),
+            ),
+            (
+                "UPDATE job_leases
+                    SET expires_at_ms = $1, revision = revision + 1, updated_at_ms = $2
+                  WHERE resource = $3 AND fence = 1
+                    AND revision < 9223372036854775807
+                    AND EXISTS (SELECT 1 FROM media_playback_pointers
+                      WHERE user_id = $4 AND playback_id = $5
+                        AND current_incarnation_id = $6)",
+                params!(
+                    lease_expires_at_ms,
+                    now_ms,
+                    staged_lease_resource.as_str(),
+                    user_id,
+                    playback_id,
+                    staged.staged_incarnation_id.as_str()
                 ),
             ),
             (
@@ -2912,6 +2992,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                         ON session.incarnation_id = pointer.current_incarnation_id
                       WHERE session.incarnation_id IS NULL OR session.state != 'active'
                         OR session.lease_expires_at_ms <= $1)
+                    OR EXISTS (SELECT 1 FROM media_session_preparations preparation
+                      LEFT JOIN media_sessions session
+                        ON session.incarnation_id = preparation.staged_incarnation_id
+                      WHERE session.incarnation_id IS NULL OR session.state != 'active')
                     OR EXISTS (SELECT 1 FROM media_session_requests
                       WHERE state = 'starting' AND claim_expires_at_ms <= $2)
                     OR EXISTS (SELECT 1 FROM media_session_requests
@@ -2993,6 +3077,25 @@ impl MediaSessionStore for HiqliteAuthStore {
                      OR session.lease_expires_at_ms <= $1
                   ORDER BY pointer.updated_at_ms, pointer.rowid LIMIT $2)",
                 params!(retire_before, MAINTENANCE_BATCH),
+            ),
+            (
+                // The ledger's own reaper, and the reason the preparation
+                // deadline can be a single clock. The retirement sweep above
+                // already ended any staged row past its deadline — a staged
+                // row is `active`, so it is in that sweep like any other — and
+                // this clears the ledger entry it left behind. Without it a
+                // dead owner's preparation holds the one-per-playback slot
+                // forever and refuses every future prepare for that player.
+                //
+                // Keyed on the successor's state, never on the deadline, so it
+                // can never race a live preparation whose owner is renewing.
+                "DELETE FROM media_session_preparations WHERE rowid IN (
+                   SELECT preparation.rowid FROM media_session_preparations preparation
+                   LEFT JOIN media_sessions session
+                     ON session.incarnation_id = preparation.staged_incarnation_id
+                  WHERE session.incarnation_id IS NULL OR session.state != 'active'
+                  ORDER BY preparation.updated_at_ms, preparation.rowid LIMIT $1)",
+                params!(MAINTENANCE_BATCH),
             ),
             (
                 "DELETE FROM media_session_requests WHERE rowid IN (
@@ -3244,6 +3347,106 @@ mod tests {
     /// accepted after exact route and current-pointer reads outside the
     /// transaction, so an ordinary precondition failure cannot masquerade as
     /// a replay.
+    /// §4.2's guards, written for the commit path rather than inherited.
+    ///
+    /// The all-zero replicated transaction is ambiguous between "I lost every
+    /// precondition" and "I am an exact replay", and only the post-commit
+    /// projection tells them apart. These assertions are what stop that
+    /// discriminator being quietly deleted by somebody who reads the
+    /// `rows_affected` check above it and concludes it is redundant.
+    #[test]
+    fn preparation_commit_disambiguates_replay_from_total_loss() {
+        let source = method_source("commit_media_session_preparation");
+        assert!(
+            source.contains("changed.iter().all(|affected| *affected == 0)"),
+            "an all-zero transaction must be treated as a candidate replay \
+             rather than a loss"
+        );
+        assert!(
+            source.contains("pointer.as_deref() != Some(staged.staged_incarnation_id.as_str())"),
+            "and the exact post-commit pointer projection is what settles it"
+        );
+        assert_eq!(
+            source.matches("current_incarnation_id = $5").count(),
+            1,
+            "the pointer advance fences on the recorded predecessor, never on \
+             whatever the pointer happens to name"
+        );
+        assert!(
+            !source.contains("SELECT current_incarnation_id FROM media_playback_pointers\n                      WHERE user_id = $4 AND playback_id = $5)"),
+            "the predecessor's retirement must name an exact incarnation, not \
+             a pointer subquery — that is the §2.4 divergence"
+        );
+        assert!(
+            source.contains("abort_media_session_preparation("),
+            "losing the pointer CAS aborts the staged successor rather than \
+             leaving the ledger row to lock the playback out of preparation"
+        );
+    }
+
+    /// A preparation must not run the supersession reap or move the pointer.
+    ///
+    /// Acceptance 3, as a source guard, because the runnable form of it needs
+    /// a three-voter cluster and does not run in the fast loop.
+    #[test]
+    fn preparation_neither_reaps_nor_repoints() {
+        let source = method_source("prepare_media_session");
+        assert!(
+            !source.contains("terminal_reason = 'superseded'"),
+            "prepare must not run the supersession reap"
+        );
+        assert!(
+            !source.contains("UPDATE media_playback_pointers")
+                && !source.contains("INSERT INTO media_playback_pointers"),
+            "prepare must not write the pointer — a staged successor is \
+             invisible to the current-session lookup precisely because it \
+             holds none"
+        );
+        assert!(
+            source.contains("NOT EXISTS (SELECT 1 FROM media_session_preparations\n                      WHERE user_id = $3 AND playback_id = $4)"),
+            "one staged successor per playback, inlined because a replicated \
+             transaction cannot read and branch"
+        );
+        assert!(
+            source.contains("INSERT INTO job_leases"),
+            "a staged successor takes its own session lease, or it can never \
+             be renewed or taken over once it commits"
+        );
+    }
+
+    /// Every write an abort performs is gated on the ledger row.
+    ///
+    /// The incarnation id alone names any session in the database, so an
+    /// ungated `WHERE incarnation_id = ?` ends a stranger's live stream.
+    #[test]
+    fn preparation_abort_is_ledger_gated_in_every_statement() {
+        let source = method_source("abort_media_session_preparation");
+        assert!(
+            source.contains("EXISTS (SELECT 1 FROM media_session_preparations"),
+            "the retirement is gated on the ledger row — the incarnation id \
+             alone names any session in the database"
+        );
+        assert_eq!(
+            source
+                .matches("state = 'ended' AND updated_at_ms = $")
+                .count(),
+            2,
+            "the pin delete and the lease clamp chain on that retirement \
+             having fired at this instant, which is stronger than re-reading \
+             the ledger and is what the SQLite twin now does too"
+        );
+        let ledger_delete = source
+            .find("DELETE FROM media_session_preparations")
+            .expect("the ledger row is cleared");
+        assert!(
+            ledger_delete
+                > source
+                    .find("UPDATE media_sessions")
+                    .expect("the retirement exists"),
+            "the ledger DELETE comes last, because the retirement reads it"
+        );
+    }
+
     #[test]
     fn activation_losing_pointer_read_race_is_a_read_only_replay() {
         let source = method_source("activate_media_session");

@@ -185,6 +185,90 @@ fn validate_preparation(preparation: &MediaSessionPreparation) -> Result<(), Sto
     }
 }
 
+/// End one staged successor, every write gated on its ledger row.
+///
+/// The gating is the safety property and it has to be in the SQL, not in a
+/// predicate applied to the result: the incarnation id alone names any session
+/// in the database, so an `UPDATE … WHERE incarnation_id = ?` would end a
+/// stranger's live stream and then report that it had lost. `playback_id` is
+/// caller-supplied and `user_id` is not otherwise consulted, so there is no
+/// boundary here except this one.
+///
+/// The ledger row is deleted LAST, because the three writes before it read it.
+///
+/// Deliberately says nothing about whether it did anything. The caller derives
+/// that from a re-read plus a predicate, never from `rows_affected`, so an
+/// owner retrying an abort after a crash reads the same answer as the first
+/// attempt rather than a spurious loss.
+fn abort_staged_generation(
+    tx: &rusqlite::Transaction<'_>,
+    user_id: i64,
+    playback_id: &str,
+    staged_incarnation_id: &str,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE media_sessions
+            SET state = 'ended', terminal_reason = 'replaced',
+                lease_expires_at_ms = ?1, updated_at_ms = ?1
+          WHERE incarnation_id = ?2 AND state != 'ended'
+            AND EXISTS (SELECT 1 FROM media_session_preparations
+              WHERE user_id = ?3 AND playback_id = ?4
+                AND staged_incarnation_id = ?2)",
+        params![now_ms, staged_incarnation_id, user_id, playback_id],
+    )?;
+    // The next two chain on the retirement above rather than re-reading the
+    // ledger: "this row is ended and was ended at this instant" proves the
+    // first statement fired, which a second ledger lookup does not. It is the
+    // guard the replicated twin uses, and the two must read the same.
+    tx.execute(
+        "DELETE FROM cache_consumer_pins
+          WHERE consumer_kind = 'media_session' AND consumer_id = ?1
+            AND EXISTS (SELECT 1 FROM media_sessions
+              WHERE incarnation_id = ?1 AND state = 'ended' AND updated_at_ms = ?2)",
+        params![staged_incarnation_id, now_ms],
+    )?;
+    tx.execute(
+        "UPDATE job_leases
+            SET expires_at_ms = CASE
+                  WHEN expires_at_ms < ?1 THEN expires_at_ms ELSE ?1 END,
+                revision = revision + 1, updated_at_ms = ?1
+          WHERE resource = ?2 AND revision < 9223372036854775807
+            AND EXISTS (SELECT 1 FROM media_sessions
+              WHERE incarnation_id = ?3 AND state = 'ended' AND updated_at_ms = ?1)",
+        params![
+            now_ms,
+            format!("session:{staged_incarnation_id}"),
+            staged_incarnation_id,
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM media_session_preparations
+          WHERE user_id = ?1 AND playback_id = ?2 AND staged_incarnation_id = ?3",
+        params![user_id, playback_id, staged_incarnation_id],
+    )?;
+    Ok(())
+}
+
+/// Exact immutable identity for a preparation replay.
+///
+/// Kept identical to the replicated twin's, because a replay that reads back
+/// on one backend and loses on the other is the §2.4 failure mode with a
+/// different name. Progress and lease coordinates are deliberately absent:
+/// they are monotone durable state a replay must read back, never restore.
+fn preparation_route_matches(
+    route: &MediaSessionRoute,
+    preparation: &MediaSessionPreparation,
+) -> bool {
+    route.session_id == preparation.session_id
+        && route.user_id == preparation.user_id
+        && route.playback_id == preparation.playback_id
+        && route.request_fingerprint == preparation.request_fingerprint
+        && route.owner_node_id == preparation.owner_node_id
+        && route.state == "active"
+        && route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
+}
+
 fn staged_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionStagedGeneration> {
     Ok(MediaSessionStagedGeneration {
         user_id: row.get(0)?,
@@ -1226,14 +1310,7 @@ impl MediaSessionStore for SqliteStore {
                         route_from_row,
                     )
                     .optional()?
-                    .filter(|route| {
-                        route.state == "active"
-                            && route.session_id == preparation.session_id
-                            && route.user_id == preparation.user_id
-                            && route.playback_id == preparation.playback_id
-                            && route.owner_node_id == preparation.owner_node_id
-                            && route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
-                    })
+                    .filter(|route| preparation_route_matches(route, &preparation))
                 } else {
                     None
                 };
@@ -1261,18 +1338,21 @@ impl MediaSessionStore for SqliteStore {
             // one being replaced, and a staged successor is neither it nor the
             // activating row, so it counts. See the trait doc — that is a
             // decision, not an oversight.
+            // No pointer exclusion, deliberately, and this is the one place
+            // it differs from activation's four counting queries. Those
+            // exclude the pointed-at incarnation because the same transaction
+            // is about to reap it. A preparation reaps nothing — the
+            // predecessor stays current and active — so discounting it would
+            // count a slot that is not being freed and admit one session past
+            // the cap.
             let current: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM media_sessions
                   WHERE user_id = ?1 AND state IN ('starting', 'active')
-                    AND lease_expires_at_ms > ?2 AND incarnation_id != ?3
-                    AND incarnation_id != COALESCE((
-                      SELECT current_incarnation_id FROM media_playback_pointers
-                       WHERE user_id = ?1 AND playback_id = ?4), '')",
+                    AND lease_expires_at_ms > ?2 AND incarnation_id != ?3",
                 params![
                     preparation.user_id,
                     preparation.now_ms,
                     preparation.incarnation_id,
-                    preparation.playback_id,
                 ],
                 |row| row.get(0),
             )?;
@@ -1300,6 +1380,21 @@ impl MediaSessionStore for SqliteStore {
                 tx.commit()?;
                 return Ok(None);
             }
+            // Pre-empt the ledger's UNIQUE rather than letting the constraint
+            // fire: a violation surfaces as `Err`, and §4.1's contract is that
+            // `Err` means malformed input or a real database fault while a
+            // lost race is `Ok(None)`. The replicated twin inlines the same
+            // check into its INSERT for the same reason.
+            let staged_elsewhere: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM media_session_preparations
+                  WHERE staged_incarnation_id = ?1",
+                params![preparation.incarnation_id],
+                |row| row.get(0),
+            )?;
+            if staged_elsewhere > 0 {
+                tx.commit()?;
+                return Ok(None);
+            }
             // An ordinary active row. The two things that make it staged are
             // both absences: no pointer, and the publication sentinel it is
             // born with and does not arm.
@@ -1309,6 +1404,32 @@ impl MediaSessionStore for SqliteStore {
             // competing clock: 60 s past it, maintenance ends this row as
             // `replaced`, which is precisely the abort an owner that died
             // would otherwise never issue.
+            // The staged row's own session lease, taken before the row like
+            // activation does. Without it the successor can never be renewed
+            // or taken over: renewal's first statement is an UPDATE on this
+            // exact resource and takeover requires it to exist.
+            if tx.execute(
+                "INSERT INTO job_leases
+                    (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 1, 1, ?3, ?4)
+                 ON CONFLICT(resource) DO UPDATE SET
+                    expires_at_ms = excluded.expires_at_ms,
+                    revision = job_leases.revision + 1,
+                    updated_at_ms = excluded.updated_at_ms
+                 WHERE job_leases.owner_node_id = excluded.owner_node_id
+                   AND job_leases.fence = 1 AND job_leases.expires_at_ms > ?4
+                   AND job_leases.revision < 9223372036854775807",
+                params![
+                    format!("session:{}", preparation.incarnation_id),
+                    preparation.owner_node_id,
+                    preparation.deadline_ms,
+                    preparation.now_ms,
+                ],
+            )? != 1
+            {
+                tx.rollback()?;
+                return Ok(None);
+            }
             tx.execute(
                 "INSERT INTO media_sessions
                     (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
@@ -1355,10 +1476,7 @@ impl MediaSessionStore for SqliteStore {
                     route_from_row,
                 )
                 .optional()?
-                .filter(|route| {
-                    route.state == "active"
-                        && route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
-                });
+                .filter(|route| preparation_route_matches(route, &preparation));
             let Some(route) = route else {
                 tx.rollback()?;
                 return Ok(None);
@@ -1380,7 +1498,7 @@ impl MediaSessionStore for SqliteStore {
             ));
         }
         let playback_id = playback_id.to_owned();
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             Ok(conn
                 .query_row(
                     &format!(
@@ -1401,12 +1519,14 @@ impl MediaSessionStore for SqliteStore {
         playback_id: &str,
         staged_incarnation_id: &str,
         now_ms: i64,
+        lease_expires_at_ms: i64,
     ) -> Result<Option<MediaSessionPreparationCommit>, StoreError> {
         if user_id <= 0
             || playback_id.is_empty()
             || playback_id.len() > 128
             || !valid_uuid(staged_incarnation_id)
             || now_ms <= 0
+            || lease_expires_at_ms <= now_ms
         {
             return Err(StoreError::Task(
                 "invalid media-session preparation commit".to_owned(),
@@ -1460,7 +1580,10 @@ impl MediaSessionStore for SqliteStore {
                 "UPDATE media_playback_pointers
                     SET current_incarnation_id = ?1, updated_at_ms = ?2
                   WHERE user_id = ?3 AND playback_id = ?4
-                    AND current_incarnation_id = ?5",
+                    AND current_incarnation_id = ?5
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = ?1 AND user_id = ?3
+                        AND playback_id = ?4 AND state = 'active')",
                 params![
                     staged.staged_incarnation_id,
                     now_ms,
@@ -1473,21 +1596,27 @@ impl MediaSessionStore for SqliteStore {
                 // A newer generation exists. Abort the staged successor rather
                 // than reap it — see the trait doc; this branch is the reason
                 // that doc is as long as it is.
-                tx.execute(
-                    "UPDATE media_sessions
-                        SET state = 'ended', terminal_reason = 'replaced',
-                            lease_expires_at_ms = ?1, updated_at_ms = ?1
-                      WHERE incarnation_id = ?2 AND state != 'ended'",
-                    params![now_ms, staged.staged_incarnation_id],
-                )?;
-                tx.execute(
-                    "DELETE FROM media_session_preparations
-                      WHERE user_id = ?1 AND playback_id = ?2 AND staged_incarnation_id = ?3",
-                    params![user_id, playback_id, staged.staged_incarnation_id],
+                //
+                // The same body an explicit abort runs, rather than a second
+                // spelling of it: the first version of this branch ended the
+                // row and dropped the ledger entry but left the successor's
+                // cache pins and job lease behind, which is a divergence from
+                // the replicated twin for the same input.
+                abort_staged_generation(
+                    &tx,
+                    user_id,
+                    &playback_id,
+                    &staged.staged_incarnation_id,
+                    now_ms,
                 )?;
                 tx.commit()?;
                 return Ok(None);
             }
+            let staged_owner: String = tx.query_row(
+                "SELECT owner_node_id FROM media_sessions WHERE incarnation_id = ?1",
+                [staged.staged_incarnation_id.as_str()],
+                |row| row.get(0),
+            )?;
             let predecessor = tx
                 .query_row(
                     &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
@@ -1527,6 +1656,27 @@ impl MediaSessionStore for SqliteStore {
                     format!("session:{}", staged.expected_predecessor_incarnation_id),
                 ],
             )?;
+            // The successor stops being a candidate and starts being a
+            // stream, so it stops carrying the candidate's clock. Both halves
+            // move: the row, and the `job_leases` fence renewal reads.
+            tx.execute(
+                "UPDATE media_sessions
+                    SET lease_expires_at_ms = ?1, updated_at_ms = ?2
+                  WHERE incarnation_id = ?3 AND state = 'active'",
+                params![lease_expires_at_ms, now_ms, staged.staged_incarnation_id],
+            )?;
+            tx.execute(
+                "UPDATE job_leases
+                    SET expires_at_ms = ?1, revision = revision + 1, updated_at_ms = ?2
+                  WHERE resource = ?3 AND owner_node_id = ?4 AND fence = 1
+                    AND revision < 9223372036854775807",
+                params![
+                    lease_expires_at_ms,
+                    now_ms,
+                    format!("session:{}", staged.staged_incarnation_id),
+                    staged_owner,
+                ],
+            )?;
             tx.execute(
                 "DELETE FROM media_session_preparations
                   WHERE user_id = ?1 AND playback_id = ?2 AND staged_incarnation_id = ?3",
@@ -1550,6 +1700,12 @@ impl MediaSessionStore for SqliteStore {
                 .optional()?
                 .filter(|route| route.state == "active");
             let Some(route) = route else {
+                // Unreachable in practice: the pointer CAS above already
+                // required the staged row to be `active`, and that branch
+                // aborts. Kept because a projection that cannot be read back
+                // must never commit — and a rollback here is the right
+                // outcome, since it also restores the ledger row rather than
+                // leaving a preparation half-consumed.
                 tx.rollback()?;
                 return Ok(None);
             };
@@ -1592,45 +1748,11 @@ impl MediaSessionStore for SqliteStore {
         let staged_incarnation_id = staged_incarnation_id.to_owned();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            // Ledger-scoped, and that is the safety property: without the
-            // ledger row this cannot end an arbitrary incarnation, so an abort
-            // aimed at a successor that already committed ends nothing. The
-            // pointer is never read and never written here.
-            let deleted = tx.execute(
-                "DELETE FROM media_session_preparations
-                  WHERE user_id = ?1 AND playback_id = ?2 AND staged_incarnation_id = ?3",
-                params![user_id, playback_id, staged_incarnation_id],
-            )?;
-            // Deliberately not a `return` on zero. The outcome is derived
-            // from a re-read plus a predicate, never from `rows_affected`, so
-            // an owner retrying an abort after a crash reads the same answer
-            // as the first attempt rather than a spurious loss.
-            let _ = deleted;
-            tx.execute(
-                "UPDATE media_sessions
-                    SET state = 'ended', terminal_reason = 'replaced',
-                        lease_expires_at_ms = ?1, updated_at_ms = ?1
-                  WHERE incarnation_id = ?2 AND state != 'ended'",
-                params![now_ms, staged_incarnation_id],
-            )?;
-            tx.execute(
-                "DELETE FROM cache_consumer_pins
-                  WHERE consumer_kind = 'media_session' AND consumer_id = ?1",
-                params![staged_incarnation_id],
-            )?;
-            tx.execute(
-                "UPDATE job_leases
-                    SET expires_at_ms = CASE
-                          WHEN expires_at_ms < ?1 THEN expires_at_ms ELSE ?1 END,
-                        revision = revision + 1, updated_at_ms = ?1
-                  WHERE resource = ?2 AND revision < 9223372036854775807",
-                params![now_ms, format!("session:{staged_incarnation_id}")],
-            )?;
-            // The predicate is the whole guard: this reports success only
-            // for a row that is ended, carries the abort's own terminal cause,
-            // and belongs to the playback the caller named. A successor that
-            // has already committed is `active` and fails it; an unrelated
-            // incarnation fails the identity.
+            abort_staged_generation(&tx, user_id, &playback_id, &staged_incarnation_id, now_ms)?;
+            // The predicate is a second line, not the first: every write above
+            // is itself ledger-gated. This reports success only for a row that
+            // is ended, carries the abort's own terminal cause, and belongs to
+            // the playback the caller named.
             let route = tx
                 .query_row(
                     &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
