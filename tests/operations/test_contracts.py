@@ -612,7 +612,14 @@ class OperationsContractCase(unittest.TestCase):
         # independently selected replicated/daemon jobs.
         gate = makefile.split(".PHONY: ci-rust-gate", 1)[1].split(".PHONY:", 1)[0]
         self.assertIn("--workspace --locked --exclude plurx-cluster-check", gate)
-        self.assertIn("ci-rust-gate: fmt-check lint", gate)
+        # The lockfile check sits in front of Clippy on purpose. `spikes/
+        # hiqlite-m0` is a separate workspace that path-depends on plurx-core,
+        # so adding a dependency to plurx-core strands its lockfile — and the
+        # thing that used to notice was `cargo clippy --locked` in a different
+        # job, twenty minutes in. Running it first costs under a second and
+        # fails with the same message.
+        self.assertIn("ci-rust-gate: fmt-check spike-lock-check lint", gate)
+        self.assertIn("spike-lock-check", makefile.split("\nunit:", 1)[1].split("\n\n", 1)[0])
         self.assertIn("run: make ci-rust-gate", workflow)
         self.assertIn("make fmt-check lint", lint)
         self.assertIn("run: make cluster-store-check cluster-harness-check", workflow)

@@ -36,7 +36,7 @@ fmt: ## Auto-format all code
 # feature unification cannot pull them into this target accidentally.
 # `--no-fail-fast` reports every failing target in one run.
 .PHONY: unit test test-full
-unit: ## Run the fast Rust unit and SQLite contract lane
+unit: spike-lock-check ## Run the fast Rust unit and SQLite contract lane
 	$(CARGO) test --workspace --exclude plurx-cluster-check --no-fail-fast
 
 test: unit ## Run the fast Rust test lane
@@ -57,7 +57,7 @@ fmt-check: ## Verify formatting without changing files
 # type-correct, but leave execution to focused local checks and the final
 # effort-to-main qualification run.
 .PHONY: effort-rust-check
-effort-rust-check: fmt-check ## Compile every Rust target without running the test suite
+effort-rust-check: fmt-check spike-lock-check ## Compile every Rust target without running the test suite
 	$(CARGO) check --workspace --locked --all-targets
 
 .PHONY: lint
@@ -71,7 +71,7 @@ rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 # contracts. Cluster jobs own WAL, replicated Store, topology, and daemon
 # contracts. Explicit test features keep those processes out of this lane.
 .PHONY: ci-rust-gate
-ci-rust-gate: fmt-check lint ## CI Rust gate: format, Clippy, and fast workspace tests
+ci-rust-gate: fmt-check spike-lock-check lint ## CI Rust gate: format, Clippy, and fast workspace tests
 	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
 
 # The real mount-namespace exercises for scratch aliasing and mount points
@@ -105,6 +105,20 @@ operations-check: ## Verify deploy, CI, container, and client shipping contracts
 
 .PHONY: check
 check: validation-lint history-check operations-check benchmark-check rust-check ## History + operations + catalog + benchmark + Rust baseline
+
+.PHONY: spike-lock-check
+spike-lock-check: ## Prove the isolated spike's lockfile still resolves
+	@# `spikes/hiqlite-m0` is a SEPARATE workspace that path-depends on
+	@# plurx-core, so adding a dependency to plurx-core strands its lockfile —
+	@# and nothing else in this Makefile touches that workspace, so the first
+	@# thing that notices is `cargo clippy --locked` twenty minutes into CI.
+	@#
+	@# `cargo metadata --locked` resolves without compiling anything: under a
+	@# second, and it fails with the same "cannot update the lock file"
+	@# message the CI job does. The fix when it fires is one command:
+	@#   cargo update --manifest-path spikes/hiqlite-m0/Cargo.toml --workspace
+	@$(CARGO) metadata --locked --manifest-path spikes/hiqlite-m0/Cargo.toml \
+	  --format-version 1 >/dev/null
 
 .PHONY: hiqlite-spike
 hiqlite-spike: ## Run the isolated M0 raft/SQLite semantic proof
