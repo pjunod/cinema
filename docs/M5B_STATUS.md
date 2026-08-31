@@ -1,6 +1,6 @@
 # M5b status — permanent Dolby Vision Profile 7 conversion
 
-**Status:** final exact-tree review pending · **Branch:**
+**Status:** candidate assembly in progress · **Branch:**
 `effort/playback-caps-v2-m5b` · **PR:**
 [#710](https://github.com/pjunod/plurx/pull/710) · **Updated:** 2026-08-31
 
@@ -21,13 +21,13 @@ a forecast.
 | Stage | State | Evidence or next action |
 |---|---|---|
 | Isolated workspace | Complete | Fresh clone at `/private/tmp/plurx-m5b.lQcDxU/repo`; the user's existing checkouts are untouched |
-| Integration line | Complete | Current `main` at `623512ea` is merged into `effort/playback-caps-v2-m5b`; Apple build 98 is claimed; development commits use `PLURX_EFFORT_COMMIT=1` |
-| Store ledger | Complete | SQLite v39 and replicated v20 implement the same terminal ledger; queue/transition contracts, historical fixtures, and SQLite-to-hiqlite import coverage pass |
-| Conversion worker | Complete | Six-stage sibling-temp pipeline, exact mux verification, scanner-identity plus open-handle source fence, leased parallel queue, fenced state transitions, and crash recovery compile and pass focused unit tests |
-| Operator surface | Complete | Admin-only library modes, progress, settings, file action/ledger, explicit tool refusal, and retry controls pass the embedded-web static contract |
+| Integration line | Refresh required | `main` moved after the first integration merge. Finish the active review fixes, merge the then-current `main`, refresh the Apple build claim if required, and review that exact tree before qualification |
+| Store ledger | Complete | SQLite v40 and replicated v21 implement the same non-cascading replacement-guard lifecycle; direct and fenced SQLite/three-voter contracts, fail-closed migrations, and current/v14 import parity pass |
+| Conversion worker | Complete | The destructive pipeline and crash-convergent cleanup pass 74 focused worker tests. Source-consuming tools inherit the manifest-bound descriptor instead of reopening a pathname; output must prove Profile 8.1 compatibility, explicit RPU presence, and no enhancement layer. Every absent guard/scratch decision requires a durable source-parent witness, terminal ledger deletion requires its `scratch_removed` tombstone, and the exact missing-mount regression proves all three cleanup boundaries fail closed |
+| Operator surface | Complete | The admin guard projection is coherent and bounded. Operations names the filesystem witness, permanent terminal tombstone, missing-mount refusal, private cleanup anchor, dedicated-account trust boundary, and manual-removal prohibition. Shipped mounts remain read-only by default; Compose, systemd, Unraid, and Kubernetes now name the exact opt-in writable-library contract, while the interactive-user macOS LaunchAgent explicitly keeps conversion Off |
 | Image and probes | Complete | Image installs checksum-pinned `dovi_tool` 2.3.3 assets and exact Bookworm MKVToolNix 74.0.0-1; the boot probe names command, version, availability, and an exact refusal reason |
-| Focused evidence | Complete | Conversion and API unit tests, SQLite and replicated Store contracts, both backend compilation, embedded-web static contracts, 60-layout/view UI capture, validation catalog, and 127 operations contracts pass |
-| Adversarial review | In progress | Three independent first-pass reviews and the deeper remediation pass are complete; destructive-media, clustered-store, API/UI, documentation, and packaging findings are fixed. Review the exact merged candidate before qualification |
+| Focused evidence | Complete | The frozen attestation tree passes 74 worker tests, the focused admin API regression, the unavailable-tools/mount-disappearance state regression, production compile, strict daemon-test Clippy, rustfmt, and patch hygiene. SQLite and three-voter migration/import/queue contracts, the deterministic concurrent queue-outcome race, guarded rollback retirement, operations/package contracts, the Apple build 102 claim, and web checks also pass |
+| Adversarial review | Complete | Severity-ordered passes found and fixed mount-loss retirement, reusable-path deletion, transient source-path tool reads, incomplete Profile 8.1 verification, legacy guardless claims, non-atomic replicated queue outcomes and upgrade trigger installation, guarded rollback cleanup, retry truth, API bounds, stale status claims, read-only deployment contradictions, the macOS same-uid trust violation, and launchd tool discovery. Three independent final verdicts are clean |
 | Complete qualification | Not started | Run once after review fixes on the frozen effort-to-main candidate; every promotion job and the exact-tree receipt must pass |
 | Merge | Not started | Merge only while the qualified head and `main` base are unchanged |
 
@@ -66,9 +66,11 @@ a forecast.
    tab and an admin file detail load one bounded snapshot, then refresh at most
    once every ten seconds while a row is `queued`, `running`, or `verified`.
    The first all-terminal snapshot stops the timer, so an idle page spends no
-   continuing ledger reads. File detail uses one batch read for all visible
-   files, including server-computed eligibility and one shared tool-capability
-   snapshot; it never fans out one request per file.
+   continuing ledger reads. File detail loads at most 1,024 visible actions
+   through no more than four sequential 256-ID reads, including
+   server-computed eligibility and one shared tool-capability snapshot. Files
+   beyond that cap show an explicit not-loaded state; the page never fans out
+   one request per file or issues ledger reads concurrently.
 6. **Do not invent ledger history while importing an old backup.** SQLite v14
    predates the v39 conversion table, so its migration creates an empty ledger;
    a current-schema import separately proves that a real failed conversion row
@@ -79,13 +81,49 @@ a forecast.
    operator to run another bounded pass, while automatic mode advances one
    library per leased tick. Admin batch reads are separately capped at 256
    file IDs.
+8. **Persist a recovery guard when policy deletes the Profile 7 source.** No
+   portable filesystem operation can prove a public pathname still names the
+   verified replacement while deleting its last other hard link. Keep one
+   same-filesystem hard link inside the conversion-owned hidden scratch, record
+   it in a separate non-cascading guard ledger, and expose its state to
+   administrators. The conversion stays `verified` until original retention or
+   deletion is durable; only then can one fenced transaction activate the guard
+   and mark the conversion `committed`. Confirmed catalog deletion leaves the
+   guard row discoverable for bounded, leased orphan cleanup rather than
+   orphaning media blocks under an untracked hidden path.
+9. **Require mounted-filesystem evidence before cleanup accepts absence.** A
+   deterministic scratch path can be missing because cleanup finished or
+   because this voter sees the empty directory underneath a missing mount.
+   Before the first destructive guard step, persist a bounded witness in the
+   source parent while the owned scratch and proof link are both validated on
+   that filesystem. Every later absent-path decision requires the same bound
+   witness. After scratch removal, retain a tiny terminal tombstone before
+   deleting the ledger row; permanent metadata is safer than either retaining
+   a 60–80 GB inode or letting an unmounted voter erase the only ownership
+   record.
+10. **Retire files inside a dedicated-account private anchor.** macOS and Linux
+    do not expose a portable compare-and-unlink syscall. Move the checked
+    object into a daemon-owned, no-follow, same-filesystem `0700` directory and
+    retire it only through the held directory capability while the Store file
+    lease serializes plurxd workers. This protects against every other Unix
+    uid and avoids retaining a full media inode. The explicit boundary is that
+    arbitrary processes running as the plurxd uid are trusted; operations now
+    requires a dedicated service account rather than sharing that uid with a
+    downloader, organizer, or shell job.
+11. **Bind tool inputs and verify the exact claimed output.** The long-running
+    ffmpeg extraction and mkvmerge remux inherit a duplicated descriptor for
+    the already manifest-bound source; they never reopen its reusable pathname,
+    and the held inode is checked before and after each child. Original deletion
+    also requires the replacement probe to report Profile 8, compatibility id
+    1, explicit RPU presence, and no enhancement layer. A generic or incomplete
+    Profile 8 output is not Profile 8.1 and fails closed.
 
 ## Final evidence — fill only from the frozen tree
 
 | Evidence | Result |
 |---|---|
-| Focused local regressions | Worker safety: all 30 `dv_disk` tests pass. Settings: all 8 focused tests pass. Store parity: the SQLite and three-voter conversion contracts pass, including bounded retry fairness and committed-cleanup cursor selection. `cargo check -p plurx-core --all-targets --features hiqlite-store`, workspace compile, focused clippy, `make web-check`, and all 127 operations contracts pass |
-| Adversarial review findings | The first pass fixed crash-publication, no-clobber/source-swap, scratch ownership, durability, MKV eligibility, lease-loss cancellation, unbounded admission, replicated queue races, migration strictness, N+1/batch-read, concurrent mode update, settings partial-write, probe timeout/version, API 404, polling/accessibility, documentation, and arm64-build gaps. The deeper pass additionally bound recovery and rollback to verified storage identities, preserved the queued retention policy, made safe rollback retryable only after proof, added crash-convergent cleanup, prioritized unseen rows over retries, prevalidated the whole settings request, and decoupled successful UI mutations from refresh reads. Exact merged-tree review pending |
+| Focused local regressions | `cargo test -p plurxd dv_disk::tests:: --no-fail-fast` (74/74); guarded rollback plus unavailable-tools/mount-disappearance scheduler regression (1/1); focused admin API; SQLite and three-voter Store/migration/import contracts plus the concurrent queue-outcome race; `make operations-check`; `make web-check`; `make apple-build-bump`; `cargo check -p plurxd --bin plurxd`; `cargo clippy -p plurxd --bin plurxd --tests -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check` |
+| Adversarial review findings | Fixed cleanup lease/slot races, exact-object identity and portable rebaseline persistence, descriptor-bound tool inputs, exact Profile 8.1/RPU verification, bounded residual filesystem I/O and tool/probe output, proof-creation/removal namespace races, private-anchor retirement, failure-cleanup fencing, durable parent syncs, truthful guarded commit, non-cascading orphan lifecycle, missing-tool cleanup scheduling, mounted-filesystem absence attestation, legacy guardless claims, atomic replicated queue outcomes and upgrade trigger installation, guarded rollback convergence, row-id reuse, missing-link fail-closed projection, migration/import failures, retry eligibility truth, UI/API request bounds, operator visibility, read-only packaging contradictions, macOS service-account safety, launchd tool discovery, and stale documentation. Three final read-only verdicts are clean |
 | Main promotion gate | Pending |
 | Qualification receipt | Pending |
 | Merge commit | Pending |

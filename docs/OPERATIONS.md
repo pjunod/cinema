@@ -40,6 +40,23 @@ This is the only operator action that replaces media bytes. It is admin-only,
 off for every library by default, and separate from playback's temporary
 Profile 7 compatibility path.
 
+Every packaged media mount is read-only by default. Before enabling this action,
+complete the path-specific writable-library contract in
+[`deploy/README.md`](../deploy/README.md#writable-media-is-a-narrow-explicit-opt-in):
+keep a tested backup outside the library, use a dedicated daemon uid, grant it
+write access only to the selected library, and prove the mounted filesystem's
+hard-link, atomic-rename, Unix ownership/mode, and durable-sync behavior. Every
+voter that can lease the work must see those same semantics. Keep conversion
+Off if any condition is unproved.
+
+The shipped macOS interactive-user LaunchAgent is not a supported permanent-
+conversion service. It preserves user-session VideoToolbox access, but desktop
+apps and shell jobs share its uid and therefore violate the private cleanup
+anchor's trust boundary. Use the documented Linux container or Linux systemd
+service path. A site-specific dedicated-account LaunchDaemon is possible, but
+no turnkey one is shipped because its media ACLs and hardware-session policy
+are operator-specific.
+
 The release image contains checksum-pinned `dovi_tool` 2.3.3 and Debian's
 exact `mkvmerge` 74.0.0 build. A bare-metal install needs both commands on
 `PATH`, or explicit `PLURX_DOVI_TOOL` and `PLURX_MKVMERGE` paths. Startup probes
@@ -91,6 +108,63 @@ Move or verify that file yourself before retrying. With **Keep original** off,
 the staged Profile 7 file is deleted only after the Profile 8 path has been
 published and re-probed. A verification failure leaves the public source
 untouched and records the mismatch for the retry control.
+
+The destructive path also keeps a hard link inside its owned hidden working
+directory: `.<source>.plurx-dv-<file-id>/replacement.p81.public-proof`. Its
+durable guard record is created before the Profile 7 original is deleted. An
+`active` guard normally remains for the life of the committed media row; while
+the public Profile 8 path still exists, the second name references the same
+inode and consumes no additional media data blocks. This requires the library
+filesystem to support same-filesystem hard links.
+
+Settings → Libraries shows the guard lifecycle and a bounded list of orphaned
+records. `intent` means the safety link is being recorded, `active` is the
+normal committed state, `guard_removed` means the link is gone and private
+scratch cleanup remains, and `scratch_removed` is ready for ledger retirement.
+If a scan confirms that the public file was deleted, the conversion row may be
+removed while the non-cascading guard record survives as an orphan. The cleanup
+worker processes that orphan automatically, even when the conversion tools are
+unavailable. Do not delete a recorded recovery path by hand: during recovery it
+may be the final verified link to the replacement. A non-zero orphan count that
+does not converge is the operator-visible signal to inspect daemon logs and the
+recorded source and recovery paths.
+
+Before it removes that final link, the worker writes and fsyncs a bounded JSON
+witness in the source parent named
+`.plurx-dv-recovery-guard-<sha256>.json`. The filename and contents bind the
+guard id, file id, and source path. If a configured media path instead resolves
+to an empty directory underneath a missing mount, that filesystem has no valid
+witness: cleanup advances no guard state and deletes no ledger row. Restore the
+media mount and leave the recorded paths untouched; the next leased pass sees
+the witness on the correct filesystem and resumes.
+
+After the large scratch inode is gone, the worker durably changes the witness
+to a terminal `scratch_removed` tombstone before deleting the guard ledger row.
+The tiny tombstone remains in the source parent by design; there is no
+automatic tombstone garbage collection in M5b. Do not remove these files as
+generic dotfile clutter, because their continued presence is the fail-closed
+proof that cleanup ran on the mounted media filesystem rather than an empty
+underlying mount point.
+
+Final file and scratch retirement runs only inside the held
+`.plurx-dv-delete-anchor-v1` directory on that media filesystem. The daemon
+opens the anchor without following links and requires its own Unix uid, mode
+`0700`, and the same device as the containing media directory before moving a
+cleanup target into it. The per-file Store lease serializes plurxd workers;
+the anchor's held directory descriptor prevents other Unix users from
+replacing its children during retirement. An empty anchor may remain after
+successful cleanup and is safe to keep.
+
+This boundary assumes that no untrusted process runs as the plurxd Unix uid.
+Run plurxd and its checksum-pinned media tools under a dedicated service
+account; do not share that account with downloaders, file organizers, shell
+jobs, or other applications that can mutate library paths. POSIX does not
+provide a portable compare-and-unlink operation, so a process deliberately
+given the daemon's own uid can bypass `0700` directory isolation. If that
+account boundary has been violated, stop automatic conversion, inspect the
+recorded guard and witness paths, and restore the dedicated-account boundary
+before retrying. Do not delete or change the mode of the private anchor by
+hand.
 
 ### Rolling back a deploy
 

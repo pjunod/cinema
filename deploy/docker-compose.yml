@@ -15,9 +15,13 @@
 # changes). Tagged releases are published separately to `ghcr.io/pjunod/plurx`
 # for image-only installations such as the Unraid template.
 #
-# plurx never writes to your media; mount it read-only (`:ro`). The data
-# directory holds the database, artwork cache, and transcode scratch — every
-# user, library, watch position and API key you have.
+# Media stays read-only (`:ro`) by default. The only exception is an exact
+# library path an operator deliberately makes writable for the admin-only,
+# off-by-default Dolby Vision on-disk conversion. That opt-in needs a dedicated
+# uid, a tested backup, and the filesystem contract in deploy/README.md; do not
+# make a broad media root writable. The data directory holds the database,
+# artwork cache, and transcode scratch — every user, library, watch position
+# and API key you have.
 #
 # That directory is a BIND MOUNT to a path you chose, not a named volume, and
 # the difference is the point. A named volume lives at a path Docker picks and
@@ -76,9 +80,10 @@ services:
       # 32414; if something else owns it (a still-running Plex), set
       # PLURX_GDM_PORT in .env to park it elsewhere until Plex retires.
       - "${PLURX_GDM_PORT:-32414}:32414/udp"
-    # Run as you, not as the image's internal `plurx` user, so the files under
-    # PLURX_DATA are readable and removable without sudo. Set PUID/PGID in
-    # .env if your uid is not 1000; `id -u` and `id -g` say what to use.
+    # The default read-only deployment may run as your uid so PLURX_DATA is
+    # manageable without sudo. Permanent on-disk Dolby Vision conversion is
+    # different: set PUID/PGID to a dedicated host service account that no
+    # downloader, organizer, or shell uses, following deploy/README.md.
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       PLURX_SERVER_NAME: "plurx"

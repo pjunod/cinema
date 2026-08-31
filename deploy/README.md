@@ -44,6 +44,53 @@ port and advertises that port with the host's LAN address. That split keeps
 automatic iPhone, iPad, Apple TV, and Android discovery without moving the
 media server off the networks its peer services use.
 
+### Writable media is a narrow, explicit opt-in
+
+Every shipped media mount remains read-only. Keep permanent Dolby Vision
+Profile 7 → 8.1 conversion **Off** for a library unless all of the following are
+true:
+
+- A tested backup exists outside the writable library. **Keep the Profile 7
+  original** remains the safer policy, but a sibling original is not a backup
+  of the filesystem that contains it.
+- plurxd runs as a dedicated Unix uid that no downloader, organizer, shell job,
+  or other application uses. The private cleanup anchor isolates other users;
+  POSIX cannot isolate a second process deliberately given the daemon's uid.
+- The exact library path is writable and traversable by that uid. Other
+  libraries and the surrounding media root remain read-only.
+- Source, hidden sibling workspace, recovery hard link, witness, and cleanup
+  anchor live on one mounted filesystem that supports hard links, atomic rename,
+  Unix ownership/modes, and durable file and directory sync. Object-store/FUSE
+  adapters that only approximate those operations do not satisfy the contract.
+- Every voter that may lease conversion work sees that same mounted filesystem
+  with the same write semantics. If one voter cannot, keep conversion Off.
+
+The full publication, recovery-guard, witness, and tombstone lifecycle is in
+[`docs/OPERATIONS.md`](../docs/OPERATIONS.md#permanent-dolby-vision-profile-7--81-conversion).
+Silence is not proof of a mount: the worker deliberately refuses cleanup when
+the source-parent witness is absent.
+
+For Compose, set `PUID` and `PGID` to a dedicated host service account, grant
+that account access to only the opted-in library, and add a separate writable
+bind rather than changing the broad `/media` bind. The default uid `1000` is
+commonly the interactive login user and does **not** satisfy this boundary for
+permanent conversion.
+
+```yaml
+services:
+  plurxd:
+    volumes:
+      - /mnt/qnap/media:/media:ro
+      - /mnt/qnap/media/dv-conversion:/media-dv-conversion:rw
+```
+
+Add `/media-dv-conversion` as its own library in Settings. Do not overlap a
+writable child with a library configured through the read-only parent path;
+one container path should name each opted-in file. Confirm the effective uid
+with `docker compose exec plurxd id`, prove that account can create, hard-link,
+sync, rename, and remove a sibling test file on the real mount, then delete the
+test artifacts before enabling conversion.
+
 When `PLURX_SERVER_NAME` is still the default `plurx`, the companion advertises
 the Docker host name plus its LAN address, so a picker says
 `m6 · 192.168.1.20` instead of showing another anonymous `plurx` row. Set a
@@ -179,7 +226,9 @@ Permanent Dolby Vision Profile 7 → 8.1 conversion additionally needs
 `dovi_tool` and `mkvmerge` 68 or newer. The Docker image includes pinned builds;
 bare-metal installs may put them on `PATH` or set `PLURX_DOVI_TOOL` and
 `PLURX_MKVMERGE`. Missing tools disable that admin action with a reason and do
-not prevent the server from starting.
+not prevent the server from starting. Run each configured executable with
+`--version` as the service account before enabling conversion; an interactive
+shell's `PATH` does not prove that systemd or launchd can find it.
 
 ### Hardware transcode & recent Intel GPUs
 
@@ -233,9 +282,43 @@ replace the binary and `sudo systemctl restart plurxd`.
   user can reach the GPU. The software x264 path works without it.
 - **Media under `/home`:** the unit sets `ProtectHome=true`, which *hides*
   `/home` from the service — if your library lives there the scan finds nothing.
-  Add a `ReadOnlyPaths=/path/to/media` line, or set `ProtectHome=read-only`.
+  Set `ProtectHome=read-only` before adding the library; an additional
+  `ReadOnlyPaths=/path/to/media` can narrow the documented path but cannot make
+  a path hidden by `ProtectHome=true` visible.
 - **ffmpeg:** uncomment the `PLURX_FFMPEG` line to use a jellyfin-ffmpeg build
   for the best hardware/tone-mapping support.
+
+The unit's `ProtectSystem=strict` and `ReadWritePaths=/var/lib/plurx` keep media
+read-only by default. To opt one non-home library into permanent conversion,
+first satisfy the writable-media contract above, then add an exact drop-in:
+
+```bash
+sudo systemctl edit plurxd
+```
+
+Enter this exact-path exception in the editor:
+
+```ini
+[Service]
+ReadWritePaths=/mnt/media/dv-conversion
+Environment=PLURX_DOVI_TOOL=/absolute/path/to/dovi_tool
+Environment=PLURX_MKVMERGE=/absolute/path/to/mkvmerge
+```
+
+Then reload, restart, and probe through the service account:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart plurxd
+sudo -u plurx /absolute/path/to/dovi_tool --version
+sudo -u plurx /absolute/path/to/mkvmerge --version
+```
+
+The underlying directory still needs write/traverse permission for the
+dedicated `plurx` account; the systemd allow-list does not grant filesystem
+permissions. If the library is below `/home`, also change `ProtectHome` to
+`read-only` in the drop-in so the exact `ReadWritePaths` exception can be seen.
+Do not replace the exact path with `/mnt` or another broad media root.
 
 ## Run as a service — launchd (macOS)
 
@@ -244,6 +327,18 @@ on crash. A user agent rather than a boot-time system daemon on purpose:
 VideoToolbox hardware transcoding needs a logged-in GUI session, which a daemon
 doesn't have. The template is [`com.plurx.plurxd.plist`](com.plurx.plurxd.plist);
 launchd doesn't expand `~`, so the install fills in absolute paths for you.
+
+**This shipped LaunchAgent does not support permanent on-disk Dolby Vision
+conversion. Keep that feature Off.** It runs as your interactive login uid, so
+desktop apps, downloaders, organizers, and shell jobs share the identity that
+owns the private cleanup anchor. That violates the destructive worker's
+dedicated-account boundary even when the anchor is mode `0700`. The trade-off
+is explicit: this user-session recipe keeps VideoToolbox available; the safer
+dedicated-account service needed for permanent conversion loses that guarantee.
+Use the Linux container or Linux systemd recipe above for the supported
+conversion path. A site-specific macOS LaunchDaemon can use a dedicated
+account, but this repository does not ship one because its media ACLs and
+user-session hardware policy cannot be inferred safely.
 
 ```sh
 # 1. Install the binary + ffmpeg (Homebrew satisfies the runtime dep)
@@ -269,6 +364,24 @@ tail -f ~/Library/Logs/plurxd.log
 open http://localhost:32400
 ```
 
+The plist contains absolute placeholders for `PLURX_DOVI_TOOL` and
+`PLURX_MKVMERGE` so Settings can report deterministic probe failures instead of
+depending on launchd's restricted `PATH`. They do **not** make conversion safe
+in this LaunchAgent. If you installed the tools for read-only inspection or a
+later move to a dedicated service, replace the placeholders only after proving
+the operator-provided paths:
+
+```bash
+DOVI_TOOL=/absolute/path/to/dovi_tool       # operator-installed executable
+MKVMERGE=/absolute/path/to/mkvmerge         # operator-installed executable
+test -x "$DOVI_TOOL" && "$DOVI_TOOL" --version
+test -x "$MKVMERGE" && "$MKVMERGE" --version
+plutil -replace EnvironmentVariables.PLURX_DOVI_TOOL \
+  -string "$DOVI_TOOL" ~/Library/LaunchAgents/com.plurx.plurxd.plist
+plutil -replace EnvironmentVariables.PLURX_MKVMERGE \
+  -string "$MKVMERGE" ~/Library/LaunchAgents/com.plurx.plurxd.plist
+```
+
 macOS prompts once to allow incoming connections (needed for other devices to
 reach `:32400`). To update later, replace the binary and re-run the `kickstart`
 line. To stop and remove it:
@@ -278,11 +391,15 @@ launchctl bootout gui/$(id -u)/com.plurx.plurxd
 rm ~/Library/LaunchAgents/com.plurx.plurxd.plist
 ```
 
-For a headless Mac that must run **with no one logged in**, install the same
-plist as a system **LaunchDaemon** in `/Library/LaunchDaemons/` (owned by
-`root`; add a `<key>UserName</key>` for a non-root account) and load it under
-`system/` instead of `gui/$(id -u)`. The trade-off is real: no GUI session means
-no VideoToolbox, so hardware transcoding falls back to software x264.
+For a headless Mac that must run **with no one logged in**, a site-specific
+system **LaunchDaemon** can run under a non-root account and load under
+`system/` instead of `gui/$(id -u)`. This is not a conversion recipe and the
+LaunchAgent plist cannot merely be copied into place: a correct daemon needs a
+dedicated `UserName`, account-owned data and log paths, explicit tool paths,
+and media ACLs for that site. None is safe to infer in a tracked template. Use
+the supported Linux container or Linux systemd path for permanent conversion.
+The headless trade-off remains real: without a GUI session, VideoToolbox is not
+available and hardware transcoding falls back to software x264.
 
 ## Unraid
 
@@ -293,6 +410,16 @@ host networking because Bonjour multicast does not leave a Docker bridge.
 That is what makes `_plurx._tcp` visible to iPhone, iPad, and Apple TV; a
 bridge deployment can still use manual server entry, but cannot provide
 automatic native discovery.
+
+The template keeps Media access mode **Read Only**. Permanent conversion must
+stay Off in that default. To opt in, create a second path mapping for only the
+conversion library and change that mapping—not the broad Media mapping—to
+**Read/Write**. Use `docker exec plurxd id` to identify the image's numeric uid,
+grant only that uid access to the selected host path, and do not reuse it for
+downloaders or organizers. Confirm the Unraid share really provides the hard
+link, rename, sync, and same-filesystem semantics in the writable-media contract
+above; a share or remote mount that cannot prove them is read-only for this
+feature. Keep an independently restorable backup before enabling the library.
 
 Host networking also means the ports are real host ports. Stop any process
 already using TCP 32400, or change `PLURX_BIND`. If Plex still owns UDP 32414,
@@ -307,6 +434,16 @@ read-only mount for media. The Service/Ingress routing pattern is in
 the workload, Raft storage, GPU scheduling, or media mounts are stateless.
 Follow the cluster bootstrap and rolling-drain rules in
 [`docs/OPERATIONS.md`](../docs/OPERATIONS.md#cluster-ingress-drain-and-recovery).
+
+Permanent conversion remains Off for that read-only deployment. An opt-in
+workload must use a dedicated non-root `runAsUser`/`runAsGroup` that no other
+workload shares, mount only the selected library with `readOnly: false`, and
+grant that identity write/traverse access at the storage backend. Every voter
+eligible to lease work must mount the same path and filesystem; a node-local
+volume, object-store adapter, or CSI driver without proven hard-link, atomic
+rename, Unix mode/owner, and durable-sync behavior is unsupported. Keep other
+libraries read-only, take and test a backup outside the writable PV, and leave
+conversion Off until a real pod proves the filesystem contract above.
 
 ## Ports
 
