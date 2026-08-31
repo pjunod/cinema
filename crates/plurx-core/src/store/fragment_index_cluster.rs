@@ -156,7 +156,454 @@ CREATE INDEX IF NOT EXISTS cluster_fragment_index_jobs_status_history
     ON cluster_fragment_index_jobs(state, updated_at_ms DESC, cache_key);
 "#;
 
+/// v41/v22 widens the already-durable request identity to the replicated
+/// semantic component. A table rebuild is required because SQLite cannot
+/// alter a CHECK constraint in place.
+pub const ANALYSIS_COMPONENTS_SCHEMA: &str = r#"
+ALTER TABLE cluster_fragment_index_jobs
+    ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'
+      CHECK (priority IN ('normal','forced','foreground'));
+ALTER TABLE cluster_fragment_index_jobs
+    ADD COLUMN trigger TEXT NOT NULL DEFAULT 'background'
+      CHECK (trigger IN ('admin','background','foreground'));
+ALTER TABLE cluster_fragment_index_jobs
+    ADD COLUMN target_node_id TEXT NOT NULL DEFAULT '';
+DROP TRIGGER IF EXISTS cluster_fragment_indexes_cancel_source;
+DROP INDEX IF EXISTS cluster_fragment_index_jobs_status_history;
+DROP INDEX IF EXISTS cluster_fragment_index_jobs_due;
+ALTER TABLE cluster_fragment_index_jobs RENAME TO cluster_fragment_index_jobs_v40;
+CREATE TABLE cluster_fragment_index_jobs (
+    cache_key         TEXT NOT NULL,
+    file_id           INTEGER NOT NULL,
+    source_size       INTEGER NOT NULL,
+    source_mtime      INTEGER NOT NULL,
+    source_sha256     TEXT NOT NULL,
+    pipeline_sha256   TEXT NOT NULL,
+    priority          TEXT NOT NULL DEFAULT 'normal'
+      CHECK (priority IN ('normal','forced','foreground')),
+    trigger           TEXT NOT NULL DEFAULT 'background'
+      CHECK (trigger IN ('admin','background','foreground')),
+    target_node_id    TEXT NOT NULL DEFAULT '',
+    state             TEXT NOT NULL CHECK (
+        state IN ('queued', 'running', 'ready', 'failed', 'cancelled')),
+    owner_node_id     TEXT,
+    fence             INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
+    lease_expires_ms  INTEGER,
+    attempts          INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    not_before_ms     INTEGER NOT NULL,
+    last_error_code   TEXT,
+    created_at_ms     INTEGER NOT NULL,
+    updated_at_ms     INTEGER NOT NULL,
+    PRIMARY KEY (cache_key, target_node_id)
+) STRICT;
+INSERT INTO cluster_fragment_index_jobs
+    (cache_key, file_id, source_size, source_mtime, source_sha256,
+     pipeline_sha256, priority, trigger, target_node_id, state,
+     owner_node_id, fence, lease_expires_ms, attempts, not_before_ms,
+     last_error_code, created_at_ms, updated_at_ms)
+SELECT cache_key, file_id, source_size, source_mtime, source_sha256,
+       pipeline_sha256, priority, trigger,
+       COALESCE((SELECT request.target_node_id FROM analysis_requests request
+                  WHERE request.result_cache_key = cluster_fragment_index_jobs_v40.cache_key
+                  ORDER BY request.updated_at_ms DESC, request.request_id DESC LIMIT 1), target_node_id), state,
+       owner_node_id, fence, lease_expires_ms, attempts, not_before_ms,
+       last_error_code, created_at_ms, updated_at_ms
+  FROM cluster_fragment_index_jobs_v40;
+DROP TABLE cluster_fragment_index_jobs_v40;
+CREATE INDEX cluster_fragment_index_jobs_due
+    ON cluster_fragment_index_jobs(state, not_before_ms, created_at_ms, cache_key, target_node_id);
+CREATE INDEX cluster_fragment_index_jobs_status_history
+    ON cluster_fragment_index_jobs(state, updated_at_ms DESC, cache_key, target_node_id);
+CREATE TRIGGER cluster_fragment_indexes_cancel_source BEFORE DELETE ON files
+BEGIN
+    DELETE FROM cluster_fragment_index_sources WHERE file_id = OLD.id;
+    UPDATE cluster_fragment_index_jobs
+       SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+           fence = fence + 1, last_error_code = 'source_deleted',
+           updated_at_ms = MAX(updated_at_ms, OLD.scanned_at * 1000)
+     WHERE file_id = OLD.id AND state IN ('queued', 'running');
+END;
+ALTER TABLE timeline_annotation_sets
+    ADD COLUMN publication_priority TEXT NOT NULL DEFAULT 'normal'
+      CHECK (publication_priority IN ('normal','forced'));
+DROP TABLE IF EXISTS analysis_attempts;
+DROP TABLE IF EXISTS cluster_fragment_index_heads;
+DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history;
+DROP TRIGGER IF EXISTS analysis_requests_supersede_source;
+DROP TRIGGER IF EXISTS analysis_requests_cancel_source;
+DROP INDEX IF EXISTS analysis_requests_result_history;
+DROP INDEX IF EXISTS analysis_requests_one_active_forced_successor;
+DROP INDEX IF EXISTS analysis_requests_one_active_source;
+DROP INDEX IF EXISTS analysis_requests_status;
+DROP INDEX IF EXISTS analysis_requests_due;
+ALTER TABLE analysis_requests RENAME TO analysis_requests_v40;
+CREATE TABLE analysis_requests (
+    request_id         TEXT PRIMARY KEY,
+    file_id            INTEGER NOT NULL,
+    source_size        INTEGER NOT NULL,
+    source_mtime       INTEGER NOT NULL,
+    component          TEXT NOT NULL CHECK (component IN ('fragment_index','skip_markers')),
+    pipeline_version   TEXT NOT NULL DEFAULT 'legacy-fragment-index',
+    requested_generation TEXT NOT NULL DEFAULT 'legacy-generation',
+    expected_predecessor_generation TEXT NOT NULL DEFAULT '',
+    priority           TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('normal','forced')),
+    trigger            TEXT NOT NULL DEFAULT 'admin' CHECK (trigger IN ('admin','background')),
+    force_rebuild      INTEGER NOT NULL CHECK (force_rebuild IN (0, 1)),
+    target_node_id     TEXT NOT NULL,
+    state              TEXT NOT NULL CHECK (
+        state IN ('queued', 'running', 'submitted', 'ready', 'failed', 'cancelled')),
+    owner_node_id      TEXT,
+    fence              INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
+    lease_expires_ms   INTEGER,
+    attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    not_before_ms      INTEGER NOT NULL,
+    result_cache_key   TEXT,
+    last_error_code    TEXT,
+    cancel_requested   INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+    created_at_ms      INTEGER NOT NULL,
+    updated_at_ms      INTEGER NOT NULL
+) STRICT;
+INSERT INTO analysis_requests
+    (request_id, file_id, source_size, source_mtime, component,
+     pipeline_version, requested_generation, expected_predecessor_generation, priority, trigger,
+     force_rebuild, target_node_id, state, owner_node_id, fence,
+     lease_expires_ms, attempts, not_before_ms, result_cache_key,
+     last_error_code, cancel_requested, created_at_ms, updated_at_ms)
+SELECT request_id, file_id, source_size, source_mtime, component,
+       CASE component WHEN 'fragment_index' THEN 'legacy-fragment-index'
+                      ELSE 'chapter-classifier-v1' END,
+       request_id, '', CASE force_rebuild WHEN 1 THEN 'forced' ELSE 'normal' END,
+       'admin', force_rebuild, target_node_id, state, owner_node_id, fence,
+       lease_expires_ms, attempts, not_before_ms, result_cache_key,
+       last_error_code, 0, created_at_ms, updated_at_ms
+  FROM analysis_requests_v40;
+DROP TABLE analysis_requests_v40;
+CREATE INDEX analysis_requests_due
+    ON analysis_requests(target_node_id, state, not_before_ms, created_at_ms, request_id);
+CREATE INDEX analysis_requests_status
+    ON analysis_requests(state, updated_at_ms DESC, request_id);
+CREATE UNIQUE INDEX analysis_requests_one_active_source
+    ON analysis_requests(file_id, source_size, source_mtime, component,
+                         pipeline_version, requested_generation, target_node_id)
+    WHERE state IN ('queued', 'running', 'submitted');
+CREATE UNIQUE INDEX analysis_requests_one_active_forced_successor
+    ON analysis_requests(file_id, source_size, source_mtime, component)
+    WHERE force_rebuild = 1 AND state IN ('queued', 'running', 'submitted');
+CREATE INDEX analysis_requests_result_history
+    ON analysis_requests(result_cache_key, updated_at_ms DESC, request_id DESC)
+    WHERE result_cache_key IS NOT NULL AND result_cache_key <> '';
+CREATE TRIGGER analysis_requests_cancel_source BEFORE DELETE ON files
+BEGIN
+    DELETE FROM cluster_fragment_index_heads
+     WHERE generation_cache_key IN (
+       SELECT cache_key FROM cluster_fragment_index_jobs WHERE file_id = OLD.id);
+    UPDATE analysis_attempts
+       SET phase = 'canceled', phase_updated_at_ms = MAX(phase_updated_at_ms, OLD.scanned_at * 1000),
+           terminal_code = 'source_deleted'
+     WHERE (request_id, claim_epoch) IN (
+       SELECT request_id, fence FROM analysis_requests
+        WHERE file_id = OLD.id AND state IN ('running', 'submitted'));
+    UPDATE analysis_requests
+       SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+           fence = fence + 1, cancel_requested = 1,
+           last_error_code = 'source_deleted', updated_at_ms = MAX(updated_at_ms, OLD.scanned_at * 1000)
+     WHERE file_id = OLD.id AND state IN ('queued', 'running', 'submitted');
+END;
+CREATE TRIGGER analysis_requests_supersede_source
+AFTER UPDATE OF size, mtime ON files
+WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime
+BEGIN
+    DELETE FROM cluster_fragment_index_heads
+     WHERE generation_cache_key IN (
+       SELECT cache_key FROM cluster_fragment_index_jobs
+        WHERE file_id = NEW.id
+          AND (source_size <> NEW.size OR source_mtime <> NEW.mtime));
+    UPDATE cluster_fragment_index_jobs
+       SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+           fence = fence + 1, last_error_code = 'source_superseded',
+           updated_at_ms = MAX(updated_at_ms, NEW.scanned_at * 1000)
+     WHERE file_id = NEW.id AND state IN ('queued', 'running')
+       AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
+    UPDATE analysis_attempts
+       SET phase = 'stale', phase_updated_at_ms = MAX(phase_updated_at_ms, NEW.scanned_at * 1000),
+           terminal_code = 'source_superseded'
+     WHERE (request_id, claim_epoch) IN (
+       SELECT request_id, fence FROM analysis_requests
+        WHERE file_id = NEW.id AND state IN ('running', 'submitted')
+          AND (source_size <> NEW.size OR source_mtime <> NEW.mtime));
+    UPDATE analysis_requests
+       SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+           fence = fence + 1, cancel_requested = 1,
+           last_error_code = 'source_superseded', updated_at_ms = MAX(updated_at_ms, NEW.scanned_at * 1000)
+     WHERE file_id = NEW.id AND state IN ('queued', 'running', 'submitted')
+       AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
+END;
+CREATE TRIGGER analysis_requests_bound_terminal_history
+AFTER UPDATE OF state ON analysis_requests
+WHEN NEW.state IN ('ready', 'failed', 'cancelled')
+BEGIN
+    DELETE FROM analysis_requests
+     WHERE request_id IN (
+       SELECT candidate.request_id FROM analysis_requests candidate
+        WHERE candidate.state IN ('ready', 'failed', 'cancelled')
+          AND candidate.request_id <> NEW.request_id
+          AND (candidate.force_rebuild = 1
+            OR NOT EXISTS (SELECT 1 FROM files
+                 WHERE files.id = candidate.file_id
+                   AND files.size = candidate.source_size
+                   AND files.mtime = candidate.source_mtime)
+            OR EXISTS (SELECT 1 FROM analysis_requests newer
+                 WHERE newer.state IN ('ready', 'failed', 'cancelled')
+                   AND newer.force_rebuild = 0
+                   AND newer.file_id = candidate.file_id
+                   AND newer.source_size = candidate.source_size
+                   AND newer.source_mtime = candidate.source_mtime
+                   AND newer.component = candidate.component
+                   AND newer.pipeline_version = candidate.pipeline_version
+                   AND newer.requested_generation = candidate.requested_generation
+                   AND newer.target_node_id = candidate.target_node_id
+                   AND (newer.updated_at_ms > candidate.updated_at_ms
+                     OR (newer.updated_at_ms = candidate.updated_at_ms
+                       AND newer.request_id > candidate.request_id))))
+        ORDER BY candidate.updated_at_ms, candidate.request_id
+        LIMIT MAX((SELECT COUNT(*) FROM analysis_requests
+                    WHERE state IN ('ready', 'failed', 'cancelled')) - 8192, 0));
+END;
+CREATE TABLE analysis_attempts (
+    request_id          TEXT NOT NULL REFERENCES analysis_requests(request_id) ON DELETE CASCADE,
+    attempt             INTEGER NOT NULL CHECK (attempt > 0),
+    claim_node_id       TEXT NOT NULL,
+    claim_epoch         INTEGER NOT NULL CHECK (claim_epoch > 0),
+    claim_expires_at_ms INTEGER NOT NULL,
+    phase               TEXT NOT NULL CHECK (
+        phase IN ('claimed','source_probe','hashing','staged','running','publishing','retry_wait','published','failed','canceled','stale')),
+    started_at_ms       INTEGER NOT NULL,
+    phase_updated_at_ms INTEGER NOT NULL,
+    terminal_code       TEXT,
+    PRIMARY KEY (request_id, claim_epoch)
+) STRICT;
+CREATE INDEX analysis_attempts_recent
+    ON analysis_attempts(request_id, claim_epoch DESC);
+CREATE TABLE cluster_fragment_index_heads (
+    logical_cache_key   TEXT PRIMARY KEY,
+    generation_cache_key TEXT NOT NULL,
+    request_id          TEXT NOT NULL,
+    updated_at_ms       INTEGER NOT NULL
+) STRICT;
+CREATE TABLE analysis_lifecycle_counters (
+    event  TEXT NOT NULL CHECK (event IN ('claim','lease_loss','retry','cancel','stale','failure','publication')),
+    reason TEXT NOT NULL CHECK (reason IN (
+      'all','lease_expired','source_catalog_read_failed','source_probe_timeout',
+      'source_unavailable','source_attestation_failed','foreground_preempted',
+      'source_attestation_timeout','source_record_failed','queue_write_failed',
+      'queue_full_or_busy','pipeline_version_unavailable','admin_cancelled',
+      'source_deleted','source_identity_changed','attempt_limit','stored_probe_invalid',
+      'source_duration_missing','invalid_cache_identity','unsupported','other','validated')),
+    count INTEGER NOT NULL DEFAULT 0 CHECK (count >= 0),
+    PRIMARY KEY (event, reason)
+) STRICT;
+CREATE TRIGGER analysis_requests_lifecycle_counters
+AFTER UPDATE OF state ON analysis_requests
+WHEN OLD.state <> NEW.state
+BEGIN
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'claim', 'all', 1 WHERE NEW.state = 'running'
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'lease_loss', 'lease_expired', 1
+       WHERE OLD.state = 'running'
+         AND ((NEW.state = 'queued' AND NEW.last_error_code = 'lease_expired')
+           OR (NEW.state = 'failed'
+             AND OLD.lease_expires_ms IS NOT NULL
+             AND OLD.lease_expires_ms <= NEW.updated_at_ms))
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'retry', CASE NEW.last_error_code
+        WHEN 'lease_expired' THEN 'lease_expired'
+        WHEN 'source_catalog_read_failed' THEN 'source_catalog_read_failed'
+        WHEN 'source_probe_timeout' THEN 'source_probe_timeout'
+        WHEN 'source_unavailable' THEN 'source_unavailable'
+        WHEN 'source_attestation_failed' THEN 'source_attestation_failed'
+        WHEN 'foreground_preempted' THEN 'foreground_preempted'
+        WHEN 'source_attestation_timeout' THEN 'source_attestation_timeout'
+        WHEN 'source_record_failed' THEN 'source_record_failed'
+        WHEN 'queue_write_failed' THEN 'queue_write_failed'
+        WHEN 'queue_full_or_busy' THEN 'queue_full_or_busy'
+        WHEN 'pipeline_version_unavailable' THEN 'pipeline_version_unavailable'
+        ELSE 'other' END, 1
+       WHERE OLD.state = 'running' AND NEW.state = 'queued'
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'cancel', CASE NEW.last_error_code
+        WHEN 'admin_cancelled' THEN 'admin_cancelled'
+        WHEN 'source_deleted' THEN 'source_deleted'
+        ELSE 'other' END, 1
+       WHERE NEW.state = 'cancelled'
+         AND COALESCE(NEW.last_error_code, '') NOT IN ('source_changed','source_superseded')
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'stale', 'source_identity_changed', 1
+       WHERE NEW.state IN ('failed','cancelled')
+         AND NEW.last_error_code IN ('source_changed','source_superseded')
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'failure', CASE NEW.last_error_code
+        WHEN 'attempt_limit' THEN 'attempt_limit'
+        WHEN 'pipeline_version_unavailable' THEN 'pipeline_version_unavailable'
+        WHEN 'stored_probe_invalid' THEN 'stored_probe_invalid'
+        WHEN 'source_duration_missing' THEN 'source_duration_missing'
+        WHEN 'invalid_cache_identity' THEN 'invalid_cache_identity'
+        WHEN 'unsupported' THEN 'unsupported'
+        WHEN 'source_unavailable' THEN 'source_unavailable'
+        ELSE 'other' END, 1
+       WHERE NEW.state = 'failed'
+         AND COALESCE(NEW.last_error_code, '') NOT IN ('source_changed','source_superseded')
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'publication', 'validated', 1
+       WHERE NEW.state = 'ready' AND NEW.component = 'skip_markers'
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+END;
+CREATE TRIGGER cluster_fragment_index_lifecycle_counters
+AFTER UPDATE OF state ON cluster_fragment_index_jobs
+WHEN OLD.state <> NEW.state
+BEGIN
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'claim', 'all', 1 WHERE NEW.state = 'running'
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'lease_loss', 'lease_expired', 1
+       WHERE OLD.state = 'running'
+         AND ((NEW.state = 'queued' AND NEW.last_error_code = 'lease_expired')
+           OR (NEW.state = 'failed'
+             AND OLD.lease_expires_ms IS NOT NULL
+             AND OLD.lease_expires_ms <= NEW.updated_at_ms))
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'retry', CASE NEW.last_error_code
+        WHEN 'lease_expired' THEN 'lease_expired'
+        WHEN 'source_catalog_read_failed' THEN 'source_catalog_read_failed'
+        WHEN 'source_unavailable' THEN 'source_unavailable'
+        WHEN 'source_attestation_failed' THEN 'source_attestation_failed'
+        WHEN 'foreground_preempted' THEN 'foreground_preempted'
+        WHEN 'pipeline_version_unavailable' THEN 'pipeline_version_unavailable'
+        ELSE 'other' END, 1
+       WHERE OLD.state = 'running' AND NEW.state = 'queued'
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'cancel', CASE NEW.last_error_code
+        WHEN 'source_deleted' THEN 'source_deleted' ELSE 'other' END, 1
+       WHERE NEW.state = 'cancelled'
+         AND COALESCE(NEW.last_error_code, '') NOT IN ('source_changed','source_superseded')
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'stale', 'source_identity_changed', 1
+       WHERE NEW.state IN ('failed','cancelled')
+         AND NEW.last_error_code IN ('source_changed','source_superseded')
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'failure', CASE NEW.last_error_code
+        WHEN 'attempt_limit' THEN 'attempt_limit'
+        WHEN 'pipeline_version_unavailable' THEN 'pipeline_version_unavailable'
+        WHEN 'unsupported' THEN 'unsupported'
+        WHEN 'source_unavailable' THEN 'source_unavailable'
+        ELSE 'other' END, 1
+       WHERE NEW.state = 'failed'
+         AND COALESCE(NEW.last_error_code, '') NOT IN ('source_changed','source_superseded')
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'publication', 'validated', 1 WHERE NEW.state = 'ready'
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+END;
+"#;
+
 pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;
+pub const DEFAULT_ANALYSIS_MAX_ATTEMPTS: i64 = 5;
+pub const MAX_ANALYSIS_MAX_ATTEMPTS: i64 = 20;
+pub const DEFAULT_ANALYSIS_LEASE_SECS: i64 = 60;
+pub const MAX_ANALYSIS_LEASE_SECS: i64 = 600;
+pub const DEFAULT_ANALYSIS_BACKOFF_BASE_SECS: i64 = 5;
+pub const MAX_ANALYSIS_BACKOFF_BASE_SECS: i64 = 300;
+pub const DEFAULT_ANALYSIS_BACKOFF_MAX_SECS: i64 = 300;
+pub const MAX_ANALYSIS_BACKOFF_MAX_SECS: i64 = 3_600;
+/// Virtual head start for forced work. Ordering by the adjusted creation time
+/// lets an operator request pass recent background work while guaranteeing
+/// that background work older than this window cannot be starved by a stream
+/// of newer forced requests.
+pub const ANALYSIS_FORCED_PRIORITY_BOOST_MS: i64 = 5 * 60 * 1_000;
+
+pub fn bounded_analysis_max_attempts(value: Option<&str>) -> i64 {
+    value
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(DEFAULT_ANALYSIS_MAX_ATTEMPTS)
+        .clamp(1, MAX_ANALYSIS_MAX_ATTEMPTS)
+}
+
+fn bounded_analysis_seconds(value: Option<&str>, default: i64, min: i64, max: i64) -> i64 {
+    value
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+pub fn bounded_analysis_lease_secs(value: Option<&str>) -> i64 {
+    bounded_analysis_seconds(
+        value,
+        DEFAULT_ANALYSIS_LEASE_SECS,
+        15,
+        MAX_ANALYSIS_LEASE_SECS,
+    )
+}
+
+pub fn bounded_analysis_backoff_base_secs(value: Option<&str>) -> i64 {
+    bounded_analysis_seconds(
+        value,
+        DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+        1,
+        MAX_ANALYSIS_BACKOFF_BASE_SECS,
+    )
+}
+
+pub fn bounded_analysis_backoff_max_secs(value: Option<&str>) -> i64 {
+    bounded_analysis_seconds(
+        value,
+        DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
+        1,
+        MAX_ANALYSIS_BACKOFF_MAX_SECS,
+    )
+}
+
+/// Stable capped exponential jitter shared by request workers and both store
+/// backends when they recover an expired lease. Queue identities are ASCII
+/// (UUID request ids or hexadecimal content keys), which keeps this formula
+/// identical to the SQLite expression used by replicated and local stores.
+pub fn analysis_backoff_ms(identity: &str, attempt: i64, base_ms: i64, max_ms: i64) -> i64 {
+    let attempt = attempt.max(1);
+    let shift = u32::try_from(attempt.saturating_sub(1).min(30)).unwrap_or(0);
+    let exponential = base_ms
+        .max(1)
+        .saturating_mul(1_i64.checked_shl(shift).unwrap_or(i64::MAX));
+    let mut chars = identity.chars();
+    let first = i64::from(chars.next().map(u32::from).unwrap_or_default());
+    let last = i64::from(
+        identity
+            .chars()
+            .next_back()
+            .map(u32::from)
+            .unwrap_or_default(),
+    );
+    let seed = i64::try_from(identity.chars().count())
+        .unwrap_or(i64::MAX)
+        .saturating_mul(17)
+        .saturating_add(first.saturating_mul(31))
+        .saturating_add(last.saturating_mul(13))
+        .saturating_add(attempt.saturating_mul(7));
+    let jitter_percent = 75_i64.saturating_add(seed.rem_euclid(51));
+    exponential
+        .saturating_mul(jitter_percent)
+        .saturating_div(100)
+        .clamp(1_000, max_ms.max(1_000))
+}
 
 /// Portable SQLite/Postgres projection used by both store backends. Retained
 /// request generations are authoritative history. A mutable worker job is
@@ -164,7 +611,7 @@ pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 /// created solely by background analysis remain standalone rows.
 pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
   SELECT request.*, ROW_NUMBER() OVER (
-    PARTITION BY COALESCE(NULLIF(result_cache_key, ''), request_id)
+    PARTITION BY COALESCE(NULLIF(result_cache_key, ''), request_id), target_node_id
     ORDER BY updated_at_ms DESC, request_id DESC) AS cache_rank
     FROM analysis_requests request
 ), canonical AS (
@@ -180,9 +627,20 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
          request.target_node_id AS target_node_id,
          request.state AS request_state,
          CASE WHEN request.cache_rank = 1 THEN COALESCE(job.state, '') ELSE '' END AS job_state,
-         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.state, request.state) ELSE request.state END AS state,
+         CASE
+           WHEN request.cache_rank = 1 AND job.state = 'ready'
+             AND request.component = 'fragment_index'
+             AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations location
+                  WHERE location.cache_key = job.cache_key
+                    AND location.node_id = request.target_node_id)
+             THEN request.state
+           WHEN request.cache_rank = 1 THEN COALESCE(job.state, request.state)
+           ELSE request.state
+         END AS state,
          CASE WHEN request.cache_rank = 1 AND COALESCE(job.owner_node_id, '') <> ''
               THEN job.owner_node_id ELSE COALESCE(request.owner_node_id, '') END AS owner_node_id,
+         CASE WHEN request.cache_rank = 1 AND job.cache_key IS NOT NULL
+              THEN job.fence ELSE request.fence END AS claim_epoch,
          CASE WHEN request.cache_rank = 1 AND COALESCE(job.lease_expires_ms, 0) > 0
               THEN job.lease_expires_ms ELSE COALESCE(request.lease_expires_ms, 0) END AS lease_expires_ms,
          CASE WHEN request.cache_rank = 1 AND job.cache_key IS NOT NULL
@@ -194,35 +652,54 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
          request.created_at_ms AS created_at_ms,
          CASE WHEN request.cache_rank = 1 AND COALESCE(job.updated_at_ms, 0) > request.updated_at_ms
               THEN job.updated_at_ms ELSE request.updated_at_ms END AS updated_at_ms,
-         CASE WHEN request.cache_rank = 1 THEN SUBSTR(COALESCE(job.pipeline_sha256, ''), 1, 12) ELSE '' END AS pipeline_version,
+         CASE WHEN request.cache_rank = 1 AND job.cache_key IS NOT NULL
+              THEN SUBSTR(job.pipeline_sha256, 1, 12)
+              ELSE request.pipeline_version END AS pipeline_version,
+         request.requested_generation AS requested_generation,
+         CASE WHEN request.cache_rank = 1 AND job.cache_key IS NOT NULL
+              THEN job.priority ELSE request.priority END AS priority,
+         CASE WHEN request.cache_rank = 1 AND job.cache_key IS NOT NULL
+              THEN job.trigger ELSE request.trigger END AS trigger,
+         request.cancel_requested AS cancel_requested,
+         COALESCE((SELECT attempt.phase FROM analysis_attempts attempt
+                    WHERE attempt.request_id = request.request_id
+                    ORDER BY attempt.claim_epoch DESC LIMIT 1), '') AS phase,
          CASE WHEN request.cache_rank = 1 AND job.cache_key IS NOT NULL
               THEN job.source_size ELSE request.source_size END AS source_size
     FROM request_ranked request
     LEFT JOIN cluster_fragment_index_jobs job
       ON request.cache_rank = 1 AND job.cache_key = request.result_cache_key
+     AND job.target_node_id = request.target_node_id
     LEFT JOIN files ON files.id = request.file_id
     LEFT JOIN items ON items.id = files.item_id
   UNION ALL
-  SELECT 'job:' || job.cache_key AS row_key,
+  SELECT 'job:' || job.cache_key || ':' || job.target_node_id AS row_key,
          '' AS request_id, job.cache_key AS job_id, job.file_id AS file_id,
          CASE WHEN files.id IS NULL THEN 0 ELSE 1 END AS file_available,
          COALESCE(files.item_id, 0) AS item_id,
          COALESCE(items.title, '') AS title,
          'fragment_index' AS component, 0 AS force_rebuild,
-         '' AS target_node_id, '' AS request_state, job.state AS job_state,
+         job.target_node_id AS target_node_id, '' AS request_state, job.state AS job_state,
          job.state AS state, COALESCE(job.owner_node_id, '') AS owner_node_id,
+         job.fence AS claim_epoch,
          COALESCE(job.lease_expires_ms, 0) AS lease_expires_ms,
          job.attempts AS attempts, job.not_before_ms AS not_before_ms,
          '' AS request_error_code, COALESCE(job.last_error_code, '') AS job_error_code,
          job.created_at_ms AS created_at_ms, job.updated_at_ms AS updated_at_ms,
          SUBSTR(job.pipeline_sha256, 1, 12) AS pipeline_version,
+         job.cache_key AS requested_generation,
+         job.priority AS priority, job.trigger AS trigger, 0 AS cancel_requested,
+         CASE job.state WHEN 'running' THEN 'hashing' WHEN 'queued' THEN 'claimed'
+           WHEN 'ready' THEN 'published' WHEN 'failed' THEN 'failed'
+           WHEN 'cancelled' THEN 'canceled' ELSE '' END AS phase,
          job.source_size AS source_size
     FROM cluster_fragment_index_jobs job
     LEFT JOIN files ON files.id = job.file_id
     LEFT JOIN items ON items.id = files.item_id
    WHERE NOT EXISTS (
      SELECT 1 FROM analysis_requests request
-      WHERE request.result_cache_key = job.cache_key)
+      WHERE request.result_cache_key = job.cache_key
+        AND request.target_node_id = job.target_node_id)
 ), classified_base AS (
   SELECT canonical.*,
          CASE state WHEN 'running' THEN 0 WHEN 'queued' THEN 1
@@ -258,40 +735,49 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
 /// active and request-referenced jobs are always included.
 pub(super) const ANALYSIS_SUMMARY_CTE: &str = r#"WITH request_ranked AS (
   SELECT request.*, ROW_NUMBER() OVER (
-    PARTITION BY COALESCE(NULLIF(result_cache_key, ''), request_id)
+    PARTITION BY COALESCE(NULLIF(result_cache_key, ''), request_id), target_node_id
     ORDER BY updated_at_ms DESC, request_id DESC) AS cache_rank
     FROM analysis_requests request
 ), summary_job_keys AS (
-  SELECT result_cache_key AS cache_key FROM analysis_requests
+  SELECT result_cache_key AS cache_key, target_node_id FROM analysis_requests
    WHERE result_cache_key IS NOT NULL AND result_cache_key <> ''
   UNION
-  SELECT cache_key FROM cluster_fragment_index_jobs
+  SELECT cache_key, target_node_id FROM cluster_fragment_index_jobs
    WHERE state IN ('queued', 'running')
   UNION
-  SELECT cache_key FROM (
-    SELECT cache_key, updated_at_ms FROM (
-      SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+  SELECT cache_key, target_node_id FROM (
+    SELECT cache_key, target_node_id, updated_at_ms FROM (
+      SELECT cache_key, target_node_id, updated_at_ms FROM cluster_fragment_index_jobs
        WHERE state = 'ready'
-       ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+       ORDER BY updated_at_ms DESC, cache_key, target_node_id LIMIT 8192)
     UNION ALL
-    SELECT cache_key, updated_at_ms FROM (
-      SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+    SELECT cache_key, target_node_id, updated_at_ms FROM (
+      SELECT cache_key, target_node_id, updated_at_ms FROM cluster_fragment_index_jobs
        WHERE state = 'failed'
-       ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+       ORDER BY updated_at_ms DESC, cache_key, target_node_id LIMIT 8192)
     UNION ALL
-    SELECT cache_key, updated_at_ms FROM (
-      SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+    SELECT cache_key, target_node_id, updated_at_ms FROM (
+      SELECT cache_key, target_node_id, updated_at_ms FROM cluster_fragment_index_jobs
        WHERE state = 'cancelled'
-       ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
-    ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+       ORDER BY updated_at_ms DESC, cache_key, target_node_id LIMIT 8192)
+    ORDER BY updated_at_ms DESC, cache_key, target_node_id LIMIT 8192)
 ), summary_jobs AS (
   SELECT job.* FROM cluster_fragment_index_jobs job
   JOIN summary_job_keys keys ON keys.cache_key = job.cache_key
+   AND keys.target_node_id = job.target_node_id
 ), summary_canonical AS (
   SELECT 'request:' || request.request_id AS row_key,
          request.file_id AS file_id,
-         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.state, request.state)
-              ELSE request.state END AS state,
+         CASE
+           WHEN request.cache_rank = 1 AND job.state = 'ready'
+             AND request.component = 'fragment_index'
+             AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations location
+                  WHERE location.cache_key = job.cache_key
+                    AND location.node_id = request.target_node_id)
+             THEN request.state
+           WHEN request.cache_rank = 1 THEN COALESCE(job.state, request.state)
+           ELSE request.state
+         END AS state,
          COALESCE(request.last_error_code, '') AS request_error_code,
          CASE WHEN request.cache_rank = 1 THEN COALESCE(job.last_error_code, '') ELSE '' END AS job_error_code,
          CASE WHEN request.cache_rank = 1 AND COALESCE(job.updated_at_ms, 0) > request.updated_at_ms
@@ -299,15 +785,17 @@ pub(super) const ANALYSIS_SUMMARY_CTE: &str = r#"WITH request_ranked AS (
     FROM request_ranked request
     LEFT JOIN summary_jobs job
       ON request.cache_rank = 1 AND job.cache_key = request.result_cache_key
+     AND job.target_node_id = request.target_node_id
   UNION ALL
-  SELECT 'job:' || job.cache_key AS row_key, job.file_id AS file_id,
+  SELECT 'job:' || job.cache_key || ':' || job.target_node_id AS row_key, job.file_id AS file_id,
          job.state AS state, '' AS request_error_code,
          COALESCE(job.last_error_code, '') AS job_error_code,
          job.updated_at_ms AS updated_at_ms
     FROM summary_jobs job
    WHERE NOT EXISTS (
      SELECT 1 FROM analysis_requests request
-      WHERE request.result_cache_key = job.cache_key)
+      WHERE request.result_cache_key = job.cache_key
+        AND request.target_node_id = job.target_node_id)
 ), summary_classified AS (
   SELECT summary_canonical.*,
          CASE
@@ -345,6 +833,9 @@ pub struct NewClusterFragmentIndexJob {
     pub source_mtime: i64,
     pub source_sha256: String,
     pub pipeline_sha256: String,
+    pub priority: String,
+    pub trigger: String,
+    pub target_node_id: String,
     pub not_before_ms: i64,
     pub created_at_ms: i64,
 }
@@ -357,6 +848,9 @@ pub struct ClusterFragmentIndexJob {
     pub source_mtime: i64,
     pub source_sha256: String,
     pub pipeline_sha256: String,
+    pub priority: String,
+    pub trigger: String,
+    pub target_node_id: String,
     pub state: String,
     pub owner_node_id: String,
     pub fence: i64,
@@ -375,6 +869,10 @@ pub struct NewAnalysisRequest {
     pub source_size: i64,
     pub source_mtime: i64,
     pub component: String,
+    pub pipeline_version: String,
+    pub requested_generation: String,
+    pub priority: String,
+    pub trigger: String,
     pub force_rebuild: bool,
     pub target_node_id: String,
     pub not_before_ms: i64,
@@ -388,6 +886,11 @@ pub struct AnalysisRequest {
     pub source_size: i64,
     pub source_mtime: i64,
     pub component: String,
+    pub pipeline_version: String,
+    pub requested_generation: String,
+    pub expected_predecessor_generation: String,
+    pub priority: String,
+    pub trigger: String,
     pub force_rebuild: bool,
     pub target_node_id: String,
     pub state: String,
@@ -398,8 +901,22 @@ pub struct AnalysisRequest {
     pub not_before_ms: i64,
     pub result_cache_key: String,
     pub last_error_code: String,
+    pub cancel_requested: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisAttempt {
+    pub request_id: String,
+    pub attempt: i64,
+    pub claim_node_id: String,
+    pub claim_epoch: i64,
+    pub claim_expires_at_ms: i64,
+    pub phase: String,
+    pub started_at_ms: i64,
+    pub phase_updated_at_ms: i64,
+    pub terminal_code: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,6 +949,11 @@ pub struct AnalysisHistoryQuery {
     pub cursor: Option<AnalysisHistoryCursor>,
     pub filter: AnalysisHistoryFilter,
     pub search: String,
+    /// Canonical durable states (`queued`, `claimed`, `retry_wait`, ...).
+    /// Empty means all states. Values are validated at the HTTP boundary.
+    pub states: Vec<String>,
+    /// Server-stamped time used to distinguish queued work from retry wait.
+    pub now_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,6 +973,7 @@ pub struct AnalysisHistoryRow {
     pub disposition: String,
     pub action: String,
     pub owner_node_id: String,
+    pub claim_epoch: i64,
     pub lease_expires_ms: i64,
     pub attempts: i64,
     pub not_before_ms: i64,
@@ -459,6 +982,11 @@ pub struct AnalysisHistoryRow {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub pipeline_version: String,
+    pub requested_generation: String,
+    pub priority: String,
+    pub trigger: String,
+    pub cancel_requested: bool,
+    pub phase: String,
     pub source_size: i64,
 }
 
@@ -533,6 +1061,22 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         lease_expires_ms: i64,
     ) -> Result<bool, StoreError>;
 
+    /// Advance the current fenced attempt's durable phase. The update is
+    /// rejected after cancellation or ownership has moved to another fence.
+    async fn record_analysis_request_phase(
+        &self,
+        request: &AnalysisRequest,
+        phase: &str,
+        terminal_code: Option<&str>,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn analysis_attempts(
+        &self,
+        request_id: &str,
+        limit: i64,
+    ) -> Result<Vec<AnalysisAttempt>, StoreError>;
+
     /// Atomically resolve a current request into its content-addressed worker
     /// row and transition the request to submitted. No stale request owner may
     /// enqueue or reopen work without also committing the fenced handoff.
@@ -572,6 +1116,47 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
 
     async fn analysis_requests(&self, limit: i64) -> Result<Vec<AnalysisRequest>, StoreError>;
 
+    async fn analysis_request(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    /// Explicit administrator retry. This creates a new request generation so
+    /// the deterministic terminal identity remains as a discovery tombstone.
+    async fn retry_analysis_request_admin(
+        &self,
+        request_id: &str,
+        requested_generation: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    /// Cancel an operator request and revoke any live request fence. A shared
+    /// fragment artifact already published by another identity is untouched.
+    async fn cancel_analysis_request_admin(
+        &self,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    /// Publish a non-fragment component directly under the exact live request
+    /// fence after its replicated payload has been validated.
+    async fn complete_analysis_request(
+        &self,
+        request: &AnalysisRequest,
+        result_key: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Atomically publish a validated semantic set and consume the exact live
+    /// request fence. A stale worker can do neither half.
+    async fn publish_timeline_annotation_set_for_request(
+        &self,
+        request: &AnalysisRequest,
+        duration_ms: i64,
+        set: &crate::segplan::TimelineAnnotationSet,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
     /// Stable keyset page over operator requests plus background-only jobs.
     /// A worker job is attached only to the newest request that references its
     /// cache key, so retained request generations remain distinct history.
@@ -593,7 +1178,16 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     async fn cluster_fragment_index_job(
         &self,
         cache_key: &str,
+        target_node_id: &str,
     ) -> Result<Option<ClusterFragmentIndexJob>, StoreError>;
+
+    /// Resolve the immutable generation currently published for a logical
+    /// file/source/pipeline identity. Coverage work on another node must build
+    /// this generation rather than creating an unused normal generation.
+    async fn cluster_fragment_index_current_generation(
+        &self,
+        logical_cache_key: &str,
+    ) -> Result<Option<String>, StoreError>;
 
     async fn record_fragment_index_source(
         &self,
@@ -636,6 +1230,7 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     async fn renew_cluster_fragment_index(
         &self,
         cache_key: &str,
+        target_node_id: &str,
         node_id: &str,
         fence: i64,
         now_ms: i64,
@@ -648,6 +1243,7 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     async fn yield_cluster_fragment_index(
         &self,
         cache_key: &str,
+        target_node_id: &str,
         node_id: &str,
         fence: i64,
         now_ms: i64,
@@ -666,9 +1262,11 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     async fn fail_cluster_fragment_index(
         &self,
         cache_key: &str,
+        target_node_id: &str,
         node_id: &str,
         fence: i64,
         error_code: &str,
+        retryable: bool,
         now_ms: i64,
         retry_at_ms: i64,
     ) -> Result<bool, StoreError>;
@@ -699,18 +1297,62 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ) -> Result<Vec<String>, StoreError>;
 }
 
-/// Canonical cache identity.  Every component is length-delimited and the
-/// source digest is over the complete file, so metadata aliases cannot collide.
-pub fn cluster_fragment_index_key(source_sha256: &str, pipeline_sha256: &str) -> Option<String> {
-    if !is_sha256(source_sha256) || !is_sha256(pipeline_sha256) {
+/// Canonical structural work and artifact identity. Every component is
+/// length-delimited. The file and source generation are intentionally part of
+/// the key: byte-identical files remain independent work/coverage identities,
+/// and replacing a file cannot attach its request to an older generation.
+pub fn cluster_fragment_index_key(
+    file_id: i64,
+    source_size: i64,
+    source_mtime: i64,
+    source_sha256: &str,
+    pipeline_sha256: &str,
+) -> Option<String> {
+    if file_id <= 0 || source_size < 0 || !is_sha256(source_sha256) || !is_sha256(pipeline_sha256) {
         return None;
     }
     let mut digest = Sha256::new();
     digest.update(b"plurx/fragment-index/cache-key\0");
     digest.update(BLOB_FORMAT_VERSION.to_be_bytes());
     digest.update(SEGPLAN_VERSION.to_be_bytes());
+    digest.update(file_id.to_be_bytes());
+    digest.update(source_size.to_be_bytes());
+    digest.update(source_mtime.to_be_bytes());
     update_field(&mut digest, source_sha256.as_bytes());
     update_field(&mut digest, pipeline_sha256.as_bytes());
+    Some(hex::encode(digest.finalize()))
+}
+
+/// Physical key for a forced successor. The logical content/pipeline key
+/// remains the serving pointer; this key keeps the predecessor's immutable
+/// bytes addressable until the successor wins publication CAS.
+pub fn cluster_fragment_index_generation_key(
+    file_id: i64,
+    source_size: i64,
+    source_mtime: i64,
+    source_sha256: &str,
+    pipeline_sha256: &str,
+    generation: &str,
+) -> Option<String> {
+    if file_id <= 0
+        || source_size < 0
+        || !is_sha256(source_sha256)
+        || !is_sha256(pipeline_sha256)
+        || generation.trim().is_empty()
+        || generation.len() > 128
+    {
+        return None;
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"plurx/fragment-index/generation-key\0");
+    digest.update(BLOB_FORMAT_VERSION.to_be_bytes());
+    digest.update(SEGPLAN_VERSION.to_be_bytes());
+    digest.update(file_id.to_be_bytes());
+    digest.update(source_size.to_be_bytes());
+    digest.update(source_mtime.to_be_bytes());
+    update_field(&mut digest, source_sha256.as_bytes());
+    update_field(&mut digest, pipeline_sha256.as_bytes());
+    update_field(&mut digest, generation.as_bytes());
     Some(hex::encode(digest.finalize()))
 }
 
@@ -930,11 +1572,75 @@ mod tests {
 
     #[test]
     fn cache_key_is_domain_separated_and_exact() {
-        let a = cluster_fragment_index_key(&digest('a'), &digest('b')).expect("valid key");
-        let b = cluster_fragment_index_key(&digest('b'), &digest('a')).expect("valid key");
+        let a =
+            cluster_fragment_index_key(1, 100, 10, &digest('a'), &digest('b')).expect("valid key");
+        let b =
+            cluster_fragment_index_key(1, 100, 10, &digest('b'), &digest('a')).expect("valid key");
+        let other_file = cluster_fragment_index_key(2, 100, 10, &digest('a'), &digest('b'))
+            .expect("other file key");
         assert_eq!(a.len(), 64);
         assert_ne!(a, b);
-        assert!(cluster_fragment_index_key("not-a-digest", &digest('b')).is_none());
+        assert_ne!(a, other_file);
+        assert!(cluster_fragment_index_key(1, 100, 10, "not-a-digest", &digest('b')).is_none());
+    }
+
+    #[test]
+    fn generation_keys_are_immutable_successors_of_one_logical_key() {
+        let source = digest('a');
+        let pipeline = digest('b');
+        let logical =
+            cluster_fragment_index_key(1, 100, 10, &source, &pipeline).expect("logical key");
+        let first =
+            cluster_fragment_index_generation_key(1, 100, 10, &source, &pipeline, "generation-1")
+                .expect("first generation");
+        let second =
+            cluster_fragment_index_generation_key(1, 100, 10, &source, &pipeline, "generation-2")
+                .expect("second generation");
+        assert_ne!(logical, first);
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 64);
+    }
+
+    #[test]
+    fn analysis_retry_settings_have_safe_defaults_and_hard_maximums() {
+        assert_eq!(
+            bounded_analysis_max_attempts(None),
+            DEFAULT_ANALYSIS_MAX_ATTEMPTS
+        );
+        assert_eq!(
+            bounded_analysis_max_attempts(Some("999")),
+            MAX_ANALYSIS_MAX_ATTEMPTS
+        );
+        assert_eq!(
+            bounded_analysis_lease_secs(Some("0")),
+            15,
+            "a lease shorter than the renewal floor is refused"
+        );
+        assert_eq!(
+            bounded_analysis_lease_secs(Some("99999")),
+            MAX_ANALYSIS_LEASE_SECS
+        );
+        assert_eq!(
+            bounded_analysis_backoff_base_secs(Some("99999")),
+            MAX_ANALYSIS_BACKOFF_BASE_SECS
+        );
+        assert_eq!(
+            bounded_analysis_backoff_max_secs(Some("99999")),
+            MAX_ANALYSIS_BACKOFF_MAX_SECS
+        );
+    }
+
+    #[test]
+    fn analysis_backoff_is_stable_exponential_and_capped() {
+        let first = analysis_backoff_ms("request-a", 1, 5_000, 300_000);
+        assert_eq!(first, analysis_backoff_ms("request-a", 1, 5_000, 300_000));
+        let second = analysis_backoff_ms("request-a", 2, 5_000, 300_000);
+        assert!(second > first);
+        assert!(analysis_backoff_ms("request-b", 1, 5_000, 300_000) != first);
+        assert_eq!(
+            analysis_backoff_ms("request-a", 60, 5_000, 300_000),
+            300_000
+        );
     }
 
     #[test]

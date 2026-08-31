@@ -1390,6 +1390,13 @@ pub struct SettingsDto {
     /// Default-off content-addressed cluster queue and peer hydration for VOD
     /// indexes. The cadence above remains the operator's I/O budget.
     pub vod_index_cluster_cache: bool,
+    /// Durable analysis claim/retry policy. These remain operator-visible and
+    /// bounded because slow storage may need more time without permitting an
+    /// unsupported source to retry forever.
+    pub analysis_max_attempts: i64,
+    pub analysis_lease_secs: i64,
+    pub analysis_backoff_base_secs: i64,
+    pub analysis_backoff_max_secs: i64,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
@@ -1569,6 +1576,19 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         cluster_media_pool_enabled && state.media_pool.remote_rollout_ready().await;
     let cluster_session_takeover_enabled =
         setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED).as_deref() == Some("1");
+    let analysis_max_attempts = plurx_core::store::bounded_analysis_max_attempts(
+        setting(keys::ANALYSIS_MAX_ATTEMPTS).as_deref(),
+    );
+    let analysis_lease_secs = plurx_core::store::bounded_analysis_lease_secs(
+        setting(keys::ANALYSIS_LEASE_SECS).as_deref(),
+    );
+    let analysis_backoff_base_secs = plurx_core::store::bounded_analysis_backoff_base_secs(
+        setting(keys::ANALYSIS_BACKOFF_BASE_SECS).as_deref(),
+    );
+    let analysis_backoff_max_secs = plurx_core::store::bounded_analysis_backoff_max_secs(
+        setting(keys::ANALYSIS_BACKOFF_MAX_SECS).as_deref(),
+    )
+    .max(analysis_backoff_base_secs);
     Ok(SettingsDto {
         server_name,
         tmdb_configured: !tmdb_api_key.is_empty(),
@@ -1605,6 +1625,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_index_mins: setting(keys::VOD_INDEX_MINS).map_or(15, |value| mins(Some(value))),
         vod_index_cluster_cache: setting(keys::VOD_INDEX_CLUSTER_CACHE)
             .is_some_and(|value| value.trim() == "1"),
+        analysis_max_attempts,
+        analysis_lease_secs,
+        analysis_backoff_base_secs,
+        analysis_backoff_max_secs,
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
@@ -1662,6 +1686,10 @@ pub struct UpdateSettings {
     pub vod_materialize_budget_secs: Option<String>,
     pub vod_index_mins: Option<i64>,
     pub vod_index_cluster_cache: Option<bool>,
+    pub analysis_max_attempts: Option<i64>,
+    pub analysis_lease_secs: Option<i64>,
+    pub analysis_backoff_base_secs: Option<i64>,
+    pub analysis_backoff_max_secs: Option<i64>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -1727,6 +1755,84 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateSettings>,
 ) -> Result<Json<SettingsDto>, ApiError> {
+    if req.analysis_max_attempts.is_some()
+        || req.analysis_lease_secs.is_some()
+        || req.analysis_backoff_base_secs.is_some()
+        || req.analysis_backoff_max_secs.is_some()
+    {
+        let current = state.store.settings_snapshot().await?;
+        let selected = |requested: Option<i64>, key: &str, default: i64| {
+            requested.unwrap_or_else(|| {
+                current
+                    .get(key)
+                    .and_then(|value| value.trim().parse::<i64>().ok())
+                    .unwrap_or(default)
+            })
+        };
+        let max_attempts = selected(
+            req.analysis_max_attempts,
+            keys::ANALYSIS_MAX_ATTEMPTS,
+            plurx_core::store::DEFAULT_ANALYSIS_MAX_ATTEMPTS,
+        );
+        let lease_secs = selected(
+            req.analysis_lease_secs,
+            keys::ANALYSIS_LEASE_SECS,
+            plurx_core::store::DEFAULT_ANALYSIS_LEASE_SECS,
+        );
+        let backoff_base_secs = selected(
+            req.analysis_backoff_base_secs,
+            keys::ANALYSIS_BACKOFF_BASE_SECS,
+            plurx_core::store::DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+        );
+        let backoff_max_secs = selected(
+            req.analysis_backoff_max_secs,
+            keys::ANALYSIS_BACKOFF_MAX_SECS,
+            plurx_core::store::DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
+        );
+        if !(1..=plurx_core::store::MAX_ANALYSIS_MAX_ATTEMPTS).contains(&max_attempts) {
+            return Err(ApiError::BadRequest(format!(
+                "analysis_max_attempts must be between 1 and {}",
+                plurx_core::store::MAX_ANALYSIS_MAX_ATTEMPTS
+            )));
+        }
+        if !(15..=plurx_core::store::MAX_ANALYSIS_LEASE_SECS).contains(&lease_secs) {
+            return Err(ApiError::BadRequest(format!(
+                "analysis_lease_secs must be between 15 and {}",
+                plurx_core::store::MAX_ANALYSIS_LEASE_SECS
+            )));
+        }
+        if !(1..=plurx_core::store::MAX_ANALYSIS_BACKOFF_BASE_SECS).contains(&backoff_base_secs) {
+            return Err(ApiError::BadRequest(format!(
+                "analysis_backoff_base_secs must be between 1 and {}",
+                plurx_core::store::MAX_ANALYSIS_BACKOFF_BASE_SECS
+            )));
+        }
+        if !(1..=plurx_core::store::MAX_ANALYSIS_BACKOFF_MAX_SECS).contains(&backoff_max_secs)
+            || backoff_max_secs < backoff_base_secs
+        {
+            return Err(ApiError::BadRequest(format!(
+                "analysis_backoff_max_secs must be between analysis_backoff_base_secs and {}",
+                plurx_core::store::MAX_ANALYSIS_BACKOFF_MAX_SECS
+            )));
+        }
+        let values = [
+            (keys::ANALYSIS_MAX_ATTEMPTS, max_attempts.to_string()),
+            (keys::ANALYSIS_LEASE_SECS, lease_secs.to_string()),
+            (
+                keys::ANALYSIS_BACKOFF_BASE_SECS,
+                backoff_base_secs.to_string(),
+            ),
+            (
+                keys::ANALYSIS_BACKOFF_MAX_SECS,
+                backoff_max_secs.to_string(),
+            ),
+        ];
+        let borrowed = values
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        state.store.put_settings(&borrowed).await?;
+    }
     if let Some(name) = &req.server_name {
         let name = name.trim();
         if name.is_empty() {
@@ -2405,6 +2511,47 @@ fn clustered_deliveries(
     out
 }
 
+fn clustered_analysis_progress(
+    local_node_id: &str,
+    local: Vec<crate::state::AnalysisProgress>,
+    peers: &PeerActivityRead,
+) -> Vec<serde_json::Value> {
+    let mut rows = local
+        .into_iter()
+        .map(|progress| (local_node_id.to_owned(), progress))
+        .collect::<Vec<_>>();
+    if let PeerActivityRead::Peers(outcomes) = peers {
+        for (node_id, outcome) in outcomes {
+            let PeerActivityOutcome::Answered(snapshot) = outcome else {
+                continue;
+            };
+            rows.extend(
+                snapshot
+                    .analysis
+                    .iter()
+                    .cloned()
+                    .map(|progress| (node_id.clone(), progress)),
+            );
+        }
+    }
+    rows.sort_by(|left, right| {
+        right
+            .1
+            .updated_at_ms
+            .cmp(&left.1.updated_at_ms)
+            .then(left.0.cmp(&right.0))
+            .then(left.1.job_id.cmp(&right.1.job_id))
+    });
+    rows.into_iter()
+        .take(64)
+        .filter_map(|(node_id, progress)| {
+            let mut value = serde_json::to_value(progress).ok()?;
+            value["node_id"] = serde_json::Value::String(node_id);
+            Some(value)
+        })
+        .collect()
+}
+
 fn missing_activity_summary(peers: &PeerActivityRead) -> Option<String> {
     match peers {
         PeerActivityRead::LocalOnly => None,
@@ -2959,7 +3106,14 @@ pub async fn activity_detail(
     // client add a second polling loop beside /activity/detail.
     if user.0.is_admin {
         response["analysis"] = match super::analysis::activity_summary(&state).await {
-            Ok(summary) => summary,
+            Ok(mut summary) => {
+                summary["progress"] = serde_json::Value::Array(clustered_analysis_progress(
+                    &state.node_id,
+                    state.jobs.analysis_progress_snapshot(),
+                    &peers,
+                ));
+                summary
+            }
             Err(error) => {
                 tracing::warn!(?error, "analysis summary unavailable for activity");
                 serde_json::json!({
@@ -3062,6 +3216,8 @@ pub(crate) struct MetricsState {
     transcode: crate::transcode::TranscodeMetrics,
     integration: Arc<IntegrationMetrics>,
     offline: Arc<crate::offline::OfflineMetrics>,
+    analysis: Arc<crate::state::AnalysisRuntimeMetrics>,
+    node_id: String,
     store_metrics: StoreMetricsCache,
     passive_raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
     passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
@@ -3074,6 +3230,8 @@ impl FromRef<AppState> for MetricsState {
             transcode: state.transcode.metrics_handle(),
             integration: state.jobs.metrics_handle(),
             offline: state.offline.metrics_handle(),
+            analysis: state.jobs.analysis_metrics_handle(),
+            node_id: state.node_id.clone(),
             store_metrics: state.store_metrics.clone(),
             passive_raft: state.replication.metrics_handle(),
             passive_membership: state.membership.metrics_handle(),
@@ -3336,6 +3494,79 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         offline.active_leases,
         offline.pinned_bytes,
     ));
+    let analysis = sample.analysis;
+    out.push_str(
+        "# HELP plurx_analysis_queue_depth Durable analysis jobs by state, component, priority, and trigger.\n\
+         # TYPE plurx_analysis_queue_depth gauge\n\
+         # HELP plurx_analysis_queue_oldest_age_seconds Age of the oldest durable analysis job in each class.\n\
+         # TYPE plurx_analysis_queue_oldest_age_seconds gauge\n",
+    );
+    for (component_index, component) in plurx_core::store::ANALYSIS_METRIC_COMPONENTS
+        .iter()
+        .enumerate()
+    {
+        for (state_index, state) in plurx_core::store::ANALYSIS_METRIC_STATES.iter().enumerate() {
+            for (priority_index, priority) in plurx_core::store::ANALYSIS_METRIC_PRIORITIES
+                .iter()
+                .enumerate()
+            {
+                for (trigger_index, trigger) in plurx_core::store::ANALYSIS_METRIC_TRIGGERS
+                    .iter()
+                    .enumerate()
+                {
+                    let slot = ((component_index
+                        * plurx_core::store::ANALYSIS_METRIC_STATES.len()
+                        + state_index)
+                        * plurx_core::store::ANALYSIS_METRIC_PRIORITIES.len()
+                        + priority_index)
+                        * plurx_core::store::ANALYSIS_METRIC_TRIGGERS.len()
+                        + trigger_index;
+                    out.push_str(&format!(
+                        "plurx_analysis_queue_depth{{state=\"{state}\",component=\"{component}\",priority=\"{priority}\",trigger=\"{trigger}\"}} {}\n\
+                         plurx_analysis_queue_oldest_age_seconds{{state=\"{state}\",component=\"{component}\",priority=\"{priority}\",trigger=\"{trigger}\"}} {}\n",
+                        analysis.queue_depth[slot], analysis.queue_oldest_age_seconds[slot]
+                    ));
+                }
+            }
+        }
+    }
+    out.push_str(
+        "# HELP plurx_analysis_lifecycle_total Durable analysis lifecycle events by typed reason.\n\
+         # TYPE plurx_analysis_lifecycle_total counter\n",
+    );
+    for (slot, (event, reason)) in plurx_core::store::ANALYSIS_LIFECYCLE_METRICS
+        .iter()
+        .enumerate()
+    {
+        out.push_str(&format!(
+            "plurx_analysis_lifecycle_total{{event=\"{event}\",reason=\"{reason}\"}} {}\n",
+            analysis.lifecycle_counts[slot]
+        ));
+    }
+    out.push_str(
+        "# HELP plurx_analysis_markers Current persisted marker count by semantic evidence.\n\
+         # TYPE plurx_analysis_markers gauge\n",
+    );
+    for (kind_index, kind) in plurx_core::store::ANALYSIS_MARKER_KINDS.iter().enumerate() {
+        for (provenance_index, provenance) in plurx_core::store::ANALYSIS_MARKER_PROVENANCE
+            .iter()
+            .enumerate()
+        {
+            for (confidence_index, confidence) in plurx_core::store::ANALYSIS_MARKER_CONFIDENCE
+                .iter()
+                .enumerate()
+            {
+                let slot = (kind_index * plurx_core::store::ANALYSIS_MARKER_PROVENANCE.len()
+                    + provenance_index)
+                    * plurx_core::store::ANALYSIS_MARKER_CONFIDENCE.len()
+                    + confidence_index;
+                out.push_str(&format!(
+                    "plurx_analysis_markers{{kind=\"{kind}\",provenance=\"{provenance}\",confidence=\"{confidence}\"}} {}\n",
+                    analysis.marker_counts[slot]
+                ));
+            }
+        }
+    }
     out
 }
 
@@ -3360,6 +3591,7 @@ pub(crate) async fn metrics(
         // this exposition would show.
         plurx_core::cluster::membership::prometheus_cluster_job_authority(),
     );
+    let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
 
     // Integration counters (plan P6). Scans by what asked for them, and how
     // many times another application has called in at all — the pair that
@@ -3391,7 +3623,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         {scans}{store_metrics}{membership_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{control_metrics}{playback_metrics}",
+         {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{control_metrics}{playback_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
@@ -3448,6 +3680,7 @@ mod tests {
                         delivered_bytes: None,
                         delivered_bps: None,
                     }],
+                    analysis: Vec::new(),
                 }),
             ),
             ("node-c".to_owned(), PeerActivityOutcome::TimedOut),

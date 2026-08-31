@@ -588,6 +588,23 @@ struct Marker: Codable, Hashable {
     let startMs: Int
     let endMs: Int
     var chapter: Bool?
+    var provenance: String? = nil
+    var confidence: Int? = nil
+    var generation: String? = nil
+    var detectorVersion: String? = nil
+
+    /// M1-M4 deliberately has no configured detector confidence floor, so
+    /// only exact authored/manual evidence is automatic. An older server's
+    /// chapter bit preserves the pre-provenance behavior.
+    var isAutoSkipEligible: Bool {
+        guard let provenance else { return chapter != false }
+        return provenance == "authored" || provenance == "manual"
+    }
+
+    var isEstimated: Bool {
+        guard let provenance else { return chapter == false }
+        return provenance == "estimated"
+    }
 }
 
 struct SourceSummary: Codable {

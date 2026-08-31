@@ -1506,6 +1506,60 @@ async function main() {
   }
 
   reporter.stop();
+
+  // The default timer, which every browser takes and no test took.
+  //
+  // `setTimeout` and `clearTimeout` are WindowTimers methods and every browser
+  // brand-checks their receiver. Stored on the reporter and invoked as
+  // `this.setTimer(...)` they throw `TypeError: Illegal invocation`, which is
+  // what the M5 fleet run hit: the web reporter completed zero exchanges while
+  // this whole file passed, because every case above injects its own timer.
+  //
+  // Node does not brand-check, so the check is installed here. The doubles are
+  // exactly as strict as a browser and no stricter: they accept the global
+  // receiver and refuse every other.
+  {
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    let refusals = 0;
+    globalThis.setTimeout = function (run, ms) {
+      if (this !== globalThis) {
+        refusals += 1;
+        throw new TypeError("Illegal invocation");
+      }
+      return realSetTimeout(run, ms);
+    };
+    globalThis.clearTimeout = function (handle) {
+      if (this !== globalThis) {
+        refusals += 1;
+        throw new TypeError("Illegal invocation");
+      }
+      return realClearTimeout(handle);
+    };
+    try {
+      const strict = new control.Reporter({
+        bootstrap: bootstrap(),
+        clientInstanceId: "22222222-2222-4222-8222-222222222222",
+        snapshot: () => snapshot(),
+        send: async () => ({ accepted: true, action: { type: "none" } }),
+      });
+      // `notify` schedules through the default timer, and `stop` cancels
+      // through it. Either one calling a bare WindowTimers function as a
+      // method is the whole defect.
+      strict.notify();
+      strict.stop();
+      assert.equal(
+        refusals,
+        0,
+        "the reporter must not invoke setTimeout or clearTimeout as its own " +
+          "method — a browser refuses that receiver and the exchange never runs",
+      );
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    }
+  }
+
   process.stdout.write("PASS passive web playback-control reporter\n");
 }
 

@@ -23,6 +23,7 @@ mod reading;
 mod sessions;
 mod shared_cache;
 mod telemetry;
+mod timeline_annotations;
 mod trakt;
 mod users;
 mod watch;
@@ -876,7 +877,15 @@ const MIGRATIONS: &[&str] = &[
     // that genuinely reported zero must stay distinguishable, or the fallback
     // to the label can never know when to stop.
     super::FILES_DOLBY_VISION_COLUMNS_BATCH,
-    // v39: a successor that exists without being current. `media_sessions`
+    // v39: replicated, source-versioned semantic markers. These remain
+    // separate from the node-local packed fragment index by design.
+    crate::store::timeline_annotations::TIMELINE_ANNOTATIONS_SCHEMA,
+    // v40: separately fenced administrator corrections. Automatic set
+    // replacement never writes this table, so rebuilds cannot erase them.
+    crate::store::timeline_annotations::TIMELINE_MANUAL_OVERRIDES_SCHEMA,
+    // v41: make semantic skip-marker work a first-class request component.
+    crate::store::fragment_index_cluster::ANALYSIS_COMPONENTS_SCHEMA,
+    // v42: a successor that exists without being current. `media_sessions`
     // alone cannot express one — it has no `created_at`, and the only thing
     // that says which of a playback's rows is current is
     // `media_playback_pointers`. A staged row therefore holds no pointer and
@@ -1195,9 +1204,12 @@ impl SqliteStore {
             // out here. Integrity is re-checked below instead of enforced
             // statement by statement.
             conn.pragma_update(None, "foreign_keys", "OFF")?;
-            let applied = conn
-                .execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
-                .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")));
+            let applied = if version == 41 && Self::analysis_component_schema_is_current(conn)? {
+                Ok(())
+            } else {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))
+            };
             conn.pragma_update(None, "foreign_keys", "ON")?;
             applied?;
             let dangling: i64 =
@@ -1231,6 +1243,34 @@ impl SqliteStore {
             tracing::info!(instance_id = %id, "generated new instance id");
         }
         Ok(())
+    }
+
+    /// Detect a fully committed v41 schema whose `user_version` marker was
+    /// not advanced before the process stopped. The v41 migration contains
+    /// non-idempotent column additions and table rebuilds, so replaying it
+    /// would turn a successful commit into a permanent startup failure.
+    fn analysis_component_schema_is_current(conn: &Connection) -> Result<bool, StoreError> {
+        let installed: i64 = conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+                  WHERE name IN ('priority','trigger','target_node_id'))
+              + (SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+                  WHERE (name = 'cache_key' AND pk = 1)
+                     OR (name = 'target_node_id' AND pk = 2))
+              + (SELECT COUNT(*) FROM pragma_table_info('timeline_annotation_sets')
+                  WHERE name = 'publication_priority')
+              + (SELECT COUNT(*) FROM pragma_table_info('analysis_requests')
+                  WHERE name IN ('pipeline_version','requested_generation',
+                                 'expected_predecessor_generation','priority','trigger',
+                                 'cancel_requested'))
+              + (SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'table' AND name IN
+                    ('analysis_attempts','cluster_fragment_index_heads',
+                     'analysis_lifecycle_counters'))",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(installed == 15)
     }
 
     async fn with_conn<T, F>(&self, f: F) -> Result<T, StoreError>
@@ -1386,7 +1426,72 @@ impl MetricsStore for SqliteStore {
                        )),
                     (SELECT COALESCE(SUM(status = 'pending'), 0) FROM watched_outbox),
                     (SELECT COALESCE(SUM(status = 'ok'), 0) FROM watched_outbox),
-                    (SELECT COALESCE(SUM(status = 'failed'), 0) FROM watched_outbox)
+                    (SELECT COALESCE(SUM(status = 'failed'), 0) FROM watched_outbox),
+                    (SELECT COALESCE(json_group_array(json_object(
+                        'component', grouped.component, 'state', grouped.durable_state,
+                        'priority', grouped.priority, 'trigger', grouped.trigger,
+                        'count', grouped.depth,
+                        'oldest', grouped.oldest_age_seconds)), '[]')
+                       FROM (SELECT component,
+                              CASE
+                                WHEN last_error_code = 'source_superseded' THEN 'stale'
+                                WHEN state = 'queued' AND not_before_ms > ?2 THEN 'retry_wait'
+                                WHEN state = 'running' THEN 'claimed'
+                                WHEN state = 'submitted' THEN 'staged'
+                                WHEN state = 'ready' THEN 'published'
+                                WHEN state = 'cancelled' THEN 'canceled'
+                                ELSE state END AS durable_state,
+                              priority, trigger,
+                              COUNT(*) AS depth,
+                              CASE WHEN ?2 > MIN(created_at_ms)
+                                THEN (?2 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds
+                         FROM (
+                           SELECT component, state, last_error_code, not_before_ms,
+                                  priority, trigger, created_at_ms
+                             FROM analysis_requests
+                            WHERE component <> 'fragment_index'
+                               OR NOT EXISTS (
+                                 SELECT 1 FROM cluster_fragment_index_jobs job
+                                  WHERE job.cache_key = analysis_requests.result_cache_key
+                                    AND job.target_node_id = analysis_requests.target_node_id)
+                           UNION ALL
+                           SELECT 'fragment_index', job.state, job.last_error_code,
+                                  job.not_before_ms, job.priority, job.trigger, job.created_at_ms
+                             FROM cluster_fragment_index_jobs job
+                         ) durable_analysis
+                        GROUP BY component, durable_state, priority, trigger) grouped),
+                    (SELECT COALESCE(json_group_array(json_object(
+                        'kind', grouped.kind, 'provenance', grouped.provenance,
+                        'confidence', grouped.confidence, 'count', grouped.count)), '[]')
+                       FROM (SELECT kind, provenance, confidence, COUNT(*) AS count
+                               FROM (SELECT json_extract(marker.value, '$.kind') AS kind,
+                                            json_extract(marker.value, '$.provenance') AS provenance,
+                                            CASE
+                                              WHEN CAST(COALESCE(json_extract(marker.value, '$.confidence_millis'), 0) AS INTEGER) < 500 THEN 'low'
+                                              WHEN CAST(COALESCE(json_extract(marker.value, '$.confidence_millis'), 0) AS INTEGER) < 900 THEN 'medium'
+                                              ELSE 'high' END AS confidence
+                                       FROM timeline_annotation_sets annotation_set,
+                                            json_each(annotation_set.annotations_json) marker
+                                      JOIN files current_file ON current_file.id = annotation_set.file_id
+                                       AND current_file.size = annotation_set.source_size
+                                       AND current_file.mtime = annotation_set.source_mtime
+                                      WHERE NOT EXISTS (
+                                        SELECT 1 FROM timeline_manual_overrides manual
+                                         WHERE manual.file_id = annotation_set.file_id
+                                           AND manual.kind = json_extract(marker.value, '$.kind')
+                                           AND manual.source_size = annotation_set.source_size
+                                           AND manual.source_mtime = annotation_set.source_mtime)
+                                      UNION ALL
+                                     SELECT kind, 'manual', 'high'
+                                       FROM timeline_manual_overrides manual
+                                       JOIN files current_file ON current_file.id = manual.file_id
+                                        AND current_file.size = manual.source_size
+                                        AND current_file.mtime = manual.source_mtime)
+                              GROUP BY kind, provenance, confidence) grouped),
+                    (SELECT COALESCE(json_group_array(json_object(
+                        'event', counter.event, 'reason', counter.reason,
+                        'count', counter.count)), '[]')
+                       FROM analysis_lifecycle_counters counter)
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],
                 |row| {
@@ -1406,6 +1511,11 @@ impl MetricsStore for SqliteStore {
                             pinned_bytes: row.get(11)?,
                         },
                         watched_outbox: (row.get(12)?, row.get(13)?, row.get(14)?),
+                        analysis: super::analysis_store_metrics(
+                            &row.get::<_, String>(15)?,
+                            &row.get::<_, String>(16)?,
+                            &row.get::<_, String>(17)?,
+                        ),
                     })
                 },
             )
@@ -1855,7 +1965,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 39,
+            version, 42,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -3051,6 +3161,97 @@ mod tests {
                 "missing v32 schema object {object}"
             );
         }
+    }
+
+    #[test]
+    fn v39_to_v41_add_annotations_and_widen_analysis_without_losing_requests() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(38) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 38)
+                .expect("v38 marker");
+            conn.execute(
+                "INSERT INTO analysis_requests
+                    (request_id, file_id, source_size, source_mtime, component,
+                     force_rebuild, target_node_id, state, not_before_ms,
+                     created_at_ms, updated_at_ms)
+                 VALUES ('preserved-v38', 7, 100, 10, 'fragment_index', 0,
+                         'node-a', 'queued', 20, 20, 20)",
+                [],
+            )
+            .expect("seed v38 analysis request");
+        }
+
+        SqliteStore::open(&db).expect("migrate v38 through annotations and component widening");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT component FROM analysis_requests WHERE request_id = 'preserved-v38'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("preserved request"),
+            "fragment_index"
+        );
+        conn.execute(
+            "INSERT INTO analysis_requests
+                (request_id, file_id, source_size, source_mtime, component,
+                 force_rebuild, target_node_id, state, not_before_ms,
+                 created_at_ms, updated_at_ms)
+             VALUES ('semantic-v41', 8, 100, 10, 'skip_markers', 0,
+                     'node-a', 'queued', 21, 21, 21)",
+            [],
+        )
+        .expect("widened component accepts semantic work");
+        for table in [
+            "timeline_annotation_sets",
+            "timeline_manual_overrides",
+            "analysis_lifecycle_counters",
+        ] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("timeline table"),
+                1,
+                "missing {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn v41_schema_commit_with_a_stale_marker_recovers_without_replaying_ddl() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        SqliteStore::open(&db).expect("create current database");
+
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            conn.pragma_update(None, "user_version", 40)
+                .expect("simulate interruption after the v41 schema commit");
+        }
+
+        SqliteStore::open(&db).expect("settle the committed v41 migration");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert!(SqliteStore::analysis_component_schema_is_current(&conn)
+            .expect("inspect current analysis schema"));
     }
 
     #[test]

@@ -6,6 +6,14 @@ enforce_after = "e8a910f"
 # that evidence from an unrelated test edit in the same patch.
 
 [[fixes]]
+id = "web.control-reporter-timer-receiver"
+commits = ["893ec4fd"]
+source = "crates/plurxd/src/web/playback-control.js"
+source_anchor = "const scheduleDefault = (run, ms) => globalThis.setTimeout(run, ms);"
+test = "tests/playback/web-control.test.js"
+test_anchor = "the reporter must not invoke setTimeout or clearTimeout as its own"
+
+[[fixes]]
 id = "apple.marker-button-label"
 commits = ["b06f78b0"]
 source = "clients/apple/Sources/PlayerView.swift"
@@ -588,3 +596,11 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "nonisolated static func sessionHDR10Request("
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testManualQualityTranscodePreservesDirectOrRemuxHDR10Decision"
+
+[[fixes]]
+id = "clients.marker-provenance-auto-skip"
+commits = ["ce253a55"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "val isAutoSkipEligible: Boolean"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/MarkerLabelTest.kt"
+test_anchor = "provenanceControlsExactnessAndAutomaticEligibility"
