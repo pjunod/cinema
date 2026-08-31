@@ -1381,6 +1381,9 @@ final class PlayerController: ObservableObject {
     /// thought it was stuck rather than only that it was.
     private var controlObservationOverride: ClientObservation?
     private var controlRenderOverride: RenderState?
+    /// The film position when the override was published, so progress past it
+    /// can expire the override without trusting `timeControlStatus`.
+    private var controlEvidencePositionMs: Int?
     private var sessionId: String?
     private var activeMediaPath: String?
     private var activeMediaAuthenticated = false
@@ -2168,7 +2171,14 @@ final class PlayerController: ObservableObject {
         clearPGSOverlaySelection()
         pgsOverlayItemGeneration &+= 1
         playbackControl.end()
+        // A verdict survives a reopen because the failure it explains usually
+        // arrives after one. It must not survive the title: a confident
+        // sentence about the wrong film is worse than a generic one.
+        playbackControl.clearVerdict()
         controlWaitingSince = nil
+        controlObservationOverride = nil
+        controlRenderOverride = nil
+        controlEvidencePositionMs = nil
         playbackRecoveryMonitor.reset()
         stallReopenBudget.reset()
         sessionHeight = nil
@@ -3712,7 +3722,15 @@ final class PlayerController: ObservableObject {
         // AVPlayer's own error object is a generic fallback and its message
         // can carry a media URL, so an armed server verdict is both more
         // accurate and safer to show.
-        playbackError = playbackControl.terminalVerdict?.message
+        //
+        // Except for a transport failure, which is the one case the verdict
+        // demonstrably does not explain: a verdict says production stopped
+        // for a reason retrying cannot change, and a link that dropped is a
+        // different cause with a different answer. Showing it there would be
+        // the failure mode of arming a verdict at all — a confident sentence
+        // about the wrong thing.
+        let verdict = isTransportFailure ? nil : playbackControl.terminalVerdict?.message
+        playbackError = verdict
             ?? item.error?.localizedDescription
             ?? PlaybackPreparationError.failed.localizedDescription
     }
@@ -4352,8 +4370,11 @@ final class PlayerController: ObservableObject {
             isChangingStream = false
             failed = true
             playbackFailureTitle = Self.playbackStoppedFailureTitle
-            playbackError =
-                "The HDR stream stopped responding. Playback was stopped instead of switching to SDR."
+            // A silent stall reaches this rung before the stall funnel's own
+            // stop, so leaving it out would hide the verdict on the path most
+            // likely to have earned one.
+            playbackError = playbackControl.terminalVerdict?.message
+                ?? "The HDR stream stopped responding. Playback was stopped instead of switching to SDR."
             return true
         }
         establishedHDRRetryAttempted = true
@@ -5260,6 +5281,12 @@ extension PlayerController {
             playbackControl.end()
             return
         }
+        // The override describes the session that just ended. Carrying it into
+        // the replacement would make its very first exchange — a session that
+        // has rendered nothing yet — report a wedge that belongs to another.
+        controlObservationOverride = nil
+        controlRenderOverride = nil
+        controlEvidencePositionMs = nil
         playbackControl.begin(
             bootstrap: bootstrap,
             transport: PlaybackControlTransport(
@@ -5352,32 +5379,50 @@ extension PlayerController {
     /// Called wherever the player's state moves. The reporter coalesces, so
     /// this is cheap enough for the periodic time observer.
     func playbackControlPlayerChanged() {
+        refreshControlWaiting()
+        expireControlEvidenceIfProgressed()
+        playbackControl.playerChanged()
+    }
+
+    private func refreshControlWaiting() {
         if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
             if controlWaitingSince == nil { controlWaitingSince = Date() }
         } else {
             controlWaitingSince = nil
         }
-        // A player that is playing has outlived whatever a recovery owner
-        // last said about it. Keeping the override would report a stall the
-        // viewer stopped having.
-        if player.timeControlStatus == .playing {
-            controlObservationOverride = nil
-            controlRenderOverride = nil
-        }
-        playbackControl.playerChanged()
     }
 
-    /// Publish what a recovery owner is about to act on, then report it.
+    /// A moving film clock is the only proof the stall this evidence describes
+    /// is over.
     ///
-    /// The order is the point: the override has to be on the player before
-    /// `playerChanged()` takes the snapshot, or the exchange carries the
-    /// player's own vaguer version of the same moment.
+    /// `timeControlStatus == .playing` is not that proof and must never be
+    /// used as it: a `.silent` stall is *defined* as a player whose clock
+    /// stopped while it claimed motion, so clearing on that status would
+    /// discard the one kind the server cannot derive from anything it holds —
+    /// and would discard it inside the same call that published it.
+    private func expireControlEvidenceIfProgressed() {
+        guard let publishedAt = controlEvidencePositionMs else { return }
+        guard realPositionMs() > publishedAt else { return }
+        controlObservationOverride = nil
+        controlRenderOverride = nil
+        controlEvidencePositionMs = nil
+    }
+
+    /// Publish what a recovery owner is about to act on, and send it now.
+    ///
+    /// Two things are load-bearing. The override is set before the snapshot is
+    /// taken, or the exchange carries the player's own vaguer version of the
+    /// same moment. And the report is urgent rather than coalesced, because
+    /// the owner's reopen normally ends this reporter before its next
+    /// scheduled exchange — the same reason the web client drains inline here.
     func reportControlEvidence(
         _ observation: ClientObservation?,
         render: RenderState? = nil
     ) {
+        refreshControlWaiting()
         controlObservationOverride = observation
         controlRenderOverride = render
-        playbackControlPlayerChanged()
+        controlEvidencePositionMs = realPositionMs()
+        playbackControl.reportEvidence()
     }
 }

@@ -289,14 +289,23 @@ final class PlaybackControlSessionTests: XCTestCase {
         XCTAssertNil(session.terminalVerdict)
     }
 
-    /// A new session is a new verdict. The old one described a recipe that is
-    /// no longer playing, and showing it against the next failure would be a
-    /// confident lie rather than a stale guess.
-    func testBeginningAgainClearsThePreviousVerdict() async throws {
+    /// A verdict survives a reopen and does not survive a title.
+    ///
+    /// The distinction is the whole design. A reopen is the same viewer on the
+    /// same source, and the failure a verdict explains normally arrives on the
+    /// far side of one — the stall funnel reopens once before it stops, so a
+    /// verdict cleared by `begin` would be gone by the stop that needed it. A
+    /// new title is a different source, and a confident sentence about the
+    /// wrong film is worse than a generic one.
+    func testAVerdictSurvivesAReopenAndIsClearedByANewTitle() async throws {
         controlExchanges.reset()
         controlAnswer.set(ControlAction(
             type: "terminal", code: "unsupported", message: "the old recipe"
         ))
+        // The answer is file-scope shared state and this class runs its tests
+        // in one process. A throw before the mid-body reset would leave every
+        // later test with a reporter that stops after sequence 1.
+        defer { controlAnswer.set(ControlAction(type: "none")) }
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         defer { urlSession.invalidateAndCancel() }
@@ -318,8 +327,52 @@ final class PlaybackControlSessionTests: XCTestCase {
             transport: transport,
             observe: { player.observation() }
         )
-        XCTAssertNil(session.terminalVerdict)
+        XCTAssertEqual(
+            session.terminalVerdict?.message, "the old recipe",
+            "a reopen keeps the verdict: the failure it explains arrives after one"
+        )
         _ = try await waitForExchange { $0.sequence == 1 }
+        session.clearVerdict()
+        XCTAssertNil(session.terminalVerdict, "a new title starts clean")
+        session.end()
+    }
+
+    /// An exchange from the reporter a reopen just replaced must not re-arm a
+    /// verdict for the session that replaced it.
+    ///
+    /// `end()` stops the old reporter with an unstructured task, so the stop
+    /// does not necessarily land before the next `begin`. Without the
+    /// generation token an old in-flight exchange completing in that window
+    /// carries a previous generation's verdict into the new session.
+    func testAStaleReporterCannotArmTheNewSessionsVerdict() async throws {
+        controlExchanges.reset()
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        // The next generation begins, and only then does a terminal arrive
+        // from a reporter belonging to the previous one.
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "from the old generation"
+        ))
+        defer { controlAnswer.set(ControlAction(type: "none")) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNotEqual(
+            session.terminalVerdict?.message, "from the old generation",
+            "a stale generation cannot arm this session's verdict"
+        )
         session.end()
     }
 

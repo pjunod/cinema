@@ -446,6 +446,26 @@ actor PlaybackControlReporter {
         pending = newest
     }
 
+    /// Report now rather than at the next cadence.
+    ///
+    /// `notify` leaves the pump asleep for `next_exchange_ms`, which the
+    /// server may set as high as a minute. For a position update that is the
+    /// point. For a recovery owner about to reopen it is fatal: the reopen
+    /// ends this reporter before the pump wakes, so the evidence is never
+    /// sent at all rather than sent late.
+    ///
+    /// Waking is a cancel-and-restart because the pump is suspended inside an
+    /// injected sleep. `run()`'s loop condition reads `Task.isCancelled`, so
+    /// the old pump exits at its next iteration instead of racing this one.
+    /// An exchange already in flight is left alone — `run()` picks up
+    /// `pending` immediately after it, without sleeping.
+    func notifyUrgently(_ value: PlaybackControlSnapshot? = nil) {
+        notify(value)
+        guard !stopped, !inFlight, pending != nil else { return }
+        pump?.cancel()
+        pump = Task { [weak self] in await self?.run() }
+    }
+
     func stop() {
         guard !stopped else { return }
         stopped = true

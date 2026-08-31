@@ -1915,6 +1915,10 @@ final class AppleClientTests: XCTestCase {
     /// the assertions below failing: the floor-stopped stall would consume a
     /// slot, and the unrelated stall a minute later would find the cap already
     /// two-thirds spent.
+    ///
+    /// (The test this comment documents is
+    /// `testAFloorStoppedStallDoesNotSpendARollingReopenSlot`, below.)
+
     /// The three stall kinds are not one condition, and the evidence the
     /// server gets has to say which. A buffering stall is a starved decoder
     /// and says nothing about the file; a silent freeze is a decoder that

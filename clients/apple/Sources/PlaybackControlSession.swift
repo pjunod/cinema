@@ -148,9 +148,10 @@ final class PlaybackControlSession {
         observe: @escaping () -> PlayerControlObservation?
     ) {
         end()
-        // A new session is a new verdict. The old one described a recipe that
-        // is no longer playing.
-        verdicts.store(nil)
+        // A generation, not a reset. A verdict outlives the session it was
+        // given in, because the failure it explains usually arrives after a
+        // reopen; `clearVerdict()` is how a new title starts clean.
+        let generation = verdicts.beginGeneration()
         self.observe = observe
         // The reporter takes its first snapshot the moment it starts, so the
         // first one has to be there before it does.
@@ -177,7 +178,7 @@ final class PlaybackControlSession {
                       action.type == "terminal",
                       action.message?.isEmpty == false
                 else { return }
-                verdicts.store(action)
+                verdicts.store(action, generation: generation)
             }
         )
         guard let reporter else {
@@ -195,6 +196,27 @@ final class PlaybackControlSession {
         guard let reporter else { return }
         Task { await reporter.notify() }
     }
+
+    /// A recovery owner published evidence and is about to act on it.
+    ///
+    /// Coalescing is right for a position update and wrong for this. The pump
+    /// sleeps for `next_exchange_ms` — up to a minute — and the owner's own
+    /// reopen normally ends this reporter before it wakes, so the evidence
+    /// would be discarded rather than sent late. The web reporter has always
+    /// drained inline at exactly this call site, for exactly this reason.
+    ///
+    /// Restricted to callers that have evidence rather than a position, so the
+    /// ordinary cadence is unchanged.
+    func reportEvidence() {
+        publish()
+        guard let reporter else { return }
+        Task { await reporter.notifyUrgently() }
+    }
+
+    /// A new title. The old verdict described a source that is no longer
+    /// playing, so keeping it would show a confident sentence about the wrong
+    /// film.
+    func clearVerdict() { verdicts.clear() }
 
     func end() {
         latest.store(nil)
@@ -233,14 +255,37 @@ final class PlaybackControlSession {
 /// rate change — against an exchange cadence the server never sets faster.
 /// The reporter's half of the bridge: one verdict, written from an actor and
 /// read from `@MainActor`, with a lock rather than an isolation assertion.
+///
+/// The token is not decoration. `end()` stops the old reporter with an
+/// unstructured `Task`, so a reopen can begin the next session before that
+/// stop lands, and an old in-flight exchange completing in that window would
+/// carry a previous generation's verdict into the new one.
 private final class PlaybackControlLatestVerdict: @unchecked Sendable {
     private let lock = NSLock()
     private var value: ControlAction?
+    private var generation = 0
 
-    func store(_ action: ControlAction?) {
+    /// Claim the next generation. Deliberately does not clear the verdict: a
+    /// reopen is the same viewer on the same title, and the failure a verdict
+    /// explains usually arrives on the far side of one.
+    func beginGeneration() -> Int {
         lock.lock()
         defer { lock.unlock() }
+        generation += 1
+        return generation
+    }
+
+    func store(_ action: ControlAction, generation: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard generation == self.generation else { return }
         value = action
+    }
+
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        value = nil
     }
 
     func load() -> ControlAction? {
@@ -250,6 +295,8 @@ private final class PlaybackControlLatestVerdict: @unchecked Sendable {
     }
 }
 
+/// The newest snapshot the player has produced, written by the main actor and
+/// read by the reporter's.
 private final class PlaybackControlLatestSnapshot: @unchecked Sendable {
     private let lock = NSLock()
     private var value: PlaybackControlSnapshot?
