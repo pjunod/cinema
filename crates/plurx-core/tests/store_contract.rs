@@ -541,6 +541,24 @@ async fn current_media_session(
         .await
         .unwrap_or_else(|error| panic!("{backend}: activate current session: {error}"))
         .unwrap_or_else(|| panic!("{backend}: current activation must win"));
+    // Publish it. A session left at the publication sentinel is not a stream
+    // anybody is watching, and the replicated activation refuses to supersede
+    // one — `activate_media_session`'s `$19` guard rejects a predecessor whose
+    // `publication_ready_at_ms != 0`. The SQLite twin has no such guard, so a
+    // helper that skipped this produced a predecessor that could be replaced
+    // on one backend and not the other. Zero is the value the validator
+    // requires for a plain start with no expected predecessor.
+    store
+        .settle_media_session_activation(
+            &activation,
+            MediaSessionActivationSettlement::Confirm {
+                publication_ready_at_ms: 0,
+            },
+            activation.now_ms,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: confirm current session: {error}"))
+        .unwrap_or_else(|| panic!("{backend}: current confirmation must win"));
     activation
 }
 
