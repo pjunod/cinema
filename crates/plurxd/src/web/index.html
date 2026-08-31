@@ -6393,20 +6393,24 @@ function notifyPlaybackControl(renderOverride,observationOverride){
   return p.controlReporter?p.controlReporter.notify():null;
 }
 // How long a recovery owner waits for the server's verdict before deciding for
-// itself. One exchange deadline — not a new number, and not a guess.
+// itself.
 //
-// But the ask does not wait for *an* exchange, it waits for the *next* one:
-// `drain` returns immediately while a request is in flight, so this ask's own
-// request cannot start until that one finishes. Whenever an exchange is
-// already running at ask time — precisely the busy case a stall correlates
-// with — a single window would expire at the instant an answer first became
-// possible. So the window is extended once, and only when an exchange that is
-// NOT this ask's completes, which is the observable moment ours became next.
-// CONTROL_ASK_CAP_MS is the hard stop: past it the viewer has waited longer
-// for the verdict than for the stall itself, and today's path is better than
-// a better answer that never arrives.
-const CONTROL_ASK_MS=6000;
-const CONTROL_ASK_CAP_MS=12000;
+// This was one exchange deadline, on the reasoning that waiting longer than an
+// exchange can take is pure delay. That was the wrong end to measure from. The
+// fallback is the branch the entire fleet takes — no node has ever answered a
+// full-vocabulary exchange — so the bound is added to every real stall for
+// every viewer, on top of the eight seconds `persistentWait` has already
+// waited. A server that cannot answer inside a second and a half is a server
+// whose answer is not worth more frozen picture than the recovery it would
+// have replaced.
+//
+// The window is still extended once, and only when an exchange that is NOT
+// this ask's completes: `drain` returns immediately while a request is in
+// flight, so this ask's own request cannot start until that one finishes, and
+// a single window would otherwise expire at the instant an answer first became
+// possible. CONTROL_ASK_CAP_MS is the hard stop.
+const CONTROL_ASK_MS=1500;
+const CONTROL_ASK_CAP_MS=3000;
 // The reporter's own exchange floor. Named here because the retry clamp below
 // must not pace an ask faster than the transport will carry it.
 const CONTROL_MIN_EXCHANGE_MS=250;

@@ -1,5 +1,8 @@
 package tv.plurx.app.player
 
+import androidx.media3.common.PlaybackException
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -200,5 +203,187 @@ class PlaybackPolicyTest {
         const val COLOR_TRANSFER_SDR = 3
         const val COLOR_TRANSFER_ST2084 = 6
         const val COLOR_TRANSFER_UNSET = -1
+    }
+}
+
+/**
+ * Which class of failure Media3 reported, in the protocol's vocabulary.
+ *
+ * The classes are not decoration. A decoder error says this device cannot play
+ * this recipe and a different rung might; a network error says nothing about
+ * the recipe at all; a manifest error is about what the server produced.
+ * Collapsing them to `unknown` hands the arbiter one word where it has to
+ * choose between three different answers — which is exactly the ambiguity M5
+ * exists to remove.
+ */
+class ControlErrorClassTest {
+
+    @Test
+    fun eachMedia3ErrorFamilyKeepsItsOwnAnswer() {
+        assertEquals(
+            ClientErrorCode.NETWORK,
+            controlErrorCode(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED),
+        )
+        assertEquals(ClientErrorCode.NETWORK, controlErrorCode(PlaybackException.ERROR_CODE_TIMEOUT))
+        assertEquals(
+            ClientErrorCode.MANIFEST,
+            controlErrorCode(PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED),
+        )
+        assertEquals(
+            ClientErrorCode.DECODER,
+            controlErrorCode(PlaybackException.ERROR_CODE_DECODING_FAILED),
+        )
+        assertEquals(
+            ClientErrorCode.DECODER,
+            controlErrorCode(PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED),
+        )
+        assertEquals(
+            ClientErrorCode.DRM,
+            controlErrorCode(PlaybackException.ERROR_CODE_DRM_UNSPECIFIED),
+        )
+    }
+
+    /**
+     * The parsing family splits, and getting it wrong tells the arbiter the
+     * opposite of what this client believes. A malformed or unsupported
+     * *container* is what drives the DV-remux and compatibility-transcode
+     * ladder — the client is about to re-encode the file — so reporting it as
+     * a manifest error would say the server produced a bad playlist.
+     */
+    @Test
+    fun aBadContainerIsNotABadPlaylist() {
+        for (code in listOf(
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+        )) {
+            assertEquals(ClientErrorCode.MEDIA, controlErrorCode(code))
+            // The same codes this client's own ladder calls a compatibility
+            // failure. If these two ever disagree, one of them is lying to
+            // somebody.
+            assertEquals(true, isCompatibilityPlaybackError(code))
+        }
+        assertEquals(
+            ClientErrorCode.MANIFEST,
+            controlErrorCode(PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED),
+        )
+    }
+
+    /**
+     * An unrecognised code is `unknown` rather than a nearby guess. A wrong
+     * class is worse than no class: the arbiter would act on it.
+     */
+    @Test
+    fun anUnrecognisedCodeClaimsNothing() {
+        assertEquals(ClientErrorCode.UNKNOWN, controlErrorCode(PlaybackException.ERROR_CODE_UNSPECIFIED))
+        assertEquals(ClientErrorCode.UNKNOWN, controlErrorCode(999_999))
+    }
+
+    /**
+     * Every class must survive the wire's own bounding, or the evidence is
+     * dropped silently at the last step.
+     */
+    @Test
+    fun everyClassSurvivesTheWiresBounding() {
+        for (code in listOf(
+            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+            PlaybackException.ERROR_CODE_DECODING_FAILED,
+            PlaybackException.ERROR_CODE_UNSPECIFIED,
+        )) {
+            val observation = ClientObservation(
+                decoderState = DecoderState.FAILED,
+                errorCode = controlErrorCode(code),
+                errorDetail = "detail",
+            )
+            val bounded = observation.bounded()
+            assertEquals(controlErrorCode(code), bounded?.errorCode)
+            assertEquals(DecoderState.FAILED, bounded?.decoderState)
+        }
+    }
+}
+
+
+/**
+ * Ruling D3. The fallback is the branch the whole fleet takes, so the ask
+ * bound is added to every real stall on every device — and the three platforms
+ * carry the same pair of numbers, so a drift is visible here rather than
+ * silent.
+ */
+class ControlAskBoundTest {
+
+    @Test
+    fun theAskBoundIsShortAndItsCapIsLonger() {
+        assertEquals(1_500L, CONTROL_ASK_MS)
+        assertEquals(3_000L, CONTROL_ASK_CAP_MS)
+        assertTrue(CONTROL_ASK_CAP_MS > CONTROL_ASK_MS)
+    }
+}
+
+
+/**
+ * The verdict that ends the compatibility ladder before its last two rungs.
+ *
+ * The rule this pins is a carve-out, and a carve-out is the kind of thing a
+ * later edit deletes as redundant: `terminalVerdict` deliberately outlives the
+ * session that earned it, so without the transport check a dropped link would
+ * inherit a sentence written about something else entirely.
+ */
+class LadderVerdictTest {
+
+    private val terminal = ControlAction(type = "terminal", message = "Production stopped.")
+
+    /** The case the slice exists for: a source the producer has ruled out. */
+    @Test
+    fun aTerminalVerdictEndsTheLadderForAMediaFailure() {
+        assertEquals(
+            terminal,
+            ladderVerdict(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+                verdict = terminal,
+            ),
+        )
+    }
+
+    /**
+     * A dropped link keeps the client's own words. The verdict outlives its
+     * session, so it may have been formed for a cause that has nothing to do
+     * with why this socket died.
+     */
+    @Test
+    fun aTransportFailureNeverBorrowsTheServersWords() {
+        for (code in listOf(2000, 2001, 2002, 2003, 2004, 2007, 2008)) {
+            assertNull(
+                "transport code $code must not inherit a verdict",
+                ladderVerdict(errorCode = code, verdict = terminal),
+            )
+        }
+    }
+
+    /**
+     * A `hold` or a `retry_resource` on a dead item would leave the player
+     * with nothing to render and no path forward. The ladder is the only
+     * thing that can still produce a picture, so those keep walking it.
+     */
+    @Test
+    fun onlyATerminalVerdictEndsTheLadder() {
+        for (type in listOf("hold", "retry_resource", "none")) {
+            assertNull(
+                "a $type verdict must not end the ladder",
+                ladderVerdict(
+                    errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                    verdict = ControlAction(type = type, reason = "busy"),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun noVerdictKeepsTheLadderWalking() {
+        assertNull(
+            ladderVerdict(
+                errorCode = PlaybackException.ERROR_CODE_DECODING_FAILED,
+                verdict = null,
+            ),
+        )
     }
 }

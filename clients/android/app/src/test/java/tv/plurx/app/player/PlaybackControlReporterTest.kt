@@ -861,3 +861,104 @@ class PlaybackControlWireTest {
         assertEquals("none", decoded.action.type)
     }
 }
+
+/**
+ * Reporting now rather than at the server's cadence.
+ *
+ * `notify` only replaces the waiting snapshot; the pump stays asleep for
+ * `next_exchange_ms`, which the server may set as high as a minute. That is
+ * right for a position update and fatal for a recovery owner: the owner's own
+ * reopen ends the reporter before the pump wakes, so its evidence is not sent
+ * late — it is never sent at all. The web reporter has always drained inline
+ * at that call site for exactly this reason.
+ */
+class PlaybackControlUrgentNotifyTest {
+
+    @Test
+    fun `an ordinary report waits out the server's cadence`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(this)
+        runCurrent()
+        assertEquals(1, harness.requests.size)
+
+        subject.notify()
+        advanceTimeBy(PlaybackControl.MIN_EXCHANGE_MS * 4)
+        runCurrent()
+        assertEquals(1, harness.requests.size, "the cadence is unchanged for a position update")
+        subject.stop()
+    }
+
+    @Test
+    fun `an urgent report is sent as soon as the rate limit allows`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(this)
+        runCurrent()
+        assertEquals(1, harness.requests.size)
+        val evidence = ClientObservation(
+            decoderState = DecoderState.STARVED,
+            errorCode = ClientErrorCode.NETWORK,
+            errorDetail = "stall",
+        )
+        harness.current = snapshot(observation = evidence)
+
+        subject.notifyUrgently(this)
+        advanceTimeBy(PlaybackControl.MIN_EXCHANGE_MS + 1)
+        runCurrent()
+
+        assertEquals(2, harness.requests.size, "the evidence went out without waiting")
+        assertEquals(DecoderState.STARVED, harness.requests[1].observation?.decoderState)
+        assertEquals(ClientErrorCode.NETWORK, harness.requests[1].observation?.errorCode)
+        subject.stop()
+    }
+
+    /**
+     * The swap that wakes the pump is one critical section. Releasing the lock
+     * between clearing and setting it would let a concurrent `start()` — whose
+     * guard is `pump != null` — launch a second run loop, and `stop()` can
+     * only cancel the one it can see.
+     */
+    @Test
+    fun `waking the pump does not leave a second one running`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(this)
+        runCurrent()
+        harness.current = snapshot(position = 2_000)
+        subject.notifyUrgently(this)
+        subject.start(this)
+        subject.notifyUrgently(this)
+        advanceTimeBy(PlaybackControl.MIN_EXCHANGE_MS * 2)
+        runCurrent()
+        subject.stop()
+        val after = harness.requests.size
+
+        // A stopped reporter has no pump left anywhere. If the swap had
+        // orphaned one, it would keep exchanging past the stop.
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(after, harness.requests.size, "nothing exchanges after stop")
+        assertTrue(subject.status().stopped)
+    }
+
+    /**
+     * An urgent report from a reporter that has already stopped is a no-op
+     * rather than a resurrection: a terminal verdict ends reporting, and a
+     * recovery owner firing afterwards must not restart it.
+     */
+    @Test
+    fun `a stopped reporter cannot be woken`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        subject.start(this)
+        runCurrent()
+        val before = harness.requests.size
+        subject.stop()
+
+        subject.notifyUrgently(this)
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(before, harness.requests.size)
+    }
+}

@@ -115,6 +115,140 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     val isReporting: Boolean get() = reporter != null
 
     /**
+     * Every exchange's action, tagged with the sequence of the request it
+     * answered. The ask reads the reporter's counter, publishes its evidence,
+     * and takes the first answer at or above that floor.
+     */
+    private val answerLock = Any()
+    private var answerAction: ControlAction? = null
+    private var answerRequestSequence = 0L
+    private var answersSeen = 0L
+    /**
+     * The answer slot keeps its own copy of the generation rather than reading
+     * the verdict slot's under the wrong lock. Two counters that must agree
+     * are a bug waiting for a reason, but one counter read without its lock is
+     * one already.
+     */
+    private var answerGeneration = 0
+
+    private val verdictLock = Any()
+    private var verdict: ControlAction? = null
+    private var verdictArmedAtMs = 0L
+    private var verdictLeaseMs = 0L
+    private var verdictGeneration = 0
+
+    /**
+     * The last terminal verdict this session was given, if any.
+     *
+     * It deliberately outlives the reporter. A terminal verdict stops
+     * reporting — correctly, since the reporter owns no recovery — so a
+     * verdict that died with it would be discarded exactly when it mattered:
+     * at the failure it explains, later.
+     */
+    val terminalVerdict: ControlAction?
+        get() = synchronized(verdictLock) {
+            val armed = verdict ?: return@synchronized null
+            // A verdict outlives its reporter and its session, but not the
+            // lease the server gave that session. Past it the session the
+            // verdict described is gone, and a confident sentence about a
+            // production attempt that ended an hour ago would caption an
+            // unrelated failure. The bound is the server's own number rather
+            // than one invented here.
+            if (System.currentTimeMillis() - verdictArmedAtMs > verdictLeaseMs) {
+                verdict = null
+                return@synchronized null
+            }
+            armed
+        }
+
+    /**
+     * Publish what a recovery owner is about to act on, then wait — briefly —
+     * for the verdict that evidence earns.
+     *
+     * [reportEvidence] tells the server. This tells the server and listens.
+     * The difference is the whole milestone: an owner that only reports still
+     * decides for itself, and every one of them decides by guessing toward
+     * retry.
+     *
+     * Returns null when the reporter is gone or stopped, the exchange failed,
+     * or nothing arrived in time — and every caller must fall through to its
+     * existing behaviour on it. That fallback is not a hedge: a server that
+     * has not yet decided must not strand a stalled viewer.
+     *
+     * `publish` is handed in rather than called first, because the floor has
+     * to be read before the evidence goes out: publishing first lets the pump
+     * start the next request before the read lands, which makes the floor one
+     * too high and rejects the very exchange that carried the evidence.
+     */
+    suspend fun askForAction(
+        boundMs: Long,
+        capMs: Long,
+        publish: () -> Unit,
+        now: () -> Long = ::monotonicNowMs,
+    ): ControlAction? {
+        val subject = reporter ?: return null
+        val status = subject.status()
+        if (status.stopped) return null
+        val floor = status.sequence + 1
+        val seenAtStart = synchronized(answerLock) { answersSeen }
+        publish()
+        val startedAt = now()
+        var deadline = startedAt + boundMs
+        val hardDeadline = startedAt + capMs
+        var seen = seenAtStart
+        var extended = false
+        // Both conditions. An answer that arrived before this ask cannot be its
+        // answer, and a 409 owner reset zeroes the reporter's sequence, so the
+        // floor alone is not enough.
+        fun ready(): Result<ControlAction?>? = synchronized(answerLock) {
+            if (answersSeen > seenAtStart && answerRequestSequence >= floor) {
+                Result.success(answerAction)
+            } else {
+                null
+            }
+        }
+        while (now() < deadline) {
+            ready()?.let { return it.getOrNull() }
+            val count = synchronized(answerLock) { answersSeen }
+            if (count > seen) {
+                seen = count
+                // An exchange finished and it was not ours, which means the
+                // reporter could not have started ours until now: run() picks
+                // up `pending` only after the one in flight. One window from
+                // this instant, once.
+                if (!extended) {
+                    extended = true
+                    deadline = minOf(now() + boundMs, hardDeadline)
+                }
+            }
+            kotlinx.coroutines.delay(ASK_POLL_MS)
+            // Read the slot again before giving up on a reporter that went
+            // away. A terminal verdict is answered and then stops the reporter
+            // in the same instant, so bailing on `stopped` without re-reading
+            // discards the one verdict this ask most needed to see — which is
+            // exactly what happened, and what the terminal test now pins.
+            val current = reporter
+            if (current == null || current.status().stopped) {
+                return ready()?.getOrNull()
+            }
+        }
+        return ready()?.getOrNull()
+    }
+
+    /**
+     * A new title. The old verdict described a source that is no longer
+     * playing, so keeping it would show a confident sentence about the wrong
+     * film. A reopen deliberately does not clear it: the failure a verdict
+     * explains normally arrives on the far side of one.
+     */
+    fun clearVerdict() {
+        synchronized(verdictLock) { verdict = null }
+    }
+
+    /** Test seam: what the verdict's staleness bound is measured against. */
+    internal fun verdictArmedAtMsForTest(): Long = synchronized(verdictLock) { verdictArmedAtMs }
+
+    /**
      * Begin reporting for a session the server said is controllable. A
      * bootstrap this client cannot address leaves it silent, which is the
      * passive behaviour rather than a playback failure.
@@ -125,6 +259,18 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
     ) {
         end()
+        // A generation, not a reset. `end()` stops the old reporter in a
+        // launched coroutine, so the stop does not necessarily land before
+        // this begin — and an old in-flight exchange completing in that window
+        // would otherwise carry a previous generation's verdict into this one.
+        val generation = synchronized(verdictLock) { ++verdictGeneration }
+        synchronized(answerLock) {
+            answerGeneration = generation
+            answerAction = null
+            answerRequestSequence = 0
+            answersSeen = 0
+        }
+        val leaseMs = bootstrap.leaseTimeoutMs
         val subject = PlaybackControlReporter.create(
             bootstrap = bootstrap,
             clientInstanceId = clientInstanceId,
@@ -132,6 +278,38 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             send = { path, request -> transport.send(path, request) },
             pace = { kotlinx.coroutines.delay(it) },
             now = { System.currentTimeMillis() },
+            // The return path. Until now this defaulted to a no-op, so the
+            // server could send a verdict the player would never see.
+            //
+            // Only `terminal` is retained, and retained rather than acted on.
+            // `hold` and `retry_resource` are exchange-level and the reporter
+            // already honours them; a player acting on them here would be
+            // deciding, which is the next slice.
+            onExchange = { exchange ->
+                // Every exchange advances the counter, including a failed one:
+                // an owner that asked must not wait out its whole bound for an
+                // exchange that has already come back with nothing.
+                synchronized(answerLock) {
+                    if (generation == answerGeneration) {
+                        answersSeen += 1
+                        answerAction = exchange.response?.action
+                        answerRequestSequence = exchange.request.sequence
+                    }
+                }
+                val action = exchange.response?.action
+                if (action != null &&
+                    action.type == "terminal" &&
+                    !action.message.isNullOrEmpty()
+                ) {
+                    synchronized(verdictLock) {
+                        if (generation == verdictGeneration) {
+                            verdict = action
+                            verdictArmedAtMs = System.currentTimeMillis()
+                            verdictLeaseMs = leaseMs
+                        }
+                    }
+                }
+            },
         ) ?: return
         reporter = subject
         scope.launch { subject.start(scope) }
@@ -147,9 +325,37 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         scope.launch { subject.notify() }
     }
 
+    /**
+     * A recovery owner published evidence and is about to act on it.
+     *
+     * Coalescing is right for a position update and wrong for this: the pump
+     * sleeps for `next_exchange_ms` and the owner's own reopen normally ends
+     * this reporter before it wakes, so the evidence would be discarded rather
+     * than sent late. Restricted to callers holding evidence, so the ordinary
+     * cadence is unchanged.
+     */
+    fun reportEvidence() {
+        val subject = reporter ?: return
+        scope.launch { subject.notifyUrgently(scope) }
+    }
+
     fun end() {
         val subject = reporter ?: return
         reporter = null
         scope.launch { subject.stop() }
     }
+
+    private companion object {
+        /**
+         * How often the ask looks. Short enough that it costs a stalled viewer
+         * nothing measurable, long enough that it is not a spin.
+         *
+         * `monotonicNowMs` rather than a wall clock, and rather than
+         * `SystemClock`: this file's own telemetry uses it, it cannot be moved
+         * by a clock adjustment mid-ask, and it works in the JVM unit lane
+         * where the Android framework stubs throw.
+         */
+        const val ASK_POLL_MS = 25L
+    }
+
 }

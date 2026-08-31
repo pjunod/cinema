@@ -805,6 +805,10 @@ async function main() {
   // in onExchange that connects the reporter to the waiters — which would make
   // every ask time out and add the whole bound to every persistent stall in
   // the browser — stayed green. Nothing here settles a waiter by hand.
+  // Ruling D3: the ask bound is short because its fallback is the branch the
+  // whole fleet takes, so it is added to every real stall. The Apple client
+  // carries the same pair of numbers; if these two ever drift, one platform is
+  // making a viewer wait longer than the other for the same reason.
   const askConstants = ["CONTROL_ASK_MS", "CONTROL_ASK_CAP_MS", "CONTROL_MIN_EXCHANGE_MS",
     "CONTROL_DEFER_LIMIT"].map((name) => {
       const found = SHIPPED_UI.match(new RegExp(`const ${name}=\\d+;`));
@@ -1414,8 +1418,14 @@ async function main() {
     // CONTROL_ASK_MS, so seeing 400 means the ask settled and the first guard
     // has already passed. Without this the test would be measuring the ask's
     // timeout and proving nothing about the second guard.
+    // The interval's own duration is the proof: the ask's timer is
+    // CONTROL_ASK_MS, so seeing 400 means the ask settled and the first guard
+    // has already passed. Without this the test would be measuring the ask's
+    // timeout and proving nothing about the second guard.
     assert.deepEqual(Array.from(h.timers.values()).map((t) => t.ms), [400],
       "the paced interval is armed, so the first guard has passed");
+    assert.notEqual(400, Number(askConstants.match(/CONTROL_ASK_MS=(\d+)/)[1]),
+      "and 400 is not the ask's own bound, or that proof is circular");
     player._seekToken = 6;
     h.fire();
     await running;
