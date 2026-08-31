@@ -214,6 +214,11 @@ pub struct VodHlsFacts {
     pub audio_index: Option<i64>,
     pub aac: bool,
     pub preserve_dolby_vision: bool,
+    /// Whether this session's copy rewrites Profile 7 RPUs to 8.1. Carried
+    /// beside the preservation because the playlist has to describe what the
+    /// copy produces — `hvc1` plus `SUPPLEMENTAL-CODECS: dvh1.08.LL` — and
+    /// the source's own Dolby Vision record says profile 7.
+    pub convert_dolby_vision: bool,
     pub(crate) response_owner: ResponseOwner,
 }
 
@@ -440,6 +445,13 @@ struct Recipe {
     /// of the rendition directory key so weak legacy metadata cannot alias
     /// segments across an in-place source rewrite.
     cluster_cache_key: Option<String>,
+    /// The source's frame rate as an exact fraction, when the probe named one.
+    ///
+    /// Carried on the recipe because only a converting producer needs it and
+    /// only at spawn time, by which point the probe JSON is long gone: the
+    /// conversion's second ffmpeg reads a raw elementary stream, which has no
+    /// timing of its own beyond whatever the bitstream's VUI carries.
+    video_frame_rate: Option<String>,
 }
 
 /// One attached reader, in plan indexes.
@@ -1020,6 +1032,7 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
+                video_frame_rate: None,
                 file: file.clone(),
                 audio_index: None,
                 aac: true,
@@ -1568,6 +1581,7 @@ impl VodServe {
             video,
             source_object_version,
             cluster_cache_key,
+            video_frame_rate: plurx_core::transcode::source_frame_rate(probe_json.as_deref()),
         };
         let key = rendition_key(&recipe, &identity);
         let attachment = self
@@ -2719,6 +2733,7 @@ impl VodServe {
             audio_index: rendition.recipe.audio_index,
             aac: rendition.recipe.aac,
             preserve_dolby_vision: rendition.recipe.video.preserves_dolby_vision(),
+            convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
             response_owner: publication.owner,
         })
     }
@@ -4182,6 +4197,20 @@ async fn spawn_converting_producer(
     let path = recipe.file.path.to_string_lossy().into_owned();
     let input = if attested { "/dev/fd/3" } else { path.as_str() };
     let audio_start = crate::transcode::probe_media_origin(&recipe.file.path, start_seconds).await;
+    // A probe that could not answer returns the requested start, which is
+    // where the picture is NOT. On the single-ffmpeg path that fallback costs
+    // a subtitle-cue offset and nothing else, because one ffmpeg reads both
+    // streams off one timeline. Here the two streams are two opens and the
+    // probe is the only thing tying them together: a fallback would seek the
+    // audio up to a full GOP later than the picture — measured at −1.1 s on a
+    // two-second GOP, and a 4K film's GOPs are longer. Silent lip-sync of that
+    // size is worse than a refusal, so refuse.
+    if start_seconds > 0.0 && (audio_start - start_seconds).abs() < f64::EPSILON {
+        return Err(format!(
+            "the media-origin probe could not say where the picture starts at {start_seconds:.3}s, \
+             and a converting producer cannot align its audio without it"
+        ));
+    }
 
     let source_args =
         plurx_core::transcode::dv_convert_source_args(input, start_seconds, Pacing::unpaced());
@@ -4192,6 +4221,7 @@ async fn spawn_converting_producer(
         recipe.audio_index,
         recipe.aac,
         recipe.video,
+        recipe.video_frame_rate.as_deref(),
     );
 
     let key = rendition.key.clone();
@@ -4819,6 +4849,7 @@ async fn regenerate_init_head(
             recipe.audio_index,
             recipe.aac,
             recipe.video,
+            recipe.video_frame_rate.as_deref(),
         );
         let producer = crate::dvpipe::spawn(
             &ffmpeg_bin(),
@@ -5165,6 +5196,7 @@ mod tests {
         let outcome = crate::fragindex::build(
             file,
             CopyVideoOptions::new(have_dovi, false),
+            None,
             runtime.path(),
             Duration::from_secs(120),
         )
@@ -5380,6 +5412,7 @@ mod tests {
             key: "synthetic-rendition".to_string(),
             dir,
             recipe: Recipe {
+                video_frame_rate: None,
                 file: media_file_at(PathBuf::from("unused.mkv"), ms),
                 audio_index: None,
                 aac: true,
@@ -5664,6 +5697,7 @@ mod tests {
         let duration_ms = index_video_ms(&index);
         let identity = SourceIdentity::new(1, 1, "fingerprint");
         let recipe = Recipe {
+            video_frame_rate: None,
             file: media_file_at(source_path, duration_ms),
             audio_index: None,
             aac: true,
@@ -7626,6 +7660,7 @@ mod tests {
     fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
         let index = synthetic_index(24);
         let recipe = Recipe {
+            video_frame_rate: None,
             file: media_file_at(PathBuf::from("unused.mkv"), 0),
             audio_index: None,
             aac: true,

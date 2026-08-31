@@ -1461,6 +1461,40 @@ pub fn dv_convert_source_args(input: &str, start_seconds: f64, pacing: Pacing) -
     args
 }
 
+/// The source's frame rate as an exact fraction, for the one place a converted
+/// stream needs to be told it.
+///
+/// An Annex B elementary stream carries no timing at all, so ffmpeg's raw HEVC
+/// demuxer falls back to a default (25 fps) unless the bitstream's VUI carries
+/// timing info. Most UHD Blu-ray sources do carry it; the ones that do not
+/// produce a converted stream whose whole timeline is wrong — measured, a
+/// 23.976 fps source encoded with `vui-timing-info=0` came out declaring 25/1
+/// and running roughly ten times too fast.
+///
+/// Kept as the fraction string rather than a float so NTSC rates retain their
+/// exact `24000/1001` meaning; rounding one to 23.976 makes a two-hour film
+/// drift by a frame and a half.
+pub fn source_frame_rate(probe_json: Option<&str>) -> Option<String> {
+    fn usable(raw: &str) -> Option<String> {
+        let (numerator, denominator) = raw.split_once('/')?;
+        let numerator = numerator.parse::<f64>().ok()?;
+        let denominator = denominator.parse::<f64>().ok()?;
+        let rate = numerator / denominator;
+        (rate.is_finite() && rate > 0.0).then(|| raw.to_owned())
+    }
+    let probe: serde_json::Value = serde_json::from_str(probe_json?).ok()?;
+    let stream = probe
+        .get("streams")?
+        .as_array()?
+        .iter()
+        .find(|stream| stream.get("codec_type").and_then(|v| v.as_str()) == Some("video"))?;
+    // `avg_frame_rate` first, the same preference the playlist uses;
+    // `r_frame_rate` is the fallback for older probe output.
+    ["avg_frame_rate", "r_frame_rate"]
+        .into_iter()
+        .find_map(|key| stream.get(key).and_then(|v| v.as_str()).and_then(usable))
+}
+
 /// The output stage for an **index** pass: converted Annex B in, one video-only
 /// fragmented MP4 out.
 ///
@@ -1474,10 +1508,15 @@ pub fn dv_convert_source_args(input: &str, start_seconds: f64, pacing: Pacing) -
 /// parameters — the second input, its seek, its offset, its codec choice —
 /// have no meaning here at all, and a caller passing `None` and `false` to
 /// four of them would be a caller working out which arguments are inert.
-pub fn dv_convert_index_output_args(source: &MediaFile, video: CopyVideoOptions) -> Vec<String> {
+pub fn dv_convert_index_output_args(
+    source: &MediaFile,
+    video: CopyVideoOptions,
+    frame_rate: Option<&str>,
+) -> Vec<String> {
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
     args.push("-f".into());
     args.push("hevc".into());
+    push_elementary_stream_rate(&mut args, frame_rate);
     args.push("-i".into());
     args.push("pipe:0".into());
     args.push("-map_chapters".into());
@@ -1510,6 +1549,19 @@ pub fn dv_convert_index_output_args(source: &MediaFile, video: CopyVideoOptions)
     args
 }
 
+/// Tell the raw-HEVC demuxer the source's frame rate, when it is known.
+///
+/// An input option, so it must precede its `-i`. Omitted rather than guessed
+/// when the probe said nothing: a wrong rate is a wrong timeline, and the
+/// bitstream's own VUI timing — which most sources carry — is a better answer
+/// than a default this code invented.
+fn push_elementary_stream_rate(args: &mut Vec<String>, frame_rate: Option<&str>) {
+    if let Some(rate) = frame_rate {
+        args.push("-r".into());
+        args.push(rate.to_owned());
+    }
+}
+
 /// The **second** ffmpeg of the pipe: converted Annex B on stdin, the source
 /// again for its audio, one fragmented MP4 out.
 ///
@@ -1529,6 +1581,37 @@ pub fn dv_convert_index_output_args(source: &MediaFile, video: CopyVideoOptions)
 /// exactly this question on the single-ffmpeg path) and passes that instant
 /// here. Both streams then begin at the same point in the source, and
 /// `-avoid_negative_ts make_zero` puts that point at zero.
+///
+/// **This anchor is not yet right, and the milestone does not ship until it
+/// is.** Measured against ffmpeg 6.1 with a 23.976 fps HEVC+AAC fixture
+/// carrying synchronised video flashes and audio bursts, comparing this pipe
+/// against the single-ffmpeg copy at the same seek:
+///
+/// ```text
+///   requested   probe origin   single ffmpeg   this pipe
+///     6.000        4.004          -0.005        -0.110
+///     7.000        6.006          -0.005        -0.068
+///     9.000        8.008          -0.005        -0.110
+///     0.000          —            -0.003        +0.018
+/// ```
+///
+/// Negative is audio *leading* the picture, which is the perceptually worse
+/// direction — detectable from about 45 ms (ITU-R BT.1359-1). Sweeping the
+/// audio seek shows slope −1 and a zero crossing about 108 ms earlier than
+/// the probe's answer, and the magnitude tracks the encode's reorder
+/// structure (no B-frames: no error). So the probe's DTS-preferring origin is
+/// not the instant the first *displayed* picture belongs to, and the
+/// correction is a property of the source rather than a constant.
+///
+/// Two candidate fixes, neither guessed at here: anchor on the keyframe's
+/// presentation timestamp rather than its decode timestamp (the probe already
+/// prints both — [`parse_keyframe_origin`] discards the PTS), or give stage
+/// two the offset explicitly. Which one is right has to be measured on real
+/// media on a real node, because the container's own `start_time` is a third
+/// term: ffmpeg's `-ss` is relative to it while ffprobe's `-read_intervals` is
+/// absolute, so a source whose first packet is not at zero adds that
+/// difference again. A session that starts at zero is unaffected and correct
+/// today.
 pub fn dv_convert_output_args(
     source: &MediaFile,
     audio_input: &str,
@@ -1536,6 +1619,7 @@ pub fn dv_convert_output_args(
     audio_index: Option<i64>,
     transcode_audio: bool,
     video: CopyVideoOptions,
+    frame_rate: Option<&str>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
 
@@ -1543,6 +1627,7 @@ pub fn dv_convert_output_args(
     // no name to probe and no container to read a format out of.
     args.push("-f".into());
     args.push("hevc".into());
+    push_elementary_stream_rate(&mut args, frame_rate);
     args.push("-i".into());
     args.push("pipe:0".into());
 
@@ -4204,6 +4289,7 @@ mod index_pipe_tests {
             None,
             false,
             CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true),
+            None,
         );
         let rendered = args.join(" ");
 
@@ -4231,7 +4317,15 @@ mod index_pipe_tests {
         file.dolby_vision.bl_compat_id = Some(1);
         let convert = CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true);
 
-        let args = dv_convert_output_args(&file, "/library/film.mkv", 0.0, Some(2), false, convert);
+        let args = dv_convert_output_args(
+            &file,
+            "/library/film.mkv",
+            0.0,
+            Some(2),
+            false,
+            convert,
+            None,
+        );
         let rendered = args.join(" ");
 
         assert!(rendered.contains("-c:v copy"), "{rendered}");
@@ -4284,12 +4378,14 @@ mod index_pipe_tests {
         let convert = CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true);
 
         let copied =
-            dv_convert_output_args(&file, "/library/film.mkv", 0.0, None, false, convert).join(" ");
+            dv_convert_output_args(&file, "/library/film.mkv", 0.0, None, false, convert, None)
+                .join(" ");
         assert!(copied.contains("-itsoffset 0.120"), "{copied}");
         assert!(!copied.contains("-af"), "{copied}");
 
         let encoded =
-            dv_convert_output_args(&file, "/library/film.mkv", 0.0, None, true, convert).join(" ");
+            dv_convert_output_args(&file, "/library/film.mkv", 0.0, None, true, convert, None)
+                .join(" ");
         assert!(!encoded.contains("-itsoffset"), "{encoded}");
         assert!(encoded.contains("-af"), "{encoded}");
         // Six-channel output keeps the standard AAC layout the copy pipe
@@ -4312,7 +4408,7 @@ mod index_pipe_tests {
         let convert = CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true);
         for args in [
             dv_convert_source_args("/library/film.mkv", 0.0, Pacing::unpaced()),
-            dv_convert_output_args(&file, "/library/film.mkv", 0.0, None, false, convert),
+            dv_convert_output_args(&file, "/library/film.mkv", 0.0, None, false, convert, None),
         ] {
             assert!(
                 !args.iter().any(|arg| arg.starts_with("--plurx-")),

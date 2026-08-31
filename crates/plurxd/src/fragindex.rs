@@ -378,13 +378,15 @@ pub fn video_identities(
 pub async fn build(
     file: &MediaFile,
     video: transcode::CopyVideoOptions,
+    probe_json: Option<&str>,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
     let input = file.path.to_string_lossy().into_owned();
+    let rate = transcode::source_frame_rate(probe_json);
     build_with_args(
         file,
-        index_pipe(file, &input, video),
+        index_pipe(file, &input, video, rate.as_deref()),
         None,
         video,
         runtime_cache,
@@ -402,14 +404,19 @@ pub async fn build(
 /// fragments are a different size from the unconverted stream's, and an index
 /// built from the single-ffmpeg pipe would describe media this identity never
 /// produces.
-fn index_pipe(file: &MediaFile, input: &str, video: transcode::CopyVideoOptions) -> IndexPipe {
+fn index_pipe(
+    file: &MediaFile,
+    input: &str,
+    video: transcode::CopyVideoOptions,
+    frame_rate: Option<&str>,
+) -> IndexPipe {
     if video.converts_dolby_vision() {
         IndexPipe::Converting {
             source: transcode::dv_convert_source_args(input, 0.0, transcode::Pacing::unpaced()),
             // Video only, from zero, and no audio to seek: an index describes
             // the video fragment sequence, which is the same for every audio
             // selection (`copy_index_pipe_args`).
-            output: transcode::dv_convert_index_output_args(file, video),
+            output: transcode::dv_convert_index_output_args(file, video, frame_rate),
         }
     } else {
         IndexPipe::Single(transcode::copy_index_pipe_args_with_input(
@@ -434,14 +441,16 @@ pub async fn build_from_attested_file(
     file: &MediaFile,
     source: &std::fs::File,
     video: transcode::CopyVideoOptions,
+    probe_json: Option<&str>,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
     use std::os::fd::AsRawFd;
 
+    let rate = transcode::source_frame_rate(probe_json);
     build_with_args(
         file,
-        index_pipe(file, "/dev/fd/3", video),
+        index_pipe(file, "/dev/fd/3", video, rate.as_deref()),
         Some(source.as_raw_fd()),
         video,
         runtime_cache,

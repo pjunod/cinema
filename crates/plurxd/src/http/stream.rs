@@ -2678,6 +2678,10 @@ mod tests {
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
             bitrate: Some(90_892_368),
+            // The columns, not only the label. The conversion needs the level
+            // and the compatibility id as numbers to build the configuration
+            // record its output declares, so a label-only row is deliberately
+            // not converted — see `file_can_convert_to_p81`.
             audio_streams: vec![
                 AudioStream {
                     index: 0,
@@ -2700,7 +2704,12 @@ mod tests {
             scanned_at: 1,
             audio_offset_ms: 0,
             probed: true,
-            dolby_vision: Default::default(),
+            dolby_vision: plurx_core::domain::DolbyVisionFacts {
+                profile: Some(7),
+                level: Some(6),
+                bl_compat_id: Some(1),
+                ..Default::default()
+            },
         };
         let caps = Caps {
             vcodec: Some("h264,hevc,av1,vp9".into()),

@@ -3695,6 +3695,15 @@ impl JobManager {
                 match crate::fragindex::build(
                     &file,
                     video,
+                    // Read again rather than carried: the conversion's second
+                    // ffmpeg reads a raw elementary stream and has to be told
+                    // the frame rate, and this is the pass that knows it.
+                    self.store
+                        .get_file_probe_json(file.id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .as_deref(),
                     &runtime_cache,
                     index_file_budget(file.duration_ms),
                 )
@@ -4594,6 +4603,7 @@ impl JobManager {
                 return false;
             }
         };
+        let probe_json = self.store.get_file_probe_json(file.id).await.ok().flatten();
         let videos = match fragment_index_video_identities(
             self.store.as_ref(),
             &file,
@@ -4724,6 +4734,7 @@ impl JobManager {
                 &file,
                 &attested.handle,
                 video,
+                probe_json.as_deref(),
                 transcode.runtime_cache_dir(),
                 index_file_budget(file.duration_ms),
             ) => (Some(outcome), false),

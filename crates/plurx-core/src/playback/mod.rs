@@ -901,24 +901,6 @@ fn has_compatible_dv_base(file: &MediaFile) -> bool {
         .is_some_and(|label| label.contains("HDR10-compatible") || label.contains("HLG-compatible"))
 }
 
-/// Narrower than [`has_compatible_dv_base`]: is the base layer specifically
-/// **HDR10**?
-///
-/// Compatibility ids 1 and 6 are HDR10 bases; 4 is HLG. The distinction does
-/// not matter to the strip, which hands over whatever the base is and lets
-/// `delivered_dynamic_range` report it — but it matters to the Profile 7
-/// conversion, which produces Profile **8.1**, and 8.1 means an HDR10 base
-/// specifically. The HLG spelling is 8.4, a different conversion with a
-/// different target that plurx has no rung for.
-fn has_hdr10_dv_base(file: &MediaFile) -> bool {
-    if let Some(compat) = file.dolby_vision.bl_compat_id {
-        return matches!(compat, 1 | 6);
-    }
-    file.hdr_format
-        .as_deref()
-        .is_some_and(|label| label.contains("HDR10-compatible"))
-}
-
 /// Does this source need the RPU-driven renderer rather than the ordinary
 /// HDR10 base-layer route — i.e. is it the Profile 5 case?
 ///
@@ -1008,7 +990,8 @@ pub fn dolby_vision_converts_to_p81(
 }
 
 /// The half of [`dolby_vision_converts_to_p81`] that is about the **file**
-/// alone: Profile 7 over an HDR10 base.
+/// alone: Profile 7 over an HDR10 base, described by columns rather than
+/// prose.
 ///
 /// Split out because the fragment index needs it without a client. Which
 /// clients convert is a per-session question and an index is per-file, so the
@@ -1016,8 +999,30 @@ pub fn dolby_vision_converts_to_p81(
 /// decider asks "does this client want it now". Two questions, one predicate
 /// for the part they share — a file the indexer skipped and the decider then
 /// routed to a conversion is a session looking up an index nothing built.
+///
+/// **The columns are required here, and the label fallback is not enough.**
+/// Everywhere else in this module a row scanned before M2 can answer from its
+/// `hdr_format` prose, and that is right: the question is what to deliver, and
+/// a label that says "Profile 7 (HDR10-compatible)" answers it. The conversion
+/// asks something the prose cannot answer. Its output must declare a Dolby
+/// Vision configuration record, plurx writes that record itself (ffmpeg copies
+/// one from the input container and a converted stream's input is a raw
+/// elementary stream with no container), and building one needs the *level*
+/// and the *compatibility id* as numbers. A label-only row would be routed to
+/// a conversion whose index could never be built — a permanent
+/// `vod_index_pending`, and a fall through to live recovery on every play.
+///
+/// So the rule is: no columns, no conversion. Such a row keeps the strip it
+/// has always had until a rescan fills them in, which is a working delivery
+/// rather than a broken one.
 pub fn file_can_convert_to_p81(file: &MediaFile) -> bool {
-    is_dolby_vision(file) && dolby_vision_profile(file) == Some(7) && has_hdr10_dv_base(file)
+    is_dolby_vision(file)
+        && file.dolby_vision.profile == Some(7)
+        && file
+            .dolby_vision
+            .bl_compat_id
+            .is_some_and(|compat| matches!(compat, 1 | 6))
+        && file.dolby_vision.level.is_some_and(|level| level > 0)
 }
 
 fn dv_handling(
@@ -2671,6 +2676,12 @@ mod tests {
             let mut file = file("mkv", "hevc", "aac");
             file.hdr = Some("dolby_vision".to_owned());
             file.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".to_owned());
+            // The columns, not only the label: the conversion needs the level
+            // and the compatibility id as numbers to build the configuration
+            // record its output has to declare.
+            file.dolby_vision.profile = Some(7);
+            file.dolby_vision.level = Some(6);
+            file.dolby_vision.bl_compat_id = Some(1);
             file
         };
         let client = |profiles: Vec<u8>| {
@@ -2772,9 +2783,19 @@ mod tests {
             );
         }
 
-        // …and the one that is converted, so the list above is a set of
-        // exclusions rather than a function that always says no.
-        assert!(dolby_vision_converts_to_p81(
+        // A row whose label says Profile 7 over an HDR10 base and whose
+        // columns say nothing is NOT converted, even though every other
+        // routing question in this module would answer it from that label.
+        //
+        // The conversion asks something prose cannot answer: its output has to
+        // declare a Dolby Vision configuration record, plurx writes that
+        // record itself, and building one needs the level and the
+        // compatibility id as numbers. Converting on a label alone would route
+        // the session to an index that can never be built — a permanent
+        // `vod_index_pending` and a fall through to live recovery on every
+        // play. Such a row keeps the strip until a rescan fills the columns
+        // in, which is a working delivery rather than a broken one.
+        assert!(!dolby_vision_converts_to_p81(
             &source(
                 Some("dolby_vision"),
                 Some("Dolby Vision · Profile 7 (HDR10-compatible)")
@@ -2782,6 +2803,23 @@ mod tests {
             &client,
             &node
         ));
+
+        // …and with the columns it converts, so the list above is a set of
+        // exclusions rather than a function that always says no.
+        let mut described = source(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        );
+        described.dolby_vision.profile = Some(7);
+        described.dolby_vision.level = Some(6);
+        described.dolby_vision.bl_compat_id = Some(1);
+        assert!(dolby_vision_converts_to_p81(&described, &client, &node));
+
+        // A level column missing on its own is enough to stand the conversion
+        // down, because the record cannot be built without it.
+        let mut levelless = described.clone();
+        levelless.dolby_vision.level = None;
+        assert!(!dolby_vision_converts_to_p81(&levelless, &client, &node));
     }
 
     /// The decision a converting client actually receives.
@@ -2797,6 +2835,7 @@ mod tests {
         p7.hdr = Some("dolby_vision".into());
         p7.dolby_vision.profile = Some(7);
         p7.dolby_vision.bl_compat_id = Some(1);
+        p7.dolby_vision.level = Some(6);
 
         let client = |profiles: Vec<u8>| {
             let mut profile = caps_profile(
@@ -2871,6 +2910,7 @@ mod tests {
         p7.hdr = Some("dolby_vision".into());
         p7.dolby_vision.profile = Some(7);
         p7.dolby_vision.bl_compat_id = Some(1);
+        p7.dolby_vision.level = Some(6);
         p7.height = Some(2160);
 
         // A client that takes profile 8 but caps height below the source:
@@ -2927,6 +2967,7 @@ mod tests {
             file.hdr_format = None;
             file.dolby_vision.profile = Some(dv_profile);
             file.dolby_vision.bl_compat_id = Some(compat);
+            file.dolby_vision.level = Some(6);
             file
         };
 
@@ -3345,6 +3386,9 @@ mod tests {
         let mut p7 = file("mp4", "hevc", "aac");
         p7.hdr = Some("dolby_vision".to_owned());
         p7.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".to_owned());
+        p7.dolby_vision.profile = Some(7);
+        p7.dolby_vision.level = Some(6);
+        p7.dolby_vision.bl_compat_id = Some(1);
         // Profile 7 on a client that decodes 8 but not 7. Since M5a this is
         // the conversion rather than the strip: the same client on the same
         // title used to be handed the HDR10 base, and now gets Dolby Vision.
