@@ -792,6 +792,37 @@ class Controller(
     }
 
     /**
+     * Act on a server verdict, or say it did not decide this stall.
+     *
+     * Returns true when the verdict is the decision, so the caller returns
+     * without spending its own budget. False means today's path, unchanged —
+     * which is the branch every node in the fleet takes.
+     */
+    private fun applyStallVerdict(verdict: ControlAction): Boolean = when (verdict.type) {
+        "terminal" -> {
+            // Ruling D1: the verdict is armed, not executed. This player is
+            // stalled with nothing left to render, so the only thing the
+            // verdict changes is whose words the viewer reads.
+            onError(verdict.message ?: "Playback stopped.")
+            true
+        }
+        "hold", "retry_resource" -> {
+            // Production is deliberately not advancing, or stopped for
+            // something that may not recur. Either way a reopen would churn
+            // against a server that already knows better, and it must not
+            // spend the budget either.
+            //
+            // The explanation is not optional. A hold is never lifted by
+            // anything this client does and the one-second watchdog re-enters
+            // here, so a client that only returned would leave a viewer in
+            // front of a frozen picture with nothing said.
+            playbackNotice = holdNotice(verdict.reason)
+            true
+        }
+        else -> false
+    }
+
+    /**
      * Called when a detected stall measurement is available. Reopens with the
      * stall-specific fields (previous_session_id, reopen_reason) and enforces
      * the client-side retry budget: the budget counts consecutive reopen
@@ -801,18 +832,33 @@ class Controller(
      * stopped early.  Once the budget is exhausted at the ladder floor the
      * session stays on that rung without further reopen attempts.
      */
-    private fun onStall(positionMs: Long) {
+    private suspend fun onStall(positionMs: Long) {
         if (sessionId == null) return
-        // Publish this owner's evidence before it decides anything. The
-        // server's picture of a stall is otherwise whatever the one-second
-        // tick happened to catch. M5g asks for a verdict here; this only
-        // tells. Note the limit: this detector cannot fire during an
-        // open-ended freeze at all, so a frozen playhead stays invisible to
-        // the control plane either way.
-        reportControlEvidence(
-            ClientObservation(decoderState = DecoderState.STARVED),
-            render = RenderState.STALLED,
+        // The ask goes before the budget is consulted, and before anything
+        // else this function does. The evidence is published from INSIDE it,
+        // after it has read the sequence floor — publishing first lets the
+        // pump start the next request before that read lands, which makes the
+        // floor one too high and rejects the very exchange that carried this
+        // stall's evidence.
+        //
+        // The limit this does not close: the detector that got us here cannot
+        // fire during an open-ended freeze at all, so a frozen playhead stays
+        // invisible to the control plane either way.
+        val session = sessionId
+        val verdict = playbackControl.askForAction(
+            boundMs = CONTROL_ASK_MS,
+            capMs = CONTROL_ASK_CAP_MS,
+            publish = {
+                reportControlEvidence(
+                    ClientObservation(decoderState = DecoderState.STARVED),
+                    render = RenderState.STALLED,
+                )
+            },
         )
+        // Seconds passed. A viewer who seeked, paused or left, or a session
+        // that was replaced under us, must not have one reopened for them.
+        if (sessionId != session || sessionId == null) return
+        if (verdict != null && applyStallVerdict(verdict)) return
         // If we have already exhausted the budget at the current floor rung,
         // stop reopening — the server cannot step further down and the client
         // must not churn forever.
@@ -1344,6 +1390,32 @@ class Controller(
         controlEvidencePositionMs = null
     }
 }
+
+/**
+ * The server's seven hold reasons, in the viewer's words.
+ *
+ * A viewer reading `working_set` learns less than one reading a sentence, and a
+ * reason this client has never heard of is a newer server rather than a broken
+ * one — so an unknown reason gets the generic line instead of its wire name or
+ * nothing at all.
+ */
+internal fun holdNotice(reason: String?): String = when (reason) {
+    "demand" -> "Another player is using this stream."
+    "time", "bytes" -> "The server is pacing this stream."
+    "global" -> "The server is busy."
+    "ahead" -> "The stream is already far enough ahead."
+    "working_set", "no_room" -> "The server is short of space."
+    else -> "Waiting for the server."
+}
+
+/**
+ * How long a recovery owner waits for the server's verdict before deciding for
+ * itself. Ruling D3, and the same pair of numbers the web and Apple clients
+ * carry: the fallback is the branch the whole fleet takes, so this is added to
+ * every real stall on every device.
+ */
+internal const val CONTROL_ASK_MS = 1_500L
+internal const val CONTROL_ASK_CAP_MS = 3_000L
 
 /**
  * Which class of failure Media3 reported, in the protocol's vocabulary.

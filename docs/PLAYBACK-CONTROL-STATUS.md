@@ -49,6 +49,9 @@ merge target: two client PRs in flight means the second always fails.
 | M5f | Android: the return path, mirroring M5d | [#711](https://github.com/pjunod/plurx/pull/711) | in review |
 | M5d follow-ups | Apple: a lifetime for the verdict and the evidence | [#713](https://github.com/pjunod/plurx/pull/713) | in review |
 | M5.5 store | the staged-generations recon and plan | [#714](https://github.com/pjunod/plurx/pull/714) | in review |
+| M5e | Apple: the stall funnel asks before it decides | [#715](https://github.com/pjunod/plurx/pull/715) | in review |
+| web bound | ruling D3 applied to the web ask | [#717](https://github.com/pjunod/plurx/pull/717) | in review |
+| M5g | Android: the stall owner asks before it decides | — | this change |
 
 ## The gate that blocks every deletion, and what it does not block
 

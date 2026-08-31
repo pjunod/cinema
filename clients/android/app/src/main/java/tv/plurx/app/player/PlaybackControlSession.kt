@@ -114,6 +114,16 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
 
     val isReporting: Boolean get() = reporter != null
 
+    /**
+     * Every exchange's action, tagged with the sequence of the request it
+     * answered. The ask reads the reporter's counter, publishes its evidence,
+     * and takes the first answer at or above that floor.
+     */
+    private val answerLock = Any()
+    private var answerAction: ControlAction? = null
+    private var answerRequestSequence = 0L
+    private var answersSeen = 0L
+
     private val verdictLock = Any()
     private var verdict: ControlAction? = null
     private var verdictArmedAtMs = 0L
@@ -150,6 +160,72 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
      * film. A reopen deliberately does not clear it: the failure a verdict
      * explains normally arrives on the far side of one.
      */
+    /**
+     * Publish what a recovery owner is about to act on, then wait — briefly —
+     * for the verdict that evidence earns.
+     *
+     * [reportEvidence] tells the server. This tells the server and listens.
+     * The difference is the whole milestone: an owner that only reports still
+     * decides for itself, and every one of them decides by guessing toward
+     * retry.
+     *
+     * Returns null when the reporter is gone or stopped, the exchange failed,
+     * or nothing arrived in time — and every caller must fall through to its
+     * existing behaviour on it. That fallback is not a hedge: a server that
+     * has not yet decided must not strand a stalled viewer.
+     *
+     * `publish` is handed in rather than called first, because the floor has
+     * to be read before the evidence goes out: publishing first lets the pump
+     * start the next request before the read lands, which makes the floor one
+     * too high and rejects the very exchange that carried the evidence.
+     */
+    suspend fun askForAction(
+        boundMs: Long,
+        capMs: Long,
+        publish: () -> Unit,
+    ): ControlAction? {
+        val subject = reporter ?: return null
+        val status = subject.status()
+        if (status.stopped) return null
+        val floor = status.sequence + 1
+        val seenAtStart = synchronized(answerLock) { answersSeen }
+        publish()
+        val startedAt = monotonicNowMs()
+        var deadline = startedAt + boundMs
+        val hardDeadline = startedAt + capMs
+        var seen = seenAtStart
+        var extended = false
+        while (monotonicNowMs() < deadline) {
+            val ready = synchronized(answerLock) {
+                // Both conditions. An answer that arrived before this ask
+                // cannot be its answer, and a 409 owner reset zeroes the
+                // reporter's sequence, so the floor alone is not enough.
+                if (answersSeen > seenAtStart && answerRequestSequence >= floor) {
+                    Result.success(answerAction)
+                } else {
+                    null
+                }
+            }
+            if (ready != null) return ready.getOrNull()
+            val count = synchronized(answerLock) { answersSeen }
+            if (count > seen) {
+                seen = count
+                // An exchange finished and it was not ours, which means the
+                // reporter could not have started ours until now: run() picks
+                // up `pending` only after the one in flight. One window from
+                // this instant, once.
+                if (!extended) {
+                    extended = true
+                    deadline = minOf(monotonicNowMs() + boundMs, hardDeadline)
+                }
+            }
+            kotlinx.coroutines.delay(ASK_POLL_MS)
+            val current = reporter ?: return null
+            if (current.status().stopped) return null
+        }
+        return null
+    }
+
     fun clearVerdict() {
         synchronized(verdictLock) { verdict = null }
     }
@@ -173,6 +249,11 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         // this begin — and an old in-flight exchange completing in that window
         // would otherwise carry a previous generation's verdict into this one.
         val generation = synchronized(verdictLock) { ++verdictGeneration }
+        synchronized(answerLock) {
+            answerAction = null
+            answerRequestSequence = 0
+            answersSeen = 0
+        }
         val leaseMs = bootstrap.leaseTimeoutMs
         val subject = PlaybackControlReporter.create(
             bootstrap = bootstrap,
@@ -189,6 +270,16 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             // already honours them; a player acting on them here would be
             // deciding, which is the next slice.
             onExchange = { exchange ->
+                // Every exchange advances the counter, including a failed one:
+                // an owner that asked must not wait out its whole bound for an
+                // exchange that has already come back with nothing.
+                synchronized(answerLock) {
+                    if (generation == verdictGeneration) {
+                        answersSeen += 1
+                        answerAction = exchange.response?.action
+                        answerRequestSequence = exchange.request.sequence
+                    }
+                }
                 val action = exchange.response?.action
                 if (action != null &&
                     action.type == "terminal" &&
@@ -237,4 +328,18 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         reporter = null
         scope.launch { subject.stop() }
     }
+
+    private companion object {
+        /**
+         * How often the ask looks. Short enough that it costs a stalled viewer
+         * nothing measurable, long enough that it is not a spin.
+         *
+         * `monotonicNowMs` rather than a wall clock, and rather than
+         * `SystemClock`: this file's own telemetry uses it, it cannot be moved
+         * by a clock adjustment mid-ask, and it works in the JVM unit lane
+         * where the Android framework stubs throw.
+         */
+        const val ASK_POLL_MS = 25L
+    }
+
 }
