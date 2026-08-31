@@ -964,34 +964,58 @@ This is the build-time deletion ledger. Source symbols must be re-verified
 before each client milestone; any newly found automatic recovery owner is
 added here before code changes.
 
-| Apple source symbol | Present mutation | Final disposition |
-|---|---|---|
-| `startStatusPolling` / `statusTask` | Polls server facts used by recovery | Replace with coalesced control exchange; it has no recovery authority |
-| `DeliveryStarvationDetector` | Confirms server/client starvation and enters same-delivery reopen | Retain only as evidence classification inside the controller; submit observation |
-| `PlaybackRecoveryMonitor` / `PlaybackStallDetector` | Nudges Play, then reopens on stagnant clock | Becomes the one `PlaybackProgressDeadline`; no nudge/reopen, only `stalled` observation |
-| `BlackFrameWatchdog` | Treats advancing audio with zero video size as decode failure | Absorb into the same deadline's startup/render predicates; submit decoder-readiness evidence |
-| `SameDeliveryStallRecoveryState` | Allows one same-delivery reopen | Delete after action cutover; server action transaction is the attempt state |
-| `StallReopenBudget` / `RecoveryReopenBudget` | Bounds colliding automatic reopen loops | Delete after action cutover; one action ID and arbiter provide the bound |
-| `PlayerReopenQueue` | Serializes/replays seeks, track changes, and recoveries | Replace automatic half with control sequencing; retain only viewer-intent coalescing until removed |
-| early-end/item failure handlers | Reopen or walk compatibility ladder | Send typed ended/failed observation; arbiter chooses one action |
+**Re-verified on `main` at `bc504681`, 2026-08-31.** Every symbol below still
+exists; none has been deleted. That pass corrected five rows and added four
+Apple owners the ledger had never named — the recon is in
+[M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md)
+§4. The correction matters more than the count: **a row that names a bound or
+a serializer as an automatic owner sends a milestone to delete the wrong
+thing**, and a row that omits a real owner leaves a recovery nobody asked the
+server about.
 
-| Web source symbol | Present mutation | Final disposition |
-|---|---|---|
-| `waitTimer` / `persistentWait` | Times persistent media wait and reopens/falls back | Becomes the one `PlaybackProgressDeadline`; report observation only |
-| `stallTimer` / `armStall` / `stallDiagnose` | Times startup/seek progress and tears down/reopens | Absorb into the same deadline and central action owner |
-| `pollSessionHealth` interval | Reads `/status` for supply/ABR/recovery | Replace with control reporter; never a liveness decision by itself |
-| hls.js fatal-error handlers | Destroy/recreate or compatibility-transcode | Normalize error as proposal; only controller applies returned action |
-| Auto ABR sample/controller | Opens a replacement session | Retain as action proposal using joined control facts; no direct create |
-| automatic fallback claim/budgets | Prevent some recovery collisions | Delete once the server arbiter/action ID is authoritative |
-| `handleEnded` / `endedTries` truncated-stream branch | Treats an early media end as failure and directly reopens up to its retry budget | Send a failed trigger observation now; after action cutover, only the controller may apply the arbiter's successor action |
+The `automatic?` column is the one that decides work. Automatic means the
+symbol mutates delivery — reopens, seeks, nudges the clock, changes the
+recipe — without the viewer asking. A symbol that only prompts, only counts,
+or only serializes is not an owner, however recovery-shaped its name.
 
-| Android source symbol | Present mutation | Final disposition |
-|---|---|---|
-| `BufferingStallTracker` one-second sample loop | Calls `onStall` after measured buffering | Becomes the one `PlaybackProgressDeadline`; report observation only |
-| `startStatusPolling` / `statusPollingJob` | Polls server supply every two seconds | Replace with coalesced control exchange |
-| `ControllerStallGuard` / `StallReopenBudget` | Fences and budgets automatic reopens | Delete after action cutover |
-| `SessionCreateCoordinator.reopenAfterStall` | Creates the lower/same successor directly | Invoked only by a prepared server action, then replaced by shared action state |
-| Media3 player-error/end callbacks | Reopen or enter compatibility handling | Send typed failed/ended observation; arbiter chooses one action |
+| Apple source symbol | automatic? | Present mutation | Final disposition |
+|---|---|---|---|
+| `startStatusPolling` / `statusTask` | **yes** (corrected) | `:3041` calls `observeDeliveryStarvation`, which ends in `retrySameDeliveryAfterStall` — it does own a recovery | Delete only that call and its detector; the rest feeds the debug panel and survives to M9 |
+| `DeliveryStarvationDetector` | yes | Confirms starvation and enters same-delivery reopen | Retain as evidence classification inside the controller; submit observation |
+| `PlaybackRecoveryMonitor` | yes | Nudges Play, then reopens on stagnant clock | Becomes the one `PlaybackProgressDeadline`. **The `.nudge` arm stays**: a `play()` on already-wanted playback mutates no delivery, and the server can answer nothing it asks |
+| `PlaybackStallDetector` | no (corrected) | Pure policy value; unit-tested | Retain until the arbiter demonstrably replaces it, then delete with its tests in one PR |
+| `BlackFrameWatchdog` | yes | Advancing audio with zero video size walks the compatibility ladder — the most invasive mutation on the platform | Keep the detector: it is the only Profile-5 evidence the server cannot derive. Route its verdict through the action ask |
+| `SameDeliveryStallRecoveryState` | yes | Allows one same-delivery reopen | Delete after action cutover; the server action transaction is the attempt state |
+| `StallReopenBudget` / `RecoveryReopenBudget` | no (corrected) | Bounds only; neither touches the player | Delete after action cutover, with their tests, in one PR |
+| `PlayerReopenQueue` | no (corrected) | Last-writer-wins serializer shared by viewer seeks and stall reopens, distinguished only by `PlayerOpenIntent` | **Delete nothing.** Its automatic half disappears when its callers stop calling `reopen` |
+| early-end handler (`observeEnd`, `endAction`) | yes | Reopens up to `RecoveryReopenBudget`, then stops | Send typed ended observation; arbiter chooses one action |
+| item-failure handler (`handleItemFailure`) | yes | Three-rung ladder: next node, established HDR, compatibility fallback | Send typed failed observation; a `terminal` verdict short-circuits the ladder |
+| `retryEstablishedHDRDelivery` | yes (added) | Reopens once, then stops with a viewer-visible verdict | Invoked only by a prepared server action |
+| `retryWithNextCompatibilityFallback` | yes (added) | Forces `forceCompatibleHDRBase` / `forceCompatibilityTranscode`, then reopens — changes the recipe without asking | Invoked only by a prepared server action |
+| `retryMediaOnNextNode` | yes (added) | Reattaches through another ingress, bumps `openGeneration`, calls `play()` | Becomes the client half of M8's node-replacement action |
+| `itemReadinessDeadlineSeconds` (15 s) | yes (added) | A real progress watchdog feeding the same ladder | Folds into the one `PlaybackProgressDeadline` |
+
+| Web source symbol | automatic? | Present mutation | Final disposition |
+|---|---|---|---|
+| `waitTimer` / `persistentWait` | yes | Times persistent media wait and reopens/falls back | Becomes the one `PlaybackProgressDeadline`; report observation only |
+| `stallTimer` / `armStall` | yes | Times startup/seek progress and tears down | Absorb into the same deadline and central action owner |
+| `stallDiagnose` | **no** (corrected) | Diagnoses and shows *Try again / Force transcode / Close* — viewer intent | **Retain.** Its verdicts are the only thing that tells a viewer an ad-blocker is eating `/hls/*.ts`; a server action can never know that |
+| `pollSessionHealth` interval | no | Reads `/status` | Replace with the control reporter; M9 deletes it |
+| hls.js fatal-error handlers | yes | Destroy/recreate or compatibility-transcode | Normalize error as proposal; only the controller applies the returned action |
+| Auto ABR sample/controller | yes | Opens a replacement session | Retain as action proposal using joined control facts; no direct create |
+| automatic fallback claim/budgets | no | Prevent recovery collisions | Delete once the server arbiter and action ID are authoritative |
+| `handleEnded` / `endedTries` | yes | Treats an early media end as failure and reopens up to its budget | Send a failed observation now; after cutover only the controller applies the successor action |
+
+| Android source symbol | automatic? | Present mutation | Final disposition |
+|---|---|---|---|
+| `BufferingStallTracker` | **no** (corrected) | A post-hoc reporter: it emits one event when the playhead **recovers** and returns nothing while stalled | Retain as evidence. **The automatic owner is the one-second loop in `Controller`'s `init`**, which is the row this table should have named |
+| the one-second stall loop → `onStall` | yes (added) | Creates the successor session through `SessionCreateCoordinator.reopenAfterStall` | The M5 ask goes here. Note it cannot fire during an open-ended freeze — only after buffering ends and a ≥6 s stagnant interval closes |
+| `startStatusPolling` / `statusPollingJob` | **no** (corrected) | Pure read; `sessionStatus` feeds the info panel and nothing else | Free deletion whenever the panel is re-sourced — this row has no recovery to take |
+| `ControllerStallGuard` | **no** (corrected) | Mints and compares request versions for viewer seeks and track changes | Retain as viewer-intent fencing; it is not a recovery owner |
+| `StallReopenBudget` | **no** (corrected) | A counter | Delete after action cutover, with `StallBudgetTest.kt`, in one PR |
+| `SessionCreateCoordinator.reopenAfterStall` | yes | Creates the lower/same successor directly, and retries once unbound on a 400 | Invoked only by a prepared server action |
+| Media3 player-error callback | yes | Three-rung ladder via `playbackErrorAction` | Send typed failed observation; arbiter chooses one action |
+| Media3 end callback (`STATE_ENDED`) | **no** (corrected) | Posts progress and autoplays the next episode or audiobook part | **Nothing for M5 to take.** Android has no early-end reopen — no analogue of web's `endedTries` or Apple's `endAction` |
 
 PGS cue-boundary jobs, UI-hide timers, seek debounce, progress reporting, and
 subtitle retry scheduling remain ordinary scheduling timers. They do not infer

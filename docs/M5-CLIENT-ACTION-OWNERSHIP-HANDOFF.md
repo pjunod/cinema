@@ -150,17 +150,140 @@ on #663.
 emulator, seconds not minutes. **This is why web is the platform to start
 with.** `make web-check` and the layout golden cover the rest.
 
-## 4. Apple and Android — not yet recced
+## 4. Apple and Android — live recon, 2026-08-31
 
-§7.4 lists the symbols. Both have a real cost web does not: Apple needs Xcode
-and Android needs an emulator, so neither can be run outside CI from a Linux
-box, and the Android instrumented lane flakes on `adb: device offline` roughly
-one run in three.
+Recced at `bc504681`. Verify line numbers at build time; both files move.
+§7.4 has been corrected from this pass — five rows were misclassified and
+four Apple owners were missing. What follows is the part that changes how the
+milestone is built, not a restatement of the table.
 
-Recon each before planning the change, the way §3 does for web. In particular
-find out, for each owner, whether it is genuinely automatic or is viewer-intent
-wearing a recovery-shaped name — the web table shows that assumption is wrong
-at least a third of the time.
+### 4.1 The finding that reorders the work
+
+**§3.2's "the observation half is done" is a web-only claim.** Neither mobile
+client can receive an action at all:
+
+| | reporter constructed with | default | result |
+|---|---|---|---|
+| Apple | `PlaybackControlSession.begin` at `PlaybackControlSession.swift:137` | `onExchange` defaults to `{ _ in }` (`PlaybackControlReporter.swift:419`) | the controller never sees a `ControlAction` |
+| Android | `PlaybackControlSession.begin` at `PlaybackControlSession.kt:122` | `onExchange` defaults to `{}` (`PlaybackControlReporter.kt:445`) | same |
+
+Both reporters already accept, validate and pace all three actions. The
+parameter that would deliver one to the player exists on both and is
+defaulted away on both. **Nothing is missing except the wire from the
+reporter back to the controller** — two files and roughly thirty lines per
+platform, a pure addition with no behaviour change.
+
+The observation half is likewise unfinished. Both platforms' snapshot mappers
+consume an `observationOverride` / `renderOverride`
+(`PlaybackControlSnapshotMapper.swift:145`, `:199`;
+`PlaybackControlSnapshotMapper.kt:95`, `:149`) with the right comment on it —
+*a recovery path's evidence is more specific than anything derived from the
+player's own state, so it wins field by field* — and **no recovery site sets
+either**. Apple hardcodes both to `nil` at `PlayerController.swift:5269-5270`;
+Android never sets `errorCode` or `errorDetail` either
+(`Controller.kt:1170-1201`).
+
+So each mobile milestone needs a preliminary slice — open the return path,
+wire the override — before its first `switch` on a `ControlAction` can exist.
+Both preliminary slices are safe to land ahead of the §5 fleet gate precisely
+because they change no behaviour.
+
+Apple's telemetry is not the control plane, and it is easy to mistake for it:
+`reportPlaybackStall` (`:3898`), `reportPlaybackFailure` (`:3777`) and
+`reportPlaybackProbe` (`:3877`) all POST to `/api/v1/client-log`. They are
+evidence for a human, not an exchange.
+
+### 4.2 Apple — one function is five ledger rows
+
+`clients/apple/Sources/PlayerController.swift`, 5313 lines.
+
+Every §7.4 stall owner funnels through `retrySameDeliveryAfterStall`
+(`:3156`) — `PlaybackRecoveryMonitor`, `DeliveryStarvationDetector`, and
+through it `statusTask`, `SameDeliveryStallRecoveryState`, and both budgets:
+
+```
+ statusTask ─┐
+ recovery ───┼─▶ retrySameDeliveryAfterStall :3156 ─▶ .reopen ─▶ reopen(at:)
+ monitor     │        │                                └─ .stop ─▶ pause + verdict
+ starvation ─┘        └─ boundedStallRecoveryDecision :3243  (pure, tested)
+```
+
+**One inserted ask defers five ledger rows.** It goes between `:3157` and
+`:3164`, before the budget is spent — spending a budget on an exchange the
+server answered `hold` would retire an attempt nobody made.
+
+`boundedStallRecoveryDecision` (`:3243`) is `nonisolated static` and
+unit-tested. It is the clean seam, and it is exactly the Apple analogue of
+web's `PlaybackPolicy.stallRecoveryAction`: keep it until the arbiter
+demonstrably replaces it, then delete it with its tests in the same PR.
+
+Two more asks, each its own slice: the early-end `.reopen` arm (`:3543`,
+replacing the `recoveryReopenBudget.admit()` guard) and `handleItemFailure`
+(`:3598`, asking before the `:3658` ladder). The second is the one that pays:
+today an `unsupported` producer verdict walks the whole DV → HDR10 →
+transcode ladder guessing at retry, and `terminal` short-circuits it.
+
+**Making `terminal` end playback is a change to `PlaybackControlSession.begin`
+and `PlayerController.beginPlaybackControl` (`:5213`), not to the reporter.**
+`PlaybackControlReporter`'s terminal handling (`:564-568`) is already right —
+it ends reporting and deliberately leaves the player alone, because buffer
+already fetched is still worth playing. The teardown the handler must perform
+already exists verbatim in `retrySameDeliveryAfterStall`'s `.stop` arm
+(`:3181-3188`); it needs the server's `message` as `playbackError`.
+
+### 4.3 Android — cheaper, with one detector that is weaker than it looks
+
+`clients/android/app/src/main/java/tv/plurx/app/player/`.
+
+The ask goes in `onStall` (`Controller.kt:783`), replacing the
+`stallReopenBudget.canReopen()` guard at `:786`. **The viewer-visible verdict
+path is already built**: `onError` (`:123`) is surfaced as `playFailure` in
+`PlayerScreen.kt:645`, so `terminal` costs one call. A second ask goes in
+`onPlayerError` (`:391`), between the node-failover attempt at `:398` and
+`playbackErrorAction` at `:399`.
+
+Android has one genuine head start over Apple: `playbackControlPlayerChanged()`
+is called at `Controller.kt:499`, on the same tick and immediately before
+`sampleStall` and `onStall`. The snapshot the server holds when a stall fires
+is at most one tick old.
+
+**And one genuine weakness worth knowing before writing the PR.** Android's
+stall recovery fires only *after* buffering ends and a ≥6 s stagnant interval
+closes (`thresholdMs = 6_000`, `PlaybackTelemetry.kt:259`). It cannot fire
+during an open-ended freeze at all. That is materially weaker than Apple's
+detector, and the server can only be asked at the moments the detector
+reaches — so an Android freeze that never ends remains invisible to the
+control plane after this milestone. Closing it is its own slice, not this one.
+
+`playbackErrorAction` (`PlaybackPolicy.kt:62`) is pure and unit-tested: same
+treatment as its Apple and web counterparts.
+
+### 4.4 Build numbers, and the gate that will cost a red cycle
+
+| | current | source of truth | how to bump |
+|---|---|---|---|
+| Apple | 95 | `clients/apple/project.yml:18` | `make apple-build-bump` — regenerates five files and requires a note under `docs/apple-builds/` carrying `Build: N` |
+| Android | 54 | `clients/android/app/build.gradle.kts:48` | **no tool exists.** Hand-edit, plus `clients/android/README.md:23` and `docs/STATUS.html:101` |
+
+The gate is `python3 -m validation.mobile_versions`, CI job `mobile_version`,
+and it compares against the **merge target**, not the branch point. So
+whichever mobile PR merges second must re-bump. Apple has a tool for that;
+Android does not. **Budget one red `mobile_version` cycle on the Android PR**
+rather than treating it as a defect.
+
+### 4.5 Test lanes
+
+| lane | command | CI job | runnable here? |
+|---|---|---|---|
+| wire conformance | `python3 -m unittest discover -s tests/validation` | `preflight` | **yes — seconds** |
+| Android JVM + lint | `make android-test` | `android_jvm` | yes, via Docker |
+| Apple iOS + tvOS | `make apple-test` | `apple` | no — needs `xcodebuild` |
+| Android instrumented | `make android-instrumentation` | `android_device` | no — needs an emulator; flakes on `adb: device offline` |
+
+`tests/validation/test_control_wire_conformance.py` reads both reporters by
+path and pins the three action names across all four ports. Both mobile PRs
+touch `ClientObservation`, so **run it locally before pushing** — it is the
+cheapest signal available on the two platforms §4 otherwise cannot exercise.
 
 ## 5. Do not start before this reads non-zero
 
@@ -252,9 +375,48 @@ with their tests, in one PR.
 **Acceptance:** the symbols are absent from `index.html`; `stallDiagnose` and
 the viewer-intent buttons still work.
 
-### M5d, M5e — Apple, Android
+### M5d — Apple opens the return path
 
-Recon first (§4), then the same three steps per platform.
+`PlaybackControlSession.begin` forwards an `onAction` handler to the reporter's
+existing `onExchange`; `PlayerController` gains a
+`pendingControlObservationOverride` that `playbackControlObservation()` reads
+instead of the hardcoded `nil` at `:5269`; `terminal` performs the teardown
+`retrySameDeliveryAfterStall`'s `.stop` arm already performs, using the
+server's `message`.
+
+Behaviour-neutral except for `terminal`, so it can land ahead of the §5 gate.
+
+**Acceptance:** an exchange returning `terminal` stops playback and shows the
+server's message; one returning `none` changes nothing; the wire conformance
+test passes.
+
+### M5e — Apple defers its stall decision
+
+The ask goes into `retrySameDeliveryAfterStall` between `:3157` and `:3164`,
+before the budget is spent. Five §7.4 rows defer at once (§4.2). Then, as
+separate slices, the early-end `.reopen` arm (`:3543`) and `handleItemFailure`
+(`:3598`).
+
+**Acceptance:** each of the four branches is covered in `PlayerControllerTests`;
+a stall with the server returning `none` behaves exactly as it does today; the
+budget is not spent on a `hold`.
+
+### M5f — Android opens the return path
+
+Same two-part unlock, smaller: `onExchange` forwarded from
+`PlaybackControlSession.begin` (`:122`), an override field read by
+`playbackControlObservation()`. `terminal` calls the existing `onError`, which
+`PlayerScreen` already surfaces.
+
+**Acceptance:** as M5d, on the `android_jvm` lane.
+
+### M5g — Android defers its stall decision
+
+The ask replaces the `stallReopenBudget.canReopen()` guard in `onStall`
+(`:786`); a second ask sits in `onPlayerError` between `:398` and `:399`.
+
+**Acceptance:** as M5e. Note §4.3 — this does not make an open-ended freeze
+visible, and must not be described as if it does.
 
 ## 8. Open questions
 
