@@ -4166,8 +4166,10 @@ mod index_pipe_tests {
         // The elementary stream is input 0 and gets no seek of its own — there
         // is nothing in a pipe to seek to.
         assert!(rendered.contains("-f hevc -i pipe:0"), "{rendered}");
+        let seek_at = rendered.find("-ss").expect("the audio input is seeked");
+        let pipe_at = rendered.find("pipe:0").expect("the stream is input 0");
         assert!(
-            rendered.find("-ss").unwrap() > rendered.find("pipe:0").unwrap(),
+            seek_at > pipe_at,
             "the seek belongs to the audio input, not the stream: {rendered}"
         );
     }

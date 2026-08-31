@@ -421,26 +421,21 @@ mod tests {
     /// A real one rather than a synthetic one because the whole question this
     /// module answers is whether a library's idea of a Profile 7 RPU matches
     /// what a disc remux actually carries.
-    /// 367 bytes, split only for the line width — joined back before use, so
-    /// a wrapped literal cannot quietly lose a byte the way a hand-wrapped one
-    /// did on the first attempt.
-    const REAL_P7_RPU: [&str; 8] = [
-        "7c011908090840613650ae20002008020080200802007f801ffc00ffc001fffa0000030100000300d0000008000006",
-        "800000400000340000030200000301a000001000000d0000030080000068000004000003034000002000000a800000",
-        "800000e18618800000800000800000800000800000800000b0c30c8000008000008000008000008000008000009861",
-        "86800000800000800000800000800000540000040000040000070c30c4000004000004000004000004000004000005",
-        "861864000004000004000004000004000004000004c30c340000040000040000040000040120000100100100000301",
-        "00480000400400400000401200001001001000001a2566000035ea2566f9fceb1c256644ca00000301000003000800",
-        "00030008000003001c36224301860a5e308e051400000301a63e5affff000003000003000003000060207dce015140",
-        "300800410999810100000300040281e00f000003000009060fa000320000030000cface62380",
-    ];
+    ///
+    /// It lives in a file rather than a literal, and is shared with
+    /// `plurxd::dvpipe`, because a hand-wrapped copy has now lost bytes twice:
+    /// once on the first attempt here, and once again when it was transcribed
+    /// into the second module. Both times the length assertion below caught it
+    /// and the failure read as "invalid mapping_idc", which is a long way from
+    /// "you dropped three bytes".
+    const REAL_P7_RPU: &str = include_str!("../../../../tests/playback/dv-p7-rpu.hex");
 
     fn rpu_bytes() -> Vec<u8> {
-        let hex = REAL_P7_RPU.concat();
+        let hex = REAL_P7_RPU.trim();
         assert_eq!(
             hex.len(),
             734,
-            "the fixture lost bytes on its way into the literal"
+            "the fixture lost bytes on its way into the test"
         );
         (0..hex.len())
             .step_by(2)

@@ -664,10 +664,6 @@ impl HeadChildOwner {
         }
     }
 
-    fn child_mut(&mut self) -> Option<&mut tokio::process::Child> {
-        self.child.as_mut()
-    }
-
     fn begin_reap(&mut self) -> Option<tokio::task::JoinHandle<()>> {
         let mut child = self.child.take()?;
         let _ = child.start_kill();
@@ -4030,25 +4026,109 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
     };
     let start_seconds = entry.start_ticks as f64 / f64::from(rendition.timescale);
     let recipe = &rendition.recipe;
-    let mut args = copy_pipe_args_with_dolby_vision(
-        &recipe.file,
-        start_seconds,
-        recipe.audio_index,
-        recipe.aac,
-        Pacing::unpaced(),
-        recipe.video,
-    );
-    #[cfg(unix)]
-    if rendition.source.is_some() {
-        for index in 0..args.len().saturating_sub(1) {
-            if args[index] == "-i" {
-                args[index + 1] = "/dev/fd/3".to_owned();
+    let attested = attested_source_setup(rendition);
+    let (mut child, stdout) = if recipe.video.converts_dolby_vision() {
+        match spawn_converting_producer(rendition, start_seconds, attested).await {
+            Ok(pair) => pair,
+            Err(cause) => {
+                record_failure(shared, rendition, cause);
+                return;
             }
         }
+    } else {
+        let mut args = copy_pipe_args_with_dolby_vision(
+            &recipe.file,
+            start_seconds,
+            recipe.audio_index,
+            recipe.aac,
+            Pacing::unpaced(),
+            recipe.video,
+        );
+        if attested {
+            replace_inputs_with_attested_descriptor(&mut args);
+        }
+        let mut command = tokio::process::Command::new(ffmpeg_bin());
+        attach_attested_descriptor(&mut command, rendition.source.as_ref());
+        let mut child = match command
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let cause = format!("spawning the producer: {error}");
+                record_failure(shared, rendition, cause);
+                return;
+            }
+        };
+        let Some(stdout) = child.stdout.take() else {
+            record_failure(
+                shared,
+                rendition,
+                "the producer started without a stdout".to_string(),
+            );
+            return;
+        };
+        (child, stdout)
+    };
+    // The rendition can be closed between the spawn above and the attach
+    // below (a purge committing on the maintain task). Attaching would leave
+    // a live ffmpeg in a slot whose driver has already exited — a child
+    // nothing reaps until the Arc drops.
+    if rendition.closed.load(Relaxed) {
+        let _ = child.kill().await;
+        return;
     }
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    rendition
+        .last_child_pid
+        .store(child.id().unwrap_or(0), Relaxed);
+    rendition.slot.attach(child, at).await;
+    let epoch = rendition.gen_epoch.load(Relaxed);
+    let shared = Arc::clone(shared);
+    let rendition = Arc::clone(rendition);
+    tokio::spawn(async move {
+        run_generation(shared, rendition, stdout, at, epoch).await;
+    });
+    tracing::info!(rendition = %rendition_key_field(at), "spawned a producer generation");
+}
+
+/// Whether this rendition's producers read the source through the attested
+/// file descriptor rather than by name.
+///
+/// The attestation is what makes a session's video and its audio provably the
+/// same bytes: a path can be replaced between two opens, a descriptor cannot.
+fn attested_source_setup(rendition: &Rendition) -> bool {
+    cfg!(unix) && rendition.source.is_some()
+}
+
+/// Point every `-i` at the inherited descriptor.
+///
+/// Every input in a copy argv is the same source — the video, and the second
+/// open a copied audio track's A/V correction needs — so they all become fd 3.
+#[allow(clippy::needless_range_loop)]
+fn replace_inputs_with_attested_descriptor(args: &mut [String]) {
+    for index in 0..args.len().saturating_sub(1) {
+        if args[index] == "-i" {
+            args[index + 1] = "/dev/fd/3".to_owned();
+        }
+    }
+}
+
+/// Hand a child the attested source as fd 3, if there is one.
+///
+/// Factored out of the spawn site because the conversion runs two children and
+/// both need it: stage one reads the picture and stage two reads the audio,
+/// and a stage two that opened the file by name could pair one file's audio
+/// with another file's video.
+fn attach_attested_descriptor(
+    command: &mut tokio::process::Command,
+    source: Option<&crate::fragment_index_cluster::SourceFence>,
+) {
     #[cfg(unix)]
-    if let Some(source) = rendition.source.as_ref() {
+    if let Some(source) = source {
         use std::os::fd::AsRawFd;
         let source_fd = source.handle.as_raw_fd();
         unsafe {
@@ -4070,48 +4150,66 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
             });
         }
     }
-    let mut child = match command
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            let cause = format!("spawning the producer: {error}");
-            record_failure(shared, rendition, cause);
-            return;
-        }
-    };
-    let Some(stdout) = child.stdout.take() else {
-        record_failure(
-            shared,
-            rendition,
-            "the producer started without a stdout".to_string(),
-        );
-        return;
-    };
-    // The rendition can be closed between the spawn above and the attach
-    // below (a purge committing on the maintain task). Attaching would leave
-    // a live ffmpeg in a slot whose driver has already exited — a child
-    // nothing reaps until the Arc drops.
-    if rendition.closed.load(Relaxed) {
-        let _ = child.kill().await;
-        return;
-    }
-    rendition
-        .last_child_pid
-        .store(child.id().unwrap_or(0), Relaxed);
-    rendition.slot.attach(child, at).await;
-    let epoch = rendition.gen_epoch.load(Relaxed);
-    let shared = Arc::clone(shared);
-    let rendition = Arc::clone(rendition);
-    tokio::spawn(async move {
-        run_generation(shared, rendition, stdout, at, epoch).await;
-    });
-    tracing::info!(rendition = %rendition_key_field(at), "spawned a producer generation");
+    #[cfg(not(unix))]
+    let _ = (command, source);
+}
+
+/// Start the two-ffmpeg Profile 7 → 8.1 producer for this generation.
+///
+/// The one thing this does that the single-ffmpeg path does not is probe where
+/// the video actually starts. Stage one seeks with `-noaccurate_seek` and hands
+/// stage two a raw Annex B stream, which carries no timestamps at all — so
+/// stage two builds the video timeline from zero while its audio input carries
+/// the source's real ones. Seeking the audio to the *requested* start would
+/// then offset it against the picture by the distance back to the keyframe:
+/// lip-sync that varies per title and per seek, plays perfectly well, and is
+/// wrong. `probe_media_origin` answers where the picture really begins, which
+/// is what the audio must be seeked to.
+async fn spawn_converting_producer(
+    rendition: &Arc<Rendition>,
+    start_seconds: f64,
+    attested: bool,
+) -> Result<(tokio::process::Child, tokio::process::ChildStdout), String> {
+    let recipe = &rendition.recipe;
+    let path = recipe.file.path.to_string_lossy().into_owned();
+    let input = if attested { "/dev/fd/3" } else { path.as_str() };
+    let audio_start = crate::transcode::probe_media_origin(&recipe.file.path, start_seconds).await;
+
+    let source_args =
+        plurx_core::transcode::dv_convert_source_args(input, start_seconds, Pacing::unpaced());
+    let output_args = plurx_core::transcode::dv_convert_output_args(
+        &recipe.file,
+        input,
+        audio_start,
+        recipe.audio_index,
+        recipe.aac,
+        recipe.video,
+    );
+
+    let key = rendition.key.clone();
+    let producer = crate::dvpipe::spawn(
+        &ffmpeg_bin(),
+        &source_args,
+        &output_args,
+        |command| attach_attested_descriptor(command, rendition.source.as_ref()),
+        move |outcome| match outcome {
+            crate::dvpipe::Outcome::Converted(report) => tracing::info!(
+                rendition = %key,
+                rpus = report.rpus,
+                enhancement_layer = ?report.enhancement_layer,
+                "converted this generation's Dolby Vision to profile 8.1"
+            ),
+            crate::dvpipe::Outcome::Refused(reason) => tracing::warn!(
+                rendition = %key,
+                "the Dolby Vision conversion refused this generation: {reason}"
+            ),
+            crate::dvpipe::Outcome::Interrupted(reason) => tracing::debug!(
+                rendition = %key,
+                "the Dolby Vision conversion ended early: {reason}"
+            ),
+        },
+    )?;
+    Ok((producer.child, producer.stdout))
 }
 
 fn rendition_key_field(at: u32) -> String {
@@ -4690,56 +4788,72 @@ async fn regenerate_init_head(
             "source changed before head regeneration".to_owned(),
         ));
     }
-    let mut args = copy_pipe_args_with_dolby_vision(
-        &recipe.file,
-        0.0,
-        recipe.audio_index,
-        recipe.aac,
-        Pacing::unpaced(),
-        recipe.video,
-    );
-    #[cfg(unix)]
-    for index in 0..args.len().saturating_sub(1) {
-        if args[index] == "-i" {
-            args[index + 1] = "/dev/fd/3".to_owned();
-        }
-    }
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let source_fd = source.handle.as_raw_fd();
-        unsafe {
-            command.pre_exec(move || {
-                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
-                if duplicate == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::dup2(duplicate, 3) == -1 {
-                    libc::close(duplicate);
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(duplicate);
-                let flags = libc::fcntl(3, libc::F_GETFD);
-                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    let child = command
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| {
-            HeadRegenerationError::Failed(format!("spawning the head regeneration: {error}"))
-        })?;
+    // A converting session's init describes the converted stream — that is
+    // why it is a separate fragment-index identity in the first place — so a
+    // regeneration running the ordinary single-ffmpeg pipe would rebuild the
+    // *unconverted* init and then be refused by the very identity check it
+    // exists to satisfy. Same pipe, same argv, same answer.
+    let (child, stdout) = if recipe.video.converts_dolby_vision() {
+        let path = recipe.file.path.to_string_lossy().into_owned();
+        let input = if cfg!(unix) {
+            "/dev/fd/3"
+        } else {
+            path.as_str()
+        };
+        let source_args =
+            plurx_core::transcode::dv_convert_source_args(input, 0.0, Pacing::unpaced());
+        let output_args = plurx_core::transcode::dv_convert_output_args(
+            &recipe.file,
+            input,
+            // Regeneration always starts at zero, so the picture's origin is
+            // zero too and there is no keyframe lead for the audio to miss.
+            0.0,
+            recipe.audio_index,
+            recipe.aac,
+            recipe.video,
+        );
+        let producer = crate::dvpipe::spawn(
+            &ffmpeg_bin(),
+            &source_args,
+            &output_args,
+            |command| attach_attested_descriptor(command, Some(source)),
+            |_| {},
+        )
+        .map_err(HeadRegenerationError::Failed)?;
+        (producer.child, producer.stdout)
+    } else {
+        let mut args = copy_pipe_args_with_dolby_vision(
+            &recipe.file,
+            0.0,
+            recipe.audio_index,
+            recipe.aac,
+            Pacing::unpaced(),
+            recipe.video,
+        );
+        #[cfg(unix)]
+        replace_inputs_with_attested_descriptor(&mut args);
+        let mut command = tokio::process::Command::new(ffmpeg_bin());
+        attach_attested_descriptor(&mut command, Some(source));
+        let mut child = command
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| {
+                HeadRegenerationError::Failed(format!("spawning the head regeneration: {error}"))
+            })?;
+        let Some(stdout) = child.stdout.take() else {
+            return Err(HeadRegenerationError::Failed(
+                "the head regeneration started without a stdout".to_owned(),
+            ));
+        };
+        (child, stdout)
+    };
     let muxer = read_regenerated_head_before(
         child,
+        stdout,
         HEAD_REGENERATION_TIMEOUT,
         HEAD_REGENERATION_MAX_BYTES,
     )
@@ -4766,16 +4880,16 @@ async fn regenerate_init_head(
 /// owner also transfers reap to a detached task if this future is cancelled.
 async fn read_regenerated_head_before(
     child: tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
     budget: Duration,
     max_bytes: usize,
 ) -> Result<Init, HeadRegenerationError> {
+    // The stdout arrives separately from the child because a converting
+    // regeneration reads the *second* ffmpeg's output while the child this
+    // owner kills is the first — that is the whole chain: kill stage one, its
+    // stdout closes, the conversion reaches EOF, stage two exits.
     let mut child = HeadChildOwner::new(child);
-    let Some(mut stdout) = child.child_mut().and_then(|child| child.stdout.take()) else {
-        child.terminate_and_reap().await;
-        return Err(HeadRegenerationError::Failed(
-            "the head regeneration started without a stdout".to_string(),
-        ));
-    };
+    let mut stdout = stdout;
     let head = tokio::time::timeout(budget, read_muxer_init_bounded(&mut stdout, max_bytes)).await;
     // Only the head is wanted; the rest of the pipe is not read.
     drop(stdout);
@@ -5870,15 +5984,16 @@ mod tests {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let timed = tokio::spawn(async move {
             let _build_guard = gate.lock_owned().await;
-            let child = tokio::process::Command::new("sleep")
+            let mut child = tokio::process::Command::new("sleep")
                 .arg("60")
                 .stdout(std::process::Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()
                 .expect("deterministic head-regeneration child");
+            let stdout = child.stdout.take().expect("child stdout");
             let pid = child.id().expect("child pid");
             let _ = started_tx.send(pid);
-            read_regenerated_head_before(child, Duration::from_millis(25), 1024).await
+            read_regenerated_head_before(child, stdout, Duration::from_millis(25), 1024).await
         });
         let pid = started_rx
             .await
