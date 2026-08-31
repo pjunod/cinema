@@ -329,9 +329,9 @@ test_anchor = "budgetStopsAfterThreeSameRungAnswers"
 id = "android.bound-ladder-ownership"
 commits = ["a5143aba", "c739a785"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "internal fun ladderStillOwnsFailure("
+source_anchor = "internal fun <T : Any> ladderStillOwnsFailure("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
-test_anchor = "aSessionOpenInFlightStopsTheLadderWhilePlayerErrorIsUnchanged"
+test_anchor = "aReleasedPlayerIsNeverEvenAsked"
 
 [[fixes]]
 id = "android.bound-stall-predecessor-alive"

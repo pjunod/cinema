@@ -287,24 +287,29 @@ class Controller(
     private var released = false
 
     /**
-     * How many session opens have been *started*, including ones still in
-     * flight.
+     * How many session opens are in flight *right now*.
      *
-     * This exists for one reader: the compatibility ladder, which resumes
-     * seconds after the failure it is recovering from and has to know whether
-     * anything is already on its way to re-preparing the player.
+     * The Android answer to Apple's `isChangingStream`, and it exists for one
+     * reader: the compatibility ladder, which resumes seconds after the
+     * failure it is recovering from and has to know whether a `prepare` it
+     * cannot see synchronously is still on its way.
      *
-     * It counts session opens and nothing else, which is the whole point.
-     * `stallGuard` is the wrong fence for this question in both directions: it
-     * is bumped by a VOD seek, a `playPause` and an in-place subtitle change,
-     * none of which re-prepare an `IDLE` player — a ladder that stood down for
-     * those would leave a frozen picture with no error and no affordance for
-     * the life of the screen — and bumping it from the failure path cancels
-     * creates that are already running. A session open is the only thing that
-     * promises a `prepare` this function cannot see synchronously; every other
-     * re-prepare happens inline and is caught by the `playerError` identity.
+     * In flight, not started. A generation counter answers "did an open begin
+     * while I waited", which is the wrong question in the one case that
+     * matters most: `openSession` ends the predecessor server-side, so the
+     * 404s that supersession causes arrive *after* the count went up, and a
+     * ladder comparing snapshots would see no change and walk a deleted
+     * playlist.
+     *
+     * Session opens and nothing else. `stallGuard` is the wrong fence in both
+     * directions: it is bumped by a VOD seek and an in-place subtitle change,
+     * neither of which re-prepares an `IDLE` player — a ladder that stood down
+     * for those would leave a frozen picture with no error and no affordance
+     * for the life of the screen — and bumping it from the failure path
+     * cancels creates that are already running. Every re-prepare that is not a
+     * session open happens inline, and the `playerError` identity catches it.
      */
-    private var sessionOpenGeneration = 0L
+    private var sessionOpensInFlight = 0
     private var activeMediaPath: String? = null
 
     private val playbackTelemetry = ControllerPlaybackTelemetry(
@@ -423,17 +428,15 @@ class Controller(
         // the screen — so every player call below still lands on the main
         // thread and none of them outlive the surface they belong to.
         //
-        // The generation is READ here, not claimed, and it is read before the
-        // dispatch rather than inside the launched body. A failure is not an
-        // owner of anything — `stallGuard.beginRequest()` would invalidate a
-        // create already in flight, which is how a viewer's seek turns into an
-        // error banner: `openSession` ends the old session server-side before
-        // its create returns, the player's next segment request against the
-        // deleted playlist 404s, and that 404 would then cancel the very seek
-        // that caused it.
+        // Nothing is claimed here. A failure is not an owner of anything —
+        // `stallGuard.beginRequest()` would invalidate a create already in
+        // flight, which is how a viewer's seek turns into an error banner:
+        // `openSession` ends the old session server-side before its create
+        // returns, the player's next segment request against the deleted
+        // playlist 404s, and that 404 would then cancel the very seek that
+        // caused it.
         override fun onPlayerError(error: PlaybackException) {
-            val openedAt = sessionOpenGeneration
-            scope.launch { handlePlayerError(error, openedAt) }
+            scope.launch { handlePlayerError(error) }
         }
 
         override fun onRenderedFirstFrame() {
@@ -467,7 +470,7 @@ class Controller(
      * Split out of the listener because it suspends. Everything below the
      * ask runs only if the player is still holding this same failure.
      */
-    private suspend fun handlePlayerError(error: PlaybackException, openedAt: Long) {
+    private suspend fun handlePlayerError(error: PlaybackException) {
         val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
         // The ask goes before rung one, not before rung two. Rung one is
         // `retryMediaOnNextNode`, and a verdict about the *source* does not
@@ -505,21 +508,39 @@ class Controller(
                 )
             },
         )
-        // Seconds passed, and it takes all three of these to notice. The
-        // predicate is a function so the set is pinned by a test, and it takes
-        // the raw inputs rather than three booleans computed here, so that
-        // there is no logic at this call site for a mutation to slip past.
-        val opensNow = sessionOpenGeneration
+        // A session open may be in flight — very likely one, if this failure
+        // is a 404 against the playlist that open just deleted. Wait it out
+        // rather than standing aside for it.
+        //
+        // Standing aside is the tempting shape and it is wrong, because an
+        // open has three exits that neither prepare nor report: the
+        // coordinator refusing a superseded request, and two staleness checks.
+        // A ladder that deferred to one of those would leave the player `IDLE`
+        // holding this exception with nothing left to clear it — `prepare()`
+        // is the only thing that does, the stall watchdog is gated on the same
+        // field, and ExoPlayer will not fire `onPlayerError` twice. Frozen
+        // picture, no error, no affordance, for the life of the screen.
+        //
+        // Waiting instead makes both outcomes self-describing. If the open
+        // prepares, `playerError` is cleared and the identity check below
+        // stands the ladder down. If it aborts, the exception is still there
+        // and the ladder is exactly the right owner for it.
+        var waitedForOpenMs = 0L
+        while (!released && sessionOpensInFlight > 0 && waitedForOpenMs < LADDER_OPEN_WAIT_MS) {
+            delay(LADDER_OPEN_POLL_MS)
+            waitedForOpenMs += LADDER_OPEN_POLL_MS
+        }
+        // Two conditions, and the ladder needs both. The predicate takes the
+        // raw inputs rather than booleans computed here, so there is no logic
+        // at this call site for a mutation to slip past.
         if (!ladderStillOwnsFailure(
                 released = released,
-                openedAt = openedAt,
-                opensNow = opensNow,
                 failure = error,
                 // Lazy on purpose: `release()` tore this player down, and
                 // ExoPlayer's `release` does not clear `playbackError`, so
                 // reading it here is both meaningless and unsafe. The
                 // predicate must not reach this lambda when `released`.
-                playerError = { player.playerError },
+                current = { player.playerError },
             )
         ) {
             // The `playback_error` beacon below never fires on this path, and
@@ -531,7 +552,7 @@ class Controller(
                 "plurx-playback",
                 "file=${plan.fileId} superseded error=${error.errorCodeName} " +
                     "code=${error.errorCode} released=$released " +
-                    "opens=$openedAt->$opensNow",
+                    "waited_ms=$waitedForOpenMs",
             )
             if (!released) {
                 playbackTelemetry.report(
@@ -539,7 +560,7 @@ class Controller(
                     level = "warn",
                     message = error.errorCodeName,
                     code = error.errorCode,
-                    detail = "opened_at=$openedAt opens_now=$opensNow",
+                    detail = "waited_ms=$waitedForOpenMs",
                 )
             }
             return
@@ -655,22 +676,32 @@ class Controller(
         stallWatchdogJob = scope.launch {
             while (isActive) {
                 playbackControlPlayerChanged()
-                val measurement = playbackTelemetry.sampleStall(establishedPlayback, monotonicNowMs())
-                // The measurement is still taken, because the viewer really
-                // did stare at a frozen picture for that long and the fleet
-                // run needs the number. What is suppressed is the *recovery*:
-                // a player holding a `PlaybackException` is not a recovered
+                // A player holding a `PlaybackException` is not a recovered
                 // stall, and `sampleStall` cannot tell the difference. An
                 // error moves ExoPlayer to `IDLE`, so `buffering` goes false
-                // on exactly the falling edge the tracker reports, while
-                // `playWhenReady` and `establishedPlayback` both stay true
-                // until the ladder restarts. Without this the failure and the
-                // stall race for the same evidence slot and the same answer:
-                // the stall's `STARVED/STALLED` overrides the ladder's
-                // `FAILED/MEDIA` before it is ever sent, both asks read one
-                // answer slot, and whichever resumes first clears
-                // `establishedPlayback` and pushes the other into `Fail`.
-                if (measurement != null && player.playerError == null) {
+                // on exactly the falling edge the tracker reports as recovery,
+                // while `playWhenReady` and `establishedPlayback` both stay
+                // true until the ladder restarts.
+                //
+                // Two things go wrong without this gate. The failure and the
+                // stall race for the same evidence slot and the same answer —
+                // `STARVED/STALLED` overwrites the ladder's `FAILED/MEDIA`
+                // before it is ever sent, both asks read one answer slot, and
+                // whichever resumes first clears `establishedPlayback` and
+                // pushes the other into `Fail`. And `sampleStall` is not a
+                // pure measurement: it emits its own beacon labelled
+                // `state=recovered`, which for a stream that just died is a
+                // false statement landing in the fleet run beside the
+                // `playback_error` for the same instant.
+                //
+                // The cost, stated: the interval is dropped rather than
+                // relabelled, so a viewer who stared at a frozen picture for
+                // eight seconds before the node died leaves no stall record.
+                // A wrong number is worse than a missing one, and the
+                // `playback_error` beacon still marks the instant.
+                val stallable = establishedPlayback && player.playerError == null
+                val measurement = playbackTelemetry.sampleStall(stallable, monotonicNowMs())
+                if (measurement != null) {
                     onStall(measurement.positionMs)
                 }
                 delay(1_000)
@@ -881,7 +912,10 @@ class Controller(
      * client sends is unit-tested rather than assembled inline.
      */
     private fun openSession(ms: Long, attempt: PlaybackAttempt) {
-        sessionOpenGeneration++
+        // Before the predecessor is ended, because the 404s that ending it
+        // causes are exactly what the ladder must not mistake for its own
+        // problem.
+        sessionOpensInFlight++
         val requestVersion = stallGuard.beginRequest()
         sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
@@ -889,65 +923,75 @@ class Controller(
         encoder = null
         sessionIsVod = false
         scope.launch {
-            val hls = try {
-                sessionCreateCoordinator.create(
-                    body = sessionBody(ms),
-                    isCurrent = { stallGuard.isCurrent(requestVersion) },
-                ) ?: return@launch
-            } catch (cancelled: CancellationException) {
-                // The screen left composition (or a newer request superseded
-                // this one) — the caller saying stop, not the server failing.
-                // Swallowing it here would show a failure state for a stream
-                // nobody is waiting for any more.
-                throw cancelled
-            } catch (error: Exception) {
-                if (stallGuard.isCurrent(requestVersion)) {
-                    playbackTelemetry.report(
-                        event = "playback_error",
-                        level = "error",
-                        message = "session create failed before Media3 started",
-                        code = (error as? HttpException)?.code(),
-                        detail = redactedFailureDetail("session_create", error),
-                        attempt = attempt,
-                    )
-                    playbackTelemetry.cancel(attempt)
-                    Log.w(
-                        "PlurxPlayback",
-                        "session create failed ${redactedFailureDetail("session_create", error)}",
-                    )
-                    onError("The server couldn't start this stream.")
+            try {
+                val hls = try {
+                    sessionCreateCoordinator.create(
+                        body = sessionBody(ms),
+                        isCurrent = { stallGuard.isCurrent(requestVersion) },
+                    ) ?: return@launch
+                } catch (cancelled: CancellationException) {
+                    // The screen left composition (or a newer request superseded
+                    // this one) — the caller saying stop, not the server failing.
+                    // Swallowing it here would show a failure state for a stream
+                    // nobody is waiting for any more.
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (stallGuard.isCurrent(requestVersion)) {
+                        playbackTelemetry.report(
+                            event = "playback_error",
+                            level = "error",
+                            message = "session create failed before Media3 started",
+                            code = (error as? HttpException)?.code(),
+                            detail = redactedFailureDetail("session_create", error),
+                            attempt = attempt,
+                        )
+                        playbackTelemetry.cancel(attempt)
+                        Log.w(
+                            "PlurxPlayback",
+                            "session create failed ${redactedFailureDetail("session_create", error)}",
+                        )
+                        onError("The server couldn't start this stream.")
+                    }
+                    return@launch
                 }
-                return@launch
+                // A later seek or track switch won while this request was in
+                // flight. Release this now-stale server session instead of letting
+                // its older timeline replace the current one.
+                if (!stallGuard.isCurrent(requestVersion)) {
+                    vm.endHlsSession(hls.session_id)
+                    return@launch
+                }
+                sessionId = hls.session_id
+                beginPlaybackControl(hls)
+                startStatusPolling(hls.session_id)
+                // Save this session's resolved height so the stall-reopen budget
+                // can compare each stall response against the predecessor rung.
+                stallReopenBudget.seed(hls.height)
+                encoder = hls.encoder
+                sessionIsVod = hls.vod
+                hls.delivered_dynamic_range?.let { deliveredRange = it }
+                // A cached session is the whole stream on disk: its timeline
+                // starts at zero and the player seeks, exactly like direct play.
+                val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
+                baseMs = timeline.baseMs
+                activeMediaPath = relativeMediaPath(hls.playlist_url)
+                player.setMediaItem(
+                    MediaItem.fromUri(Session.url(hls.playlist_url)),
+                    timeline.attachPositionMs,
+                )
+                player.prepare()
+                playbackTelemetry.prepared(attempt)
+                player.playWhenReady = true
+                armTrackSelections()
+            } finally {
+                // Every exit, including the two silent ones — the coordinator
+                // refusing a superseded request, and the post-create staleness
+                // check. Those abort without preparing and without an error,
+                // so a ladder waiting on this count has to be released, or a
+                // player left `IDLE` holding an exception stays that way for
+                // the life of the screen.
+                sessionOpensInFlight--
             }
-            // A later seek or track switch won while this request was in
-            // flight. Release this now-stale server session instead of letting
-            // its older timeline replace the current one.
-            if (!stallGuard.isCurrent(requestVersion)) {
-                vm.endHlsSession(hls.session_id)
-                return@launch
-            }
-            sessionId = hls.session_id
-            beginPlaybackControl(hls)
-            startStatusPolling(hls.session_id)
-            // Save this session's resolved height so the stall-reopen budget
-            // can compare each stall response against the predecessor rung.
-            stallReopenBudget.seed(hls.height)
-            encoder = hls.encoder
-            sessionIsVod = hls.vod
-            hls.delivered_dynamic_range?.let { deliveredRange = it }
-            // A cached session is the whole stream on disk: its timeline
-            // starts at zero and the player seeks, exactly like direct play.
-            val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
-            baseMs = timeline.baseMs
-            activeMediaPath = relativeMediaPath(hls.playlist_url)
-            player.setMediaItem(
-                MediaItem.fromUri(Session.url(hls.playlist_url)),
-                timeline.attachPositionMs,
-            )
-            player.prepare()
-            playbackTelemetry.prepared(attempt)
-            player.playWhenReady = true
-            armTrackSelections()
         }
     }
 
@@ -1057,96 +1101,100 @@ class Controller(
         // server validates previous_session_id against a live session
         // map.  Session creation supersedes and kills the predecessor
         // atomically.
-        sessionOpenGeneration++
+        sessionOpensInFlight++
         sessionId = null
         clearStatusPolling()
         encoder = null
         sessionIsVod = false
         scope.launch {
-            val body = bindDecisionPlan(
-                body = subtitleSessionBody(
-                    playbackId = playbackId,
-                    requestId = UUID.randomUUID().toString(),
-                    startSeconds = positionMs / 1000.0,
-                    delivery = subtitleDelivery,
-                    subtitleIndex = selectedSubtitle,
-                    copyableVideo = planMode != "transcode",
-                    aac = plan.aac,
-                    preserveDolbyVision = plan.preserveDolbyVision,
-                    audioIndex = selectedAudio,
-                    audioOffsetMs = audioOffsetMs,
-                    quality = vm.preferences.value.playbackQuality,
-                    sourceHeight = plan.sourceHeight,
-                    deliveredDynamicRange = deliveredRange,
-                    previousSessionId = prevId,
-                    reopenReason = ReopenReason.Stall,
-                ),
-                caps = decisionCaps,
-                requestHDR10 = sessionHDR10Request(
-                    decisionMode = plan.mode,
-                    deliveredDynamicRange = plan.deliveredDynamicRange,
-                    compatibilityTranscode = forceCompatibilityTranscode,
-                    delivery = subtitleDelivery,
-                ),
-            )
-            val hls = try {
-                sessionCreateCoordinator.reopenAfterStall(
-                    body = body,
-                    isCurrent = { stallGuard.isCurrent(requestVersion) },
-                ) ?: return@launch
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                if (stallGuard.isCurrent(requestVersion)) {
-                    playbackTelemetry.report(
-                        event = "playback_error",
-                        level = "error",
-                        message = "session reopen failed before Media3 started",
-                        code = (error as? HttpException)?.code(),
-                        detail = redactedFailureDetail("session_reopen", error),
-                        attempt = attempt,
-                    )
-                    playbackTelemetry.cancel(attempt)
-                    Log.w(
-                        "PlurxPlayback",
-                        "session reopen failed ${redactedFailureDetail("session_reopen", error)}",
-                    )
-                    onError(
-                        playbackControl.terminalVerdict?.message
-                            ?: "The stream stalled and recovery failed.",
-                    )
+            try {
+                val body = bindDecisionPlan(
+                    body = subtitleSessionBody(
+                        playbackId = playbackId,
+                        requestId = UUID.randomUUID().toString(),
+                        startSeconds = positionMs / 1000.0,
+                        delivery = subtitleDelivery,
+                        subtitleIndex = selectedSubtitle,
+                        copyableVideo = planMode != "transcode",
+                        aac = plan.aac,
+                        preserveDolbyVision = plan.preserveDolbyVision,
+                        audioIndex = selectedAudio,
+                        audioOffsetMs = audioOffsetMs,
+                        quality = vm.preferences.value.playbackQuality,
+                        sourceHeight = plan.sourceHeight,
+                        deliveredDynamicRange = deliveredRange,
+                        previousSessionId = prevId,
+                        reopenReason = ReopenReason.Stall,
+                    ),
+                    caps = decisionCaps,
+                    requestHDR10 = sessionHDR10Request(
+                        decisionMode = plan.mode,
+                        deliveredDynamicRange = plan.deliveredDynamicRange,
+                        compatibilityTranscode = forceCompatibilityTranscode,
+                        delivery = subtitleDelivery,
+                    ),
+                )
+                val hls = try {
+                    sessionCreateCoordinator.reopenAfterStall(
+                        body = body,
+                        isCurrent = { stallGuard.isCurrent(requestVersion) },
+                    ) ?: return@launch
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (stallGuard.isCurrent(requestVersion)) {
+                        playbackTelemetry.report(
+                            event = "playback_error",
+                            level = "error",
+                            message = "session reopen failed before Media3 started",
+                            code = (error as? HttpException)?.code(),
+                            detail = redactedFailureDetail("session_reopen", error),
+                            attempt = attempt,
+                        )
+                        playbackTelemetry.cancel(attempt)
+                        Log.w(
+                            "PlurxPlayback",
+                            "session reopen failed ${redactedFailureDetail("session_reopen", error)}",
+                        )
+                        onError(
+                            playbackControl.terminalVerdict?.message
+                                ?: "The stream stalled and recovery failed.",
+                        )
+                    }
+                    return@launch
                 }
-                return@launch
+                if (!stallGuard.isCurrent(requestVersion)) {
+                    vm.endHlsSession(hls.session_id)
+                    return@launch
+                }
+                // Update the same-rung budget: the budget counts consecutive
+                // reopen responses that do NOT resolve a strictly lower rung than
+                // the predecessor (same rung, absent/zero height, or a higher
+                // rung).  A genuine strict downgrade resets the count.
+                // Absent or zero height counts as no step down — it is the server
+                // saying "this session is already at its answer" without a rung
+                // the client can compare.
+                stallReopenBudget.record(hls.height)
+                sessionId = hls.session_id
+                beginPlaybackControl(hls)
+                startStatusPolling(hls.session_id)
+                encoder = hls.encoder
+                sessionIsVod = hls.vod
+                hls.delivered_dynamic_range?.let { deliveredRange = it }
+                val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
+                baseMs = timeline.baseMs
+                activeMediaPath = relativeMediaPath(hls.playlist_url)
+                player.setMediaItem(
+                    MediaItem.fromUri(Session.url(hls.playlist_url)),
+                    timeline.attachPositionMs,
+                )
+                player.prepare()
+                playbackTelemetry.prepared(attempt)
+                player.playWhenReady = true
+                armTrackSelections()
+            } finally {
+                sessionOpensInFlight--
             }
-            if (!stallGuard.isCurrent(requestVersion)) {
-                vm.endHlsSession(hls.session_id)
-                return@launch
-            }
-            // Update the same-rung budget: the budget counts consecutive
-            // reopen responses that do NOT resolve a strictly lower rung than
-            // the predecessor (same rung, absent/zero height, or a higher
-            // rung).  A genuine strict downgrade resets the count.
-            // Absent or zero height counts as no step down — it is the server
-            // saying "this session is already at its answer" without a rung
-            // the client can compare.
-            stallReopenBudget.record(hls.height)
-            sessionId = hls.session_id
-            beginPlaybackControl(hls)
-            startStatusPolling(hls.session_id)
-            encoder = hls.encoder
-            sessionIsVod = hls.vod
-            hls.delivered_dynamic_range?.let { deliveredRange = it }
-            val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
-            baseMs = timeline.baseMs
-            activeMediaPath = relativeMediaPath(hls.playlist_url)
-            player.setMediaItem(
-                MediaItem.fromUri(Session.url(hls.playlist_url)),
-                timeline.attachPositionMs,
-            )
-            player.prepare()
-            playbackTelemetry.prepared(attempt)
-            player.playWhenReady = true
-            armTrackSelections()
         }
     }
 
@@ -1576,6 +1624,16 @@ class Controller(
  * carry: the fallback is the branch the whole fleet takes, so this is added to
  * every real stall on every device.
  */
+/**
+ * How long the deferred ladder waits for a session open already in flight.
+ *
+ * Generous, because the alternative to waiting long enough is acting on a
+ * player somebody else is about to re-prepare; and bounded, because the
+ * alternative to a bound is a ladder that never runs when a create hangs.
+ */
+internal const val LADDER_OPEN_WAIT_MS = 10_000L
+internal const val LADDER_OPEN_POLL_MS = 100L
+
 internal const val CONTROL_ASK_MS = 1_500L
 internal const val CONTROL_ASK_CAP_MS = 3_000L
 
@@ -1591,36 +1649,36 @@ internal const val CONTROL_ASK_CAP_MS = 3_000L
 /**
  * Does the deferred compatibility ladder still own the failure it waited on?
  *
- * Three conditions, and the ladder needs all three. It takes the raw inputs
- * rather than three ready-made booleans so that the call site has no logic of
+ * Two conditions, in this order, and the ladder needs both. It takes the raw
+ * inputs rather than ready-made booleans so that the call site has no logic of
  * its own — a predicate that only ANDs what the caller already decided pins
  * nothing.
  *
  * - [released]: `release()` tore the player down. ExoPlayer's `release` does
  *   not clear `playbackError`, so the identity check is no defence here — and
- *   it must not even be *attempted*, which is why [playerError] is a lambda
- *   and why this check comes first.
- * - [openedAt] vs [opensNow]: a session open started while the ask was out, so
- *   a `prepare` this function cannot see synchronously is already coming.
- *   Standing aside for anything wider than that is the dangerous direction: a
- *   VOD seek, a `playPause` and an in-place subtitle change bump no counter
- *   here and re-prepare nothing, and a ladder that stood down for them would
- *   leave a frozen picture with no error and no affordance.
- * - [playerError] identity: the player is still holding this exact exception.
- *   Catches every re-prepare that happened inline — `retryMediaOnNextNode`,
- *   the remux seek arm, the direct-play arm — since `prepare()` is the only
- *   thing that clears `playbackError`.
+ *   it must not even be *attempted*, which is why [current] is a lambda and
+ *   why this check comes first.
+ * - [current] identity: the player is still holding this exact failure.
+ *   `prepare()` is the only thing that clears `playbackError`, so this is a
+ *   complete test for "somebody already re-prepared" — provided the caller has
+ *   first waited out any open still in flight, which is the one re-prepare
+ *   that has not happened yet by the time it is decided.
+ *
+ * Deliberately identity, not equality: `Throwable` does not override `equals`,
+ * but a future one might, and two distinct failures of the same code are two
+ * failures.
+ *
+ * Generic over the failure type so the JVM test lane can exercise it. It reads
+ * `PlaybackException`s in production; constructing one off-device throws,
+ * because media3 stamps every instance with `SystemClock.elapsedRealtime()`.
  */
-internal fun ladderStillOwnsFailure(
+internal fun <T : Any> ladderStillOwnsFailure(
     released: Boolean,
-    openedAt: Long,
-    opensNow: Long,
-    failure: PlaybackException,
-    playerError: () -> PlaybackException?,
+    failure: T,
+    current: () -> T?,
 ): Boolean {
     if (released) return false
-    if (openedAt != opensNow) return false
-    return playerError() === failure
+    return current() === failure
 }
 
 internal fun controlErrorCode(errorCode: Int): ClientErrorCode = when (errorCode) {

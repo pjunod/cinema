@@ -323,28 +323,27 @@ class ControlAskBoundTest {
 /**
  * The compatibility ladder waits on a verdict now, so it resumes into a
  * player that may have moved. These tests pin the SET of conditions it
- * re-checks, because the hazard is not any one of them being wrong — it is a
- * later edit dropping one, which leaves a ladder that restarts a player
- * somebody else already moved, or one that stands aside from a player nobody
- * else is going to fix.
+ * re-checks and their ORDER, because the hazard is not any one of them being
+ * wrong — it is a later edit dropping one, which leaves a ladder that
+ * restarts a player somebody else already moved, or one that interrogates a
+ * player that has been torn down.
+ *
+ * The failures here are plain objects rather than `PlaybackException`s: media3
+ * stamps every instance with `SystemClock.elapsedRealtime()`, which throws in
+ * this lane. The predicate is generic for exactly that reason.
  */
 class LadderOwnershipTest {
 
-    private val failure = PlaybackException(
-        "failed",
-        null,
-        PlaybackException.ERROR_CODE_DECODING_FAILED,
-    )
+    private class Failure(val name: String)
 
     @Test
-    fun theLadderProceedsWhenNothingHasMoved() {
+    fun theLadderOwnsAFailureThePlayerIsStillHolding() {
+        val failure = Failure("decoder")
         assertTrue(
             ladderStillOwnsFailure(
                 released = false,
-                openedAt = 4L,
-                opensNow = 4L,
                 failure = failure,
-                playerError = { failure },
+                current = { failure },
             ),
         )
     }
@@ -353,90 +352,47 @@ class LadderOwnershipTest {
      * `release()` tore the player down. ExoPlayer's `release` does not clear
      * `playbackError`, so the identity check would pass on a dead player —
      * and the lambda must not even be reached, because everything that reads
-     * a released ExoPlayer is reading freed state.
+     * a released ExoPlayer is reading freed state. This is what pins the
+     * ORDER: move the released check below the identity read and this fails.
      */
     @Test
     fun aReleasedPlayerIsNeverEvenAsked() {
+        val failure = Failure("decoder")
         var asked = false
         assertFalse(
             ladderStillOwnsFailure(
                 released = true,
-                openedAt = 4L,
-                opensNow = 4L,
                 failure = failure,
-                playerError = { asked = true; failure },
+                current = { asked = true; failure },
             ),
         )
         assertFalse("a released player must not be interrogated", asked)
     }
 
-    /**
-     * A session open started while the ask was out, so a `prepare` this
-     * function cannot see synchronously is already coming — and `playerError`
-     * is unchanged until it lands, so this is the only check that sees it.
-     */
+    /** Somebody re-prepared: `prepare()` is the only thing that clears it. */
     @Test
-    fun aSessionOpenInFlightStopsTheLadderWhilePlayerErrorIsUnchanged() {
+    fun aClearedErrorStopsTheLadder() {
         assertFalse(
             ladderStillOwnsFailure(
                 released = false,
-                openedAt = 4L,
-                opensNow = 5L,
-                failure = failure,
-                playerError = { failure },
+                failure = Failure("decoder"),
+                current = { null },
             ),
         )
     }
 
     /**
-     * The dangerous direction. A VOD seek, a `playPause` and an in-place
-     * subtitle change re-prepare nothing, so they must NOT look like a session
-     * open — a ladder that stood down for one would leave a frozen picture
-     * with no error and no affordance for the life of the screen.
+     * Identity, not equality. Two failures of the same shape are two failures,
+     * and a `Throwable` subclass that grew an `equals` must not start hiding
+     * the second one behind the first.
      */
     @Test
-    fun anActionThatRePreparesNothingLeavesTheLadderInCharge() {
-        assertTrue(
-            ladderStillOwnsFailure(
-                released = false,
-                openedAt = 7L,
-                opensNow = 7L,
-                failure = failure,
-                playerError = { failure },
-            ),
-        )
-    }
-
-    /** Anything that re-prepared inline: `prepare()` clears `playbackError`. */
-    @Test
-    fun aRePreparedPlayerStopsTheLadderEvenWithNoSessionOpen() {
+    fun aDistinctFailureOfTheSameShapeIsNotThisOne() {
         assertFalse(
             ladderStillOwnsFailure(
                 released = false,
-                openedAt = 4L,
-                opensNow = 4L,
-                failure = failure,
-                playerError = { null },
-            ),
-        )
-    }
-
-    /** A different failure is a different failure, not this one. */
-    @Test
-    fun aDifferentExceptionIsNotThisOne() {
-        assertFalse(
-            ladderStillOwnsFailure(
-                released = false,
-                openedAt = 4L,
-                opensNow = 4L,
-                failure = failure,
-                playerError = {
-                    PlaybackException(
-                        "failed",
-                        null,
-                        PlaybackException.ERROR_CODE_DECODING_FAILED,
-                    )
-                },
+                failure = Failure("decoder"),
+                current = { Failure("decoder") },
             ),
         )
     }
