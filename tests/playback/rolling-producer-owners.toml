@@ -954,11 +954,13 @@ expected_occurrences = 9
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-# 347 since M2: the Dolby Vision facts backfill is spawned from the per-tick
+# 348 since M2: the Dolby Vision facts backfill is spawned from the per-tick
 # maintenance block beside the genre backfill. It is a leased catalogue job
 # (`catalogue:dv-facts`) that walks a node-local cursor and writes columns —
 # it owns no producer, no process, and no timer of its own.
-expected_occurrences = 347
+# The additional spawn is confined to the HTTP marker race fixture: its join
+# handle is awaited inside the test and it owns no shipped producer or process.
+expected_occurrences = 348
 
 [[module_structures]]
 id = "method-spawn"
@@ -991,7 +993,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # background requests into the unified queue, whose leased resolver owns the
 # one shared attestation deadline. The discovery-only polling helper left with
 # that direct execution path as well.
-expected_occurrences = 503
+# 505 with the HTTP marker race fixture: two test-only timeouts bound the two
+# halves of its deterministic barrier, and the spawned handle is always joined.
+expected_occurrences = 505
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1051,7 +1055,9 @@ id = "process-lifecycle-method"
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +3: the bounded chapter probe kills and reaps oversized output, and reaps
 # ordinary completion. Cancellation/deadline drops the kill-on-drop child.
-expected_occurrences = 296
+# +4: the HTTP marker race fixture's two-party barrier calls `wait` four times;
+# these are in-process test synchronization, not child-process lifecycle calls.
+expected_occurrences = 300
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
