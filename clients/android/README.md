@@ -21,9 +21,9 @@ has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
 > Status: **v0.2.8**, build `57` — native viewer parity across phone, foldable,
-> and TV. Build 57 ends the compatibility ladder on a server verdict, so a
-> source the producer has ruled out costs one player prepare instead of
-> three. Build 46 accepts the temporary live-HLS recovery presentation while
+> and TV. Build 57 skips the unchanged-recipe retry when the server has
+> already ruled that recipe out, which is the only rung its verdict
+> licenses skipping. Build 46 accepts the temporary live-HLS recovery presentation while
 > immutable VOD indexes are backfilled. Build 44
 > retries a stalled stream through another cluster node's
 > ingress without moving the account origin or spending the codec-compatibility

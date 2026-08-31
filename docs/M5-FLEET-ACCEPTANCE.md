@@ -22,8 +22,8 @@ client build carrying it has ever run on hardware.
 |---|---|---|
 | server (emits the actions) | yes | three nodes on `v0.2.8-106-g55abad8f`, nynuc on a later untagged build |
 | web (served by the node) | yes | **whatever those nodes serve** — a server deploy ships the web client with it |
-| Apple | build **99** | build 86 |
-| Android | versionCode **56** | 47 |
+| Apple | build **100** | build 86 |
+| Android | versionCode **57** | 47 |
 
 The web row is the useful one: **deploying the server deploys the web client**,
 so one action gets a full-vocabulary client onto the fleet without touching a
@@ -69,7 +69,7 @@ touched — that is the cluster quorum boundary and it is not optional. Deploy
 after the tag exists, or each node stamps itself `v0.2.8-N-g…` instead of the
 release.
 
-**Mobile.** Apple build 99 and Android versionCode 56, to the named roster:
+**Mobile.** Apple build 100 and Android versionCode 57, to the named roster:
 Pixel 11 Pro XL · Motorola razr ultra 2025 · Xiaomi 25019PNF3C, plus the TCL
 9445X when it is online, and whatever `xcrun devicectl list devices` reports.
 `scripts/ship-physical` is the path that works when the Ansible controller

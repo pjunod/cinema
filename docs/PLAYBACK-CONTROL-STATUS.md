@@ -55,7 +55,7 @@ merge target: two client PRs in flight means the second always fails.
 | ask exits | Apple: read the answer slot at every exit | [#719](https://github.com/pjunod/plurx/pull/719) | merged |
 | acceptance | what a fleet run has to show | [#720](https://github.com/pjunod/plurx/pull/720) | merged |
 | M5e ladder | Apple: ask before walking the compatibility ladder | [#721](https://github.com/pjunod/plurx/pull/721) | merged |
-| M5g ladder | Android: end the ladder on an armed verdict | this change | open |
+| M5g ladder | Android: skip the unchanged retry on an armed verdict | this change | open |
 
 **What is left in M5, and what each is waiting for.** The two ladder slices are
 the last buildable M5 work; once they land, M5c and M5h — deleting the web and
@@ -87,14 +87,44 @@ client can currently answer.
 
 So Android arms rather than awaits. `reportControlEvidence` notifies the
 reporter urgently, the exchange carrying the failure goes out immediately, and
-the verdict it earns lands in `terminalVerdict` — where the *next* rung reads
-it. The ladder ends one rung later than Apple's and saves two prepares of
-three instead of three of three, and it cannot reorder anything.
+the verdict it earns lands in `terminalVerdict`, where a later rung reads it —
+without a coroutine, and without reordering anything.
 
 **What this leaves owed.** Making `openSession` publish its outcome
 (prepared · aborted · already reported) is the prerequisite for any deferred
 decision on Android, and M6's `buffered_break_before_make` will need it too.
 It is not in M5's scope and is recorded here rather than attempted.
+
+### A terminal verdict is recipe-scoped, and both ladder slices assumed source-scoped
+
+Found by the fifth review pass, and the more consequential of the two findings
+in this section.
+
+`terminal` is emitted only for `Unsupported` and `InvalidConfiguration`
+(`playback_control.rs` `resolve_action` → `is_permanent`), and `is_permanent`
+documents itself as *"whether retrying this source, **unchanged**, can ever
+succeed"*. `unsupported`'s own sentence is "this source cannot be carried by
+**this delivery pipeline**" — a copy-producer exit. The server treats it as
+recoverable by changing the pipeline: `execute_prepublication_copy_retry` is
+admitted for exactly this reason.
+
+The compatibility ladder's last two rungs *change the recipe*. A Dolby Vision
+remux and a compatibility transcode both ask the server for a different
+pipeline, and `forceCompatibilityTranscode` flips `copyableVideo` to false. So
+a `terminal` verdict does not rule them out — and a client that short-circuits
+them deletes the rung most likely to still produce a picture, then captions the
+failure with a sentence about a pipeline nobody is proposing any more.
+
+Only `RetrySameHDRDelivery` re-prepares the identical recipe, so that is the
+one rung the verdict licenses skipping. This slice is scoped to it.
+
+**Owed on Apple.** [#721](https://github.com/pjunod/plurx/pull/721) merged with
+the short-circuit ahead of the whole ladder, so it has this defect: an
+`unsupported` copy exit now ends playback on Apple where the compatibility
+transcode would have played. It is a two-line narrowing — move the check into
+the ladder step that retries unchanged — and it should land before the fleet
+run, because the acceptance procedure's item 3 is precisely a source the
+producer refuses.
 
 ## The gate that blocks every deletion, and what it does not block
 
@@ -150,7 +180,12 @@ blocks the slices now in flight; each shapes M6.
 6. What interruption bound is acceptable for `buffered_break_before_make`?
    Its acceptance criterion is "within its measured interruption bound", and
    nobody has measured or chosen one.
-7. Should Android's session opens publish an outcome, so a client decision can
+7. Should the two ladder slices short-circuit anything but the unchanged
+   retry? **Answered: no** — a `terminal` verdict is recipe-scoped, see above.
+   Android is scoped to `RetrySameHDRDelivery`; **Apple is not yet, and #721 is
+   already merged**. Decided without the operator, and the one to look at
+   first.
+8. Should Android's session opens publish an outcome, so a client decision can
    be deferred there at all? Decided *not* to attempt it inside M5 — see
    §"Why Android does not await the verdict" above. Decided without the
    operator, and the one worth a second look: it is the difference between the
