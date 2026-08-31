@@ -572,3 +572,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.k
 source_anchor = "internal fun sessionHDR10Request("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
 test_anchor = "compatibilityRescueAndBurnNeverRepeatTheReplacedHdr10Plan"
+
+[[fixes]]
+id = "native.apple-session-recipe-hdr10"
+commits = ["8d3ed9e6"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "nonisolated static func sessionHDR10Request("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testManualQualityTranscodePreservesDirectOrRemuxHDR10Decision"
