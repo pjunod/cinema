@@ -2554,12 +2554,31 @@ protocol.
 
 An incomplete cluster read leads with **Activity incomplete**. The page names
 each known voter that was unhealthy, unreachable, timed out, or returned an
-invalid response, and states that streams on those nodes may be missing. A peer
+invalid response. It also distinguishes a voter that **refused the activity
+request** (HTTP 401/403) from one that **returned an HTTP error**. The latter
+means the server answered; it is not a network-reachability claim. A peer
 directory failure is visible by the same rule. Do not read a short table below
 that warning as proof that the cluster is idle; restore the named voter or the
 cluster directory and wait for the next three-second refresh. Ordinary SQLite
 and never-joined installations perform no peer read and retain the historical
 payload and page behavior.
+
+The process-only `/metrics` counters separate sender fanout/reuse, peer
+outcomes, and receiver authentication pressure. Interpret a rising `refused`
+peer outcome beside the receiver counters as follows:
+
+- `plurx_cluster_activity_auth_admission_refusals_total` also rises: the
+  receiver verified the sender, then denied its per-sender live-authority burst.
+- `plurx_cluster_activity_key_lookup_refusals_total` also rises: cold or
+  evicted signing-key pressure, or forged traffic naming keys that are absent.
+- neither rises: inspect the receiver for clock skew beyond the 30-second
+  window, an invalid key or proof, lost voter authority, or another receiver
+  authentication error.
+
+`plurx_cluster_activity_aggregations_total{path="fanout|reuse|directory_error"}`
+and `plurx_cluster_activity_peer_outcomes_total{outcome="..."}` use fixed
+labels only. Scraping them does not read the Store or acquire the Activity
+read gate.
 
 ## Reading library scan status
 

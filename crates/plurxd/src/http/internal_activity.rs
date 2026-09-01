@@ -6,6 +6,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
@@ -25,6 +27,7 @@ use crate::state::AppState;
 pub const PATH: &str = "/_internal/v1/activity-snapshot";
 #[allow(dead_code)] // aggregation child #326 calls the pre-wired client
 pub const TIMEOUT: Duration = Duration::from_secs(2);
+const ACTIVITY_SNAPSHOT_REUSE: Duration = Duration::from_secs(1);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 // A saturated delivery list must not erase every analysis row from a peer's
 // Activity snapshot. Reserve one quarter of the shared wire budget whenever
@@ -67,7 +70,77 @@ pub enum PeerActivityOutcome {
     Unhealthy,
     Unreachable,
     TimedOut,
+    Refused,
+    HttpError,
     InvalidResponse,
+}
+
+pub type SharedPeerActivity = Arc<[(String, PeerActivityOutcome)]>;
+
+#[derive(Default)]
+struct PeerActivityReadGate {
+    last_started: Option<tokio::time::Instant>,
+    completed: Option<(tokio::time::Instant, SharedPeerActivity)>,
+}
+
+static ACTIVITY_AGGREGATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+static ACTIVITY_PEER_OUTCOMES: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+fn record_aggregation(path: usize) {
+    ACTIVITY_AGGREGATIONS[path].fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_peer_outcome(outcome: &PeerActivityOutcome) {
+    let slot = match outcome {
+        PeerActivityOutcome::Answered(_) => 0,
+        PeerActivityOutcome::Unhealthy => 1,
+        PeerActivityOutcome::Unreachable => 2,
+        PeerActivityOutcome::TimedOut => 3,
+        PeerActivityOutcome::Refused => 4,
+        PeerActivityOutcome::HttpError => 5,
+        PeerActivityOutcome::InvalidResponse => 6,
+    };
+    ACTIVITY_PEER_OUTCOMES[slot].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Render process-lifetime Activity fanout and peer-outcome counters.
+///
+/// This reads atomics only: scraping `/metrics` never acquires the Activity
+/// gate, resolves membership, or touches the Store.
+#[must_use]
+pub fn prometheus_cluster_activity() -> String {
+    let mut out = String::from(
+        "# HELP plurx_cluster_activity_aggregations_total Cluster Activity aggregations by execution path.\n\
+         # TYPE plurx_cluster_activity_aggregations_total counter\n",
+    );
+    for (slot, path) in ["fanout", "reuse", "directory_error"].iter().enumerate() {
+        out.push_str(&format!(
+            "plurx_cluster_activity_aggregations_total{{path=\"{path}\"}} {}\n",
+            ACTIVITY_AGGREGATIONS[slot].load(Ordering::Relaxed)
+        ));
+    }
+    out.push_str(
+        "# HELP plurx_cluster_activity_peer_outcomes_total Physical Activity peer reads by typed outcome.\n\
+         # TYPE plurx_cluster_activity_peer_outcomes_total counter\n",
+    );
+    for (slot, outcome) in [
+        "answered",
+        "unhealthy",
+        "unreachable",
+        "timed_out",
+        "refused",
+        "http_error",
+        "invalid_response",
+    ]
+    .iter()
+    .enumerate()
+    {
+        out.push_str(&format!(
+            "plurx_cluster_activity_peer_outcomes_total{{outcome=\"{outcome}\"}} {}\n",
+            ACTIVITY_PEER_OUTCOMES[slot].load(Ordering::Relaxed)
+        ));
+    }
+    out
 }
 
 #[allow(dead_code)] // wired now so #326 does not need state/main territory
@@ -75,6 +148,7 @@ pub enum PeerActivityOutcome {
 pub struct PeerActivityClient {
     membership: plurx_core::cluster::membership::MembershipManager,
     transport: PeerTransport,
+    reads: Arc<tokio::sync::Mutex<PeerActivityReadGate>>,
 }
 
 #[allow(dead_code)]
@@ -84,26 +158,42 @@ impl PeerActivityClient {
         Self {
             transport: PeerTransport::new(membership.clone()),
             membership,
+            reads: Arc::new(tokio::sync::Mutex::new(PeerActivityReadGate::default())),
         }
     }
 
-    pub async fn snapshots(&self) -> Result<Vec<(String, PeerActivityOutcome)>, MembershipError> {
-        let peers = self.membership.activity_peers().await?;
+    pub async fn snapshots(&self) -> Result<SharedPeerActivity, MembershipError> {
         let client = self.clone();
-        let deadline = deadline_after(TIMEOUT);
-        Ok(collect_peer_outcomes(peers, deadline, move |peer| {
-            let client = client.clone();
-            async move {
-                if !peer.reachable {
-                    PeerActivityOutcome::Unhealthy
-                } else if let Some(http_base) = peer.http_base {
-                    client.snapshot(&peer.node_id, &http_base, deadline).await
-                } else {
-                    PeerActivityOutcome::Unreachable
+        shared_peer_activity(&self.reads, move || async move {
+            let peers = match client.membership.activity_peers().await {
+                Ok(peers) => peers,
+                Err(error) => {
+                    record_aggregation(2);
+                    return Err(error);
                 }
+            };
+            record_aggregation(0);
+            let deadline = deadline_after(TIMEOUT);
+            let fetcher = client.clone();
+            let outcomes = collect_peer_outcomes(peers, deadline, move |peer| {
+                let fetcher = fetcher.clone();
+                async move {
+                    if !peer.reachable {
+                        PeerActivityOutcome::Unhealthy
+                    } else if let Some(http_base) = peer.http_base {
+                        fetcher.snapshot(&peer.node_id, &http_base, deadline).await
+                    } else {
+                        PeerActivityOutcome::Unreachable
+                    }
+                }
+            })
+            .await;
+            for (_, outcome) in &outcomes {
+                record_peer_outcome(outcome);
             }
+            Ok(outcomes)
         })
-        .await)
+        .await
     }
 
     async fn snapshot(
@@ -126,13 +216,55 @@ impl PeerActivityClient {
             )
             .await
         {
-            Ok(response) if response.status.is_success() => {
-                decode_snapshot(&response.body, expected_node_id)
+            Ok(response) => {
+                classify_snapshot_response(response.status, &response.body, expected_node_id)
             }
             Err(PeerTransportError::TimedOut) => PeerActivityOutcome::TimedOut,
             Err(PeerTransportError::InvalidResponse) => PeerActivityOutcome::InvalidResponse,
-            Ok(_) | Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
+            Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
         }
+    }
+}
+
+async fn shared_peer_activity<F, Fut>(
+    gate: &tokio::sync::Mutex<PeerActivityReadGate>,
+    fetch: F,
+) -> Result<SharedPeerActivity, MembershipError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Vec<(String, PeerActivityOutcome)>, MembershipError>>,
+{
+    let mut gate = gate.lock().await;
+    let now = tokio::time::Instant::now();
+    if let Some((completed_at, snapshot)) = &gate.completed {
+        if now.saturating_duration_since(*completed_at) < ACTIVITY_SNAPSHOT_REUSE {
+            record_aggregation(1);
+            return Ok(Arc::clone(snapshot));
+        }
+    }
+    if let Some(last_started) = gate.last_started {
+        tokio::time::sleep_until(last_started + ACTIVITY_SNAPSHOT_REUSE).await;
+    }
+    // Reserve the physical start before the first fallible await. If this
+    // caller is cancelled, the mutex is released but a successor still honors
+    // the receiver-load floor.
+    gate.last_started = Some(tokio::time::Instant::now());
+    let snapshot: SharedPeerActivity = fetch().await?.into();
+    gate.completed = Some((tokio::time::Instant::now(), Arc::clone(&snapshot)));
+    Ok(snapshot)
+}
+
+fn classify_snapshot_response(
+    status: StatusCode,
+    body: &[u8],
+    expected_node_id: &str,
+) -> PeerActivityOutcome {
+    if status.is_success() {
+        decode_snapshot(body, expected_node_id)
+    } else if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        PeerActivityOutcome::Refused
+    } else {
+        PeerActivityOutcome::HttpError
     }
 }
 
@@ -755,6 +887,147 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(titles.len(), MAX_DELIVERIES);
     }
+
+    #[test]
+    fn http_failures_are_not_reported_as_transport_failures() {
+        let body = serde_json::to_vec(&ActivitySnapshot {
+            node_id: "node-b".to_owned(),
+            deliveries: Vec::new(),
+            analysis: Vec::new(),
+        })
+        .expect("snapshot JSON");
+        assert_eq!(
+            classify_snapshot_response(StatusCode::UNAUTHORIZED, &body, "node-b"),
+            PeerActivityOutcome::Refused
+        );
+        assert_eq!(
+            classify_snapshot_response(StatusCode::FORBIDDEN, &body, "node-b"),
+            PeerActivityOutcome::Refused
+        );
+        assert_eq!(
+            classify_snapshot_response(StatusCode::SERVICE_UNAVAILABLE, &body, "node-b"),
+            PeerActivityOutcome::HttpError
+        );
+        assert_eq!(
+            classify_snapshot_response(StatusCode::OK, &body, "node-c"),
+            PeerActivityOutcome::InvalidResponse
+        );
+        assert_eq!(
+            classify_snapshot_response(StatusCode::OK, b"not JSON", "node-b"),
+            PeerActivityOutcome::InvalidResponse
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_completed_peer_wave_is_shared_then_refreshed() {
+        let gate = Arc::new(tokio::sync::Mutex::new(PeerActivityReadGate::default()));
+        let physical = Arc::new(AtomicUsize::new(0));
+        let mut callers = Vec::new();
+        for _ in 0..8 {
+            let gate = Arc::clone(&gate);
+            let physical = Arc::clone(&physical);
+            callers.push(tokio::spawn(async move {
+                shared_peer_activity(&gate, || async move {
+                    physical.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![("node-b".to_owned(), PeerActivityOutcome::Unhealthy)])
+                })
+                .await
+                .expect("shared Activity read")
+            }));
+        }
+        let mut snapshots = Vec::new();
+        for caller in callers {
+            snapshots.push(caller.await.expect("caller task"));
+        }
+        assert_eq!(physical.load(Ordering::SeqCst), 1);
+        assert!(snapshots
+            .windows(2)
+            .all(|pair| Arc::ptr_eq(&pair[0], &pair[1])));
+
+        tokio::time::advance(ACTIVITY_SNAPSHOT_REUSE - Duration::from_millis(1)).await;
+        let before_expiry = shared_peer_activity(&gate, || async {
+            physical.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![("node-b".to_owned(), PeerActivityOutcome::Unhealthy)])
+        })
+        .await
+        .expect("cached Activity read");
+        assert!(Arc::ptr_eq(&snapshots[0], &before_expiry));
+        assert_eq!(physical.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let after_expiry = shared_peer_activity(&gate, || async {
+            physical.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![("node-b".to_owned(), PeerActivityOutcome::Unhealthy)])
+        })
+        .await
+        .expect("fresh Activity read");
+        assert!(!Arc::ptr_eq(&snapshots[0], &after_expiry));
+        assert_eq!(physical.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_owner_keeps_the_physical_start_floor() {
+        let gate = Arc::new(tokio::sync::Mutex::new(PeerActivityReadGate::default()));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let leader_gate = Arc::clone(&gate);
+        let leader_started = Arc::clone(&started);
+        let leader = tokio::spawn(async move {
+            let _ = shared_peer_activity(&leader_gate, || async move {
+                leader_started.notify_one();
+                std::future::pending::<Result<Vec<(String, PeerActivityOutcome)>, MembershipError>>(
+                )
+                .await
+            })
+            .await;
+        });
+        started.notified().await;
+        leader.abort();
+        let _ = leader.await;
+
+        let physical = Arc::new(AtomicUsize::new(0));
+        let follower_gate = Arc::clone(&gate);
+        let follower_physical = Arc::clone(&physical);
+        let follower = tokio::spawn(async move {
+            shared_peer_activity(&follower_gate, || async move {
+                follower_physical.fetch_add(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(physical.load(Ordering::SeqCst), 0);
+        tokio::time::advance(ACTIVITY_SNAPSHOT_REUSE - Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(physical.load(Ordering::SeqCst), 0);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        follower
+            .await
+            .expect("follower task")
+            .expect("follower Activity read");
+        assert_eq!(physical.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn activity_metrics_publish_only_fixed_bounded_labels() {
+        let metrics = prometheus_cluster_activity();
+        for path in ["fanout", "reuse", "directory_error"] {
+            assert!(metrics.contains(&format!("path=\"{path}\"")));
+        }
+        for outcome in [
+            "answered",
+            "unhealthy",
+            "unreachable",
+            "timed_out",
+            "refused",
+            "http_error",
+            "invalid_response",
+        ] {
+            assert!(metrics.contains(&format!("outcome=\"{outcome}\"")));
+        }
+        assert!(!metrics.contains("node_id="));
+        assert!(!metrics.contains("hostname="));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn ninth_peer_cannot_extend_the_common_deadline() {
         let peers = (0..9)

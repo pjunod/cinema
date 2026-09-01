@@ -191,6 +191,21 @@ test("an unnamed peer is still named by its id in the banner", () => {
   assert.match(html, /Node 9a1c77e2-0000-4000-8000-aa5f912f327f · timed out/);
 });
 
+test("authentication refusals and HTTP failures stay distinct in the banner", () => {
+  const html = paint(
+    snapshot({
+      node_hostnames: { [NODE_A]: "nuc3", [NODE_B]: "m6" },
+      activity_nodes: [
+        { node_id: NODE_A, status: "refused" },
+        { node_id: NODE_B, status: "http_error" },
+      ],
+    }),
+  );
+  assert.match(html, /Node nuc3 · refused the activity request/);
+  assert.match(html, /Node m6 · returned an HTTP error/);
+  assert.doesNotMatch(html, /Node (nuc3|m6) · unreachable/);
+});
+
 test("the peer directory keeps its own sentence when no node can be named", () => {
   const html = paint(
     snapshot({ activity_nodes: [{ status: "unavailable" }] }),

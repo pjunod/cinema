@@ -11215,6 +11215,7 @@ function activityNodeFailures(d){
 }
 function activityNodeStatusText(status){
   return ({unhealthy:"unhealthy",unreachable:"unreachable",timed_out:"timed out",
+    refused:"refused the activity request",http_error:"returned an HTTP error",
     invalid_response:"sent an invalid response",unavailable:"directory unavailable"})[status]||"unavailable";
 }
 // A node id is stable but names nothing: nobody recognizes a machine from
