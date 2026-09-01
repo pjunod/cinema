@@ -26,9 +26,15 @@ services:
     #   - media
 
     volumes:
+      # Read-only is the safe default. Permanent on-disk Dolby Vision
+      # conversion must remain Off for these libraries. If you explicitly opt
+      # one library into conversion, follow deploy/README.md first, then mount
+      # only that exact library at a separate container path with :rw. Do not
+      # turn this whole media root writable.
       - /mnt/qnap/media:/media:ro
       # - /mnt/qnap/20t:/mnt/qnap/20t:ro
       # - /mnt/qnap/8tb:/mnt/qnap/8tb:ro
+      # - /mnt/qnap/media/dv-conversion:/media-dv-conversion:rw
       # Optional cluster shared-cache mount. Use the same underlying writable
       # filesystem and PLURX_SHARED_CACHE_ID on every participating voter;
       # the container path itself may differ between hosts.

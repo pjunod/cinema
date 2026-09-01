@@ -548,6 +548,34 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RawBeginBatch,
         shape: TransactionShape::ReadBranchWrite,
     },
+    SqliteTransactionSite {
+        module: "dv_conversion.rs",
+        method: "queue_dv_conversion",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "dv_conversion.rs",
+        method: "queue_library_dv_conversion_batch",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "dv_conversion.rs",
+        method: "begin_dv_recovery_guard",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "dv_conversion.rs",
+        method: "mark_dv_conversion_committed_with_guard",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
 ];
 
 /// hiqlite 0.14.0 `store/state_machine/sqlite/state_machine.rs:401-510`
@@ -671,6 +699,7 @@ mod tests {
         ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
         ("cache.rs", include_str!("sqlite/cache.rs")),
         ("coordination.rs", include_str!("sqlite/coordination.rs")),
+        ("dv_conversion.rs", include_str!("sqlite/dv_conversion.rs")),
         ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
         (
             "fragment_index_cluster.rs",
@@ -794,7 +823,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 59);
+        assert_eq!(methods.len(), 63);
     }
 
     #[test]

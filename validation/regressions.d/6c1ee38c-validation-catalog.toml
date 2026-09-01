@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6c1ee38c"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The history audit verifies that the preceding governed Store change is linked to its retained current checks."

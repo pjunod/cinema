@@ -2618,6 +2618,9 @@ impl MediaStore for HiqliteAuthStore {
                 "DELETE FROM files \
                  WHERE item_id IN (SELECT id FROM items WHERE library_id = $1) \
                    AND id IN (SELECT value FROM json_each($2)) \
+                   AND NOT EXISTS (SELECT 1 FROM dv_conversions d \
+                                   WHERE d.file_id = files.id \
+                                     AND d.state IN ('running', 'verified')) \
                    AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1)"
                     .to_owned(),
                 params!(library_id, &gone_file_ids),

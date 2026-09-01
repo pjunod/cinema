@@ -1,6 +1,6 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-31 · **Baseline:** `main` at `347d7457` ·
+**Updated:** 2026-08-31 · **Baseline:** `main` at `e1876cce` (`v0.3.0`) ·
 **Fleet:** nuc3 · nuc4 · m6 serve `v0.2.8-106-g55abad8f`; nynuc serves a
 later untagged build · **Devices:** Apple 99 and Android 56 were **installed**
 on 2026-08-31 and neither has produced a control exchange — see
@@ -69,7 +69,9 @@ merge target: two client PRs in flight means the second always fails.
 | spike lock | catch the stranded lockfile in the fast lane, not in CI | [#733](https://github.com/pjunod/plurx/pull/733) | merged |
 | browser gate | two real exchanges, in real Chromium, in CI | [#729](https://github.com/pjunod/plurx/pull/729) | merged |
 | acceptance | read the commit and the builds, do not quote them | [#734](https://github.com/pjunod/plurx/pull/734) | merged |
-| status | what item 8 actually delivered, and the M5.5 store half | — | this change |
+| status | what item 8 actually delivered, and the M5.5 store half | [#735](https://github.com/pjunod/plurx/pull/735) | merged |
+| release | v0.3.0: the API, the config and both schemas moved | [#736](https://github.com/pjunod/plurx/pull/736) | merged |
+| prewarm | withhold a rate that has no possible numerator | [#738](https://github.com/pjunod/plurx/pull/738) | this change |
 
 **What item 8 did not deliver.** §6 item 8 names five things: exact
 intro/credits annotations, subtitle windows, force-analysis controls,
@@ -99,6 +101,28 @@ index side — [CONTENT-ANALYSIS-INDEX-HANDOFF.md](CONTENT-ANALYSIS-INDEX-HANDOF
 §6.1 forbids that branch from touching `playback_control.rs`, and §4.5 defers
 actor-side consumption to this programme. The counter is waiting for a consumer
 this programme owes it.
+
+**The gauge is no longer published until a hit is observed.** A rate with no
+possible numerator is not a measurement, and the single value `0.000000` was
+carrying two unrelated facts — nothing prewarms, and this node has served no
+marker skip since boot. The counters still carry every miss, so nothing is
+lost and the quotient stays derivable; what is withheld is the server's claim
+to have measured a rate. The gauge appears the first time a hit is recorded,
+which is exactly when it starts meaning something.
+
+Two rejected approaches are worth recording as non-goals, because both were
+tried here:
+
+- **Redefining `"hit"`** as "the destination was already in the client's
+  ordinary forward playback buffer". On direct play a browser buffers minutes
+  ahead, so the ratio degenerates into a proxy for which transport served the
+  skip — a fact the transport labels already carry — and an unbuilt feature
+  starts reading as a working one. Worse than the zero, by exactly the
+  argument that motivated changing it.
+- **Explaining the zero in the metric's `HELP` text.** Prometheus drops `HELP`
+  on remote write and federation and the query API does not return it, so the
+  only reader reached is someone curling `/metrics` by hand — the reader least
+  likely to be confused. A label on the trap is not a fix for it.
 
 **What is left in M5.** Nothing buildable. M5c and M5h — deleting the web and
 mobile budgets — are all that remains, and both are gated on

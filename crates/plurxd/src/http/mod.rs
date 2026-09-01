@@ -13,6 +13,7 @@ pub(crate) mod cluster_operations;
 pub mod comingsoon;
 pub use comingsoon::ComingSoonCache;
 mod dto;
+mod dv_disk;
 mod error;
 mod extract;
 mod hls;
@@ -202,6 +203,11 @@ pub fn router(state: AppState) -> Router {
         .route("/libraries/{id}/schedule", put(libraries::set_schedule))
         .route("/libraries/{id}/scan", post(libraries::scan))
         .route("/libraries/{id}/refresh", post(libraries::refresh))
+        .route("/libraries/{id}/dv-conversion", put(dv_disk::set_mode))
+        .route(
+            "/libraries/{id}/dv-conversions",
+            post(dv_disk::queue_library),
+        )
         .route(
             "/libraries/{id}/root-identity/reset",
             post(libraries::reset_root_identity),
@@ -212,6 +218,11 @@ pub fn router(state: AppState) -> Router {
         .route("/items/{id}/reanalyze", post(items::reanalyze))
         .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
         .route("/files/{id}/analysis", post(analysis::request))
+        .route(
+            "/files/{id}/dv-conversion",
+            get(dv_disk::file_status).post(dv_disk::queue_file),
+        )
+        .route("/dv-conversions", get(dv_disk::status))
         .route(
             "/files/{id}/timeline-annotations/{kind}",
             put(analysis::set_manual_annotation).delete(analysis::discard_manual_annotation),
@@ -4897,6 +4908,36 @@ mod tests {
         (router(state.clone()), state)
     }
 
+    fn test_state_with_dv_disk_tools() -> (Router, AppState) {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let base = crate::test_temp_path(format!("plurx-dv-api-{}", uuid::Uuid::new_v4()));
+        let available = |command: &str, version: &str| crate::dv_disk::ToolCapability {
+            command: command.to_owned(),
+            version: Some(version.to_owned()),
+            available: true,
+            reason: None,
+        };
+        let system = crate::state::SystemInfo {
+            dv_disk: crate::dv_disk::DvDiskCapabilities {
+                available: true,
+                dovi_tool: available("dovi_tool", "dovi_tool 2.3.3"),
+                mkvmerge: available("mkvmerge", "mkvmerge v74.0.0"),
+                reason: None,
+            },
+            ..Default::default()
+        };
+        let state = AppState::new(
+            "test".into(),
+            Arc::new(store),
+            test_dirs(&base),
+            "test-node".into(),
+            Default::default(),
+            system,
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        (router(state.clone()), state)
+    }
+
     fn test_state_with_pgs_overlay() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = crate::test_temp_path(format!("plurx-pgs-api-{}", uuid::Uuid::new_v4()));
@@ -4911,6 +4952,471 @@ mod tests {
         );
         state.pgs_overlay_enabled = true;
         (router(state.clone()), state)
+    }
+
+    #[tokio::test]
+    async fn dv_disk_admin_api_queues_once_and_reports_durable_progress() {
+        use plurx_core::domain::{
+            DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult,
+        };
+
+        let (app, state) = test_state_with_dv_disk_tools();
+        let admin = setup_admin(&app).await;
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Dolby Vision discs".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![std::path::PathBuf::from("/dv-api")],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let movie = state
+            .store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Profile 7 API contract".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("movie");
+        let probe = ProbeResult {
+            container: Some("mkv".into()),
+            dolby_vision: DolbyVisionFacts {
+                profile: Some(7),
+                bl_compat_id: Some(6),
+                el_present: Some(true),
+                rpu_present: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let file = state
+            .store
+            .upsert_file(movie, "/dv-api/profile7.mkv", 8_000, 100, &probe)
+            .await
+            .expect("file");
+
+        assert_eq!(
+            call(&app, get("/api/v1/dv-conversions", None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, viewer_login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{viewer_login}");
+        let viewer = viewer_login["token"].as_str().expect("viewer token");
+        assert_eq!(
+            call(&app, get("/api/v1/dv-conversions", Some(viewer)))
+                .await
+                .0,
+            StatusCode::FORBIDDEN,
+            "recovery paths remain admin-only"
+        );
+        let (status, initial) = call(&app, get("/api/v1/dv-conversions", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["capabilities"]["available"], true);
+        assert_eq!(initial["keep_original"], true);
+        assert_eq!(initial["parallel"], 1);
+        assert_eq!(initial["progress"]["eligible"], 1);
+        assert!(initial["library_modes"][library.id.to_string()].is_null());
+        assert_eq!(
+            initial["progress_by_library"][library.id.to_string()]["eligible"],
+            1
+        );
+
+        let file_uri = format!("/api/v1/files/{file}/dv-conversion");
+        let (status, file_status) = call(&app, get(&file_uri, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{file_status}");
+        assert_eq!(file_status["eligible"], true);
+        assert!(file_status["conversion"].is_null());
+
+        let mode_uri = format!("/api/v1/libraries/{}/dv-conversion", library.id);
+        let library_queue_uri = format!("/api/v1/libraries/{}/dv-conversions", library.id);
+        let (status, off_file) = call(&app, post(&file_uri, Some(&admin), json!({}))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{off_file}");
+        assert_eq!(
+            off_file["error"],
+            plurx_core::store::DV_CONVERSION_MODE_DISABLED_REASON
+        );
+        let (status, off_library) = call(
+            &app,
+            post(
+                &library_queue_uri,
+                Some(&admin),
+                json!({ "retry_failed": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{off_library}");
+        assert_eq!(
+            off_library["error"],
+            plurx_core::store::DV_CONVERSION_MODE_DISABLED_REASON
+        );
+
+        let (status, mode) = call(
+            &app,
+            put(&mode_uri, Some(&admin), json!({ "mode": "manual" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{mode}");
+        assert_eq!(mode["mode"], "manual");
+
+        let (status, queued) = call(&app, post(&file_uri, Some(&admin), json!({}))).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{queued}");
+        assert_eq!(queued["queued"], true);
+        assert_eq!(queued["conversion"]["state"], "queued");
+        let (status, manual_library) = call(
+            &app,
+            post(
+                &library_queue_uri,
+                Some(&admin),
+                json!({ "retry_failed": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{manual_library}");
+        assert_eq!(manual_library["queued"], 0);
+        let (status, idempotent) = call(&app, post(&file_uri, Some(&admin), json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{idempotent}");
+        assert_eq!(idempotent["queued"], false);
+        assert!(state
+            .store
+            .mark_dv_conversion_failed(file, "controlled retry failure", 110)
+            .await
+            .expect("mark controlled conversion failure"));
+        let rescanned = state
+            .store
+            .upsert_file(
+                movie,
+                "/dv-api/profile7.mkv",
+                8_000,
+                100,
+                &ProbeResult {
+                    container: Some("mkv".into()),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(8),
+                        bl_compat_id: Some(1),
+                        el_present: Some(false),
+                        rpu_present: Some(true),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("rescan failed source as ineligible");
+        assert_eq!(rescanned, file);
+        let (status, ineligible_retry) = call(&app, post(&file_uri, Some(&admin), json!({}))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{ineligible_retry}"
+        );
+        assert_eq!(
+            ineligible_retry["error"],
+            "file is not Dolby Vision Profile 7"
+        );
+        let rescanned = state
+            .store
+            .upsert_file(movie, "/dv-api/profile7.mkv", 8_000, 100, &probe)
+            .await
+            .expect("restore eligible retry source");
+        assert_eq!(rescanned, file);
+        let (status, retried) = call(&app, post(&file_uri, Some(&admin), json!({}))).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{retried}");
+        assert_eq!(retried["queued"], true);
+        assert!(state
+            .store
+            .mark_dv_conversion_running(file, 8_000)
+            .await
+            .expect("mark conversion running"));
+        assert!(state
+            .store
+            .mark_dv_conversion_verified(file, Some("fel"), 6_000)
+            .await
+            .expect("mark conversion verified"));
+        let recovery_path =
+            format!("/dv-api/.profile7.mkv.plurx-dv-{file}/replacement.p81.public-proof");
+        assert!(state
+            .store
+            .begin_dv_recovery_guard(file, "api-guard-1", &recovery_path, 123,)
+            .await
+            .expect("record recovery guard intent"));
+
+        let batch_uri = format!("/api/v1/dv-conversions?file_ids={file},9223372036854775807");
+        let (status, batch) = call(&app, get(&batch_uri, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{batch}");
+        assert_eq!(batch["eligible_by_file"][file.to_string()], true);
+        assert_eq!(
+            batch["conversions_by_file"][file.to_string()]["state"],
+            "verified"
+        );
+        assert_eq!(batch["capabilities"]["available"], true);
+        assert_eq!(batch["library_modes"][library.id.to_string()], "manual");
+        assert_eq!(
+            batch["conversions_by_file"][file.to_string()]["recovery_guard"]["state"],
+            "intent"
+        );
+        assert_eq!(
+            batch["conversions_by_file"][file.to_string()]["recovery_guard"]["recovery_path"],
+            recovery_path
+        );
+        assert!(batch["eligible_by_file"]["9223372036854775807"].is_null());
+
+        let read_max = plurx_core::store::DV_CONVERSION_LEDGER_READ_MAX;
+        let repeated_at_limit = vec![file.to_string(); read_max].join(",");
+        let (status, repeated_batch) = call(
+            &app,
+            get(
+                &format!("/api/v1/dv-conversions?file_ids={repeated_at_limit}"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{repeated_batch}");
+        assert_eq!(
+            repeated_batch["conversions_by_file"]
+                .as_object()
+                .expect("bounded repeated-id response"),
+            batch["conversions_by_file"]
+                .as_object()
+                .expect("ordinary batch response")
+        );
+        let repeated_over_limit = vec![file.to_string(); read_max + 1].join(",");
+        let (status, repeated_overflow) = call(
+            &app,
+            get(
+                &format!("/api/v1/dv-conversions?file_ids={repeated_over_limit}"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{repeated_overflow}");
+        assert_eq!(
+            repeated_overflow["error"],
+            format!("file_ids accepts at most {read_max} ids")
+        );
+        let oversized_raw = "1".repeat(dv_disk::DV_CONVERSION_FILE_IDS_RAW_MAX + 1);
+        let (status, oversized_raw_body) = call(
+            &app,
+            get(
+                &format!("/api/v1/dv-conversions?file_ids={oversized_raw}"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{oversized_raw_body}");
+        assert_eq!(
+            oversized_raw_body["error"],
+            format!(
+                "file_ids accepts at most {} bytes",
+                dv_disk::DV_CONVERSION_FILE_IDS_RAW_MAX
+            )
+        );
+        for stuffed in [format!("{file},,{file}"), format!("{file},%20,%20{file}")] {
+            let (status, empty_value) = call(
+                &app,
+                get(
+                    &format!("/api/v1/dv-conversions?file_ids={stuffed}"),
+                    Some(&admin),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{empty_value}");
+            assert_eq!(
+                empty_value["error"],
+                "file_ids must not contain empty values"
+            );
+        }
+
+        let (status, guarded_file) = call(&app, get(&file_uri, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{guarded_file}");
+        assert_eq!(
+            guarded_file["conversion"]["recovery_guard"]["guard_id"],
+            "api-guard-1"
+        );
+
+        let (status, invalid_batch) =
+            call(&app, get("/api/v1/dv-conversions?file_ids=0", Some(&admin))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid_batch}");
+
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "dv_disk_keep_original": false,
+                    "dv_disk_convert_parallel": 2
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["dv_disk_keep_original"], false);
+        assert_eq!(settings["dv_disk_convert_parallel"], 2);
+
+        let (_, current) = call(&app, get("/api/v1/dv-conversions", Some(&admin))).await;
+        assert_eq!(current["library_modes"][library.id.to_string()], "manual");
+        assert_eq!(current["keep_original"], false);
+        assert_eq!(current["parallel"], 2);
+        assert_eq!(current["progress"]["verified"], 1);
+        assert_eq!(current["recovery_guards"]["summary"]["intent"], 1);
+        assert_eq!(current["recovery_guards"]["summary"]["orphaned"], 0);
+        assert_eq!(current["recovery_guards"]["orphans"], json!([]));
+        assert_eq!(
+            current["recovery_guards"]["orphan_limit"],
+            plurx_core::store::DV_RECOVERY_GUARD_READ_MAX
+        );
+        assert_eq!(current["recovery_guards"]["orphans_truncated"], false);
+
+        assert_eq!(
+            state
+                .store
+                .delete_files(&[file])
+                .await
+                .expect("delete guarded file"),
+            1
+        );
+        let (status, orphaned) = call(&app, get("/api/v1/dv-conversions", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{orphaned}");
+        assert_eq!(orphaned["recovery_guards"]["summary"]["orphaned"], 1);
+        assert_eq!(
+            orphaned["recovery_guards"]["orphans"][0]["guard_id"],
+            "api-guard-1"
+        );
+        assert_eq!(
+            orphaned["recovery_guards"]["orphans"][0]["source_path"],
+            "/dv-api/profile7.mkv"
+        );
+        assert_eq!(
+            orphaned["recovery_guards"]["orphans"][0]["recovery_path"],
+            recovery_path
+        );
+    }
+
+    #[tokio::test]
+    async fn dv_disk_settings_reject_invalid_parallel_before_changing_retention() {
+        let (app, _) = test_state_with_dv_disk_tools();
+        let admin = setup_admin(&app).await;
+
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "dv_disk_keep_original": false,
+                    "dv_disk_convert_parallel": 9
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["dv_disk_keep_original"], true);
+        assert_eq!(settings["dv_disk_convert_parallel"], 1);
+    }
+
+    #[tokio::test]
+    async fn settings_reject_late_invalid_field_before_any_dv_policy_write() {
+        let (app, _) = test_state_with_dv_disk_tools();
+        let admin = setup_admin(&app).await;
+
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "dv_disk_keep_original": false,
+                    "dv_disk_convert_parallel": 2,
+                    "stream_readrate": "not-a-number"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["dv_disk_keep_original"], true);
+        assert_eq!(settings["dv_disk_convert_parallel"], 1);
+    }
+
+    #[tokio::test]
+    async fn dv_disk_queue_refuses_missing_tools_before_media_lookup() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/files/9223372036854775807/dv-conversion",
+                Some(&admin),
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("library.dv_disk_convert unavailable")),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dv_disk_library_mutations_return_not_found_for_missing_library() {
+        let (app, _) = test_state_with_dv_disk_tools();
+        let admin = setup_admin(&app).await;
+        let missing = 9_223_372_036_854_775_807_i64;
+
+        let (status, body) = call(
+            &app,
+            put(
+                &format!("/api/v1/libraries/{missing}/dv-conversion"),
+                Some(&admin),
+                json!({ "mode": "manual" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/libraries/{missing}/dv-conversions"),
+                Some(&admin),
+                json!({ "retry_failed": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     }
 
     #[tokio::test]

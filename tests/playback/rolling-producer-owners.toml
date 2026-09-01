@@ -958,6 +958,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # maintenance block beside the genre backfill. It is a leased catalogue job
 # (`catalogue:dv-facts`) that walks a node-local cursor and writes columns —
 # it owns no producer, no process, and no timer of its own.
+# M5b's frozen media-safety implementation adds 22 namespaced spawns to the
+# current-main tree: the single-flight queue owner plus bounded hashing,
+# descriptor/namespace work, and deterministic race fixtures. Production queue
+# and file workers retain their slots and leases through publication; test
+# actors are joined before their fixture returns.
 # 347 -> 348 on main: the additional spawn is confined to the HTTP marker race
 # fixture; its join handle is awaited inside the test and it owns no shipped
 # producer or process.
@@ -968,16 +973,19 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # ffmpegs destroys the video timeline (see `plurxd::dvpipe`). The conversion now
 # rewrites NAL units inside the fragments the one producer already writes, so
 # the process and task counts are exactly what they were before it.
-# 349 with the bounded subtitle window: the window warmer's detached extraction.
-expected_occurrences = 349
+# +1 with the bounded subtitle window: the window warmer's detached extraction.
+expected_occurrences = 371
 
 [[module_structures]]
 id = "method-spawn"
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
+# +4 M5b: the JoinSet-owned leased file worker and three bounded subprocess or
+# blocking-I/O owners. Each is awaited, cancellation-bound, or deliberately
+# retains a node-local permit if an operating-system read cannot be stopped.
 # +1: `run_chapter_probe` spawns one bounded ffprobe child. Its caller owns a
 # cancellation token and deadline; the child is kill-on-drop and always reaped
 # on the explicit oversize and ordinary completion paths.
-expected_occurrences = 37
+expected_occurrences = 41
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1006,8 +1014,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # halves of its deterministic barrier, and the spawned handle is always joined.
 # 506 with the detached marker telemetry assertion: one test-only sleep yields
 # to the handler's bounded background recorder; it owns no process or producer.
-# 509 with the bounded subtitle window: the window read and the two warm starts in the subtitle segment arm.
-expected_occurrences = 509
+# +11 M5b: conversion deadlines and cancellation/race fixtures. Production
+# subprocess and hash deadlines are paired with kill-on-drop or a bounded
+# residual-I/O permit; every test-only timer is awaited by its fixture.
+# +3 with the bounded subtitle window: the window read and the two warm starts in the subtitle segment arm.
+expected_occurrences = 520
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1033,8 +1044,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # straight to `bounded_command_output` -- so it inherits that function's
 # `kill_on_drop`, its 5s timeout, and its awaited `child.wait()`. Nothing owns
 # it beyond the await, and it never runs in a shipped binary.
-# 62 with the bounded subtitle window: the window extractor.
-expected_occurrences = 62
+# M5b contributes a net +2 command constructions to the current-main tree.
+# They are boot/conversion probes routed through the bounded command helper;
+# capability failure prevents admission and conversion children are cancellable,
+# kill-on-drop, output-capped, and reaped.
+# +1 with the bounded subtitle window: the window extractor.
+expected_occurrences = 66
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1051,8 +1066,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # across the tests that pin the permanence split, the action ranking and the
 # wire names. All are `&'static str` lookups on a fieldless enum used to name
 # one wire field; none launches anything or owns a producer.
-# 192 with the bounded subtitle window: its output().
-expected_occurrences = 192
+# M5b is a net +1 launch-shaped method on the merged current-main tree. The
+# apparent launch set includes JoinSet's in-process leased worker; the actual
+# child is retained by `run_tool` until exit or cancellation.
+# +1 with the bounded subtitle window: its output().
+expected_occurrences = 196
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1071,7 +1089,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # ordinary completion. Cancellation/deadline drops the kill-on-drop child.
 # +4: the HTTP marker race fixture's two-party barrier calls `wait` four times;
 # these are in-process test synchronization, not child-process lifecycle calls.
-expected_occurrences = 300
+# +4 M5b: conversion helpers explicitly wait/reap their bounded child or use
+# deterministic in-process synchronization in tests.
+expected_occurrences = 304
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -1084,10 +1104,12 @@ pattern = "kill_on_drop\\s*\\("
 # +2: the two HDR10 boot probes, which take it for the same reason every
 # other probe does -- a capability check that outlives its await is a stray
 # ffmpeg holding a device the first real session then cannot open.
+# +3 M5b: production conversion children and the noisy/hung command fixtures
+# use kill-on-drop, so cancellation cannot leave a writer running afterward.
 # +1: the chapter probe is dropped by cancellation or deadline selection and
 # must not leave ffprobe holding a NAS file or the queue's global media slot.
-# 34 with the bounded subtitle window: its kill_on_drop, for the same reason the whole-track extractor has one.
-expected_occurrences = 34
+# +1 with the bounded subtitle window: its kill_on_drop, for the same reason the whole-track extractor has one.
+expected_occurrences = 37
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

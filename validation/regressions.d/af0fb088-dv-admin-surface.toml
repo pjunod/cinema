@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["af0fb088"]
+points = ["server.api", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "api-wire", "web-static", "web-layout", "resource-bounds", "history-regressions"]
+reason = "Admin API and web suites pin authorization, coherent bounded guard snapshots, 256-token admission, capped sequential hydration, truthful retry outcomes, accessible guard state, and terminal-only polling."

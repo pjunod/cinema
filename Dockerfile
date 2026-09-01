@@ -21,6 +21,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check
 
 FROM debian:bookworm-slim
+ARG TARGETARCH
+ARG DOVI_TOOL_VERSION=2.3.3
+ARG MKVTOOLNIX_VERSION=74.0.0-1
 # plurxd shells out to ffmpeg/ffprobe for scanning, remux, and transcode; TLS
 # roots are for TMDB/AniList.
 #
@@ -57,6 +60,7 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg ca-certificates mesa-va-drivers curl gnupg \
+        "mkvtoolnix=${MKVTOOLNIX_VERSION}" \
     && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install -y --no-install-recommends \
             intel-media-va-driver-non-free i965-va-driver; \
@@ -80,6 +84,26 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
       || ( echo "FATAL: this jellyfin-ffmpeg7 has no tonemapx apply_dovi renderer." >&2; \
            echo "Profile 5 fallback requires tonemapx with Dolby Vision RPU reshaping." >&2; \
            exit 1 ) ) \
+    && dovi_arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$dovi_arch" in \
+        amd64|x86_64) \
+            dovi_target=x86_64-unknown-linux-musl; \
+            dovi_sha=5dae82cb2becd3b9fd726127f936a8d32635e60746d16238fdfded12aa05988c ;; \
+        arm64|aarch64) \
+            dovi_target=aarch64-unknown-linux-musl; \
+            dovi_sha=daf538c275f4e702219ce8eb61db28382193ac9d0126e1ef4185a88303af4485 ;; \
+        *) echo "FATAL: dovi_tool has no pinned asset for architecture $dovi_arch" >&2; exit 1 ;; \
+       esac \
+    && dovi_archive="dovi_tool-${DOVI_TOOL_VERSION}-${dovi_target}.tar.gz" \
+    && curl -fsSL \
+        "https://github.com/quietvoid/dovi_tool/releases/download/${DOVI_TOOL_VERSION}/${dovi_archive}" \
+        -o "/tmp/${dovi_archive}" \
+    && echo "${dovi_sha}  /tmp/${dovi_archive}" | sha256sum -c - \
+    && tar -xzf "/tmp/${dovi_archive}" -C /usr/local/bin ./dovi_tool \
+    && chmod 0755 /usr/local/bin/dovi_tool \
+    && rm -f "/tmp/${dovi_archive}" \
+    && dovi_tool --version | grep -F "${DOVI_TOOL_VERSION}" \
+    && mkvmerge --version | grep -F "mkvmerge v74.0.0" \
     && apt-get purge -y curl gnupg && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r plurx \
@@ -98,7 +122,9 @@ COPY --from=build /plurx-cluster-check /usr/local/bin/plurx-cluster-check
 ENV PLURX_BIND=0.0.0.0:32400 \
     PLURX_DATA_DIR=/var/lib/plurx \
     PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg \
-    PLURX_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe
+    PLURX_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe \
+    PLURX_DOVI_TOOL=/usr/local/bin/dovi_tool \
+    PLURX_MKVMERGE=/usr/bin/mkvmerge
 
 EXPOSE 32400
 VOLUME ["/var/lib/plurx"]

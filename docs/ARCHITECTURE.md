@@ -99,7 +99,7 @@ regenerable thumbnail cache would be waste:
 | **Replicated-durable** | Users, auth tokens, settings, library metadata, watch state, playlists | Raft → SQLite | None once acked |
 | **Replicated-ephemeral** | Playback sessions (item, decision, position, segment index), node membership/health | Raft KV/cache with TTL | Seconds of staleness OK |
 | **Node-local, regenerable** | Transcode segment cache, image cache, thumbnails/trickplay | Local disk (optionally shared) | Free to lose |
-| **Operator-owned** | The media files themselves | Shared storage | plurx never writes media |
+| **Operator-owned** | The media files themselves | Shared storage | Read-only by default; only an admin-enabled library may opt into the Dolby Vision replacement contract |
 
 Write rates must be safe for raft. Each active-player heartbeat still reads
 the item and durable watch state, but the M1d server coalescer now bounds
@@ -406,11 +406,13 @@ one of these is a door we're keeping shut on purpose:
 - **No external database, broker, or cache service.** The moment plurx needs
   Postgres or Redis to run, "lean and boring to operate" is dead. The embedded
   raft store is the whole point.
-- **plurx never writes to media storage.** Media is operator-owned and mounted
-  read-only. No "organize my files," no renaming, no deleting — a media server
-  that edits your files is one bug away from eating them. This stands unchanged
-  after home video: that feature was designed *around* it (decision 7), which
-  is why NFO seeding is one-way and generated thumbnails go to the artwork
+- **Media is read-only unless an administrator opts one library into the named
+  replacement workflow.** Scanning, metadata, playback, home video, and ordinary
+  library maintenance never organize, rename, or delete media. The sole
+  exception is the off-by-default Dolby Vision Profile 7 → 8.1 conversion: it
+  replaces verified media bytes only under the dedicated-account, writable
+  filesystem, and backup contract in [OPERATIONS.md](OPERATIONS.md). Home-video
+  NFO seeding remains one-way and generated thumbnails stay in the artwork
   cache. Renaming a folder in the UI changes the DB title, never the directory.
 - **No cloud dependency, no phone-home.** Everything works on a LAN that never
   touches the internet. There is no plurx.tv and there never needs to be.

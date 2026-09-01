@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d2cd3aa4"]
+points = ["core.media", "server.api", "operations.packaging"]
+checks = ["rust-gate", "rust-gate-ci", "operations-contract", "resource-bounds", "history-regressions"]
+reason = "Focused worker tests pin convergence of an orphan guard intent created before its proof while preserving bytes and refusing witness mutation whenever either original-bearing child exists."

@@ -44,11 +44,13 @@ use crate::error::StoreError;
 // indexes that keep the analysis operations projection cheap under polling;
 // v16 persists the first terminal cause; v17 adds the replacement-publication
 // fence; v18 installs the atomic request-claim trigger for that fence on
-// clusters which had already reached v17; v20 adds replicated semantic
-// timeline annotations; v21 adds separately fenced manual overrides; v22
-// admits semantic marker jobs to the analysis queue; v23 adds the
-// staged-generation ledger, which is what lets a successor session exist
-// without being current. Every additive
+// clusters which had already reached v17; v19 stores the Dolby Vision record
+// columns; v20 adds replicated semantic timeline annotations; v21 adds
+// separately fenced manual overrides; v22 admits semantic marker jobs to the
+// analysis queue; v23 adds the staged-generation ledger, which is what lets a
+// successor session exist without being current; v24 adds the permanent
+// Profile 7 conversion ledger; v25 adds its non-cascading, attempt-identified
+// permanent recovery guard. Every additive
 // step is applied through Raft before the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
@@ -67,7 +69,9 @@ const TIMELINE_ANNOTATIONS_SCHEMA_VERSION: i64 = 20;
 const TIMELINE_MANUAL_OVERRIDES_SCHEMA_VERSION: i64 = 21;
 const ANALYSIS_COMPONENT_SCHEMA_VERSION: i64 = 22;
 const STAGED_GENERATION_SCHEMA_VERSION: i64 = 23;
-pub const AUTH_SCHEMA_VERSION: i64 = STAGED_GENERATION_SCHEMA_VERSION;
+const DV_CONVERSIONS_SCHEMA_VERSION: i64 = 24;
+const DV_RECOVERY_GUARDS_SCHEMA_VERSION: i64 = 25;
+pub const AUTH_SCHEMA_VERSION: i64 = DV_RECOVERY_GUARDS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -88,6 +92,8 @@ const TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE: i64 = DOLBY_VISION_COLUMNS_S
 const TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE: i64 = TIMELINE_ANNOTATIONS_SCHEMA_VERSION;
 const ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE: i64 = TIMELINE_MANUAL_OVERRIDES_SCHEMA_VERSION;
 const STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_COMPONENT_SCHEMA_VERSION;
+const DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE: i64 = STAGED_GENERATION_SCHEMA_VERSION;
+const DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE: i64 = DV_CONVERSIONS_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1214,6 +1220,7 @@ impl HiqliteAuthStore {
         }
         super::hiqlite_catalog::install_schema(&client).await?;
         super::hiqlite_durable::install_schema(&client).await?;
+        super::hiqlite_dv_conversion::install_schema(&client).await?;
         super::hiqlite_pretranscode::install_schema(&client).await?;
         super::hiqlite_sessions::install_schema(&client).await?;
         super::hiqlite_shared_cache::install_schema(&client).await?;
@@ -1791,6 +1798,75 @@ impl HiqliteAuthStore {
                         .await;
                     self.settle_migration_attempt(
                         STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::dv_conversion::DV_CONVERSIONS_MIGRATION_SCHEMA,
+                                params!(),
+                            ),
+                            (
+                                super::dv_conversion::DV_CONVERSIONS_MIGRATION_QUEUE_INDEX,
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    DV_CONVERSIONS_SCHEMA_VERSION,
+                                    now,
+                                    DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::dv_conversion::DV_RECOVERY_GUARDS_MIGRATION_COLUMN,
+                                params!(),
+                            ),
+                            (
+                                super::dv_conversion::DV_RECOVERY_GUARDS_MIGRATION_LINK_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::dv_conversion::DV_RECOVERY_GUARDS_MIGRATION_SCHEMA,
+                                params!(),
+                            ),
+                            (
+                                super::dv_conversion::DV_RECOVERY_GUARDS_MIGRATION_FILE_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::dv_conversion::DV_QUEUE_ADMISSION_MIGRATION_TRIGGER,
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    DV_RECOVERY_GUARDS_SCHEMA_VERSION,
+                                    now,
+                                    DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(
+                        DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE,
                         attempt,
                     )
                     .await?;
@@ -3158,7 +3234,9 @@ fn schema_migration_action(
         | TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE
         | TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE
         | ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE
-        | STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE => {
+        | STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE
+        | DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE
+        | DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -4715,9 +4793,27 @@ mod tests {
             "v22 must advance exactly one step to the staged-generation schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 18,
+            DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE, STAGED_GENERATION_SCHEMA_VERSION,
+            "the conversion-ledger migration must start from the exact v23 shape"
+        );
+        assert_eq!(
+            DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE + 1,
+            DV_CONVERSIONS_SCHEMA_VERSION,
+            "v23 must advance exactly one step to the conversion-ledger schema"
+        );
+        assert_eq!(
+            DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE, DV_CONVERSIONS_SCHEMA_VERSION,
+            "the recovery-guard migration must start from the exact v24 shape"
+        );
+        assert_eq!(
+            DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE + 1,
+            DV_RECOVERY_GUARDS_SCHEMA_VERSION,
+            "v24 must advance exactly one step to the recovery-guard schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 20,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v23 step"
+            "this implementation contains every additive v5→v25 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -4832,6 +4928,62 @@ mod tests {
             )
             .expect("publication-claim predecessor"),
             SchemaMigrationAction::MigrateFrom(PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("Dolby Vision columns predecessor"),
+            SchemaMigrationAction::MigrateFrom(DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("timeline-annotation predecessor"),
+            SchemaMigrationAction::MigrateFrom(TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("manual-override predecessor"),
+            SchemaMigrationAction::MigrateFrom(TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("analysis-component predecessor"),
+            SchemaMigrationAction::MigrateFrom(ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("staged-generation predecessor"),
+            SchemaMigrationAction::MigrateFrom(STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("conversion-ledger predecessor"),
+            SchemaMigrationAction::MigrateFrom(DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("recovery-guard predecessor"),
+            SchemaMigrationAction::MigrateFrom(DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE)
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {
