@@ -525,7 +525,9 @@ mod tests {
         // A quiet node is the other reading the single value conflated: no
         // marker skip since boot is not a rate of zero either.
         let idle = PlaybackMetrics::new();
-        assert!(!idle.render().contains("plurx_playback_marker_prewarm_hit_ratio"));
+        assert!(!idle
+            .render()
+            .contains("plurx_playback_marker_prewarm_hit_ratio"));
 
         // The first hit is what makes the gauge mean something, and a genuine
         // zero rate publishes normally once one exists.
