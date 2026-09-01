@@ -471,13 +471,17 @@ decoding shows what the file is versus what your browser is actually rendering.
   labels the credits, the inferred credits window stops where the preview
   begins rather than running over it, and is not invented at all when that
   leaves no room — no boundary means no evidence, and a guess there would sit
-  over the last seconds of story. Only a chapter in the last 30% of the runtime
-  is trusted as a preview, the same positional rule every tail marker obeys, so
-  a scene title that happens to match the words cannot cost you the real Skip
-  Credits button. "Trailer" is deliberately not one of those words: on a disc
-  rip that is usually the bonus reel, not a region inside the episode.
-- **Auto-skip** intro, credits & preview — an opt-in, per-user, persisted toggle
-  in the preferences menu (default off).
+  over the last seconds of story. A chapter is trusted as a preview only if it
+  is in the last 30% of the runtime *and* it is the last thing in the file: the
+  words alone are not enough, because "Until Next Time" is an ordinary sign-off
+  on a final story chapter and reading it as a teaser would take the real Skip
+  Credits button with it. For the same reason the "next …" phrasings match only
+  when they lead the title, the way a teaser announces itself. "Trailer" is
+  deliberately not one of the words at all: on a disc rip that is usually the
+  bonus reel, not a region inside the episode.
+- **Auto-skip** intro & credits — an opt-in, per-user, persisted toggle in the
+  preferences menu (default off). **Never previews:** a preview is new footage
+  and skipping it is a decision the viewer makes, not one made for them.
 - **Method-aware seek:** direct play seeks natively; remux and transcode restart
   the server stream at the new offset.
 

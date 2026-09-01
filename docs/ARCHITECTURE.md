@@ -388,7 +388,12 @@ against the API it talks to.
    A labelled *preview* ends that window rather than starting it, and when it
    leaves no chapter boundary to infer from we say nothing at all: the region
    before a preview is story, and a guessed "Skip Credits" over it would seek a
-   viewer out of the episode. A preview is offered but never auto-skipped —
+   viewer out of the episode. A chapter earns the preview kind on position and
+   structure, not on its title: it must sit in the credits window *and* be the
+   last thing in the file. Title matching alone is not safe there, because the
+   position bound rejects nothing above 70% and a false preview in the tail
+   does not add a spare button — it deletes the file's real Skip Credits marker
+   and, on the web, offers one that reports the episode watched. A preview is offered but never auto-skipped —
    it is new footage every week, and the toggle is a standing preference about
    repeated material.
 7. **The NFO is a seed, not a store.** A Kodi `<basename>.nfo` in a home
