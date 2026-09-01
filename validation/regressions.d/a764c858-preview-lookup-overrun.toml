@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a764c858"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "`a_preview_that_overruns_the_duration_still_bounds_the_guess` drives a trailing preview chapter whose end lands two seconds past the declared runtime — the MKV/ffprobe rounding artefact the no-preview path already has a test for — and requires that no estimated credits marker is invented. Reverting the lookup to read the emitted markers fails it, because the emitting loop drops that chapter for ending outside the runtime, `credits_end` reverts to the end of the file, and the estimate lands over the teaser. `a_mid_film_match_cannot_move_the_credits_window` requires the same lookup to keep CREDITS_MIN_START_PCT, so a substring match 41% into a film neither becomes a preview nor drags the credits window back; dropping that filter fails it. `a_teaser_split_across_two_chapters_is_bounded_at_its_first` pins `.min()` over a teaser marked as two chapters, so the credits stop at the first of them rather than calling the first half credits. `a_post_credits_stinger_does_not_anchor_the_guess` pins the 15s floor on the boundary search, requiring the proportional estimate rather than a Skip Credits button over a ten-second stinger. Each assertion pins the consequence rather than the lookup: the estimate is not invented, even where the emitting loop drops the preview marker on an ordinary MKV/ffprobe rounding artefact."

@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["a764c858"]
-points = ["playback.pipeline"]
-checks = ["rust-gate"]
-reason = "The retained overrun regression proves a trailing preview whose end lands past the declared runtime still bounds the inferred credits. MKV and ffprobe routinely disagree with format.duration by a millisecond or two, so the emitting loop drops such a marker -- and reading the preview off the emitted set therefore forgot it on an ordinary rounding artefact, reverting credits_end to the end of the file and offering the estimate over next week's footage. The assertion pins the consequence rather than the lookup: no credits marker is invented, even though no preview marker is emitted."
