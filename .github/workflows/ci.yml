@@ -186,10 +186,12 @@ jobs:
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
-  cluster_store:
-    name: replicated Store contracts
+  cluster_store_legacy:
+    name: replicated Store contracts (legacy)
     needs: [scope, preflight]
-    if: needs.scope.outputs.cluster_auth == 'true'
+    if: >-
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.execution_mode != 'accelerated'
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-store"]') }}
     timeout-minutes: 40
     steps:
@@ -198,7 +200,7 @@ jobs:
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
-          lane: cluster-store
+          lane: cluster-store-legacy
           execution-mode: ${{ needs.scope.outputs.execution_mode }}
           persistent-eligible: "true"
       - name: Run replicated Store contracts
@@ -217,14 +219,14 @@ jobs:
           python3 -m validation.ci_lane_receipt
           --output target/validation/cluster-store-receipt.json
           --log target/validation/cluster-store.log
-          --lane cluster-store
+          --lane cluster-store-legacy
           --result "$LANE_RESULT"
           --command "make cluster-store-check"
       - name: Retain the Store lane log and receipt
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cluster-store-contracts
+          name: cluster-store-legacy-contracts
           path: |
             target/validation/cluster-store.log
             target/validation/cluster-store-receipt.json
@@ -240,6 +242,180 @@ jobs:
       - name: Propagate the Store contract result
         if: always() && steps.store_contracts.outcome != 'success'
         run: exit 1
+
+  cluster_store_shard:
+    name: replicated Store shard ${{ matrix.shard_index }}
+    needs: [scope, preflight]
+    if: >-
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.execution_mode != 'legacy'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || matrix.self_hosted_runs_on) }}
+    timeout-minutes: 40
+    continue-on-error: ${{ needs.scope.outputs.execution_mode == 'shadow' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_index: 0
+            self_hosted_runs_on: '["self-hosted","Linux","X64","lab","ci-store"]'
+          - shard_index: 1
+            # Intentionally unassigned until nuc2's changed SSH host key is
+            # independently verified and its dedicated runner is online.
+            self_hosted_runs_on: '["self-hosted","Linux","X64","lab","ci-store-shard-1"]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: buildx-cache
+        uses: ./.github/actions/buildx-cache
+        with:
+          lane: cluster-store-shard-${{ matrix.shard_index }}
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
+          persistent-eligible: "true"
+      - name: Build the exact Store test binary
+        id: build_store_binary
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.store-shard
+          target: store-contract-binary
+          platforms: linux/amd64
+          outputs: type=local,dest=store-contract-export
+          build-args: |
+            PLURX_BUILD_REF=${{ github.sha }}
+            PLURX_BUILD_SHA=${{ github.sha }}
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=cluster-store-shard-{0}', matrix.shard_index) || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=max,scope=cluster-store-shard-{0}', matrix.shard_index) || '' }}
+      - name: Run the assigned Store tests once
+        id: store_shard
+        if: steps.build_store_binary.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          python3 -m validation.store_shard run
+          --binary store-contract-export/store_contract
+          --rustc-vv store-contract-export/rustc-vv.txt
+          --receipt target/validation/cluster-store-shard-${{ matrix.shard_index }}-receipt.json
+          --log target/validation/cluster-store-shard-${{ matrix.shard_index }}.log
+          --shard-count 2
+          --shard-index ${{ matrix.shard_index }}
+      - name: Record a Store binary build failure
+        if: always() && steps.build_store_binary.outcome != 'success'
+        run: >-
+          python3 -m validation.store_shard record-failure
+          --receipt target/validation/cluster-store-shard-${{ matrix.shard_index }}-receipt.json
+          --log target/validation/cluster-store-shard-${{ matrix.shard_index }}.log
+          --shard-count 2
+          --shard-index ${{ matrix.shard_index }}
+          --error "Store test binary build failed"
+      - name: Retain the Store shard log and receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-store-shard-${{ matrix.shard_index }}
+          path: |
+            target/validation/cluster-store-shard-${{ matrix.shard_index }}.log
+            target/validation/cluster-store-shard-${{ matrix.shard_index }}-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Bound persistent BuildKit state
+        if: always() && steps.buildx-cache.outputs.local == 'true'
+        env:
+          BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
+        run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50
+      - name: Propagate the Store shard result
+        if: >-
+          always() &&
+          (steps.build_store_binary.outcome != 'success' ||
+          steps.store_shard.outcome != 'success')
+        run: exit 1
+
+  cluster_store_shard_receipts:
+    name: replicated Store shard union
+    needs: [scope, preflight, cluster_store_shard]
+    if: >-
+      always() &&
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.execution_mode != 'legacy'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    timeout-minutes: 3
+    continue-on-error: ${{ needs.scope.outputs.execution_mode == 'shadow' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download every Store shard receipt
+        id: download_store_shards
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cluster-store-shard-*
+          path: target/validation/store-shards
+          merge-multiple: true
+      - name: Prove Store shard union and disjointness
+        id: validate_store_shards
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p target/validation
+          python3 -m validation.store_shard validate \
+            --receipts-directory target/validation/store-shards \
+            --output target/validation/cluster-store-shard-aggregate.json \
+            2>&1 | tee target/validation/cluster-store-shard-aggregate.log
+      - name: Retain the Store shard aggregate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-store-shard-aggregate
+          path: |
+            target/validation/cluster-store-shard-aggregate.log
+            target/validation/cluster-store-shard-aggregate.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Propagate the Store shard aggregate result
+        if: >-
+          always() &&
+          (steps.download_store_shards.outcome != 'success' ||
+          steps.validate_store_shards.outcome != 'success')
+        run: exit 1
+
+  cluster_store:
+    name: replicated Store contracts
+    needs:
+      - scope
+      - preflight
+      - cluster_store_legacy
+      - cluster_store_shard_receipts
+    if: always() && needs.scope.outputs.cluster_auth == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    timeout-minutes: 2
+    steps:
+      - name: Select the required Store graph
+        env:
+          EXECUTION_MODE: ${{ needs.scope.outputs.execution_mode }}
+          LEGACY_RESULT: ${{ needs.cluster_store_legacy.result }}
+          SHARD_RESULT: ${{ needs.cluster_store_shard_receipts.result }}
+        run: |
+          case "$EXECUTION_MODE" in
+            legacy)
+              test "$LEGACY_RESULT" = success
+              test "$SHARD_RESULT" = skipped
+              ;;
+            shadow)
+              test "$LEGACY_RESULT" = success
+              echo "Store shard shadow result: $SHARD_RESULT"
+              ;;
+            accelerated)
+              test "$LEGACY_RESULT" = skipped
+              test "$SHARD_RESULT" = success
+              ;;
+            *)
+              echo "::error::Unknown resolved execution mode: $EXECUTION_MODE"
+              exit 1
+              ;;
+          esac
 
   cluster_topology:
     name: replicated topology contracts

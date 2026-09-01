@@ -16,7 +16,9 @@ class LaneReceiptError(ValueError):
     """The lane result cannot be represented as trustworthy evidence."""
 
 
-LANES = frozenset({"cluster-store", "cluster-topology"})
+LANES = frozenset(
+    {"cluster-store", "cluster-store-legacy", "cluster-store-backstop", "cluster-topology"}
+)
 RESULTS = frozenset({"success", "failure", "cancelled"})
 
 

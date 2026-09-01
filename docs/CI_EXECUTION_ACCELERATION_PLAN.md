@@ -125,9 +125,9 @@ The 2026-09-01 read-only audit found:
 | `nuc3` | yes | generic `general` / `high-cpu` labels | ~183 GB | ~9.2 GB |
 | `nuc4` | yes | generic `general` / `high-cpu` labels | ~210 GB | ~12.2 GB |
 | `nynuc` | yes | generic `general` / `high-cpu` labels | ~281 GB | ~13.8 GB |
-| `nuc1` | no | online generic Linux runner | not yet measured | not yet measured |
-| `nuc2` | no | Android runners offline at audit time | not yet measured | not yet measured |
-| `rogg16` | no | four online generic Linux runners plus Android | not yet measured | not yet measured |
+| `nuc1` | no | one runner uniquely labeled `ci-store` | not yet measured | not yet measured |
+| `nuc2` | no | Android runners offline at audit time; shard label withheld | not yet measured | not yet measured |
+| `rogg16` | no | one runner uniquely labeled `ci-topology`; other generic runners online | not yet measured | not yet measured |
 | Apple laptop | no | macOS ARM64 `apple` / `xcode-26` | not assigned | not applicable |
 
 Every production voter currently satisfies the generic labels used by heavy
@@ -145,10 +145,18 @@ jobs, so the desired isolation is not yet true. Before `shadow` is enabled:
 6. retain `general` only for short policy/scope jobs if production load policy
    permits it; otherwise create a lightweight non-voter label too.
 
-The supplied deployment SSH key was not authorized on `nuc1`, `nuc2`, or
-`rogg16` during the audit. That is an inventory gap, not permission to alter
-access. GitHub runner labels can establish scheduling identity; host facts
-must still be measured before a persistent budget is activated there.
+The supplied deployment key is not authorized for `nuc1` or `rogg16`.
+`nuc2` additionally presents a changed ED25519 host key (observed fingerprint
+`SHA256:LI8rEpqCBeVnsn54PLNJy2UqbmWYQaB+cuxP/A5QSoE`). The old known-hosts
+entry has not been replaced and the new key has not been trusted: independent
+verification is required before any host access or runner activation. The
+`ci-store-shard-1` label is therefore intentionally unassigned and repository
+mode remains `legacy`. This is a security boundary, not permission to bypass
+host verification. `nuc1` and `rogg16` already separate Store and topology by
+physical host through their unique GitHub runner labels, but their disk facts
+remain unverified. A third verified non-production x86 host is still required
+for Store shard 1 because topology may not share a host with either Store
+shard.
 
 ## 5. Persistent Cargo cache contract
 
@@ -413,6 +421,12 @@ A scheduled full, unsharded x86 run remains the architecture and assignment
 backstop. There is no monthly partition salt: the unsharded run supplies the
 independent proof without churning the duration table.
 
+The implementation builds each shard's test binary independently in the same
+`/src` path from `rust:1.97.1-bookworm`, using locked architecture-specific
+BuildKit mounts. This avoids a large GitHub artifact hand-off. The aggregate
+requires both SHA-256 digests to match, so host, image, or path drift fails
+closed instead of combining unlike executables.
+
 ## 12. Rollout and acceptance
 
 Each repository milestone is one reviewable PR into
@@ -515,5 +529,14 @@ These are explicitly separate efforts:
 - The effort branch began at repaired `main` commit `950db83d`.
 - The initial cache foundation is default-dark behind `CI_EXECUTION_MODE` and
   adds no host or Docker lifecycle changes.
-- M0's voter audit is complete. Non-voter disk facts and dedicated scheduling
-  labels remain the activation gate for `shadow`.
+- PR #761 added the bounded Cargo and BuildKit cache foundation.
+- PR #764 combined package compilation and smoke in one architecture-local job.
+- PR #767 split Store and topology onto distinct non-voter hosts with separate
+  logs, exact-tree receipts, caches, and failure propagation.
+- Deterministic Store sharding is implemented default-dark with a stable
+  required verdict, dynamic SHA-256 partitioning, exact-union validation, and a
+  weekly full unsharded backstop.
+- M0's voter audit is complete for the active Store/topology labels. The changed
+  `nuc2` host key, a verified third non-voter x86 host, disk facts, and the
+  `ci-store-shard-1` runner remain activation gates for `shadow`.
+- No Docker daemon was restarted or reconfigured for this implementation.
