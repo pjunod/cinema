@@ -161,6 +161,7 @@ private data class Plan(
     override val aac: Boolean,
     override val preserveDolbyVision: Boolean,
     override val deliveredDynamicRange: String?,
+    override val deliveredDolbyVisionProfile: Int?,
     /** Both protocol spellings from the route probe that produced the plan. */
     val legacyCaps: Map<String, String>,
     val decisionCaps: DeviceCaps,
@@ -243,6 +244,7 @@ private suspend fun loadPlan(
             preserveDolbyVision = decision.delivery?.preserve_dolby_vision
                 ?: decision.preserve_dolby_vision,
             deliveredDynamicRange = decision.delivered_dynamic_range,
+            deliveredDolbyVisionProfile = decision.delivered_dolby_vision_profile,
             legacyCaps = playbackDecision.capabilities.legacyQuery,
             decisionCaps = playbackDecision.capabilities.document,
             deliveryAudio = decision.delivery?.audio,
@@ -1100,6 +1102,7 @@ private fun PlayerContent(
                         decoderColorTransfer = controller.player.videoFormat?.colorInfo?.colorTransfer,
                         hdrTypes = displayHdrTypes,
                     ),
+                    deliveredDolbyVisionProfile = controller.deliveredDolbyVisionProfile,
                 ),
                 onTransportHeight = { transportHeightPx = it },
                 onBack = onExit,

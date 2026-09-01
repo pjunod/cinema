@@ -109,9 +109,10 @@ internal fun playerMediaFacts(
     audio: AudioTrack?,
     delivered: String? = null,
     rendered: String? = null,
+    deliveredDolbyVisionProfile: Int? = null,
 ): List<MediaFact> = buildList {
     resolutionFact(file)?.let(::add)
-    dynamicRangeFact(file, delivered, rendered)?.let(::add)
+    dynamicRangeFact(file, delivered, rendered, deliveredDolbyVisionProfile)?.let(::add)
     audio?.let { audioFact(it.codec, it.channels, it.title) }?.let(::add)
 }
 
@@ -185,6 +186,7 @@ private fun dynamicRangeFact(
     file: MediaFileDto?,
     delivered: String? = null,
     rendered: String? = null,
+    deliveredDolbyVisionProfile: Int? = null,
 ): MediaFact? {
     val value = file?.hdr_format ?: file?.hdr ?: return null
     val source = sourceDynamicRange(file) ?: return null
@@ -197,6 +199,26 @@ private fun dynamicRangeFact(
 
     val onScreen = rendered ?: delivered
     if (onScreen == source) {
+        // Same grade — but possibly not the same profile. A Profile 7 disc
+        // remux reaching a device that takes 8 is converted on the fly: every
+        // picture byte is copied and only the per-frame metadata is rewritten,
+        // so the grade really is unchanged and what is on screen really is
+        // Dolby Vision.
+        //
+        // NEITHER HALF DIMS, and that is the whole reason this is its own
+        // state rather than a spelling of the downgrade below. A dimmed source
+        // half means "this capability is unavailable"; here it is *active*.
+        // Dimming it would say the opposite of what happened.
+        val converted = convertedDolbyVisionMark(file, source, deliveredDolbyVisionProfile)
+        if (converted != null) {
+            return MediaFact(
+                kind = MediaFactKind.DynamicRange,
+                label = label,
+                accessibilityLabel = "$spoken, playing as $converted",
+                state = FactState.Active,
+                activeLabel = converted,
+            )
+        }
         return MediaFact(MediaFactKind.DynamicRange, label, spoken, FactState.Active)
     }
     val arrow = dynamicRangeLabel(onScreen)
@@ -207,6 +229,56 @@ private fun dynamicRangeFact(
         state = FactState.Downgraded,
         activeLabel = arrow,
     )
+}
+
+/**
+ * The arrow half for a Dolby Vision title whose profile changed on the way to
+ * this device — `"Dolby Vision Profile 8"` — or null when nothing changed.
+ *
+ * Null on every one of: a non-Dolby-Vision source, a server that sent no
+ * profile (absent means "no answer", not "not Dolby Vision"), a library row
+ * scanned before the profile columns existed so the source profile is
+ * unreadable, and a delivery whose profile matches the disk's. The last is the
+ * preserved case: a device that genuinely decodes dual-layer gets the stream
+ * untouched and there is nothing to announce.
+ *
+ * The arrow carries the number in every client, because that number is the
+ * entire content of this state — `DV → DV` says nothing. The *source* half
+ * stays a bare `DV` here, matching what this client has always shown and
+ * unlike the web chip; that asymmetry is deliberate and predates this
+ * (MEDIA-BADGES-PLAN §2.3).
+ */
+private fun convertedDolbyVisionMark(
+    file: MediaFileDto?,
+    source: String,
+    deliveredProfile: Int?,
+): String? {
+    if (source != DynamicRange.DOLBY_VISION) return null
+    val delivered = deliveredProfile ?: return null
+    val onDisk = sourceDolbyVisionProfile(file) ?: return null
+    if (onDisk == delivered) return null
+    return "Dolby Vision Profile $delivered"
+}
+
+/**
+ * The profile the file itself carries: the column first, the prose second.
+ *
+ * The same order and the same fallback as the web chip's
+ * `sourceDolbyVisionProfile`, deliberately. This number is never displayed
+ * here — the source half stays a bare `DV` on this client — it exists only to
+ * decide *whether* the delivered profile differs from the disk's. So if the
+ * two clients read it differently, the same file shows an arrow on one and
+ * not the other, which is a worse answer than either rule alone.
+ *
+ * A row scanned before the profile columns existed carries the bare string
+ * "Dolby Vision" with no number in it, and then there is no answer and no
+ * arrow — the badge stays exactly what it was before this feature.
+ */
+internal fun sourceDolbyVisionProfile(file: MediaFileDto?): Int? {
+    file?.dolby_vision?.profile?.let { return it }
+    val match = Regex("""profile\s*(\d+)""", RegexOption.IGNORE_CASE)
+        .find(file?.hdr_format.orEmpty())
+    return match?.groupValues?.get(1)?.toIntOrNull()
 }
 
 /**
