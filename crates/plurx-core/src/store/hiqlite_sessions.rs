@@ -3570,6 +3570,21 @@ mod tests {
         &rest[..end]
     }
 
+    fn helper_source(helper: &str) -> &'static str {
+        let declaration = format!("\nfn {helper}(");
+        let start = SOURCE
+            .find(&declaration)
+            .unwrap_or_else(|| panic!("missing {declaration} in hiqlite_sessions.rs"))
+            + 1;
+        let rest = &SOURCE[start..];
+        let end = ["\nfn ", "\nstruct ", "\nimpl "]
+            .into_iter()
+            .filter_map(|next| rest[1..].find(next).map(|offset| offset + 1))
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
     /// Every `$N` placeholder in a replicated statement must be introduced in
     /// numeric order.
     ///
@@ -3736,7 +3751,12 @@ mod tests {
     /// a three-voter cluster and does not run in the fast loop.
     #[test]
     fn preparation_neither_reaps_nor_repoints() {
-        let source = method_source("prepare_media_session");
+        let method = method_source("prepare_media_session");
+        assert!(
+            method.contains("prepare_statements(preparation)"),
+            "the public preparation path must use the shared statement builder"
+        );
+        let source = helper_source("prepare_statements");
         assert!(
             !source.contains("terminal_reason = 'superseded'"),
             "prepare must not run the supersession reap"
@@ -3748,10 +3768,15 @@ mod tests {
              invisible to the current-session lookup precisely because it \
              holds none"
         );
+        let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            source.contains("NOT EXISTS (SELECT 1 FROM media_session_preparations\n                      WHERE user_id = $3 AND playback_id = $4)"),
-            "one staged successor per playback, inlined because a replicated \
-             transaction cannot read and branch"
+            normalized.contains(
+                "NOT EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $5 AND playback_id = $6)"
+            ) && normalized.contains(
+                "NOT EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $3 AND playback_id = $4)"
+            ),
+            "both lease and session admission enforce one staged successor per \
+             playback because a replicated transaction cannot read and branch"
         );
         assert!(
             source.contains("INSERT INTO job_leases"),
@@ -3766,7 +3791,13 @@ mod tests {
     /// ungated `WHERE incarnation_id = ?` ends a stranger's live stream.
     #[test]
     fn preparation_abort_is_ledger_gated_in_every_statement() {
-        let source = method_source("abort_media_session_preparation");
+        let method = method_source("abort_media_session_preparation");
+        assert!(
+            method
+                .contains("abort_statements(user_id, playback_id, staged_incarnation_id, now_ms)"),
+            "the public abort path must use the shared statement builder"
+        );
+        let source = helper_source("abort_statements");
         assert!(
             source.contains("EXISTS (SELECT 1 FROM media_session_preparations"),
             "the retirement is gated on the ledger row — the incarnation id \
