@@ -44,6 +44,7 @@ jobs:
       cluster_auth: ${{ steps.scope.outputs.cluster_auth }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
       qualification: ${{ steps.scope.outputs.qualification }}
+      execution_mode: ${{ steps.execution_mode.outputs.mode }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,6 +79,13 @@ jobs:
             self-hosted|github) ;;
             *) echo "::error::CI_RUNNER_MODE must be self-hosted or github"; exit 1 ;;
           esac
+      - name: Resolve the fail-safe execution rollout mode
+        id: execution_mode
+        env:
+          REQUESTED_MODE: ${{ vars.CI_EXECUTION_MODE || 'legacy' }}
+        run: |
+          mode="$(scripts/ci-execution-mode resolve "$REQUESTED_MODE")"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
   # A stale counter must fail the aggregate gate without hiding the native test
   # result. Run release hygiene beside preflight and the affected platform jobs
@@ -160,7 +168,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
+        with:
+          lane: rust-gate
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - name: Run format, Clippy, unit, and SQLite contracts
         run: make ci-rust-gate
 
@@ -176,11 +187,6 @@ jobs:
     # graph. Keep enough headroom for a cold NUC and artifact cleanup; warm
     # persistent-runner caches make subsequent runs substantially faster.
     timeout-minutes: 40
-    env:
-      # The M0 proof has its own manifest, but not its own dependency build.
-      # Sharing the root target lets it reuse the Hiqlite/OpenRaft graph from
-      # the Store and topology contracts instead of compiling it twice.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -191,9 +197,10 @@ jobs:
           cargo_bin="$(rustup which --toolchain 1.97.1 cargo)"
           rustc_bin="$(rustup which --toolchain 1.97.1 rustc)"
           printf 'CARGO=%s\nRUSTC=%s\n' "$cargo_bin" "$rustc_bin" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
-          key: hiqlite-cluster-auth
+          lane: cluster-auth
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - name: Run replicated Store and topology contracts
         if: needs.scope.outputs.cluster_auth == 'true'
         run: make cluster-store-check cluster-harness-check
@@ -231,9 +238,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
-          key: hiqlite-wal
+          lane: cluster-wal
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - name: Run exact Hiqlite and WAL recovery regressions
         run: make cluster-wal-check
 
@@ -246,9 +254,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
-          key: cluster-daemon
+          lane: cluster-daemon
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
@@ -270,9 +279,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
-          key: web-layout
+          lane: web-layout
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       # Pinned so the browser-bundle cache key below is meaningful; bump both
       # together. A cache hit skips the ~150 MB Chromium download every run.
       - name: Cache Playwright browsers
@@ -303,9 +313,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
-          key: vod-web
+          lane: vod-web
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -578,7 +589,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
+        with:
+          lane: coverage
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - uses: taiki-e/install-action@cargo-llvm-cov
       # Instrumented or not, this runs the same suite as the check job, so it
       # needs the same ffmpeg.
@@ -651,9 +665,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
         with:
-          key: ${{ matrix.target }}
+          lane: release-${{ matrix.target }}
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - name: Provision or verify the aarch64 cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         # Also provides the C cross-compiler for rusqlite's bundled SQLite.
@@ -678,8 +694,8 @@ jobs:
       - name: Record the release binary digest
         if: github.event_name == 'push' || needs.scope.outputs.qualification == 'true'
         run: >-
-          sha256sum target/${{ matrix.target }}/release/plurxd
-          > target/${{ matrix.target }}/release/plurxd.sha256
+          sha256sum "$CARGO_TARGET_DIR/${{ matrix.target }}/release/plurxd"
+          > "$CARGO_TARGET_DIR/${{ matrix.target }}/release/plurxd.sha256"
       # Ordinary PRs prove both release targets compile but retain no large
       # artifacts. Push/tag runs and final effort qualifications keep the exact
       # binary plus digest for one day, long enough to inspect or stage it.
@@ -694,8 +710,8 @@ jobs:
         with:
           name: plurxd-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/plurxd
-            target/${{ matrix.target }}/release/plurxd.sha256
+            ${{ steps.cargo-cache.outputs.target-dir }}/${{ matrix.target }}/release/plurxd
+            ${{ steps.cargo-cache.outputs.target-dir }}/${{ matrix.target }}/release/plurxd.sha256
           retention-days: 1
 
   # CD validates the tag in this workflow, then delegates artifact construction,
@@ -722,7 +738,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - id: buildx-cache
+        uses: ./.github/actions/buildx-cache
+        with:
+          lane: docker-smoke
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -734,8 +754,8 @@ jobs:
           # the Dockerfile, so the GHA layer cache spares their ~150 MB of
           # downloads on every run; the cargo builder layer still rebuilds on
           # source changes, which is exactly the part that must.
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha' || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,mode=min' || '' }}
       - name: Start, probe, restart, and re-probe the image
         run: scripts/container-smoke plurx/plurxd:ci
       # Release publication ships amd64 and arm64. The ordinary smoke loads
@@ -749,7 +769,14 @@ jobs:
           push: false
           platforms: linux/arm64
           outputs: type=cacheonly
-          cache-from: type=gha
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha' || '' }}
+      - name: Bound persistent BuildKit state
+        if: always() && steps.buildx-cache.outputs.local == 'true'
+        env:
+          BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
+        run: >-
+          docker buildx prune --builder "$BUILDER_NAME" --force
+          --max-used-space 50GB --min-free-space 100GB
 
   # Configure this as the single required check for main-bound PRs and the
   # merge queue when repository protections become available. Until then it is

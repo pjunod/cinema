@@ -25,6 +25,7 @@ jobs:
       android_jvm: ${{ steps.scope.outputs.android_jvm }}
       web_layout: ${{ steps.scope.outputs.web_layout }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
+      execution_mode: ${{ steps.execution_mode.outputs.mode }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,6 +45,13 @@ jobs:
             self-hosted|github) ;;
             *) echo "::error::CI_RUNNER_MODE must be self-hosted or github"; exit 1 ;;
           esac
+      - name: Resolve the fail-safe execution rollout mode
+        id: execution_mode
+        env:
+          REQUESTED_MODE: ${{ vars.CI_EXECUTION_MODE || 'legacy' }}
+        run: |
+          mode="$(scripts/ci-execution-mode resolve "$REQUESTED_MODE")"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
   preflight:
     name: effort policy and contract preflight
@@ -77,9 +85,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
-          key: effort-rust
+          lane: effort-rust
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - name: Compile every Rust target without executing tests
         run: make effort-rust-check
 

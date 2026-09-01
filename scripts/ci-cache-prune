@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() {
+  echo "ci-cache-prune: $*" >&2
+  exit 1
+}
+
+[ "$#" -eq 2 ] || die "usage: ci-cache-prune <cache-root> <budget-gb>"
+cache_root=$1
+budget_gb=$2
+[[ "$budget_gb" =~ ^[1-9][0-9]*$ ]] || die "budget must be whole gigabytes"
+test -n "${RUNNER_TOOL_CACHE:-}" || die "RUNNER_TOOL_CACHE is required"
+case "$cache_root" in
+  "$RUNNER_TOOL_CACHE"/plurx-ci/cargo/*/rust-[0-9]*.[0-9]*.[0-9]*) ;;
+  *) die "refusing unsafe cache root: $cache_root" ;;
+esac
+test -d "$cache_root" || die "cache root does not exist: $cache_root"
+
+read -r filesystem_kb available_kb < <(
+  df -Pk "$cache_root" | awk 'NR == 2 { print $2, $4 }'
+)
+usage_kb=$(du -sk "$cache_root" | awk '{ print $1 }')
+budget_kb=$((budget_gb * 1024 * 1024))
+percent_floor_kb=$((filesystem_kb / 5))
+absolute_floor_kb=$((100 * 1024 * 1024))
+floor_kb=$absolute_floor_kb
+if [ "$percent_floor_kb" -gt "$floor_kb" ]; then
+  floor_kb=$percent_floor_kb
+fi
+
+before_kb=$usage_kb
+reason=within-budget
+if [ "$usage_kb" -gt "$budget_kb" ] || [ "$available_kb" -lt "$floor_kb" ]; then
+  reason=pressure
+  while IFS= read -r target_dir; do
+    case "$target_dir" in
+      "$cache_root"/*/target) ;;
+      *) die "refusing unsafe target directory: $target_dir" ;;
+    esac
+    rm -rf -- "$target_dir"
+    usage_kb=$(du -sk "$cache_root" | awk '{ print $1 }')
+    read -r _ available_kb < <(
+      df -Pk "$cache_root" | awk 'NR == 2 { print $2, $4 }'
+    )
+    if [ "$usage_kb" -le "$budget_kb" ] && [ "$available_kb" -ge "$floor_kb" ]; then
+      break
+    fi
+  done < <(
+    find "$cache_root" -mindepth 2 -maxdepth 2 -type d -name target \
+      -printf '%T@ %p\n' | sort -n | cut -d' ' -f2-
+  )
+fi
+
+after_kb=$(du -sk "$cache_root" | awk '{ print $1 }')
+{
+  echo "### Cargo cache"
+  echo
+  echo "- root: \`$cache_root\`"
+  echo "- budget: ${budget_gb} GiB"
+  echo "- filesystem floor: $((floor_kb / 1024 / 1024)) GiB"
+  echo "- before: $((before_kb / 1024)) MiB"
+  echo "- after: $((after_kb / 1024)) MiB"
+  echo "- prune decision: \`$reason\`"
+} >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

@@ -1,0 +1,62 @@
+name: Configure BuildKit cache
+description: >-
+  Reuse named BuildKit state on persistent runners while preserving an
+  isolated ephemeral builder on GitHub-hosted runners.
+
+inputs:
+  lane:
+    description: Stable, filesystem-safe name for this BuildKit lane.
+    required: true
+  execution-mode:
+    description: CI execution rollout mode; local state is disabled in legacy mode.
+    required: false
+    default: legacy
+
+outputs:
+  builder-name:
+    description: Name of the active Buildx builder.
+    value: ${{ steps.configure.outputs.builder_name }}
+  local:
+    description: Whether BuildKit state persists on this runner.
+    value: ${{ steps.configure.outputs.local }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select the BuildKit state contract
+      id: configure
+      shell: bash
+      env:
+        CACHE_LANE: ${{ inputs.lane }}
+        EXECUTION_MODE: ${{ inputs.execution-mode }}
+      run: |
+        set -euo pipefail
+        [[ "$CACHE_LANE" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || {
+          echo "::error::BuildKit cache lane must be filesystem-safe"
+          exit 1
+        }
+        if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] \
+          || [ "$EXECUTION_MODE" != shadow -a "$EXECUTION_MODE" != accelerated ]; then
+          echo "local=false" >> "$GITHUB_OUTPUT"
+          echo "builder_name=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        runner_name=$(printf '%s' "$RUNNER_NAME" \
+          | tr '[:upper:]' '[:lower:]' \
+          | tr -c 'a-z0-9_.-' '-')
+        echo "local=true" >> "$GITHUB_OUTPUT"
+        echo "builder_name=plurx-$runner_name-$CACHE_LANE" >> "$GITHUB_OUTPUT"
+
+    - name: Start a persistent self-hosted builder
+      if: steps.configure.outputs.local == 'true'
+      uses: docker/setup-buildx-action@v3
+      with:
+        name: ${{ steps.configure.outputs.builder_name }}
+        keep-state: true
+        buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+
+    - name: Start an ephemeral hosted builder
+      if: steps.configure.outputs.local != 'true'
+      uses: docker/setup-buildx-action@v3
+      with:
+        buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml

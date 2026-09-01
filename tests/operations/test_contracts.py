@@ -788,8 +788,8 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("target/validation/android-instrumentation.txt", makefile)
         self.assertIn("Android instrumentation did not report a passing suite", makefile)
 
-        # The semantic proof reuses the cluster job's root target instead of
-        # compiling the same Hiqlite/OpenRaft dependency graph a second time.
+        # The semantic proof reuses the cluster lane's persistent target
+        # instead of compiling the same dependency graph a second time.
         cluster = workflow.split("  cluster_auth:", 1)[1].split(
             "\n  cluster_wal:", 1
         )[0]
@@ -799,7 +799,8 @@ class OperationsContractCase(unittest.TestCase):
         daemon = workflow.split("  cluster_daemon:", 1)[1].split(
             "\n  web_layout:", 1
         )[0]
-        self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", cluster)
+        self.assertIn("uses: ./.github/actions/cargo-cache", cluster)
+        self.assertIn("lane: cluster-auth", cluster)
         self.assertIn(
             "Resolve pinned Rust executables for the long contract run", cluster
         )
@@ -819,11 +820,13 @@ class OperationsContractCase(unittest.TestCase):
         )
         self.assertIn("if-no-files-found: error", cluster)
 
-        # The docker smoke build keeps the GHA layer cache wired so the
-        # ffmpeg runtime layers stop re-downloading on every run.
+        # Hosted smoke keeps GHA cache; self-hosted smoke uses named bounded
+        # BuildKit state instead of uploading the same layers after each job.
         docker = workflow.split("  docker:", 1)[1].split("\n  pr_gate:", 1)[0]
-        self.assertIn("cache-from: type=gha", docker)
-        self.assertIn("cache-to: type=gha,mode=min", docker)
+        self.assertIn("uses: ./.github/actions/buildx-cache", docker)
+        self.assertIn("'type=gha' || ''", docker)
+        self.assertIn("'type=gha,mode=min' || ''", docker)
+        self.assertIn("--max-used-space 50GB --min-free-space 100GB", docker)
 
     def test_hiqlite_shutdown_budget_covers_its_deliberate_cluster_waits(self):
         management = read("vendor/hiqlite/src/client/mgmt.rs")
