@@ -2380,6 +2380,44 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
+    /// A preview is offered and never automatic.
+    ///
+    /// The eligibility rule was kind-agnostic, and a chapter-derived preview is
+    /// `authored` — so the preference spelled "Auto-skip intro & credits"
+    /// silently began skipping next week's footage. The button still appears;
+    /// what is withheld is the seek nobody asked for.
+    func testAPreviewIsNeverAutomaticWhateverItsProvenance() {
+        let preview = Marker(
+            kind: "preview",
+            label: "Skip Preview",
+            startMs: 1_200_000,
+            endMs: 1_410_000,
+            chapter: true,
+            provenance: "authored"
+        )
+        XCTAssertFalse(preview.isAutoSkipEligible)
+
+        var manual = preview
+        manual.provenance = "manual"
+        XCTAssertFalse(manual.isAutoSkipEligible)
+
+        // Not a provenance rule: an older server sends no provenance at all.
+        var bare = preview
+        bare.provenance = nil
+        XCTAssertFalse(bare.isAutoSkipEligible)
+
+        // The kinds the preference actually names stay automatic.
+        let credits = Marker(
+            kind: "credits",
+            label: "Skip Credits",
+            startMs: 1_200_000,
+            endMs: 1_410_000,
+            chapter: true,
+            provenance: "authored"
+        )
+        XCTAssertTrue(credits.isAutoSkipEligible)
+    }
+
     func testSeekRoutePrefersTheNativeClockInsideTheAdvertisedWindow() {
         // Growing HLS session that began at film-time 60 s; the served
         // window currently spans item-local 0 s .. 90 s (film 60 s .. 150 s).

@@ -9169,6 +9169,13 @@ function markerIsEstimated(m){
 }
 function markerAutoSkipEligible(m){
   if(!m) return false;
+  // A preview is never automatic. The preference this gates is spelled
+  // "Auto-skip intro & credits" on every surface that offers it, and a
+  // preview is the one marker kind that is new footage every week: skipping
+  // it is a choice about *this* episode's ending, not a standing preference
+  // about repeated material. The button still appears, so a viewer who wants
+  // it gone presses it — what is withheld is the seek nobody asked for.
+  if(m.kind==="preview") return false;
   // M1-M4 has no configured detector confidence floor. Keep automatic seeks
   // to exact authored/manual evidence; old servers fall back to `chapter`.
   if(m.provenance!=null) return m.provenance==="authored"||m.provenance==="manual";
@@ -9188,7 +9195,9 @@ function renderSkip(m){
   const key=m.kind+m.start_ms+(estimated?"e":"");
   if(c.dataset.k===key) return; // avoid rebuilding every timeupdate tick
   c.dataset.k=key;
-  const label=m.label||(m.kind==="intro"?"Skip Intro":"Skip Credits");
+  // The server sends the label; the fallback is for a marker from a node too
+  // old to send one, where only intro and credits existed.
+  const label=m.label||(m.kind==="intro"?"Skip Intro":m.kind==="preview"?"Skip Preview":"Skip Credits");
   c.innerHTML=`<button onclick="skipCurrent()">${esc(label)}${estimated?" · Estimated":""} ›</button>`;
   const offerKey=(m.kind||"unknown")+":"+m.start_ms;
   const automatic=PLAYER.autoskip&&markerAutoSkipEligible(m);
@@ -9207,8 +9216,17 @@ function skipMarker(m,automatic=false){
   const c=document.getElementById("pskip"); if(c){ c.innerHTML=""; c.dataset.k=""; }
   clientLog({level:"info",event:automatic?"marker_automatic_skip":"marker_manual_skip",
     detail:m.kind||"unknown",message:"playback marker skipped"});
-  // Credits that run to the very end → treat "skip" as "finished".
-  if(m.kind==="credits" && PLAYER.durMs && m.end_ms>=PLAYER.durMs-2500){
+  // A tail marker that runs to the very end → treat "skip" as "finished".
+  // Keyed on where the region ENDS rather than on its kind: an episode whose
+  // last chapter is "Next Episode Preview" is just as over as one that ends in
+  // credits, and before the preview kind existed that file reached here as
+  // credits and finished correctly. Kind-keying it now would quietly stop
+  // marking those episodes watched.
+  // Listed rather than excluded: `!== "intro"` also caught `recap`, and any
+  // marker whose kind is absent or unrecognised by this build. Marking an
+  // episode watched and advancing to the next one is not a thing to do on a
+  // kind this build does not know.
+  if((m.kind==="credits"||m.kind==="preview") && PLAYER.durMs && m.end_ms>=PLAYER.durMs-2500){
     reportProgress(PLAYER.fileId,true); return finishPlayback(true);
   }
   clientLog({level:"info",event:"marker_prewarm",detail:"miss",

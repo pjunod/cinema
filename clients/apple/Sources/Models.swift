@@ -596,7 +596,14 @@ struct Marker: Codable, Hashable {
     /// M1-M4 deliberately has no configured detector confidence floor, so
     /// only exact authored/manual evidence is automatic. An older server's
     /// chapter bit preserves the pre-provenance behavior.
+    ///
+    /// A `preview` is never automatic whatever its provenance. The preference
+    /// this gates is spelled "Auto-skip intro & credits" on every surface that
+    /// offers it, and a preview is the one kind that is new footage every
+    /// week: skipping it is a choice about this episode's ending, not a
+    /// standing preference about repeated material. The button still appears.
     var isAutoSkipEligible: Bool {
+        if kind == "preview" { return false }
         guard let provenance else { return chapter != false }
         return provenance == "authored" || provenance == "manual"
     }

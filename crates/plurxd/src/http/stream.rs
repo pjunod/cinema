@@ -887,9 +887,40 @@ fn subtitle_burn_would_discard_hdr(decision: &Decision, requires_burn_in: bool) 
         )
 }
 
-/// Classify a chapter title as an intro or end-credits marker. Case-insensitive
-/// substring match against the conventions used by MakeMKV, anime releases, and
-/// hand-authored chapters. Returns the marker kind + button label, or `None`.
+/// Classify a chapter title as an intro, end-credits, or next-episode-preview
+/// marker. Case-insensitive substring match against the conventions used by
+/// MakeMKV, anime releases, and hand-authored chapters. Returns the marker kind
+/// + button label, or `None`.
+///
+/// **A trailing preview is not the credits**, and it used to be: `"preview"`
+/// and `"next episode"` sat in the credits keyword list, so a chapter titled
+/// "Next Episode Preview" produced a `Skip Credits` button over a region that
+/// is not the credits. The distinction is not cosmetic — the two regions want
+/// opposite treatment. Credits are the same every week and a viewer who skips
+/// them is done with the episode; a preview is new footage each time, and a
+/// viewer who skips it is going *on*, not finishing. `AnnotationKind::Preview`
+/// has existed since the analysis index landed with nothing to produce it; this
+/// is what produces it.
+/// Whether a lowercased title *opens* with `phrase` as a whole word-run.
+///
+/// A teaser chapter announces what is coming, so the phrase leads the title:
+/// "Next Time", "Next Time On Deadwood", "Next On:". An ordinary tail story
+/// chapter puts the identical words at the end, where they are a sign-off and
+/// not an announcement — "Until Next Time", "Till Next Time". Plain substring
+/// matching cannot tell those apart, and getting it wrong in the *tail* is the
+/// expensive direction: `CREDITS_MIN_START_PCT` only rejects a match below 70%
+/// of the runtime, so a false preview in the last act is unbounded by position,
+/// takes the file's real Skip Credits marker with it, and on the web offers a
+/// button that marks the episode watched several minutes early.
+///
+/// The trailing word boundary is what stops "next week" also accepting "Next
+/// Weekend".
+fn opens_with_phrase(title: &str, phrase: &str) -> bool {
+    title
+        .strip_prefix(phrase)
+        .is_some_and(|rest| rest.chars().next().is_none_or(|c| !c.is_alphanumeric()))
+}
+
 fn classify_chapter(title: &str) -> Option<(&'static str, &'static str)> {
     let t = title.trim().to_lowercase();
     // Exact single-token anime conventions (OP/ED, non-credit variants).
@@ -908,22 +939,52 @@ fn classify_chapter(title: &str) -> Option<(&'static str, &'static str)> {
         "title sequence",
         "main titles",
     ];
-    let credit_kw = [
-        "end credit",
-        "credits",
-        "ending",
-        "outro",
-        "closing",
-        "next episode",
-        "preview",
-    ];
+    let credit_kw = ["end credit", "credits", "ending", "outro", "closing"];
+    // Anime discs and TV rips label the tail teaser several ways, in two
+    // grammatical shapes that need different matching.
+    //
+    // These name the region outright wherever they appear in the title, so a
+    // plain substring is right: "Next Episode Preview", "Preview", "Previews".
+    let preview_kw = ["next episode", "preview"];
+    // These are ordinary English that only means "a teaser follows" when it
+    // *leads* the title. As a suffix the same words are a sign-off on a story
+    // chapter — "Until Next Time", "Till Next Time" — and matching those was a
+    // shipping defect, not a hypothetical: `CREDITS_MIN_START_PCT` rejects a
+    // match below 70% of the runtime and nothing else, so a false preview in
+    // the last act deleted the file's real Skip Credits marker and offered a
+    // button that finished the episode minutes early. See `opens_with_phrase`.
+    //
+    // Leading-form matching is also what lets "next on" back in. It was
+    // withdrawn for substring-matching "The Next One", which is story; as a
+    // prefix it accepts "Next On" and "Next On: Better Call Saul" and rejects
+    // that, so the teaser it names stops being labelled credits.
+    let preview_lead = ["next time", "next week", "next on", "on the next"];
+    // Two words that look like they belong are absent, for opposite reasons.
+    // "Trailer" is a judgement call: on a disc rip it is usually the
+    // bonus-features reel, and although the position bound would catch a
+    // front-of-disc one, a *tail* extras reel on a single-title rip would slip
+    // through and skip a viewer into supplements. That judgement is admittedly
+    // half-kept — "Previews", the same reel's North American label, does match
+    // `preview` and is left matching, because the alternative is losing the
+    // spelling most next-episode teasers actually use. "Coming up" is absent
+    // because unscripted television uses it for the act-break tease before an
+    // ad, which is a mid-programme label the position bound cannot always
+    // reject on a short episode.
     // "Opening Credits" is the front titles, not the tail — intro wins.
     let is_opening_titles = t.contains("opening") && t.contains("credits");
     if is_opening_titles || (intro_kw.iter().any(|k| t.contains(k)) && !t.contains("credit")) {
         return Some(("intro", "Skip Intro"));
     }
+    // Credits win a title that names both, because such a chapter *starts* in
+    // the credits: the viewer sees those first, so that is the honest button,
+    // and pressing it skips the whole span either way.
     if credit_kw.iter().any(|k| t.contains(k)) {
         return Some(("credits", "Skip Credits"));
+    }
+    if preview_kw.iter().any(|k| t.contains(k))
+        || preview_lead.iter().any(|k| opens_with_phrase(&t, k))
+    {
+        return Some(("preview", "Skip Preview"));
     }
     None
 }
@@ -1057,6 +1118,52 @@ fn chapter_span(chapter: &serde_json::Value) -> Option<ChapterSpan> {
 /// Turn an ffprobe `chapters` array into skippable intro/credits markers.
 /// Pure, so the classification and the bounds checks are testable without a
 /// file or a subprocess.
+/// How far past the declared runtime a chapter's end may land and still be
+/// treated as rounding rather than as broken metadata.
+///
+/// MKV chapter atoms and `format.duration` are computed from different places
+/// and disagree by a millisecond or two routinely; five seconds also covers a
+/// trailing black frame or a padded final atom.
+const CHAPTER_END_SLACK_MS: i64 = 5_000;
+
+/// Where the run of teaser chapters that *ends the file* begins, if there is
+/// one.
+///
+/// A preview earns its kind on position and on structure, not on its title
+/// alone. `CREDITS_MIN_START_PCT` rejects a keyword match below 70% of the
+/// runtime and imposes nothing above it, so the last act is exactly where a
+/// false positive is unbounded — and a false positive there is not a spare
+/// button. It deletes the file's real Skip Credits marker (the preview bounds
+/// the inferred credits, and with no chapter boundary before it there is
+/// nothing to infer from) and on the web it offers a button that reports the
+/// episode watched, irreversibly and pushed to Trakt, minutes early.
+///
+/// So the teaser has to be the last thing there is. A mid-tail match — a
+/// keyword hit followed by more story — is refused however well positioned.
+///
+/// It is a *run* and not a single span because some rips mark the teaser and
+/// its title card separately, and both halves belong to the same teaser: the
+/// credits must stop at the first of them, not partway through.
+///
+/// Slack, not equality, on each link: the last chapter may overrun
+/// `format.duration`, and consecutive chapters may leave a black-frame gap.
+fn trailing_teaser_start(spans: &[ChapterSpan], timeline_ms: i64) -> Option<i64> {
+    let mut reach = timeline_ms;
+    let mut first = None;
+    for span in spans.iter().rev() {
+        let is_preview = span.class.map(|c| c.0) == Some("preview");
+        let ends_the_run = span.end_ms + CHAPTER_END_SLACK_MS >= reach;
+        let in_credits_window = i128::from(span.start_ms) * 100
+            >= i128::from(timeline_ms) * i128::from(CREDITS_MIN_START_PCT);
+        if !(is_preview && ends_the_run && in_credits_window) {
+            break;
+        }
+        reach = span.start_ms;
+        first = Some(span.start_ms);
+    }
+    first
+}
+
 pub(crate) fn markers_from_chapters(
     chapters: &[serde_json::Value],
     duration_ms: Option<i64>,
@@ -1089,6 +1196,8 @@ pub(crate) fn markers_from_chapters(
         return Vec::new();
     };
 
+    let teaser_start = trailing_teaser_start(&spans, timeline_ms);
+
     let mut out = Vec::new();
     for &ChapterSpan {
         start_ms,
@@ -1100,15 +1209,47 @@ pub(crate) fn markers_from_chapters(
     } in &spans
     {
         let Some((kind, label)) = class else { continue };
+        // A preview must additionally belong to the run of teaser chapters
+        // that ends the file. Position alone is not enough for this kind: the
+        // credits bound rejects a match below 70% and nothing above it, and a
+        // false preview in the tail is the expensive failure — it takes the
+        // real Skip Credits marker with it and, on the web, offers a button
+        // that marks the episode watched. See `trailing_teaser_start`.
+        if kind == "preview" && !matches!(teaser_start, Some(first) if start_ms >= first) {
+            continue;
+        }
+        // Every tail kind shares the credits bound. Written as "not intro"
+        // rather than "is credits" so a kind added later inherits the tail
+        // rule instead of silently getting the intro one.
         let in_bounds = if kind == "intro" {
             i128::from(start_ms) * 100 <= i128::from(timeline_ms) * i128::from(INTRO_MAX_START_PCT)
         } else {
             i128::from(start_ms) * 100
                 >= i128::from(timeline_ms) * i128::from(CREDITS_MIN_START_PCT)
         };
-        if !in_bounds || end_ms > timeline_ms {
+        if !in_bounds {
             continue;
         }
+        // A trailing chapter whose end overruns the declared runtime by a hair
+        // is an ordinary MKV/ffprobe artefact — the chapter atom and
+        // `format.duration` are computed from different places — not broken
+        // metadata. Dropping the marker for it costs the viewer the button
+        // entirely, and silently demotes an authored credits chapter to the
+        // proportional estimate below, which is a worse marker wearing an
+        // "Estimated" badge. Clamp the end to the timeline instead, and drop
+        // only an overrun too large to be rounding.
+        let (end_ms, end_ticks) = if end_ms > timeline_ms {
+            match ms_to_ticks_checked(timeline_ms, timescale) {
+                Some(clamped)
+                    if end_ms - timeline_ms <= CHAPTER_END_SLACK_MS && clamped > start_ticks =>
+                {
+                    (timeline_ms, clamped)
+                }
+                _ => continue,
+            }
+        } else {
+            (end_ms, end_ticks)
+        };
         out.push(Marker {
             kind: kind.to_owned(),
             label: label.to_owned(),
@@ -1133,6 +1274,32 @@ pub(crate) fn markers_from_chapters(
     let has_credits = out.iter().any(|m| m.kind == "credits");
     if !has_credits {
         if let Some(dur) = duration_ms.filter(|d| *d > 5 * 60_000) {
+            // A labelled preview ends the credits; it does not start them.
+            //
+            // This is the whole reason splitting the two kinds is more than a
+            // relabelling. A file whose only tail chapter is "Next Episode
+            // Preview" used to satisfy `has_credits` and stop here. Now it does
+            // not, and the guess below would otherwise do two wrong things at
+            // once: take that preview's own boundary as the exact start of the
+            // credits, and run the span to the end of the file — labelling the
+            // preview as credits, which is what this change exists to stop.
+            //
+            // So the credits are inferred over what is left: up to where the
+            // preview begins, from the last boundary before it.
+            //
+            // The same run the emit loop used, and deliberately the same value:
+            // one rule decides both which spans become Skip Preview buttons and
+            // where the credits stop, so the two can never disagree about what
+            // the teaser is. Read off `spans` rather than the emitted markers —
+            // a chapter whose end overruns the runtime past the clamp is
+            // dropped from `out`, and forgetting it here would not merely lose
+            // the Skip Preview button, it would revert `credits_end` to the end
+            // of the file and offer the estimate over next week's footage,
+            // which is the exact bug this change exists to stop. Only the
+            // span's *start* is used, and an overrunning end says nothing about
+            // that.
+            let preview_start = teaser_start;
+            let credits_end = preview_start.unwrap_or(dur);
             let tail = plausible_credits_tail_ms(dur);
             // A final chapter boundary that lands inside a plausible tail is
             // almost certainly where the credits begin, and it is exact where
@@ -1142,17 +1309,32 @@ pub(crate) fn markers_from_chapters(
             // not, and falls back to the estimate rather than opening the
             // button early. The 15s floor keeps a post-credits stinger from
             // becoming the button.
-            let boundary = spans
-                .last()
-                .copied()
-                .filter(|span| span.start_ms <= dur)
-                .filter(|span| (15_000..=tail * 2).contains(&(dur - span.start_ms)));
+            let boundary = if preview_start.is_some() {
+                // Walk back past the preview's own boundary to the one before
+                // it: the preview's start is `credits_end`, not a candidate.
+                spans
+                    .iter()
+                    .rev()
+                    .find(|span| span.start_ms < credits_end)
+                    .copied()
+            } else {
+                // No preview, so this is unchanged from before this slice.
+                // Walking back here would be a silent behaviour change on
+                // every ordinary file: a container whose chapters overrun its
+                // declared duration used to fall through to the estimate, and
+                // a walk-back would newly accept an earlier boundary as exact.
+                spans
+                    .last()
+                    .copied()
+                    .filter(|span| span.start_ms <= credits_end)
+            }
+            .filter(|span| (15_000..=tail * 2).contains(&(credits_end - span.start_ms)));
             let exact_boundary = boundary.and_then(|span| {
                 let timescale = common_timebase(span.timescale, 1_000)?;
                 let start_ticks = span
                     .start_ticks
                     .checked_mul(i64::from(timescale / span.timescale))?;
-                let end_ticks = ms_to_ticks_checked(dur, timescale)?;
+                let end_ticks = ms_to_ticks_checked(credits_end, timescale)?;
                 (end_ticks > start_ticks).then_some((
                     span.start_ms,
                     start_ticks,
@@ -1160,13 +1342,42 @@ pub(crate) fn markers_from_chapters(
                     timescale,
                 ))
             });
-            let (start_ms, start_ticks, end_ticks, timescale) =
-                exact_boundary.unwrap_or((dur - tail, dur - tail, dur, 1_000));
+            // Without a chapter boundary to anchor on, the start is a
+            // proportion of runtime. That is defensible when the credits run to
+            // the end of the file — the estimate is bounded by the end, and the
+            // worst case is a button that opens slightly early over credits
+            // that are really there.
+            //
+            // It is not defensible when a labelled preview bounds them. The
+            // muxer named the preview and did not name the credits, so there is
+            // no evidence they are the length this estimate assumes;
+            // `credits_end - tail` then lands inside *story*, and an invented
+            // "Skip Credits" there seeks a viewer out of the episode. Saying
+            // nothing is right.
+            //
+            // The earlier form of this guard tested the computed start against
+            // `credits_end` and could never fire: a preview clears
+            // CREDITS_MIN_START_PCT of the runtime, `tail` is at most a
+            // fortieth of it or 180s, and the exact branch already filters
+            // `start_ms < credits_end`. Every file with a labelled preview and
+            // no labelled credits got the invented marker the comment said it
+            // was preventing.
+            let inferred = match exact_boundary {
+                Some(exact) => Some(exact),
+                None if preview_start.is_none() => {
+                    Some((credits_end - tail, credits_end - tail, credits_end, 1_000))
+                }
+                None => None,
+            };
+            let Some((start_ms, start_ticks, end_ticks, timescale)) = inferred else {
+                out.sort_by_key(|m| m.start_ms);
+                return out;
+            };
             out.push(Marker {
                 kind: "credits".to_owned(),
                 label: "Skip Credits".to_owned(),
                 start_ms,
-                end_ms: dur,
+                end_ms: credits_end,
                 start_ticks,
                 end_ticks,
                 timescale,
@@ -1197,6 +1408,37 @@ pub(crate) fn markers_from_chapters(
 /// any other. A file whose probe never succeeded has no document to graft
 /// onto and simply keeps probing live; it has larger problems, and the
 /// reanalyze button is the fix for them.
+///
+/// **It is deliberately NOT bumped for the 2026-08-31 preview split**, and the
+/// reason is the one thing about this constant that is easy to get wrong twice
+/// — as this branch did, in both directions, before checking.
+///
+/// It is not a label. `annotation_source_identity` hashes it into the
+/// `argv_fingerprint`, and both store backends select the set with
+/// `WHERE … AND argv_fingerprint = ?`. So bumping it does not mark old sets
+/// stale; it makes them **invisible**. Three consequences follow, and only the
+/// first is the intended one:
+///
+/// 1. every automatic set re-derives on next play and is overwritten, because
+///    the `ON CONFLICT … WHERE … argv_fingerprint <> ?` clause now fires;
+/// 2. **every manual override is orphaned.** `set_manual_timeline_annotation`
+///    keys on this same identity (`http/analysis.rs`), so a viewer's own
+///    correction stops being found — silently, with the row still in the
+///    table and nothing in the UI to say it was dropped;
+/// 3. a queued job still carrying the old version is refused terminally as
+///    `pipeline_version_unavailable` rather than producing old output on a new
+///    node (`state.rs`).
+///
+/// Trading (2) for (1) is a bad trade. A stale automatic marker is wrong and
+/// visibly wrong and one `POST /api/v1/files/{file}/analysis` fixes it; a
+/// silently discarded manual correction is the viewer's own work, and they
+/// have no way to tell it happened. So files analysed before this deploy keep
+/// their old markers — with a trailing preview still labelled credits — until
+/// re-analysed through that endpoint, which is the documented remedy and the
+/// only one that respects the manual-wins invariant #700 established.
+///
+/// Bump it when the *identity* of the analysis genuinely changes and orphaning
+/// overrides is the point. A classifier correction is not that.
 pub(crate) const CHAPTER_ANNOTATION_VERSION: &str = "chapter-classifier-v1";
 
 pub(crate) fn annotation_source_identity(file: &MediaFile) -> plurx_core::segplan::SourceIdentity {
@@ -1336,6 +1578,16 @@ async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
         .timeline_annotation_set(file.id, &source_identity)
         .await
     {
+        // The persisted set wins outright. A "re-derive it if its classifier
+        // was superseded" branch stood here briefly and was removed: it could
+        // never fire, because the version that would mark a set superseded is
+        // the same version hashed into the identity this lookup selects on, so
+        // a set from an older classifier is not stale here — it is *absent*.
+        // And had it fired, `put_timeline_annotation_set_if_missing` refuses a
+        // same-identity replacement, so the re-derivation would have been
+        // discarded and the stale set served anyway, at the cost of a full
+        // chapter pass on every play forever. See `CHAPTER_ANNOTATION_VERSION`
+        // for why the identity is not bumped to force the miss.
         Ok(Some(set)) => return markers_from_annotation_set(set),
         Ok(None) => {}
         Err(error) => {
@@ -3366,6 +3618,97 @@ mod tests {
         assert_eq!(classify_chapter("The Heist"), None);
     }
 
+    /// A trailing preview is its own kind, and used to be the credits.
+    ///
+    /// Both regions sit in the tail, so the old single keyword list collapsed
+    /// them and put a `Skip Credits` button over new footage. They want
+    /// opposite treatment: credits are identical every week and skipping them
+    /// means the viewer is done, while a preview is different each time and a
+    /// viewer skipping it is going on to the next episode.
+    #[test]
+    fn a_trailing_preview_is_not_the_credits() {
+        for title in [
+            "Next Episode Preview",
+            "Preview",
+            "Previews",
+            "Next Time On",
+            "On the Next",
+            "Next Week On",
+            "next episode",
+        ] {
+            assert_eq!(
+                classify_chapter(title).map(|m| m.0),
+                Some("preview"),
+                "{title}"
+            );
+        }
+        // Titles that must NOT become a preview button. "The Next One" is the
+        // trap a bare `next on` substring would spring — it contains those
+        // characters and is story. "Coming Up" is unscripted television's
+        // act-break tease before an ad break, mid-programme by definition.
+        // "Previously On" is a recap and belongs to intro, which is checked
+        // first; assert that ordering rather than trusting it.
+        //
+        // "Until Next Time" and "Till Next Time" are the expensive ones. They
+        // are ordinary tail story titles carrying the identical words as a
+        // sign-off, they sit past 70% of the runtime where the position bound
+        // imposes nothing, and matching them deleted the file's real Skip
+        // Credits marker and offered a button that finished the episode early.
+        // "Next Weekend" is why the leading match needs a word boundary.
+        for title in [
+            "The Next One",
+            "Coming Up",
+            "Trailers",
+            "Until Next Time",
+            "Till Next Time",
+            "Next Weekend",
+            "Epilogue",
+        ] {
+            assert_eq!(classify_chapter(title).map(|m| m.0), None, "{title}");
+        }
+        // The teaser spellings that announce themselves in the lead, including
+        // the bare "Next On" that a substring list had to withdraw for
+        // matching "The Next One".
+        for title in ["Next Time", "Next On", "Next On: Better Call Saul"] {
+            assert_eq!(
+                classify_chapter(title).map(|m| m.0),
+                Some("preview"),
+                "{title}"
+            );
+        }
+        assert_eq!(
+            classify_chapter("Previously On").map(|m| m.0),
+            Some("intro"),
+            "a recap is not a preview"
+        );
+        assert_eq!(
+            classify_chapter("Next Episode Preview").map(|m| m.1),
+            Some("Skip Preview"),
+            "the button says what the region is"
+        );
+
+        // The credits stay the credits, including the anime spellings that sit
+        // right next to a preview chapter on the same disc.
+        for title in ["End Credits", "Ending", "ED", "Outro", "Closing"] {
+            assert_eq!(
+                classify_chapter(title).map(|m| m.0),
+                Some("credits"),
+                "{title}"
+            );
+        }
+
+        // A title naming both starts in the credits, so that is the honest
+        // button — and pressing it skips the whole span either way.
+        assert_eq!(
+            classify_chapter("Credits & Next Episode").map(|m| m.0),
+            Some("credits")
+        );
+
+        // A disc's bonus reel is not a region inside the episode. Offering to
+        // seek into it is worse than offering nothing.
+        assert_eq!(classify_chapter("Trailers"), None);
+    }
+
     #[test]
     fn stored_chapter_bound_ignores_unrelated_probe_metadata() {
         let raw = serde_json::json!({
@@ -3392,6 +3735,393 @@ mod tests {
 
     fn chapter(title: &str, start: &str, end: &str) -> serde_json::Value {
         serde_json::json!({ "start_time": start, "end_time": end, "tags": { "title": title } })
+    }
+
+    /// The preview and the credits are separate markers on the same file, and
+    /// neither swallows the other.
+    ///
+    /// The layout an anime or TV rip actually has: story, ED, next-episode
+    /// teaser. Before the split both tail chapters produced `credits`, so the
+    /// viewer got two identical buttons and the second one lied about what it
+    /// was skipping.
+    #[test]
+    fn the_credits_and_the_trailing_preview_are_separate_markers() {
+        let chapters = vec![
+            chapter("Opening", "0.000", "90.000"),
+            chapter("Episode", "90.000", "1290.000"),
+            chapter("Ending", "1290.000", "1380.000"),
+            chapter("Next Episode Preview", "1380.000", "1410.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_410_000));
+        let kinds: Vec<&str> = markers.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["intro", "credits", "preview"]);
+
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("credits");
+        let preview = markers
+            .iter()
+            .find(|m| m.kind == "preview")
+            .expect("preview");
+        assert_eq!(credits.start_ms, 1_290_000);
+        assert_eq!(preview.start_ms, 1_380_000);
+        assert!(
+            credits.end_ms <= preview.start_ms,
+            "the credits must not run into the preview"
+        );
+        assert_eq!(preview.label, "Skip Preview");
+        assert!(
+            preview.chapter,
+            "the file said so; this is not an inference"
+        );
+    }
+
+    /// A file whose only tail chapter is the preview does not get an invented
+    /// credits marker laid over it.
+    ///
+    /// This is the regression the split creates, and it is worse than the bug
+    /// it fixes. That preview chapter used to satisfy "some chapter said
+    /// credits" and stop the inference. Now it does not — so the guess would
+    /// run, take the preview's own boundary as the exact start of the credits,
+    /// and stretch to the end of the file: the same mislabelling, rebuilt by a
+    /// different path. The inferred credits are bounded by where the preview
+    /// begins instead.
+    #[test]
+    fn an_inferred_credits_marker_stops_where_a_labelled_preview_begins() {
+        // A 24-minute episode: the plausible credits tail is 36 s, and the
+        // boundary before the preview sits 40 s ahead of it — inside the
+        // window, so the exact boundary is used rather than a proportion.
+        let chapters = vec![
+            chapter("Cold Open", "0.000", "60.000"),
+            chapter("Act One", "60.000", "600.000"),
+            chapter("Act Two", "600.000", "1340.000"),
+            // The unlabelled tail chapter. Its boundary is the only positional
+            // evidence for where the credits start, and taking it is what
+            // makes the estimate exact.
+            chapter("Tag", "1340.000", "1380.000"),
+            chapter("Next Episode Preview", "1380.000", "1440.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_440_000));
+        let preview = markers
+            .iter()
+            .find(|m| m.kind == "preview")
+            .expect("preview");
+        assert_eq!(preview.start_ms, 1_380_000);
+
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("the tail before the preview is still inferred as credits");
+        assert!(
+            !credits.chapter,
+            "no chapter said credits, so it stays a guess"
+        );
+        assert_eq!(
+            credits.end_ms, 1_380_000,
+            "the inference ends where the file's own label begins, not at the \
+             end of the file — which is the whole point"
+        );
+        assert_eq!(
+            credits.start_ms, 1_340_000,
+            "and starts at the last real boundary before the preview, not at \
+             the preview's own"
+        );
+    }
+
+    /// With no credits chapter at all, the guess still runs — bounded.
+    ///
+    /// Inferring credits inside unlabelled story is the fallback's whole job
+    /// and predates this change; a file with no chapters gets exactly that. The
+    /// invariant the preview adds is narrower and it is the one asserted here:
+    /// the guess never runs past where the file said the preview begins, so a
+    /// viewer pressing an estimated "Skip Credits" can never be seeking into
+    /// footage they have not seen.
+    #[test]
+    fn a_preview_with_no_credits_boundary_invents_no_credits_marker() {
+        // One story chapter and a preview. There is no boundary inside a
+        // plausible credits tail before the preview, so there is no evidence
+        // for where credits would start — and the proportional estimate would
+        // put a "Skip Credits" button over the last 35 s of *story*, seeking a
+        // viewer out of the episode.
+        //
+        // The earlier guard for this could never fire: it compared the
+        // computed start against `credits_end`, and a preview clears 70% of
+        // the runtime while the tail is at most a fortieth of it. Every such
+        // file got the invented marker. Assert the absence, not the overlap.
+        let chapters = vec![
+            chapter("Episode", "0.000", "1200.000"),
+            chapter("Preview", "1200.000", "1410.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_410_000));
+        assert!(markers.iter().any(|m| m.kind == "preview"));
+        assert!(
+            !markers.iter().any(|m| m.kind == "credits"),
+            "invented credits over story: {:?}",
+            markers
+                .iter()
+                .filter(|m| m.kind == "credits")
+                .map(|m| (m.start_ms, m.end_ms))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_preview_with_a_real_boundary_infers_credits_up_to_it() {
+        // The other half of the rule. Here the muxer did leave a boundary
+        // inside a plausible tail — the story chapter ends 40 s before the
+        // preview — so the credits are inferred exactly, from evidence, and
+        // stop where the preview starts rather than running to the file end.
+        let chapters = vec![
+            chapter("Episode", "0.000", "1160.000"),
+            chapter("End", "1160.000", "1200.000"),
+            chapter("Preview", "1200.000", "1410.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_410_000));
+        let preview = markers
+            .iter()
+            .find(|m| m.kind == "preview")
+            .expect("preview");
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("inferred credits");
+        assert!(!credits.chapter);
+        assert_eq!(credits.start_ms, 1_160_000);
+        assert_eq!(credits.end_ms, preview.start_ms);
+        assert!(credits.start_ms < credits.end_ms);
+        // Ticks and milliseconds describe the same span. Clients seek on the
+        // ticks and label on the milliseconds, so a marker whose halves
+        // disagree seeks somewhere other than where its button says.
+        let scale = i64::from(credits.timescale);
+        assert!(scale > 0);
+        assert_eq!(credits.start_ticks * 1_000 / scale, credits.start_ms);
+        assert_eq!(credits.end_ticks * 1_000 / scale, credits.end_ms);
+    }
+
+    /// A trailing chapter that overruns the runtime by a hair keeps its button.
+    ///
+    /// MKV chapter atoms and `format.duration` are computed from different
+    /// places and disagree by a millisecond or two routinely. Dropping the
+    /// marker for it cost the viewer the button entirely — no Skip Preview, no
+    /// Skip Credits — and, on a *credits* chapter, silently demoted an authored
+    /// marker to the proportional estimate, so the button gained an "Estimated"
+    /// badge and lost auto-skip eligibility. The end is clamped to the runtime
+    /// instead.
+    #[test]
+    fn a_trailing_chapter_overrunning_the_runtime_by_a_hair_is_clamped() {
+        let chapters = vec![
+            chapter("Episode", "0.000", "1200.000"),
+            // Two seconds past the declared runtime.
+            chapter("Next Episode Preview", "1200.000", "1412.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_410_000));
+        let preview = markers
+            .iter()
+            .find(|m| m.kind == "preview")
+            .expect("the teaser still gets its button");
+        assert!(preview.chapter, "and stays authored, not an estimate");
+        assert_eq!(preview.end_ms, 1_410_000, "clamped to the runtime");
+        assert!(preview.end_ticks > preview.start_ticks);
+        assert!(
+            !markers.iter().any(|m| m.kind == "credits"),
+            "and no estimate is invented over it: {:?}",
+            markers
+                .iter()
+                .filter(|m| m.kind == "credits")
+                .map(|m| (m.start_ms, m.end_ms))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The same overrun on a credits chapter keeps it authored.
+    ///
+    /// This is the half that mattered most: a 1 ms overrun used to drop the
+    /// real credits chapter, and the inference below then invented a
+    /// `chapter:false` marker in its place — a worse marker wearing an
+    /// "Estimated" badge, on a file that had told us exactly where the credits
+    /// were.
+    #[test]
+    fn an_overrunning_credits_chapter_is_not_demoted_to_an_estimate() {
+        let chapters = vec![
+            chapter("Episode", "0.000", "1350.000"),
+            chapter("End Credits", "1350.000", "1410.001"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_410_000));
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("credits");
+        assert!(credits.chapter, "authored, not inferred");
+        assert_eq!((credits.start_ms, credits.end_ms), (1_350_000, 1_410_000));
+    }
+
+    /// An overrun too large to be rounding is still refused.
+    ///
+    /// The clamp exists for a metadata artefact of a few milliseconds, not as a
+    /// blanket amnesty: a chapter claiming to end a minute past the runtime is
+    /// describing a different file, and clamping it would invent a span the
+    /// container never asserted.
+    #[test]
+    fn an_overrun_too_large_to_be_rounding_is_still_dropped() {
+        let chapters = vec![
+            chapter("Episode", "0.000", "1200.000"),
+            chapter("Next Episode Preview", "1200.000", "1470.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_410_000));
+        assert!(
+            !markers.iter().any(|m| m.kind == "preview"),
+            "60s past the runtime is broken metadata, not rounding"
+        );
+    }
+
+    /// A keyword match in the tail still has to be the last thing there is.
+    ///
+    /// `CREDITS_MIN_START_PCT` rejects a preview match below 70% of the runtime
+    /// and imposes nothing above it, so the last act is where a false positive
+    /// is unbounded — and it is not a spare button there. It bounds the
+    /// inferred credits, and with no chapter boundary before it in the window
+    /// there is nothing to infer from, so the file's real Skip Credits marker
+    /// disappears; on the web the false button also reports the episode
+    /// watched. Being the last thing in the file is the structural evidence
+    /// that separates a teaser from a scene title.
+    #[test]
+    fn a_tail_keyword_match_followed_by_more_story_is_not_a_preview() {
+        let chapters = vec![
+            chapter("Act Three", "1800.000", "2400.000"),
+            // 89% in — well past the credits bound — and then the film keeps
+            // going for another five minutes.
+            chapter("Next Time", "2400.000", "2460.000"),
+            chapter("Finale", "2460.000", "2700.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(2_700_000));
+        assert!(
+            !markers.iter().any(|m| m.kind == "preview"),
+            "a teaser is the last thing in the file, and this is not"
+        );
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("so the real credits marker survives");
+        assert_eq!(credits.end_ms, 2_700_000);
+    }
+
+    /// A "preview" matched in the middle of a film cannot move the window.
+    ///
+    /// `preview_kw` is substrings, so an ordinary scene title can match one
+    /// however carefully the list is drawn. When it does, the cost has to stay
+    /// a missing *preview* marker: a mid-film match that dragged `credits_end`
+    /// back with it would trade the real Skip Credits button at the end of the
+    /// film for nothing at all, which is strictly worse than the mislabelling
+    /// this change fixes. `CREDITS_MIN_START_PCT` is what prevents it, and it
+    /// is applied at the lookup as well as at the emit.
+    #[test]
+    fn a_mid_film_match_cannot_move_the_credits_window() {
+        let chapters = vec![
+            chapter("Opening", "0.000", "600.000"),
+            // 41% in, and nowhere near the end: whatever this is, it is story.
+            chapter("Next Time It Rains", "3000.000", "3200.000"),
+            chapter("Finale", "6900.000", "7200.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(7_200_000));
+        assert!(
+            !markers.iter().any(|m| m.kind == "preview"),
+            "a mid-film match is outside the credits window and is not offered"
+        );
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("the credits are still inferred at the end of the film");
+        assert_eq!(
+            credits.end_ms, 7_200_000,
+            "the guess still runs to the end of the file"
+        );
+        assert_eq!(
+            credits.start_ms, 6_900_000,
+            "and anchors on the last real boundary, which sits inside the \
+             plausible tail"
+        );
+    }
+
+    /// A teaser split across two chapter marks is one teaser.
+    ///
+    /// Some rips mark the next-episode preview and its title card separately.
+    /// The credits have to stop at the first of the pair; stopping at the
+    /// second calls the first half of the teaser "credits", which is the same
+    /// mislabelling in miniature.
+    #[test]
+    fn a_teaser_split_across_two_chapters_is_bounded_at_its_first() {
+        let chapters = vec![
+            chapter("Episode", "0.000", "1170.000"),
+            chapter("End", "1170.000", "1200.000"),
+            chapter("Next Episode", "1200.000", "1300.000"),
+            chapter("On The Next", "1300.000", "1410.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_410_000));
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("inferred credits");
+        assert_eq!(
+            credits.end_ms, 1_200_000,
+            "the guess stops at the first of the two teaser chapters"
+        );
+        assert_eq!(credits.start_ms, 1_170_000);
+    }
+
+    /// A boundary closer than 15s to the end is a stinger, not the credits.
+    ///
+    /// Post-credits scenes are chaptered on plenty of discs. Anchoring the
+    /// guess to one puts a "Skip Credits" button over ten seconds of the very
+    /// thing the viewer stayed for, so the boundary window has a floor as well
+    /// as a ceiling and the proportional estimate is used instead.
+    #[test]
+    fn a_post_credits_stinger_does_not_anchor_the_guess() {
+        let chapters = vec![
+            chapter("Opening", "0.000", "600.000"),
+            chapter("Finale", "600.000", "7190.000"),
+            chapter("Stinger", "7190.000", "7200.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(7_200_000));
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("credits");
+        assert_eq!(
+            credits.start_ms, 7_020_000,
+            "the proportional estimate, not the stinger's boundary at 7190s"
+        );
+        assert!(!credits.chapter, "still an inference");
+    }
+
+    #[test]
+    fn chapters_overrunning_the_duration_still_fall_through_to_the_estimate() {
+        // With no preview the boundary search is the pre-existing one: only
+        // the final span is a candidate. Walking back would newly accept an
+        // earlier boundary as exact on containers whose chapters overrun their
+        // declared duration, which is common with mismatched metadata — the
+        // estimate is the honest answer there, not a boundary chosen because
+        // it happened to fit the window.
+        // The final span starts past the declared duration, so it is not a
+        // candidate. A walk-back would land on the 1370 s boundary — 30 s of
+        // window, comfortably inside the filter — and call it exact. The
+        // estimate is the honest answer, and asserting its exact value is what
+        // distinguishes the two.
+        let chapters = vec![
+            chapter("Story", "0.000", "1370.000"),
+            chapter("Tail", "1370.000", "1450.000"),
+            chapter("Extra", "1450.000", "1500.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_400_000));
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("estimated credits");
+        assert!(!credits.chapter, "the final span starts past the duration");
+        assert_eq!(credits.end_ms, 1_400_000);
+        // duration/40 = 35 s of tail, not the 1_370_000 boundary a walk-back
+        // would have taken.
+        assert_eq!(credits.start_ms, 1_400_000 - 35_000);
     }
 
     /// Markers are built from a chapters array, whatever produced it — which is
