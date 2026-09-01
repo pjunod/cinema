@@ -370,7 +370,8 @@ hardware.
 ## M3's latch, and the decision that landed it
 
 **Written 2026-09-01, updated the same day.** Built as
-[#754](https://github.com/pjunod/plurx/pull/754). The section is kept because
+[#754](https://github.com/pjunod/plurx/pull/754), and **not finished** — see
+"What M3 still owes" at the end of this section. The section is kept because
 the reasoning is the part worth inheriting, and because it records a gap the
 plan had.
 
@@ -424,6 +425,27 @@ produce twenty attached players. What it produces is up to twenty session
 creations the server honours. The cost is server-side waste, not client
 confusion.
 
+
+### What M3 still owes
+
+Two gaps, neither a regression — an absent `control_sequence` means "do the
+work", which is exactly today's behaviour — but the milestone is not closed
+until both are shut.
+
+**No test covers the HTTP refusal.** `SettledTarget::supersedes` has four unit
+tests including the twenty-seek storm; the glue in `hls::create` that calls it
+and returns `playback_target_superseded` is exercised by nothing. It is
+compile-verified and behaviour-unverified. M3's own acceptance is *a scripted
+20-seek storm results in production started for exactly one target*, and that
+is a protocol-level assertion the latch tests do not make.
+
+**Only the web client sends `control_sequence`.** One sender in the tree,
+`crates/plurxd/src/web/index.html:6783`. A seek storm from an iPhone or an
+Apple TV is still unlatched, because those clients omit the field. Adding it
+to Apple and Android is a build-number bump and a coordinated client release,
+which is why it was deliberately not folded into the same pull request — the
+build-number rule is that a bump must clear current `main`, not the branch
+point, so client edits are batched to pay it once.
 
 ## M5.5 ran, and two thirds of it settled
 
