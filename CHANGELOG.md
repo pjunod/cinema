@@ -10,6 +10,59 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **The noirr fleet can build plurxd once and pull the same stamped image on
+  every voter.** Compose accepts `PLURX_IMAGE` while retaining its source-build
+  default, and `scripts/registry-push` publishes both `latest` and an immutable
+  `sha-<12hex>` rollback tag to the LAN Forgejo registry. The deployment and
+  operations guides cover authentication, serial restart discipline, rollback,
+  registry retention, and the local `--build` fallback when nuc3 is down.
+
+## [0.3.0] — 2026-08-31
+
+### Added
+
+- **Exact intro and credits markers, with a queue you can watch.** Skipping an
+  intro used to mean trusting whatever chapter marks the file shipped with,
+  which for most libraries is nothing at all. Analysis now records exact
+  timeline annotations per file, each carrying its provenance and a confidence
+  number, so a marker that came from a container's own chapters and one a
+  detector proposed are distinguishable rather than equally authoritative. Web,
+  Apple and Android read them the same way.
+
+  An annotation can be corrected by hand — `PUT` and `DELETE` on
+  `/api/v1/files/{id}/timeline-annotations/{kind}` — and a manual override wins
+  over anything derived, permanently, because a person who has watched the
+  episode is a better authority than a heuristic and should not have to win the
+  argument twice. Overrides carry their own revision, so a later re-analysis
+  cannot silently undo one.
+
+  The work behind them is visible instead of implied:
+  `/api/v1/analysis/jobs` lists what is queued and what is running, with the
+  node's hostname rather than its id, and `plurx_analysis_queue_depth` plus the
+  lifecycle counters make the backlog readable from a dashboard.
+  Force-analysis controls let an operator push a specific file to the front
+  rather than waiting for the sweep.
+
+  **Detection itself is not in this release.** Nothing here decides where an
+  intro *is*; it stores, corrects, serves and queues annotations, and the
+  detectors that propose them are gated on evaluation work that has not been
+  done. A library with no chapter marks will show no markers, and that is the
+  expected behaviour rather than a fault.
+
+- **Dolby Vision Profile 7 files play on Profile 8.1 hardware.** Profile 7
+  carries an enhancement layer most client hardware cannot use, so those files
+  either fell back to SDR or refused. The server now converts Profile 7 to 8.1
+  in the copy session, after the muxer, and reports which profile the bytes
+  actually carry rather than deriving it from a display label. The Dolby Vision
+  configuration — profile, level, base-layer compatibility, and whether an
+  enhancement layer and an RPU are present — is stored as columns on `files`
+  and backfilled from probe data already on each row, so an existing library
+  gains them without a re-scan.
+
+  Conversion is on by default and cluster-wide. `PLURX_DV_CONVERT=0` (or `OFF`)
+  turns it off for the whole cluster, not one node — a per-node switch would
+  mean a file that plays or does not depending on which machine answered.
+
 - **Activity and Content analysis name the node instead of its id.** The Node column
   printed a raw UUID, which is stable and recognizes nothing — an operator
   could not tell which machine was serving the stream, the only question that
@@ -44,6 +97,41 @@ bump may break compatibility and a **patch** bump never does.
   from probe data already stored on each row, so an existing library gains them
   without a re-scan, and rewrites a label only where it would actually change.
   `/decision` and the file listing report the profile as a number.
+
+### Changed
+
+- **The server decides how playback recovers; the player no longer guesses.**
+  Web, Apple and Android each carried their own reopen and watchdog paths, so
+  three codebases held three opinions about when a stall was worth abandoning a
+  stream for, and none of them could see what the server knew. Every recovery
+  owner on all three clients now asks first and acts on the answer: hold, retry
+  after a stated delay, or stop.
+
+  A `terminal` verdict is scoped to the recipe, not to the source. It says that
+  retrying *this delivery, unchanged* cannot succeed — not that the file is
+  unplayable — so it rules out only the retry that would re-prepare the
+  identical recipe, and a client may still step down to one the hardware can
+  take. Transport failures are never terminal; a dropped connection is not a
+  statement about the media.
+
+  Nothing about this changes what a working stream does. It changes what a
+  failing one does, and it makes that behaviour one thing that can be corrected
+  in one place.
+
+### Fixed
+
+- **The web player's control reporter never completed a single exchange.** It
+  stored `setTimeout` on an object and called it as a method. Every browser
+  brand-checks the receiver of a `WindowTimers` method, so that call threw
+  `TypeError: Illegal invocation` on the first scheduled tick and the web
+  control plane completed exactly zero exchanges on real hardware — while every
+  unit test passed, because Node does not brand-check and the suite injected its
+  own timer in every case, never once exercising the default.
+
+  The fix wraps both timers in closures. A new CI gate drives the real module in
+  real Chromium and demands two complete exchanges rather than one: the defect
+  killed the first, so a regression in scheduling would have shown up only in
+  the second.
 
 ## [0.2.8] — 2026-08-30
 
@@ -2623,6 +2711,7 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/pjunod/plurx/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/pjunod/plurx/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/pjunod/plurx/releases/tag/v0.2.7
