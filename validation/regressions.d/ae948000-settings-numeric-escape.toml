@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ae948000"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "`analysis settings render the numeric retry policy returned by the API` in `tests/playback/web-policy.test.js` executes the shipped `esc`, `presetOpts`, and `analysisSettingsPanel` functions with all four retry-policy fields as JSON numbers, matching the Rust `SettingsDto` wire types. Restoring only the pre-fix `index.html` makes that retained test throw the live `(s ?? \"\").replace is not a function` TypeError before the panel renders; the current scalar normalization renders the four exact numeric values while retaining the shared HTML escaping boundary."

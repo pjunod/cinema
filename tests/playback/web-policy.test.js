@@ -294,18 +294,18 @@ test("analysis settings render the numeric retry policy returned by the API", ()
     {
       vod_index_cluster_cache: true,
       vod_index_mins: 15,
-      analysis_max_attempts: 5,
-      analysis_lease_secs: 60,
-      analysis_backoff_base_secs: 5,
-      analysis_backoff_max_secs: 300,
+      analysis_max_attempts: 3,
+      analysis_lease_secs: 90,
+      analysis_backoff_base_secs: 7,
+      analysis_backoff_max_secs: 77,
     },
     { enabled: true },
   );
 
-  assert.match(html, /id="an-attempts"[^>]*value="5"/);
-  assert.match(html, /id="an-lease"[^>]*value="60"/);
-  assert.match(html, /id="an-backoff-base"[^>]*value="5"/);
-  assert.match(html, /id="an-backoff-max"[^>]*value="300"/);
+  assert.match(html, /id="an-attempts"[^>]*value="3"/);
+  assert.match(html, /id="an-lease"[^>]*value="90"/);
+  assert.match(html, /id="an-backoff-base"[^>]*value="7"/);
+  assert.match(html, /id="an-backoff-max"[^>]*value="77"/);
 });
 
 test("estimated skip markers are hedged without rebuilding each tick", () => {
