@@ -14,9 +14,11 @@ lease-fenced analysis queue, its operator surfaces, and its instrumentation.
 This document is the plan for everything §13.8 asks for that #700 did not
 build: subtitle readiness through `DeliveryView` (§3), bounded forward
 subtitle materialization (§4), seek coalescing and cancel-by-sequence (§5),
-joining burn changes into an existing successor action (§6), and the
-marker-destination prewarm whose metric currently reads a permanent zero
-(§7). Section 2 is what exists today, verified against the tree; §8 is the
+and joining burn changes into an existing successor action (§6). The
+fifth piece — the marker-destination prewarm whose metric reads a permanent
+zero — split into its own plan,
+[MARKER-PREWARM-HANDOFF.md](MARKER-PREWARM-HANDOFF.md), per Paul 2026-09-01;
+§7 here is the pointer. Section 2 is what exists today, verified against the tree; §8 is the
 guardrails; §9 the milestones; §10 the repo mechanics that bite.
 
 Read, in order: §13.8 of the protocol plan (the specification this executes),
@@ -140,7 +142,8 @@ The **server** has no equivalent: every restart it is asked for starts work.
   emits a hard-coded `"miss"` and no `"hit"` producer exists, so
   `plurx_playback_marker_prewarm_hit_ratio`
   ([`telemetry.rs:239–248`](../crates/plurxd/src/telemetry.rs)) is pinned at
-  zero. §7 builds the consumer; §8.2 forbids the shortcut.
+  zero. [MARKER-PREWARM-HANDOFF.md](MARKER-PREWARM-HANDOFF.md) builds the
+  consumer; §8.2 forbids the shortcut.
 
 ---
 
@@ -220,10 +223,16 @@ by the segment requests the client is already making:
 
 Bounds, each with its reason:
 
-- `WINDOW_SECONDS`: one value, order of 120–300 s — large enough that a
-  window survives several segments, small enough that extraction beats the
-  deadline on NAS sources. Measure on the playback lab before pinning; the
-  number lands in this doc when it lands in code.
+- `WINDOW_SECONDS`: **default 200 s** (Paul, 2026-09-01), delivered as a
+  bounded server setting following the analysis knobs' shape — a
+  `bounded_*` clamp over the stored string with the default as a named
+  constant (see `bounded_analysis_lease_secs` in
+  [`fragment_index_cluster.rs`](../crates/plurx-core/src/store/fragment_index_cluster.rs)),
+  surfaced beside `analysis_lease_secs` in the settings API. Clamp to
+  [30 s, 900 s]: below 30 s a window dies within one AVPlayer retry cycle;
+  above 900 s the extraction stops beating the whole-track warm on NAS
+  sources and the bridge loses its point. Playback-lab measurement remains
+  the validity check on the default, not the source of it.
 - **At most one window flight per session** (reuse the `warmups()` dedup
   shape keyed by `(fingerprint, window_start)`). A seek storm must not fan
   out window extractions — M3's latch gates this too.
@@ -274,7 +283,8 @@ Per playback (control-session scoped, in the rolling actor where
 - Each accepted snapshot updates the **settled target**: `seek_target_ms`
   when present and `render_state` is `Seeking`, else the anchor is settled.
 - Expensive production triggered on behalf of a seek — session restart at an
-  offset, M2 window extraction, §7 prewarm — is keyed by the control
+  offset, M2 window extraction, the prewarm plan's production once it
+  lands — is keyed by the control
   **sequence** that requested it. Before the work commits resources (spawns
   ffmpeg, inserts a session row), it checks the latch: a newer sequence with
   a different target means this work is obsolete — skip it; if already
@@ -339,39 +349,13 @@ first, stop and flag it — do not build a third mechanism.
 
 ---
 
-## 7. Contract — marker-destination prewarm (M5, separable)
+## 7. Prewarm — moved to its own plan
 
-*Use the control snapshot to prewarm marker destinations without seeking the
-client.* The actor holds, per exchange: position, rate, buffered-through,
-and the annotation index holds exact marker end times. When
-`position_ms` approaches a marker whose stored exact end time lies beyond
-`produced_through_ms`, ask the producer for that destination — the same
-bounded ahead-window machinery playback already uses, aimed at the skip
-target — without emitting any client action. M2's subtitle windows prewarm
-alongside for the selected track.
-
-The metric contract, learned the expensive way and non-negotiable:
-
-- **A `"hit"` is emitted only when a skip lands on a destination this
-  prewarm actually produced** — the prewarmed range covered the landing
-  point at skip time, verified against the prewarm's own bookkeeping.
-- **Never** redefine hit as "destination happened to be in the client's
-  ordinary forward buffer". On direct play the browser buffers minutes
-  ahead, the ratio degenerates into a proxy for the transport mix — already
-  available from transport labels — and an unbuilt feature reads as built.
-  The pinned zero was the honest reading; the redefinition was rejected in
-  review once already.
-- A measurement wanted before or beside the feature gets **its own name or
-  label**, never a redefinition of
-  `plurx_playback_marker_prewarm_hit_ratio`.
-
-Direct play has nothing server-side to warm; its callsites keep emitting
-`"miss"`, and that is correct — the ratio then reports exactly the share of
-skips the server could and did help.
-
-This milestone is separable from M1–M4 and may be extracted into its own
-plan without renumbering anything here; it is included because §13.8 lists
-it and because M2/M3 build the pieces it reuses.
+The marker-destination prewarm bullet is separable from everything above and
+is now its own document: [MARKER-PREWARM-HANDOFF.md](MARKER-PREWARM-HANDOFF.md)
+(split per Paul, 2026-09-01). It carries the design, the honest-`"hit"`
+metric contract, and its acceptance. It builds best after §5's latch exists;
+nothing here waits on it. §8.2's metric guardrail still binds both plans.
 
 ---
 
@@ -404,7 +388,8 @@ video pointer), and the no-avoidable-404 is M2's by construction (§4.2).
 - **Do not make subtitle work able to replace video.** §8.1 forbids it; it
   is the failure mode a naive burn-successor produces.
 - **Do not redefine an existing metric's meaning** to make it non-zero
-  (§7).
+  ([MARKER-PREWARM-HANDOFF.md](MARKER-PREWARM-HANDOFF.md) §4 carries the
+  full contract).
 - **Do not remove the empty-segment fallback** without replacing the
   property it protects: a subtitle route that blocks past AVPlayer's ~2 s
   deadline turns healthy HDR and H.264 streams into a black screen.
@@ -483,19 +468,10 @@ cargo test -p plurx-core --features hiqlite-contract-tests \
   --test store_contract media_session   # ~3.5 min, three real voters
 ```
 
-### 9.5 M5 — prewarm (separable)
+### 9.5 M5 — prewarm
 
-The actor-side prewarm consumer per §7 and the honest `"hit"` producer.
-
-**Acceptance:** on a fixture with stored markers, a skip whose destination
-was prewarmed emits `hit`, one whose destination was not emits `miss`,
-direct play emits `miss`, and `plurx_playback_marker_prewarm_hit_ratio`
-moves off `0.000000` for the first time for the right reason.
-
-```bash
-cargo test -p plurxd prewarm
-curl -s localhost:8080/metrics | grep marker_prewarm
-```
+Moved to [MARKER-PREWARM-HANDOFF.md](MARKER-PREWARM-HANDOFF.md); its
+acceptance lives there. Not a prerequisite for anything in §9.1–§9.4.
 
 ---
 
@@ -525,12 +501,15 @@ these are the rules this plan predictably collides with:
   summed, and the three-voter contract run is what finds what SQL review
   cannot.
 
-## 11. Open questions for Paul
+## 11. Settled questions — answered by Paul, 2026-09-01
 
-1. **`WINDOW_SECONDS`** — any prior on the NAS sources' worst case, or
-   happy to let the playback-lab measurement pick it?
-2. **M5 extraction** — keep prewarm in this plan's execution, or split it
-   into its own doc once M1–M4 are underway (§7 is written to allow either)?
-3. **Readiness on the wire as three strings** (§3) — any client already
-   speculatively parsing `DeliveryView` strictly enough to care before its
-   consumer lands?
+1. **`WINDOW_SECONDS`** — "that range is fine. 200? … maybe make it
+   configurable in settings." → default 200 s, bounded server setting; §4.1
+   carries the shape.
+2. **Prewarm extraction** — "you can split it into its own doc" → split as
+   [MARKER-PREWARM-HANDOFF.md](MARKER-PREWARM-HANDOFF.md); §7 and §9.5 are
+   pointers.
+3. **Readiness wire format** — no strictly-parsing `DeliveryView` client
+   known to him ("but that doesn't mean much") → proceed with the three
+   closed-set strings; M1's relay-tolerance test is the guard the answer's
+   uncertainty asks for.

@@ -70,7 +70,8 @@ merge target: two client PRs in flight means the second always fails.
 | browser gate | two real exchanges, in real Chromium, in CI | [#729](https://github.com/pjunod/plurx/pull/729) | merged |
 | acceptance | read the commit and the builds, do not quote them | [#734](https://github.com/pjunod/plurx/pull/734) | merged |
 | status | what item 8 actually delivered, and the M5.5 store half | — | merged |
-| plan | the M7 remainder scoped: readiness, bounded subtitle windows, seek coalescing, burn-join, prewarm | [M7 remainder](M7-REMAINDER-HANDOFF.md) | this change |
+| plan | the M7 remainder scoped: readiness, bounded subtitle windows, seek coalescing, burn-join | [M7 remainder](M7-REMAINDER-HANDOFF.md) | this change |
+| plan | marker prewarm scoped separately, with the honest-hit metric contract | [prewarm](MARKER-PREWARM-HANDOFF.md) | this change |
 
 **What item 8 did not deliver.** §6 item 8 names five things: exact
 intro/credits annotations, subtitle windows, force-analysis controls,
@@ -100,8 +101,8 @@ rate is hunting a bug that does not exist. This one *is* deliberate on the
 index side — [CONTENT-ANALYSIS-INDEX-HANDOFF.md](CONTENT-ANALYSIS-INDEX-HANDOFF.md)
 §6.1 forbids that branch from touching `playback_control.rs`, and §4.5 defers
 actor-side consumption to this programme. The counter is waiting for a consumer
-this programme owes it — scoped as the separable final milestone of
-[M7-REMAINDER-HANDOFF.md](M7-REMAINDER-HANDOFF.md).
+this programme owes it — scoped in its own plan,
+[MARKER-PREWARM-HANDOFF.md](MARKER-PREWARM-HANDOFF.md).
 
 **What is left in M5.** Nothing buildable. M5c and M5h — deleting the web and
 mobile budgets — are all that remains, and both are gated on
