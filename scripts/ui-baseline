@@ -1985,8 +1985,8 @@ def parse_args(argv):
                    help="localStorage.plurx_appearance (default: dark)")
     p.add_argument("--viewport-only", action="store_true",
                    help="capture the viewport instead of the full scrollable page")
-    p.add_argument("--tab-stops", type=int, default=60,
-                   help="how many times to press Tab per route (default: 60)")
+    p.add_argument("--tab-stops", type=int, default=80,
+                   help="how many times to press Tab per route (default: 80)")
     p.add_argument("--settle-ms", type=int, default=4500,
                    help="quiet period before the shutter, in ms — must exceed the 4s "
                         "activity poll so the capture never lands mid-cycle (default: 4500)")
