@@ -260,6 +260,50 @@ pub async fn ensure_vtt_bytes(dir: &Path, file: &MediaFile, index: i64) -> Resul
         .ok_or_else(|| "published subtitle sidecar is no longer valid".to_owned())
 }
 
+/// What the sidecar cache can say about one track right now, without doing
+/// anything about it.
+///
+/// Every arm is a fact the control plane can report to a client so it stops
+/// guessing when to re-fetch an empty subtitle segment. Deliberately
+/// side-effect free: it launches no extraction, enlists no warmer, and writes
+/// no memo. A readiness probe that started work would make every control
+/// exchange a reason to spawn ffmpeg, which is the opposite of what bounded
+/// materialization is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidecarState {
+    /// Bytes are on disk and servable now.
+    Ready,
+    /// An extraction or warmer is in flight for this key.
+    Warming,
+    /// The last attempt failed and its memo has not expired. A client should
+    /// stop retrying rather than poll a key this server has given up on.
+    Failed,
+    /// Nothing is cached and nothing is running. From the client's side this
+    /// is indistinguishable from `Warming` — both mean "not yet" — but they
+    /// are different facts about the server and only one of them is progress.
+    Absent,
+}
+
+/// Probe the cache for one track. See [`SidecarState`] for why this starts
+/// nothing.
+pub async fn sidecar_state(dir: &Path, file: &MediaFile, index: i64) -> SidecarState {
+    let cached = vtt_path(dir, file, index);
+    if matches!(read_vtt_path(&cached, MAX_SIDECAR_BYTES).await, Ok(Some(_))) {
+        return SidecarState::Ready;
+    }
+    // Order matters below `Ready`: a published sidecar outranks any memory of
+    // failing, which is why `forget_failure` exists, and an in-flight attempt
+    // outranks a stale memo because it is the thing that will settle the key.
+    if extractions().lock().await.contains_key(&cached) || warmups().lock().await.contains(&cached)
+    {
+        return SidecarState::Warming;
+    }
+    if remembered_failure(&cached).await.is_some() {
+        return SidecarState::Failed;
+    }
+    SidecarState::Absent
+}
+
 /// Read a warm sidecar without launching extraction. Used by AVPlayer's
 /// short-deadline segmented subtitle route, where a cache miss must return an
 /// empty segment immediately and warm in the background.
