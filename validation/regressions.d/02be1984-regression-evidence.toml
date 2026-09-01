@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["02be1984"]
+reason = "This commit adds only the current-check mapping for the preceding runtime correction; it changes no runtime behavior."
+ignore = true
