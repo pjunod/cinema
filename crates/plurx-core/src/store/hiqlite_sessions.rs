@@ -3777,6 +3777,14 @@ mod tests {
             3,
             "preparation is exactly lease, session, then ledger"
         );
+        assert!(
+            statements[0].0.contains("INSERT INTO job_leases")
+                && statements[1].0.contains("INSERT INTO media_sessions")
+                && statements[2]
+                    .0
+                    .contains("INSERT INTO media_session_preparations"),
+            "preparation statement order is lease, session, then ledger"
+        );
         let statement_sql = statements
             .iter()
             .map(|(sql, _)| sql)
@@ -3788,11 +3796,17 @@ mod tests {
                 && !statement_sql.contains("terminal_reason = 'superseded'"),
             "prepare must not run the supersession reap"
         );
+        let normalized_statements = statement_sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
-            !method.contains("media_playback_pointers")
-                && !statement_sql.contains("UPDATE media_playback_pointers")
-                && !statement_sql.contains("INSERT INTO media_playback_pointers")
-                && !statement_sql.contains("DELETE FROM media_playback_pointers"),
+            !normalized_method.contains("UPDATE media_playback_pointers")
+                && !normalized_method.contains("INSERT INTO media_playback_pointers")
+                && !normalized_method.contains("DELETE FROM media_playback_pointers")
+                && !normalized_statements.contains("UPDATE media_playback_pointers")
+                && !normalized_statements.contains("INSERT INTO media_playback_pointers")
+                && !normalized_statements.contains("DELETE FROM media_playback_pointers"),
             "prepare must not write the pointer — a staged successor is \
              invisible to the current-session lookup precisely because it \
              holds none"
@@ -3816,11 +3830,9 @@ mod tests {
             "both lease and session admission enforce one staged successor per \
              playback because a replicated transaction cannot read and branch"
         );
-        assert!(
-            statements[0].0.contains("INSERT INTO job_leases"),
-            "a staged successor takes its own session lease, or it can never \
-             be renewed or taken over once it commits"
-        );
+        // The ordered identity assertion above also proves that a staged
+        // successor takes its own session lease, without which it could never
+        // be renewed or taken over once it commits.
     }
 
     /// Every write an abort performs is gated on the ledger row.
@@ -3857,6 +3869,13 @@ mod tests {
         let pin_delete = statements[1].0;
         let lease_clamp = statements[2].0;
         let ledger_delete = statements[3].0;
+        let normalized_retirement = retirement.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_pin_delete = pin_delete.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_lease_clamp = lease_clamp.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_ledger_delete = ledger_delete
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
             retirement.contains("UPDATE media_sessions")
                 && pin_delete.contains("DELETE FROM cache_consumer_pins")
@@ -3864,30 +3883,36 @@ mod tests {
                 && ledger_delete.contains("DELETE FROM media_session_preparations"),
             "the abort statement order is part of its transaction contract"
         );
-        for (name, sql) in [
-            ("retirement", retirement),
-            ("pin delete", pin_delete),
-            ("lease clamp", lease_clamp),
-        ] {
-            assert!(
-                sql.contains("EXISTS (SELECT 1 FROM media_session_preparations"),
-                "the {name} is gated on the ledger row"
-            );
-        }
         assert!(
-            pin_delete.contains("state = 'ended' AND updated_at_ms = $")
-                && lease_clamp.contains("state = 'ended' AND updated_at_ms = $"),
+            normalized_retirement.contains(
+                "EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $3 AND playback_id = $4 AND staged_incarnation_id = $2)"
+            ),
+            "retirement is gated on the exact ledger identity"
+        );
+        assert!(
+            normalized_pin_delete.contains(
+                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)"
+            ) && normalized_pin_delete.contains(
+                "EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $3 AND playback_id = $4 AND staged_incarnation_id = $1)"
+            ),
+            "pin deletion is gated on this retirement and exact ledger identity"
+        );
+        assert!(
+            normalized_lease_clamp.contains(
+                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)"
+            ) && normalized_lease_clamp.contains(
+                "EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $4 AND playback_id = $5 AND staged_incarnation_id = $3)"
+            ),
             "the pin delete and the lease clamp also chain on that retirement \
              having fired at this instant — `now_ms` is the caller's, so the \
              timestamp alone is not proof, and the ledger EXISTS alone does \
              not say the work is this abort's"
         );
-        assert_eq!(
-            ledger_delete
-                .matches("EXISTS (SELECT 1 FROM media_session_preparations")
-                .count(),
-            0,
-            "only the final exact ledger DELETE is not ledger-existence gated"
+        assert!(
+            normalized_ledger_delete
+                .contains("WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3")
+                && !ledger_delete.contains("EXISTS (SELECT 1 FROM media_session_preparations"),
+            "only the final exact-identity ledger DELETE is not ledger-existence gated"
         );
     }
 
