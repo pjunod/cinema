@@ -7572,6 +7572,11 @@ pub struct SessionRequest {
     pub playback_id: String,
     /// Optional idempotency key for one creation attempt.
     pub request_id: Option<String>,
+    /// The control exchange this start was decided from, when the client has
+    /// one. Orders this ask against the destination the client has since
+    /// settled on; `None` means there is no earlier exchange to be stale
+    /// against, so the work is done.
+    pub control_sequence: Option<u64>,
     /// True when the VIEWER chose Auto and left the rung to server policy.
     /// The resolved numeric height alone cannot distinguish Auto from a
     /// viewer's sticky manual pick, and neither can the presence of `height`
@@ -16288,6 +16293,20 @@ impl TranscodeManager {
     /// Status bound to the exact VOD incarnation or rolling producer attempt
     /// that was sampled. The HTTP layer must bodylessly authorize this owner
     /// immediately before returning telemetry.
+    /// The destination the named session's client last settled on.
+    ///
+    /// `None` covers three cases a caller must treat identically: no such
+    /// session, an actor that has retired, and a client that has not exchanged
+    /// yet. In all three there is no ordering to compare against, so the
+    /// correct answer is to do the work rather than skip it.
+    pub(crate) async fn settled_target_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::playback_control::SettledTarget> {
+        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        session.control.snapshot().await?.settled_target
+    }
+
     pub(crate) async fn hls_session_status_publication(
         &self,
         session_id: &str,
@@ -22898,6 +22917,7 @@ mod tests {
     #[test]
     fn the_grade_is_part_of_a_request_identity() {
         let request = SessionRequest {
+            control_sequence: None,
             file_id: 5,
             playback_id: "player".into(),
             request_id: Some("attempt".into()),
@@ -22955,6 +22975,7 @@ mod tests {
     #[test]
     fn a_converting_copy_fingerprints_apart_from_the_copy_it_replaces() {
         let copy = |convert: bool| SessionRequest {
+            control_sequence: None,
             file_id: 1,
             playback_id: "p".to_owned(),
             request_id: Some("r".to_owned()),
@@ -26266,6 +26287,7 @@ mod tests {
         previous_session_id: &str,
     ) -> SessionRequest {
         SessionRequest {
+            control_sequence: None,
             file_id,
             playback_id: playback_id.into(),
             request_id: Some(request_id.into()),
@@ -33102,6 +33124,7 @@ mod tests {
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            control_sequence: None,
             file_id,
             playback_id: "pb-1".into(),
             request_id: Some("req-1".into()),
@@ -33220,6 +33243,7 @@ mod tests {
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            control_sequence: None,
             file_id,
             playback_id: "pb-race".into(),
             request_id: Some("req-race".into()),
@@ -33292,6 +33316,7 @@ mod tests {
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            control_sequence: None,
             file_id: 999_999, // nothing has this id, so the create fails
             playback_id: "pb-fail".into(),
             request_id: Some("req-fail".into()),
@@ -33342,6 +33367,7 @@ mod tests {
             Pipeline::Cpu,
         );
         let original = SessionRequest {
+            control_sequence: None,
             file_id,
             playback_id: "native-replay".into(),
             request_id: Some("native-original".into()),

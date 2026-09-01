@@ -6323,6 +6323,7 @@ mod tests {
 
     fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
         SessionRequest {
+            control_sequence: None,
             file_id: 1,
             playback_id: playback_id.to_string(),
             request_id: None,
