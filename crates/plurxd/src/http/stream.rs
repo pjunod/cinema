@@ -1250,12 +1250,9 @@ pub(crate) fn markers_from_chapters(
             // was preventing.
             let inferred = match exact_boundary {
                 Some(exact) => Some(exact),
-                None if preview_start.is_none() => Some((
-                    credits_end - tail,
-                    credits_end - tail,
-                    credits_end,
-                    1_000,
-                )),
+                None if preview_start.is_none() => {
+                    Some((credits_end - tail, credits_end - tail, credits_end, 1_000))
+                }
                 None => None,
             };
             let Some((start_ms, start_ticks, end_ticks, timescale)) = inferred else {
@@ -1385,7 +1382,9 @@ fn chapter_annotations_are_stale(set: &plurx_core::segplan::TimelineAnnotationSe
     !set.annotations.is_empty()
         && set.annotations.iter().all(|annotation| {
             annotation.provenance != AnnotationProvenance::Manual
-                && annotation.detector_version.starts_with("chapter-classifier-")
+                && annotation
+                    .detector_version
+                    .starts_with("chapter-classifier-")
                 && annotation.detector_version != CHAPTER_ANNOTATION_VERSION
         })
 }
