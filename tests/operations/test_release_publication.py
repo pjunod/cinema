@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
+from validation.release_artifact import BINARIES, create, verify
 from validation.release_aliases import alias_action
-from validation.release_dockerfile import render
+from validation.release_dockerfile import render, required_binaries
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,7 +30,19 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertIn("container: rust:1.97.1-bookworm", workflow)
         binary = workflow.split("\n  binary:\n", 1)[1].split("\n  image:\n", 1)[0]
         self.assertIn("defaults:\n      run:\n        shell: bash", binary)
+        self.assertIn("cargo build --locked --release", workflow)
+        self.assertNotIn("-p plurxd -p plurx-cluster-check", workflow)
         self.assertIn("cargo build --locked --release -p plurxd", workflow)
+        self.assertIn(
+            "cargo build --locked --release -p plurx-cluster-check", workflow
+        )
+        self.assertIn("path: trusted-packaging", binary)
+        self.assertIn(
+            'PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging"', binary
+        )
+        self.assertIn("--list-binaries", binary)
+        self.assertIn("python3 -m validation.release_artifact create", workflow)
+        self.assertIn("python3 -m validation.release_artifact verify", workflow)
         self.assertIn(
             "PLURX_BUILD_REF: ${{ needs.resolve.outputs.release_tag }}",
             workflow,
@@ -100,20 +116,16 @@ class ReleasePublicationContractCase(unittest.TestCase):
             alias_action("latest", "0.2.7", "main")
 
     def test_generated_dockerfile_keeps_only_the_tagged_runtime(self):
-        source = """# syntax=docker/dockerfile:1
-FROM rust:1-bookworm AS build
-RUN cargo build --release && cp target/release/plurxd /plurxd
-FROM debian:bookworm-slim
-RUN apt-get update
-COPY --from=build /plurxd /usr/local/bin/plurxd
-ENTRYPOINT [\"plurxd\"]
-"""
-
-        generated = render(source)
+        generated = render((ROOT / "Dockerfile").read_text(encoding="utf-8"))
 
         self.assertIn("FROM debian:bookworm-slim", generated)
         self.assertIn(
             "COPY --chmod=0755 release-bin/plurxd /usr/local/bin/plurxd",
+            generated,
+        )
+        self.assertIn(
+            "COPY --chmod=0755 release-bin/plurx-cluster-check "
+            "/usr/local/bin/plurx-cluster-check",
             generated,
         )
         self.assertNotIn("FROM rust:", generated)
@@ -123,6 +135,148 @@ ENTRYPOINT [\"plurxd\"]
     def test_generator_refuses_an_unrecognized_runtime_contract(self):
         with self.assertRaisesRegex(ValueError, "one Bookworm runtime stage"):
             render("FROM alpine:3.22\n")
+
+    def test_generator_supports_historical_one_binary_runtime(self):
+        source = """FROM rust:1-bookworm AS build
+FROM debian:bookworm-slim
+COPY --from=build /plurxd /usr/local/bin/plurxd
+"""
+
+        self.assertEqual(required_binaries(source), ("plurxd",))
+        generated = render(source)
+        self.assertIn(
+            "COPY --chmod=0755 release-bin/plurxd /usr/local/bin/plurxd",
+            generated,
+        )
+        self.assertNotIn("plurx-cluster-check", generated)
+
+    def test_generator_derives_current_two_binary_runtime(self):
+        source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+        self.assertEqual(required_binaries(source), BINARIES)
+
+    def test_trusted_helper_can_inspect_real_isolated_tag_checkouts(self):
+        tagged_contracts = {
+            "v0.2.7": ("plurxd",),
+            "v0.3.0": BINARIES,
+        }
+        with tempfile.TemporaryDirectory() as raw_directory:
+            tagged_checkout = Path(raw_directory)
+            for tag, expected in tagged_contracts.items():
+                with self.subTest(tag=tag):
+                    source = subprocess.run(
+                        ["git", "show", f"{tag}:Dockerfile"],
+                        cwd=ROOT,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout
+                    dockerfile = tagged_checkout / "Dockerfile"
+                    dockerfile.write_text(source, encoding="utf-8")
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "validation.release_dockerfile",
+                            "--list-binaries",
+                            str(dockerfile),
+                        ],
+                        cwd=ROOT,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+
+                    self.assertEqual(result.stdout.splitlines(), list(expected))
+
+    def test_release_artifact_binds_both_binaries_to_the_candidate(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            for name in BINARIES:
+                (directory / name).write_bytes(f"binary:{name}".encode())
+            manifest = create(
+                directory,
+                git_tree="1" * 40,
+                git_commit="2" * 40,
+                build_ref="v0.3.0",
+                rustc="rustc 1.97.1 (fixture)",
+                target="x86_64-unknown-linux-gnu",
+                binary_names=BINARIES,
+            )
+
+            verified = verify(
+                directory,
+                git_tree="1" * 40,
+                git_commit="2" * 40,
+                build_ref="v0.3.0",
+                target="x86_64-unknown-linux-gnu",
+                binary_names=BINARIES,
+            )
+
+            self.assertEqual(verified, manifest)
+            self.assertEqual(set(verified["binaries"]), set(BINARIES))
+
+    def test_release_artifact_rejects_tampering_and_wrong_tree(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            for name in BINARIES:
+                (directory / name).write_bytes(f"binary:{name}".encode())
+            create(
+                directory,
+                git_tree="1" * 40,
+                git_commit="2" * 40,
+                build_ref="v0.3.0",
+                rustc="rustc 1.97.1 (fixture)",
+                target="x86_64-unknown-linux-gnu",
+                binary_names=BINARIES,
+            )
+
+            with self.assertRaisesRegex(ValueError, "git_tree mismatch"):
+                verify(
+                    directory,
+                    git_tree="3" * 40,
+                    git_commit="2" * 40,
+                    build_ref="v0.3.0",
+                    target="x86_64-unknown-linux-gnu",
+                    binary_names=BINARIES,
+                )
+
+            (directory / "plurx-cluster-check").write_bytes(b"tampered")
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                verify(
+                    directory,
+                    git_tree="1" * 40,
+                    git_commit="2" * 40,
+                    build_ref="v0.3.0",
+                    target="x86_64-unknown-linux-gnu",
+                    binary_names=BINARIES,
+                )
+
+    def test_release_artifact_supports_historical_one_binary_set(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            (directory / "plurxd").write_bytes(b"historical daemon")
+            manifest = create(
+                directory,
+                git_tree="1" * 40,
+                git_commit="2" * 40,
+                build_ref="v0.2.7",
+                rustc="rustc 1.97.1 (fixture)",
+                target="x86_64-unknown-linux-gnu",
+                binary_names=("plurxd",),
+            )
+
+            verified = verify(
+                directory,
+                git_tree="1" * 40,
+                git_commit="2" * 40,
+                build_ref="v0.2.7",
+                target="x86_64-unknown-linux-gnu",
+                binary_names=("plurxd",),
+            )
+
+            self.assertEqual(verified, manifest)
+            self.assertEqual(tuple(verified["binaries"]), ("plurxd",))
 
 
 if __name__ == "__main__":
