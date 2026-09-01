@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["bab05715"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained progressive_marker_prewarm_ambiguity_saturation_fails_closed and rolling_marker_prewarm_ambiguity_saturation_fails_closed regressions fill each bounded retirement ledger, add one unrepresented retirement, and require the global overflow tombstone to keep every sessionless marker beacon ambiguous without growing or evicting the exact ledger. Reverting the correction removes that fail-closed state, so the unrepresented same-user/file event can again be assigned to VOD and both regressions fail."
