@@ -67,4 +67,30 @@ class MarkerLabelTest {
             detected.isAutoSkipEligible,
         )
     }
+
+    /**
+     * A preview is offered and never automatic.
+     *
+     * The eligibility rule was kind-agnostic, and a chapter-derived preview is
+     * `authored` — so the preference spelled "Auto-skip intro and credits"
+     * silently began skipping next week's footage, and on an episode ending in
+     * its preview the tail rule marked it watched and advanced. The button
+     * still appears; what is withheld is the seek nobody asked for.
+     */
+    @Test
+    fun aPreviewIsNeverAutomaticWhateverItsProvenance() {
+        val preview = Net.json.decodeFromString(
+            Marker.serializer(),
+            """{"kind":"preview","label":"Skip Preview","start_ms":1200000,"end_ms":1410000,"chapter":true,"provenance":"authored","confidence":1000,"generation":"g1","detector_version":"chapter-classifier-v2"}""",
+        )
+
+        assertEquals("Skip Preview", preview.displayLabel)
+        assertFalse("a preview is new footage every week", preview.isAutoSkipEligible)
+        assertFalse(preview.copy(provenance = "manual").isAutoSkipEligible)
+        // Not a provenance rule: an older server sends no provenance at all.
+        assertFalse(preview.copy(provenance = null).isAutoSkipEligible)
+        // The kinds the preference actually names stay automatic.
+        assertTrue(preview.copy(kind = "credits").isAutoSkipEligible)
+        assertTrue(preview.copy(kind = "intro").isAutoSkipEligible)
+    }
 }

@@ -604,3 +604,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
 source_anchor = "val isAutoSkipEligible: Boolean"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/MarkerLabelTest.kt"
 test_anchor = "provenanceControlsExactnessAndAutomaticEligibility"
+
+[[fixes]]
+id = "clients.preview-is-never-auto-skipped"
+commits = ["564c20cb"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "kind == \"preview\" -> false"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/MarkerLabelTest.kt"
+test_anchor = "aPreviewIsNeverAutomaticWhateverItsProvenance"
