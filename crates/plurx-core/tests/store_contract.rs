@@ -498,6 +498,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "maintain_media_sessions",
     "owned_media_sessions",
     "prepare_media_session",
+    "rejoin_media_session_preparation",
     "staged_media_session_for_playback",
     "commit_media_session_preparation",
     "abort_media_session_preparation",
@@ -811,6 +812,346 @@ async fn media_session_prepare_stages_a_successor_that_changes_nothing() {
              what commit fences on"
         );
         let _ = current;
+    })
+    .await;
+}
+
+/// Burn work joins an occupied slot by replacing its staged generation, not
+/// by creating a second successor or by advancing the playback pointer.
+#[tokio::test]
+async fn media_session_rejoin_replaces_one_preparation_without_committing_video() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-rejoin-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-rejoin user: {error}"));
+        let playback = "staged-rejoin-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000d101";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000d102",
+            backend,
+        )
+        .await;
+        let current_before = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: current route before rejoin: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: predecessor must be current"));
+
+        let occupied = "00000000-0000-4000-8000-00000000d103";
+        let mut first = staged_preparation(
+            user.id,
+            playback,
+            occupied,
+            "00000000-0000-4000-8000-00000000d104",
+            predecessor,
+        );
+        first.recipe_json = r#"{"video":"copy","subtitle":"none"}"#.to_owned();
+        store
+            .prepare_media_session(&first)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: occupy preparation slot: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: first preparation must win"));
+
+        let merged_incarnation = "00000000-0000-4000-8000-00000000d105";
+        let mut merged = staged_preparation(
+            user.id,
+            playback,
+            merged_incarnation,
+            "00000000-0000-4000-8000-00000000d106",
+            predecessor,
+        );
+        merged.recipe_json = r#"{"video":"copy","subtitle":"burn:7"}"#.to_owned();
+        merged.response_json = r#"{"session":"merged"}"#.to_owned();
+        merged.now_ms = 2_500;
+
+        let route = store
+            .rejoin_media_session_preparation(occupied, &merged)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: rejoin occupied slot: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: rejoin must stage the merged successor"));
+        assert_eq!(route.incarnation_id, merged_incarnation, "{backend}");
+        assert_eq!(route.recipe_json, merged.recipe_json, "{backend}");
+
+        let staged = store
+            .staged_media_session_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: merged staged lookup: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: merged preparation owns the slot"));
+        assert_eq!(
+            staged.staged_incarnation_id, merged_incarnation,
+            "{backend}"
+        );
+        assert_eq!(
+            staged.expected_predecessor_incarnation_id, predecessor,
+            "{backend}: rejoin preserves the predecessor recorded by the occupied slot"
+        );
+        let retired = store
+            .media_session_route_by_incarnation(occupied)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retired staged route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retired staged row remains readable"));
+        assert_eq!(retired.state, "ended", "{backend}");
+        assert_eq!(
+            retired.terminal_reason.as_deref(),
+            Some("replaced"),
+            "{backend}"
+        );
+        let current_after = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: current route after rejoin: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: predecessor stays current"));
+        assert_eq!(
+            current_after, current_before,
+            "{backend}: subtitle work must never commit a pointer advance on its own"
+        );
+
+        // The owner may crash after the transaction commits but before it sees
+        // the response. Retrying the same rejoin is an exact replay, not a
+        // named-row-gone loss.
+        let replay = store
+            .rejoin_media_session_preparation(occupied, &merged)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: rejoin replay: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a successful rejoin must replay its route"));
+        assert_eq!(
+            replay, route,
+            "{backend}: replay must not rewrite the route"
+        );
+    })
+    .await;
+}
+
+/// If the occupied preparation commits first, rejoin must not end that newly
+/// current generation. The caller re-derives a preparation against it.
+#[tokio::test]
+async fn media_session_rejoin_loses_safely_after_the_occupied_slot_commits() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-rejoin-race-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create rejoin-race user: {error}"));
+        let playback = "staged-rejoin-race-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000d201";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000d202",
+            backend,
+        )
+        .await;
+        let occupied = "00000000-0000-4000-8000-00000000d203";
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                occupied,
+                "00000000-0000-4000-8000-00000000d204",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare occupied slot: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: occupied preparation must win"));
+        store
+            .commit_media_session_preparation(user.id, playback, occupied, 3_000, 900_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: commit occupied slot: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: occupied preparation must commit"));
+        let committed = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: committed route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: committed successor is current"));
+
+        let merged_incarnation = "00000000-0000-4000-8000-00000000d205";
+        let mut stale = staged_preparation(
+            user.id,
+            playback,
+            merged_incarnation,
+            "00000000-0000-4000-8000-00000000d206",
+            predecessor,
+        );
+        stale.now_ms = 4_000;
+        stale.recipe_json = r#"{"subtitle":"burn:7"}"#.to_owned();
+        assert!(
+            store
+                .rejoin_media_session_preparation(occupied, &stale)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale rejoin: {error}"))
+                .is_none(),
+            "{backend}: a rejoin derived from the old predecessor must lose"
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: current route after loss: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: committed route survives")),
+            committed,
+            "{backend}: losing the abort cannot end or rewrite the new current generation"
+        );
+
+        stale.expected_predecessor_incarnation_id = occupied.to_owned();
+        store
+            .prepare_media_session(&stale)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: re-prepare against new current: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: caller can re-prepare against new current"));
+    })
+    .await;
+}
+
+/// Naming another incarnation cannot steal or disturb an occupied slot.
+#[tokio::test]
+async fn media_session_rejoin_is_guarded_by_the_named_preparation() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-rejoin-guard-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create rejoin-guard user: {error}"));
+        let playback = "staged-rejoin-guard-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000d301";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000d302",
+            backend,
+        )
+        .await;
+        let occupied = "00000000-0000-4000-8000-00000000d303";
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                occupied,
+                "00000000-0000-4000-8000-00000000d304",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare guarded slot: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: guarded preparation must win"));
+        let merged = staged_preparation(
+            user.id,
+            playback,
+            "00000000-0000-4000-8000-00000000d305",
+            "00000000-0000-4000-8000-00000000d306",
+            predecessor,
+        );
+        assert!(
+            store
+                .rejoin_media_session_preparation("00000000-0000-4000-8000-00000000d399", &merged,)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: wrong-id rejoin: {error}"))
+                .is_none(),
+            "{backend}: a wrong incarnation cannot replace the occupied slot"
+        );
+        let staged = store
+            .staged_media_session_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: guarded staged lookup: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: occupied slot must survive"));
+        assert_eq!(staged.staged_incarnation_id, occupied, "{backend}");
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(occupied)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: occupied route lookup: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: occupied route remains"))
+                .state,
+            "active",
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+/// Rejoin is all-or-nothing even when admission changes after the first
+/// preparation. In particular, fencing its owner cannot leave the old row
+/// retired with no merged successor.
+#[tokio::test]
+async fn media_session_rejoin_preserves_the_occupied_slot_when_reprepare_is_refused() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-rejoin-refusal-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create rejoin-refusal user: {error}"));
+        let playback = "staged-rejoin-refusal-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000d401";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000d402",
+            backend,
+        )
+        .await;
+        let occupied = "00000000-0000-4000-8000-00000000d403";
+        let mut first = staged_preparation(
+            user.id,
+            playback,
+            occupied,
+            "00000000-0000-4000-8000-00000000d404",
+            predecessor,
+        );
+        first.owner_node_id = "staged-rejoin-removed-node".to_owned();
+        store
+            .prepare_media_session(&first)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare refusal fixture: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: refusal fixture must occupy the slot"));
+        store
+            .put_setting(
+                "internal.cluster_job_owner_removed.staged-rejoin-removed-node",
+                "removed",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fence rejoin owner: {error}"));
+
+        let mut merged = staged_preparation(
+            user.id,
+            playback,
+            "00000000-0000-4000-8000-00000000d405",
+            "00000000-0000-4000-8000-00000000d406",
+            predecessor,
+        );
+        merged.owner_node_id = first.owner_node_id.clone();
+        merged.now_ms = 2_500;
+        let error = store
+            .rejoin_media_session_preparation(occupied, &merged)
+            .await
+            .expect_err("a fenced owner makes the replacement inadmissible");
+        assert!(
+            error
+                .to_string()
+                .contains("rejoin replacement is no longer admissible"),
+            "{backend}: {error}"
+        );
+        let staged = store
+            .staged_media_session_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: staged row after refusal: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: atomic refusal must preserve the old slot"));
+        assert_eq!(staged.staged_incarnation_id, occupied, "{backend}");
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(occupied)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: old route after refusal: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: old route remains readable"))
+                .state,
+            "active",
+            "{backend}: failed rejoin must roll back the abort"
+        );
     })
     .await;
 }
@@ -12854,7 +13195,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 287, "review the Store method count");
+    assert_eq!(declared.len(), 288, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

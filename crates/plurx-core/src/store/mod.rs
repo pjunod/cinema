@@ -2527,6 +2527,29 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         preparation: &crate::domain::MediaSessionPreparation,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
+    /// Replace one named staged successor with a merged preparation.
+    ///
+    /// The abort and replacement prepare are one durable mutation. They leave
+    /// the playback pointer and its current generation untouched; only the
+    /// ordinary preparation commit may advance that pointer. This is the
+    /// occupied-slot operation used when subtitle burn work joins successor
+    /// work that is already in flight.
+    ///
+    /// `Ok(Some(route))` means the merged preparation now owns the slot. That
+    /// includes an exact retry after the first rejoin succeeded but its owner
+    /// crashed before observing the response. `Ok(None)` means the named row
+    /// is gone and the caller's own merged preparation is not the staged row;
+    /// the caller must re-read the current generation before deriving another
+    /// preparation. If the named row still owns the slot but the replacement
+    /// no longer satisfies prepare admission, the transaction leaves that row
+    /// intact and returns `Err`; silently dropping occupied work is not a CAS
+    /// loss. Malformed identities and database faults are also `Err`.
+    async fn rejoin_media_session_preparation(
+        &self,
+        staged_incarnation_id: &str,
+        preparation: &crate::domain::MediaSessionPreparation,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
     /// The staged successor for one playback, if there is one.
     async fn staged_media_session_for_playback(
         &self,
