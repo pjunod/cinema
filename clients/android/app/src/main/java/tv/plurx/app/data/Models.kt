@@ -199,6 +199,12 @@ data class MediaFileDto(
     val bit_depth: Long? = null,
     val hdr: String? = null,
     val hdr_format: String? = null,
+    /**
+     * The Dolby Vision facts as columns, when the row has them. Absent on a
+     * row scanned before those columns existed, whose only DV evidence is the
+     * prose in [hdr_format].
+     */
+    val dolby_vision: DolbyVisionFactsDto? = null,
     val bitrate: Long? = null,
     val audio_streams: List<AudioStream> = emptyList(),
     val subtitle_streams: List<SubtitleStream> = emptyList(),
@@ -573,6 +579,42 @@ data class Decision(
      * to describing the source alone.
      */
     val delivered_dynamic_range: String? = null,
+    /**
+     * The Dolby Vision profile actually on the wire, when the delivery carries
+     * Dolby Vision at all.
+     *
+     * [delivered_dynamic_range] answers `"dolby_vision"` for both a Profile 7
+     * title preserved for a device that enumerates 7 and the same title
+     * converted to 8.1 for one that does not, because the grade really is the
+     * same in both. What differs is that in the second case the profile on
+     * screen is not the profile on disk, and a badge reading the file's
+     * profile for both is describing the disk rather than the picture.
+     *
+     * **Absent means "no answer", not "not Dolby Vision."** Three things
+     * produce it: a delivery carrying no Dolby Vision at all (a transcode, a
+     * strip), a source that never had any, and a library row scanned before
+     * the profile columns existed. [delivered_dynamic_range] beside it is the
+     * field that answers "is this Dolby Vision".
+     */
+    val delivered_dolby_vision_profile: Int? = null,
+)
+
+/**
+ * The Dolby Vision facts the server derives its label from, so a client can
+ * read the profile as a number instead of out of prose.
+ *
+ * Every field optional and defaulted: a row scanned before these columns
+ * existed sends the object with nulls, or omits it entirely, and neither may
+ * fail to parse — a client that cannot decode a response over a missing
+ * optional field cannot play anything at all on that server.
+ */
+@Serializable
+data class DolbyVisionFactsDto(
+    val profile: Int? = null,
+    val level: Int? = null,
+    val bl_compat_id: Int? = null,
+    val el_present: Boolean? = null,
+    val rpu_present: Boolean? = null,
 )
 
 @Serializable
@@ -609,6 +651,19 @@ data class HlsStart(
      * read the source mid-request — the client then keeps what it had.
      */
     val delivered_dynamic_range: String? = null,
+    /**
+     * This session's answer for the Dolby Vision profile, overriding the
+     * decision's the moment the session attaches.
+     *
+     * Read together with [delivered_dynamic_range], never on its own: a
+     * session that reports a range must CLEAR a decision's profile when it
+     * omits this. That is not hypothetical — the legacy single-ffmpeg copy
+     * path serves the HDR10 base for a title the decision said would be
+     * converted, which is the *normal* first watch of a converting title,
+     * before its fragment index exists. A stale profile there paints
+     * "DV → DV P8" over HDR10.
+     */
+    val delivered_dolby_vision_profile: Int? = null,
     /**
      * Where this session's playback-control exchange lives, and the exact
      * generation and owner epoch it addresses. Absent from an older server,

@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import tv.plurx.app.data.AudioTrack
+import tv.plurx.app.data.DolbyVisionFactsDto
 import tv.plurx.app.data.DynamicRange
 import tv.plurx.app.data.HdrType
 import tv.plurx.app.data.MediaFileDto
@@ -200,7 +201,109 @@ class MediaFactsTest {
         rendered = renderedRange(delivered, decoderMime, decoderColorTransfer, display),
     ).single { it.kind == MediaFactKind.DynamicRange }
 
-    private fun dolbyVision(format: String) = MediaFileDto(
+    /** The converted state: same grade, different profile, neither half dim. */
+    @Test
+    fun aConvertedProfileSevenTitleShowsBothHalvesLit() {
+        val fact = playerMediaFacts(
+            dolbyVision("Dolby Vision · Profile 7 (HDR10-compatible)", profile = 7),
+            null,
+            delivered = DynamicRange.DOLBY_VISION,
+            rendered = DynamicRange.DOLBY_VISION,
+            deliveredDolbyVisionProfile = 8,
+        ).single { it.kind == MediaFactKind.DynamicRange }
+
+        // Active, not Downgraded. The dimmed source half means "this
+        // capability is unavailable"; here the base layer is copied byte for
+        // byte and what reaches the device IS Dolby Vision, so dimming it
+        // would say the opposite of what happened.
+        assertEquals(FactState.Active, fact.state)
+        assertEquals("DV", fact.chipText)
+        assertEquals("Dolby Vision Profile 8", fact.activeLabel)
+        assertEquals("Dolby Vision, playing as Dolby Vision Profile 8", fact.accessibilityLabel)
+    }
+
+    @Test
+    fun aPreservedTitleAtItsOwnProfileGetsNoArrow() {
+        // A device that genuinely decodes this profile gets the stream
+        // untouched. Nothing changed, so there is nothing to announce.
+        val fact = playerMediaFacts(
+            dolbyVision("Dolby Vision · Profile 8 (HDR10-compatible)", profile = 8),
+            null,
+            delivered = DynamicRange.DOLBY_VISION,
+            rendered = DynamicRange.DOLBY_VISION,
+            deliveredDolbyVisionProfile = 8,
+        ).single { it.kind == MediaFactKind.DynamicRange }
+
+        assertEquals(FactState.Active, fact.state)
+        assertNull(fact.activeLabel)
+    }
+
+    @Test
+    fun aServerThatOmitsTheProfileGetsExactlyTodaysChip() {
+        // Absent means "no answer", not "not Dolby Vision". An older server
+        // sends nothing here and the badge must be what it always was — a
+        // client that renders a new state off a missing optional field is a
+        // client that lies on every server that predates the field.
+        val fact = playerMediaFacts(
+            dolbyVision("Dolby Vision · Profile 7 (HDR10-compatible)", profile = 7),
+            null,
+            delivered = DynamicRange.DOLBY_VISION,
+            rendered = DynamicRange.DOLBY_VISION,
+        ).single { it.kind == MediaFactKind.DynamicRange }
+
+        assertEquals(FactState.Active, fact.state)
+        assertNull(fact.activeLabel)
+    }
+
+    @Test
+    fun aRowWithNoProfileColumnAndNoNumberInItsLabelGetsNoArrow() {
+        // Scanned before the profile columns existed: the label is the bare
+        // string with no number in it. Reading a number out of prose that does
+        // not have one is how a badge invents a conversion that never
+        // happened.
+        val fact = playerMediaFacts(
+            dolbyVision("Dolby Vision"),
+            null,
+            delivered = DynamicRange.DOLBY_VISION,
+            rendered = DynamicRange.DOLBY_VISION,
+            deliveredDolbyVisionProfile = 8,
+        ).single { it.kind == MediaFactKind.DynamicRange }
+
+        assertEquals(FactState.Active, fact.state)
+        assertNull(fact.activeLabel)
+    }
+
+    @Test
+    fun theSourceProfileIsReadFromTheColumnBeforeTheProse() {
+        // The column wins, and the prose is the fallback — the same order the
+        // web chip uses, so the same file cannot show an arrow on one client
+        // and not the other.
+        assertEquals(
+            7,
+            sourceDolbyVisionProfile(dolbyVision("Dolby Vision · Profile 5", profile = 7)),
+        )
+        assertEquals(5, sourceDolbyVisionProfile(dolbyVision("Dolby Vision · Profile 5")))
+        assertNull(sourceDolbyVisionProfile(dolbyVision("Dolby Vision")))
+        assertNull(sourceDolbyVisionProfile(hdr10()))
+    }
+
+    @Test
+    fun aForcedTranscodeStillDimsTheSourceHalf() {
+        // The converted state must not swallow the real downgrade beside it:
+        // a forced 1080p rung re-encodes to SDR and reports no profile, and
+        // that half MUST dim.
+        val fact = playerMediaFacts(
+            dolbyVision("Dolby Vision · Profile 7 (HDR10-compatible)", profile = 7),
+            null,
+            delivered = DynamicRange.SDR,
+            rendered = DynamicRange.SDR,
+        ).single { it.kind == MediaFactKind.DynamicRange }
+
+        assertEquals(FactState.Downgraded, fact.state)
+        assertEquals("SDR", fact.activeLabel)
+    }
+
+    private fun dolbyVision(format: String, profile: Int? = null) = MediaFileDto(
         id = 6_041,
         filename = "dv.mkv",
         width = 3_840,
@@ -208,6 +311,7 @@ class MediaFactsTest {
         video_codec = "hevc",
         hdr = "dolby_vision",
         hdr_format = format,
+        dolby_vision = profile?.let { DolbyVisionFactsDto(profile = it) },
     )
 
     private fun hdr10() = MediaFileDto(

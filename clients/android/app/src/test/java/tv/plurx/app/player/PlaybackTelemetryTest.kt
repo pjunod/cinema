@@ -34,6 +34,7 @@ class PlaybackTelemetryTest {
         override val aac = true
         override val preserveDolbyVision = false
         override val deliveredDynamicRange = "sdr"
+        override val deliveredDolbyVisionProfile: Int? = null
     }
 
     @Test

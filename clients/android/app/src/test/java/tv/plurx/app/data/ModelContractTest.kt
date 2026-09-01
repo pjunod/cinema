@@ -348,6 +348,60 @@ class ModelContractTest {
             """{"file_id": 1, "method": "direct_play", "play_url": "/direct"}""",
         )
         assertNull(old.delivered_dynamic_range)
+        assertNull(old.delivered_dolby_vision_profile)
+
+        // The converted delivery: the grade is unchanged and the profile is
+        // not, which is the pair `delivered_dynamic_range` alone cannot say.
+        val converted = json.decodeFromString<Decision>(
+            """{
+              "file_id": 6041, "method": "remux", "play_url": "/stream.mp4",
+              "delivery": {"mode": "remux", "preserve_dolby_vision": true},
+              "source": {"hdr": "dolby_vision"},
+              "delivered_dynamic_range": "dolby_vision",
+              "delivered_dolby_vision_profile": 8
+            }""".trimIndent(),
+        )
+        assertEquals("dolby_vision", converted.delivered_dynamic_range)
+        assertEquals(8, converted.delivered_dolby_vision_profile)
+
+        // The source profile comes off the FILE row, not the decision's
+        // summary — the two carry it under different names, and the badge
+        // reads the file.
+        val row = json.decodeFromString<MediaFileDto>(
+            """{"id": 6041, "filename": "dv.mkv", "hdr": "dolby_vision",
+                "dolby_vision": {"profile": 7, "bl_compat_id": 1}}""".trimIndent(),
+        )
+        assertEquals(7, row.dolby_vision?.profile)
+
+        // A session reporting a range and NO profile. This is the one that
+        // matters most and the one that fails silently: the legacy copy path
+        // serves the HDR10 base for a title the decision said would be
+        // converted, which is the normal FIRST watch of a converting title.
+        // The field must decode as null rather than being absent-and-ignored,
+        // because the controller clears the decision's profile from it.
+        val fellBack = json.decodeFromString<HlsStart>(
+            """{
+              "session_id": "s3", "playlist_url": "/hls/s3/index.m3u8",
+              "delivered_dynamic_range": "hdr10"
+            }""".trimIndent(),
+        )
+        assertEquals("hdr10", fellBack.delivered_dynamic_range)
+        assertNull(fellBack.delivered_dolby_vision_profile)
+
+        // A row scanned before the Dolby Vision columns existed sends no
+        // object at all, and a row scanned after but with nothing to say sends
+        // one full of nulls. Neither may fail to parse: a client that cannot
+        // decode a response over a missing optional field cannot play anything
+        // at all on that server.
+        val bareRow = json.decodeFromString<MediaFileDto>(
+            """{"id": 1, "filename": "old.mkv", "hdr": "dolby_vision",
+                "hdr_format": "Dolby Vision"}""".trimIndent(),
+        )
+        assertNull(bareRow.dolby_vision)
+        val emptyFacts = json.decodeFromString<MediaFileDto>(
+            """{"id": 2, "filename": "new.mkv", "dolby_vision": {}}""",
+        )
+        assertNull(emptyFacts.dolby_vision?.profile)
         assertNull(
             json.decodeFromString<HlsStart>(
                 """{"session_id": "s3", "playlist_url": "/hls/s3/index.m3u8"}""",
