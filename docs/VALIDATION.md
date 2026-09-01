@@ -90,10 +90,12 @@ packaging. Local profiles (`commit`, `full`, `nightly`) run `rust-gate` —
 `make rust-check`, the one-command fmt + clippy + full-workspace suite. The
 `ci` profile and the PR workflow run `rust-gate-ci` — `make ci-rust-gate` —
 which owns formatting, Clippy, unit tests, and SQLite contracts in one job.
-Three parallel jobs own replicated Store/topology, WAL recovery, and real
-daemons. Excluding `plurx-cluster-check` from the fast lane keeps Cargo's
-feature unification from compiling those replicated contracts into it. The
-subset re-runs (`api-wire`,
+Four parallel jobs separately own replicated Store semantics, the topology
+harness, WAL recovery, and real daemons. Store and topology retain independent
+logs and exact-tree receipts, so a slow or failed lane is attributable without
+re-running the other one. Excluding `plurx-cluster-check` from the fast lane
+keeps Cargo's feature unification from compiling those replicated contracts
+into it. The subset re-runs (`api-wire`,
 `security-boundaries`, `user-journey`) stay out of the `ci` profile for the
 same reason: there they would re-execute binaries the workspace run already
 executed with identical feature resolution.

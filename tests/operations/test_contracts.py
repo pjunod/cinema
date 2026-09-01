@@ -458,7 +458,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
         fast_rust = workflow.split("  check:", 1)[1].split(
-            "\n  cluster_auth:", 1
+            "\n  cluster_store:", 1
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
         self.assertIn("run: make ci-rust-gate", fast_rust)
@@ -487,7 +487,8 @@ class OperationsContractCase(unittest.TestCase):
         )
         self.assertIn("needs.scope.outputs.hiqlite_spike == 'true'", workflow)
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", workflow)
-        self.assertIn("name: replicated store and topology contracts", workflow)
+        self.assertIn("name: replicated Store contracts", workflow)
+        self.assertIn("name: replicated topology contracts", workflow)
         self.assertIn("name: replicated WAL recovery contracts", workflow)
         self.assertIn("name: cluster daemon contracts", workflow)
         self.assertIn("if: needs.scope.outputs.rust == 'true'", workflow)
@@ -497,14 +498,21 @@ class OperationsContractCase(unittest.TestCase):
             "MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}",
             workflow,
         )
-        self.assertIn("CLUSTER_AUTH_RESULT: ${{ needs.cluster_auth.result }}", workflow)
+        self.assertIn(
+            "CLUSTER_STORE_RESULT: ${{ needs.cluster_store.result }}", workflow
+        )
+        self.assertIn(
+            "CLUSTER_TOPOLOGY_RESULT: ${{ needs.cluster_topology.result }}",
+            workflow,
+        )
         self.assertIn("CLUSTER_WAL_RESULT: ${{ needs.cluster_wal.result }}", workflow)
         self.assertIn(
             "CLUSTER_DAEMON_RESULT: ${{ needs.cluster_daemon.result }}", workflow
         )
         pr_gate = workflow.split("  pr_gate:", 1)[1]
         self.assertIn("      - mobile_version", pr_gate)
-        self.assertIn("      - cluster_auth", pr_gate)
+        self.assertIn("      - cluster_store", pr_gate)
+        self.assertIn("      - cluster_topology", pr_gate)
         self.assertIn("      - cluster_wal", pr_gate)
         self.assertIn("      - cluster_daemon", pr_gate)
         self.assertIn("      - web_layout", pr_gate)
@@ -664,8 +672,8 @@ class OperationsContractCase(unittest.TestCase):
         )
         self.assertIn("scripts/validate run --profile commit --staged", precommit)
 
-        # Exactly four Rust test lanes own the PR: the fast gate plus three
-        # independently selected replicated/daemon jobs.
+        # Exactly five Rust test lanes own the PR: the fast gate plus four
+        # independently selected Store/topology/WAL/daemon jobs.
         gate = makefile.split(".PHONY: ci-rust-gate", 1)[1].split(".PHONY:", 1)[0]
         self.assertIn("--workspace --locked --exclude plurx-cluster-check", gate)
         # The lockfile check sits in front of Clippy on purpose. `spikes/
@@ -678,7 +686,11 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("spike-lock-check", makefile.split("\nunit:", 1)[1].split("\n\n", 1)[0])
         self.assertIn("run: make ci-rust-gate", workflow)
         self.assertIn("make fmt-check lint", lint)
-        self.assertIn("run: make cluster-store-check cluster-harness-check", workflow)
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        self.assertIn("make cluster-store-check", jobs["cluster_store"])
+        self.assertNotIn("make cluster-harness-check", jobs["cluster_store"])
+        self.assertIn("make cluster-harness-check", jobs["cluster_topology"])
+        self.assertNotIn("make cluster-store-check", jobs["cluster_topology"])
         self.assertIn("run: make cluster-wal-check", workflow)
         self.assertIn("run: make cluster-daemon-check", workflow)
 
@@ -809,37 +821,48 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("target/validation/android-instrumentation.txt", makefile)
         self.assertIn("Android instrumentation did not report a passing suite", makefile)
 
-        # The semantic proof reuses the cluster lane's persistent target
-        # instead of compiling the same dependency graph a second time.
-        cluster = workflow.split("  cluster_auth:", 1)[1].split(
-            "\n  cluster_wal:", 1
-        )[0]
+        # Store semantics and topology have independent caches, routing,
+        # failure logs, and exact-tree receipts.
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        store = jobs["cluster_store"]
+        topology = jobs["cluster_topology"]
         wal = workflow.split("  cluster_wal:", 1)[1].split(
             "\n  cluster_daemon:", 1
         )[0]
         daemon = workflow.split("  cluster_daemon:", 1)[1].split(
             "\n  web_layout:", 1
         )[0]
-        self.assertIn("uses: ./.github/actions/cargo-cache", cluster)
-        self.assertIn("lane: cluster-auth", cluster)
+        self.assertIn("uses: ./.github/actions/cargo-cache", store)
+        self.assertIn("lane: cluster-store", store)
+        self.assertIn('persistent-eligible: "true"', store)
+        self.assertIn("uses: ./.github/actions/cargo-cache", topology)
+        self.assertIn("lane: cluster-topology", topology)
+        self.assertIn('persistent-eligible: "true"', topology)
         self.assertIn(
-            "Resolve pinned Rust executables for the long contract run", cluster
+            "Resolve pinned Rust executables for the long contract run", topology
         )
-        self.assertIn("rustup which --toolchain 1.97.1 cargo", cluster)
-        self.assertIn("rustup which --toolchain 1.97.1 rustc", cluster)
-        self.assertNotIn("CARGO: rustup run 1.97.1 cargo", cluster)
-        self.assertIn("run: make cluster-store-check cluster-harness-check", cluster)
-        self.assertIn("run: make hiqlite-spike", cluster)
+        self.assertIn("rustup which --toolchain 1.97.1 cargo", topology)
+        self.assertIn("rustup which --toolchain 1.97.1 rustc", topology)
+        self.assertNotIn("CARGO: rustup run 1.97.1 cargo", topology)
+        self.assertIn("make cluster-store-check", store)
+        self.assertNotIn("make cluster-harness-check", store)
+        self.assertIn("make cluster-harness-check", topology)
+        self.assertNotIn("make cluster-store-check", topology)
+        self.assertIn("make hiqlite-spike", topology)
+        self.assertIn("cluster-store-receipt.json", store)
+        self.assertIn("cluster-topology-receipt.json", topology)
+        self.assertIn("if: always()", store)
+        self.assertIn("if: always()", topology)
         self.assertIn("run: make cluster-wal-check", wal)
         self.assertIn("run: make cluster-daemon-check", daemon)
         self.assertIn("name: Verify the cluster fixture generator", daemon)
         self.assertIn("command -v ffmpeg", daemon)
         self.assertNotIn("spikes/hiqlite-m0/target", workflow)
-        self.assertIn("name: cluster-topology-semantic", cluster)
+        self.assertIn("name: cluster-topology-semantic", topology)
         self.assertIn(
-            "path: target/validation/cluster-topology-semantic.json", cluster
+            "path: target/validation/cluster-topology-semantic.json", topology
         )
-        self.assertIn("if-no-files-found: error", cluster)
+        self.assertIn("if-no-files-found: error", topology)
 
         # Hosted smoke keeps scoped GHA state; an eligible self-hosted smoke
         # uses the one named host builder and enforces its postcondition.
@@ -996,6 +1019,12 @@ class OperationsContractCase(unittest.TestCase):
             "macos-26",
             '\"macOS\",\"ARM64\",\"lab\",\"apple\",\"xcode-26\"',
         )
+        ci_store = choose(
+            "ubuntu-24.04", '\"Linux\",\"X64\",\"lab\",\"ci-store\"'
+        )
+        ci_topology = choose(
+            "ubuntu-24.04", '\"Linux\",\"X64\",\"lab\",\"ci-topology\"'
+        )
         hosted_linux_24 = "    runs-on: ubuntu-24.04"
         hosted_linux = "    runs-on: ubuntu-latest"
 
@@ -1028,9 +1057,12 @@ class OperationsContractCase(unittest.TestCase):
                     expected = high_cpu_ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "web_layout":
                     expected = ffmpeg6
+                elif path == ".github/workflows/ci.yml" and name == "cluster_store":
+                    expected = ci_store
+                elif path == ".github/workflows/ci.yml" and name == "cluster_topology":
+                    expected = ci_topology
                 elif path == ".github/workflows/ci.yml" and name in {
                     "check",
-                    "cluster_auth",
                     "cluster_wal",
                     "package_smoke",
                 }:
