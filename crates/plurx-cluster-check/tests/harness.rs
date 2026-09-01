@@ -773,6 +773,14 @@ async fn every_argument_rejection_names_what_was_wrong() {
             vec!["harness", "preflight"],
             "preflight mode requires its launch JSON",
         ),
+        (
+            vec!["harness", "watermark-experiment", "bogus"],
+            "watermark-experiment takes an optional pair count",
+        ),
+        (
+            vec!["harness", "watermark-experiment", "0"],
+            "watermark-experiment needs at least one pair",
+        ),
     ];
     for (args, expected) in cases {
         let error = format!(
