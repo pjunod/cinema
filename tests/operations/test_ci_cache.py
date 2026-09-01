@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import tempfile
 import unittest
@@ -295,13 +296,120 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertIn('"$EXECUTION_MODE" != shadow', action)
         self.assertIn('"$PERSISTENT_ELIGIBLE" != true', action)
         self.assertIn('default: "false"', action)
-        self.assertIn("plurx-$runner_name-$CACHE_LANE", action)
+        self.assertIn("builder_name=plurx-$runner_name", action)
+        self.assertNotIn("plurx-$runner_name-$CACHE_LANE", action)
         self.assertIn("buildkitd-config:", action)
         self.assertIn('[registry."192.168.4.7:3000"]', config)
         self.assertIn("http = true", config)
-        self.assertIn("--max-used-space 50GB --min-free-space 100GB", workflow)
+        self.assertIn(
+            'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', workflow
+        )
         self.assertIn("'type=gha,mode=min' || ''", workflow)
         self.assertNotIn("persistent-eligible: true", workflow)
+
+    def test_buildkit_pruner_enforces_hostwide_budget_and_reserve(self):
+        script = ROOT / "scripts/ci-buildkit-prune"
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        with tempfile.TemporaryDirectory() as raw_directory:
+            fixture = Path(raw_directory)
+            docker_root = fixture / "docker-root"
+            fake_bin = fixture / "bin"
+            docker_root.mkdir()
+            fake_bin.mkdir()
+            marker = fixture / "pruned"
+            log = fixture / "docker.log"
+
+            fake_docker = fake_bin / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = info ]; then\n"
+                "  printf '%s\\n' \"$DOCKER_ROOT_FIXTURE\"\n"
+                "elif [ \"$1 $2\" = 'buildx du' ]; then\n"
+                "  if [ -f \"$DOCKER_PRUNED\" ]; then size=$DU_AFTER_BYTES; "
+                "else size=$DU_BEFORE_BYTES; fi\n"
+                "  printf '{\"Size\":\"%s\"}\\n' \"$size\"\n"
+                "elif [ \"$1 $2\" = 'buildx prune' ]; then\n"
+                "  printf '%s\\n' \"$@\" > \"$DOCKER_LOG\"\n"
+                "  touch \"$DOCKER_PRUNED\"\n"
+                "else\n"
+                "  exit 97\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+
+            fake_df = fake_bin / "df"
+            fake_df.write_text(
+                "#!/bin/sh\n"
+                "if [ -f \"$DOCKER_PRUNED\" ]; then "
+                "available=$AFTER_AVAILABLE_KB; else available=52428800; fi\n"
+                "printf '%s\\n' "
+                "'Filesystem 1024-blocks Used Available Capacity Mounted'\n"
+                "printf 'fixture 1073741824 1 %s 1%% /fixture\\n' \"$available\"\n",
+                encoding="utf-8",
+            )
+            fake_df.chmod(0o755)
+
+            summary = fixture / "summary.md"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "AFTER_AVAILABLE_KB": "314572800",
+                    "DOCKER_LOG": str(log),
+                    "DOCKER_PRUNED": str(marker),
+                    "DOCKER_ROOT_FIXTURE": str(docker_root),
+                    "DU_AFTER_BYTES": str(40 * 1024**3),
+                    "DU_BEFORE_BYTES": str(60 * 1024**3),
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                }
+            )
+
+            subprocess.run(
+                [str(script), "plurx-runner-01", "50"],
+                check=True,
+                env=environment,
+            )
+
+            arguments = log.read_text(encoding="utf-8").splitlines()
+            self.assertIn("--max-used-space", arguments)
+            self.assertEqual(
+                arguments[arguments.index("--max-used-space") + 1],
+                str(50 * 1024**3),
+            )
+            self.assertIn("--min-free-space", arguments)
+            self.assertEqual(
+                arguments[arguments.index("--min-free-space") + 1],
+                str(((1073741824 + 4) // 5) * 1024),
+            )
+            self.assertIn(
+                "filesystem floor: 214748365 KiB", summary.read_text()
+            )
+
+            marker.unlink()
+            environment.update(
+                {
+                    "AFTER_AVAILABLE_KB": "1048576",
+                    "DU_AFTER_BYTES": str(60 * 1024**3),
+                }
+            )
+            failed = subprocess.run(
+                [str(script), "plurx-runner-01", "50"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("remains over", failed.stderr)
+
+            unsafe = subprocess.run(
+                [str(script), "../../foreign-builder", "50"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(unsafe.returncode, 0)
+            self.assertIn("unsafe builder name", unsafe.stderr)
 
     def test_external_cargo_targets_reach_browser_harnesses(self):
         ui = (ROOT / "scripts/ui-baseline").read_text(encoding="utf-8")
@@ -313,6 +421,42 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertIn('os.environ.get("CARGO_TARGET_DIR"', ui)
         self.assertIn("process.env.CARGO_TARGET_DIR", playback)
         self.assertIn('echo "CARGO_TARGET_DIR=$target_dir"', action)
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            target = Path(raw_directory) / "external-target"
+            server = target / "debug" / "plurxd"
+            server.parent.mkdir(parents=True)
+            server.touch()
+            environment = os.environ.copy()
+            environment["CARGO_TARGET_DIR"] = str(target)
+            node = subprocess.run(
+                [
+                    "node",
+                    "-e",
+                    "process.stdout.write(require('./scripts/playback-lab')"
+                    ".defaultServerBin())",
+                ],
+                cwd=ROOT,
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(Path(node.stdout), server)
+
+            previous = os.environ.get("CARGO_TARGET_DIR")
+            os.environ["CARGO_TARGET_DIR"] = str(target)
+            try:
+                contract = runpy.run_path(
+                    str(ROOT / "scripts/ui-baseline"),
+                    run_name="ui_baseline_cache_contract",
+                )
+                self.assertEqual(contract["default_server_bin"](), server)
+            finally:
+                if previous is None:
+                    os.environ.pop("CARGO_TARGET_DIR", None)
+                else:
+                    os.environ["CARGO_TARGET_DIR"] = previous
 
     def test_scope_outputs_are_only_read_by_direct_dependents(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

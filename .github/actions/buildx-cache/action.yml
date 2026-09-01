@@ -5,7 +5,7 @@ description: >-
 
 inputs:
   lane:
-    description: Stable, filesystem-safe name for this BuildKit lane.
+    description: Stable, filesystem-safe lane name used to validate callers.
     required: true
   execution-mode:
     description: CI execution rollout mode; local state is disabled in legacy mode.
@@ -51,7 +51,7 @@ runs:
           | tr '[:upper:]' '[:lower:]' \
           | tr -c 'a-z0-9_.-' '-')
         echo "local=true" >> "$GITHUB_OUTPUT"
-        echo "builder_name=plurx-$runner_name-$CACHE_LANE" >> "$GITHUB_OUTPUT"
+        echo "builder_name=plurx-$runner_name" >> "$GITHUB_OUTPUT"
 
     - name: Start a persistent self-hosted builder
       if: steps.configure.outputs.local == 'true'

@@ -338,6 +338,11 @@ function findGeckodriver(explicit) {
   return findOnPath(["geckodriver"]);
 }
 
+function defaultServerBin() {
+  const cargoTarget = path.resolve(ROOT, process.env.CARGO_TARGET_DIR || "target");
+  return path.join(cargoTarget, "debug", "plurxd");
+}
+
 function doctor(options) {
   const browser = options.browser || "chrome";
   const checks = [];
@@ -354,7 +359,7 @@ function doctor(options) {
   const filters = spawnSync("ffmpeg", ["-hide_banner", "-filters"], { encoding: "utf8" });
   const filterText = `${filters.stdout || ""}\n${filters.stderr || ""}`;
   add("ffmpeg zscale", /\bzscale\b/.test(filterText), /\bzscale\b/.test(filterText) ? "available" : "missing (HDR tone-map cases will fail)");
-  const server = path.resolve(options.server || path.join(ROOT, "target", "debug", "plurxd"));
+  const server = path.resolve(options.server || defaultServerBin());
   add("plurxd debug binary", fs.existsSync(server), fs.existsSync(server) ? server : `${server} (run cargo build -p plurxd)`);
   if (browser === "chrome") {
     const chrome = findChrome(options.chrome);
@@ -1445,8 +1450,7 @@ async function startServer(options, fixtureDirectory) {
   await fsp.writeFile(config,
     `[server]\nname = "plurx playback lab"\nbind = "127.0.0.1:${port}"\n\n` +
     `[storage]\ndata_dir = ${tomlString(dataDir)}\n`, "utf8");
-  const cargoTarget = path.resolve(ROOT, process.env.CARGO_TARGET_DIR || "target");
-  const serverBin = path.resolve(options.server || path.join(cargoTarget, "debug", "plurxd"));
+  const serverBin = path.resolve(options.server || defaultServerBin());
   if (!fs.existsSync(serverBin)) {
     if (options.server) throw new Error(`server binary does not exist: ${serverBin}`);
     process.stdout.write("BUILD   plurxd debug binary\n");
@@ -3382,6 +3386,7 @@ module.exports = {
   diagnosticPath,
   deviceRunCommand,
   deviceProxyCommand,
+  defaultServerBin,
   executeRun,
   expandCases,
   fragmentIndexPassBuiltFile,

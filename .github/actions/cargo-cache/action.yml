@@ -16,7 +16,7 @@ inputs:
     required: false
     default: "false"
   budget-gb:
-    description: Maximum runner-local bytes retained for this Rust toolchain.
+    description: Maximum Cargo bytes retained across every toolchain on this runner.
     required: false
     default: "30"
 

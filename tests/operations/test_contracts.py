@@ -826,7 +826,9 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("uses: ./.github/actions/buildx-cache", docker)
         self.assertIn("'type=gha' || ''", docker)
         self.assertIn("'type=gha,mode=min' || ''", docker)
-        self.assertIn("--max-used-space 50GB --min-free-space 100GB", docker)
+        self.assertIn(
+            'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', docker
+        )
 
     def test_hiqlite_shutdown_budget_covers_its_deliberate_cluster_waits(self):
         management = read("vendor/hiqlite/src/client/mgmt.rs")

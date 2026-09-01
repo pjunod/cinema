@@ -46,7 +46,7 @@ read_disk() {
 read -r filesystem_kb available_kb < <(read_disk)
 usage_kb=$(read_usage)
 budget_kb=$((budget_gb * 1024 * 1024))
-percent_floor_kb=$((filesystem_kb / 5))
+percent_floor_kb=$(((filesystem_kb + 4) / 5))
 absolute_floor_kb=$((100 * 1024 * 1024))
 floor_kb=$absolute_floor_kb
 if [ "$percent_floor_kb" -gt "$floor_kb" ]; then

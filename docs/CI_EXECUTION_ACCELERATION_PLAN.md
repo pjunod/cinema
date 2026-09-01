@@ -201,19 +201,22 @@ the Cargo root is still over budget or the filesystem remains below its
 reserve. The stated limit is therefore a postcondition, not a best-effort
 preflight observation.
 
-The initial Cargo ceiling is 30 GiB per runner/toolchain. Exactly one runner
-service per physical builder is eligible for persistent-heavy work, so this is
-also the host's active Cargo ceiling. Toolchain epochs can coexist only while
-the host floor remains satisfied; stale epochs are an operator-visible cleanup
-item until an age-based outer pruner lands.
+The initial Cargo ceiling is 30 GiB per eligible runner across all toolchain
+epochs. Exactly one runner service per physical builder is eligible for
+persistent-heavy work, so this is also the host's active Cargo ceiling.
+Toolchain epochs can coexist only while the host floor remains satisfied; the
+pruner evicts stale epochs oldest-first when either the budget or floor is
+violated.
 
 ## 6. Persistent BuildKit and Forgejo cache contract
 
 `.github/actions/buildx-cache/action.yml` selects one stable builder name per
-runner and lane and asks `docker/setup-buildx-action` to retain BuildKit state
-on cleanup. Legacy and hosted jobs keep an ephemeral builder and the existing
-GitHub cache backend. Persistent jobs rely on the named builder's local state,
-avoiding a save/upload after every run.
+physical runner and asks `docker/setup-buildx-action` to retain BuildKit state
+on cleanup. Sharing that builder across its sequential lanes makes the 50 GiB
+limit host-wide instead of multiplying the allowance by the number of lanes.
+Legacy and hosted jobs keep an ephemeral builder and the existing GitHub cache
+backend. Persistent jobs rely on the named builder's local state, avoiding a
+save/upload after every run.
 
 The builder uses `.github/buildkitd.toml`:
 
@@ -226,10 +229,14 @@ This is required even when the host Docker daemon already trusts that
 registry: the `docker-container` BuildKit daemon has its own registry client.
 Adding this file does not restart or reconfigure Docker on any host.
 
-The initial BuildKit ceiling is 50 GiB per runner/lane, enforced with both:
+The initial BuildKit ceiling is 50 GiB per eligible runner. An `always()`
+finalizer computes the reserve from the filesystem containing Docker's root,
+passes both limits to BuildKit, then independently verifies cache usage and
+free space:
 
 ```text
---max-used-space 50GB --min-free-space 100GB
+cache <= 50 GiB
+free space >= max(100 GiB, 20% of the Docker filesystem)
 ```
 
 The Forgejo remote-cache fallback is read-mostly:
@@ -456,8 +463,8 @@ These are explicitly separate efforts:
 | Scheduler | Keep GitHub Actions | Existing trust, UI, receipts, and gates remain useful |
 | Rollout switch | `legacy` / `shadow` / `accelerated`, unknown → `legacy` | Fail-safe and reversible |
 | Required check | Keep `Main promotion gate` | Stable repository contract |
-| Persistent Cargo | Per runner/toolchain/lane | Avoid concurrent corruption and stale toolchains |
-| BuildKit | Stable named local builders | Avoid per-job remote save/restore |
+| Persistent Cargo | Isolated per runner/toolchain/lane; budgeted per runner | Avoid concurrent corruption while enforcing a host-scale ceiling |
+| BuildKit | One stable named local builder per runner | Avoid per-job remote save/restore and enforce one host-wide cap |
 | Registry | Optional Forgejo fallback with builder-local HTTP config | Read-mostly LAN cache without daemon changes |
 | Budgets | Per host; reserve first; approximate 50/30/20 | The original global arithmetic did not fit every disk |
 | Package hand-off | Same job per architecture | Avoid GitHub artifact quota and wrong-workspace risk |

@@ -837,9 +837,7 @@ jobs:
         if: always() && steps.buildx-cache.outputs.local == 'true'
         env:
           BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
-        run: >-
-          docker buildx prune --builder "$BUILDER_NAME" --force
-          --max-used-space 50GB --min-free-space 100GB
+        run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50
 
   # Configure this as the single required check for main-bound PRs and the
   # merge queue when repository protections become available. Until then it is
