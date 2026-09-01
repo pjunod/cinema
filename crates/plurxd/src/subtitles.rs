@@ -103,12 +103,13 @@ fn vtt_name(file_id: i64, index: i64, size: i64, mtime: i64) -> String {
 /// The size barely moves the cost — see [`windowing_is_worthwhile`] for what
 /// does — so this is chosen to outlive several segment requests without being
 /// so long that a viewer seeks out of it immediately.
-pub const WINDOW_SECONDS_DEFAULT: i64 = 200;
+#[cfg(test)]
+pub const WINDOW_SECONDS_DEFAULT: i64 = plurx_core::store::DEFAULT_SUBTITLE_WINDOW_SECS;
 /// Below this a window dies inside one AVPlayer retry cycle; above it the
 /// extraction stops beating the whole-track warm on a slow source and the
 /// bridge loses its point.
-pub const WINDOW_SECONDS_MIN: i64 = 30;
-pub const WINDOW_SECONDS_MAX: i64 = 900;
+pub const WINDOW_SECONDS_MIN: i64 = plurx_core::store::MIN_SUBTITLE_WINDOW_SECS;
+pub const WINDOW_SECONDS_MAX: i64 = plurx_core::store::MAX_SUBTITLE_WINDOW_SECS;
 
 pub fn bounded_window_seconds(configured: i64) -> i64 {
     configured.clamp(WINDOW_SECONDS_MIN, WINDOW_SECONDS_MAX)
@@ -518,6 +519,43 @@ pub async fn sidecar_state(dir: &Path, file: &MediaFile, index: i64) -> SidecarS
     SidecarState::Absent
 }
 
+/// Probe the whole-track cache and the exact forward window serving one
+/// demand anchor. Like [`sidecar_state`], this is observation only: a control
+/// exchange must never become a reason to start ffmpeg.
+pub async fn sidecar_state_for_demand(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    anchor_seconds: i64,
+    window_seconds: i64,
+) -> SidecarState {
+    let whole_state = sidecar_state(dir, file, index).await;
+    if whole_state == SidecarState::Ready {
+        return SidecarState::Ready;
+    }
+
+    let anchor = window_anchor_seconds(anchor_seconds, window_seconds);
+    let window = vtt_window_path(dir, file, index, anchor, window_seconds);
+    if matches!(read_vtt_path(&window, MAX_SIDECAR_BYTES).await, Ok(Some(_))) {
+        return SidecarState::Ready;
+    }
+
+    // Only the whole track and this demand's exact grid window count as
+    // progress. A neighbouring window is real work for another position, not
+    // evidence that this one is becoming servable.
+    if whole_state == SidecarState::Warming {
+        return SidecarState::Warming;
+    }
+    if extractions().lock().await.contains_key(&window) || warmups().lock().await.contains(&window)
+    {
+        return SidecarState::Warming;
+    }
+    if whole_state == SidecarState::Failed {
+        return SidecarState::Failed;
+    }
+    SidecarState::Absent
+}
+
 /// Read a warm sidecar without launching extraction. Used by AVPlayer's
 /// short-deadline segmented subtitle route, where a cache miss must return an
 /// empty segment immediately and warm in the background.
@@ -577,6 +615,21 @@ pub async fn ensure_vtt_file(
 /// minutes. One detached warmer per key lets playback begin immediately and
 /// lets later segments pick up the finished captions.
 pub async fn warm_vtt(dir: &Path, file: &MediaFile, index: i64) {
+    warm_vtt_with(dir, file, index, |tmp, file, index| async move {
+        extract_vtt(&tmp, &file, index).await
+    })
+    .await;
+}
+
+/// The whole-track warmer seam used by deterministic HTTP boundary tests.
+/// The injected producer still runs behind the production warmup and
+/// extraction registries, so cancellation and single-flight semantics remain
+/// part of the exercised path.
+pub(crate) async fn warm_vtt_with<F, Fut>(dir: &Path, file: &MediaFile, index: i64, extract: F)
+where
+    F: FnOnce(PathBuf, MediaFile, i64) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), String>> + Send + 'static,
+{
     let cached = vtt_path(dir, file, index);
     if valid_sidecar(&cached, MAX_SIDECAR_BYTES).await {
         return;
@@ -588,7 +641,7 @@ pub async fn warm_vtt(dir: &Path, file: &MediaFile, index: i64) {
     let dir = dir.to_owned();
     let file = file.clone();
     tokio::spawn(async move {
-        let _ = ensure_vtt(&dir, &file, index).await;
+        let _ = ensure_vtt_with(&dir, &file, index, extract).await;
         warmups().lock().await.remove(&cached);
     });
 }
@@ -825,6 +878,36 @@ pub async fn warm_vtt_window(
     anchor_seconds: i64,
     window_seconds: i64,
 ) -> bool {
+    warm_vtt_window_with(
+        dir,
+        file,
+        index,
+        anchor_seconds,
+        window_seconds,
+        |tmp, file, index, anchor_seconds, window_seconds| async move {
+            extract_vtt_window(&tmp, &file, index, anchor_seconds, window_seconds).await
+        },
+    )
+    .await
+}
+
+/// The window-warmer seam used by the HTTP boundary fixture.
+///
+/// Keeping the injected producer behind the same warmup and extraction
+/// registries is deliberate: the fixture must prove the production
+/// single-flight behavior, not a test double's imitation of it.
+pub(crate) async fn warm_vtt_window_with<F, Fut>(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    anchor_seconds: i64,
+    window_seconds: i64,
+    extract: F,
+) -> bool
+where
+    F: FnOnce(PathBuf, MediaFile, i64, i64, i64) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), String>> + Send + 'static,
+{
     let Some(duration_seconds) = file.duration_ms.map(|ms| ms / 1_000) else {
         // Without a duration there is no midpoint to compare against, and
         // guessing one would be guessing about I/O cost. The whole-track warm
@@ -859,7 +942,7 @@ pub async fn warm_vtt_window(
             index,
             ExtractionLimits::default(),
             move |tmp, file, index| async move {
-                extract_vtt_window(&tmp, &file, index, anchor_seconds, window).await
+                extract(tmp, file, index, anchor_seconds, window).await
             },
         )
         .await;
@@ -954,12 +1037,27 @@ where
             limits.max_sidecar_bytes
         ));
     }
+    // A whole-track sidecar is authoritative. If it won while this window was
+    // extracting, do not resurrect disposable bytes after the whole-track
+    // publisher pruned them.
+    if let Some(whole_name) = whole_name_for_window(cached_name) {
+        if let Some(parent) = cached.parent() {
+            let whole = parent.join(&whole_name);
+            if valid_sidecar(&whole, MAX_SIDECAR_BYTES).await {
+                let _ = directory.unlink_child(tmp_name).await;
+                return Ok(whole);
+            }
+        }
+    }
     if let Err(error) = directory.atomic_write_child(cached_name, &bytes).await {
         let _ = directory.unlink_child(tmp_name).await;
         return Err(format!("publishing subtitle cache: {error}"));
     }
     let _ = directory.unlink_child(tmp_name).await;
     if let Some(dir) = cached.parent() {
+        if !is_window_name(cached_name) {
+            prune_matching_windows(directory, dir, cached_name).await;
+        }
         prune(dir).await;
     }
     Ok(cached.to_owned())
@@ -1033,6 +1131,38 @@ fn is_window_name(name: &str) -> bool {
         })
         .and_then(|(_, anchor)| anchor.strip_prefix('w'))
         .is_some_and(|anchor| anchor.parse::<i64>().is_ok())
+}
+
+fn whole_name_for_window(name: &str) -> Option<String> {
+    if !is_window_name(name) {
+        return None;
+    }
+    let stem = name.strip_suffix(".vtt")?;
+    let (head, _) = stem.rsplit_once('-')?;
+    let (whole, anchor) = head.rsplit_once('-')?;
+    anchor.strip_prefix('w')?.parse::<i64>().ok()?;
+    Some(format!("{whole}.vtt"))
+}
+
+async fn prune_matching_windows(
+    directory: &plurx_core::fs_secure::SecureDirectory,
+    dir: &Path,
+    whole_name: &str,
+) {
+    let Some(stem) = whole_name.strip_suffix(".vtt") else {
+        return;
+    };
+    let prefix = format!("{stem}-w");
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && is_window_name(&name) {
+            let _ = directory.unlink_child(&name).await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1233,6 +1363,106 @@ mod tests {
         assert_eq!(first, "f42-s2-1000-200.vtt");
         assert_ne!(first, vtt_name(42, 3, 1_000, 200));
         assert_ne!(first, vtt_name(42, 2, 1_000, 201));
+    }
+
+    #[tokio::test]
+    async fn subtitle_readiness_names_only_the_window_that_can_serve_it() {
+        let dir = crate::test_tempdir().expect("cache");
+        let file = media_file(dir.path().join("source.mkv"));
+        let whole = vtt_path(dir.path(), &file, 0);
+        let wanted = vtt_window_path(dir.path(), &file, 0, 0, 200);
+        let unrelated = vtt_window_path(dir.path(), &file, 0, 200, 200);
+
+        assert_eq!(
+            sidecar_state_for_demand(dir.path(), &file, 0, 12, 200).await,
+            SidecarState::Absent
+        );
+
+        tokio::fs::write(&unrelated, b"WEBVTT\n\nunrelated\n")
+            .await
+            .expect("unrelated window");
+        assert_eq!(
+            sidecar_state_for_demand(dir.path(), &file, 0, 12, 200).await,
+            SidecarState::Absent,
+            "a neighbouring window cannot make this demand ready"
+        );
+
+        warmups().lock().await.insert(whole.clone());
+        assert_eq!(
+            sidecar_state_for_demand(dir.path(), &file, 0, 12, 200).await,
+            SidecarState::Warming
+        );
+        warmups().lock().await.remove(&whole);
+
+        extractions().lock().await.insert(
+            wanted.clone(),
+            Arc::new(Extraction {
+                result: tokio::sync::Mutex::new(None),
+                ready: tokio::sync::Notify::new(),
+            }),
+        );
+        assert_eq!(
+            sidecar_state_for_demand(dir.path(), &file, 0, 12, 200).await,
+            SidecarState::Warming
+        );
+        extractions().lock().await.remove(&wanted);
+
+        remember_failure(&whole, "failed", Duration::from_secs(60)).await;
+        assert_eq!(
+            sidecar_state_for_demand(dir.path(), &file, 0, 12, 200).await,
+            SidecarState::Failed
+        );
+        forget_failure(&whole).await;
+
+        tokio::fs::write(&wanted, b"WEBVTT\n\n00:00:12.000 --> 00:00:13.000\nready\n")
+            .await
+            .expect("wanted window");
+        assert_eq!(
+            sidecar_state_for_demand(dir.path(), &file, 0, 12, 200).await,
+            SidecarState::Ready
+        );
+        tokio::fs::remove_file(&wanted)
+            .await
+            .expect("remove window");
+
+        tokio::fs::write(&whole, b"WEBVTT\n\nwhole\n")
+            .await
+            .expect("whole track");
+        assert_eq!(
+            sidecar_state_for_demand(dir.path(), &file, 0, 12, 200).await,
+            SidecarState::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn whole_track_publication_prunes_only_its_fingerprint_windows() {
+        let dir = crate::test_tempdir().expect("cache");
+        let file = media_file(dir.path().join("source.mkv"));
+        let mut other = file.clone();
+        other.mtime += 1;
+        let first = vtt_window_path(dir.path(), &file, 0, 0, 200);
+        let second = vtt_window_path(dir.path(), &file, 0, 200, 200);
+        let other_window = vtt_window_path(dir.path(), &other, 0, 0, 200);
+        for path in [&first, &second, &other_window] {
+            tokio::fs::write(path, b"WEBVTT\n\nwindow\n")
+                .await
+                .expect("window sidecar");
+        }
+
+        ensure_vtt_with(dir.path(), &file, 0, |tmp, _, _| async move {
+            tokio::fs::write(tmp, b"WEBVTT\n\nwhole\n")
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .expect("publish whole track");
+
+        assert!(tokio::fs::metadata(&first).await.is_err());
+        assert!(tokio::fs::metadata(&second).await.is_err());
+        assert!(
+            tokio::fs::metadata(&other_window).await.is_ok(),
+            "another source fingerprint keeps its windows"
+        );
     }
 
     #[tokio::test]

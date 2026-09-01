@@ -526,6 +526,11 @@ pub const DEFAULT_ANALYSIS_BACKOFF_BASE_SECS: i64 = 5;
 pub const MAX_ANALYSIS_BACKOFF_BASE_SECS: i64 = 300;
 pub const DEFAULT_ANALYSIS_BACKOFF_MAX_SECS: i64 = 300;
 pub const MAX_ANALYSIS_BACKOFF_MAX_SECS: i64 = 3_600;
+/// Forward subtitle materialization span. Kept with the other bounded server
+/// settings so every consumer resolves the same default and clamp.
+pub const DEFAULT_SUBTITLE_WINDOW_SECS: i64 = 200;
+pub const MIN_SUBTITLE_WINDOW_SECS: i64 = 30;
+pub const MAX_SUBTITLE_WINDOW_SECS: i64 = 900;
 /// Virtual head start for forced work. Ordering by the adjusted creation time
 /// lets an operator request pass recent background work while guaranteeing
 /// that background work older than this window cannot be starved by a stream
@@ -570,6 +575,15 @@ pub fn bounded_analysis_backoff_max_secs(value: Option<&str>) -> i64 {
         DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
         1,
         MAX_ANALYSIS_BACKOFF_MAX_SECS,
+    )
+}
+
+pub fn bounded_subtitle_window_seconds(value: Option<&str>) -> i64 {
+    bounded_analysis_seconds(
+        value,
+        DEFAULT_SUBTITLE_WINDOW_SECS,
+        MIN_SUBTITLE_WINDOW_SECS,
+        MAX_SUBTITLE_WINDOW_SECS,
     )
 }
 
@@ -1627,6 +1641,26 @@ mod tests {
         assert_eq!(
             bounded_analysis_backoff_max_secs(Some("99999")),
             MAX_ANALYSIS_BACKOFF_MAX_SECS
+        );
+    }
+
+    #[test]
+    fn subtitle_window_setting_has_the_documented_default_and_bounds() {
+        assert_eq!(
+            bounded_subtitle_window_seconds(None),
+            DEFAULT_SUBTITLE_WINDOW_SECS
+        );
+        assert_eq!(
+            bounded_subtitle_window_seconds(Some("not-a-number")),
+            DEFAULT_SUBTITLE_WINDOW_SECS
+        );
+        assert_eq!(
+            bounded_subtitle_window_seconds(Some("0")),
+            MIN_SUBTITLE_WINDOW_SECS
+        );
+        assert_eq!(
+            bounded_subtitle_window_seconds(Some("99999")),
+            MAX_SUBTITLE_WINDOW_SECS
         );
     }
 

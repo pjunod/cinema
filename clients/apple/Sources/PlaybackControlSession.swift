@@ -149,7 +149,8 @@ final class PlaybackControlSession {
     func begin(
         bootstrap: ControlBootstrap,
         transport: PlaybackControlTransport,
-        observe: @escaping () -> PlayerControlObservation?
+        observe: @escaping () -> PlayerControlObservation?,
+        onSubtitleReady: @escaping @MainActor @Sendable () -> Void = {}
     ) {
         end()
         // A generation, not a reset. A verdict outlives the session it was
@@ -158,6 +159,7 @@ final class PlaybackControlSession {
         let generation = verdicts.beginGeneration()
         answers.begin(generation: generation)
         let lease = TimeInterval(bootstrap.leaseTimeoutMs) / 1_000
+        let subtitleReadiness = SubtitleReadinessRetryState()
         self.observe = observe
         // The reporter takes its first snapshot the moment it starts, so the
         // first one has to be there before it does.
@@ -188,6 +190,11 @@ final class PlaybackControlSession {
                     requestSequence: exchange.request.sequence,
                     generation: generation
                 )
+                if subtitleReadiness.record(
+                    exchange.response?.delivery?.subtitleReadiness
+                ) {
+                    Task { @MainActor in onSubtitleReady() }
+                }
                 guard let action = exchange.response?.action,
                       action.type == "terminal",
                       action.message?.isEmpty == false

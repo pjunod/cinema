@@ -15,8 +15,9 @@ use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use futures_util::StreamExt;
+use futures_util::{future::BoxFuture, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -3619,6 +3620,8 @@ async fn subtitle_track_cache(
     state: &AppState,
     recipe: &RemoteStartRequest,
     selection: &crate::playback_control::SubtitleSelection,
+    request: &crate::playback_control::ControlRequestV1,
+    window_seconds: i64,
 ) -> Option<crate::playback_control::SubtitleTrackCache> {
     use crate::playback_control::{SubtitleMode, SubtitleTrackCache};
 
@@ -3639,8 +3642,21 @@ async fn subtitle_track_cache(
     if !plurx_core::tracks::is_native_text_subtitle(&track.codec) {
         return Some(SubtitleTrackCache::Unavailable);
     }
+    // Control positions are already absolute film time. The segment path gets
+    // the same value by adding its item-local segment start to
+    // `media_origin_seconds`; snapping both through the shared grid is what
+    // prevents readiness from reporting on a window the segment will not use.
+    let demand_seconds = request.seek_target_ms.unwrap_or(request.position_ms).max(0) / 1_000;
     Some(
-        match crate::subtitles::sidecar_state(&state.subs_dir, &file, index).await {
+        match crate::subtitles::sidecar_state_for_demand(
+            &state.subs_dir,
+            &file,
+            index,
+            demand_seconds,
+            window_seconds,
+        )
+        .await
+        {
             crate::subtitles::SidecarState::Ready => SubtitleTrackCache::Ready,
             crate::subtitles::SidecarState::Failed => SubtitleTrackCache::Unavailable,
             crate::subtitles::SidecarState::Warming | crate::subtitles::SidecarState::Absent => {
@@ -4569,6 +4585,15 @@ async fn control_local_inner(
             }
         }
     } else {
+        let subtitle_window_seconds = state.subtitle_window_seconds().await;
+        let subtitle_cache = subtitle_track_cache(
+            state,
+            &recipe,
+            &request.selection.subtitle,
+            &request,
+            subtitle_window_seconds,
+        )
+        .await;
         local_control_response(
             route,
             &start,
@@ -4578,7 +4603,7 @@ async fn control_local_inner(
             unix_ms(),
             crate::playback_control::subtitle_readiness_value(
                 &request.selection.subtitle,
-                subtitle_track_cache(state, &recipe, &request.selection.subtitle).await,
+                subtitle_cache,
             ),
         )
     };
@@ -6074,12 +6099,121 @@ pub async fn subtitle_vtt(
     subtitle_vtt_local_before(&state, &session, index, &segment, request_deadline).await
 }
 
+trait SubtitleSegmentSource: Send + Sync {
+    fn read_whole<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>>;
+
+    fn read_window<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+        anchor_seconds: i64,
+        window_seconds: i64,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>>;
+
+    fn warm_whole<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+    ) -> BoxFuture<'a, ()>;
+
+    fn warm_window<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+        anchor_seconds: i64,
+        window_seconds: i64,
+    ) -> BoxFuture<'a, bool>;
+}
+
+struct ProductionSubtitleSegmentSource;
+
+impl SubtitleSegmentSource for ProductionSubtitleSegmentSource {
+    fn read_whole<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+        Box::pin(crate::subtitles::read_cached_vtt(dir, file, index))
+    }
+
+    fn read_window<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+        anchor_seconds: i64,
+        window_seconds: i64,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+        Box::pin(crate::subtitles::read_cached_window(
+            dir,
+            file,
+            index,
+            anchor_seconds,
+            window_seconds,
+        ))
+    }
+
+    fn warm_whole<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(crate::subtitles::warm_vtt(dir, file, index))
+    }
+
+    fn warm_window<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+        anchor_seconds: i64,
+        window_seconds: i64,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(crate::subtitles::warm_vtt_window(
+            dir,
+            file,
+            index,
+            anchor_seconds,
+            window_seconds,
+        ))
+    }
+}
+
 async fn subtitle_vtt_local_before(
     state: &AppState,
     session: &str,
     index: i64,
     segment: &str,
     publication_deadline: Instant,
+) -> Result<Response, ApiError> {
+    subtitle_vtt_local_before_with_source(
+        state,
+        session,
+        index,
+        segment,
+        publication_deadline,
+        &ProductionSubtitleSegmentSource,
+    )
+    .await
+}
+
+async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSource + ?Sized>(
+    state: &AppState,
+    session: &str,
+    index: i64,
+    segment: &str,
+    publication_deadline: Instant,
+    source: &S,
 ) -> Result<Response, ApiError> {
     let (context, file, owner) = session_file(state, session, publication_deadline).await?;
     let Some(track) = file.subtitle_streams.get(index as usize) else {
@@ -6153,9 +6287,15 @@ async fn subtitle_vtt_local_before(
         .await?;
         return Err(ApiError::NotFound("subtitle segment"));
     };
-    let (bytes, cache_control) = match tokio::time::timeout_at(
+    let subtitle_window_seconds = tokio::time::timeout_at(
         tokio::time::Instant::from_std(publication_deadline),
-        crate::subtitles::read_cached_vtt(&state.subs_dir, &file, index),
+        state.subtitle_window_seconds(),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())?;
+    let (bytes, cache_control, slice_timeline) = match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(publication_deadline),
+        source.read_whole(&state.subs_dir, &file, index),
     )
     .await
     .map_err(|_| response_publication_timeout())?
@@ -6171,7 +6311,7 @@ async fn subtitle_vtt_local_before(
                 start_seconds = context.start_seconds,
                 "serving native HLS WebVTT subtitle"
             );
-            (bytes, "private, max-age=3600")
+            (bytes, "private, max-age=3600", true)
         }
         Ok(None) | Err(_) => {
             // The whole-track sidecar is not there yet. Before falling back to
@@ -6184,18 +6324,16 @@ async fn subtitle_vtt_local_before(
             // session's media origin plus this segment's start — the same
             // mapping `slice_webvtt` undoes below.
             let demand_seconds = (context.media_origin_seconds + segment_start).max(0.0) as i64;
-            let anchor = crate::subtitles::window_anchor_seconds(
-                demand_seconds,
-                crate::subtitles::WINDOW_SECONDS_DEFAULT,
-            );
+            let anchor =
+                crate::subtitles::window_anchor_seconds(demand_seconds, subtitle_window_seconds);
             let window_bytes = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(publication_deadline),
-                crate::subtitles::read_cached_window(
+                source.read_window(
                     &state.subs_dir,
                     &file,
                     index,
                     anchor,
-                    crate::subtitles::WINDOW_SECONDS_DEFAULT,
+                    subtitle_window_seconds,
                 ),
             )
             .await
@@ -6209,7 +6347,7 @@ async fn subtitle_vtt_local_before(
                 // authoritative extraction never kicked from this route.
                 tokio::time::timeout_at(
                     tokio::time::Instant::from_std(publication_deadline),
-                    crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+                    source.warm_whole(&state.subs_dir, &file, index),
                 )
                 .await
                 .map_err(|_| response_publication_timeout())?;
@@ -6223,7 +6361,7 @@ async fn subtitle_vtt_local_before(
                 // `no-store`: a window covers this position and not the next
                 // one, and the whole-track sidecar will supersede it. Letting
                 // a player pin these bytes would pin a partial answer.
-                (bytes, "no-store")
+                (bytes, "no-store", true)
             } else {
                 // AVPlayer gives a subtitle segment only about two seconds to
                 // answer and blocks the muxed video while it waits. Extracting
@@ -6247,7 +6385,7 @@ async fn subtitle_vtt_local_before(
                 // swallowed: it is the path every other consumer depends on.
                 tokio::time::timeout_at(
                     tokio::time::Instant::from_std(publication_deadline),
-                    crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+                    source.warm_whole(&state.subs_dir, &file, index),
                 )
                 .await
                 .map_err(|_| response_publication_timeout())?;
@@ -6257,12 +6395,12 @@ async fn subtitle_vtt_local_before(
                 // request.
                 let windowing = tokio::time::timeout_at(
                     tokio::time::Instant::from_std(publication_deadline),
-                    crate::subtitles::warm_vtt_window(
+                    source.warm_window(
                         &state.subs_dir,
                         &file,
                         index,
                         anchor,
-                        crate::subtitles::WINDOW_SECONDS_DEFAULT,
+                        subtitle_window_seconds,
                     ),
                 )
                 .await
@@ -6275,7 +6413,7 @@ async fn subtitle_vtt_local_before(
                     windowing,
                     "serving an empty subtitle segment while its sidecar cache warms"
                 );
-                (b"WEBVTT\n\n".to_vec(), "no-store")
+                (b"WEBVTT\n\n".to_vec(), "no-store", false)
             }
         }
     };
@@ -6291,12 +6429,19 @@ async fn subtitle_vtt_local_before(
         // request made them lead the picture by up to a whole GOP (1–6 s on a
         // 4K film) on every resumed or seeked copy session, which is the
         // flagship Apple path.
-        slice_webvtt(
-            &bytes,
-            context.media_origin_seconds,
-            segment_start,
-            segment_end,
-        ),
+        if slice_timeline {
+            slice_webvtt(
+                &bytes,
+                context.media_origin_seconds,
+                segment_start,
+                segment_end,
+            )
+        } else {
+            // Keep the cold-cache fallback byte-for-byte minimal. It carries
+            // no cues to shift, and this exact body is the acceptance handle
+            // proving the request escaped before either producer finished.
+            bytes
+        },
     )
         .into_response();
     let object_name = format!("subs/{index}/{segment}");
@@ -10026,6 +10171,275 @@ mod tests {
         )
         .await
         .expect("published VTT sidecar");
+    }
+
+    struct WindowFixtureSubtitleSource {
+        whole_runs: Arc<std::sync::atomic::AtomicUsize>,
+        whole_started: Arc<tokio::sync::Semaphore>,
+        whole_release: Arc<tokio::sync::Semaphore>,
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+        started: Arc<tokio::sync::Semaphore>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl SubtitleSegmentSource for WindowFixtureSubtitleSource {
+        fn read_whole<'a>(
+            &'a self,
+            dir: &'a Path,
+            file: &'a MediaFile,
+            index: i64,
+        ) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+            Box::pin(crate::subtitles::read_cached_vtt(dir, file, index))
+        }
+
+        fn read_window<'a>(
+            &'a self,
+            dir: &'a Path,
+            file: &'a MediaFile,
+            index: i64,
+            anchor_seconds: i64,
+            window_seconds: i64,
+        ) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+            Box::pin(crate::subtitles::read_cached_window(
+                dir,
+                file,
+                index,
+                anchor_seconds,
+                window_seconds,
+            ))
+        }
+
+        fn warm_whole<'a>(
+            &'a self,
+            dir: &'a Path,
+            file: &'a MediaFile,
+            index: i64,
+        ) -> BoxFuture<'a, ()> {
+            let runs = Arc::clone(&self.whole_runs);
+            let started = Arc::clone(&self.whole_started);
+            let release = Arc::clone(&self.whole_release);
+            Box::pin(crate::subtitles::warm_vtt_with(
+                dir,
+                file,
+                index,
+                move |tmp, _, _| async move {
+                    runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    started.add_permits(1);
+                    let _permit = release.acquire().await.expect("release whole producer");
+                    tokio::fs::write(tmp, b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nwhole cue\n")
+                        .await
+                        .map_err(|error| error.to_string())
+                },
+            ))
+        }
+
+        fn warm_window<'a>(
+            &'a self,
+            dir: &'a Path,
+            file: &'a MediaFile,
+            index: i64,
+            anchor_seconds: i64,
+            window_seconds: i64,
+        ) -> BoxFuture<'a, bool> {
+            let runs = Arc::clone(&self.runs);
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            Box::pin(crate::subtitles::warm_vtt_window_with(
+                dir,
+                file,
+                index,
+                anchor_seconds,
+                window_seconds,
+                move |tmp, _, _, _, _| async move {
+                    runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    started.add_permits(1);
+                    let _permit = release.acquire().await.expect("release window producer");
+                    tokio::fs::write(tmp, b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nready cue\n")
+                        .await
+                        .map_err(|error| error.to_string())
+                },
+            ))
+        }
+    }
+
+    /// M7 R-M2 B7: exercise the real subtitle-segment handler boundary while
+    /// replacing only the producer. The first requests must not wait for the
+    /// held extraction, concurrent first touches must share its production
+    /// flight, and the same advertised segment must expose its cues after the
+    /// window publishes. A segment the video playlist never advertised stays
+    /// a 404 throughout.
+    #[tokio::test]
+    async fn subtitles_cold_segment_is_empty_nonblocking_then_serves_one_window_flight() {
+        let dir = crate::test_tempdir().expect("session directory");
+        let mut fixture = HlsDeliveryFixture::publish(dir.path(), "subtitle-window").await;
+        add_http_text_subtitle(&mut fixture, "subtitle-window").await;
+        let file = fixture
+            .store
+            .get_file(fixture.file_id())
+            .await
+            .expect("fixture file lookup")
+            .expect("fixture file");
+        tokio::fs::remove_file(crate::subtitles::vtt_path(
+            &fixture.state.subs_dir,
+            &file,
+            0,
+        ))
+        .await
+        .expect("return fixture to a cold cache");
+        tokio::fs::write(dir.path().join("seg00000.ts"), b"video")
+            .await
+            .expect("video segment");
+        tokio::fs::write(
+            dir.path().join("index.m3u8"),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.000,\nseg00000.ts\n",
+        )
+        .await
+        .expect("video playlist");
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .segment_window("subtitle-window", 0)
+                .await,
+            Some((0.0, 4.0)),
+            "the fixture advertises exactly one subtitle interval"
+        );
+
+        let source = Arc::new(WindowFixtureSubtitleSource {
+            whole_runs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            whole_started: Arc::new(tokio::sync::Semaphore::new(0)),
+            whole_release: Arc::new(tokio::sync::Semaphore::new(0)),
+            runs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        });
+        let request = |state: AppState, source: Arc<WindowFixtureSubtitleSource>| async move {
+            subtitle_vtt_local_before_with_source(
+                &state,
+                "subtitle-window",
+                0,
+                "seg00000.vtt",
+                Instant::now() + Duration::from_secs(5),
+                source.as_ref(),
+            )
+            .await
+            .expect("advertised subtitle segment")
+        };
+        let first = tokio::spawn(request(fixture.state.clone(), Arc::clone(&source)));
+        let second = tokio::spawn(request(fixture.state.clone(), Arc::clone(&source)));
+
+        let _started = tokio::time::timeout(Duration::from_secs(2), source.started.acquire())
+            .await
+            .expect("window producer starts")
+            .expect("started semaphore remains open");
+        let _whole_started =
+            tokio::time::timeout(Duration::from_secs(2), source.whole_started.acquire())
+                .await
+                .expect("whole-track producer starts")
+                .expect("whole started semaphore remains open");
+        let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
+            (
+                first.await.expect("first request task"),
+                second.await.expect("second request task"),
+            )
+        })
+        .await
+        .expect("cold requests return without waiting for the held producer");
+        assert_eq!(
+            source.runs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "concurrent first touches share exactly one window producer"
+        );
+        assert_eq!(
+            source.whole_runs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the artificially slow whole-track producer is also single-flight"
+        );
+        for response in [first, second] {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL),
+                Some(&axum::http::HeaderValue::from_static("no-store"))
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("empty VTT body")
+                .to_bytes();
+            assert_eq!(body.as_ref(), b"WEBVTT\n\n");
+        }
+
+        let missing = subtitle_vtt_local_before_with_source(
+            &fixture.state,
+            "subtitle-window",
+            0,
+            "seg00001.vtt",
+            Instant::now() + Duration::from_secs(5),
+            source.as_ref(),
+        )
+        .await;
+        assert!(matches!(
+            missing,
+            Err(ApiError::NotFound("subtitle segment"))
+        ));
+
+        source.release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    crate::subtitles::read_cached_window(
+                        &fixture.state.subs_dir,
+                        &file,
+                        0,
+                        0,
+                        200,
+                    )
+                    .await,
+                    Ok(Some(_))
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("window publishes");
+
+        let ready = request(fixture.state.clone(), Arc::clone(&source)).await;
+        assert_eq!(ready.status(), StatusCode::OK);
+        assert_eq!(
+            ready.headers().get(header::CACHE_CONTROL),
+            Some(&axum::http::HeaderValue::from_static("no-store"))
+        );
+        let body = ready
+            .into_body()
+            .collect()
+            .await
+            .expect("ready VTT body")
+            .to_bytes();
+        let body = String::from_utf8(body.to_vec()).expect("utf8 VTT");
+        assert!(body.contains("ready cue"), "{body}");
+        assert_eq!(
+            source.runs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "serving the published window does not relaunch production"
+        );
+
+        source.whole_release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    crate::subtitles::read_cached_vtt(&fixture.state.subs_dir, &file, 0).await,
+                    Ok(Some(_))
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("slow whole-track producer settles before fixture cleanup");
     }
 
     #[tokio::test]

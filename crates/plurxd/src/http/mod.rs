@@ -3431,6 +3431,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subtitle_window_setting_round_trips_and_clamps_corrupt_storage() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let key = plurx_core::store::keys::SUBTITLE_WINDOW_SECS;
+
+        let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["subtitle_window_secs"], 200);
+
+        for (stored, expected) in [("0", 30), ("99999", 900)] {
+            state
+                .store
+                .put_setting(key, stored)
+                .await
+                .expect("corrupt stored subtitle window");
+            let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK, "{settings}");
+            assert_eq!(settings["subtitle_window_secs"], expected);
+        }
+
+        let (status, updated) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"subtitle_window_secs": 200}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        assert_eq!(updated["subtitle_window_secs"], 200);
+
+        for invalid in [29, 901] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"subtitle_window_secs": invalid}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("between 30 and 900")),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            state.store.get_setting(key).await.expect("stored setting"),
+            Some("200".to_owned())
+        );
+    }
+
+    #[tokio::test]
     async fn an_unknown_request_id_is_a_404() {
         let app = test_app();
         let admin = setup_admin(&app).await;

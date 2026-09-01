@@ -31,7 +31,7 @@ one is deleted.
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike still **needs hardware**, and item 7 is not allowed to start without its numbers |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
-| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it". R-M1 closes the unknown-readiness contract and carries the dated [large-MKV observation](M7-M1-LARGE-MKV-OBSERVATION.md); R-M2 remains gated on R-M1 acceptance. **M4 (burn-join) is a separate active effort**, not part of this remediation; detection is separately deferred |
+| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it". R-M1 closes the unknown-readiness contract and carries the dated [large-MKV observation](M7-M1-LARGE-MKV-OBSERVATION.md); its implementation PR is [#775](https://github.com/pjunod/plurx/pull/775). R-M2's source acceptance is complete on top of that prerequisite; physical directed-retry evidence remains post-merge work. **M4 (burn-join) remains separate from this remediation**, and detection remains deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
 
@@ -50,6 +50,29 @@ limits are in
 [M7-M1-LARGE-MKV-OBSERVATION.md](M7-M1-LARGE-MKV-OBSERVATION.md). A
 tracking-only PR is not acceptance and is not required; R-M2 stays closed
 until the implementation change carrying both facts is accepted.
+
+### M7 R-M2 source acceptance is complete; hardware acceptance is not
+
+The bounded bridge now has all five remediation pieces. The window duration is
+a server setting with a 200-second default and a 30–900-second stored bound;
+control readiness observes the exact demand-grid window without starting work;
+web, Apple, and Android issue one subtitle-only retry on the false-to-true edge;
+whole-track publication removes only matching-fingerprint windows; and the HLS
+boundary fixture holds a slow whole-track producer while two first-touch
+requests return exact `WEBVTT\n\n`/`no-store`, share one fast window producer,
+then serve real cues without advertising a 404 interval.
+
+Source evidence is `cargo test -p plurxd subtitles` (22 passing),
+`cargo test -p plurxd subtitle_readiness` (4 passing), the settings API
+round-trip, the web control/policy suites, Android unit tests and lint, and the
+complete iOS/tvOS simulator suites. Apple build 108 and Android versionCode 64
+are above the merge target. The dated large-MKV deadline evidence remains in
+[M7-M1-LARGE-MKV-OBSERVATION.md](M7-M1-LARGE-MKV-OBSERVATION.md).
+
+This is not a claim that M2 is physically complete. After merge and a Paul-run
+deploy/install, one real web, Apple, and Android session still has to show the
+directed retry making captions appear without a video restart. No deploy is
+performed by this change.
 
 ## Slice ledger — every PR in the current push
 

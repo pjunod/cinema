@@ -671,12 +671,11 @@ pub(crate) struct DeliveryView {
     /// Readiness of the native text subtitle track this client's selection
     /// names, when this server evaluated it.
     ///
-    /// One of `ready`, `warming`, or `unavailable`. `ready` means the cached
-    /// text is servable now — until bounded materialization lands that is the
-    /// whole-track sidecar, and afterwards it tightens to the demand window,
-    /// which is a narrowing of the same promise rather than a change of
-    /// meaning. `warming` means materialization is in flight and segments stay
-    /// empty until it lands. `unavailable` means stop asking: no such track,
+    /// One of `ready`, `warming`, or `unavailable`. `ready` means cached text
+    /// covering this control snapshot's demand window is servable now, either
+    /// from its bounded window sidecar or the authoritative whole-track one.
+    /// `warming` means materialization is in flight and segments stay empty
+    /// until it lands. `unavailable` means stop asking: no such track,
     /// a bitmap track that can only be burned in, or an extraction that failed
     /// and whose memo is still live. The cause is deliberately not on the
     /// wire — the client's behaviour is identical for all three, and the

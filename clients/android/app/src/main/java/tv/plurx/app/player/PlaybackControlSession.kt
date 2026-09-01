@@ -257,6 +257,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         bootstrap: ControlBootstrap,
         observe: () -> PlayerControlObservation?,
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
+        onSubtitleReady: () -> Unit = {},
     ) {
         end()
         // A generation, not a reset. `end()` stops the old reporter in a
@@ -271,6 +272,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             answersSeen = 0
         }
         val leaseMs = bootstrap.leaseTimeoutMs
+        val subtitleReadiness = SubtitleReadinessRetryState()
         val subject = PlaybackControlReporter.create(
             bootstrap = bootstrap,
             clientInstanceId = clientInstanceId,
@@ -295,6 +297,9 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                         answerAction = exchange.response?.action
                         answerRequestSequence = exchange.request.sequence
                     }
+                }
+                if (subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)) {
+                    scope.launch { onSubtitleReady() }
                 }
                 val action = exchange.response?.action
                 if (action != null &&
