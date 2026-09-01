@@ -130,15 +130,22 @@ pub const WINDOW_SLACK_SECONDS: i64 = 60;
 
 /// Rewrite window cue times to absolute source time.
 ///
-/// **The timestamp base of a windowed extraction is not a constant — it
-/// depends on the ffmpeg build.** Measured: ffmpeg 6.1.1 returns absolute
-/// times for `-i src -ss A -to B`, and ffmpeg 4.4.2 returns them rebased to
-/// zero. The Dockerfile installs jellyfin-ffmpeg deliberately unpinned so it
-/// can track upstream, so the base can change under a running server without
-/// anything in this repository changing.
+/// **This is a no-op on every build this server ships against, and that is the
+/// point.** Measured on `-i src -ss A -to B`: ffmpeg 7.0.2 and 6.1.1 both
+/// return absolute cue times, and 4.4.2 returns them rebased to zero. The
+/// Dockerfile installs `jellyfin-ffmpeg7` and fails the build unless it
+/// carries `dovi_rpu`, which needs 7.1+, so a running fleet is always on a
+/// build where the times are already absolute and this function returns its
+/// input untouched.
 ///
-/// Depending on either behaviour is therefore the bug, and detecting it is
-/// cheap and exact rather than a heuristic. A rebased window's cues lie in
+/// It exists because that install is deliberately unpinned — the Dockerfile's
+/// own note says "WHICH ffmpeg lands here depends on the day the image was
+/// built" — and a base change would otherwise be silent and selective:
+/// windows at the head of a file work under either base, so a smoke test
+/// passes while every later window serves a cue-less segment logged as a
+/// success. One scan of the cue lines buys immunity from that.
+///
+/// Detection is exact rather than heuristic. A rebased window's cues lie in
 /// `[0, span)`; an absolute window's lie in `[anchor, anchor + span)`. Anchors
 /// are grid multiples, so a non-zero anchor is at least one window long and
 /// the two ranges cannot overlap. At anchor zero the two bases are the same
@@ -1029,11 +1036,12 @@ mod tests {
     /// The base of a windowed extraction depends on the ffmpeg build, and the
     /// build is deliberately unpinned.
     ///
-    /// Measured: ffmpeg 6.1.1 returns absolute cue times for
-    /// `-i src -ss A -to B`; ffmpeg 4.4.2 returns them rebased to zero. Two
-    /// reviewers of this change measured it on different builds and reached
-    /// opposite conclusions, which is the clearest possible evidence that
-    /// depending on either is the bug.
+    /// Measured on `-i src -ss A -to B`: ffmpeg 7.0.2 and 6.1.1 return
+    /// absolute cue times, 4.4.2 returns them rebased to zero. The fleet runs
+    /// 7.1+ — the Dockerfile fails the build without `dovi_rpu` — so the
+    /// shipped path is the absolute one and normalization is a no-op there.
+    /// Two reviewers measuring on different builds reached opposite
+    /// conclusions, which is why the code no longer depends on either.
     ///
     /// Detection is exact rather than heuristic: anchors are grid multiples,
     /// so a non-zero anchor is at least one window long, and a rebased
