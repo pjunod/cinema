@@ -609,6 +609,9 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true'
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["macos-26"]' || '["self-hosted","macOS","ARM64","lab","apple","xcode-26"]') }}
+    concurrency:
+      group: ${{ vars.CI_RUNNER_MODE != 'github' && 'plurx-apple-silicon-heavy' || format('plurx-apple-{0}', github.run_id) }}
+      cancel-in-progress: false
     timeout-minutes: 30
     env:
       DEVELOPER_DIR: ${{ vars.CI_RUNNER_MODE == 'github' && '/Applications/Xcode_26.6.app/Contents/Developer' || '/Applications/Xcode.app/Contents/Developer' }}
@@ -870,7 +873,10 @@ jobs:
 
   package_smoke:
     name: package and smoke (${{ matrix.arch }})
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && matrix.github_runs_on || matrix.self_hosted_runs_on) }}
+    concurrency:
+      group: ${{ vars.CI_RUNNER_MODE != 'github' && matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy' || format('plurx-package-{0}-{1}', github.run_id, matrix.arch) }}
+      cancel-in-progress: false
     needs: [scope, preflight]
     if: needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true'
     timeout-minutes: 90
@@ -880,18 +886,32 @@ jobs:
         include:
           - arch: amd64
             target: x86_64-unknown-linux-gnu
+            kernel_machine: x86_64
+            github_runs_on: '["ubuntu-24.04"]'
+            self_hosted_runs_on: '["self-hosted","Linux","X64","lab","general","high-cpu"]'
           - arch: arm64
             target: aarch64-unknown-linux-gnu
+            kernel_machine: aarch64
+            github_runs_on: '["ubuntu-24.04-arm"]'
+            self_hosted_runs_on: '["self-hosted","Linux","ARM64","lab","ci-arm64"]'
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: docker/setup-qemu-action@v3
+      - name: Prove the package runner and Docker engine are native
+        env:
+          ARCH: ${{ matrix.arch }}
+          KERNEL_ARCH: ${{ matrix.kernel_machine }}
+        run: |
+          set -euo pipefail
+          test "$(uname -s)/$(uname -m)" = "Linux/$KERNEL_ARCH"
+          test "$(docker info --format '{{.OSType}}/{{.Architecture}}')" = "linux/$ARCH"
       - id: buildx-cache
         uses: ./.github/actions/buildx-cache
         with:
           lane: package-smoke-${{ matrix.arch }}
           execution-mode: ${{ needs.scope.outputs.execution_mode }}
+          persistent-eligible: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}
       - name: Derive the binary-only Bookworm build
         run: >-
           python3 -m validation.release_dockerfile --binary-export
@@ -976,103 +996,6 @@ jobs:
             release-bin/*.sha256
           if-no-files-found: error
           retention-days: 1
-      - name: Bound persistent BuildKit state
-        if: always() && steps.buildx-cache.outputs.local == 'true'
-        env:
-          BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
-        run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50
-
-  # This is native Linux evidence from a dedicated ARM64 VM, never an emulator
-  # and never a required dependency. The label remains unassigned until the VM
-  # is provisioned without overlapping the host's macOS/Xcode runner.
-  native_arm_shadow:
-    name: native Linux ARM64 package shadow
-    needs: [scope, preflight]
-    if: >-
-      needs.scope.outputs.execution_mode != 'legacy' &&
-      (needs.scope.outputs.release_build == 'true' ||
-      needs.scope.outputs.container == 'true')
-    runs-on: [self-hosted, Linux, ARM64, lab, ci-arm64-shadow]
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Prove the runner and Docker engine are native Linux ARM64
-        run: |
-          set -euo pipefail
-          test "$(uname -s)/$(uname -m)" = Linux/aarch64
-          test "$(docker info --format '{{.OSType}}/{{.Architecture}}')" = linux/aarch64
-      - id: buildx-cache
-        uses: ./.github/actions/buildx-cache
-        with:
-          lane: native-arm-shadow
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
-          persistent-eligible: "true"
-      - name: Derive the binary-only Bookworm build
-        run: >-
-          python3 -m validation.release_dockerfile --binary-export
-          Dockerfile Dockerfile.binaries
-      - name: Compile and export the exact native ARM64 binaries
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.binaries
-          target: release-binaries
-          platforms: linux/arm64
-          outputs: type=local,dest=binary-export
-          build-args: |
-            PLURX_BUILD_REF=${{ github.sha }}
-            PLURX_BUILD_SHA=${{ github.sha }}
-      - name: Bind the native binary set to this candidate tree
-        run: |
-          set -euo pipefail
-          scripts/release-package-candidate \
-            . . binary-export release-bin \
-            aarch64-unknown-linux-gnu "$GITHUB_SHA" "$GITHUB_SHA"
-          for name in plurxd plurx-cluster-check; do
-            max_glibc=$(readelf --version-info "release-bin/$name" \
-              | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
-              | sort -V | tail -1)
-            test -n "$max_glibc"
-            test "$(printf '%s\n' "$max_glibc" 2.36 | sort -V | tail -1)" = 2.36
-          done
-      - name: Build the native runtime from only the verified binaries
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.release
-          push: false
-          load: true
-          platforms: linux/arm64
-          tags: plurx/plurxd:ci-native-arm64
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            tv.plurx.build-ref=${{ github.sha }}
-      - name: Verify native architecture, identity, and stop/start runtime
-        env:
-          IMAGE: plurx/plurxd:ci-native-arm64
-        run: |
-          set -euo pipefail
-          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = linux/arm64
-          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$GITHUB_SHA"
-          version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
-            | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
-          test "$(docker run --rm "$IMAGE" --version)" = "plurxd $version ($GITHUB_SHA)"
-          test "$(docker run --rm \
-            --entrypoint /usr/local/bin/plurx-cluster-check \
-            "$IMAGE" build-identity)" = "$GITHUB_SHA"
-          scripts/container-smoke "$IMAGE"
-      - name: Retain the native ARM64 package receipt
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-arm64-shadow-receipt
-          path: |
-            release-bin/build-manifest.json
-            release-bin/*.sha256
-          if-no-files-found: error
-          retention-days: 14
       - name: Bound persistent BuildKit state
         if: always() && steps.buildx-cache.outputs.local == 'true'
         env:

@@ -299,9 +299,15 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("PLURX_MKVMERGE=/usr/bin/mkvmerge", dockerfile)
 
         workflow = read(".github/workflows/ci.yml")
-        self.assertIn("docker/setup-qemu-action@v3", workflow)
+        self.assertNotIn("docker/setup-qemu-action@v3", workflow)
         self.assertIn("name: package and smoke (${{ matrix.arch }})", workflow)
         self.assertIn("- arch: arm64", workflow)
+        self.assertIn("github_runs_on: '[\"ubuntu-24.04-arm\"]'", workflow)
+        self.assertIn(
+            "self_hosted_runs_on: "
+            "'[\"self-hosted\",\"Linux\",\"ARM64\",\"lab\",\"ci-arm64\"]'",
+            workflow,
+        )
         self.assertIn("platforms: linux/${{ matrix.arch }}", workflow)
         self.assertIn("file: Dockerfile.release", workflow)
 
@@ -956,82 +962,42 @@ class OperationsContractCase(unittest.TestCase):
             "if: always() && steps.store_backstop.outcome != 'success'", job
         )
 
-    def test_native_arm_shadow_is_native_receipted_and_never_required(self):
+    def test_required_arm_package_is_native_and_serialized_with_apple(self):
         workflow = read(".github/workflows/ci.yml")
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
-        arm = jobs["native_arm_shadow"]
+        package = jobs["package_smoke"]
+        apple = jobs["apple"]
         pr_gate = jobs["pr_gate"]
 
-        self.assertIn("execution_mode != 'legacy'", arm)
-        self.assertIn("needs.scope.outputs.release_build == 'true'", arm)
-        self.assertIn("needs.scope.outputs.container == 'true'", arm)
         self.assertIn(
-            "runs-on: [self-hosted, Linux, ARM64, lab, ci-arm64-shadow]", arm
+            "runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && "
+            "matrix.github_runs_on || matrix.self_hosted_runs_on) }}",
+            package,
         )
-        self.assertNotIn("continue-on-error:", arm)
-        self.assertNotIn("docker/setup-qemu-action", arm)
-        self.assertNotIn("native_arm_shadow", pr_gate)
-        self.assertNotIn("native_arm_shadow", jobs["cluster_store"])
-        self.assertEqual(
-            workflow.count("native_arm_shadow"),
-            1,
-            "native ARM shadow must never enter another job's dependency graph",
+        self.assertIn("github_runs_on: '[\"ubuntu-24.04-arm\"]'", package)
+        self.assertIn(
+            "self_hosted_runs_on: "
+            "'[\"self-hosted\",\"Linux\",\"ARM64\",\"lab\",\"ci-arm64\"]'",
+            package,
         )
-        reachable: set[str] = set()
-        pending = ["pr_gate"]
-        while pending:
-            job_name = pending.pop()
-            for dependency in workflow_job_needs(jobs[job_name]):
-                if dependency not in reachable:
-                    reachable.add(dependency)
-                    pending.append(dependency)
-        self.assertNotIn(
-            "native_arm_shadow",
-            reachable,
-            "native ARM shadow must be unreachable from Main promotion gate",
+        self.assertNotIn("docker/setup-qemu-action", package)
+        proof = workflow_step_blocks(package)[
+            "Prove the package runner and Docker engine are native"
+        ]
+        self.assertIn('test "$(uname -s)/$(uname -m)"', proof)
+        self.assertIn("Linux/$KERNEL_ARCH", proof)
+        self.assertIn("docker info --format '{{.OSType}}/{{.Architecture}}'", proof)
+        self.assertIn("linux/$ARCH", proof)
+        self.assertIn(
+            "persistent-eligible: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}",
+            package,
         )
-
-        native = workflow_step_blocks(arm)[
-            "Prove the runner and Docker engine are native Linux ARM64"
-        ]
-        self.assertIn('test "$(uname -s)/$(uname -m)" = Linux/aarch64', native)
-        self.assertIn("docker info --format '{{.OSType}}/{{.Architecture}}'", native)
-
-        self.assertIn("uses: ./.github/actions/buildx-cache", arm)
-        self.assertIn("lane: native-arm-shadow", arm)
-        self.assertIn('persistent-eligible: "true"', arm)
-        self.assertEqual(arm.count("uses: docker/build-push-action@v6"), 2)
-        compile_step = workflow_step_blocks(arm)[
-            "Compile and export the exact native ARM64 binaries"
-        ]
-        self.assertIn("file: Dockerfile.binaries", compile_step)
-        self.assertIn("target: release-binaries", compile_step)
-        self.assertIn("platforms: linux/arm64", compile_step)
-        self.assertIn("outputs: type=local,dest=binary-export", compile_step)
-        self.assertIn("aarch64-unknown-linux-gnu", arm)
-
-        runtime_step = workflow_step_blocks(arm)[
-            "Build the native runtime from only the verified binaries"
-        ]
-        self.assertIn("file: Dockerfile.release", runtime_step)
-        self.assertIn("load: true", runtime_step)
-        self.assertIn("platforms: linux/arm64", runtime_step)
-        verify = workflow_step_blocks(arm)[
-            "Verify native architecture, identity, and stop/start runtime"
-        ]
-        self.assertIn("linux/arm64", verify)
-        self.assertIn("plurx-cluster-check", verify)
-        self.assertIn('scripts/container-smoke "$IMAGE"', verify)
-        self.assertNotIn("--platform", verify)
-
-        receipt = workflow_step_blocks(arm)[
-            "Retain the native ARM64 package receipt"
-        ]
-        self.assertIn("release-bin/build-manifest.json", receipt)
-        self.assertIn("release-bin/*.sha256", receipt)
-        self.assertIn("retention-days: 14", receipt)
-        self.assertNotIn("release-bin/plurxd", receipt)
-        self.assertIn('scripts/ci-buildkit-prune "$BUILDER_NAME" 50', arm)
+        self.assertIn("package_smoke", workflow_job_needs(pr_gate))
+        self.assertNotIn("native_arm_shadow", jobs)
+        self.assertIn("plurx-apple-silicon-heavy", package)
+        self.assertIn("plurx-apple-silicon-heavy", apple)
+        self.assertIn("cancel-in-progress: false", package)
+        self.assertIn("cancel-in-progress: false", apple)
 
     def test_ci_caches_are_keyed_to_what_they_cache(self):
         workflow = read(".github/workflows/ci.yml")
@@ -1218,7 +1184,7 @@ class OperationsContractCase(unittest.TestCase):
             "docker image inspect --format "
             "'{{ index .Config.Labels \"org.opencontainers.image.revision\" }}'"
         )
-        self.assertEqual(workflow.count(label_template), 2)
+        self.assertEqual(workflow.count(label_template), 1)
         self.assertNotIn(r'index .Config.Labels \"', workflow)
         self.assertIn(
             'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', package
@@ -1404,13 +1370,11 @@ class OperationsContractCase(unittest.TestCase):
                     expected = high_cpu_ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "web_layout":
                     expected = ffmpeg6
-                elif (
-                    path == ".github/workflows/ci.yml"
-                    and name == "native_arm_shadow"
-                ):
+                elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = (
-                        "    runs-on: [self-hosted, Linux, ARM64, lab, "
-                        "ci-arm64-shadow]"
+                        "    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == "
+                        "'github' && matrix.github_runs_on || "
+                        "matrix.self_hosted_runs_on) }}"
                     )
                 elif (
                     path == ".github/workflows/ci.yml"
@@ -1436,7 +1400,6 @@ class OperationsContractCase(unittest.TestCase):
                 elif path == ".github/workflows/ci.yml" and name in {
                     "check",
                     "cluster_wal",
-                    "package_smoke",
                 }:
                     expected = high_cpu
                 elif (

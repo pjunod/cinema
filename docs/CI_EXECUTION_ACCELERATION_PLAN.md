@@ -47,8 +47,8 @@ Success means:
 - Store and topology failures identify their own lane;
 - two Store shards jointly execute exactly the discovered inventory, once
   each, with a retained receipt;
-- native ARM is useful shadow evidence without making a sleeping laptop block
-  merges;
+- required arm64 packaging runs on native Linux ARM rather than emulating the
+  Rust compiler on x86;
 - the old graph remains immediately selectable for 30 days after cutover.
 
 ## 2. Invariants — speed cannot buy a weaker verdict
@@ -128,7 +128,8 @@ The 2026-09-01 read-only audit found:
 | `nuc1` | no | one runner uniquely labeled `ci-store` | not yet measured | not yet measured |
 | `nuc2` | no | Android runners offline at audit time; shard label withheld | not yet measured | not yet measured |
 | `rogg16` | no | one runner uniquely labeled `ci-topology`; other generic runners online | not yet measured | not yet measured |
-| Apple laptop | no | macOS ARM64 `apple` / `xcode-26` | not assigned | not applicable |
+| MacBook Pro | no | Linux ARM64 VM `ci-arm64` primary | ~371 GB host free | new native guest |
+| MacBook Air | no | macOS ARM64 `apple` / `xcode-26`; Linux ARM64 VM `ci-arm64` backup | ~70 GB host free | new native guest |
 
 Every production voter currently satisfies the generic labels used by heavy
 jobs, so the desired isolation is not yet true. Before `shadow` is enabled:
@@ -350,20 +351,27 @@ gain authority to restart the Docker daemon.
 
 ## 9. Native ARM64 lane
 
-The first native ARM environment is a Linux ARM64 VM on the available Apple
-Silicon host, not a Docker Desktop build. That is the only proposed laptop
-shape that proves the Linux binary can compile, package, start, and answer its
-health endpoint natively.
+Native ARM runs in isolated Lima Linux VMs, not in the macOS runner and not as
+an x86 QEMU compile. The MacBook Pro hosts the primary VM; the MacBook Air
+hosts a smaller backup VM alongside its existing macOS/Xcode runner. Both
+guests prove `Linux/aarch64` and a `linux/arm64` Docker engine before building,
+then compile, package, start, and probe the exact candidate natively.
 
-It remains shadow-only because a laptop can sleep, leave the network, or be
-busy with the required macOS/Xcode tenant. The scheduler must prevent the
-Apple simulator job and the Linux VM's heavy job from co-scheduling. No
-replicated cluster shard or timing-sensitive test runs there.
+The first final qualification disproved the proposed required-QEMU fallback:
+an x86 runner spent more than 86 minutes in the ARM compile before the job was
+cancelled. That is a failed design, not a slow pass. After operator review, the
+required self-hosted arm64 matrix row now selects the two-runner `ci-arm64`
+pool; the GitHub-hosted mode selects native `ubuntu-24.04-arm`. Neither path
+installs QEMU. The separate native shadow job was removed because it would
+repeat the same compile and smoke after native ARM became the required path.
 
-Promotion to required ARM needs dedicated always-on ARM hardware plus the same
-10-run shadow and 20-run required-candidate evidence used elsewhere. Mobile
-phones and tablets are useful product-test targets but are not trusted Linux
-container builders in this design.
+The package job and the self-hosted Apple simulator job share the repository
+concurrency group `plurx-apple-silicon-heavy`, preventing the Air's macOS and
+Linux tenants from doing heavy work together. No replicated cluster shard or
+timing-sensitive test runs on either laptop. Both VMs start on host login and
+their guest runner services start under systemd. Laptop sleep remains an
+availability limitation; the two-host pool is the accepted operational
+trade-off until dedicated always-on ARM hardware replaces it.
 
 ## 10. Split replicated Store from topology
 
@@ -511,7 +519,7 @@ These are explicitly separate efforts:
 | Registry | Optional Forgejo fallback with builder-local HTTP config | Read-mostly LAN cache without daemon changes |
 | Budgets | Per host; reserve first; approximate 50/30/20 | The original global arithmetic did not fit every disk |
 | Package hand-off | Same job per architecture | Avoid GitHub artifact quota and wrong-workspace risk |
-| ARM | Linux VM, shadow-only | Native Linux proof without laptop availability in the gate |
+| ARM | Two Linux VM runners, required for self-hosted packaging | Eliminate the failed x86/QEMU compile; retain a native GitHub-hosted fallback mode |
 | First shards | Two non-production x86 hosts | Homogeneous baseline and no production/laptop load |
 | Assignment v1 | Hash plus exact-union receipt | Simple, deterministic, auditable start |
 | Assignment v2 | Deterministic LPT from committed durations | Balance seconds after trustworthy measurements exist |
@@ -539,13 +547,18 @@ These are explicitly separate efforts:
 - Shadow invokes the same-commit reusable shard workflow outside every required
   job's dependency graph; accelerated execution calls that workflow from the
   required Store path. An offline shadow runner cannot delay promotion.
-- The native ARM64 shadow job is implemented default-dark on the dedicated
-  `[self-hosted, Linux, ARM64, lab, ci-arm64-shadow]` label. It refuses a
-  non-`aarch64` kernel or Docker engine, uses no QEMU, compiles and packages the
-  exact two-binary candidate in one job, runs identity plus stop/start smoke,
-  and retains only the small manifest/digest receipt. The label is intentionally
-  unassigned until the Linux VM and host-level non-overlap policy are ready;
-  the job is absent from every required dependency chain.
+- The first promotion qualification proved the required arm64 matrix was still
+  compiling under x86 QEMU and was cancelled after more than 86 minutes. The
+  package matrix now selects native Linux/ARM64 runners, proves guest and
+  Docker architecture before building, shares a heavy-work concurrency lock
+  with Apple CI, and has no QEMU setup. The former default-dark native shadow
+  job was removed as duplicate work.
+- Authorized host provisioning created native Ubuntu 26.04 ARM64 Lima VMs on
+  the MacBook Pro (12 CPU, 24 GB, sparse 180 GB disk) and MacBook Air (6 CPU,
+  16 GB, sparse 140 GB disk). Repository-scoped runners
+  `gha-mbp-linux-arm-01` and `gha-mba-linux-arm-01` are online with the
+  dedicated `ci-arm64` label; the Air is the backup. The guest Docker daemons
+  are independent of Docker Desktop and production Docker.
 - M0's voter audit is complete for the active Store/topology labels. The changed
   `nuc2` host key, a verified third non-voter x86 host, disk facts, and the
   `ci-store-shard-1` runner remain activation gates for `shadow`.
