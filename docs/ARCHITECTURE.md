@@ -99,7 +99,7 @@ regenerable thumbnail cache would be waste:
 | **Replicated-durable** | Users, auth tokens, settings, library metadata, watch state, playlists | Raft → SQLite | None once acked |
 | **Replicated-ephemeral** | Playback sessions (item, decision, position, segment index), node membership/health | Raft KV/cache with TTL | Seconds of staleness OK |
 | **Node-local, regenerable** | Transcode segment cache, image cache, thumbnails/trickplay | Local disk (optionally shared) | Free to lose |
-| **Operator-owned** | The media files themselves | Shared storage | plurx never writes media |
+| **Operator-owned** | The media files themselves | Shared storage | Read-only by default; only an admin-enabled library may opt into the Dolby Vision replacement contract |
 
 Write rates must be safe for raft. Each active-player heartbeat still reads
 the item and durable watch state, but the M1d server coalescer now bounds
@@ -375,7 +375,7 @@ against the API it talks to.
 5. **ffprobe output is treated as ground truth and stored verbatim.** The raw
    JSON is kept so a future decision-engine rule can use a field we didn't parse
    yet, without a re-scan of the whole library.
-6. **Chapters, not fingerprinting, for skip intro/credits.** Real chapter titles
+6. **Chapters, not fingerprinting, for skip intro/credits/preview.** Real chapter titles
    (MakeMKV, anime OP/ED, hand-authored) are honest and cheap — one ffprobe at
    playback start. We do *not* guess an intro from a model, because a "Skip Intro"
    button that jumps into the middle of a scene is worse than no button. A title
@@ -385,6 +385,17 @@ against the API it talks to.
    When no title names the credits we infer the window — from the final chapter
    boundary when it lands in a plausible tail, from the runtime when it does not
    — and the API marks either inference `chapter:false` so the UI can hedge.
+   A labelled *preview* ends that window rather than starting it, and when it
+   leaves no chapter boundary to infer from we say nothing at all: the region
+   before a preview is story, and a guessed "Skip Credits" over it would seek a
+   viewer out of the episode. A chapter earns the preview kind on position and
+   structure, not on its title: it must sit in the credits window *and* be the
+   last thing in the file. Title matching alone is not safe there, because the
+   position bound rejects nothing above 70% and a false preview in the tail
+   does not add a spare button — it deletes the file's real Skip Credits marker
+   and, on the web, offers one that reports the episode watched. A preview is offered but never auto-skipped —
+   it is new footage every week, and the toggle is a standing preference about
+   repeated material.
 7. **The NFO is a seed, not a store.** A Kodi `<basename>.nfo` in a home
    library is read once, at first ingest, to build the item — and after that
    the DB owns the metadata: plurx never re-reads the sidecar and never writes
@@ -406,11 +417,13 @@ one of these is a door we're keeping shut on purpose:
 - **No external database, broker, or cache service.** The moment plurx needs
   Postgres or Redis to run, "lean and boring to operate" is dead. The embedded
   raft store is the whole point.
-- **plurx never writes to media storage.** Media is operator-owned and mounted
-  read-only. No "organize my files," no renaming, no deleting — a media server
-  that edits your files is one bug away from eating them. This stands unchanged
-  after home video: that feature was designed *around* it (decision 7), which
-  is why NFO seeding is one-way and generated thumbnails go to the artwork
+- **Media is read-only unless an administrator opts one library into the named
+  replacement workflow.** Scanning, metadata, playback, home video, and ordinary
+  library maintenance never organize, rename, or delete media. The sole
+  exception is the off-by-default Dolby Vision Profile 7 → 8.1 conversion: it
+  replaces verified media bytes only under the dedicated-account, writable
+  filesystem, and backup contract in [OPERATIONS.md](OPERATIONS.md). Home-video
+  NFO seeding remains one-way and generated thumbnails stay in the artwork
   cache. Renaming a folder in the UI changes the DB title, never the directory.
 - **No cloud dependency, no phone-home.** Everything works on a LAN that never
   touches the internet. There is no plurx.tv and there never needs to be.

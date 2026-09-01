@@ -32,7 +32,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{
     AtomicBool, AtomicU32, AtomicU64,
-    Ordering::{Acquire, Relaxed, Release},
+    Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
 use std::sync::Mutex as StdMutex;
 use std::sync::{Arc, Weak};
@@ -42,7 +42,7 @@ use futures_util::StreamExt;
 use plurx_core::domain::MediaFile;
 use plurx_core::fmp4::{segment_name, CutPolicy, FragmentReader, Init, Unit};
 use plurx_core::segplan::{
-    FragmentIndex, PlanEntryKind, SegmentPlan, SourceIdentity, TrackDurations,
+    AnnotationKind, FragmentIndex, PlanEntryKind, SegmentPlan, SourceIdentity, TrackDurations,
 };
 use plurx_core::store::Store;
 use plurx_core::transcode::{
@@ -57,7 +57,7 @@ use crate::copyseg::sanitize_stale_dolby_brand;
 use crate::ffmpeg::ffmpeg_bin;
 use crate::prodexec::{next_step, Producer, Step, Termination};
 use crate::prodrun::{Performed, ProducerSlot};
-use crate::prodsched::{decide, Demand, Position, WorkingSet, AHEAD_HORIZON_SECONDS};
+use crate::prodsched::{decide, Action, Demand, Position, WorkingSet, AHEAD_HORIZON_SECONDS};
 use crate::renditiondir::{InitIdentity, InitRefused, RenditionDir, INIT_NAME};
 use crate::titlestore::{Budgets, Manifest, ReaderWindow, SegState};
 use crate::transcode::{session_log_id, SessionKind, SessionRequest};
@@ -84,6 +84,11 @@ const DORMANT_RENDITION_TTL: Duration = Duration::from_secs(1800);
 const TERMINAL_TOMBSTONE_RETENTION: Duration = Duration::from_secs(60);
 const TERMINAL_ROUTE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 const TERMINAL_ROUTE_CONFIRM_FANOUT: usize = 16;
+/// Begin speculative marker work this many seconds of playback time before a
+/// stored marker. The distance in film time is scaled by the client's current
+/// playback rate, so 2x playback still gives the producer the same wall-clock
+/// opportunity to warm the destination.
+const MARKER_PREWARM_APPROACH_WALL_MS: i64 = 60_000;
 /// One maintenance pass confirms at most one fanout wave. The cursor below
 /// advances the window so a persistently unavailable route cannot starve
 /// later tombstones while also preventing an unavailable Store from turning
@@ -448,12 +453,566 @@ struct Recipe {
 }
 
 /// One attached reader, in plan indexes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Reader {
     /// The furthest segment this session has asked for.
     frontier: u32,
     /// The last segment actually served — the eviction window's playhead.
     last_served: Option<u32>,
+    /// Per-playback provenance for speculative marker production. This is
+    /// deliberately separate from the ordinary reader frontier: moving the
+    /// frontier to a marker would make speculative work outrank the playhead.
+    marker_prewarm: Arc<StdMutex<MarkerPrewarmLedger>>,
+}
+
+impl Reader {
+    fn new(frontier: u32) -> Self {
+        Self {
+            frontier,
+            last_served: None,
+            marker_prewarm: Arc::new(StdMutex::new(MarkerPrewarmLedger::default())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerDestination {
+    kind: AnnotationKind,
+    start_ms: i64,
+    end_ms: i64,
+    target_entry: u32,
+    window_end_entry: u32,
+    eligible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrewarmedRange {
+    first: u32,
+    last: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrewarmedEntry {
+    index: u32,
+    publication: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MarkerPrewarmRecord {
+    destination: MarkerDestination,
+    requested_sequence: u64,
+    /// Ledger-local identity. Unlike the protocol sequence, this never resets
+    /// when control ownership changes, so an old dispatch cannot credit a
+    /// replacement request that happens to reuse the same sequence number.
+    nonce: u64,
+    /// True only while the latest accepted snapshot is inside this marker's
+    /// approach window. Historical provenance stays in the row after this is
+    /// cleared, but it can no longer schedule work.
+    schedulable: bool,
+    active: bool,
+    settled: bool,
+    produced: Vec<PrewarmedEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerPrewarmRequest {
+    destination: MarkerDestination,
+    nonce: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerPendingSkip {
+    request: MarkerPrewarmRequest,
+    /// Exact prewarm publication present when the skip beacon was consumed.
+    /// `None` is a durable miss: later production cannot upgrade it.
+    publication_at_skip: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerAwaitingBeacon {
+    request: MarkerPrewarmRequest,
+    /// Exact publication observed at a post-marker Rendering snapshot. This
+    /// lets a delayed beacon settle without treating old forward-buffer fetches
+    /// as landing evidence.
+    publication_at_landing: Option<u64>,
+}
+
+impl MarkerPrewarmRecord {
+    fn credited(&self, entry: u32) -> bool {
+        self.produced.iter().any(|produced| produced.index == entry)
+    }
+
+    fn credit(&mut self, entry: u32, publication: u64) {
+        if entry > self.destination.window_end_entry {
+            return;
+        }
+        if let Some(existing) = self
+            .produced
+            .iter_mut()
+            .find(|produced| produced.index == entry)
+        {
+            existing.publication = publication;
+            return;
+        }
+        self.produced.push(PrewarmedEntry {
+            index: entry,
+            publication,
+        });
+    }
+
+    fn credited_publication(&self, entry: u32, publication: Option<u64>) -> bool {
+        publication.is_some_and(|publication| {
+            self.produced
+                .iter()
+                .any(|produced| produced.index == entry && produced.publication == publication)
+        })
+    }
+}
+
+/// Bounded provenance ledger for one playback. There can be at most one row
+/// per stored annotation (the store itself caps that set), and rows survive
+/// settlement so a later marker seek can prove who produced its landing
+/// segment rather than consulting the ordinary forward buffer.
+#[derive(Debug, Default)]
+struct MarkerPrewarmLedger {
+    enabled: bool,
+    records: Vec<MarkerPrewarmRecord>,
+    next_nonce: u64,
+    /// A client marker beacon is the explicit skip intent. Control snapshots
+    /// arm its exact stored destination while playback is inside the marker;
+    /// the beacon moves it here until a served segment or later snapshot
+    /// proves the landing.
+    approach_skip: Option<MarkerPrewarmRequest>,
+    armed_skip: Option<MarkerPrewarmRequest>,
+    pending_skip: Option<MarkerPendingSkip>,
+    awaiting_beacon: Option<MarkerAwaitingBeacon>,
+    last_settled_skip: Option<MarkerPrewarmRequest>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerPrewarmCandidate {
+    target_entry: u32,
+    window_end_entry: u32,
+    target_materialized: bool,
+}
+
+struct MarkerPrewarmDecision {
+    action: Action,
+    candidate: Option<MarkerPrewarmCandidate>,
+    owners: Vec<MarkerPrewarmOwner>,
+}
+
+#[derive(Clone)]
+struct MarkerPrewarmOwner {
+    ledger: Arc<StdMutex<MarkerPrewarmLedger>>,
+    record_nonce: u64,
+}
+
+struct MarkerPrewarmDispatch {
+    producer_epoch: u64,
+    candidate: MarkerPrewarmCandidate,
+    owners: Vec<MarkerPrewarmOwner>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerPrewarmOutcome {
+    hit: bool,
+    destination: MarkerDestination,
+    requested_sequence: Option<u64>,
+    produced_range: Option<PrewarmedRange>,
+}
+
+#[derive(Debug)]
+struct MarkerClientSkipResult {
+    matched: bool,
+    outcome: Option<MarkerPrewarmOutcome>,
+}
+
+struct MarkerPrewarmControl {
+    rendition: Arc<Rendition>,
+    snapshot: crate::playback_control::PlaybackDemandSnapshot,
+    destinations: Vec<MarkerDestination>,
+    sequence: u64,
+    file_id: i64,
+    kind: SessionKind,
+}
+
+impl MarkerPrewarmLedger {
+    fn allocate_nonce(&mut self) -> u64 {
+        self.next_nonce = self.next_nonce.saturating_add(1);
+        self.next_nonce
+    }
+
+    fn request_for(&self, destination: MarkerDestination) -> Option<MarkerPrewarmRequest> {
+        self.records
+            .iter()
+            .find(|record| record.destination == destination && !record.settled)
+            .map(|record| MarkerPrewarmRequest {
+                destination,
+                nonce: record.nonce,
+            })
+    }
+
+    fn update_control(
+        &mut self,
+        sequence: u64,
+        snapshot: &crate::playback_control::PlaybackDemandSnapshot,
+        destinations: &[MarkerDestination],
+    ) {
+        for record in &mut self.records {
+            record.schedulable = false;
+        }
+        let scheduling_enabled = snapshot.demand == crate::playback_control::PlaybackDemand::Active
+            && snapshot.render_state != crate::playback_control::RenderState::Seeking
+            && snapshot.playback_rate > 0.0;
+        self.enabled = scheduling_enabled;
+
+        let approach_ms = (MARKER_PREWARM_APPROACH_WALL_MS as f64 * snapshot.playback_rate)
+            .round()
+            .clamp(0.0, i64::MAX as f64) as i64;
+        let approach_end_ms = snapshot.position_ms.saturating_add(approach_ms);
+        let approaching = destinations
+            .iter()
+            .copied()
+            .filter(|destination| {
+                destination.eligible
+                    && snapshot.position_ms < destination.end_ms
+                    && destination.start_ms <= approach_end_ms
+            })
+            .collect::<Vec<_>>();
+        for destination in &approaching {
+            let existing = self
+                .records
+                .iter()
+                .position(|record| record.destination == *destination);
+            match existing {
+                Some(index) if self.records[index].settled => {
+                    let nonce = self.allocate_nonce();
+                    self.records[index] = MarkerPrewarmRecord {
+                        destination: *destination,
+                        requested_sequence: sequence,
+                        nonce,
+                        schedulable: scheduling_enabled,
+                        active: false,
+                        settled: false,
+                        produced: Vec::new(),
+                    };
+                    self.last_settled_skip = None;
+                }
+                Some(index) => self.records[index].schedulable = scheduling_enabled,
+                None => {
+                    let nonce = self.allocate_nonce();
+                    self.records.push(MarkerPrewarmRecord {
+                        destination: *destination,
+                        requested_sequence: sequence,
+                        nonce,
+                        schedulable: scheduling_enabled,
+                        active: false,
+                        settled: false,
+                        produced: Vec::new(),
+                    });
+                }
+            }
+        }
+        let mut approach_requests = approaching
+            .iter()
+            .filter_map(|destination| self.request_for(*destination));
+        let approach_request = approach_requests.next();
+        self.approach_skip = approach_requests
+            .next()
+            .is_none()
+            .then_some(approach_request)
+            .flatten();
+        // A prior natural traversal can leave a landing waiting for a beacon.
+        // Once playback is observed before that destination again, that
+        // landing belongs to the old traversal and cannot prove a new skip.
+        if self
+            .awaiting_beacon
+            .is_some_and(|awaiting| snapshot.position_ms < awaiting.request.destination.end_ms)
+        {
+            self.awaiting_beacon = None;
+        }
+        if self.approach_skip.is_some_and(|request| {
+            self.last_settled_skip
+                .is_some_and(|settled| settled != request)
+        }) {
+            self.last_settled_skip = None;
+        }
+        if self.approach_skip.is_some_and(|request| {
+            self.pending_skip
+                .is_some_and(|pending| pending.request != request)
+        }) {
+            self.pending_skip = None;
+        }
+        if self.approach_skip.is_some_and(|request| {
+            self.awaiting_beacon
+                .is_some_and(|awaiting| awaiting.request != request)
+        }) {
+            self.awaiting_beacon = None;
+        }
+        let inside = approaching.iter().copied().find(|destination| {
+            snapshot.position_ms >= destination.start_ms
+                && snapshot.position_ms < destination.end_ms
+        });
+        self.armed_skip = inside.and_then(|destination| self.request_for(destination));
+        self.enabled &= !approaching.is_empty();
+        if !self.enabled {
+            self.deactivate();
+        } else {
+            for record in &mut self.records {
+                if !record.schedulable {
+                    record.active = false;
+                }
+            }
+        }
+    }
+
+    fn candidate(&mut self, manifest: &Manifest) -> Option<MarkerPrewarmCandidate> {
+        if !self.enabled {
+            return None;
+        }
+        let mut candidate: Option<MarkerPrewarmCandidate> = None;
+        for record in &mut self.records {
+            if record.settled || !record.schedulable {
+                continue;
+            }
+            let target_materialized = manifest
+                .state(record.destination.target_entry)
+                .is_some_and(SegState::is_materialized);
+            if target_materialized && !record.credited(record.destination.target_entry) {
+                // Ordinary playback or another reader won the race. It is
+                // useful media, but it is not this prewarm's production.
+                record.active = false;
+                record.schedulable = false;
+                continue;
+            }
+            if target_materialized {
+                let has_window_gap = manifest
+                    .next_gap(record.destination.target_entry)
+                    .is_some_and(|gap| gap <= record.destination.window_end_entry);
+                if !has_window_gap {
+                    record.active = false;
+                    record.schedulable = false;
+                    continue;
+                }
+            }
+            let proposed = MarkerPrewarmCandidate {
+                target_entry: record.destination.target_entry,
+                window_end_entry: record.destination.window_end_entry,
+                target_materialized,
+            };
+            if candidate.is_none_or(|current| proposed.target_entry < current.target_entry) {
+                candidate = Some(proposed);
+            }
+        }
+        candidate
+    }
+
+    fn activate(&mut self, candidate: MarkerPrewarmCandidate) -> Vec<u64> {
+        for record in &mut self.records {
+            record.active = self.enabled
+                && record.schedulable
+                && !record.settled
+                && record.destination.target_entry == candidate.target_entry
+                && record.destination.window_end_entry == candidate.window_end_entry;
+        }
+        self.records
+            .iter()
+            .filter(|record| record.active)
+            .map(|record| record.nonce)
+            .collect()
+    }
+
+    fn deactivate(&mut self) {
+        for record in &mut self.records {
+            record.active = false;
+        }
+    }
+
+    fn credit_dispatched(
+        &mut self,
+        candidate: MarkerPrewarmCandidate,
+        record_nonce: u64,
+        entry: u32,
+        publication: u64,
+    ) {
+        for record in self.records.iter_mut().filter(|record| {
+            !record.settled
+                && record.nonce == record_nonce
+                && record.destination.target_entry == candidate.target_entry
+                && record.destination.window_end_entry == candidate.window_end_entry
+        }) {
+            record.credit(entry, publication);
+        }
+    }
+
+    fn can_match_client_skip(&self) -> bool {
+        self.approach_skip.is_some()
+            || self.awaiting_beacon.is_some()
+            || self.armed_skip.is_some()
+            || self.pending_skip.is_some()
+            || self.last_settled_skip.is_some()
+    }
+
+    fn credited_publication(
+        &self,
+        request: MarkerPrewarmRequest,
+        manifest: &Manifest,
+        publications: &[Option<u64>],
+    ) -> Option<u64> {
+        let publication = publications
+            .get(request.destination.target_entry as usize)
+            .copied()
+            .flatten()?;
+        (manifest
+            .state(request.destination.target_entry)
+            .is_some_and(SegState::is_materialized)
+            && self.records.iter().any(|record| {
+                record.nonce == request.nonce
+                    && record
+                        .credited_publication(request.destination.target_entry, Some(publication))
+            }))
+        .then_some(publication)
+    }
+
+    fn observe_control_landing(
+        &mut self,
+        position_ms: i64,
+        landing_entry: u32,
+        manifest: &Manifest,
+        publications: &[Option<u64>],
+    ) -> Option<MarkerPrewarmOutcome> {
+        if let Some(outcome) = self.settle_pending_at(landing_entry, manifest, publications) {
+            return Some(outcome);
+        }
+        let request = self.armed_skip.or(self.approach_skip).filter(|request| {
+            position_ms >= request.destination.end_ms
+                && landing_entry == request.destination.target_entry
+        })?;
+        self.awaiting_beacon = Some(MarkerAwaitingBeacon {
+            request,
+            publication_at_landing: self.credited_publication(request, manifest, publications),
+        });
+        None
+    }
+
+    fn note_client_skip(
+        &mut self,
+        manifest: &Manifest,
+        publications: &[Option<u64>],
+    ) -> MarkerClientSkipResult {
+        if let Some(awaiting) = self.awaiting_beacon.take() {
+            let current = self.credited_publication(awaiting.request, manifest, publications);
+            let publication_at_skip = awaiting
+                .publication_at_landing
+                .filter(|publication| current == Some(*publication));
+            self.last_settled_skip = Some(awaiting.request);
+            return MarkerClientSkipResult {
+                matched: true,
+                outcome: Some(self.settle_skip(
+                    awaiting.request,
+                    publication_at_skip,
+                    manifest,
+                    publications,
+                )),
+            };
+        }
+        if self.pending_skip.is_some() {
+            return MarkerClientSkipResult {
+                matched: true,
+                outcome: None,
+            };
+        }
+        let request = self.armed_skip.take().or(self.approach_skip);
+        let Some(request) = request else {
+            return MarkerClientSkipResult {
+                matched: self.last_settled_skip.is_some(),
+                outcome: None,
+            };
+        };
+        if self.approach_skip == Some(request) {
+            self.approach_skip = None;
+        }
+        self.pending_skip = Some(MarkerPendingSkip {
+            request,
+            publication_at_skip: self.credited_publication(request, manifest, publications),
+        });
+        MarkerClientSkipResult {
+            matched: true,
+            outcome: None,
+        }
+    }
+
+    fn settle_pending_at(
+        &mut self,
+        landing_entry: u32,
+        manifest: &Manifest,
+        publications: &[Option<u64>],
+    ) -> Option<MarkerPrewarmOutcome> {
+        let pending = self
+            .pending_skip
+            .filter(|pending| pending.request.destination.target_entry == landing_entry)?;
+        self.pending_skip = None;
+        if self.armed_skip == Some(pending.request) {
+            self.armed_skip = None;
+        }
+        self.last_settled_skip = Some(pending.request);
+        Some(self.settle_skip(
+            pending.request,
+            pending.publication_at_skip,
+            manifest,
+            publications,
+        ))
+    }
+
+    fn settle_skip(
+        &mut self,
+        request: MarkerPrewarmRequest,
+        publication_at_skip: Option<u64>,
+        manifest: &Manifest,
+        publications: &[Option<u64>],
+    ) -> MarkerPrewarmOutcome {
+        self.enabled = false;
+        self.deactivate();
+        self.approach_skip = None;
+        self.armed_skip = None;
+        self.awaiting_beacon = None;
+        let current_publication = publications
+            .get(request.destination.target_entry as usize)
+            .copied()
+            .flatten();
+        let current_matches = publication_at_skip.is_some()
+            && current_publication == publication_at_skip
+            && manifest
+                .state(request.destination.target_entry)
+                .is_some_and(SegState::is_materialized);
+        let record = self
+            .records
+            .iter_mut()
+            .find(|record| record.nonce == request.nonce);
+        let (requested_sequence, produced_range) = record.map_or((None, None), |record| {
+            record.settled = true;
+            record.schedulable = false;
+            (
+                Some(record.requested_sequence),
+                (current_matches
+                    && record.credited_publication(
+                        request.destination.target_entry,
+                        publication_at_skip,
+                    ))
+                .then_some(PrewarmedRange {
+                    first: request.destination.target_entry,
+                    last: request.destination.target_entry,
+                }),
+            )
+        });
+        MarkerPrewarmOutcome {
+            hit: produced_range.is_some(),
+            destination: request.destination,
+            requested_sequence,
+            produced_range,
+        }
+    }
 }
 
 /// The rendition's init identity and where it came from — `from_disk` marks a
@@ -491,6 +1050,25 @@ struct Rendition {
     identity: Mutex<IdentityState>,
     slot: ProducerSlot,
     readers: Mutex<HashMap<String, Reader>>,
+    /// Monotonic identity of each successful segment publication. The ledger
+    /// stores this beside an entry index so eviction followed by ordinary
+    /// rematerialization cannot inherit stale prewarm credit.
+    publication_serial: AtomicU64,
+    publication_versions: StdMutex<Vec<Option<u64>>>,
+    /// Attribution for work already dispatched to one producer generation.
+    /// Control may disable future speculation while that generation has the
+    /// landing fragment in flight; the dispatch survives just long enough to
+    /// credit that publication to the playback that requested it.
+    marker_prewarm_dispatch: StdMutex<Option<MarkerPrewarmDispatch>>,
+    /// Keeps the ordinary producer publication path O(1) when no playback is
+    /// currently attributing work to marker prewarm.
+    active_marker_prewarms: AtomicU32,
+    /// The generation that was started or repurposed for speculative marker
+    /// work, encoded as epoch + 1 so zero means absent. Attribution may end as
+    /// soon as the requested window publishes, but the producer can still
+    /// have output queued; capacity work must fence that generation until it
+    /// physically retires.
+    marker_prewarm_generation: AtomicU64,
     /// A recorded producer failure: subsequent planned-segment GETs answer
     /// `ProducerFailed` until a new create replaces the rendition.
     failed: StdMutex<Option<String>>,
@@ -536,13 +1114,10 @@ impl Rendition {
 
     #[cfg(test)]
     async fn attach_reader(&self, session_id: &str, frontier: u32) {
-        self.readers.lock().await.insert(
-            session_id.to_string(),
-            Reader {
-                frontier,
-                last_served: None,
-            },
-        );
+        self.readers
+            .lock()
+            .await
+            .insert(session_id.to_string(), Reader::new(frontier));
         *self.dormant_since.lock().expect("dormant lock") = None;
     }
 
@@ -559,7 +1134,7 @@ impl Rendition {
         let readers = self.readers.lock().await;
         readers
             .values()
-            .map(|reader| reader_window(*reader, self.seconds_per_segment))
+            .map(|reader| reader_window(reader, self.seconds_per_segment))
             .collect()
     }
 }
@@ -812,6 +1387,13 @@ struct Session {
     last_touch: StdMutex<Instant>,
     /// Owner-local sequence fence kept separate from media-object touches.
     control: StdMutex<crate::playback_control::ControlState>,
+    /// Stored, source-fenced marker boundaries projected onto this rendition's
+    /// immutable plan. No request-path probing or detector runs here.
+    marker_destinations: Vec<MarkerDestination>,
+    /// Latest accepted snapshot, used to correlate a session-less shipped
+    /// marker beacon and to settle a seek whose transient state was coalesced.
+    /// Replays never replace it or emit a second outcome.
+    last_control_snapshot: Option<crate::playback_control::PlaybackDemandSnapshot>,
     /// Exact terminal acknowledgement retained after a client `demand=end`
     /// tombstones the attachment. Other lifecycle causes never populate it.
     control_end: Option<crate::playback_control::LocalControlResult>,
@@ -1032,6 +1614,7 @@ impl VodServe {
         );
         let dir = RenditionDir::new(base.join(format!("http-test-{}", uuid::Uuid::new_v4())));
         dir.create().await.expect("create HTTP VOD test rendition");
+        let plan_len = plan.len();
         let rendition = Arc::new(Rendition {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
@@ -1059,6 +1642,11 @@ impl VodServe {
             identity: Mutex::new(IdentityState::default()),
             slot: ProducerSlot::new(),
             readers: Mutex::new(HashMap::new()),
+            publication_serial: AtomicU64::new(0),
+            publication_versions: StdMutex::new(vec![None; plan_len]),
+            marker_prewarm_dispatch: StdMutex::new(None),
+            active_marker_prewarms: AtomicU32::new(0),
+            marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
@@ -1105,6 +1693,8 @@ impl VodServe {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -1331,6 +1921,52 @@ impl VodServe {
                 suspended: Some(false),
                 reason: reason.map(str::to_owned),
                 extra: Some(r#"{"presentation":"vod"}"#.to_owned()),
+                ..plurx_core::domain::PlaybackEvent::default()
+            },
+        );
+    }
+
+    fn emit_marker_prewarm(
+        &self,
+        session_id: &str,
+        file_id: i64,
+        kind: SessionKind,
+        outcome: MarkerPrewarmOutcome,
+    ) {
+        let produced_range = outcome.produced_range.map(|range| {
+            serde_json::json!({
+                "first_entry": range.first,
+                "last_entry": range.last,
+            })
+        });
+        crate::telemetry::emit(
+            Arc::clone(&self.shared.store),
+            plurx_core::domain::PlaybackEvent {
+                at_unix_ms: now_ms(),
+                session_id: Some(session_log_id(session_id)),
+                file_id: Some(file_id),
+                event: "marker_prewarm".to_owned(),
+                level: Some("info".to_owned()),
+                method: Some(
+                    match kind {
+                        SessionKind::Copy { .. } => "remux",
+                        SessionKind::Transcode { .. } => "transcode",
+                    }
+                    .to_owned(),
+                ),
+                encoder: Some("vod".to_owned()),
+                detail: Some(if outcome.hit { "hit" } else { "miss" }.to_owned()),
+                extra: Some(
+                    serde_json::json!({
+                        "presentation": "vod",
+                        "marker": outcome.destination.kind.as_str(),
+                        "destination_ms": outcome.destination.end_ms,
+                        "destination_entry": outcome.destination.target_entry,
+                        "requested_sequence": outcome.requested_sequence,
+                        "produced_range": produced_range,
+                    })
+                    .to_string(),
+                ),
                 ..plurx_core::domain::PlaybackEvent::default()
             },
         );
@@ -1603,6 +2239,13 @@ impl VodServe {
         let rendition = Arc::clone(&attachment.rendition);
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
+        let marker_destinations = stored_marker_destinations(
+            self.shared.store.as_ref(),
+            file,
+            &rendition.plan,
+            rendition.seconds_per_segment,
+        )
+        .await;
         let _release_transition = if let Some(release_fence) = fences.release_fence {
             let guard = release_fence.transition.lock_owned().await;
             if release_fence.released.load(Acquire) {
@@ -1637,6 +2280,8 @@ impl VodServe {
             incarnation: Arc::new(()),
             last_touch: StdMutex::new(Instant::now()),
             control: StdMutex::new(crate::playback_control::ControlState::default()),
+            marker_destinations,
+            last_control_snapshot: None,
             control_end: None,
             control_end_snapshot: None,
             terminal_cleanup: None,
@@ -1683,13 +2328,7 @@ impl VodServe {
                 }
             }
         }
-        replacement_readers.insert(
-            session_id.clone(),
-            Reader {
-                frontier: start_entry,
-                last_served: None,
-            },
-        );
+        replacement_readers.insert(session_id.clone(), Reader::new(start_entry));
         *rendition.dormant_since.lock().expect("dormant lock") = None;
         sessions.insert(session_id.clone(), replacement);
         drop(_serving_transition);
@@ -1779,6 +2418,90 @@ impl VodServe {
             .count()
     }
 
+    /// Consume the shipped clients' historical hard-coded marker miss only
+    /// when it can be correlated to exactly one live VOD playback that was
+    /// armed while inside a stored marker. The beacon is the durable skip
+    /// intent that transient `Seeking` snapshots cannot provide: reporters
+    /// may coalesce those away before the next control exchange.
+    pub async fn consume_marker_prewarm_placeholder(
+        &self,
+        user_id: i64,
+        file_id: i64,
+        method: &str,
+    ) -> bool {
+        if !matches!(method, "remux" | "transcode") {
+            return false;
+        }
+        let user_scope = serde_json::json!(["user_id", user_id]).to_string();
+        let candidates = {
+            let sessions = self.shared.sessions.lock().await;
+            sessions
+                .iter()
+                .filter(|(_, session)| {
+                    session.file.id == file_id && session.supersession_user == user_scope
+                })
+                .map(|(session_id, session)| {
+                    (
+                        session_id.clone(),
+                        session.live_rendition().cloned(),
+                        session.kind,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let [(session_id, rendition, kind)] = candidates.as_slice() else {
+            // Ambiguity is a miss, never permission to steal another
+            // playback's credit. Direct play and rolling HLS also land here.
+            return false;
+        };
+        let Some(rendition) = rendition else {
+            // A recent terminal VOD row can own a delayed beacon even though
+            // its reader is already gone. Keep the miss rather than letting a
+            // surviving same-file session steal it.
+            return false;
+        };
+        if !matches!(
+            (*kind, method),
+            (SessionKind::Copy { .. }, "remux") | (SessionKind::Transcode { .. }, "transcode")
+        ) {
+            return false;
+        }
+        let reader_facts = {
+            let readers = rendition.readers.lock().await;
+            readers
+                .get(session_id)
+                .map(|reader| Arc::clone(&reader.marker_prewarm))
+        };
+        let Some(ledger) = reader_facts else {
+            return false;
+        };
+        if !ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .can_match_client_skip()
+        {
+            return false;
+        }
+
+        let manifest = rendition.manifest.lock().await;
+        let publications = rendition
+            .publication_versions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ledger = ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = ledger.note_client_skip(&manifest, &publications);
+        drop(ledger);
+        drop(publications);
+        drop(manifest);
+        if let Some(outcome) = result.outcome {
+            self.emit_marker_prewarm(session_id, file_id, *kind, outcome);
+        }
+        result.matched
+    }
+
     /// Renew one immutable session only after its caller has a concrete
     /// playlist, subtitle, or media response ready. Kept separate from
     /// lookup so a vanished/tombstoned capability cannot be mistaken for a
@@ -1829,8 +2552,31 @@ impl VodServe {
                 reader.frontier = reader.frontier.max(index);
             }
         }
+        let marker_ledger = segment_index.and_then(|_| {
+            readers
+                .as_ref()?
+                .get(session_id)
+                .map(|reader| Arc::clone(&reader.marker_prewarm))
+        });
+        let marker_identity = (session.file.id, session.kind);
         drop(readers);
         drop(sessions);
+        if let (Some(index), Some(ledger)) = (segment_index, marker_ledger) {
+            let manifest = owner_rendition.manifest.lock().await;
+            let publications = owner_rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let outcome = ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .settle_pending_at(index, &manifest, &publications);
+            drop(publications);
+            drop(manifest);
+            if let Some(outcome) = outcome {
+                self.emit_marker_prewarm(session_id, marker_identity.0, marker_identity.1, outcome);
+            }
+        }
         owner_rendition.kick();
         true
     }
@@ -2564,6 +3310,7 @@ impl VodServe {
                 action: crate::playback_control::ControlAction,
                 platform: crate::playback_control::ClientPlatform,
                 lease_expires_at_unix_ms: i64,
+                marker_prewarm: Option<MarkerPrewarmControl>,
             },
         }
         let outcome = {
@@ -2622,6 +3369,22 @@ impl VodServe {
                     kind: session.kind,
                 })
             } else {
+                let marker_prewarm = (disposition
+                    == crate::playback_control::ControlDisposition::Accepted)
+                    .then(|| MarkerPrewarmControl {
+                        rendition: session
+                            .live_rendition()
+                            .map(Arc::clone)
+                            .expect("a live VOD control has a rendition"),
+                        snapshot: control.snapshot.clone(),
+                        destinations: session.marker_destinations.clone(),
+                        sequence: control.sequence,
+                        file_id: session.file.id,
+                        kind: session.kind,
+                    });
+                if disposition == crate::playback_control::ControlDisposition::Accepted {
+                    session.last_control_snapshot = Some(control.snapshot.clone());
+                }
                 let mut last_touch = session.last_touch.lock().expect("touch lock");
                 if disposition == crate::playback_control::ControlDisposition::Accepted {
                     *last_touch = Instant::now();
@@ -2635,6 +3398,7 @@ impl VodServe {
                     platform,
                     lease_expires_at_unix_ms: crate::media_sessions::unix_ms()
                         .saturating_add(remaining_ms),
+                    marker_prewarm,
                 })
             }
         };
@@ -2642,44 +3406,70 @@ impl VodServe {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
-        let (disposition, accepted_sequence, action, platform, lease_expires_at_unix_ms) =
-            match outcome {
-                AppliedControl::End {
-                    result,
-                    terminal_commit,
-                    cleanup,
+        let (
+            disposition,
+            accepted_sequence,
+            action,
+            platform,
+            lease_expires_at_unix_ms,
+            marker_prewarm,
+        ) = match outcome {
+            AppliedControl::End {
+                result,
+                terminal_commit,
+                cleanup,
+                rendition,
+                file_id,
+                height,
+                kind,
+            } => {
+                self.spawn_terminal_cleanup(
+                    control.session_id.to_owned(),
+                    Arc::clone(&cleanup),
                     rendition,
                     file_id,
                     height,
                     kind,
-                } => {
-                    self.spawn_terminal_cleanup(
-                        control.session_id.to_owned(),
-                        Arc::clone(&cleanup),
-                        rendition,
-                        file_id,
-                        height,
-                        kind,
-                        Terminal::Deleted,
-                        terminal_commit,
-                    );
-                    cleanup.wait().await;
-                    return Some(Ok(result));
-                }
-                AppliedControl::Live {
-                    disposition,
-                    accepted_sequence,
-                    action,
-                    platform,
-                    lease_expires_at_unix_ms,
-                } => (
-                    disposition,
-                    accepted_sequence,
-                    action,
-                    platform,
-                    lease_expires_at_unix_ms,
-                ),
-            };
+                    Terminal::Deleted,
+                    terminal_commit,
+                );
+                cleanup.wait().await;
+                return Some(Ok(result));
+            }
+            AppliedControl::Live {
+                disposition,
+                accepted_sequence,
+                action,
+                platform,
+                lease_expires_at_unix_ms,
+                marker_prewarm,
+            } => (
+                disposition,
+                accepted_sequence,
+                action,
+                platform,
+                lease_expires_at_unix_ms,
+                marker_prewarm,
+            ),
+        };
+        if let Some(marker_prewarm) = marker_prewarm {
+            if let Some(outcome) = apply_marker_prewarm_control(
+                &marker_prewarm.rendition,
+                control.session_id,
+                marker_prewarm.sequence,
+                &marker_prewarm.snapshot,
+                &marker_prewarm.destinations,
+            )
+            .await
+            {
+                self.emit_marker_prewarm(
+                    control.session_id,
+                    marker_prewarm.file_id,
+                    marker_prewarm.kind,
+                    outcome,
+                );
+            }
+        }
         drop(lifecycle_guard);
         let status = self.status(control.session_id).await?;
         Some(Ok(crate::playback_control::LocalControlResult {
@@ -3694,6 +4484,7 @@ impl Shared {
         } else {
             plan.duration_ticks() as f64 / f64::from(timescale) / plan.len() as f64
         };
+        let plan_len = plan.len();
         let rendition = Arc::new(Rendition {
             key: key.to_string(),
             dir,
@@ -3712,6 +4503,11 @@ impl Shared {
             identity: Mutex::new(identity_state),
             slot: ProducerSlot::new(),
             readers: Mutex::new(HashMap::new()),
+            publication_serial: AtomicU64::new(0),
+            publication_versions: StdMutex::new(vec![None; plan_len]),
+            marker_prewarm_dispatch: StdMutex::new(None),
+            active_marker_prewarms: AtomicU32::new(0),
+            marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
@@ -3951,12 +4747,16 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
     if let Some(blocked) = shared.pool.blocked_on(&rendition.key) {
         demands.push(Demand::waiting_on(blocked));
     }
-    {
+    let prewarm_ledgers = {
         let readers = rendition.readers.lock().await;
         for reader in readers.values() {
             demands.push(Demand::idle_at(reader.frontier));
         }
-    }
+        readers
+            .values()
+            .map(|reader| Arc::clone(&reader.marker_prewarm))
+            .collect::<Vec<_>>()
+    };
     let belief = rendition.slot.belief().await;
     let mut manifest = rendition.manifest.lock().await;
     let position = Position {
@@ -3969,14 +4769,34 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             held: matches!(belief, Producer::Stopped { .. }),
         },
     };
-    let action = decide(&manifest, &demands, position);
-    let step = next_step(belief, action);
+    let decision = decide_with_marker_prewarm(&manifest, &demands, position, &prewarm_ledgers);
+    let step = retire_completed_marker_prewarm(
+        rendition,
+        belief,
+        &decision,
+        next_step(belief, decision.action),
+    );
+    if fence_marker_prewarm_before_room(rendition, belief, step) {
+        // Capacity belongs to blocked foreground demand. Fence and retire a
+        // speculative generation before freeing bytes, so queued prewarm
+        // output cannot consume the room between this pass and the next.
+        let terminate = Step::Terminate {
+            why: Termination::IndefiniteHold,
+        };
+        if let Err(error) = rendition.slot.perform(terminate, || {}).await {
+            tracing::debug!(rendition = %rendition.key, "retiring prewarm producer: {error}");
+        }
+        rendition.kick();
+        return;
+    }
+    update_marker_prewarm_dispatch(rendition, belief, step, &decision);
     match step {
         Step::Nothing => {}
         Step::Stop | Step::Resume => {
             // TODO(m3-wire): session progress clock — the manager's motion
             // clock replaces this no-op touch when it attaches.
             if let Err(error) = rendition.slot.perform(step, || {}).await {
+                clear_marker_prewarm_dispatch(rendition);
                 tracing::warn!(rendition = %rendition.key, "performing {step:?}: {error}");
             }
         }
@@ -3992,6 +4812,7 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
                 Ok(Performed::NeedsSpawn { at }) => spawn_generation(shared, rendition, at).await,
                 Ok(Performed::Done) => {}
                 Err(error) => {
+                    clear_marker_prewarm_dispatch(rendition);
                     tracing::warn!(rendition = %rendition.key, "performing {step:?}: {error}");
                 }
             }
@@ -4029,6 +4850,210 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             tracing::warn!(rendition = %rendition.key, "producer stalled: {hold:?}");
         }
     }
+}
+
+/// A completed speculative window has no foreground reason to retain its
+/// ffmpeg process. The ordinary scheduler would stop it at the ahead horizon;
+/// retire it instead once attribution is exhausted, unless foreground demand
+/// has explicitly taken ownership of the same generation.
+fn retire_completed_marker_prewarm(
+    rendition: &Rendition,
+    belief: Producer,
+    decision: &MarkerPrewarmDecision,
+    step: Step,
+) -> Step {
+    let epoch = rendition.gen_epoch.load(Relaxed);
+    let prewarm_generation =
+        rendition.marker_prewarm_generation.load(Acquire) == epoch.saturating_add(1);
+    let ahead_hold = matches!(
+        decision.action,
+        Action::Suspend {
+            reason: crate::prodsched::Hold::Ahead { .. },
+            ..
+        }
+    );
+    if prewarm_generation
+        && rendition.active_marker_prewarms.load(Acquire) == 0
+        && decision.candidate.is_none()
+        && ahead_hold
+        && !matches!(belief, Producer::Absent { .. })
+        && matches!(step, Step::Stop | Step::Nothing)
+    {
+        Step::Terminate {
+            why: Termination::Idle,
+        }
+    } else {
+        step
+    }
+}
+
+/// Fence a live speculative producer before a foreground room-making pass.
+/// Returns true when the caller must physically terminate the old generation
+/// and retry scheduling before it may evict anything.
+fn fence_marker_prewarm_before_room(rendition: &Rendition, belief: Producer, step: Step) -> bool {
+    if !matches!(step, Step::MakeRoom { .. }) || matches!(belief, Producer::Absent { .. }) {
+        return false;
+    }
+    let epoch = rendition.gen_epoch.load(Relaxed);
+    let prewarm_generation =
+        rendition.marker_prewarm_generation.load(Acquire) == epoch.saturating_add(1);
+    if !prewarm_generation {
+        return false;
+    }
+    clear_marker_prewarm_dispatch(rendition);
+    rendition.marker_prewarm_generation.store(0, Release);
+    rendition.gen_epoch.fetch_add(1, Relaxed);
+    true
+}
+
+fn decide_with_marker_prewarm(
+    manifest: &Manifest,
+    demands: &[Demand],
+    position: Position,
+    prewarm_ledgers: &[Arc<StdMutex<MarkerPrewarmLedger>>],
+) -> MarkerPrewarmDecision {
+    let foreground_action = decide(manifest, demands, position);
+    // Real reader demand is always decided first. Only an idle producer or
+    // one that would otherwise stop at the ordinary ahead horizon may spend
+    // work on a marker destination. Capacity holds never evict or make room
+    // for speculative bytes.
+    let selected_prewarm = if matches!(
+        foreground_action,
+        crate::prodsched::Action::Idle
+            | crate::prodsched::Action::Suspend {
+                reason: crate::prodsched::Hold::Ahead { .. },
+                ..
+            }
+    ) {
+        prewarm_ledgers
+            .iter()
+            .filter_map(|ledger| {
+                ledger
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .candidate(manifest)
+            })
+            .min_by_key(|candidate| candidate.target_entry)
+    } else {
+        None
+    };
+    let action = selected_prewarm
+        .map(|candidate| {
+            let demand = if candidate.target_materialized {
+                Demand::idle_at(candidate.target_entry)
+            } else {
+                // This internal demand gets the same repositioning decision a
+                // blocked GET would, but only after the foreground decision
+                // above proved the playhead has no work left.
+                Demand::waiting_on(candidate.target_entry)
+            };
+            (candidate, decide(manifest, &[demand], position))
+        })
+        .filter(|(_, action)| {
+            matches!(
+                action,
+                crate::prodsched::Action::Produce { .. }
+                    | crate::prodsched::Action::Reposition { .. }
+            )
+        });
+    let mut owners = Vec::new();
+    for ledger in prewarm_ledgers {
+        let mut state = ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((candidate, _)) = action {
+            for record_nonce in state.activate(candidate) {
+                owners.push(MarkerPrewarmOwner {
+                    ledger: Arc::clone(ledger),
+                    record_nonce,
+                });
+            }
+        } else {
+            state.deactivate();
+        }
+    }
+    MarkerPrewarmDecision {
+        action: action.map_or(foreground_action, |(_, action)| action),
+        candidate: action.map(|(candidate, _)| candidate),
+        owners,
+    }
+}
+
+/// Bind speculative work to the exact producer generation that received it.
+/// A later control snapshot may disable future prewarming before an in-flight
+/// fragment publishes; in that case retain only the producer's immediate
+/// reach. A restart for foreground work is a new cause and drops attribution.
+fn update_marker_prewarm_dispatch(
+    rendition: &Rendition,
+    belief: Producer,
+    step: Step,
+    decision: &MarkerPrewarmDecision,
+) {
+    let current_epoch = rendition.gen_epoch.load(Relaxed);
+    let mut dispatch = rendition
+        .marker_prewarm_dispatch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(candidate) = decision.candidate.filter(|_| !decision.owners.is_empty()) {
+        let producer_epoch = current_epoch.saturating_add(u64::from(matches!(
+            step,
+            Step::Start { .. } | Step::Restart { .. }
+        )));
+        *dispatch = Some(MarkerPrewarmDispatch {
+            producer_epoch,
+            candidate,
+            owners: decision.owners.clone(),
+        });
+        rendition
+            .marker_prewarm_generation
+            .store(producer_epoch.saturating_add(1), Release);
+    } else {
+        let foreground_owns_generation = matches!(
+            decision.action,
+            Action::Produce { .. } | Action::Reposition { .. }
+        );
+        if foreground_owns_generation || matches!(step, Step::Terminate { .. }) {
+            rendition.marker_prewarm_generation.store(0, Release);
+        }
+        if foreground_owns_generation {
+            // The publication that follows is owed to foreground demand, even
+            // when it reuses a process prewarm positioned. Keeping the old
+            // owners would let foreground work manufacture a prewarm hit.
+            *dispatch = None;
+        } else {
+            let immediate_reach = matches!(step, Step::Nothing | Step::Resume | Step::Stop)
+                .then(|| {
+                    belief
+                        .produced_through()
+                        .map(|through| through.saturating_add(1))
+                        .or_else(|| belief.positioned_at())
+                })
+                .flatten();
+            let retain = dispatch.as_mut().is_some_and(|existing| {
+                if existing.producer_epoch != current_epoch {
+                    return false;
+                }
+                let Some(reach) = immediate_reach else {
+                    return false;
+                };
+                if reach < existing.candidate.target_entry {
+                    return false;
+                }
+                existing.candidate.window_end_entry =
+                    existing.candidate.window_end_entry.min(reach);
+                true
+            });
+            if !retain {
+                *dispatch = None;
+            }
+        }
+    }
+    rendition.active_marker_prewarms.store(
+        dispatch.as_ref().map_or(0, |dispatch| {
+            u32::try_from(dispatch.owners.len()).unwrap_or(u32::MAX)
+        }),
+        Release,
+    );
 }
 
 /// Spawn a real generation positioned at plan entry `at` and hand its stdout
@@ -4387,6 +5412,12 @@ async fn on_generation_end(
         // its ending carries no verdict.
         return;
     }
+    let _ = rendition.marker_prewarm_generation.compare_exchange(
+        epoch.saturating_add(1),
+        0,
+        AcqRel,
+        Acquire,
+    );
     // Reap the child so the belief goes honestly absent, keeping its progress.
     let _ = rendition
         .slot
@@ -4493,6 +5524,71 @@ struct RenditionSink {
     epoch: u64,
 }
 
+/// Assign the successful publication a monotonic identity and, only when the
+/// scheduler currently attributes work to marker prewarm, credit that exact
+/// identity to the active playback ledgers. The caller holds `manifest`, so a
+/// landing observation cannot interleave between publication and provenance.
+fn clear_marker_prewarm_dispatch(rendition: &Rendition) {
+    *rendition
+        .marker_prewarm_dispatch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    rendition.active_marker_prewarms.store(0, Release);
+}
+
+async fn credit_marker_prewarm_publication(
+    rendition: &Rendition,
+    producer_epoch: u64,
+    entry: u32,
+) -> u64 {
+    let publication = rendition
+        .publication_serial
+        .fetch_add(1, Relaxed)
+        .saturating_add(1);
+    if let Some(version) = rendition
+        .publication_versions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_mut(entry as usize)
+    {
+        *version = Some(publication);
+    }
+    if rendition.active_marker_prewarms.load(Acquire) == 0 {
+        return publication;
+    }
+    let attribution = {
+        let mut dispatch = rendition
+            .marker_prewarm_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let attribution = dispatch.as_ref().and_then(|dispatch| {
+            (dispatch.producer_epoch == producer_epoch
+                && entry >= dispatch.candidate.target_entry
+                && entry <= dispatch.candidate.window_end_entry)
+                .then(|| (dispatch.candidate, dispatch.owners.clone()))
+        });
+        if dispatch.as_ref().is_some_and(|dispatch| {
+            dispatch.producer_epoch != producer_epoch
+                || entry >= dispatch.candidate.window_end_entry
+        }) {
+            *dispatch = None;
+            rendition.active_marker_prewarms.store(0, Release);
+        }
+        attribution
+    };
+    let Some((candidate, owners)) = attribution else {
+        return publication;
+    };
+    for owner in owners {
+        owner
+            .ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .credit_dispatched(candidate, owner.record_nonce, entry, publication);
+    }
+    publication
+}
+
 impl vodgen::Sink for RenditionSink {
     async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> io::Result<()> {
         if self.rendition.closed.load(Relaxed) {
@@ -4532,6 +5628,10 @@ impl vodgen::Sink for RenditionSink {
                 .dir
                 .materialize(&mut manifest, entry, &bytes, now_ms())
                 .await?;
+            // Publication and provenance linearize under the same manifest
+            // lock. A skip can therefore observe neither fact or both, never
+            // real prewarm bytes with a missing credit.
+            credit_marker_prewarm_publication(&self.rendition, self.epoch, entry).await;
             if !manifest.is_admitted() {
                 sub_saturating(&self.shared.working_set, before);
                 self.shared.working_set.fetch_add(len, Relaxed);
@@ -4675,6 +5775,113 @@ fn entry_containing(plan: &SegmentPlan, start_seconds: f64) -> u32 {
     video_entry_at_or_before(plan, at)
 }
 
+/// Apply one accepted control snapshot to the playback's speculative ledger.
+/// The marker seek result is settled before the reader frontier moves, using
+/// only ranges credited by `RenditionSink` and still materialized at this
+/// exact instant.
+async fn apply_marker_prewarm_control(
+    rendition: &Arc<Rendition>,
+    session_id: &str,
+    sequence: u64,
+    snapshot: &crate::playback_control::PlaybackDemandSnapshot,
+    destinations: &[MarkerDestination],
+) -> Option<MarkerPrewarmOutcome> {
+    let ledger = rendition
+        .readers
+        .lock()
+        .await
+        .get(session_id)
+        .map(|reader| Arc::clone(&reader.marker_prewarm))?;
+    let manifest = rendition.manifest.lock().await;
+    let publications = rendition
+        .publication_versions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut ledger = ledger
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // A landing observed before its fire-and-forget beacon is a one-control
+    // reorder latch, not durable skip intent. Any later accepted control
+    // proves the beacon did not accompany that landing; retaining it would
+    // let a natural traversal manufacture a hit on a future replay.
+    ledger.awaiting_beacon = None;
+
+    let outcome = if snapshot.render_state == crate::playback_control::RenderState::Seeking {
+        ledger.enabled = false;
+        ledger.deactivate();
+        None
+    } else {
+        let landing_entry =
+            entry_containing(&rendition.plan, snapshot.position_ms as f64 / 1_000.0);
+        let outcome = ledger.observe_control_landing(
+            snapshot.position_ms,
+            landing_entry,
+            &manifest,
+            &publications,
+        );
+        ledger.update_control(sequence, snapshot, destinations);
+        outcome
+    };
+    drop(ledger);
+    drop(publications);
+    drop(manifest);
+    rendition.kick();
+    outcome
+}
+
+/// Read only the persisted annotation index and project each exact client
+/// landing time onto the immutable VOD plan. A store miss is intentionally a
+/// no-op: marker probing belongs to `/decision`, and prewarm must never add a
+/// detector or source read to the control path.
+async fn stored_marker_destinations(
+    store: &dyn Store,
+    file: &MediaFile,
+    plan: &SegmentPlan,
+    seconds_per_segment: f64,
+) -> Vec<MarkerDestination> {
+    let source = crate::http::stream::annotation_source_identity(file);
+    let set = match store.timeline_annotation_set(file.id, &source).await {
+        Ok(Some(set)) => set,
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(
+                file_id = file.id,
+                %error,
+                "could not read timeline annotations for marker prewarm"
+            );
+            return Vec::new();
+        }
+    };
+    let per = if seconds_per_segment > 0.0 {
+        seconds_per_segment
+    } else {
+        1.0
+    };
+    let window_entries = ((f64::from(AHEAD_HORIZON_SECONDS) / per).ceil() as u32).max(1);
+    let last_entry = plan.entries.last().map_or(0, |entry| entry.index);
+    let mut destinations = set
+        .annotations
+        .into_iter()
+        .map(|annotation| {
+            let target_entry = entry_containing(plan, annotation.end_ms as f64 / 1_000.0);
+            MarkerDestination {
+                kind: annotation.kind,
+                start_ms: annotation.start_ms,
+                end_ms: annotation.end_ms,
+                target_entry,
+                window_end_entry: target_entry.saturating_add(window_entries).min(last_entry),
+                eligible: matches!(
+                    annotation.kind,
+                    AnnotationKind::Intro | AnnotationKind::Credits
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+    destinations.sort_by_key(|destination| (destination.start_ms, destination.end_ms));
+    destinations
+}
+
 /// The last VIDEO entry at or before `at` — the only kind a generation may be
 /// positioned on. Audio-tail entries carry no video boundary of their own
 /// ([`crate::titlestore::Manifest::is_audio_tail`]'s "a scheduler must not
@@ -4708,7 +5915,7 @@ fn plan_duration_ms(plan: &SegmentPlan) -> i64 {
 /// and a window that forgot it would let `make_room` evict the just-
 /// materialized seek target before the waiter opens it — a Pending → produce
 /// → evict livelock under working-set pressure.
-fn reader_window(reader: Reader, seconds_per_segment: f64) -> ReaderWindow {
+fn reader_window(reader: &Reader, seconds_per_segment: f64) -> ReaderWindow {
     let playhead = reader.last_served.unwrap_or(reader.frontier);
     let frontier = reader
         .last_served
@@ -4997,7 +6204,10 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering::AcqRel};
 
-    use plurx_core::store::{FragmentIndexStore, MediaSessionStore as _, SqliteStore};
+    use plurx_core::store::{
+        FragmentIndexStore, LibraryStore as _, MediaSessionStore as _, MediaStore as _,
+        PlaybackTelemetryStore as _, SqliteStore, TimelineAnnotationStore as _,
+    };
     use plurx_core::testfixtures;
 
     use crate::fragindex::IndexOutcome;
@@ -5113,6 +6323,7 @@ mod tests {
 
     fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
         SessionRequest {
+            control_sequence: None,
             file_id: 1,
             playback_id: playback_id.to_string(),
             request_id: None,
@@ -5316,6 +6527,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -5351,6 +6564,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: Some(cleanup),
@@ -5401,6 +6616,7 @@ mod tests {
         );
         let dir = RenditionDir::new(base.join("synthetic"));
         dir.create().await.expect("create rendition dir");
+        let plan_len = plan.len();
         Arc::new(Rendition {
             key: "synthetic-rendition".to_string(),
             dir,
@@ -5428,6 +6644,11 @@ mod tests {
             identity: Mutex::new(IdentityState::default()),
             slot: ProducerSlot::new(),
             readers: Mutex::new(HashMap::new()),
+            publication_serial: AtomicU64::new(0),
+            publication_versions: StdMutex::new(vec![None; plan_len]),
+            marker_prewarm_dispatch: StdMutex::new(None),
+            active_marker_prewarms: AtomicU32::new(0),
+            marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
@@ -5438,6 +6659,1239 @@ mod tests {
             warned_admission: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
         })
+    }
+
+    #[tokio::test]
+    async fn stored_marker_prewarm_is_subordinate_and_hits_only_its_own_production() {
+        use plurx_core::segplan::{
+            AnnotationProvenance, TimelineAnnotation, TimelineAnnotationSet,
+        };
+
+        let base = crate::test_tempdir().expect("base");
+        let rendition = synthetic_rendition(base.path()).await;
+        let file = &rendition.recipe.file;
+        let duration_ms = file.duration_ms.expect("synthetic duration");
+        assert!(
+            duration_ms > 400_000,
+            "fixture must contain the credits marker"
+        );
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = store
+            .create_library(&plurx_core::domain::NewLibrary {
+                name: "Markers".to_owned(),
+                kind: plurx_core::domain::LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&plurx_core::domain::NewItem {
+                library_id: library.id,
+                kind: plurx_core::domain::ItemKind::Movie,
+                parent_id: None,
+                title: "Marker fixture".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let stored_file_id = store
+            .upsert_file(
+                item,
+                &file.path.to_string_lossy(),
+                file.size,
+                file.mtime,
+                &plurx_core::domain::ProbeResult {
+                    duration_ms: Some(duration_ms),
+                    ..plurx_core::domain::ProbeResult::default()
+                },
+            )
+            .await
+            .expect("file");
+        assert_eq!(stored_file_id, file.id);
+        let annotations = TimelineAnnotationSet {
+            source_identity: crate::http::stream::annotation_source_identity(file),
+            generation_id: uuid::Uuid::new_v4().to_string(),
+            version: 1,
+            annotations: vec![TimelineAnnotation {
+                kind: AnnotationKind::Credits,
+                start_ticks: 200_000,
+                end_ticks: 400_000,
+                timescale: 1_000,
+                start_ms: 200_000,
+                end_ms: 400_000,
+                provenance: AnnotationProvenance::Authored,
+                confidence_millis: 1_000,
+                detector_version: "stored-marker-fixture".to_owned(),
+                manual_override_revision: None,
+            }],
+        };
+        store
+            .put_timeline_annotation_set(file.id, duration_ms, &annotations)
+            .await
+            .expect("store exact marker");
+        let destinations = stored_marker_destinations(
+            store.as_ref(),
+            file,
+            &rendition.plan,
+            rendition.seconds_per_segment,
+        )
+        .await;
+        assert_eq!(destinations.len(), 1);
+        let destination = destinations[0];
+        assert_eq!(destination.end_ms, 400_000);
+        assert!(destination.eligible);
+
+        let frontier = entry_containing(&rendition.plan, 150.0);
+        assert!(destination.target_entry > frontier);
+        rendition.attach_reader("prewarmed", frontier).await;
+        let ledger = rendition.readers.lock().await["prewarmed"]
+            .marker_prewarm
+            .clone();
+        let mut rendering = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        rendering.position_ms = 150_000;
+        rendering.buffered_from_ms = Some(145_000);
+        rendering.buffered_through_ms = 170_000;
+        assert!(apply_marker_prewarm_control(
+            &rendition,
+            "prewarmed",
+            7,
+            &rendering,
+            &destinations,
+        )
+        .await
+        .is_none());
+        assert_eq!(
+            ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .records
+                .len(),
+            1,
+            "the approaching stored marker registers one bounded request"
+        );
+
+        let ledgers = vec![Arc::clone(&ledger)];
+        let mut manifest = rendition.manifest.lock().await;
+        let empty_position = Position {
+            produced_through: None,
+            positioned_at: None,
+            seconds_per_segment: rendition.seconds_per_segment,
+            working_set: WorkingSet::default(),
+        };
+        assert_eq!(
+            decide(&manifest, &[Demand::idle_at(frontier)], empty_position),
+            Action::Reposition { to: frontier },
+            "the foreground fixture itself starts at the playhead window"
+        );
+        let foreground = decide_with_marker_prewarm(
+            &manifest,
+            &[Demand::idle_at(frontier)],
+            empty_position,
+            &ledgers,
+        );
+        assert_eq!(
+            foreground.action,
+            Action::Reposition { to: frontier },
+            "ordinary playhead fill wins before speculative work"
+        );
+        assert!(foreground.owners.is_empty());
+        assert!(
+            !ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .records[0]
+                .active
+        );
+
+        let horizon = ((f64::from(AHEAD_HORIZON_SECONDS) / rendition.seconds_per_segment).ceil()
+            as u32)
+            .max(1);
+        let foreground_end = frontier.saturating_add(horizon);
+        assert!(foreground_end < destination.target_entry);
+        for entry in 0..=foreground_end {
+            assert!(manifest.materialize(entry, 1_000, i64::from(entry)));
+        }
+        let filled_position = Position {
+            produced_through: Some(foreground_end),
+            positioned_at: Some(0),
+            seconds_per_segment: rendition.seconds_per_segment,
+            working_set: WorkingSet {
+                used_bytes: 2,
+                budget_bytes: 1,
+                held: false,
+            },
+        };
+        let pressured = decide_with_marker_prewarm(
+            &manifest,
+            &[Demand::idle_at(frontier)],
+            filled_position,
+            &ledgers,
+        );
+        assert!(matches!(
+            pressured.action,
+            Action::Suspend {
+                reason: crate::prodsched::Hold::Ahead { .. },
+                ..
+            }
+        ));
+        assert!(pressured.owners.is_empty());
+        assert!(
+            !ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .records[0]
+                .active,
+            "prewarm never makes room under pressure"
+        );
+
+        let unpressured = Position {
+            working_set: WorkingSet::default(),
+            ..filled_position
+        };
+        let prewarm = decide_with_marker_prewarm(
+            &manifest,
+            &[Demand::idle_at(frontier)],
+            unpressured,
+            &ledgers,
+        );
+        assert_eq!(
+            prewarm.action,
+            Action::Produce {
+                next: foreground_end + 1
+            },
+            "the same bounded scheduler advances toward the target only after foreground is full"
+        );
+        assert_eq!(prewarm.owners.len(), 1);
+        let producer = Producer::Running {
+            produced_through: Some(foreground_end),
+            positioned_at: 0,
+        };
+        update_marker_prewarm_dispatch(
+            &rendition,
+            producer,
+            next_step(producer, prewarm.action),
+            &prewarm,
+        );
+        let mut prewarm_publication = None;
+        for entry in destination.target_entry..=destination.window_end_entry {
+            assert!(manifest.materialize(entry, 1_000, i64::from(entry)));
+            let publication = credit_marker_prewarm_publication(
+                &rendition,
+                rendition.gen_epoch.load(Relaxed),
+                entry,
+            )
+            .await;
+            if entry == destination.target_entry {
+                prewarm_publication = Some(publication);
+            }
+        }
+        let prewarm_publication = prewarm_publication.expect("target publication");
+        let completed = decide_with_marker_prewarm(
+            &manifest,
+            &[Demand::idle_at(frontier)],
+            unpressured,
+            &ledgers,
+        );
+        assert!(
+            completed.owners.is_empty(),
+            "a complete prewarm window stops scheduling but remains correlatable"
+        );
+        let pending = {
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_client_skip(&manifest, &publications)
+        };
+        assert!(
+            pending.matched,
+            "the marker beacon binds the unique approach request"
+        );
+        assert!(
+            pending.outcome.is_none(),
+            "the approach position is not a landing"
+        );
+        drop(manifest);
+
+        let mut seeking = rendering.clone();
+        seeking.position_ms = destination.end_ms;
+        seeking.buffered_from_ms = Some(destination.end_ms);
+        seeking.buffered_through_ms = destination.end_ms;
+        seeking.render_state = crate::playback_control::RenderState::Seeking;
+        seeking.seek_target_ms = Some(destination.end_ms);
+        assert!(
+            apply_marker_prewarm_control(&rendition, "prewarmed", 9, &seeking, &destinations,)
+                .await
+                .is_none(),
+            "an arbitrary exact-target seek is not a marker skip"
+        );
+
+        let mut landed = rendering.clone();
+        landed.position_ms = destination.end_ms;
+        landed.buffered_from_ms = Some(destination.end_ms);
+        landed.buffered_through_ms = destination.end_ms;
+        let hit = apply_marker_prewarm_control(&rendition, "prewarmed", 10, &landed, &destinations)
+            .await
+            .expect("the first settled post-seek snapshot emits the result");
+        assert!(hit.hit);
+        assert_eq!(hit.requested_sequence, Some(7));
+        assert!(hit
+            .produced_range
+            .is_some_and(|range| (range.first..=range.last).contains(&destination.target_entry)));
+        let serve = VodServe::new(
+            base.path().join("marker-telemetry"),
+            Arc::clone(&store) as Arc<dyn Store>,
+        );
+        serve.emit_marker_prewarm(
+            "prewarmed",
+            file.id,
+            SessionKind::Copy {
+                aac: true,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+            hit,
+        );
+        let expected_session = session_log_id("prewarmed");
+        let mut emitted = None;
+        for _ in 0..100 {
+            let events = store
+                .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                    event: Some("marker_prewarm".to_owned()),
+                    limit: 10,
+                    ..plurx_core::domain::PlaybackEventQuery::default()
+                })
+                .await
+                .expect("read marker telemetry");
+            emitted = events
+                .into_iter()
+                .find(|event| event.session_id.as_deref() == Some(expected_session.as_str()));
+            if emitted.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let emitted = emitted.expect("server marker prewarm telemetry persisted");
+        assert_eq!(emitted.detail.as_deref(), Some("hit"));
+        let emitted_extra: serde_json::Value =
+            serde_json::from_str(emitted.extra.as_deref().expect("prewarm proof"))
+                .expect("valid prewarm proof JSON");
+        assert_eq!(
+            emitted_extra["destination_entry"].as_u64(),
+            Some(u64::from(destination.target_entry))
+        );
+        assert_eq!(
+            emitted_extra["produced_range"]["first_entry"].as_u64(),
+            Some(u64::from(destination.target_entry))
+        );
+        let ratio = crate::telemetry::prometheus()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("plurx_playback_marker_prewarm_hit_ratio ")
+                    .and_then(|value| value.parse::<f64>().ok())
+            })
+            .expect("marker prewarm ratio");
+        assert!(ratio > 0.0, "a proven server hit moves the ratio off zero");
+        let duplicate = {
+            let manifest = rendition.manifest.lock().await;
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_client_skip(&manifest, &publications)
+        };
+        assert!(duplicate.matched);
+        assert!(duplicate.outcome.is_none(), "one skip emits only once");
+
+        let mut inside_marker = rendering.clone();
+        inside_marker.position_ms = 250_000;
+
+        // The rendition now contains the landing segment, but it was produced
+        // for another playback. This is the rejected ordinary-buffer
+        // definition made adversarial: the second playback must still miss.
+        rendition.attach_reader("ordinary-buffer", frontier).await;
+        apply_marker_prewarm_control(&rendition, "ordinary-buffer", 1, &rendering, &destinations)
+            .await;
+        apply_marker_prewarm_control(
+            &rendition,
+            "ordinary-buffer",
+            2,
+            &inside_marker,
+            &destinations,
+        )
+        .await;
+        let ordinary_ledger = rendition.readers.lock().await["ordinary-buffer"]
+            .marker_prewarm
+            .clone();
+        let miss = {
+            let manifest = rendition.manifest.lock().await;
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ledger = ordinary_ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let beacon = ledger.note_client_skip(&manifest, &publications);
+            assert!(beacon.matched);
+            assert!(beacon.outcome.is_none());
+            ledger
+                .settle_pending_at(destination.target_entry, &manifest, &publications)
+                .expect("a later landing emits the uncredited miss")
+        };
+        assert!(!miss.hit);
+        assert_eq!(miss.produced_range, None);
+        let duplicate_inside = {
+            let manifest = rendition.manifest.lock().await;
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ordinary_ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_client_skip(&manifest, &publications)
+        };
+        assert!(duplicate_inside.matched);
+        assert!(
+            duplicate_inside.outcome.is_none(),
+            "an inside-marker arm is consumed and cannot emit twice"
+        );
+
+        // Old credit cannot attach to a new ordinary publication of the same
+        // entry after eviction.
+        apply_marker_prewarm_control(&rendition, "prewarmed", 11, &inside_marker, &destinations)
+            .await;
+        let mut manifest = rendition.manifest.lock().await;
+        assert!(manifest.evict(destination.target_entry));
+        assert!(manifest.materialize(destination.target_entry, 2_000, 2));
+        rendition.active_marker_prewarms.store(0, Release);
+        let ordinary_publication = credit_marker_prewarm_publication(
+            &rendition,
+            rendition.gen_epoch.load(Relaxed),
+            destination.target_entry,
+        )
+        .await;
+        assert_ne!(ordinary_publication, prewarm_publication);
+        let rematerialized = {
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ledger = ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let beacon = ledger.note_client_skip(&manifest, &publications);
+            assert!(beacon.matched);
+            assert!(beacon.outcome.is_none());
+            ledger
+                .settle_pending_at(destination.target_entry, &manifest, &publications)
+                .expect("the repeated explicit skip settles")
+        };
+        assert!(!rematerialized.hit, "ordinary regeneration is not prewarm");
+        drop(manifest);
+
+        // A disabled playback never receives another reader's shared
+        // prewarm attribution.
+        let mut manifest = rendition.manifest.lock().await;
+        assert!(manifest.evict(destination.target_entry));
+        drop(manifest);
+        apply_marker_prewarm_control(&rendition, "prewarmed", 12, &rendering, &destinations).await;
+        let mut held = rendering.clone();
+        held.demand = crate::playback_control::PlaybackDemand::Hold;
+        apply_marker_prewarm_control(&rendition, "prewarmed", 13, &held, &destinations).await;
+        rendition.attach_reader("enabled", frontier).await;
+        apply_marker_prewarm_control(&rendition, "enabled", 1, &rendering, &destinations).await;
+        let enabled_ledger = rendition.readers.lock().await["enabled"]
+            .marker_prewarm
+            .clone();
+        let mut manifest = rendition.manifest.lock().await;
+        let enabled = decide_with_marker_prewarm(
+            &manifest,
+            &[Demand::idle_at(frontier)],
+            unpressured,
+            &[Arc::clone(&ledger), Arc::clone(&enabled_ledger)],
+        );
+        assert_eq!(enabled.owners.len(), 1);
+        assert!(!ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .records
+            .iter()
+            .any(|record| record.active));
+        assert!(enabled_ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .records
+            .iter()
+            .any(|record| record.active));
+        update_marker_prewarm_dispatch(
+            &rendition,
+            producer,
+            next_step(producer, enabled.action),
+            &enabled,
+        );
+        assert!(manifest.materialize(destination.target_entry, 3_000, 3));
+        let shared_publication = credit_marker_prewarm_publication(
+            &rendition,
+            rendition.gen_epoch.load(Relaxed),
+            destination.target_entry,
+        )
+        .await;
+        let publications = rendition
+            .publication_versions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            publications[destination.target_entry as usize],
+            Some(shared_publication)
+        );
+        assert!(enabled_ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .records
+            .iter()
+            .any(|record| record
+                .credited_publication(destination.target_entry, Some(shared_publication))));
+        assert!(!ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .records
+            .iter()
+            .any(|record| record
+                .credited_publication(destination.target_entry, Some(shared_publication))));
+    }
+
+    #[tokio::test]
+    async fn marker_prewarm_skip_time_and_request_identity_are_immutable() {
+        let base = crate::test_tempdir().expect("base");
+        let rendition = synthetic_rendition(base.path()).await;
+        let target_entry = entry_containing(&rendition.plan, 200.0);
+        let destination = MarkerDestination {
+            kind: AnnotationKind::Intro,
+            start_ms: 100_000,
+            end_ms: 200_000,
+            target_entry,
+            window_end_entry: target_entry.saturating_add(1),
+            eligible: true,
+        };
+        let frontier = entry_containing(&rendition.plan, 50.0);
+        let mut approach = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        approach.position_ms = 50_000;
+        approach.buffered_from_ms = Some(45_000);
+        approach.buffered_through_ms = 65_000;
+        rendition.attach_reader("race", frontier).await;
+        apply_marker_prewarm_control(&rendition, "race", 1, &approach, &[destination]).await;
+        let ledger = rendition.readers.lock().await["race"]
+            .marker_prewarm
+            .clone();
+
+        let manifest = rendition.manifest.lock().await;
+        let candidate = ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .candidate(&manifest)
+            .expect("approach candidate");
+        let owners = ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .activate(candidate)
+            .into_iter()
+            .map(|record_nonce| MarkerPrewarmOwner {
+                ledger: Arc::clone(&ledger),
+                record_nonce,
+            })
+            .collect::<Vec<_>>();
+        let decision = MarkerPrewarmDecision {
+            action: Action::Reposition { to: target_entry },
+            candidate: Some(candidate),
+            owners,
+        };
+        let producer = Producer::Running {
+            produced_through: None,
+            positioned_at: target_entry,
+        };
+        update_marker_prewarm_dispatch(
+            &rendition,
+            producer,
+            next_step(producer, decision.action),
+            &decision,
+        );
+        let before_publication = {
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_client_skip(&manifest, &publications)
+        };
+        assert!(before_publication.matched);
+        assert!(before_publication.outcome.is_none());
+        drop(manifest);
+
+        let mut manifest = rendition.manifest.lock().await;
+        assert!(manifest.materialize(target_entry, 1_000, 1));
+        credit_marker_prewarm_publication(
+            &rendition,
+            rendition.gen_epoch.load(Relaxed),
+            target_entry,
+        )
+        .await;
+        let after_beacon = {
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .settle_pending_at(target_entry, &manifest, &publications)
+                .expect("landing settles the snapshotted miss")
+        };
+        assert!(
+            !after_beacon.hit,
+            "production after skip time cannot upgrade the miss"
+        );
+
+        // Reusing protocol sequence 1 after a settled request creates a new
+        // ledger nonce. The old in-flight dispatch cannot credit that record.
+        assert!(manifest.evict(target_entry));
+        drop(manifest);
+        apply_marker_prewarm_control(&rendition, "race", 1, &approach, &[destination]).await;
+        let new_nonce = ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .approach_skip
+            .expect("replacement request")
+            .nonce;
+        assert_ne!(new_nonce, decision.owners[0].record_nonce);
+        let mut manifest = rendition.manifest.lock().await;
+        assert!(manifest.materialize(target_entry, 2_000, 2));
+        credit_marker_prewarm_publication(
+            &rendition,
+            rendition.gen_epoch.load(Relaxed),
+            target_entry,
+        )
+        .await;
+        let reused_sequence = {
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(state.note_client_skip(&manifest, &publications).matched);
+            state
+                .settle_pending_at(target_entry, &manifest, &publications)
+                .expect("replacement landing")
+        };
+        assert!(
+            !reused_sequence.hit,
+            "an old dispatch cannot credit a nonce replacement"
+        );
+        assert!(manifest.evict(target_entry));
+        drop(manifest);
+
+        // The opposite network ordering is also deterministic: a Rendering
+        // snapshot can prove landing before the fire-and-forget beacon arrives.
+        rendition.attach_reader("late-beacon", frontier).await;
+        apply_marker_prewarm_control(&rendition, "late-beacon", 1, &approach, &[destination]).await;
+        let late = rendition.readers.lock().await["late-beacon"]
+            .marker_prewarm
+            .clone();
+        let mut manifest = rendition.manifest.lock().await;
+        let candidate = late
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .candidate(&manifest)
+            .expect("late candidate");
+        let owners = late
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .activate(candidate)
+            .into_iter()
+            .map(|record_nonce| MarkerPrewarmOwner {
+                ledger: Arc::clone(&late),
+                record_nonce,
+            })
+            .collect();
+        let decision = MarkerPrewarmDecision {
+            action: Action::Reposition { to: target_entry },
+            candidate: Some(candidate),
+            owners,
+        };
+        update_marker_prewarm_dispatch(
+            &rendition,
+            producer,
+            next_step(producer, decision.action),
+            &decision,
+        );
+        assert!(manifest.materialize(target_entry, 3_000, 3));
+        credit_marker_prewarm_publication(
+            &rendition,
+            rendition.gen_epoch.load(Relaxed),
+            target_entry,
+        )
+        .await;
+        drop(manifest);
+        let mut landed = approach.clone();
+        landed.position_ms = destination.end_ms;
+        landed.buffered_from_ms = Some(destination.end_ms);
+        landed.buffered_through_ms = destination.end_ms;
+        assert!(
+            apply_marker_prewarm_control(&rendition, "late-beacon", 2, &landed, &[destination],)
+                .await
+                .is_none(),
+            "landing waits for explicit skip intent"
+        );
+        let late_hit = {
+            let manifest = rendition.manifest.lock().await;
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            late.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_client_skip(&manifest, &publications)
+                .outcome
+                .expect("delayed beacon settles the latched landing")
+        };
+        assert!(late_hit.hit);
+
+        // A natural pass can leave an exact landing waiting for a beacon.
+        // Re-entering the same marker makes that old landing stale; a new
+        // beacon, even if Seeking overtakes it on the control channel, must
+        // wait for the new seek's own landing.
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            assert!(manifest.evict(target_entry));
+        }
+        rendition.attach_reader("rewind", frontier).await;
+        apply_marker_prewarm_control(&rendition, "rewind", 1, &approach, &[destination]).await;
+        let rewind = rendition.readers.lock().await["rewind"]
+            .marker_prewarm
+            .clone();
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            let candidate = rewind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .candidate(&manifest)
+                .expect("rewind candidate");
+            let owners = rewind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .activate(candidate)
+                .into_iter()
+                .map(|record_nonce| MarkerPrewarmOwner {
+                    ledger: Arc::clone(&rewind),
+                    record_nonce,
+                })
+                .collect();
+            let rewind_decision = MarkerPrewarmDecision {
+                action: Action::Reposition { to: target_entry },
+                candidate: Some(candidate),
+                owners,
+            };
+            update_marker_prewarm_dispatch(
+                &rendition,
+                producer,
+                next_step(producer, rewind_decision.action),
+                &rewind_decision,
+            );
+            assert!(manifest.materialize(target_entry, 4_000, 4));
+            credit_marker_prewarm_publication(
+                &rendition,
+                rendition.gen_epoch.load(Relaxed),
+                target_entry,
+            )
+            .await;
+        }
+        assert!(
+            apply_marker_prewarm_control(&rendition, "rewind", 2, &landed, &[destination])
+                .await
+                .is_none(),
+            "a natural traversal waits for an explicit marker beacon"
+        );
+        assert!(rewind
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .awaiting_beacon
+            .is_some());
+        assert!(
+            apply_marker_prewarm_control(&rendition, "rewind", 3, &landed, &[destination])
+                .await
+                .is_none()
+        );
+        assert!(
+            rewind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .awaiting_beacon
+                .is_none(),
+            "a landing-first reorder latch expires at the next accepted control"
+        );
+
+        let mut reentered = approach.clone();
+        reentered.position_ms = destination.start_ms;
+        apply_marker_prewarm_control(&rendition, "rewind", 4, &reentered, &[destination]).await;
+        {
+            let state = rewind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                state.awaiting_beacon.is_none(),
+                "re-entry invalidates the old traversal's landing"
+            );
+            assert!(state.armed_skip.is_some());
+        }
+        let mut held_before_beacon = reentered.clone();
+        held_before_beacon.demand = crate::playback_control::PlaybackDemand::Hold;
+        held_before_beacon.playback_rate = 0.0;
+        apply_marker_prewarm_control(&rendition, "rewind", 5, &held_before_beacon, &[destination])
+            .await;
+        assert!(
+            rewind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .armed_skip
+                .is_some(),
+            "a pause disables speculation without erasing skip correlation"
+        );
+
+        let mut seeking_first = held_before_beacon.clone();
+        seeking_first.render_state = crate::playback_control::RenderState::Seeking;
+        seeking_first.seek_target_ms = Some(destination.end_ms);
+        apply_marker_prewarm_control(&rendition, "rewind", 6, &seeking_first, &[destination]).await;
+        let reordered_beacon = {
+            let manifest = rendition.manifest.lock().await;
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            rewind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_client_skip(&manifest, &publications)
+        };
+        assert!(reordered_beacon.matched);
+        assert!(
+            reordered_beacon.outcome.is_none(),
+            "Seeking cannot turn the previous traversal into an immediate hit"
+        );
+        let reordered_hit =
+            apply_marker_prewarm_control(&rendition, "rewind", 7, &landed, &[destination])
+                .await
+                .expect("the new skip settles only at its new landing");
+        assert!(reordered_hit.hit);
+
+        apply_marker_prewarm_control(&rendition, "rewind", 8, &held_before_beacon, &[destination])
+            .await;
+        let held_replay = {
+            let manifest = rendition.manifest.lock().await;
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            rewind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_client_skip(&manifest, &publications)
+        };
+        assert!(held_replay.matched);
+        assert!(held_replay.outcome.is_none());
+        let held_replay_miss =
+            apply_marker_prewarm_control(&rendition, "rewind", 9, &landed, &[destination])
+                .await
+                .expect("a held replay still emits one authoritative result");
+        assert!(
+            !held_replay_miss.hit,
+            "a replay that could not schedule new prewarm is a miss"
+        );
+
+        let second = MarkerDestination {
+            kind: AnnotationKind::Credits,
+            start_ms: 250_000,
+            end_ms: 300_000,
+            target_entry: entry_containing(&rendition.plan, 300.0),
+            window_end_entry: entry_containing(&rendition.plan, 300.0).saturating_add(1),
+            eligible: true,
+        };
+        let mut second_approach = approach.clone();
+        second_approach.position_ms = 220_000;
+        apply_marker_prewarm_control(
+            &rendition,
+            "late-beacon",
+            3,
+            &second_approach,
+            &[destination, second],
+        )
+        .await;
+        {
+            let manifest = rendition.manifest.lock().await;
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let second_beacon = late
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_client_skip(&manifest, &publications);
+            assert!(second_beacon.matched, "a later marker is not a duplicate");
+            assert!(second_beacon.outcome.is_none());
+        }
+        let mut second_landing = second_approach.clone();
+        second_landing.position_ms = second.end_ms;
+        second_landing.buffered_from_ms = Some(second.end_ms);
+        second_landing.buffered_through_ms = second.end_ms;
+        let second_miss = apply_marker_prewarm_control(
+            &rendition,
+            "late-beacon",
+            4,
+            &second_landing,
+            &[destination, second],
+        )
+        .await
+        .expect("the second marker emits independently");
+        assert!(!second_miss.hit);
+        assert_eq!(second_miss.requested_sequence, Some(3));
+
+        // An abandoned first seek cannot reserve the one sessionless beacon
+        // slot forever. Reaching a different exact marker opportunity cancels
+        // that stale pending request and lets the later marker settle.
+        apply_marker_prewarm_control(
+            &rendition,
+            "late-beacon",
+            5,
+            &approach,
+            &[destination, second],
+        )
+        .await;
+        {
+            let manifest = rendition.manifest.lock().await;
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let first_abandoned = late
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_client_skip(&manifest, &publications);
+            assert!(first_abandoned.matched);
+            assert!(first_abandoned.outcome.is_none());
+        }
+        apply_marker_prewarm_control(
+            &rendition,
+            "late-beacon",
+            6,
+            &second_approach,
+            &[destination, second],
+        )
+        .await;
+        {
+            let manifest = rendition.manifest.lock().await;
+            let publications = rendition
+                .publication_versions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let later_beacon = late
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .note_client_skip(&manifest, &publications);
+            assert!(later_beacon.matched);
+            assert!(
+                later_beacon.outcome.is_none(),
+                "marker B replaces marker A's abandoned pending seek"
+            );
+        }
+        let later_landing = apply_marker_prewarm_control(
+            &rendition,
+            "late-beacon",
+            7,
+            &second_landing,
+            &[destination, second],
+        )
+        .await
+        .expect("marker B settles after marker A was abandoned");
+        assert!(!later_landing.hit);
+        assert_eq!(later_landing.requested_sequence, Some(6));
+
+        // Publishing the speculative window endpoint exhausts attribution,
+        // but the producer-origin fence survives until the old generation is
+        // physically retired.
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            if manifest
+                .state(destination.window_end_entry)
+                .is_some_and(SegState::is_materialized)
+            {
+                assert!(manifest.evict(destination.window_end_entry));
+            }
+            assert!(manifest.materialize(destination.window_end_entry, 5_000, 5));
+        }
+        let old_epoch = rendition.gen_epoch.load(Relaxed);
+        credit_marker_prewarm_publication(&rendition, old_epoch, destination.window_end_entry)
+            .await;
+        assert!(rendition
+            .marker_prewarm_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none());
+        assert_eq!(rendition.active_marker_prewarms.load(Acquire), 0);
+        assert_eq!(
+            rendition.marker_prewarm_generation.load(Acquire),
+            old_epoch.saturating_add(1)
+        );
+        assert!(fence_marker_prewarm_before_room(
+            &rendition,
+            producer,
+            Step::MakeRoom { wanted: 1 },
+        ));
+        assert_eq!(rendition.gen_epoch.load(Relaxed), old_epoch + 1);
+        assert_eq!(rendition.active_marker_prewarms.load(Acquire), 0);
+        assert!(rendition
+            .marker_prewarm_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none());
+
+        // Once real playhead demand adopts that same process, it is no longer
+        // speculative and a later capacity pass must not kill it.
+        let current_epoch = rendition.gen_epoch.load(Relaxed);
+        rendition
+            .marker_prewarm_generation
+            .store(current_epoch.saturating_add(1), Release);
+        let stale_owner = Arc::new(StdMutex::new(MarkerPrewarmLedger::default()));
+        {
+            let mut state = stale_owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.records.push(MarkerPrewarmRecord {
+                destination,
+                requested_sequence: 10,
+                nonce: 1,
+                schedulable: false,
+                active: true,
+                settled: false,
+                produced: Vec::new(),
+            });
+        }
+        *rendition
+            .marker_prewarm_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(MarkerPrewarmDispatch {
+            producer_epoch: current_epoch,
+            candidate: MarkerPrewarmCandidate {
+                target_entry,
+                window_end_entry: target_entry,
+                target_materialized: false,
+            },
+            owners: vec![MarkerPrewarmOwner {
+                ledger: Arc::clone(&stale_owner),
+                record_nonce: 1,
+            }],
+        });
+        rendition.active_marker_prewarms.store(1, Release);
+        let stopped = Producer::Stopped {
+            produced_through: Some(target_entry.saturating_sub(1)),
+            positioned_at: target_entry,
+            reason: crate::prodsched::Hold::Ahead { horizon: 1 },
+        };
+        let foreground = MarkerPrewarmDecision {
+            action: Action::Produce { next: target_entry },
+            candidate: None,
+            owners: Vec::new(),
+        };
+        let resume = next_step(stopped, foreground.action);
+        assert_eq!(resume, Step::Resume);
+        update_marker_prewarm_dispatch(&rendition, stopped, resume, &foreground);
+        assert_eq!(rendition.marker_prewarm_generation.load(Acquire), 0);
+        assert_eq!(rendition.active_marker_prewarms.load(Acquire), 0);
+        assert!(rendition
+            .marker_prewarm_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none());
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            if manifest
+                .state(target_entry)
+                .is_some_and(SegState::is_materialized)
+            {
+                assert!(manifest.evict(target_entry));
+            }
+            assert!(manifest.materialize(target_entry, 6_000, 6));
+        }
+        credit_marker_prewarm_publication(&rendition, current_epoch, target_entry).await;
+        assert!(
+            stale_owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .records[0]
+                .produced
+                .is_empty(),
+            "foreground publication cannot inherit stale prewarm owners"
+        );
+        assert!(!fence_marker_prewarm_before_room(
+            &rendition,
+            Producer::Running {
+                produced_through: Some(target_entry),
+                positioned_at: target_entry,
+            },
+            Step::MakeRoom { wanted: 1 },
+        ));
+
+        // With no foreground owner and no remaining attribution, the same
+        // ahead decision retires speculative ffmpeg instead of parking it.
+        rendition
+            .marker_prewarm_generation
+            .store(current_epoch.saturating_add(1), Release);
+        let running = Producer::Running {
+            produced_through: Some(target_entry),
+            positioned_at: target_entry,
+        };
+        let ahead = MarkerPrewarmDecision {
+            action: Action::Suspend {
+                produced_through: target_entry,
+                reason: crate::prodsched::Hold::Ahead { horizon: 1 },
+            },
+            candidate: None,
+            owners: Vec::new(),
+        };
+        assert!(matches!(
+            retire_completed_marker_prewarm(
+                &rendition,
+                running,
+                &ahead,
+                next_step(running, ahead.action),
+            ),
+            Step::Terminate {
+                why: Termination::Idle
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn marker_prewarm_placeholder_correlates_without_a_client_session_id() {
+        let base = crate::test_tempdir().expect("base");
+        let store: Arc<dyn Store> =
+            Arc::new(SqliteStore::open_in_memory().expect("in-memory store"));
+        let serve = VodServe::new(base.path().join("serve"), store);
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(
+            &serve,
+            "marker-client",
+            Arc::clone(&rendition),
+            Instant::now(),
+        )
+        .await;
+
+        let target_entry = entry_containing(&rendition.plan, 200.0);
+        let destination = MarkerDestination {
+            kind: AnnotationKind::Intro,
+            start_ms: 100_000,
+            end_ms: 200_000,
+            target_entry,
+            window_end_entry: target_entry.saturating_add(1),
+            eligible: true,
+        };
+        let mut inside = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Apple,
+        );
+        inside.position_ms = 50_000;
+        inside.buffered_from_ms = Some(45_000);
+        inside.buffered_through_ms = 65_000;
+        apply_marker_prewarm_control(&rendition, "marker-client", 1, &inside, &[destination]).await;
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let session = sessions.get_mut("marker-client").expect("session");
+            session.marker_destinations = vec![destination];
+            session.last_control_snapshot = Some(inside);
+        }
+
+        insert_control_session(
+            &serve,
+            "same-file-unarmed",
+            Arc::clone(&rendition),
+            Instant::now(),
+        )
+        .await;
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let ended = sessions
+                .get_mut("same-file-unarmed")
+                .expect("second session");
+            ended.kind = SessionKind::Transcode { height: 720 };
+            ended.rendition = None;
+            ended.tombstone = Some(Terminal::Deleted);
+        }
+        assert!(
+            !serve
+                .consume_marker_prewarm_placeholder(1, rendition.recipe.file.id, "remux")
+                .await,
+            "method filtering cannot hide another same-file VOD candidate"
+        );
+        serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .remove("same-file-unarmed");
+
+        assert!(
+            !serve
+                .consume_marker_prewarm_placeholder(1, rendition.recipe.file.id, "transcode",)
+                .await,
+            "a transcode beacon cannot consume a copy/remux ledger"
+        );
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            sessions.get_mut("marker-client").expect("session").kind =
+                SessionKind::Transcode { height: 720 };
+        }
+        assert!(
+            !serve
+                .consume_marker_prewarm_placeholder(1, rendition.recipe.file.id, "remux")
+                .await,
+            "a remux beacon cannot consume a transcode ledger"
+        );
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            sessions.get_mut("marker-client").expect("session").kind = SessionKind::Copy {
+                aac: true,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            };
+        }
+
+        assert!(
+            serve
+                .consume_marker_prewarm_placeholder(1, rendition.recipe.file.id, "remux")
+                .await,
+            "an early auto-skip beacon binds the unique approach request without a session id"
+        );
+        assert!(
+            !serve
+                .consume_marker_prewarm_placeholder(1, rendition.recipe.file.id, "direct_play")
+                .await,
+            "direct play never consumes its client-owned miss"
+        );
     }
 
     async fn create(
@@ -6825,6 +9279,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -6904,6 +9360,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -6946,6 +9404,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(replacement_touch),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -7018,7 +9478,7 @@ mod tests {
                 .lock()
                 .await
                 .get("sess-a")
-                .copied()
+                .cloned()
                 .expect("replacement reader")
                 .last_served,
             None,
@@ -7524,6 +9984,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -7599,13 +10061,9 @@ mod tests {
         // The reader just fetched segment 5 — exactly the window the driver
         // would build for it.
         let seconds_per_segment = plan.duration_ticks() as f64 / 16_000.0 / plan.len() as f64;
-        let window = reader_window(
-            Reader {
-                frontier: 6,
-                last_served: Some(5),
-            },
-            seconds_per_segment,
-        );
+        let mut reader = Reader::new(6);
+        reader.last_served = Some(5);
+        let window = reader_window(&reader, seconds_per_segment);
         let freed = dir
             .make_room(&mut manifest, &[window], u64::MAX)
             .await
@@ -7630,13 +10088,9 @@ mod tests {
         // A forward seek's blocked GET moves the frontier past the playhead;
         // the window's high edge must follow it, or `make_room` evicts the
         // just-materialized seek target before the waiter opens it.
-        let seeked = reader_window(
-            Reader {
-                frontier: 30,
-                last_served: Some(5),
-            },
-            seconds_per_segment,
-        );
+        let mut seeked_reader = Reader::new(30);
+        seeked_reader.last_served = Some(5);
+        let seeked = reader_window(&seeked_reader, seconds_per_segment);
         assert!(
             seeked.covers(30),
             "the blocked seek target sits inside its own reader's window"

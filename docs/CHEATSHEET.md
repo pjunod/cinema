@@ -193,5 +193,5 @@ Offline global/per-user quota settings and accounting are in
 | `Esc` | Close the player (or exit fullscreen first) |
 | ⓘ Stats | Same as `i` |
 | 🔊 Audio / 💬 Subtitles | Track menus (shown when there's more than one) |
-| Skip Intro / Skip Credits | Appear when playback enters a marked region |
-| Preferences (◐) → Playback | Auto-skip intro & credits toggle |
+| Skip Intro / Skip Credits / Skip Preview | Appear when playback enters a marked region |
+| Preferences (◐) → Playback | Auto-skip intro & credits toggle (never previews) |

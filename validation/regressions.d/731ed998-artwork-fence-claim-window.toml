@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["731ed998"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The membership lifecycle drill demanded that exactly the leader win the artwork repair fence in one shot, but claim_artwork_source_repair declines with an explicit fence: None whenever the leader's quorum acknowledgement is older than one second at the claim instant, and on a loaded host that instant can fall in a scheduling gap the drill's own successor proof already tolerates for its read-only probes. The correction retries only that classified no-op — bounded well below one repair lease so it can absorb a freshness gap but can never complete a fresh receiver-local observation window — while metrics still show the same quorum-acknowledged leader in the same term, and both exclusivity bails now carry the node's raft state and the durable repair row. The property the drill proves is unchanged and still executed by the harness lane cluster-auth runs: followers are asked exactly once and must lose, the winning claim still costs exactly one Raft entry (the retried declines precede the generation CAS at these sites), and a None that survives the bounded window still fails the drill."

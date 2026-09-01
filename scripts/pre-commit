@@ -8,7 +8,7 @@
 # complete release suite.
 set -e
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 
 if [ "${PLURX_EFFORT_COMMIT:-}" = "1" ]; then

@@ -244,16 +244,36 @@ impl PlaybackMetrics {
         );
         let hits = self.marker_prewarm[0].load(Ordering::Relaxed);
         let total = hits.saturating_add(self.marker_prewarm[1].load(Ordering::Relaxed));
-        out.push_str(&format!(
-            "# HELP plurx_playback_marker_prewarm_hit_ratio Skip-destination prewarm hit rate.\n\
-             # TYPE plurx_playback_marker_prewarm_hit_ratio gauge\n\
-             plurx_playback_marker_prewarm_hit_ratio {:.6}\n",
-            if total == 0 {
-                0.0
-            } else {
+        // Publish the ratio only once a hit has been observed.
+        //
+        // The gauge divides hits by skips, and no first-party client can
+        // currently produce a hit: prewarming a marker destination is
+        // unbuilt, so every callsite reports a miss and reports it truthfully.
+        // Emitting the quotient anyway published a permanent 0.000000, which
+        // is the shape of a feature that is failing rather than one that does
+        // not exist — and an operator cannot tell those apart from the number.
+        //
+        // Two readings collapse into that one value, which is the reason a
+        // help string could not fix this: `hits == 0` because nothing prewarms,
+        // and `total == 0` because this node has served no marker skip since
+        // boot. A quiet node and a missing feature are different facts and
+        // neither is a rate.
+        //
+        // Suppression is not "hiding a zero". The counters above carry every
+        // miss, so nothing is lost and the quotient stays derivable by anyone
+        // who wants it; what is withheld is a server-side claim to have
+        // measured a rate it has no numerator for. The gauge appears the first
+        // time a hit is recorded, which is exactly when it starts meaning
+        // something, and a genuine 0% then publishes normally.
+        if hits > 0 {
+            out.push_str(&format!(
+                "# HELP plurx_playback_marker_prewarm_hit_ratio Skip-destination prewarm hit rate. \
+                 Absent until a hit is observed, because a rate with no possible numerator is not a measurement.\n\
+                 # TYPE plurx_playback_marker_prewarm_hit_ratio gauge\n\
+                 plurx_playback_marker_prewarm_hit_ratio {:.6}\n",
                 hits as f64 / total as f64
-            }
-        ));
+            ));
+        }
         out
     }
 }
@@ -454,6 +474,12 @@ mod tests {
                 ..PlaybackEvent::default()
             });
         }
+        metrics.record(&PlaybackEvent {
+            event: "marker_prewarm".to_owned(),
+            detail: Some("miss".to_owned()),
+            method: Some("direct_play".to_owned()),
+            ..PlaybackEvent::default()
+        });
         let text = metrics.render();
         assert!(text.contains("plurx_ttff_ms_count{method=\"remux\"} 1"));
         assert!(text.contains("plurx_ttff_ms_bucket{method=\"remux\",le=\"1000\"} 1"));
@@ -467,11 +493,51 @@ mod tests {
         assert!(text.contains("plurx_playback_marker_actions_total{action=\"automatic_skip\"} 1"));
         assert!(text.contains("plurx_playback_marker_actions_total{action=\"undo_seek_back\"} 1"));
         assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"hit\"} 1"));
-        assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"miss\"} 1"));
-        assert!(text.contains("plurx_playback_marker_prewarm_hit_ratio 0.500000"));
+        assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"miss\"} 2"));
+        assert!(text.contains("plurx_playback_marker_prewarm_hit_ratio 0.333333"));
         assert!(!text.contains("title="));
         assert!(!text.contains("user="));
         assert!(!text.contains("path="));
+    }
+
+    #[test]
+    fn the_prewarm_ratio_stays_absent_until_a_hit_is_observed() {
+        // This is the fleet's real state. Prewarming a marker destination is
+        // unbuilt, so every callsite on every client reports a miss and does
+        // so truthfully -- and a published quotient would sit at 0.000000
+        // forever, which is indistinguishable from a feature that is failing.
+        // The counters still carry every miss, so the suppression withholds a
+        // claim rather than data.
+        let metrics = PlaybackMetrics::new();
+        for _ in 0..3 {
+            metrics.record(&PlaybackEvent {
+                event: "marker_prewarm".into(),
+                detail: Some("miss".into()),
+                ..PlaybackEvent::default()
+            });
+        }
+        let text = metrics.render();
+        assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"miss\"} 3"));
+        assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"hit\"} 0"));
+        assert!(!text.contains("plurx_playback_marker_prewarm_hit_ratio"));
+
+        // A quiet node is the other reading the single value conflated: no
+        // marker skip since boot is not a rate of zero either.
+        let idle = PlaybackMetrics::new();
+        assert!(!idle
+            .render()
+            .contains("plurx_playback_marker_prewarm_hit_ratio"));
+
+        // The first hit is what makes the gauge mean something, and a genuine
+        // zero rate publishes normally once one exists.
+        metrics.record(&PlaybackEvent {
+            event: "marker_prewarm".into(),
+            detail: Some("hit".into()),
+            ..PlaybackEvent::default()
+        });
+        assert!(metrics
+            .render()
+            .contains("plurx_playback_marker_prewarm_hit_ratio 0.250000"));
     }
 
     #[test]

@@ -15,8 +15,9 @@ and seek work, so it lives in its own plan. It depends on nothing in
 that plan's pieces make this one better when they exist: M3's settled-target
 latch (prewarm work triggered for a seek the client has already abandoned is
 exactly the obsolete production that latch cancels) and M2's window
-extraction (the subtitle half of warming a destination). Build this after
-M3 lands, or accept that its production joins the latch retroactively.
+extraction (the subtitle half of warming a destination). M3 merged as
+[#754](https://github.com/pjunod/plurx/pull/754) on 2026-09-01, so the latch
+exists to join.
 
 Line numbers are from `e1876cce`; re-verify against the tree at build time.
 
@@ -29,11 +30,14 @@ clients — but every prewarm callsite emits a hard-coded `"miss"`
 (`crates/plurxd/src/web/index.html`, `PlayerController.swift`,
 `PlayerScreen.kt`), no `"hit"` producer exists anywhere in the product, and
 `plurx_playback_marker_prewarm_hit_ratio`
-([`telemetry.rs:239–248`](../crates/plurxd/src/telemetry.rs) — hits over
-hits+misses from `plurx_playback_marker_prewarm_total`) is therefore pinned
-at `0.000000` permanently. On a dashboard that reads as a broken feature
-rather than an absent one; the pinned zero is at least honest, and this plan
-exists to make it move for the right reason.
+([`telemetry.rs`](../crates/plurxd/src/telemetry.rs) — hits over hits+misses
+from `plurx_playback_marker_prewarm_total`) therefore had no possible
+numerator. [#738](https://github.com/pjunod/plurx/pull/738) (2026-09-01)
+stopped the dashboard lie by withholding the ratio entirely until a hit is
+observed — "a rate with no possible numerator is not a measurement" — so
+the metric is now absent rather than pinned at zero. The consumer is still
+owed; this plan builds it, and its first honest hit is what makes the ratio
+publish at all.
 
 What the actor already holds, per control exchange
 ([`playback_control.rs`](../crates/plurxd/src/playback_control.rs),
@@ -104,8 +108,9 @@ One milestone; the feature is small once its inputs are honest.
 was prewarmed emits `hit`; one whose destination was not emits `miss`;
 direct play emits `miss`; prewarm production never runs for a target the
 latch has settled away from (once M3 exists); and
-`plurx_playback_marker_prewarm_hit_ratio` moves off `0.000000` for the
-first time for the right reason.
+`plurx_playback_marker_prewarm_hit_ratio` publishes for the first time —
+#738 keeps it absent until a real hit exists, so its very presence is the
+acceptance signal.
 
 ```bash
 cargo test -p plurxd prewarm

@@ -533,6 +533,16 @@ pub struct CreateSession {
     pub playback_id: String,
     /// Optional idempotency key for this one attempt.
     pub request_id: Option<String>,
+    /// The control exchange this restart was decided from, when the client has
+    /// one. A seek storm asks for a session per destination; the sequence is
+    /// what orders those asks against the destination the client has since
+    /// settled on, so a restart the viewer has already scrolled past can be
+    /// skipped rather than produced and thrown away.
+    ///
+    /// Absent means "do the work", which is what every client did before this
+    /// field existed and what a first play still means -- there is no earlier
+    /// exchange to be stale against.
+    pub control_sequence: Option<u64>,
     /// Exact predecessor for a typed recovery. Both fields are required for a
     /// stall reopen, which also requires `request_id`; ordinary seeks and
     /// track changes omit them.
@@ -654,6 +664,7 @@ impl CreateSession {
             file_id,
             playback_id: self.playback_id,
             request_id: self.request_id,
+            control_sequence: self.control_sequence,
             automatic,
             previous_session_id: self.previous_session_id,
             reopen_reason: self.reopen_reason,
@@ -1486,6 +1497,37 @@ pub async fn create(
             "media_session_handoff_pending",
             "the current session is still completing its predecessor handoff; retry shortly",
         ));
+    }
+    // A seek storm asks for one session per destination. The control actor
+    // already knows which destination the client settled on, and the sequence
+    // on this request says where in that ordering this ask belongs -- so a
+    // restart for a target the viewer has since scrolled past can be refused
+    // before it spawns a producer.
+    //
+    // Refused, not deferred: waiting to see whether a newer exchange arrives
+    // would add latency to every honest seek, and the ordering is already
+    // decided. Only a strictly later exchange naming a different destination
+    // supersedes, so the honest seek arriving next is never the one skipped.
+    if let (Some(control_sequence), Some(predecessor)) =
+        (request.control_sequence, activation_predecessor.as_ref())
+    {
+        let requested_anchor_ms = if request.start_seconds.is_finite() {
+            (request.start_seconds.max(0.0) * 1_000.0) as i64
+        } else {
+            0
+        };
+        if state
+            .transcode
+            .settled_target_for_session(&predecessor.session_id)
+            .await
+            .is_some_and(|settled| settled.supersedes(control_sequence, requested_anchor_ms))
+        {
+            return Err(ApiError::typed(
+                StatusCode::CONFLICT,
+                "playback_target_superseded",
+                "a later seek replaced this destination, so no session was started for it",
+            ));
+        }
     }
     let expected_predecessor_incarnation_id = activation_predecessor
         .as_ref()
@@ -3455,6 +3497,9 @@ pub async fn start(
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
 ) -> Result<Json<StartResponse>, ApiError> {
     let legacy = CreateSession {
+        // No control exchange precedes a legacy start, so there is no
+        // ordering for it to be stale against.
+        control_sequence: None,
         playback_id: format!("legacy:{}:{id}", user.username),
         request_id: None,
         previous_session_id: None,
@@ -3563,6 +3608,48 @@ struct RetainedTerminalResponse {
     response: crate::playback_control::ControlResponseV1,
 }
 
+/// Resolve the selected native text track's cache state for the control
+/// response.
+///
+/// Gated on `Native` before anything is read: `Off`, `Overlay` and `Burn` name
+/// no sidecar, so the common case costs one enum comparison and no store hit.
+/// Nothing here starts an extraction — a readiness probe that did would make
+/// every control exchange a reason to spawn ffmpeg.
+async fn subtitle_track_cache(
+    state: &AppState,
+    recipe: &RemoteStartRequest,
+    selection: &crate::playback_control::SubtitleSelection,
+) -> Option<crate::playback_control::SubtitleTrackCache> {
+    use crate::playback_control::{SubtitleMode, SubtitleTrackCache};
+
+    if !matches!(selection.mode, SubtitleMode::Native) {
+        return None;
+    }
+    let index = selection.track?;
+    let file = state.store.get_file(recipe.request.file_id).await.ok()??;
+    // A track that is not there, or is there as a bitmap, will never produce a
+    // sidecar however long the client waits. Saying `unavailable` is the whole
+    // point of distinguishing it from `warming`.
+    let Some(track) = usize::try_from(index)
+        .ok()
+        .and_then(|i| file.subtitle_streams.get(i))
+    else {
+        return Some(SubtitleTrackCache::Unavailable);
+    };
+    if !plurx_core::tracks::is_native_text_subtitle(&track.codec) {
+        return Some(SubtitleTrackCache::Unavailable);
+    }
+    Some(
+        match crate::subtitles::sidecar_state(&state.subs_dir, &file, index).await {
+            crate::subtitles::SidecarState::Ready => SubtitleTrackCache::Ready,
+            crate::subtitles::SidecarState::Failed => SubtitleTrackCache::Unavailable,
+            crate::subtitles::SidecarState::Warming | crate::subtitles::SidecarState::Absent => {
+                SubtitleTrackCache::Warming
+            }
+        },
+    )
+}
+
 fn local_control_response(
     route: &MediaSessionRoute,
     start: &StartResponse,
@@ -3570,6 +3657,7 @@ fn local_control_response(
     request: &crate::playback_control::ControlRequestV1,
     result: &crate::playback_control::LocalControlResult,
     server_time_unix_ms: i64,
+    subtitle_readiness: Option<String>,
 ) -> crate::playback_control::ControlResponseV1 {
     let owner_epoch = u64::try_from(route.owner_epoch).unwrap_or_default();
     let response = crate::playback_control::ControlResponseV1 {
@@ -3593,6 +3681,7 @@ fn local_control_response(
             &route.owner_node_id,
             owner_epoch,
             route.media_origin_ms,
+            subtitle_readiness,
         ),
         effective_selection: crate::playback_control::EffectiveSelection::from_recipe(
             recipe,
@@ -3773,6 +3862,11 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
             &self.request,
             result,
             server_time_unix_ms,
+            // The session is ending. Subtitle readiness is a fact about a
+            // stream that will keep serving segments, and this one will not;
+            // absent is the honest answer, and this trait method cannot await
+            // a probe anyway.
+            None,
         );
         let response_json = serde_json::to_string(&RetainedTerminalResponse {
             platform: result.platform,
@@ -4475,7 +4569,18 @@ async fn control_local_inner(
             }
         }
     } else {
-        local_control_response(route, &start, &recipe, &request, &result, unix_ms())
+        local_control_response(
+            route,
+            &start,
+            &recipe,
+            &request,
+            &result,
+            unix_ms(),
+            crate::playback_control::subtitle_readiness_value(
+                &request.selection.subtitle,
+                subtitle_track_cache(state, &recipe, &request.selection.subtitle).await,
+            ),
+        )
     };
     let outcome = match result.disposition {
         crate::playback_control::ControlDisposition::Accepted => {
@@ -6069,28 +6174,109 @@ async fn subtitle_vtt_local_before(
             (bytes, "private, max-age=3600")
         }
         Ok(None) | Err(_) => {
-            // AVPlayer gives a subtitle segment only about two seconds to
-            // answer and blocks the muxed video while it waits. Extracting an
-            // embedded text track is a full-source scan that can legitimately
-            // take minutes on a large MKV over a NAS, so awaiting `ensure_vtt`
-            // here turns healthy Dolby Vision, HDR and H.264 streams into a
-            // black screen. Publish a syntactically valid empty segment now
-            // and let the deduplicated cache extraction finish independently.
-            // `no-store` lets a player retry this window once the sidecar is
-            // ready instead of pinning the temporary empty answer.
-            tokio::time::timeout_at(
+            // The whole-track sidecar is not there yet. Before falling back to
+            // an empty segment, ask whether a bounded window covering the
+            // position this segment actually wants is available or worth
+            // starting.
+            //
+            // Cue times in a sidecar are absolute source time and
+            // `segment_start` is session-local, so the demand position is the
+            // session's media origin plus this segment's start — the same
+            // mapping `slice_webvtt` undoes below.
+            let demand_seconds = (context.media_origin_seconds + segment_start).max(0.0) as i64;
+            let anchor = crate::subtitles::window_anchor_seconds(
+                demand_seconds,
+                crate::subtitles::WINDOW_SECONDS_DEFAULT,
+            );
+            let window_bytes = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(publication_deadline),
-                crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+                crate::subtitles::read_cached_window(
+                    &state.subs_dir,
+                    &file,
+                    index,
+                    anchor,
+                    crate::subtitles::WINDOW_SECONDS_DEFAULT,
+                ),
             )
             .await
             .map_err(|_| response_publication_timeout())?;
-            tracing::debug!(
-                session = %crate::transcode::session_log_id(session),
-                file_id = file.id,
-                index,
-                "serving an empty subtitle segment while its sidecar cache warms"
-            );
-            (b"WEBVTT\n\n".to_vec(), "no-store")
+            if let Ok(Some(bytes)) = window_bytes {
+                // Start the whole-track warm even though this request is
+                // answered. A window is a bridge: it persists on disk across
+                // restarts while the whole-track sidecar may not exist yet, so
+                // returning here without warming would leave a viewer parked
+                // past the first window served by a window forever, with the
+                // authoritative extraction never kicked from this route.
+                tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(publication_deadline),
+                    crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+                )
+                .await
+                .map_err(|_| response_publication_timeout())?;
+                tracing::info!(
+                    session = %crate::transcode::session_log_id(session),
+                    file_id = file.id,
+                    index,
+                    anchor,
+                    "serving a windowed WebVTT subtitle while the whole track warms"
+                );
+                // `no-store`: a window covers this position and not the next
+                // one, and the whole-track sidecar will supersede it. Letting
+                // a player pin these bytes would pin a partial answer.
+                (bytes, "no-store")
+            } else {
+                // AVPlayer gives a subtitle segment only about two seconds to
+                // answer and blocks the muxed video while it waits. Extracting
+                // an embedded text track is a full-source scan that can
+                // legitimately take minutes on a large MKV over a NAS, so
+                // awaiting `ensure_vtt` here turns healthy Dolby Vision, HDR
+                // and H.264 streams into a black screen. Publish a
+                // syntactically valid empty segment now and let the
+                // deduplicated cache extraction finish independently.
+                // `no-store` lets a player retry this window once the sidecar
+                // is ready instead of pinning the temporary empty answer.
+                //
+                // Both warms are started, and neither is awaited. The window
+                // is the bridge over the head of playback; the whole track is
+                // what supersedes it and what every other consumer needs. The
+                // window declines itself past the midpoint of the file, where
+                // it would read the same bytes as the whole track for a
+                // disposable result.
+                // The whole-track warm keeps its original contract, including
+                // that a timeout here fails the request rather than being
+                // swallowed: it is the path every other consumer depends on.
+                tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(publication_deadline),
+                    crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+                )
+                .await
+                .map_err(|_| response_publication_timeout())?;
+                // The window is best effort by construction — it is a bridge,
+                // and the empty segment below is already a correct answer — so
+                // a timeout starting it means "no window", not a failed
+                // request.
+                let windowing = tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(publication_deadline),
+                    crate::subtitles::warm_vtt_window(
+                        &state.subs_dir,
+                        &file,
+                        index,
+                        anchor,
+                        crate::subtitles::WINDOW_SECONDS_DEFAULT,
+                    ),
+                )
+                .await
+                .unwrap_or(false);
+                tracing::debug!(
+                    session = %crate::transcode::session_log_id(session),
+                    file_id = file.id,
+                    index,
+                    anchor,
+                    windowing,
+                    "serving an empty subtitle segment while its sidecar cache warms"
+                );
+                (b"WEBVTT\n\n".to_vec(), "no-store")
+            }
         }
     };
     let response = (
@@ -8619,6 +8805,7 @@ mod tests {
             source_mtime: 1,
             typeless_playlist: true,
             request: crate::transcode::SessionRequest {
+                control_sequence: None,
                 file_id: 1,
                 playback_id: "control-transition".to_owned(),
                 request_id: Some(generation.clone()),
@@ -9236,6 +9423,7 @@ mod tests {
             source_mtime: 1,
             typeless_playlist: true,
             request: crate::transcode::SessionRequest {
+                control_sequence: None,
                 file_id: fixture.file_id(),
                 playback_id: "terminal-cancellation".to_owned(),
                 request_id: Some(generation.clone()),
@@ -9466,6 +9654,7 @@ mod tests {
                 source_mtime: 1,
                 typeless_playlist: true,
                 request: crate::transcode::SessionRequest {
+                    control_sequence: None,
                     file_id: fixture.file_id(),
                     playback_id: format!("terminal-{label}"),
                     request_id: Some(generation.clone()),
@@ -9585,6 +9774,7 @@ mod tests {
                     admitted,
                     producer_decision: None,
                     hold_reason: None,
+                    subtitle_readiness: None,
                     owner_node_hash: "n-0123456789abcdef".to_owned(),
                     owner_epoch: 1,
                 },
@@ -10161,6 +10351,7 @@ mod tests {
         let dir = crate::test_tempdir().expect("state dir");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "guard-lifetime").await;
         let request = crate::transcode::SessionRequest {
+            control_sequence: None,
             file_id: 1,
             playback_id: "guard-lifetime-player".to_owned(),
             request_id: None,
@@ -11888,6 +12079,7 @@ mod tests {
     /// A create body with nothing set, to be spread over.
     fn bare_create() -> CreateSession {
         CreateSession {
+            control_sequence: None,
             playback_id: String::new(),
             request_id: None,
             previous_session_id: None,
@@ -12498,6 +12690,7 @@ mod tests {
     #[test]
     fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
         let request = CreateSession {
+            control_sequence: None,
             playback_id: "player".into(),
             request_id: Some("attempt".into()),
             previous_session_id: None,
@@ -12529,6 +12722,7 @@ mod tests {
     #[test]
     fn bitmap_fallback_still_carries_an_explicit_burn_request() {
         let request = CreateSession {
+            control_sequence: None,
             playback_id: "apple-bitmap".into(),
             request_id: None,
             previous_session_id: None,

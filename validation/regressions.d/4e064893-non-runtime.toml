@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["4e064893"]
+reason = "This commit only corrects a doc comment and a test comment that described the ffmpeg timestamp-base normalization as fixing a live defect when it is a no-op on every build the fleet runs. It changes no runtime behavior."
+ignore = true

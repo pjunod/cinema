@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a7146202"]
+points = ["core.media", "server.api", "cluster.auth", "operations.packaging"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "operations-contract", "resource-bounds", "history-regressions"]
+reason = "Focused worker and scheduler tests pin descriptor-bound tool inputs, exact Profile 8.1 verification, guarded publication, private-anchor retirement, mount-loss refusal, bounded subprocess I/O, and leased tool-independent cleanup."

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["4284f8af"]
+points = ["core.media", "server.api", "operations.packaging"]
+checks = ["rust-gate", "rust-gate-ci", "operations-contract", "history-regressions"]
+reason = "The Rust and operations gates compile the device-identity test hooks on Linux and macOS, preserving exact inode matching while accommodating each platform's dev_t width under warnings-as-errors Clippy."

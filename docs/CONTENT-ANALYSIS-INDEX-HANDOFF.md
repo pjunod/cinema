@@ -436,5 +436,8 @@ These are decisions this document deliberately does not make:
    to `authored` and `manual` only, which needs no threshold at all.
 2. **Retry and backoff ceilings** (§5.5) — settings with safe maximums, chosen
    and tested before enablement.
-3. **Whether `preview` is in scope for M1.** `AnnotationKind` includes it;
-   nothing in the current chapter classifier produces one.
+3. ~~**Whether `preview` is in scope for M1.** `AnnotationKind` includes it;
+   nothing in the current chapter classifier produces one.~~ **Answered
+   2026-09-01:** the chapter classifier produces `preview` (PR #737). A
+   labelled preview ends the credits window rather than starting it, and is
+   offered but never auto-skipped.

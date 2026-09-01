@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["97155a07"]
+points = ["server.api", "web.experience"]
+checks = ["web-static", "resource-bounds", "history-regressions"]
+reason = "The web resource-budget suite caps Dolby Vision ledger hydration at four sequential 256-ID reads, keeps concurrency at one, and renders an explicit not-loaded state beyond 1,024 visible actions."

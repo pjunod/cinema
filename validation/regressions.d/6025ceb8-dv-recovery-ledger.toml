@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6025ceb8"]
+points = ["core.media", "persistence.upgrades", "cluster.auth", "server.api"]
+checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth", "resource-bounds", "history-regressions"]
+reason = "SQLite and three-voter contracts pin the non-cascading guard lifecycle, fenced publication, fail-closed legacy migration/import, coherent bounded projections, and atomic concurrent queue outcomes."

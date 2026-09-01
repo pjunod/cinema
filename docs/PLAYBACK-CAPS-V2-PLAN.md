@@ -1,10 +1,14 @@
 # Playback capabilities v2 — highest deliverable grade, negotiated not guessed
 
-**Status:** building — M0, M1, M2, M3a–M3d, M4, M5a and M6 merged (M5a as
-#688 + #716); M5b in review (#710). M5a's badge remains for the Apple and
-Android clients, and the §7 timeline check remains for nuc4 · **Executes:** fable's rulings of 2026-08-29 on opus's DV-delivery
-findings · **Analysed:** `main` @ `4ba8bb48` · **Written:** 2026-08-29 ·
-**Updated:** 2026-08-31 · **Builder:** opus
+**Status:** building — M0, M1, M2, M3a–M3d, M4, M5a, M5b and M6 merged;
+M5a is #688 + #716; M5b is #710, merged under a documented owner-approved
+capacity exception after the final arm64 QEMU image build exceeded its
+60-minute guard and the promotion gate failed as designed. M5a's badge remains
+for the Apple and Android clients, and the §7 timeline check remains for nuc4 ·
+**Executes:**
+fable's rulings of 2026-08-29 on opus's DV-delivery findings · **Analysed:**
+`main` @ `4ba8bb48` · **Written:** 2026-08-29 · **Updated:** 2026-08-31 ·
+**Builder:** opus
 
 Two handoffs carry what is left of M5a:
 [M5A-CLIENT-BADGE-HANDOFF.md](M5A-CLIENT-BADGE-HANDOFF.md) (the
@@ -536,7 +540,8 @@ dovi_tool info -i RPU.bin --summary
 #    the first access unit overran the 1 MiB probe buffer; issue #3363).
 mkvmerge -o "$OUT.tmp" BL_RPU.p81.hevc --no-video "$SRC"
 # 5. verify BEFORE touching the original: ffprobe reports dv_profile=8,
-#    el_present_flag=0, same duration ±1 frame, same audio track count.
+#    el_present_flag=0, same duration ±1 frame, and identical audio,
+#    subtitle, and chapter counts.
 # 6. commit: rename original → "$SRC.p7.orig" (setting `keep_original`, default
 #    on) or delete it (off), rename "$OUT.tmp" → "$SRC", re-probe the row.
 ```
@@ -576,8 +581,8 @@ The options, with the recommendation marked:
 
 | Dependency | Form | Licence | Buys | Cost / risk |
 |---|---|---|---|---|
-| **`dovi_tool`** (quietvoid) — **M5b** | static binary in the Docker image (GitHub release asset, pinned version + sha256; or `cargo install dovi_tool --locked` in the builder stage) | MIT | the only battle-tested P7→P8.1 RPU converter; `info` gives MEL/FEL; the de-facto tool every DV library workflow uses | +~10 MB image; a boot probe (`dovi_tool --version`) so its absence degrades to "disk conversion off", never a crash |
-| **`mkvtoolnix`** (`mkvmerge`) — **M5b** | `apt-get install mkvtoolnix` | GPL-2 (separate process, fine) | writes the Profile 8 DV configuration block from a raw HEVC stream, which ffmpeg's muxers cannot (verified 2026-08-29: `dovi_rpu` bsf has `strip`/`compression` only and copies the RPU profile header verbatim; `ff_dovi_configure_ext` refuses profiles 4/7) | +~30 MB image; pin ≥ 68 (raw-HEVC RPU detection landed after the MP4-only support in v57; the large-first-frame miss was fixed 2022-07) |
+| **`dovi_tool`** (quietvoid) — **M5b** | 2.3.3 static GitHub assets for amd64/arm64, each checked against its release SHA-256 before install | MIT | the only battle-tested P7→P8.1 RPU converter; `info` gives MEL/FEL; the de-facto tool every DV library workflow uses | +~2 MB archive; a boot probe (`dovi_tool --version`) so its absence degrades to "disk conversion off", never a crash |
+| **`mkvtoolnix`** (`mkvmerge`) — **M5b** | exact Debian Bookworm package `74.0.0-1` | GPL-2 (separate process, fine) | writes the Profile 8 DV configuration block from a raw HEVC stream, which ffmpeg's muxers cannot (verified 2026-08-29: `dovi_rpu` bsf has `strip`/`compression` only and copies the RPU profile header verbatim; `ff_dovi_configure_ext` refuses profiles 4/7) | +~30 MB image; boot probe refuses versions below 68 (raw-HEVC RPU detection landed after the MP4-only support in v57; the large-first-frame miss was fixed 2022-07) |
 | **`dolby_vision` crate** (quietvoid) — **M5a** | Cargo dependency (`dolby_vision = "3"`, default features; pin exact) | MIT | in-process RPU parse/convert — the streaming P7→P8.1 stage with no disk cost; the same code dovi_tool is built on | plurx may have to write the `dvcC` box itself (§4.8 spike decides); a Rust dep, so it rides `make unit` and `cargo audit` like everything else |
 | `libplacebo` (already optional in jellyfin-ffmpeg) | none new | LGPL | higher-quality tone-mapping on Vulkan GPUs; `ToneMap::Libplacebo` exists at `transcode.rs:3596` | unchanged; not on this plan's path |
 | `mediainfo` | apt | BSD-2 | prettier DV strings | nothing ffprobe + dovi_tool don't give; **not recommended** |

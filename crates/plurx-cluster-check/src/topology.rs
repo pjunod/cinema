@@ -26,6 +26,10 @@ pub const TOPOLOGY_CATALOGUE_READ_OPERATIONS: u64 = 256;
 pub const TOPOLOGY_CATALOGUE_READ_CONCURRENCY: u64 = 32;
 pub(crate) const TOPOLOGY_CATALOGUE_TITLE_PREFIX: &str = "Topology Catalogue Read";
 const TOPOLOGY_VALUE_BYTES: usize = 64;
+/// The background class labels a topology write window tolerates - the
+/// membership heartbeat only. Topology nodes hold no cluster-job lease, so
+/// lease-CAS traffic there is contamination, not background.
+const TOPOLOGY_BACKGROUND_SQL: [&str; 1] = ["membership_heartbeat"];
 const SEMANTIC_EVIDENCE_SCOPE: &str = "semantic_ci";
 const NAMED_RUNNER_EVIDENCE_SCOPE: &str = "named_runner";
 
@@ -76,6 +80,11 @@ pub struct TopologyRun {
     pub applied_index_before: u64,
     pub applied_index_after: u64,
     pub physical_commit_entries: u64,
+    /// Raft entries the write window applied from declared background
+    /// writers (the membership heartbeat), counted by SQL class at apply
+    /// time. The applied-index delta equals `physical_commit_entries` plus
+    /// this - named traffic, never absorbed into the per-write cost.
+    pub window_background_entries: u64,
     pub acknowledged_write_round_trip_p50_us: f64,
     pub acknowledged_write_round_trip_p95_us: f64,
     pub acknowledged_write_round_trip_p99_us: f64,
@@ -335,7 +344,8 @@ pub(super) async fn exercise_topology(
         &format!("{TOPOLOGY_CATALOGUE_TITLE_PREFIX} 0000"),
     )
     .await?;
-    let applied_index_before = metric_index(cluster, leader).await?;
+    let (applied_index_before, payload_counts_before) =
+        stable_applied_sample(cluster, leader).await?;
     let resource_baseline = if let Some(identities) = evidence.resources {
         Some(
             collect_named_resources(cluster, &voters, identities, true)
@@ -371,7 +381,81 @@ pub(super) async fn exercise_topology(
             .require_ok()?;
         raw_acknowledged_write_round_trip_us.push(duration_us(started.elapsed()));
     }
-    let applied_index_after = metric_index(cluster, leader).await?;
+    let (applied_index_after, payload_counts_after) =
+        stable_applied_sample(cluster, leader).await?;
+    // Account for every entry the write window applied, by payload kind, so a
+    // per-write entry-cost violation names the contaminating entry (a blank
+    // leader-establishment commit, a membership change, or a genuinely
+    // unaccounted normal write) instead of only counting it at verify time.
+    let window_entries = applied_index_after.saturating_sub(applied_index_before);
+    let (window_blank, window_membership, window_normal) = (
+        payload_counts_after
+            .blank
+            .saturating_sub(payload_counts_before.blank),
+        payload_counts_after
+            .membership
+            .saturating_sub(payload_counts_before.membership),
+        payload_counts_after
+            .normal
+            .saturating_sub(payload_counts_before.normal),
+    );
+    // Topology nodes run the membership heartbeat (one transaction per node
+    // per round), so its entries are tolerated by SQL class and recorded, not
+    // absorbed. No node holds a cluster-job lease here, so lease-class
+    // traffic stays hard contamination.
+    let mut tolerated = 0_u64;
+    let mut foreign = 0_u64;
+    let mut classified = 0_u64;
+    let mut class_report = String::new();
+    for (position, class) in super::BACKGROUND_SQL_CLASSES.iter().enumerate() {
+        let delta = payload_counts_after
+            .class_counts
+            .get(position)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(
+                payload_counts_before
+                    .class_counts
+                    .get(position)
+                    .copied()
+                    .unwrap_or(0),
+            );
+        classified = classified.saturating_add(delta);
+        if TOPOLOGY_BACKGROUND_SQL.contains(&class.label) {
+            tolerated = tolerated.saturating_add(delta);
+        } else {
+            foreign = foreign.saturating_add(delta);
+        }
+        if !class_report.is_empty() {
+            class_report.push(' ');
+        }
+        class_report.push_str(&format!("{}={delta}", class.label));
+    }
+    let unclassified = window_normal.saturating_sub(classified);
+    if unclassified != workload.operations
+        || window_entries != workload.operations.saturating_add(tolerated)
+        || window_blank != 0
+        || window_membership != 0
+        || foreign != 0
+    {
+        bail!(
+            "topology write window did not cost exactly one Raft entry per acknowledged \
+             write: {} operations advanced the applied index by {window_entries} \
+             ({applied_index_before} -> {applied_index_after}); the window applied \
+             {window_blank} blank, {window_membership} membership, and {window_normal} \
+             normal entries (background [{class_report}]; {foreign} undeclared \
+             background, {unclassified} unclassified); leader term {} before, {} after",
+            workload.operations,
+            payload_counts_before.current_term,
+            payload_counts_after.current_term
+        );
+    }
+    println!(
+        "cluster-check: topology write window accounted: operations={} \
+         background=[{class_report}] blank={window_blank} \
+         membership={window_membership} normal={window_normal} term={}..{}",
+        workload.operations, payload_counts_before.current_term, payload_counts_after.current_term
+    );
     let applied_indexes = wait_for_applied(cluster, &voters, applied_index_after).await?;
     let (
         raw_local_catalogue_read_us,
@@ -453,7 +537,10 @@ pub(super) async fn exercise_topology(
         errors: 0,
         applied_index_before,
         applied_index_after,
-        physical_commit_entries: applied_index_after.saturating_sub(applied_index_before),
+        physical_commit_entries: applied_index_after
+            .saturating_sub(applied_index_before)
+            .saturating_sub(tolerated),
+        window_background_entries: tolerated,
         acknowledged_write_round_trip_p50_us: percentile_type7(
             &raw_acknowledged_write_round_trip_us,
             0.50,
@@ -695,6 +782,95 @@ async fn observe_corpus(
     Ok(observations)
 }
 
+/// One node's applied Raft entries broken down by payload kind, with the term
+/// its metrics reported at the sample. Read from local metrics only — no
+/// quorum operation — so sampling it cannot itself append an entry.
+struct PayloadCounts {
+    blank: u64,
+    membership: u64,
+    normal: u64,
+    current_term: u64,
+    class_counts: Vec<u64>,
+}
+
+async fn applied_payload_counts(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+) -> Result<PayloadCounts> {
+    match cluster
+        .request(node_id, Request::AppliedPayloadCounts)
+        .await?
+    {
+        Response::AppliedPayloadCounts {
+            blank,
+            membership,
+            normal,
+            current_term,
+            applied_index: _,
+            class_counts,
+        } => Ok(PayloadCounts {
+            blank,
+            membership,
+            normal,
+            current_term,
+            class_counts,
+        }),
+        response => bail!("topology voter {node_id} omitted payload counts: {response:?}"),
+    }
+}
+
+/// One consistent (boundary index, payload counters) pair from a node,
+/// bracketed by the commit watermark: read the watermark, wait until the
+/// node has applied everything committed at it, sample the counters, then
+/// read the watermark again and accept only if term and committed index held
+/// still. The counters advance at apply start while `last_applied` moves
+/// after a batch, so an applied-index bracket alone can lead or lag them; a
+/// commit bracket cannot, because apply never precedes commit and every
+/// committed entry finished applying before the sample. The watermark read
+/// itself appends nothing, which the `watermark-experiment` subcommand
+/// proves. Retried so a background commit landing mid-sample moves the
+/// boundary instead of skewing the breakdown.
+async fn stable_applied_sample(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+) -> Result<(u64, PayloadCounts)> {
+    for _ in 0..10 {
+        let first = boundary_watermark(cluster, node_id).await?;
+        let applied_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if metric_index(cluster, node_id).await? >= first.1 {
+                break;
+            }
+            if Instant::now() >= applied_deadline {
+                bail!(
+                    "topology voter {node_id} did not apply up to committed {} while \
+                     sampling payload counters",
+                    first.1
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let counts = applied_payload_counts(cluster, node_id).await?;
+        let second = boundary_watermark(cluster, node_id).await?;
+        if first == second {
+            return Ok((first.1, counts));
+        }
+    }
+    bail!("topology voter {node_id} window boundary would not settle across 10 sampling attempts");
+}
+
+/// The (term, committed index) pair proving one quorum watermark read.
+async fn boundary_watermark(cluster: &mut ClusterProcesses, node_id: u64) -> Result<(u64, u64)> {
+    match cluster.request(node_id, Request::QuorumWatermark).await? {
+        Response::QuorumWatermark {
+            term,
+            committed_index,
+            ..
+        } => Ok((term, committed_index)),
+        response => bail!("topology voter {node_id} omitted its quorum watermark: {response:?}"),
+    }
+}
+
 async fn metric_index(cluster: &mut ClusterProcesses, node_id: u64) -> Result<u64> {
     match cluster.request(node_id, Request::Metrics).await? {
         Response::Metrics {
@@ -896,7 +1072,9 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
             || run
                 .applied_index_after
                 .saturating_sub(run.applied_index_before)
-                != run.physical_commit_entries
+                != run
+                    .physical_commit_entries
+                    .saturating_add(run.window_background_entries)
         {
             bail!("topology run did not observe exactly one Raft entry per acknowledged write");
         }
@@ -1084,6 +1262,7 @@ mod tests {
             applied_index_before: 100,
             applied_index_after: 100 + TOPOLOGY_WRITE_OPERATIONS,
             physical_commit_entries: TOPOLOGY_WRITE_OPERATIONS,
+            window_background_entries: 0,
             acknowledged_write_round_trip_p50_us: percentile_type7(
                 &raw_acknowledged_write_round_trip_us,
                 0.50,

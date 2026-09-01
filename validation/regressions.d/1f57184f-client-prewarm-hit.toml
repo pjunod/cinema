@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1f57184f"]
+points = ["cluster.page-reads", "server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained shipped_marker_prewarm_placeholder_is_correlatable_without_a_session_id regression submits a client-owned marker_prewarm hit for direct play and requires it to normalize to miss, then requires the same forged hit on remux to remain a miss unless the server VOD ledger consumes and proves the placeholder. Reverting this correction lets the forged direct-play hit reach PlaybackMetrics without prewarm bookkeeping, so the regression fails."

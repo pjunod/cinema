@@ -267,10 +267,43 @@ pub fn validate_compacted_growth(report: &CompactedGrowthReport) -> Result<()> {
 
 /// Dispatch one harness mode from a full `argv`.
 ///
+/// One legitimate background writer in the replicated store: a report label
+/// and the SQL needle that identifies its statements at apply time (a `^`
+/// prefix anchors the match to the start of a statement). The needles are
+/// deliberately statement-leading so guard subqueries that merely reference
+/// the same tables — every fenced publication carries a `SELECT 1 FROM
+/// job_leases` guard — can never classify as background.
+pub(crate) struct BackgroundSqlClass {
+    pub(crate) label: &'static str,
+    pub(crate) needle: &'static str,
+}
+
+/// The replicated store's legitimate background writers, in reporting order,
+/// registered once per process before any node starts: the cluster-job lease
+/// CAS family (acquire, renew — successful and failed attempts both commit an
+/// entry — and release all lead with the same UPDATE), and the membership
+/// heartbeat (one `cluster_node_heartbeat_intents` transaction per node per
+/// round; join and finalize seed the same statement, outside any window).
+/// Exact-count windows declare which class labels are legitimate for that
+/// window; entries in undeclared classes remain hard contamination.
+pub(crate) const BACKGROUND_SQL_CLASSES: [BackgroundSqlClass; 2] = [
+    BackgroundSqlClass {
+        label: "job_lease_cas",
+        needle: "^UPDATE job_leases",
+    },
+    BackgroundSqlClass {
+        label: "membership_heartbeat",
+        needle: "^INSERT INTO cluster_node_heartbeat_intents",
+    },
+];
+
 /// `main` passes `std::env::args()` straight through, so the argument
 /// contract — including every rejection — is exercised by the crate's tests.
 pub async fn run(args: Vec<String>) -> Result<()> {
     install_crypto_provider();
+    hiqlite::validation_register_applied_sql_classes(
+        &BACKGROUND_SQL_CLASSES.map(|class| class.needle),
+    );
     match args.get(1).map(String::as_str) {
         None | Some("check") => {
             run_growth_subprocess().await?;
@@ -283,6 +316,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         Some("singleton-attempt") => run_singleton_takeover_attempt().await,
         Some("serving-partition") => run_serving_partition_case().await,
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
+        Some("watermark-experiment") => run_watermark_double_read_experiment(args.get(2)).await,
         Some("inspect-wal") => run_inspect_wal(&args[2..]),
         Some("topology") => {
             let output = args.get(2).map(PathBuf::from).unwrap_or_else(|| {
@@ -3370,33 +3404,32 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         Response::ItemId { item_id } => item_id,
         response => bail!("unexpected cross-item fence fixture response: {response:?}"),
     };
-    let before_repair = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics { applied_index, .. } => {
-            applied_index.context("repair budget missing initial applied index")?
-        }
+    let (before_repair, initial_term) = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics {
+            applied_index,
+            current_term,
+            ..
+        } => (
+            applied_index.context("repair budget missing initial applied index")?,
+            current_term,
+        ),
         response => bail!("unexpected pre-repair metrics: {response:?}"),
     };
     let mut first_winners = Vec::new();
     let mut initial_fence = None;
     for node_id in 1..=3 {
         if node_id == leader {
-            match cluster
-                .request(
-                    node_id,
-                    Request::ClaimArtworkRepairFence {
-                        item_id: repair_item,
-                        lease_ms: repair_lease_ms,
-                        inject_leader_change: false,
-                    },
-                )
-                .await?
+            if let Some(fence) = claim_artwork_repair_fence_as_leader(
+                &mut cluster,
+                node_id,
+                initial_term,
+                repair_item,
+                repair_lease_ms,
+            )
+            .await?
             {
-                Response::ArtworkRepairFence { fence: Some(fence) } => {
-                    first_winners.push(node_id);
-                    initial_fence = Some(fence);
-                }
-                Response::ArtworkRepairFence { fence: None } => {}
-                response => bail!("unexpected initial artwork fence response: {response:?}"),
+                first_winners.push(node_id);
+                initial_fence = Some(fence);
             }
         } else {
             match cluster
@@ -3416,7 +3449,14 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         }
     }
     if first_winners != [leader] {
-        bail!("artwork repair authority was not exactly leader {leader}: {first_winners:?}");
+        // Evidence only: a failed evidence read must never replace the
+        // verdict, so both results are printed as-is rather than propagated.
+        let raft = cluster.request(leader, Request::RaftDebug).await;
+        let row = try_read_artwork_repair_observation(&mut cluster, leader, repair_item).await;
+        bail!(
+            "artwork repair authority was not exactly leader {leader}: {first_winners:?}; \
+             leader raft: {raft:?}; durable repair row: {row:?}"
+        );
     }
     let after_repair = match cluster.request(leader, Request::Metrics).await? {
         Response::Metrics { applied_index, .. } => {
@@ -3680,12 +3720,12 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let mut new_fence = None;
     for node_id in 1..=3 {
         if node_id == handoff {
-            if let Some(fence) = claim_artwork_repair_fence_once(
+            if let Some(fence) = claim_artwork_repair_fence_as_leader(
                 &mut cluster,
                 node_id,
+                handoff_term,
                 repair_item,
                 repair_lease_ms,
-                false,
             )
             .await?
             {
@@ -3715,7 +3755,14 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         handoff_term,
     )?;
     if handoff_winners != [handoff] {
-        bail!("new leader did not exclusively fence artwork repair: {handoff_winners:?}");
+        // Evidence only: a failed evidence read must never replace the
+        // verdict, so both results are printed as-is rather than propagated.
+        let raft = cluster.request(handoff, Request::RaftDebug).await;
+        let row = try_read_artwork_repair_observation(&mut cluster, handoff, repair_item).await;
+        bail!(
+            "new leader did not exclusively fence artwork repair: {handoff_winners:?}; \
+             handoff raft: {raft:?}; durable repair row: {row:?}"
+        );
     }
     let (before_ambiguous_fence, before_ambiguous_index) =
         read_artwork_repair_observation(&mut cluster, handoff, wrong_target_item).await?;
@@ -4668,6 +4715,62 @@ fn require_artwork_repair_cas_topology(
     }
 }
 
+/// Claim the artwork repair fence on the node the drill expects to win,
+/// retrying only the explicitly retry-safe outcome. `claim_artwork_source_repair`
+/// declines with an explicit `fence: None` when the leader's quorum
+/// acknowledgement is older than one second at the instant of the claim, and
+/// a loaded host can age it past that between the drill's stability proof and
+/// the claim reaching the node — the same one-second window the successor
+/// proof already re-enters for its read-only probes. Retry while the same
+/// node still reports itself the quorum-acknowledged leader in the same
+/// term, bounded WELL BELOW one repair lease: the bound must absorb a
+/// quorum-freshness gap but must never be long enough to complete a fresh
+/// receiver-local observation window from scratch, or the claim would stop
+/// proving that the successor proof established that window. At this drill's
+/// call sites a `None` precedes the generation CAS — the freshness and
+/// observation guards decline before it and no competing claimant exists —
+/// so these retries consume no Raft entries and keep the one-entry
+/// contention budget intact; a losing CAS elsewhere would also answer
+/// `None` while committing an entry, so this helper is not a general-purpose
+/// retry.
+async fn claim_artwork_repair_fence_as_leader(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    expected_term: u64,
+    item_id: i64,
+    lease_ms: u64,
+) -> Result<Option<ArtworkRepairFence>> {
+    let deadline = Instant::now() + Duration::from_millis(lease_ms / 2);
+    loop {
+        if let Some(fence) =
+            claim_artwork_repair_fence_once(cluster, node_id, item_id, lease_ms, false).await?
+        {
+            return Ok(Some(fence));
+        }
+        // Retry a None only while the same election era provably still
+        // holds: same node, same term. Quorum freshness is deliberately NOT
+        // required here — a stale quorum acknowledgement is exactly the
+        // transient this loop exists to wait out (the first CI capture of
+        // the enriched bail showed the leader stable in its term with
+        // since_last_ack at 1036 ms), and requiring it back before retrying
+        // reproduces the one-shot behavior. A quorum that is genuinely gone
+        // ends the term or exhausts the deadline; either way the drill still
+        // receives the node's real verdict.
+        match cluster.request(node_id, Request::Metrics).await? {
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                ..
+            } if current_leader == node_id && current_term == expected_term => {}
+            _ => return Ok(None),
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// A potentially mutating repair claim is sent exactly once. In particular,
 /// its typed routing ambiguity is terminal because the write may have applied.
 async fn claim_artwork_repair_fence_once(
@@ -4956,6 +5059,77 @@ async fn offline_summary(
             },
         )
         .await
+}
+
+/// The two-call watermark experiment from the exact-count investigation:
+/// against an idle three-voter cluster, prove whether `db_quorum_watermark`
+/// itself ever advances the committed index. Two consecutive reads with no
+/// writes between them must observe the same index unless the term changed —
+/// an election commits a blank leader-establishment entry, which is a
+/// different mechanism and is reported separately. Fails only on a same-term
+/// move, because that would prove the watermark read appends per call and
+/// every exact-count drill that anchors on it mis-measures.
+async fn run_watermark_double_read_experiment(pairs: Option<&String>) -> Result<()> {
+    let pairs: u64 = match pairs {
+        Some(raw) => raw
+            .parse()
+            .context("watermark-experiment takes an optional pair count")?,
+        None => 50,
+    };
+    if pairs == 0 {
+        bail!("watermark-experiment needs at least one pair");
+    }
+    println!("cluster-check: watermark double-read experiment over {pairs} pairs");
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("watermark experiment data root")?;
+    let (mut cluster, _) = start_cluster_with_port_retry(&executable, root.path(), 3).await?;
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+    let leader = cluster.leader().await?;
+    // Let the cluster go quiet. No write is issued past this point, so any
+    // index movement below came from raft itself, not from the workload.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut moved_same_term = 0_u64;
+    let mut moved_new_term = 0_u64;
+    for pair in 0..pairs {
+        let first = quorum_watermark_observation(&mut cluster, leader).await?;
+        let second = quorum_watermark_observation(&mut cluster, leader).await?;
+        if second.committed_index != first.committed_index {
+            if second.term == first.term {
+                moved_same_term += 1;
+            } else {
+                moved_new_term += 1;
+            }
+            println!(
+                "cluster-check: watermark pair {pair} moved: index {} -> {}, \
+                 term {} -> {}, leader {} -> {}",
+                first.committed_index,
+                second.committed_index,
+                first.term,
+                second.term,
+                first.leader_id,
+                second.leader_id,
+            );
+        }
+    }
+    println!(
+        "cluster-check: watermark double-read tally: {pairs} pairs, {moved_same_term} moved \
+         within one term, {moved_new_term} moved across an election"
+    );
+    if moved_same_term != 0 {
+        bail!(
+            "db_quorum_watermark advanced the committed index {moved_same_term} times with no \
+             election and no writes in flight: the read itself appends, and every exact-count \
+             drill that anchors on it mis-measures"
+        );
+    }
+    Ok(())
 }
 
 /// The P6 learner contract, on real processes.
@@ -5297,6 +5471,17 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
             leader,
             Request::ForceCompaction {
                 phase: "learner-snapshot".to_owned(),
+                // The leader holds FIRST_JOB, so its production lease
+                // heartbeat legitimately commits while the 10,000-entry
+                // trigger load is being written — successful renewals and
+                // failed CAS attempts alike — and every node's membership
+                // heartbeat commits one transaction per round. The drill
+                // accounts for each such entry by its SQL class instead of
+                // failing on it.
+                background: BACKGROUND_SQL_CLASSES
+                    .iter()
+                    .map(|class| class.label.to_owned())
+                    .collect(),
             },
         )
         .await?
@@ -5913,6 +6098,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         initial_snapshot,
         "baseline warm-up",
+        &[],
     )
     .await?;
     // The first snapshot also lets SQLite settle its state-machine WAL. Take a
@@ -5923,6 +6109,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         Some(warm_snapshot),
         "baseline settle",
+        &[],
     )
     .await?;
     settle_post_snapshot_tail(
@@ -5994,6 +6181,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         Some(baseline_snapshot),
         "coalesced load",
+        &[],
     )
     .await?;
     // hiqlite's retained WAL segment alternates allocation across adjacent
@@ -6004,6 +6192,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         Some(measured_snapshot),
         "coalesced settle",
+        &[],
     )
     .await?;
     settle_post_snapshot_tail(
@@ -6037,14 +6226,20 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
             .context("raw induced-regression retained-state write")?;
     }
     let raw_applied_after = applied_index(&metrics_client).await?;
-    let raw_measured_snapshot =
-        ensure_compaction_after(&metrics_client, store.as_ref(), raw_snapshot, "raw control")
-            .await?;
+    let raw_measured_snapshot = ensure_compaction_after(
+        &metrics_client,
+        store.as_ref(),
+        raw_snapshot,
+        "raw control",
+        &[],
+    )
+    .await?;
     let raw_settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
         Some(raw_measured_snapshot),
         "raw settle",
+        &[],
     )
     .await?;
     settle_post_snapshot_tail(&metrics_client, store.as_ref(), raw_settled_snapshot, "raw").await?;
@@ -6181,6 +6376,7 @@ async fn ensure_compaction_after(
     store: &HiqliteAuthStore,
     previous_snapshot: Option<u64>,
     phase: &str,
+    background: &[String],
 ) -> Result<u64> {
     let metrics = client.metrics_db().await?;
     if let Some(snapshot) = metrics
@@ -6196,31 +6392,78 @@ async fn ensure_compaction_after(
     // tail and contaminates the fixed-tail size comparison. Quorum-anchor the
     // starting point, submit exactly enough writes to reach the trigger, then
     // stop all writes while the snapshot builds and publishes.
-    let committed = client
-        .db_quorum_watermark()
-        .await
-        .with_context(|| format!("{phase} obtain pre-compaction commit watermark"))?
-        .committed_index;
+    // A held cluster-job lease keeps its production heartbeat running on this
+    // node — `acquire_cluster_job` renews every `JOB_LEASE_HEARTBEAT` — and
+    // each renewal commits one Raft entry the plan below cannot see. Every
+    // lease-row commit under an unchanged owner and fence advances the durable
+    // row's `revision` by exactly one, so the revision delta between two
+    // consistent boundaries is an exact, named count of those entries. Both
+    // boundaries are sampled by `window_boundary`, which retries until no
+    // entry committed mid-sample, so a renewal landing during sampling moves
+    // the boundary instead of corrupting the account on either side of it.
+    let anchor = window_boundary(client, phase).await?;
+    let committed = anchor.watermark.committed_index;
     let writes = snapshot_trigger_plan(previous_snapshot, committed)?;
     let marker = format!("cluster.growth.compaction.{phase}");
     for ordinal in 0..writes {
         store.put_setting(&marker, &ordinal.to_string()).await?;
     }
-    let final_committed = client
-        .db_quorum_watermark()
-        .await
-        .with_context(|| format!("{phase} confirm exact compaction trigger"))?
-        .committed_index;
+    let confirm = window_boundary(client, phase).await?;
+    let final_committed = confirm.watermark.committed_index;
+    // Account for every entry the window applied, by payload kind, so a
+    // mismatch names the contaminating entry instead of only counting it.
+    // Blank entries are leader-establishment commits (an election happened
+    // inside the window); membership entries are configuration changes; only
+    // normal entries carry SQL, and of those, exactly the declared lease's
+    // renewals are legitimate beyond the drill's own writes.
+    let (blank, membership, normal) = (
+        confirm.counts.0.saturating_sub(anchor.counts.0),
+        confirm.counts.1.saturating_sub(anchor.counts.1),
+        confirm.counts.2.saturating_sub(anchor.counts.2),
+    );
+    let account = window_account(
+        &anchor.class_counts,
+        &confirm.class_counts,
+        background,
+        normal,
+    );
     let expected_final = committed
         .checked_add(writes)
+        .and_then(|total| total.checked_add(account.tolerated))
         .context("compaction trigger commit index overflowed")?;
-    if final_committed != expected_final {
+    if final_committed != expected_final
+        || blank != 0
+        || membership != 0
+        || account.foreign != 0
+        || account.unclassified != writes
+    {
         bail!(
             "{phase} compaction trigger was contaminated by concurrent writes: \
-             committed {committed} + {writes} planned writes reached {final_committed}, \
-             expected exact {expected_final}"
+             committed {committed} + {writes} planned writes + {} declared background \
+             entries reached {final_committed}, expected exact {expected_final}; the \
+             window applied {blank} blank, {membership} membership, and {normal} \
+             normal entries (background [{}]; {} undeclared background, {} \
+             unclassified); watermark term {} leader {} at the anchor, term {} \
+             leader {} at confirmation",
+            account.tolerated,
+            account.report,
+            account.foreign,
+            account.unclassified,
+            anchor.watermark.term,
+            anchor.watermark.leader_id,
+            confirm.watermark.term,
+            confirm.watermark.leader_id
         );
     }
+    // stderr deliberately: in node mode this function runs inside a harness
+    // node process whose stdout is the request/response protocol channel, and
+    // one foreign stdout line breaks response decoding on the controller.
+    eprintln!(
+        "cluster-check: {phase} compaction window accounted: writes={writes} \
+         background=[{}] blank={blank} membership={membership} normal={normal} \
+         term={}..{}",
+        account.report, anchor.watermark.term, confirm.watermark.term
+    );
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let metrics = client.metrics_db().await?;
@@ -6234,6 +6477,121 @@ async fn ensure_compaction_after(
             bail!("{phase} did not create a snapshot after the bounded write load");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// One consistent boundary of an exact-count window: the quorum watermark,
+/// this process's applied payload counters, and its applied SQL-class counts,
+/// all belonging to the same committed index. The watermark is read again
+/// after the samples and the whole set is retried until both reads agree on
+/// term and index; applied never exceeds committed, so samples taken while
+/// the committed index held still are exact for that boundary. The watermark
+/// read itself appends nothing, which the `watermark-experiment` subcommand
+/// proves standalone.
+struct WindowBoundary {
+    watermark: hiqlite::DbQuorumWatermark,
+    counts: (u64, u64, u64),
+    class_counts: Vec<u64>,
+}
+
+async fn window_boundary(client: &Client, phase: &str) -> Result<WindowBoundary> {
+    for _ in 0..10 {
+        let first = client
+            .db_quorum_watermark()
+            .await
+            .with_context(|| format!("{phase} obtain window-boundary watermark"))?;
+        let counts = applied_payload_counts_at(client, first.committed_index, phase).await?;
+        let class_counts = hiqlite::validation_applied_sql_class_counts();
+        let second = client
+            .db_quorum_watermark()
+            .await
+            .with_context(|| format!("{phase} confirm window-boundary watermark"))?;
+        if second.committed_index == first.committed_index && second.term == first.term {
+            return Ok(WindowBoundary {
+                watermark: first,
+                counts,
+                class_counts,
+            });
+        }
+    }
+    bail!("{phase} window boundary would not settle across 10 sampling attempts");
+}
+
+/// The class-attributed account of one exact-count window: entries in classes
+/// the window declared as legitimate background (`tolerated`), entries in
+/// registered classes the window did not declare (`foreign` — contamination),
+/// and normal entries no class matched (`unclassified` — the drill's own
+/// writes, and nothing else). `report` names every class with its delta for
+/// the success line and the bail message alike.
+struct WindowAccount {
+    tolerated: u64,
+    foreign: u64,
+    unclassified: u64,
+    report: String,
+}
+
+fn window_account(
+    before: &[u64],
+    after: &[u64],
+    background: &[String],
+    normal: u64,
+) -> WindowAccount {
+    let mut tolerated = 0_u64;
+    let mut foreign = 0_u64;
+    let mut classified = 0_u64;
+    let mut report = String::new();
+    for (position, class) in BACKGROUND_SQL_CLASSES.iter().enumerate() {
+        let delta = after
+            .get(position)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(before.get(position).copied().unwrap_or(0));
+        classified = classified.saturating_add(delta);
+        if background.iter().any(|declared| declared == class.label) {
+            tolerated = tolerated.saturating_add(delta);
+        } else {
+            foreign = foreign.saturating_add(delta);
+        }
+        if !report.is_empty() {
+            report.push(' ');
+        }
+        report.push_str(&format!("{}={delta}", class.label));
+    }
+    WindowAccount {
+        tolerated,
+        foreign,
+        unclassified: normal.saturating_sub(classified),
+        report,
+    }
+}
+
+/// Sample this process's applied-payload counters once its state machine has
+/// applied at least `committed`. The counters advance at apply time while the
+/// quorum watermark proves commit, so sampling without this wait would blame
+/// the window for entries that were merely still in flight at the anchor.
+async fn applied_payload_counts_at(
+    client: &Client,
+    committed: u64,
+    phase: &str,
+) -> Result<(u64, u64, u64)> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let applied = client
+            .metrics_db()
+            .await?
+            .last_applied
+            .map(|log| log.index)
+            .unwrap_or(0);
+        if applied >= committed {
+            return Ok(hiqlite::validation_applied_payload_counts());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "{phase} node applied only {applied} of {committed} while sampling \
+                 payload counters"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -7024,6 +7382,14 @@ pub enum Request {
     },
     ForceCompaction {
         phase: String,
+        /// The `BACKGROUND_SQL_CLASSES` entries whose background writers are
+        /// legitimately committing on this node while the drill writes its
+        /// exact trigger load — the cluster-job lease heartbeat, the
+        /// membership heartbeat. Each such entry is counted by SQL class at
+        /// apply time and subtracted exactly — a named, per-entry account,
+        /// not slack. An empty list asserts no background writer exists and
+        /// keeps the window fully strict.
+        background: Vec<String>,
     },
     ReleaseArtworkRepair {
         fence: ArtworkRepairFence,
@@ -7119,6 +7485,11 @@ pub enum Request {
     RaftDebug,
     PassiveRaftMetrics,
     QuorumWatermark,
+    /// This process's applied Raft entries broken down by payload kind, with
+    /// its current term and applied index, read from local metrics without any
+    /// quorum operation. Exact-count drills sample it around their write
+    /// window so a contaminating entry is named, not merely counted.
+    AppliedPayloadCounts,
     PauseApply,
     ApplyPauseObserved,
     ResumeApply,
@@ -7245,6 +7616,16 @@ pub enum Response {
         term: u64,
         leader_id: u64,
         committed_index: u64,
+    },
+    AppliedPayloadCounts {
+        blank: u64,
+        membership: u64,
+        normal: u64,
+        current_term: u64,
+        applied_index: u64,
+        /// Per-class applied-entry counts for `BACKGROUND_SQL_CLASSES`, in
+        /// that order.
+        class_counts: Vec<u64>,
     },
     ApplyPauseObserved {
         observed: bool,
@@ -9746,9 +10127,12 @@ async fn handle_request(
         Request::ReadLocalSetting { ref key } => Ok(Response::Setting {
             value: read_local_setting(client, key).await?,
         }),
-        Request::ForceCompaction { ref phase } => {
+        Request::ForceCompaction {
+            ref phase,
+            ref background,
+        } => {
             let previous = snapshot_index(client).await?;
-            ensure_compaction_after(client, store_ref(store)?, previous, phase).await?;
+            ensure_compaction_after(client, store_ref(store)?, previous, phase, background).await?;
             Ok(Response::Ok)
         }
         Request::ReleaseArtworkRepair { ref fence } => membership_ref(membership)?
@@ -10062,6 +10446,24 @@ async fn handle_request(
                 term: watermark.term,
                 leader_id: watermark.leader_id,
                 committed_index: watermark.committed_index,
+            })
+        }
+        Request::AppliedPayloadCounts => {
+            // The counters advance at apply start while last_applied moves
+            // after a batch completes, so this pair alone is not a consistent
+            // sample; exact-count callers bracket it with commit-watermark
+            // reads (see the topology window's stable sample) and treat the
+            // applied_index here as informational.
+            let (blank, membership, normal) = hiqlite::validation_applied_payload_counts();
+            let class_counts = hiqlite::validation_applied_sql_class_counts();
+            let metrics = client.metrics_db().await?;
+            Ok(Response::AppliedPayloadCounts {
+                blank,
+                membership,
+                normal,
+                current_term: metrics.current_term,
+                applied_index: metrics.last_applied.map(|log| log.index).unwrap_or(0),
+                class_counts,
             })
         }
         Request::PauseApply => {
@@ -12402,6 +12804,7 @@ mod tests {
     fn compaction_request_outlives_snapshot_publication_and_purge_bounds() {
         let request = Request::ForceCompaction {
             phase: "response-timeout-contract".to_owned(),
+            background: Vec::new(),
         };
         assert!(request.response_timeout() > Duration::from_secs(60));
         assert_eq!(Request::Metrics.response_timeout(), REQUEST_TIMEOUT);

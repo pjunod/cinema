@@ -96,6 +96,31 @@ def redact(obj):
     return obj
 
 
+def dolby_file_type_brand(init):
+    """Whether an init segment's `ftyp` claims Dolby Vision (`dby1`).
+
+    Read properly rather than by searching the whole buffer for four bytes: a
+    `dby1` sequence can appear anywhere in a media header by coincidence, and a
+    false alarm on this check would send someone hunting a defect that is not
+    there. So walk the box: `ftyp` must be first, the major brand sits at 8 and
+    the compatible-brands list runs from 16 to the declared size, four bytes at
+    a time. Bytes 12..16 are the minor version — a number, not a brand.
+
+    Returns False on anything this cannot walk exactly, which is the honest
+    answer for a `largesize` box or a size that is not 16 plus a whole number
+    of brands.
+    """
+    if not isinstance(init, (bytes, bytearray)) or len(init) < 16:
+        return False
+    if init[4:8] != b"ftyp":
+        return False
+    size = int.from_bytes(init[0:4], "big")
+    if size < 16 or size > len(init) or (size - 16) % 4:
+        return False
+    offsets = [8] + list(range(16, size, 4))
+    return any(init[at:at + 4] == b"dby1" for at in offsets)
+
+
 # ---- sections -------------------------------------------------------------
 
 def node_section(out, sys_info):
@@ -233,15 +258,33 @@ def log_section(out, logs, cache_settings, srv=None, playback_events=None):
                 # Max over exactly this. The dovi_rpu strip removes the side
                 # data this box is written from; this check is how a report
                 # proves the wire is actually clean.
+                #
+                # The `ftyp` brand is checked too, and separately, because the
+                # two failures are different and only one of them stutters.
+                # `dby1` beside a sample entry that HAS a record is an ordinary
+                # Dolby Vision stream. `dby1` beside one that has NONE is a
+                # contradictory initialization segment, and AVPlayer refuses
+                # the item outright rather than falling back to software — a
+                # worse outcome, and one a box-only scan calls clean. Both
+                # plurx's own removal and ffmpeg's `dovi_rpu` can produce it:
+                # movenc writes the brand from the source's side data before
+                # anything downstream has emptied the sample entry.
                 st2, init = srv.call(f"/hls/{sid}/init.mp4", raw=True)
                 if st2 == 200 and isinstance(init, (bytes, bytearray)):
                     boxes = [b for b in (b"dvcC", b"dvvC", b"dvwC") if b in init]
+                    brand = dolby_file_type_brand(init)
                     if boxes:
                         names = ", ".join(b.decode() for b in boxes)
                         out(f"    ⚠ init segment still signals Dolby Vision ({names}) — with the")
                         out("      RPUs stripped that is a promise the stream no longer keeps, and")
                         out("      VideoToolbox (both Mac browsers) refuses the hardware path over")
                         out("      it. The dovi_rpu strip needs ffmpeg ≥ 7.1 on the server.")
+                    elif brand:
+                        out("    ⚠ init segment carries the dby1 file-type brand with NO Dolby")
+                        out("      Vision record behind it. That pair is contradictory, and")
+                        out("      AVPlayer fails the item immediately rather than software-")
+                        out("      decoding it — a harder failure than the stutter this report")
+                        out("      usually looks for, and one a dvcC/dvvC scan alone calls clean.")
                     else:
                         out("    init segment signals no Dolby Vision — the wire is plain HDR10")
             else:

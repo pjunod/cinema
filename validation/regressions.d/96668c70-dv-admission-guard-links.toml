@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["96668c70"]
+points = ["core.media", "persistence.upgrades", "cluster.auth", "server.api"]
+checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth", "resource-bounds", "history-regressions"]
+reason = "Store contracts pin atomic Off/manual admission, exact recovery-guard linkage for fenced and unfenced commits, rollback on mismatched activation, and fail-closed validation of every imported guard link."

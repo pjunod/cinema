@@ -598,9 +598,41 @@ test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testManualQualityTranscodePreservesDirectOrRemuxHDR10Decision"
 
 [[fixes]]
+id = "apple.build-98-m5b-release-claim"
+commits = ["203cf7cf"]
+source = "clients/apple/project.yml"
+source_anchor = "CURRENT_PROJECT_VERSION:"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "test_repository_build_claims_match_release_inputs"
+
+[[fixes]]
+id = "apple.build-102-m5b-release-claim"
+commits = ["d651deed"]
+source = "clients/apple/project.yml"
+source_anchor = "CURRENT_PROJECT_VERSION:"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "test_repository_build_claims_match_release_inputs"
+
+[[fixes]]
+id = "apple.build-103-m5b-release-claim"
+commits = ["fae1edbc"]
+source = "clients/apple/project.yml"
+source_anchor = "CURRENT_PROJECT_VERSION:"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "test_repository_build_claims_match_release_inputs"
+
+[[fixes]]
 id = "clients.marker-provenance-auto-skip"
 commits = ["ce253a55"]
 source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
 source_anchor = "val isAutoSkipEligible: Boolean"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/MarkerLabelTest.kt"
 test_anchor = "provenanceControlsExactnessAndAutomaticEligibility"
+
+[[fixes]]
+id = "clients.preview-is-never-auto-skipped"
+commits = ["564c20cb"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "kind == \"preview\" -> false"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/MarkerLabelTest.kt"
+test_anchor = "aPreviewIsNeverAutomaticWhateverItsProvenance"

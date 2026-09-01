@@ -4739,6 +4739,7 @@ mod tests {
             source_mtime: 1_700_000_000,
             typeless_playlist: true,
             request: SessionRequest {
+                control_sequence: None,
                 file_id: 11,
                 playback_id: "player-a".to_owned(),
                 request_id: Some(incarnation_id),
@@ -5415,6 +5416,7 @@ mod tests {
                 admitted: Some(true),
                 producer_decision: None,
                 hold_reason: None,
+                subtitle_readiness: None,
                 owner_node_hash: "n-0123456789abcdef".to_owned(),
                 owner_epoch: 1,
             },

@@ -1,9 +1,14 @@
 # M7 remainder — subtitle readiness, bounded materialization, seek coalescing, burn-join, prewarm
 
-**Status:** ready to build · **Executes:** the unbuilt half of
+**Status:** in execution · **Executes:** the unbuilt half of
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) §13.8
 (handoff §6 item 8) · **Written:** 2026-09-01 · **Baseline:** `main` at
-`e1876cce` (`v0.3.0`)
+`e1876cce` (`v0.3.0`) · **Execution record (2026-09-01):** M1 merged as
+[#741](https://github.com/pjunod/plurx/pull/741) · M2 as
+[#742](https://github.com/pjunod/plurx/pull/742) · M3 as
+[#754](https://github.com/pjunod/plurx/pull/754) — M4 (§6) is the live
+milestone; [PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md) is the
+running record, and §2/§5's quoted line numbers predate that landing
 
 ## 1. Orientation — read this, work like this
 

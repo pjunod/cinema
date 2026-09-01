@@ -447,12 +447,61 @@ unsupported-profile declaration is exactly Safari’s observed behaviour.
 **Fix shipped:** the DV strip now runs `dovi_rpu=strip=1` ahead of
 `filter_units` (`hevc_copy_bsf`), which removes the RPUs *and* the DOVI
 side data, so nothing remains to write a `dvcC` from and the stream is
-signalled as what it is: plain HDR10. Version-gated on ffmpeg ≥ 7.1
-(production runs jellyfin-ffmpeg 7.1.4; the gate is tested against real
-version lines, and an older ffmpeg falls back to the NAL-only strip rather
-than hard-exiting on an unknown filter). The perf report now fetches the
-live session’s init segment and states outright whether any DV box
-survives — the wire is proven clean or the report says why not.
+signalled as what it is: plain HDR10. Gated on the filter's presence, asked
+of the binary (production runs jellyfin-ffmpeg 7.1.4).
+
+**The fallback shipped the original bug (fixed 2026-09-01).** "An older
+ffmpeg falls back to the NAL-only strip rather than hard-exiting on an
+unknown filter" is exactly the half-strip described two paragraphs up: the
+layers go, the side data stays, and the muxer writes the `dvcC` that costs
+the hardware path. The automatic ladder never reached it — `dv_handling`
+gates a strip on the same `dovi_rpu` probe and re-encodes instead — but
+**forced Original does**, because that control means "no video re-encode"
+whatever the ladder decided, and the comment claiming the client's error
+path rescues it assumed a client that refuses the stream. Safari does not
+refuse it; it plays it, in software.
+
+plurx now removes the record itself, in the init, on the far side of the
+muxer — the same place the Profile 7 → 8.1 conversion rewrites RPUs, and
+through the same promotion funnel, so a regenerated head is byte-identical
+to the live one. The live-HLS recovery path builds its served init directly
+rather than through that funnel, so it asks for the removal separately.
+`filter_units` takes out the layers, the removal takes out the claim.
+
+**Two of plurx's three copy paths, not all three.** The legacy muxer path —
+a cluster takeover, or the one frozen retry after a structural `Unsupported`
+— has ffmpeg's own HLS muxer write `init.mp4` directly. There is no
+`copyseg` reader and no promotion in between, so nothing removes anything,
+and that init keeps both the record and the `dby1` brand. It is a fallback
+for a fallback (`copyseg::supports` covers HEVC, so a fresh session on a
+Dolby Vision title always segments) and it is the same defect `main` has
+had all along, but it is not fixed and the claim should not be read wider
+than it is. A removal failure is deliberately reported as
+`InvalidHevcConfiguration` rather than `Unsupported` for this reason:
+`Unsupported` is the one classification the actor may retry, and the retry
+it permits is that legacy path — reporting it that way would hand the
+session to the path this removal exists to keep it off.
+
+The removal also rewrites the `dby1` file-type brand, in the same call. It
+has to: the sanitizer that normally does that runs on the muxer init, where
+the record is still present, so it correctly declines — and `dby1` over a
+sample entry with no record is a *contradictory* initialization segment,
+which AVPlayer refuses outright rather than merely software-decoding.
+
+Both field tools read the brand now — [`scripts/perf-report`](../scripts/perf-report)
+and [`scripts/dv-evidence`](../scripts/dv-evidence) — and report it *beside*
+the record rather than instead of it, because the two failures are different:
+`dby1` **with** a record is an ordinary Dolby Vision stream, and `dby1` with
+**none** is the contradictory init. Until 2026-09-01 they scanned for
+`dvcC`/`dvvC` only, so on the one shape this work most recently got wrong they
+reported the wire clean. Read as a box, not grepped — the major brand at
+offset 8 and the compatible-brands list from 16 to the declared size — so a
+`dby1` sequence elsewhere in the file is not mistaken for a claim, and a
+`largesize` `ftyp` declines rather than guessing.
+
+The perf report fetches the live session's init segment and states outright
+whether any DV box survives — the wire is proven clean or the report says
+why not.
 
 Also shipped: the detector discloses blindness. Safari’s stutter produced
 an *empty* Hitches row, which read as exoneration but meant

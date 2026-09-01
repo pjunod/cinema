@@ -14,11 +14,13 @@ purpose (see [non-goals](#non-goals)); books are not — text books and audioboo
 are both supported.
 
 > **Self-hosted and pre-1.0.** plurx runs on your LAN with no cloud dependency and
-> never phones home. It mounts your media **read-only** and never writes, renames,
-> or deletes a file. Today it runs as a **single one-voter node** on the
-> replicated Store after a verified, reversible SQLite import. Membership and
-> failover are still Phase 4 work. Treat it as a capable daily driver, not a
-> backup of your only copy.
+> never phones home. Media mounts are **read-only by default**. The one explicit
+> exception is admin-only, per-library Dolby Vision Profile 7 → 8.1 on-disk
+> conversion: it is Off by default and requires the writable-storage and backup
+> contract in [Operations](docs/OPERATIONS.md). Today plurx runs as a **single
+> one-voter node** on the replicated Store after a verified, reversible SQLite
+> import. Membership and failover are still Phase 4 work. Treat it as a capable
+> daily driver, not a backup of your only copy.
 
 ![The plurx home screen — continue watching, next up, and recently added](docs/img/home.png)
 
@@ -37,6 +39,10 @@ commit, CI, and full depth, and how to add a regression without losing it.
 [docs/DEVELOPMENT_PIPELINE.md](docs/DEVELOPMENT_PIPELINE.md) explains the
 effort-branch lane for large projects: compile quickly during task integration,
 then run one complete exact-tree qualification before merging to `main`.
+[docs/AGENT-COMPILE-LOOP.md](docs/AGENT-COMPILE-LOOP.md) is its short
+companion for anyone — contributor or coding agent — whose checkout has no
+Rust toolchain: how to put `cargo check`, Clippy and the unit suite ten
+minutes away instead of pushing to find out.
 [docs/CI_TEST_OVERHAUL_PLAN.md](docs/CI_TEST_OVERHAUL_PLAN.md) records
 the measured failure order, docs-only lane, suite split, and safe rebase-result
 reuse roadmap. Then
@@ -344,8 +350,10 @@ Deliberate, with reasons — the full list and rationale is in
 and [docs/FEATURES.md](docs/FEATURES.md#11-what-plurx-does-not-do):
 
 - **No cloud, no phone-home.** There is no plurx.tv and there never needs to be.
-- **plurx never writes your media.** Read-only mounts; no organizing, renaming, or
-  deleting.
+- **No ordinary media mutation.** Scanning, metadata, and playback use read-only
+  mounts; plurx does not organize or rename files. The sole opt-in exception is
+  the admin-only, per-library, off-by-default Dolby Vision on-disk conversion
+  documented in [Operations](docs/OPERATIONS.md).
 - **Not a streaming aggregator.** No ads, no live TV, no rentals, no "discover"
   feeds.
 - **No general music library** in v1 (the data model won't preclude it later).

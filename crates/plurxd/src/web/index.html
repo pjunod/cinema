@@ -3626,12 +3626,14 @@ function fmtUptime(s){ const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=
 function fmtTs(ms){ const d=new Date(ms); return d.toLocaleTimeString([], {hour12:false})+"."+String(ms%1000).padStart(3,"0"); }
 function fmtAgo(unix){ if(!unix) return ""; const s=Math.max(0,Math.floor(Date.now()/1000)-unix);
   if(s<60) return "just now"; if(s<3600) return Math.floor(s/60)+"m ago"; if(s<86400) return Math.floor(s/3600)+"h ago"; return Math.floor(s/86400)+"d ago"; }
-// HTML-escape for text and attribute values. Escapes BOTH quote characters:
+// HTML-escape for text and attribute values. API DTOs contain numeric limits
+// and counts, so normalize template scalars before applying string methods.
+// Escapes BOTH quote characters:
 // `'` matters because inline on* handlers are single-quoted, and an unescaped
 // apostrophe in interpolated data (e.g. a title like "Can't") closes the
 // attribute early and silently breaks the handler. Compose with JSON.stringify
 // for a JS string inside an attribute: esc(JSON.stringify(value)).
-function esc(s){ return (s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 // A recorded/EXIF date for display. Parsed by hand rather than through
 // `new Date("2019-06-14")`, which is UTC midnight and shows the day before in
 // every western timezone.
@@ -5403,7 +5405,13 @@ async function loadItem(id){
   // French audio track chosen for one film quietly applying to the next.
   clearPrePlay();
   const lib=libs.find(l=>l.id===it.library_id);
-  d.files.forEach(f=>ITEM_FOR_FILE[f.id]=String(id));
+  d.files.forEach(f=>{
+    ITEM_FOR_FILE[f.id]=String(id);
+    // File DTOs are item-scoped and do not repeat their library id. The
+    // conversion status endpoint publishes modes per library, so bind the
+    // already-loaded item authority once instead of issuing per-file reads.
+    f.library_id=it.library_id;
+  });
   const files=d.files, children=d.children||[], ancestors=d.ancestors||[];
   const best=files[0], multi=files.length>1;
   const runtime=it.runtime_ms||(best&&best.duration_ms)||0;
@@ -5531,6 +5539,171 @@ function bookByline(it){
   return (it.kind==='book'||it.kind==='audiobook')&&it.author
     ? `<div class="muted" style="margin-top:4px">By ${esc(it.author)}</div>` : '';
 }
+const DV_PROGRESS_POLL_MS=10000, DV_CONVERSION_LEDGER_READ_MAX=256;
+const DV_CONVERSION_LEDGER_BATCH_MAX=4;
+let DV_FILE_PAGE_FILES=[], DV_FILE_POLLING=false, DV_SETTINGS_POLL_AT=0;
+function dvConversionIsActive(conversion){
+  return !!conversion&&["queued","running","verified"].includes(conversion.state);
+}
+function dvSnapshotHasActive(snapshot){
+  const progress=snapshot&&snapshot.progress;
+  return !!progress&&(Number(progress.queued||0)+Number(progress.running||0)+Number(progress.verified||0)>0);
+}
+function dvRecoveryGuardStatusHtml(guard){
+  if(!guard) return "";
+  const state=String(guard.state||"");
+  if(state==="intent"){
+    return ` · recovery protection is being recorded for <code>${esc(guard.recovery_path||"unknown path")}</code>`;
+  }
+  if(state==="active"){
+    return ` · recovery guard active at <code>${esc(guard.recovery_path||"unknown path")}</code>`;
+  }
+  if(state==="guard_removed") return " · recovery guard removed; private scratch cleanup pending";
+  if(state==="scratch_removed") return " · recovery cleanup complete";
+  return ` · recovery cleanup state ${esc(state||"unknown")}`;
+}
+function dvFileActionMount(file){
+  if(!ME||!ME.is_admin||![7,8].includes(Number(file&&file.dv_profile))) return "";
+  const id=exactWireId(file);
+  return `<div class="dv-file-action px-admin th-admin" id="dv-file-${id}" aria-live="polite"><span class="muted">Checking on-disk conversion…</span></div>`;
+}
+function dvConversionStateHtml(file,snapshot){
+  const conversion=snapshot.conversion;
+  const capability=snapshot.capabilities||{};
+  const id=exactWireId(file);
+  const mode=(snapshot.library_modes||{})[String(file.library_id)]||"off";
+  const modeOff=mode==="off";
+  const modeReason="library Dolby Vision conversion mode is Off — choose Manual or Automatic in Settings → Libraries";
+  if(!conversion){
+    if(!snapshot.eligible) return "";
+    const reason=modeOff?modeReason
+      :capability.available===false?capability.reason||"dovi_tool or mkvmerge is unavailable":"";
+    return `<div class="row" style="margin-top:8px;gap:8px"><span class="muted">Profile 7 can be permanently converted to Profile 8.1.</span>
+      <button class="ghost sm" aria-label="Convert file ${esc(id)} from Dolby Vision Profile 7 to Profile 8.1 on disk" onclick='queueDvFile(${JSON.stringify(id)},this)'${reason?' disabled':''}>Convert on disk</button>
+      ${reason?`<span class="problem">Unavailable: ${esc(reason)}</span>`:""}</div>`;
+  }
+  const state=conversion.state;
+  const bytes=(conversion.bytes_before||conversion.bytes_after)
+    ? ` · ${fmtBytes(conversion.bytes_before||0)}${conversion.bytes_after?` → ${fmtBytes(conversion.bytes_after)}`:""}`:"";
+  if(state==="committed"){
+    const layer=conversion.el_type?` · source ${String(conversion.el_type).toUpperCase()}`:"";
+    const original=conversion.original_path?` · original retained at <code>${esc(conversion.original_path)}</code>`:" · original deleted by policy";
+    return `<div class="muted" style="margin-top:8px">✓ Converted to Profile 8.1${layer}${bytes}${original}${dvRecoveryGuardStatusHtml(conversion.recovery_guard)}</div>`;
+  }
+  if(state==="failed"){
+    const unavailable=capability.available===false;
+    const ineligible=snapshot.eligible===false;
+    const reason=ineligible?"the current scan no longer meets the Profile 7 conversion requirements"
+      :modeOff?modeReason:unavailable?capability.reason||"conversion tools unavailable":"";
+    const blocked=modeOff||unavailable;
+    const retry=ineligible
+      ?`<span class="problem">Retry unavailable: ${esc(reason)}.</span>`
+      :`<button class="ghost sm" aria-label="Retry on-disk Dolby Vision conversion for file ${esc(id)}" onclick='queueDvFile(${JSON.stringify(id)},this)'${blocked?' disabled':''}>Retry conversion</button>${reason?` <span class="muted">${esc(reason)}</span>`:""}`;
+    return `<div style="margin-top:8px"><div class="problem">Conversion failed: ${esc(conversion.error||"unknown error")}${dvRecoveryGuardStatusHtml(conversion.recovery_guard)}</div>
+      ${retry}</div>`;
+  }
+  const labels={queued:"Queued for on-disk conversion",running:"Converting Profile 7",verified:"Replacement verified; publishing"};
+  return `<div class="muted" style="margin-top:8px">${esc(labels[state]||state)}${bytes}${dvRecoveryGuardStatusHtml(conversion.recovery_guard)}</div>`;
+}
+async function hydrateDvFileActions(files){
+  if(!ME||!ME.is_admin) return false;
+  const targets=(files||[]).filter(file=>document.getElementById(`dv-file-${exactWireId(file)}`));
+  if(!targets.length) return false;
+  const uniqueIds=[...new Set(targets.map(exactWireId))];
+  const cap=DV_CONVERSION_LEDGER_READ_MAX*DV_CONVERSION_LEDGER_BATCH_MAX;
+  const ids=uniqueIds.slice(0,cap), selectedIds=new Set(ids);
+  const selectedTargets=targets.filter(file=>selectedIds.has(exactWireId(file)));
+  const cappedTargets=targets.filter(file=>!selectedIds.has(exactWireId(file)));
+  for(const file of cappedTargets){
+    const mount=document.getElementById(`dv-file-${exactWireId(file)}`);
+    if(!mount) continue;
+    mount.innerHTML=`<div class="problem">Conversion status not loaded for this file: this item exposes ${uniqueIds.length} Dolby Vision file actions; this page checks at most ${cap}.</div>`;
+    mount.dataset.dvActive="false";
+  }
+  try{
+    const batches=[];
+    for(let at=0;at<ids.length;at+=DV_CONVERSION_LEDGER_READ_MAX){
+      batches.push(ids.slice(at,at+DV_CONVERSION_LEDGER_READ_MAX));
+    }
+    // At most four sequential reads bound both the page's total Store work and
+    // its request concurrency. Results stay private until every read succeeds.
+    const snapshots=[];
+    for(const batch of batches){
+      snapshots.push(await api(`/dv-conversions?file_ids=${encodeURIComponent(batch.join(","))}`));
+    }
+    const conversions={}, eligibility={};
+    for(const snapshot of snapshots){
+      Object.assign(conversions,snapshot.conversions_by_file||{});
+      Object.assign(eligibility,snapshot.eligible_by_file||{});
+    }
+    // Tool capability and configured library modes are process-wide; choosing
+    // the first input-ordered batch makes the result independent of later
+    // batch responses.
+    const capabilities=snapshots[0].capabilities||{};
+    const libraryModes=snapshots[0].library_modes||{};
+    let anyActive=false;
+    for(const file of selectedTargets){
+      const id=exactWireId(file), mount=document.getElementById(`dv-file-${id}`);
+      if(!mount) continue;
+      const conversion=conversions[id]||null;
+      const active=dvConversionIsActive(conversion);
+      anyActive=anyActive||active;
+      mount.innerHTML=dvConversionStateHtml(file,{
+        conversion,
+        eligible:eligibility[id]===true,
+        capabilities,
+        library_modes:libraryModes,
+      });
+      mount.dataset.dvActive=active?"true":"false";
+    }
+    return anyActive;
+  }catch(e){
+    let anyActive=false;
+    for(const file of selectedTargets){
+      const mount=document.getElementById(`dv-file-${exactWireId(file)}`);
+      if(!mount) continue;
+      mount.innerHTML=`<div class="problem">Conversion status unavailable: ${esc(e.message||"request failed")}</div>`;
+      anyActive=anyActive||mount.dataset.dvActive==="true";
+    }
+    return anyActive;
+  }
+}
+async function pollDvFileActions(files,generation){
+  if(DV_FILE_POLLING||generation!==PAGE_RENDER_GENERATION||!location.hash.startsWith("#/item/")||document.visibilityState==="hidden") return;
+  DV_FILE_POLLING=true;
+  try{
+    const active=await hydrateDvFileActions(files);
+    if(!active&&generation===PAGE_RENDER_GENERATION&&location.hash.startsWith("#/item/")){
+      clearInterval(PAGE_TIMER); PAGE_TIMER=null;
+    }
+  }finally{ DV_FILE_POLLING=false; }
+}
+function armDvFilePoll(files,generation=PAGE_RENDER_GENERATION){
+  DV_FILE_PAGE_FILES=files||[];
+  setPageTimer(()=>pollDvFileActions(DV_FILE_PAGE_FILES,generation),DV_PROGRESS_POLL_MS,generation);
+}
+async function queueDvFile(id,btn){
+  btn.disabled=true;
+  try{
+    const result=await api(`/files/${id}/dv-conversion`,{method:"POST"});
+    // The mutation response is the authoritative first active snapshot. Paint
+    // and poll from it instead of making queue success depend on a second read.
+    const file=DV_FILE_PAGE_FILES.find(candidate=>exactWireId(candidate)===String(id));
+    const mount=document.getElementById(`dv-file-${id}`);
+    const active=dvConversionIsActive(result&&result.conversion);
+    const queued=result&&result.queued===true;
+    if(file&&mount&&result&&result.conversion){
+      mount.innerHTML=dvConversionStateHtml(file,{
+        conversion:result.conversion,eligible:queued||active,capabilities:{available:true},
+      });
+      mount.dataset.dvActive=active?"true":"false";
+    }
+    toast(queued?"Dolby Vision conversion queued":active
+      ?"Dolby Vision conversion is already active":"Dolby Vision conversion was not queued");
+    if(active) armDvFilePoll(DV_FILE_PAGE_FILES);
+  }catch(e){ toast(e.message||"Couldn't queue conversion"); }
+  finally{ btn.disabled=false; }
+}
 function chapterList(p){
   const rows=[];
   for(const f of p.files){
@@ -5542,9 +5715,14 @@ function chapterList(p){
   return rows.length?`<div class="chapters"><h2 class="section">Chapters</h2><div class="row" style="align-items:flex-start">${rows.join('')}</div></div>`:'';
 }
 async function viewItem(id){
+  const generation=PAGE_RENDER_GENERATION;
   layoutChrome("home",`<div class="empty">Loading…</div>`);
   const page=await loadItem(id);
   document.getElementById("main").innerHTML=layoutView("item",page);
+  DV_FILE_PAGE_FILES=page.files||[];
+  hydrateDvFileActions(DV_FILE_PAGE_FILES).then(active=>{
+    if(active&&generation===PAGE_RENDER_GENERATION&&location.hash.startsWith("#/item/")) armDvFilePoll(DV_FILE_PAGE_FILES,generation);
+  });
   restoreScroll();
   // One-click play from an episode list lands here and starts immediately.
   if(AUTOPLAY===String(id)){
@@ -5646,7 +5824,7 @@ function classicItemBody(p){
       const header=(multi||miss)
         ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" onclick='${playCall(p,v,resume)}'>▶ Play</button>`:''}</div>`
         : '';
-      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}</div>`;
+      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}</div>`;
     }).join("");
   } else if(p.shape==="episodes"){
     // Season: episodes as a list.
@@ -6595,6 +6773,14 @@ async function openSession(fileId, opts){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
     {playback_id:PLAYBACK_ID,request_id:newRequestId()},contract.session);
+  // Where this start sits in the control ordering, so a server that has since
+  // accepted a later seek can refuse to produce a destination the viewer has
+  // already scrolled past. The client's own `_seekToken` discards the response
+  // either way; this saves the server the work rather than the client the
+  // confusion. Omitted when no exchange has been accepted yet — a first play
+  // has no earlier ask to be stale against.
+  const acceptedSequence=PLAYER&&PLAYER.controlReporter&&Number(PLAYER.controlReporter.sequence);
+  if(Number.isFinite(acceptedSequence)&&acceptedSequence>0) body.control_sequence=acceptedSequence;
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
   if(body.height==null) delete body.height;
@@ -8993,6 +9179,13 @@ function markerIsEstimated(m){
 }
 function markerAutoSkipEligible(m){
   if(!m) return false;
+  // A preview is never automatic. The preference this gates is spelled
+  // "Auto-skip intro & credits" on every surface that offers it, and a
+  // preview is the one marker kind that is new footage every week: skipping
+  // it is a choice about *this* episode's ending, not a standing preference
+  // about repeated material. The button still appears, so a viewer who wants
+  // it gone presses it — what is withheld is the seek nobody asked for.
+  if(m.kind==="preview") return false;
   // M1-M4 has no configured detector confidence floor. Keep automatic seeks
   // to exact authored/manual evidence; old servers fall back to `chapter`.
   if(m.provenance!=null) return m.provenance==="authored"||m.provenance==="manual";
@@ -9012,7 +9205,9 @@ function renderSkip(m){
   const key=m.kind+m.start_ms+(estimated?"e":"");
   if(c.dataset.k===key) return; // avoid rebuilding every timeupdate tick
   c.dataset.k=key;
-  const label=m.label||(m.kind==="intro"?"Skip Intro":"Skip Credits");
+  // The server sends the label; the fallback is for a marker from a node too
+  // old to send one, where only intro and credits existed.
+  const label=m.label||(m.kind==="intro"?"Skip Intro":m.kind==="preview"?"Skip Preview":"Skip Credits");
   c.innerHTML=`<button onclick="skipCurrent()">${esc(label)}${estimated?" · Estimated":""} ›</button>`;
   const offerKey=(m.kind||"unknown")+":"+m.start_ms;
   const automatic=PLAYER.autoskip&&markerAutoSkipEligible(m);
@@ -9031,8 +9226,17 @@ function skipMarker(m,automatic=false){
   const c=document.getElementById("pskip"); if(c){ c.innerHTML=""; c.dataset.k=""; }
   clientLog({level:"info",event:automatic?"marker_automatic_skip":"marker_manual_skip",
     detail:m.kind||"unknown",message:"playback marker skipped"});
-  // Credits that run to the very end → treat "skip" as "finished".
-  if(m.kind==="credits" && PLAYER.durMs && m.end_ms>=PLAYER.durMs-2500){
+  // A tail marker that runs to the very end → treat "skip" as "finished".
+  // Keyed on where the region ENDS rather than on its kind: an episode whose
+  // last chapter is "Next Episode Preview" is just as over as one that ends in
+  // credits, and before the preview kind existed that file reached here as
+  // credits and finished correctly. Kind-keying it now would quietly stop
+  // marking those episodes watched.
+  // Listed rather than excluded: `!== "intro"` also caught `recap`, and any
+  // marker whose kind is absent or unrecognised by this build. Marking an
+  // episode watched and advancing to the next one is not a thing to do on a
+  // kind this build does not know.
+  if((m.kind==="credits"||m.kind==="preview") && PLAYER.durMs && m.end_ms>=PLAYER.durMs-2500){
     reportProgress(PLAYER.fileId,true); return finishPlayback(true);
   }
   clientLog({level:"info",event:"marker_prewarm",detail:"miss",
@@ -11290,6 +11494,7 @@ let LOGS_RUN=null, CLUSTER_LOGS_RUN=null;
 let SETTINGS_DATA={}, SETTINGS_LOADED=new Set(), SETTINGS_LOADS=new Map();
 const SETTINGS_ENDPOINTS={
   libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
+  dvConversions:()=>api("/dv-conversions"),
   sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
   analysis:()=>api("/analysis/summary"),
   playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
@@ -11303,7 +11508,7 @@ const SETTINGS_ENDPOINTS={
   clusterOps:()=>api("/cluster/status").then(ops=>{ clusterOpsStamp(); return ops; }),
 };
 const SETTINGS_MANIFEST={
-  libraries:{required:["settings","libs","status"],secondary:[]},
+  libraries:{required:["settings","libs","status","dvConversions"],secondary:[]},
   metadata:{required:["settings","trakt"],secondary:["libs"]},
   playback:{required:["settings"],secondary:[]},
   analysis:{required:["settings","analysis"],secondary:[]},
@@ -11338,6 +11543,7 @@ function loadSettingsKey(key,generation){
   return transport.then(value=>{
     if(generation!==PAGE_RENDER_GENERATION) return value;
     SETTINGS_DATA[key]=value; SETTINGS_LOADED.add(key);
+    if(key==="dvConversions") DV_SETTINGS_POLL_AT=Date.now()+DV_PROGRESS_POLL_MS;
     if(key==="settings") cacheSettings(value);
     if(key==="trakt") cacheTrakt(value);
     if(key==="cluster") CLUSTER_LOADED=true;
@@ -11415,6 +11621,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   if(reset){
     SETTINGS=null; TRAKT=null; TRAKT_EDIT=false; SETTINGS_DATA={};
     SETTINGS_LOADED.clear(); SETTINGS_LOADS.clear();
+    DV_SETTINGS_POLL_AT=0;
     CLUSTER_LOADED=false; forgetJoinToken();
   }
   const tab=settingsTab();
@@ -11459,7 +11666,7 @@ function settingsPanel(tab,d){
   if(tab==="users")    return usersPanel(d.users);
   if(tab==="system")   return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")  return clusterPanel(d);
-  return librariesPanel(d.libs,d.status,d.settings);
+  return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
 }
 // Intervals in minutes. Nothing under 15 — the server refuses it, because a
 // real library scanned every minute is a NAS denial-of-service on a timer.
@@ -11594,19 +11801,158 @@ async function savePrecache(btn){
   }catch(e){ toast(e.message||"Couldn't save"); }
   finally{ btn.disabled=false; }
 }
-function libRow(l,status){
+function dvProgressText(progress){
+  if(!progress) return "No eligible files found";
+  const active=Number(progress.queued||0)+Number(progress.running||0)+Number(progress.verified||0);
+  const parts=[];
+  if(active) parts.push(`${active} active`);
+  if(progress.committed) parts.push(`${progress.committed} converted`);
+  if(progress.failed) parts.push(`${progress.failed} failed`);
+  if(!parts.length) parts.push(`${progress.eligible||0} eligible`);
+  return parts.join(" · ");
+}
+function dvModeSelect(l,dv){
+  const mode=(dv&&dv.library_modes&&dv.library_modes[String(l.id)])||"off";
+  const unavailable=!(dv&&dv.capabilities&&dv.capabilities.available);
+  const reason=unavailable?(dv&&dv.capabilities&&dv.capabilities.reason)||"dovi_tool or mkvmerge is unavailable":"";
+  return `<div class="sched" title="${esc(reason)}"><span class="schedpair">Dolby Vision
+    <select id="dv-mode-${l.id}" aria-label="Dolby Vision conversion mode for ${esc(l.name)}" aria-describedby="dv-progress-${l.id}" data-dv-tools-available="${unavailable?'false':'true'}" onchange="updateDvModeControls(${l.id})" style="max-width:105px;font-size:12px;padding:3px 6px">
+      ${[["off","Off"],["manual","Manual"],["auto","Automatic"]].map(([v,label])=>`<option value="${v}"${mode===v?' selected':''}${unavailable&&v!=="off"?' disabled':''}>${label}</option>`).join("")}
+    </select></span>
+    <span class="schedpair"><button class="ghost sm" id="dv-mode-save-${l.id}" aria-label="Save Dolby Vision conversion mode for ${esc(l.name)}" aria-describedby="dv-progress-${l.id}" onclick="saveDvMode(${l.id},this)"${unavailable&&mode!=="off"?' disabled':''}>Save</button>
+    <button class="ghost sm" id="dv-convert-${l.id}" aria-label="Convert Dolby Vision files in ${esc(l.name)} now" aria-describedby="dv-progress-${l.id}" onclick="convertDvLibrary(${l.id},this)"${unavailable||mode==="off"?' disabled':''}>Convert now</button></span>
+    <span class="muted" id="dv-progress-${l.id}" aria-live="polite">${esc(unavailable?`Unavailable: ${reason}`:dvProgressText(dv.progress_by_library&&dv.progress_by_library[String(l.id)]))}</span></div>`;
+}
+function updateDvModeControls(id){
+  const select=document.getElementById(`dv-mode-${id}`);
+  if(!select) return;
+  const unavailable=select.dataset.dvToolsAvailable!=="true";
+  const save=document.getElementById(`dv-mode-save-${id}`);
+  const convert=document.getElementById(`dv-convert-${id}`);
+  if(save) save.disabled=unavailable&&select.value!=="off";
+  if(convert) convert.disabled=unavailable||select.value==="off";
+}
+async function refreshDvConversions(){
+  // Stamp before the request so a slow or failed read cannot stack another
+  // conversion snapshot behind itself on the two-second settings tick.
+  DV_SETTINGS_POLL_AT=Date.now()+DV_PROGRESS_POLL_MS;
+  const snapshot=await api("/dv-conversions");
+  SETTINGS_DATA.dvConversions=snapshot; SETTINGS_LOADED.add("dvConversions");
+  return snapshot;
+}
+function paintDvConversionProgress(snapshot){
+  const unavailable=!(snapshot&&snapshot.capabilities&&snapshot.capabilities.available);
+  const reason=unavailable?(snapshot&&snapshot.capabilities&&snapshot.capabilities.reason)||"dovi_tool or mkvmerge is unavailable":"";
+  for(const library of SETTINGS_DATA.libs||[]){
+    const mount=document.getElementById(`dv-progress-${library.id}`);
+    if(mount) mount.textContent=unavailable?`Unavailable: ${reason}`:dvProgressText(snapshot.progress_by_library&&snapshot.progress_by_library[String(library.id)]);
+  }
+  const recovery=document.getElementById("dv-recovery-guards");
+  if(recovery) recovery.innerHTML=dvRecoveryGuardsHtml(snapshot);
+}
+async function saveDvMode(id,btn){
+  const mode=document.getElementById(`dv-mode-${id}`).value;
+  btn.disabled=true;
+  try{
+    const saved=await api(`/libraries/${id}/dv-conversion`,{method:"PUT",body:{mode}});
+    const snapshot=SETTINGS_DATA.dvConversions;
+    if(snapshot){
+      snapshot.library_modes=snapshot.library_modes||{};
+      snapshot.library_modes[String(id)]=saved.mode;
+    }
+    toast(mode==="off"?"On-disk conversion disabled":mode==="auto"?"Automatic conversion enabled":"Manual conversion enabled");
+    renderSettings();
+  }catch(e){ toast(e.message||"Couldn't save Dolby Vision mode"); }
+  finally{ btn.disabled=false; }
+}
+function noteDvLibraryQueueResult(id,result){
+  const queued=Math.max(0,Number(result&&result.queued||0));
+  const snapshot=SETTINGS_DATA.dvConversions;
+  if(!snapshot||!queued) return false;
+  snapshot.progress=snapshot.progress||{};
+  snapshot.progress.queued=Number(snapshot.progress.queued||0)+queued;
+  snapshot.progress_by_library=snapshot.progress_by_library||{};
+  const progress=snapshot.progress_by_library[String(id)]||{};
+  progress.queued=Number(progress.queued||0)+queued;
+  snapshot.progress_by_library[String(id)]=progress;
+  // settingsTick owns the bounded ten-second reads. Make its next two-second
+  // tick eligible; the first terminal snapshot turns polling off again.
+  DV_SETTINGS_POLL_AT=0;
+  return true;
+}
+async function convertDvLibrary(id,btn){
+  btn.disabled=true;
+  try{
+    const result=await api(`/libraries/${id}/dv-conversions`,{method:"POST",body:{retry_failed:true}});
+    noteDvLibraryQueueResult(id,result);
+    const more=result.saturated?"; more eligible files may remain — run Convert now again":"";
+    toast(`${result.queued||0} Dolby Vision file${Number(result.queued)===1?'':'s'} queued${more}`);
+    renderSettings();
+  }catch(e){ toast(e.message||"Couldn't queue Dolby Vision conversion"); }
+  finally{ btn.disabled=false; }
+}
+async function saveDvDiskSettings(btn){
+  btn.disabled=true;
+  try{
+    const saved=await api("/settings",{method:"PUT",body:{
+      dv_disk_keep_original:document.getElementById("dv-keep-original").checked,
+      dv_disk_convert_parallel:Number(document.getElementById("dv-parallel").value)}});
+    cacheSettings(saved);
+    const snapshot=SETTINGS_DATA.dvConversions;
+    if(snapshot){
+      snapshot.keep_original=saved.dv_disk_keep_original;
+      snapshot.parallel=saved.dv_disk_convert_parallel;
+    }
+    toast("Dolby Vision conversion settings saved");
+    renderSettings();
+  }catch(e){ toast(e.message||"Couldn't save Dolby Vision settings"); }
+  finally{ btn.disabled=false; }
+}
+function dvRecoveryGuardsHtml(dv){
+  const guards=dv&&dv.recovery_guards||{}, summary=guards.summary||{};
+  const pending=Number(summary.intent||0)+Number(summary.guard_removed||0);
+  const orphaned=Math.max(0,Number(summary.orphaned||0));
+  const orphans=Array.isArray(guards.orphans)?guards.orphans:[];
+  // The server supplies these from one Store snapshot. Keep the renderer
+  // fail-visible as well: a future projection regression must never hide a
+  // concrete recovery record merely because its count disagrees.
+  const visibleOrphaned=Math.max(orphaned,orphans.length);
+  const orphanRows=orphans.map(guard=>`<li><b>${esc(guard.state||"unknown")}</b> · former source <code>${esc(guard.source_path||"unknown")}</code><br>
+      <span class="muted">Recorded recovery path <code>${esc(guard.recovery_path||"unknown")}</code> · guard <code>${esc(guard.guard_id||"unknown")}</code></span></li>`).join("");
+  const orphanList=visibleOrphaned?`<details open><summary>Review orphaned recovery records (${visibleOrphaned})</summary>
+      <p class="hint">An orphan no longer belongs to a conversion row. Leave its recorded path alone while the recovery worker automatically verifies and retires it; deleting it manually can remove the last verified link.</p>
+      ${orphanRows?`<ul>${orphanRows}</ul>`:`<div class="problem">The orphan count is non-zero, but this bounded snapshot returned no records.</div>`}
+      ${guards.orphans_truncated?`<div class="muted">Showing ${orphans.length} of ${visibleOrphaned} orphaned records in this bounded snapshot.</div>`:""}</details>`
+    :`<div class="hint">No orphaned recovery records.</div>`;
+  return `<h3 class="section">Recovery guard lifecycle</h3>
+    <div aria-live="polite"><b>${Number(summary.active||0)}</b> active guards · <b>${pending}</b> transitions pending · ${Number(summary.intent||0)} recording · ${Number(summary.guard_removed||0)} awaiting scratch cleanup · ${Number(summary.scratch_removed||0)} ready for ledger retirement</div>
+    ${orphanList}`;
+}
+function dvDiskPanel(settings,dv){
+  const capabilities=dv&&dv.capabilities;
+  const reason=capabilities&&!capabilities.available?capabilities.reason:"";
+  return `<div class="card"><h2 class="section" style="margin-top:0">Dolby Vision on disk</h2>
+    ${reason?`<div class="setwarn">⚠ <b>Conversion unavailable.</b> ${esc(reason)}</div>`:""}
+    <div class="row setrow" style="gap:14px 18px">
+      <label class="schedpair"><input type="checkbox" id="dv-keep-original"${settings&&settings.dv_disk_keep_original?' checked':''}> Keep the Profile 7 original as <code>.p7.orig</code></label>
+      <label class="schedpair" for="dv-parallel">Parallel files <select id="dv-parallel">${[1,2,3,4,5,6,7,8].map(n=>`<option value="${n}"${Number(settings&&settings.dv_disk_convert_parallel||1)===n?' selected':''}>${n}</option>`).join("")}</select></label>
+      <button class="ghost sm" aria-label="Save Dolby Vision conversion settings" onclick="saveDvDiskSettings(this)">Save</button></div>
+    <div class="hint">Profile 7 files are copied to a verified Profile 8.1 replacement before their public path changes. Keeping the original is safest and is on by default. Each file is leased cluster-wide, while parallelism limits work on this node.</div>
+    <div id="dv-recovery-guards">${dvRecoveryGuardsHtml(dv)}</div></div>`;
+}
+function libRow(l,status,dv){
   const paths=(l.paths||[]).map(p=>`<span class="pathchip">${esc(p)}</span>`).join(" ")||'<span class="muted">—</span>';
   return `<tr id="librow-${l.id}"><td class="libname"><b>${esc(l.name)}</b></td><td data-label="Kind">${esc(l.anime?'anime':l.kind)}</td>
       <td data-label="Paths"><div class="paths">${paths}</div></td>
-      <td class="muted" data-label="Status"><div id="st-${l.id}">${statusText(status[l.id],l.last_scan_at)}</div>${schedRow(l)}</td>
+      <td class="muted" data-label="Status"><div id="st-${l.id}">${statusText(status[l.id],l.last_scan_at)}</div>${schedRow(l)}${dvModeSelect(l,dv)}</td>
       <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end;gap:5px">
         <button class="ghost sm" onclick="scanLib(${l.id})">Scan</button>
         <button class="ghost sm" onclick="refreshLib(${l.id})" title="Re-fetch all metadata & artwork (incl. season posters)">Refresh art</button>
         <button class="ghost sm" onclick="editLib(${l.id})">Edit</button>
         <button class="ghost sm" onclick="delLib(${l.id})">Delete</button></div></td></tr>`;
 }
-function librariesPanel(libs,status,settings){
-  const rows=libs.map(l=>libRow(l,status)).join("")||`<tr><td colspan="5" class="muted">No libraries yet.</td></tr>`;
+function librariesPanel(libs,status,settings,dv){
+  const rows=libs.map(l=>libRow(l,status,dv)).join("")||`<tr><td colspan="5" class="muted">No libraries yet.</td></tr>`;
   const bulk=libs.length?`<div class="row" style="margin:0 0 14px;gap:8px;align-items:center">
         <button class="ghost sm" onclick="scanAll()" title="Scan every library for new & changed files">Scan all</button>
         <button class="ghost sm" onclick="refreshAll()" title="Re-fetch metadata & artwork for every library">Refresh all art</button>
@@ -11644,6 +11990,7 @@ function librariesPanel(libs,status,settings){
       <div class="err" id="lerr"></div>
       <button style="margin-top:12px" onclick="addLib()">Add & scan</button>
     </div>
+    ${dvDiskPanel(settings,dv)}
     ${maintenancePanel(settings)?`<div class="card">${maintenancePanel(settings)}</div>`:""}`;
 }
 // Set when a provider key is saved while libraries already exist.
@@ -12944,6 +13291,16 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         const el=document.getElementById("st-"+id);
         if(el) el.innerHTML=statusText(st,lastScans.get(String(id)));
       }
+      // Conversion progress is deliberately colder than scan status. Refresh
+      // only while durable work is active, and stop spending the extra request
+      // as soon as the next snapshot is terminal.
+      if(dvSnapshotHasActive(SETTINGS_DATA.dvConversions)&&Date.now()>=DV_SETTINGS_POLL_AT){
+        try{
+          const snapshot=await refreshDvConversions();
+          if(!settingsCurrent(generation,tab)) return;
+          paintDvConversionProgress(snapshot);
+        }catch(error){ if(error&&error.status===401) throw error; }
+      }
     }
     const secondary=[];
     const auto=document.getElementById("logauto");
@@ -13970,7 +14327,7 @@ function catalogItemBody(p){
       const header=(multi||miss)
         ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" onclick='play(${v.id},${esc(JSON.stringify(it.title))},${resume},${v.duration_ms||0},${esc(JSON.stringify(pmeta))})'>▶ Play</button>`:''}</div>`
         : '';
-      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}</div>`;
+      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}</div>`;
     }).join("");
   } else if(p.shape==="episodes"){
     const a=watchControls(it);
@@ -14450,7 +14807,7 @@ function theaterItemBody(p){
       const header=(p.multi||miss)
         ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&p.multi)?`<button class="ghost sm" onclick='play(${v.id},${esc(JSON.stringify(it.title))},${resume},${v.duration_ms||0},${esc(JSON.stringify(pmeta))})'>▶ Play</button>`:''}</div>`
         : '';
-      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}</div>`;
+      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}</div>`;
     }).join("");
   } else if(p.shape==="episodes"){
     const a=watchControls(it);

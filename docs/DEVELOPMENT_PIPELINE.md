@@ -80,6 +80,12 @@ The aggregate result is named `Effort development gate`. Every new task push
 cancels its superseded run because only the latest task tree can merge. Missing
 scope information fails open into all compile surfaces.
 
+**Compilation being blocking is a reason to compile locally, not a reason to
+let the gate do it.** A session whose checkout has no toolchain can still have
+one in about ten minutes — see
+[AGENT-COMPILE-LOOP.md](AGENT-COMPILE-LOOP.md) — and the local run reports
+every error at once where the gate reports the first.
+
 **Corrective changes still need a focused local proof.** Run the smallest test
 that rejects the old behavior and name it in the task PR. CI intentionally does
 not rediscover or expand that command in the effort lane; the history audit

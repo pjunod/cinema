@@ -238,22 +238,56 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("-h filter=libplacebo", dockerfile)
         self.assertNotIn("apply_dolbyvision", dockerfile)
 
+    def test_docker_build_pins_and_verifies_disk_conversion_tools(self):
+        dockerfile = read("Dockerfile")
+        self.assertIn("ARG DOVI_TOOL_VERSION=2.3.3", dockerfile)
+        self.assertIn("ARG MKVTOOLNIX_VERSION=74.0.0-1", dockerfile)
+        self.assertIn('"mkvtoolnix=${MKVTOOLNIX_VERSION}"', dockerfile)
+        self.assertIn(
+            "dovi_sha=5dae82cb2becd3b9fd726127f936a8d32635e60746d16238fdfded12aa05988c",
+            dockerfile,
+        )
+        self.assertIn(
+            "dovi_sha=daf538c275f4e702219ce8eb61db28382193ac9d0126e1ef4185a88303af4485",
+            dockerfile,
+        )
+        self.assertIn('sha256sum -c -', dockerfile)
+        self.assertIn('dovi_tool --version | grep -F "${DOVI_TOOL_VERSION}"', dockerfile)
+        self.assertIn('mkvmerge --version | grep -F "mkvmerge v74.0.0"', dockerfile)
+        self.assertIn("PLURX_DOVI_TOOL=/usr/local/bin/dovi_tool", dockerfile)
+        self.assertIn("PLURX_MKVMERGE=/usr/bin/mkvmerge", dockerfile)
+
+        workflow = read(".github/workflows/ci.yml")
+        self.assertIn("docker/setup-qemu-action@v3", workflow)
+        self.assertIn("Build arm64 runtime and verify pinned conversion tools", workflow)
+        self.assertIn("platforms: linux/arm64", workflow)
+        self.assertIn("outputs: type=cacheonly", workflow)
+
     def test_docker_build_keeps_cluster_validation_features_out_of_plurxd(self):
         dockerfile = read("Dockerfile")
-        self.assertNotIn(
-            "cargo build --release -p plurxd -p plurx-cluster-check",
-            dockerfile,
-        )
+        release = read(".github/workflows/publish-release.yml")
+        for source in (dockerfile, release):
+            self.assertNotIn(
+                "cargo build --release -p plurxd -p plurx-cluster-check",
+                source,
+            )
+            self.assertRegex(
+                source,
+                r"cargo build(?: --locked)? --release -p plurxd",
+            )
+            self.assertRegex(
+                source,
+                r"cargo build(?: --locked)? --release -p plurx-cluster-check",
+            )
+            self.assertIn("cargo tree --locked -p plurxd -e features", source)
+            self.assertIn("grep -q 'cluster-read-cost-validation'", source)
+        self.assertIn("CARGO_TARGET_DIR=/src/target-plurxd", dockerfile)
+        self.assertIn("CARGO_TARGET_DIR=/src/target-cluster-check", dockerfile)
+        self.assertIn('CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-plurxd"', release)
         self.assertIn(
-            "CARGO_TARGET_DIR=/src/target-plurxd cargo build --release -p plurxd",
-            dockerfile,
+            'CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-cluster-check"',
+            release,
         )
-        self.assertIn(
-            "CARGO_TARGET_DIR=/src/target-cluster-check cargo build --release -p plurx-cluster-check",
-            dockerfile,
-        )
-        self.assertIn("cargo tree --locked -p plurxd -e features", dockerfile)
-        self.assertIn("grep -q 'cluster-read-cost-validation'", dockerfile)
 
     def test_ship_routes_real_mobile_targets_through_ansible(self):
         ship = read("scripts/ship")
@@ -602,6 +636,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("docker/build-push-action", effort)
         self.assertIn("$(CARGO) check --workspace --locked --all-targets", makefile)
         self.assertIn('"${PLURX_EFFORT_COMMIT:-}" = "1"', precommit)
+        self.assertIn("ROOT=$(git rev-parse --show-toplevel)", precommit)
         self.assertIn(
             "make history-check validation-lint operations-check effort-rust-check",
             precommit,

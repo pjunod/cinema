@@ -1228,6 +1228,18 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     api_calls = []
     page.on("request", lambda r: api_calls.append(
         f"{r.method} {api_path(urlparse(r.url).path)}") if "/api/" in urlparse(r.url).path else None)
+    if route.get("player"):
+        # A real player persists progress every five seconds. Decoder startup
+        # can cross that wall-clock boundary only on a loaded runner, which
+        # used to make one unchanged capture alternate between zero and one
+        # writes. Keep the baseline database immutable; the deterministic
+        # shipped-function pulse below proves the request remains wired, while
+        # any extra wall-clock pulses are normalized to the same presence fact.
+        page.route(
+            "**/api/v1/items/*/progress",
+            lambda intercepted: intercepted.fulfill(
+                status=200, content_type="application/json", body="{}"),
+        )
     # Console errors and uncaught exceptions are collected for the whole visit,
     # not sampled at the end: an error thrown during boot is exactly the kind
     # this gate exists to catch, and it is long gone by the time we screenshot.
@@ -1356,6 +1368,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
             # before opening the player.
             pause_activity_polling(page, name, args.timeout)
             open_player(page, args.timeout)
+            page.evaluate("() => reportProgress(PLAYER.fileId)")
 
         if args.self_test_fail and name == args.self_test_route:
             if args.self_test_fail == "console":
@@ -1439,12 +1452,14 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
             raise Fail(f"{name}: " + "; ".join(problems[:5]))
         counted = {}
         for call in api_calls:
+            if route.get("player") and call == "POST /api/v1/items/<id>/progress":
+                counted[call] = 1
             # Chromium is free to satisfy one direct-play video with one GET or
             # several byte-range GETs. The baseline contract is that the real
             # direct endpoint was used; its transport chunk count changes with
             # decoder buffering and is not a UI or routing invariant. Control
             # plane calls remain exact counts.
-            if route.get("player") and call == "GET /api/v1/files/<id>/direct":
+            elif route.get("player") and call == "GET /api/v1/files/<id>/direct":
                 counted[call] = 1
             else:
                 counted[call] = counted.get(call, 0) + 1
@@ -1985,8 +2000,8 @@ def parse_args(argv):
                    help="localStorage.plurx_appearance (default: dark)")
     p.add_argument("--viewport-only", action="store_true",
                    help="capture the viewport instead of the full scrollable page")
-    p.add_argument("--tab-stops", type=int, default=60,
-                   help="how many times to press Tab per route (default: 60)")
+    p.add_argument("--tab-stops", type=int, default=80,
+                   help="how many times to press Tab per route (default: 80)")
     p.add_argument("--settle-ms", type=int, default=4500,
                    help="quiet period before the shutter, in ms — must exceed the 4s "
                         "activity poll so the capture never lands mid-cycle (default: 4500)")

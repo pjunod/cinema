@@ -509,8 +509,12 @@ MKEY=<monarr Settings → Security → Reveal>
 
 ## What plurx deliberately does not do
 
-- **Never writes to media storage.** Libraries are mounted read-only. plurx
-  never renames, moves, or deletes a file, and no integration changes that.
+- **Integrations never write media storage.** Scanning, metadata, playback, and
+  every integration in this document use read-only libraries and never rename,
+  move, or delete a file. The only product-wide exception is the unrelated,
+  admin-only, per-library, off-by-default Dolby Vision on-disk conversion under
+  the explicit storage contract in [OPERATIONS.md](OPERATIONS.md); no integration
+  can enable or invoke it.
 - **Never talks to nzbd.** There is no seam. plurx learns about new files from
   monarr, after the import, when they are actually in place — telling it
   earlier would only announce files that are not there yet.

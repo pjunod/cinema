@@ -11,6 +11,7 @@
 mod apikeys;
 mod cache;
 mod coordination;
+mod dv_conversion;
 mod fragindex;
 mod fragment_index_cluster;
 mod library;
@@ -905,6 +906,45 @@ const MIGRATIONS: &[&str] = &[
     // means a newer player generation exists, and the staged successor must
     // abort rather than reap it.
     super::MEDIA_SESSION_PREPARATIONS_SCHEMA,
+    // v43: permanent Profile 7 -> 8.1 conversion ledger. The media pipeline
+    // never touches the source before this row reaches `verified`; keeping the
+    // audit row under the file foreign key also makes a library deletion clean
+    // up bookkeeping without following or deleting the renamed original.
+    "CREATE TABLE dv_conversions (
+        file_id        INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        state          TEXT NOT NULL,
+        el_type        TEXT,
+        original_path  TEXT,
+        bytes_before   INTEGER,
+        bytes_after    INTEGER,
+        error          TEXT,
+        queued_at_ms   INTEGER NOT NULL,
+        finished_at_ms INTEGER
+    ) STRICT;
+    CREATE INDEX dv_conversions_queue
+        ON dv_conversions(state, queued_at_ms, file_id);",
+    // v44: a non-cascading, attempt-identified recovery witness. The link on
+    // the cascading conversion row makes a deleted-and-reused integer file id
+    // unable to adopt an old guard accidentally; the guard itself survives a
+    // confirmed scan deletion until bounded filesystem cleanup completes.
+    "ALTER TABLE dv_conversions ADD COLUMN recovery_guard_id TEXT CHECK
+         (state != 'committed' OR original_path IS NOT NULL
+          OR recovery_guard_id IS NOT NULL);
+    CREATE UNIQUE INDEX dv_conversions_recovery_guard
+        ON dv_conversions(recovery_guard_id) WHERE recovery_guard_id IS NOT NULL;
+    CREATE TABLE dv_recovery_guards (
+        guard_id       TEXT PRIMARY KEY,
+        file_id        INTEGER NOT NULL,
+        library_id     INTEGER NOT NULL,
+        source_path    TEXT NOT NULL,
+        recovery_path  TEXT NOT NULL UNIQUE,
+        state          TEXT NOT NULL CHECK
+                         (state IN ('intent','active','guard_removed','scratch_removed')),
+        created_at_ms  INTEGER NOT NULL,
+        updated_at_ms  INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX dv_recovery_guards_file
+        ON dv_recovery_guards(file_id, guard_id);",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1965,7 +2005,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 42,
+            version, 44,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2030,7 +2070,7 @@ mod tests {
             .expect("preparation ledger");
         assert!(
             preparations.contains("PRIMARY KEY (user_id, playback_id)"),
-            "v39 enforces one staged successor per playback in the schema \
+            "v42 enforces one staged successor per playback in the schema \
              rather than in a read-then-write, which is the only place a \
              concurrent second prepare cannot slip past: {preparations}"
         );
@@ -3235,10 +3275,12 @@ mod tests {
     fn v41_schema_commit_with_a_stale_marker_recovers_without_replaying_ddl() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("plurx.db");
-        SqliteStore::open(&db).expect("create current database");
-
         {
             let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(41) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
             conn.pragma_update(None, "user_version", 40)
                 .expect("simulate interruption after the v41 schema commit");
         }
