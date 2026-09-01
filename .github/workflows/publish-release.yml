@@ -152,30 +152,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-bookworm-${{ matrix.target }}
-      - name: Build the exact tagged binary
+      - name: Build the exact tagged binaries
         env:
           TARGET: ${{ matrix.target }}
           PLURX_BUILD_REF: ${{ needs.resolve.outputs.release_tag }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --locked --release -p plurxd --target "$TARGET"
-      - name: Verify version, ABI ceiling, and checksum
+        run: >-
+          cargo build --locked --release
+          -p plurxd -p plurx-cluster-check --target "$TARGET"
+      - name: Verify version, ABI ceiling, and release artifact
         env:
           TARGET: ${{ matrix.target }}
           ARCH: ${{ matrix.arch }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.commit_sha }}
         run: |
           set -euo pipefail
+          for name in plurxd plurx-cluster-check; do
+            binary="target/$TARGET/release/$name"
+            test "$(file -b "$binary")" != ""
+            max_glibc=$(readelf --version-info "$binary" \
+              | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
+              | sort -V | tail -1)
+            test -n "$max_glibc"
+            test "$(printf '%s\n' "$max_glibc" 2.36 | sort -V | tail -1)" = 2.36 || {
+              echo "::error::$ARCH $name requires GLIBC_$max_glibc; Bookworm provides 2.36"
+              exit 1
+            }
+          done
           binary="target/$TARGET/release/plurxd"
-          test "$(file -b "$binary")" != ""
-          max_glibc=$(readelf --version-info "$binary" \
-            | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
-            | sort -V | tail -1)
-          test -n "$max_glibc"
-          test "$(printf '%s\n' "$max_glibc" 2.36 | sort -V | tail -1)" = 2.36 || {
-            echo "::error::$ARCH binary requires GLIBC_$max_glibc; Bookworm provides 2.36"
-            exit 1
-          }
           if [ "$ARCH" = arm64 ]; then
             reported=$(qemu-aarch64 -L /usr/aarch64-linux-gnu "$binary" --version)
           else
@@ -186,9 +192,17 @@ jobs:
             exit 1
           }
           mkdir -p release-binary
-          install -m 0755 "$binary" release-binary/plurxd
-          cd release-binary
-          sha256sum plurxd > plurxd.sha256
+          install -m 0755 \
+            "target/$TARGET/release/plurxd" \
+            "target/$TARGET/release/plurx-cluster-check" \
+            release-binary/
+          python3 -m validation.release_artifact create \
+            --directory release-binary \
+            --git-tree "$(git rev-parse HEAD^{tree})" \
+            --git-commit "$SOURCE_SHA" \
+            --build-ref "$RELEASE_TAG" \
+            --rustc "$(rustc -Vv)" \
+            --target "$TARGET"
       - uses: actions/upload-artifact@v4
         with:
           name: release-binary-${{ matrix.arch }}
@@ -228,12 +242,23 @@ jobs:
           name: release-binary-${{ matrix.arch }}
           path: release-source/release-bin
       - name: Derive a prebuilt-only Dockerfile from the tagged runtime
+        env:
+          TARGET: ${{ matrix.arch == 'amd64' && 'x86_64-unknown-linux-gnu' || 'aarch64-unknown-linux-gnu' }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.commit_sha }}
         run: |
+          set -euo pipefail
           python3 -m validation.release_dockerfile \
             release-source/Dockerfile release-source/Dockerfile.release
-          cd release-source/release-bin
-          sha256sum -c plurxd.sha256
-          chmod 0755 plurxd
+          python3 -m validation.release_artifact verify \
+            --directory release-source/release-bin \
+            --git-tree "$(git -C release-source rev-parse HEAD^{tree})" \
+            --git-commit "$SOURCE_SHA" \
+            --build-ref "$RELEASE_TAG" \
+            --target "$TARGET"
+          chmod 0755 \
+            release-source/release-bin/plurxd \
+            release-source/release-bin/plurx-cluster-check
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3

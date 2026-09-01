@@ -627,6 +627,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("docker/build-push-action", effort)
         self.assertIn("$(CARGO) check --workspace --locked --all-targets", makefile)
         self.assertIn('"${PLURX_EFFORT_COMMIT:-}" = "1"', precommit)
+        self.assertIn("ROOT=$(git rev-parse --show-toplevel)", precommit)
         self.assertIn(
             "make history-check validation-lint operations-check effort-rust-check",
             precommit,
