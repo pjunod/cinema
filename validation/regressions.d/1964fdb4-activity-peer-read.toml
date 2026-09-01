@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1964fdb4"]
+points = ["cluster.membership", "cluster.page-reads", "web.experience"]
+checks = ["rust-gate", "cluster-auth", "web-static"]
+reason = "The retained regressions coalesce eight concurrent public Activity reads into one authenticated peer request, preserve per-request admin hostname privacy, refresh the one-second start floor after delayed directory resolution before cancellation, classify non-success headers without buffering their bodies, distinguish a peer with no Activity origin from transport unreachability, and expose fixed-cardinality sender, peer-outcome, authority-admission, and cold-key refusal counters without adding Store work to /metrics."
