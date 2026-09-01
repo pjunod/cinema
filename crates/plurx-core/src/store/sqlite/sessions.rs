@@ -447,11 +447,16 @@ fn preparation_route_matches(
     route: &MediaSessionRoute,
     preparation: &MediaSessionPreparation,
 ) -> bool {
-    route.session_id == preparation.session_id
+    route.incarnation_id == preparation.incarnation_id
+        && route.session_id == preparation.session_id
         && route.user_id == preparation.user_id
         && route.playback_id == preparation.playback_id
         && route.request_fingerprint == preparation.request_fingerprint
         && route.owner_node_id == preparation.owner_node_id
+        && route.owner_epoch == 1
+        && route.recipe_json == preparation.recipe_json
+        && route.response_json == preparation.response_json
+        && route.media_origin_ms == preparation.media_origin_ms
         && route.state == "active"
         && route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
 }
@@ -1504,17 +1509,29 @@ impl MediaSessionStore for SqliteStore {
                     staged_from_row,
                 )
                 .optional()?;
-            let named_owns_slot = existing.as_ref().is_some_and(|staged| {
-                staged.staged_incarnation_id == staged_incarnation_id
-                    && staged.expected_predecessor_incarnation_id
-                        == preparation.expected_predecessor_incarnation_id
-            });
-            let exact_replay = existing.is_some_and(|staged| {
+            let exact_replay = existing.as_ref().is_some_and(|staged| {
                 staged.staged_incarnation_id == preparation.incarnation_id
                     && staged.expected_predecessor_incarnation_id
                         == preparation.expected_predecessor_incarnation_id
             });
-            if !named_owns_slot && !exact_replay {
+            if exact_replay {
+                let route = tx
+                    .query_row(
+                        &format!(
+                            "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
+                        ),
+                        [preparation.incarnation_id.as_str()],
+                        route_from_row,
+                    )
+                    .optional()?
+                    .filter(|route| preparation_route_matches(route, &preparation));
+                tx.commit()?;
+                return Ok(route);
+            }
+            let named_owns_slot = existing
+                .as_ref()
+                .is_some_and(|staged| staged.staged_incarnation_id == staged_incarnation_id);
+            if !named_owns_slot {
                 tx.rollback()?;
                 return Ok(None);
             }

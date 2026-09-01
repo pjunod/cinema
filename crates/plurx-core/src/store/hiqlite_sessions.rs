@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use hiqlite::macros::params;
-use hiqlite::Row;
+use hiqlite::{Param, Row};
 
 use super::hiqlite::{database_error, timeout_store, validate_sql, HiqliteAuthStore};
 use super::MediaSessionStore;
@@ -22,6 +22,12 @@ type ActivationPointerReadPause = (
     tokio::sync::oneshot::Receiver<()>,
 );
 
+#[cfg(feature = "hiqlite-contract-tests")]
+type RejoinLedgerReadPause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
 /// Contract-only seam which freezes one activation after its optimistic
 /// pointer read and before its replicated transaction is submitted. It lets
 /// the three-voter contract deterministically order activation+renewal inside
@@ -29,6 +35,13 @@ type ActivationPointerReadPause = (
 #[cfg(feature = "hiqlite-contract-tests")]
 static ACTIVATION_POINTER_READ_PAUSE: std::sync::LazyLock<
     std::sync::Mutex<Option<ActivationPointerReadPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// Contract-only seam for ordering a competing abort after rejoin's
+/// optimistic ledger read but before its Raft proposal.
+#[cfg(feature = "hiqlite-contract-tests")]
+static REJOIN_LEDGER_READ_PAUSE: std::sync::LazyLock<
+    std::sync::Mutex<Option<RejoinLedgerReadPause>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -46,6 +59,20 @@ impl HiqliteAuthStore {
             pause.is_none(),
             "activation pointer-read pause already armed"
         );
+        *pause = Some((reached_sender, release_receiver));
+        (reached_receiver, release_sender)
+    }
+
+    pub fn validation_pause_next_rejoin_after_ledger_read() -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached_sender, reached_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        let mut pause = REJOIN_LEDGER_READ_PAUSE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(pause.is_none(), "rejoin ledger-read pause already armed");
         *pause = Some((reached_sender, release_receiver));
         (reached_receiver, release_sender)
     }
@@ -333,6 +360,42 @@ async fn staged_row(
         .map(|row| row.0))
 }
 
+/// Classify an expected rejected or empty rejoin attempt from durable state.
+///
+/// A missing guarded DELETE means another proposal won after the optimistic
+/// read. A deliberate assertion failure means this proposal deleted the old
+/// ledger but could not stage the replacement, so Hiqlite restored it. Reads
+/// after either rollback (or an all-zero proposal) distinguish exact replay,
+/// retained ownership, and a genuinely lost named row without trusting a
+/// caller-supplied timestamp.
+async fn classify_rejoin_after_attempt(
+    store: &HiqliteAuthStore,
+    staged_incarnation_id: &str,
+    preparation: &crate::domain::MediaSessionPreparation,
+) -> Result<Option<MediaSessionRoute>, StoreError> {
+    let staged = staged_row(store, preparation.user_id, &preparation.playback_id).await?;
+    if staged.as_ref().is_some_and(|staged| {
+        staged.staged_incarnation_id == preparation.incarnation_id
+            && staged.expected_predecessor_incarnation_id
+                == preparation.expected_predecessor_incarnation_id
+    }) {
+        return Ok(
+            route_by(store, "incarnation_id", &preparation.incarnation_id)
+                .await?
+                .filter(|route| preparation_route_matches(route, preparation)),
+        );
+    }
+    if staged
+        .as_ref()
+        .is_some_and(|staged| staged.staged_incarnation_id == staged_incarnation_id)
+    {
+        return Err(StoreError::Task(
+            "media-session rejoin replacement is no longer admissible".to_owned(),
+        ));
+    }
+    Ok(None)
+}
+
 fn prepare_statements(
     preparation: &crate::domain::MediaSessionPreparation,
 ) -> Vec<(&'static str, hiqlite::Params)> {
@@ -369,7 +432,8 @@ fn prepare_statements(
                 updated_at_ms = excluded.updated_at_ms
               WHERE job_leases.owner_node_id = excluded.owner_node_id
                 AND job_leases.fence = 1 AND job_leases.expires_at_ms > $4
-                AND job_leases.revision < 9223372036854775807",
+                AND job_leases.revision < 9223372036854775807
+             RETURNING resource, owner_node_id, fence, revision, expires_at_ms",
             params!(
                 prepare_lease_resource.as_str(),
                 preparation.owner_node_id.as_str(),
@@ -411,7 +475,8 @@ fn prepare_statements(
                 AND (SELECT COUNT(*) FROM media_sessions
                       WHERE owner_node_id = $6 AND state = 'active'
                         AND lease_expires_at_ms > $12 AND incarnation_id != $1) < $16
-                AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $17)",
+                AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $17)
+             RETURNING incarnation_id, session_id, user_id, playback_id, owner_node_id",
             params!(
                 preparation.incarnation_id.as_str(),
                 preparation.session_id.as_str(),
@@ -680,11 +745,16 @@ fn preparation_route_matches(
     route: &MediaSessionRoute,
     preparation: &crate::domain::MediaSessionPreparation,
 ) -> bool {
-    route.session_id == preparation.session_id
+    route.incarnation_id == preparation.incarnation_id
+        && route.session_id == preparation.session_id
         && route.user_id == preparation.user_id
         && route.playback_id == preparation.playback_id
         && route.request_fingerprint == preparation.request_fingerprint
         && route.owner_node_id == preparation.owner_node_id
+        && route.owner_epoch == 1
+        && route.recipe_json == preparation.recipe_json
+        && route.response_json == preparation.response_json
+        && route.media_origin_ms == preparation.media_origin_ms
         && route.state == "active"
         // The sentinel is what keeps a staged row out of takeover inventory,
         // so a replay that finds it armed is not looking at a staged row.
@@ -1442,39 +1512,38 @@ impl MediaSessionStore for HiqliteAuthStore {
 
         // A read narrows proposals to either the named occupied slot or an
         // exact replay. Every mutation remains SQL-gated in the proposal, so
-        // a commit racing this read still turns into an all-zero loss.
+        // a commit racing this read makes the observable ledger CAS reject.
         let existing = staged_row(self, preparation.user_id, &preparation.playback_id).await?;
-        let named_owns_slot = existing.as_ref().is_some_and(|staged| {
-            staged.staged_incarnation_id == staged_incarnation_id
+        let exact_replay = existing.as_ref().is_some_and(|staged| {
+            staged.staged_incarnation_id == preparation.incarnation_id
                 && staged.expected_predecessor_incarnation_id
                     == preparation.expected_predecessor_incarnation_id
         });
+        if exact_replay {
+            return Ok(
+                route_by(self, "incarnation_id", &preparation.incarnation_id)
+                    .await?
+                    .filter(|route| preparation_route_matches(route, preparation)),
+            );
+        }
+        let named_owns_slot = existing
+            .as_ref()
+            .is_some_and(|staged| staged.staged_incarnation_id == staged_incarnation_id);
         if !named_owns_slot {
-            let exact_replay = existing.is_some_and(|staged| {
-                staged.staged_incarnation_id == preparation.incarnation_id
-                    && staged.expected_predecessor_incarnation_id
-                        == preparation.expected_predecessor_incarnation_id
-            });
-            if !exact_replay {
-                return Ok(None);
-            }
-            let named_was_replaced = route_by(self, "incarnation_id", staged_incarnation_id)
-                .await?
-                .is_some_and(|route| {
-                    route.state == "ended"
-                        && route.terminal_reason.as_deref() == Some("replaced")
-                        && route.user_id == preparation.user_id
-                        && route.playback_id == preparation.playback_id
-                });
-            return if named_was_replaced {
-                Ok(
-                    route_by(self, "incarnation_id", &preparation.incarnation_id)
-                        .await?
-                        .filter(|route| preparation_route_matches(route, preparation)),
-                )
-            } else {
-                Ok(None)
+            return Ok(None);
+        }
+        #[cfg(feature = "hiqlite-contract-tests")]
+        {
+            let ledger_read_pause = {
+                let mut pause = REJOIN_LEDGER_READ_PAUSE
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                pause.take()
             };
+            if let Some((reached, release)) = ledger_read_pause {
+                let _ = reached.send(());
+                let _ = release.await;
+            }
         }
 
         // Hiqlite executes this ordered vector as one Raft proposal. The
@@ -1494,18 +1563,36 @@ impl MediaSessionStore for HiqliteAuthStore {
         statements.push((
             "DELETE FROM media_session_preparations
               WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3
+                AND expected_predecessor_incarnation_id = $4
                 AND EXISTS (SELECT 1 FROM media_sessions
                   WHERE incarnation_id = $3 AND user_id = $1 AND playback_id = $2
                     AND state = 'ended' AND terminal_reason = 'replaced'
-                    AND updated_at_ms = $4)",
+                    AND updated_at_ms = $5)
+              RETURNING user_id, playback_id, staged_incarnation_id,
+                        expected_predecessor_incarnation_id",
             params!(
                 preparation.user_id,
                 preparation.playback_id.as_str(),
                 staged_incarnation_id,
+                preparation.expected_predecessor_incarnation_id.as_str(),
                 preparation.now_ms
             ),
         ));
-        statements.extend(prepare_statements(preparation));
+        let guarded_delete_index = statements.len() - 1;
+        let mut prepare = prepare_statements(preparation);
+        // Each stage is observable and the next stage consumes its output.
+        // Missing old ledger, refused lease mutation, or refused session
+        // insert therefore aborts the proposal before a later statement can
+        // mistake pre-existing state for this rejoin's work.
+        prepare[0].1[6] = Param::StmtOutputNamed(
+            guarded_delete_index,
+            "expected_predecessor_incarnation_id".into(),
+        );
+        let prepare_lease_index = guarded_delete_index + 1;
+        prepare[1].1[5] = Param::StmtOutputNamed(prepare_lease_index, "owner_node_id".into());
+        let prepare_session_index = prepare_lease_index + 1;
+        prepare[2].1[2] = Param::StmtOutputNamed(prepare_session_index, "incarnation_id".into());
+        statements.extend(prepare);
         // A zero-row guarded prepare is a normal CAS loss, but not after this
         // proposal has already retired the named candidate. Turn that partial
         // shape into a constraint error so Hiqlite rolls back the whole Raft
@@ -1541,19 +1628,22 @@ impl MediaSessionStore for HiqliteAuthStore {
         let results = match self.client().txn(statements).await {
             Ok(results) => results,
             Err(error) => {
-                let assertion_failed = error
-                    .to_string()
-                    .contains("media_session_preparations.user_id");
-                let named_restored =
-                    staged_row(self, preparation.user_id, &preparation.playback_id)
-                        .await?
-                        .is_some_and(|staged| {
-                            staged.staged_incarnation_id == staged_incarnation_id
-                        });
-                if assertion_failed && named_restored {
-                    return Err(StoreError::Task(
-                        "media-session rejoin replacement is no longer admissible".to_owned(),
-                    ));
+                let message = error.to_string();
+                let guarded_step_lost = [
+                    guarded_delete_index,
+                    prepare_lease_index,
+                    prepare_session_index,
+                ]
+                .into_iter()
+                .any(|index| {
+                    message.contains(&format!(
+                        "StmtIndex({index}) does not have observable row output"
+                    ))
+                });
+                let assertion_failed = message.contains("media_session_preparations.user_id");
+                if guarded_step_lost || assertion_failed {
+                    return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation)
+                        .await;
                 }
                 return Err(database_error(error));
             }
@@ -1563,18 +1653,14 @@ impl MediaSessionStore for HiqliteAuthStore {
             Err(error) => {
                 // The conditional NOT NULL assertion above is the only
                 // expected statement error. Hiqlite has rolled the proposal
-                // back; the named ledger row proves this was that guarded
-                // admission loss rather than an unrelated database fault.
-                let named_restored =
-                    staged_row(self, preparation.user_id, &preparation.playback_id)
-                        .await?
-                        .is_some_and(|staged| {
-                            staged.staged_incarnation_id == staged_incarnation_id
-                        });
-                if named_restored {
-                    return Err(StoreError::Task(
-                        "media-session rejoin replacement is no longer admissible".to_owned(),
-                    ));
+                // back. Classify only that exact constraint target; unrelated
+                // statement errors remain database faults.
+                if error
+                    .to_string()
+                    .contains("media_session_preparations.user_id")
+                {
+                    return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation)
+                        .await;
                 }
                 return Err(database_error(error));
             }
@@ -1608,7 +1694,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(Some(route));
         }
         if changed.iter().all(|affected| *affected == 0) {
-            return Ok(None);
+            return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation).await;
         }
         Err(StoreError::Task(
             "replicated media-session rejoin committed without its exact projection".to_owned(),
