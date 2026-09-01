@@ -6096,6 +6096,18 @@ async fn subtitle_vtt_local_before(
             .await
             .map_err(|_| response_publication_timeout())?;
             if let Ok(Some(bytes)) = window_bytes {
+                // Start the whole-track warm even though this request is
+                // answered. A window is a bridge: it persists on disk across
+                // restarts while the whole-track sidecar may not exist yet, so
+                // returning here without warming would leave a viewer parked
+                // past the first window served by a window forever, with the
+                // authoritative extraction never kicked from this route.
+                tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(publication_deadline),
+                    crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+                )
+                .await
+                .map_err(|_| response_publication_timeout())?;
                 tracing::info!(
                     session = %crate::transcode::session_log_id(session),
                     file_id = file.id,

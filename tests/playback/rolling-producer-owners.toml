@@ -968,7 +968,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # ffmpegs destroys the video timeline (see `plurxd::dvpipe`). The conversion now
 # rewrites NAL units inside the fragments the one producer already writes, so
 # the process and task counts are exactly what they were before it.
-expected_occurrences = 348
+# 349 with the bounded subtitle window: the window warmer's detached extraction.
+expected_occurrences = 349
 
 [[module_structures]]
 id = "method-spawn"
@@ -1005,7 +1006,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # halves of its deterministic barrier, and the spawned handle is always joined.
 # 506 with the detached marker telemetry assertion: one test-only sleep yields
 # to the handler's bounded background recorder; it owns no process or producer.
-expected_occurrences = 506
+# 509 with the bounded subtitle window: the window read and the two warm starts in the subtitle segment arm.
+expected_occurrences = 509
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1031,7 +1033,8 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # straight to `bounded_command_output` -- so it inherits that function's
 # `kill_on_drop`, its 5s timeout, and its awaited `child.wait()`. Nothing owns
 # it beyond the await, and it never runs in a shipped binary.
-expected_occurrences = 61
+# 62 with the bounded subtitle window: the window extractor.
+expected_occurrences = 62
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1048,7 +1051,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # across the tests that pin the permanence split, the action ranking and the
 # wire names. All are `&'static str` lookups on a fieldless enum used to name
 # one wire field; none launches anything or owns a producer.
-expected_occurrences = 191
+# 192 with the bounded subtitle window: its output().
+expected_occurrences = 192
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1082,7 +1086,8 @@ pattern = "kill_on_drop\\s*\\("
 # ffmpeg holding a device the first real session then cannot open.
 # +1: the chapter probe is dropped by cancellation or deadline selection and
 # must not leave ffprobe holding a NAS file or the queue's global media slot.
-expected_occurrences = 33
+# 34 with the bounded subtitle window: its kill_on_drop, for the same reason the whole-track extractor has one.
+expected_occurrences = 34
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
