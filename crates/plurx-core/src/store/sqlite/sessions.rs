@@ -206,8 +206,8 @@ fn abort_staged_generation(
     playback_id: &str,
     staged_incarnation_id: &str,
     now_ms: i64,
-) -> rusqlite::Result<()> {
-    tx.execute(
+) -> rusqlite::Result<usize> {
+    let retired = tx.execute(
         "UPDATE media_sessions
             SET state = 'ended', terminal_reason = 'replaced',
                 lease_expires_at_ms = ?1, updated_at_ms = ?1
@@ -256,7 +256,185 @@ fn abort_staged_generation(
           WHERE user_id = ?1 AND playback_id = ?2 AND staged_incarnation_id = ?3",
         params![user_id, playback_id, staged_incarnation_id],
     )?;
-    Ok(())
+    Ok(retired)
+}
+
+/// Stage one preparation inside the caller's transaction.
+///
+/// The caller owns commit versus rollback. Returning `None` therefore leaves
+/// no partial lease/session/ledger writes behind, which lets the ordinary
+/// prepare and the occupied-slot rejoin share exactly the same admission and
+/// replay rules.
+fn prepare_within(
+    tx: &rusqlite::Transaction<'_>,
+    preparation: &MediaSessionPreparation,
+) -> rusqlite::Result<Option<MediaSessionRoute>> {
+    let existing = tx
+        .query_row(
+            &format!(
+                "SELECT {STAGED_COLS} FROM media_session_preparations
+                  WHERE user_id = ?1 AND playback_id = ?2"
+            ),
+            params![preparation.user_id, preparation.playback_id],
+            staged_from_row,
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        let replay = existing.staged_incarnation_id == preparation.incarnation_id
+            && existing.expected_predecessor_incarnation_id
+                == preparation.expected_predecessor_incarnation_id;
+        return if replay {
+            Ok(tx
+                .query_row(
+                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    [preparation.incarnation_id.as_str()],
+                    route_from_row,
+                )
+                .optional()?
+                .filter(|route| preparation_route_matches(route, preparation)))
+        } else {
+            Ok(None)
+        };
+    }
+
+    let current_pointer = tx
+        .query_row(
+            "SELECT current_incarnation_id FROM media_playback_pointers
+              WHERE user_id = ?1 AND playback_id = ?2",
+            params![preparation.user_id, preparation.playback_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if current_pointer.as_deref() != Some(preparation.expected_predecessor_incarnation_id.as_str())
+    {
+        return Ok(None);
+    }
+
+    // A preparation reaps nothing, so the pointed-at predecessor remains in
+    // every admission count. During a rejoin the caller has already ended the
+    // old staged row in this transaction, which naturally frees its live slot
+    // before these reads run.
+    let current: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM media_sessions
+          WHERE user_id = ?1 AND state IN ('starting', 'active')
+            AND lease_expires_at_ms > ?2 AND incarnation_id != ?3",
+        params![
+            preparation.user_id,
+            preparation.now_ms,
+            preparation.incarnation_id,
+        ],
+        |row| row.get(0),
+    )?;
+    let session_rows: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM media_sessions
+          WHERE user_id = ?1 AND incarnation_id != ?2",
+        params![preparation.user_id, preparation.incarnation_id],
+        |row| row.get(0),
+    )?;
+    let owner_current: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM media_sessions
+          WHERE owner_node_id = ?1 AND state = 'active'
+            AND lease_expires_at_ms > ?2 AND incarnation_id != ?3",
+        params![
+            preparation.owner_node_id,
+            preparation.now_ms,
+            preparation.incarnation_id,
+        ],
+        |row| row.get(0),
+    )?;
+    if current >= MAX_CURRENT_PER_USER
+        || session_rows >= MAX_SESSION_ROWS_PER_USER
+        || owner_current >= MAX_OWNED
+    {
+        return Ok(None);
+    }
+
+    let removed_owner: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM settings WHERE key = ?1",
+        params![removed_job_owner_key(&preparation.owner_node_id)],
+        |row| row.get(0),
+    )?;
+    if removed_owner > 0 {
+        return Ok(None);
+    }
+    let staged_elsewhere: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM media_session_preparations
+          WHERE staged_incarnation_id = ?1",
+        params![preparation.incarnation_id],
+        |row| row.get(0),
+    )?;
+    if staged_elsewhere > 0 {
+        return Ok(None);
+    }
+
+    if tx.execute(
+        "INSERT INTO job_leases
+            (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
+         VALUES (?1, ?2, 1, 1, ?3, ?4)
+         ON CONFLICT(resource) DO UPDATE SET
+            expires_at_ms = excluded.expires_at_ms,
+            revision = job_leases.revision + 1,
+            updated_at_ms = excluded.updated_at_ms
+         WHERE job_leases.owner_node_id = excluded.owner_node_id
+           AND job_leases.fence = 1 AND job_leases.expires_at_ms > ?4
+           AND job_leases.revision < 9223372036854775807",
+        params![
+            format!("session:{}", preparation.incarnation_id),
+            preparation.owner_node_id,
+            preparation.deadline_ms,
+            preparation.now_ms,
+        ],
+    )? != 1
+    {
+        return Ok(None);
+    }
+    tx.execute(
+        "INSERT INTO media_sessions
+            (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
+             owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
+             response_json, produced_playable_through_ms, fetched_through_ms,
+             media_origin_ms, media_sequence, discontinuity_sequence,
+             publication_ready_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, 'active', ?8, ?9,
+                 0, 0, ?10, 0, 0, ?11, ?12)",
+        params![
+            preparation.incarnation_id,
+            preparation.session_id,
+            preparation.user_id,
+            preparation.playback_id,
+            preparation.request_fingerprint,
+            preparation.owner_node_id,
+            preparation.deadline_ms,
+            preparation.recipe_json,
+            preparation.response_json,
+            preparation.media_origin_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED,
+            preparation.now_ms,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO media_session_preparations
+            (user_id, playback_id, staged_incarnation_id,
+             expected_predecessor_incarnation_id, deadline_ms,
+             created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![
+            preparation.user_id,
+            preparation.playback_id,
+            preparation.incarnation_id,
+            preparation.expected_predecessor_incarnation_id,
+            preparation.deadline_ms,
+            preparation.now_ms,
+        ],
+    )?;
+    Ok(tx
+        .query_row(
+            &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+            [preparation.incarnation_id.as_str()],
+            route_from_row,
+        )
+        .optional()?
+        .filter(|route| preparation_route_matches(route, preparation)))
 }
 
 /// Exact immutable identity for a preparation replay.
@@ -269,11 +447,16 @@ fn preparation_route_matches(
     route: &MediaSessionRoute,
     preparation: &MediaSessionPreparation,
 ) -> bool {
-    route.session_id == preparation.session_id
+    route.incarnation_id == preparation.incarnation_id
+        && route.session_id == preparation.session_id
         && route.user_id == preparation.user_id
         && route.playback_id == preparation.playback_id
         && route.request_fingerprint == preparation.request_fingerprint
         && route.owner_node_id == preparation.owner_node_id
+        && route.owner_epoch == 1
+        && route.recipe_json == preparation.recipe_json
+        && route.response_json == preparation.response_json
+        && route.media_origin_ms == preparation.media_origin_ms
         && route.state == "active"
         && route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
 }
@@ -1290,12 +1473,32 @@ impl MediaSessionStore for SqliteStore {
         let preparation = preparation.clone();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            // Replay first, and by exact identity. An owner that lost its
-            // response to a crash must be able to ask again and get the same
-            // staged successor rather than a refusal from its own earlier
-            // attempt — the ledger's primary key would otherwise turn the
-            // retry into "one staged successor per playback, and you already
-            // have one".
+            let Some(route) = prepare_within(&tx, &preparation)? else {
+                tx.rollback()?;
+                return Ok(None);
+            };
+            tx.commit()?;
+            Ok(Some(route))
+        })
+        .await
+    }
+
+    async fn rejoin_media_session_preparation(
+        &self,
+        staged_incarnation_id: &str,
+        preparation: &MediaSessionPreparation,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        validate_preparation(preparation)?;
+        if !valid_uuid(staged_incarnation_id) || staged_incarnation_id == preparation.incarnation_id
+        {
+            return Err(StoreError::Task(
+                "invalid media-session preparation rejoin".to_owned(),
+            ));
+        }
+        let staged_incarnation_id = staged_incarnation_id.to_owned();
+        let preparation = preparation.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
             let existing = tx
                 .query_row(
                     &format!(
@@ -1306,12 +1509,14 @@ impl MediaSessionStore for SqliteStore {
                     staged_from_row,
                 )
                 .optional()?;
-            if let Some(existing) = existing {
-                let replay = existing.staged_incarnation_id == preparation.incarnation_id
-                    && existing.expected_predecessor_incarnation_id
-                        == preparation.expected_predecessor_incarnation_id;
-                let route = if replay {
-                    tx.query_row(
+            let exact_replay = existing.as_ref().is_some_and(|staged| {
+                staged.staged_incarnation_id == preparation.incarnation_id
+                    && staged.expected_predecessor_incarnation_id
+                        == preparation.expected_predecessor_incarnation_id
+            });
+            if exact_replay {
+                let route = tx
+                    .query_row(
                         &format!(
                             "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
                         ),
@@ -1319,188 +1524,54 @@ impl MediaSessionStore for SqliteStore {
                         route_from_row,
                     )
                     .optional()?
-                    .filter(|route| preparation_route_matches(route, &preparation))
-                } else {
-                    None
-                };
+                    .filter(|route| preparation_route_matches(route, &preparation));
                 tx.commit()?;
                 return Ok(route);
             }
-            // The pointer must name the predecessor this preparation was made
-            // against. Not "must exist" — must be exactly this one.
-            let current_pointer = tx
-                .query_row(
-                    "SELECT current_incarnation_id FROM media_playback_pointers
-                      WHERE user_id = ?1 AND playback_id = ?2",
-                    params![preparation.user_id, preparation.playback_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
-            if current_pointer.as_deref()
-                != Some(preparation.expected_predecessor_incarnation_id.as_str())
-            {
-                tx.commit()?;
-                return Ok(None);
-            }
-            // The same admission bounds an activation faces, and read the same
-            // way: the pointed-at incarnation is excluded because it is the
-            // one being replaced, and a staged successor is neither it nor the
-            // activating row, so it counts. See the trait doc — that is a
-            // decision, not an oversight.
-            // No pointer exclusion, deliberately, and this is the one place
-            // it differs from activation's four counting queries. Those
-            // exclude the pointed-at incarnation because the same transaction
-            // is about to reap it. A preparation reaps nothing — the
-            // predecessor stays current and active — so discounting it would
-            // count a slot that is not being freed and admit one session past
-            // the cap.
-            let current: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM media_sessions
-                  WHERE user_id = ?1 AND state IN ('starting', 'active')
-                    AND lease_expires_at_ms > ?2 AND incarnation_id != ?3",
-                params![
-                    preparation.user_id,
-                    preparation.now_ms,
-                    preparation.incarnation_id,
-                ],
-                |row| row.get(0),
-            )?;
-            let session_rows: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM media_sessions
-                  WHERE user_id = ?1 AND incarnation_id != ?2",
-                params![preparation.user_id, preparation.incarnation_id],
-                |row| row.get(0),
-            )?;
-            let owner_current: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM media_sessions
-                  WHERE owner_node_id = ?1 AND state = 'active'
-                    AND lease_expires_at_ms > ?2 AND incarnation_id != ?3",
-                params![
-                    preparation.owner_node_id,
-                    preparation.now_ms,
-                    preparation.incarnation_id,
-                ],
-                |row| row.get(0),
-            )?;
-            if current >= MAX_CURRENT_PER_USER
-                || session_rows >= MAX_SESSION_ROWS_PER_USER
-                || owner_current >= MAX_OWNED
-            {
-                tx.commit()?;
-                return Ok(None);
-            }
-            // Pre-empt the ledger's UNIQUE rather than letting the constraint
-            // fire: a violation surfaces as `Err`, and §4.1's contract is that
-            // `Err` means malformed input or a real database fault while a
-            // lost race is `Ok(None)`. The replicated twin inlines the same
-            // check into its INSERT for the same reason.
-            // A node the cluster has fenced off cannot activate or renew a
-            // session; it must not be able to prepare one either, or it would
-            // go on to commit and move the playback pointer to a session
-            // owned by a node nobody can reach.
-            let removed_owner: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM settings WHERE key = ?1",
-                params![removed_job_owner_key(&preparation.owner_node_id)],
-                |row| row.get(0),
-            )?;
-            if removed_owner > 0 {
-                tx.commit()?;
-                return Ok(None);
-            }
-            let staged_elsewhere: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM media_session_preparations
-                  WHERE staged_incarnation_id = ?1",
-                params![preparation.incarnation_id],
-                |row| row.get(0),
-            )?;
-            if staged_elsewhere > 0 {
-                tx.commit()?;
-                return Ok(None);
-            }
-            // An ordinary active row. The two things that make it staged are
-            // both absences: no pointer, and the publication sentinel it is
-            // born with and does not arm.
-            //
-            // `lease_expires_at_ms` is the preparation deadline, which is what
-            // makes `maintain_media_sessions` the backstop rather than a
-            // competing clock: 60 s past it, maintenance ends this row as
-            // `replaced`, which is precisely the abort an owner that died
-            // would otherwise never issue.
-            // The staged row's own session lease, taken before the row like
-            // activation does. Without it the successor can never be renewed
-            // or taken over: renewal's first statement is an UPDATE on this
-            // exact resource and takeover requires it to exist.
-            if tx.execute(
-                "INSERT INTO job_leases
-                    (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, 1, 1, ?3, ?4)
-                 ON CONFLICT(resource) DO UPDATE SET
-                    expires_at_ms = excluded.expires_at_ms,
-                    revision = job_leases.revision + 1,
-                    updated_at_ms = excluded.updated_at_ms
-                 WHERE job_leases.owner_node_id = excluded.owner_node_id
-                   AND job_leases.fence = 1 AND job_leases.expires_at_ms > ?4
-                   AND job_leases.revision < 9223372036854775807",
-                params![
-                    format!("session:{}", preparation.incarnation_id),
-                    preparation.owner_node_id,
-                    preparation.deadline_ms,
-                    preparation.now_ms,
-                ],
-            )? != 1
-            {
+            let named_owns_slot = existing
+                .as_ref()
+                .is_some_and(|staged| staged.staged_incarnation_id == staged_incarnation_id);
+            if !named_owns_slot {
                 tx.rollback()?;
                 return Ok(None);
             }
-            tx.execute(
-                "INSERT INTO media_sessions
-                    (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
-                     owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
-                     response_json, produced_playable_through_ms, fetched_through_ms,
-                     media_origin_ms, media_sequence, discontinuity_sequence,
-                     publication_ready_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, 'active', ?8, ?9,
-                         0, 0, ?10, 0, 0, ?11, ?12)",
-                params![
-                    preparation.incarnation_id,
-                    preparation.session_id,
-                    preparation.user_id,
-                    preparation.playback_id,
-                    preparation.request_fingerprint,
-                    preparation.owner_node_id,
-                    preparation.deadline_ms,
-                    preparation.recipe_json,
-                    preparation.response_json,
-                    preparation.media_origin_ms,
-                    MEDIA_SESSION_PUBLICATION_BLOCKED,
-                    preparation.now_ms,
-                ],
+            let retired = abort_staged_generation(
+                &tx,
+                preparation.user_id,
+                &preparation.playback_id,
+                &staged_incarnation_id,
+                preparation.now_ms,
             )?;
-            tx.execute(
-                "INSERT INTO media_session_preparations
-                    (user_id, playback_id, staged_incarnation_id,
-                     expected_predecessor_incarnation_id, deadline_ms,
-                     created_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-                params![
-                    preparation.user_id,
-                    preparation.playback_id,
-                    preparation.incarnation_id,
-                    preparation.expected_predecessor_incarnation_id,
-                    preparation.deadline_ms,
-                    preparation.now_ms,
-                ],
-            )?;
-            let route = tx
+            if retired != 1 {
+                tx.rollback()?;
+                return Err(StoreError::Task(
+                    "media-session rejoin replacement is no longer admissible".to_owned(),
+                ));
+            }
+            let route = prepare_within(&tx, &preparation)?;
+            // This is the same second-line predicate as explicit abort. SQL
+            // ledger guards are the safety boundary; the projection prevents
+            // a wrong named incarnation from being reported as a rejoin.
+            let named_was_replaced = tx
                 .query_row(
                     &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
-                    [preparation.incarnation_id.as_str()],
+                    [staged_incarnation_id.as_str()],
                     route_from_row,
                 )
                 .optional()?
-                .filter(|route| preparation_route_matches(route, &preparation));
-            let Some(route) = route else {
+                .is_some_and(|route| {
+                    route.state == "ended"
+                        && route.terminal_reason.as_deref() == Some("replaced")
+                        && route.user_id == preparation.user_id
+                        && route.playback_id == preparation.playback_id
+                });
+            let Some(route) = route.filter(|_| named_was_replaced) else {
                 tx.rollback()?;
+                if named_owns_slot {
+                    return Err(StoreError::Task(
+                        "media-session rejoin replacement is no longer admissible".to_owned(),
+                    ));
+                }
                 return Ok(None);
             };
             tx.commit()?;

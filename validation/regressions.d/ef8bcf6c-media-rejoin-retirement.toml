@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ef8bcf6c"]
+points = ["core.media"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained present-slot contract terminals a staged route as replaced at the exact timestamp rejoin would use and requires both backends to preserve its ledger and refuse resurrection; the replicated abort-wins seam additionally proves a stale proposal cannot recreate work after another proposal retires the named route."
