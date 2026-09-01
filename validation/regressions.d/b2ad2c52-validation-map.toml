@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b2ad2c52"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The retained history contract requires the exact media-identity fix to remain mapped to its focused Store, daemon, API, and web regressions. This explicit entry also proves that a validation-only commit whose subject is classified as corrective cannot bypass the same current-check evidence policy it documents."

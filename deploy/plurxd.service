@@ -29,8 +29,12 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/plurx
 ProtectHome=true
-# Media usually lives under /home or /mnt; ProtectHome=true hides /home, so if
-# your library is there, either move ReadOnlyPaths in or set ProtectHome=read-only.
+# Media usually lives under /home or /mnt. ProtectHome=true hides /home; an
+# exact ReadOnlyPaths entry cannot expose it, so set ProtectHome=read-only before
+# adding a home-directory library. The admin-only Dolby Vision on-disk
+# conversion must remain Off for read-only media. Its explicit opt-in uses a
+# path-specific ReadWritePaths drop-in and the ownership/filesystem contract in
+# deploy/README.md; never make an entire media root writable by default.
 # ReadOnlyPaths=/mnt/media
 
 [Install]

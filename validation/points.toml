@@ -314,7 +314,10 @@ paths = [
   "crates/plurx-core/Cargo.toml",
   "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,lib,testfixtures}.rs",
   "crates/plurx-core/src/store/mod.rs",
+  "crates/plurx-core/src/store/dv_conversion.rs",
+  "crates/plurx-core/src/store/hiqlite_dv_conversion.rs",
   "crates/plurx-core/src/store/replicated.rs",
+  "crates/plurx-core/src/store/sqlite/dv_conversion.rs",
   "crates/plurx-core/src/store/sqlite/{cache,pretranscode}.rs",
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
   "crates/plurx-core/src/store/hiqlite_sessions.rs",
@@ -478,13 +481,15 @@ depends_on = ["cluster.auth"]
 [[points]]
 id = "server.api"
 title = "Native server API and runtime"
-contract = "The single server binary exposes stable native endpoints, coordinates background work safely, and carries authenticated cluster media control without widening household credentials."
+contract = "The single server binary exposes stable native endpoints, coordinates background work safely, carries authenticated cluster media control without widening household credentials, and publishes a permanent Dolby Vision replacement only after exact media verification and a final source-identity fence."
 paths = [
   "crates/plurxd/Cargo.toml",
   "crates/plurxd/src/{cachekeep,logbuf,main,schedule,state,storeprobe,telemetry}.rs",
+  "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/reader_formats.rs",
   "crates/plurxd/src/http/{analysis,dto,error,extract,mod,network,publication,reading,system}.rs",
+  "crates/plurxd/src/http/dv_disk.rs",
   "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
   "plurx.example.toml",
 ]

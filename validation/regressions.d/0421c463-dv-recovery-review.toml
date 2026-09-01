@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["0421c463"]
+points = ["core.media", "persistence.upgrades", "cluster.auth", "server.api", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth", "resource-bounds", "web-static", "web-layout", "history-regressions"]
+reason = "Retained SQLite and three-voter contracts prove bounded retry fairness and ordered committed-cleanup selection. Daemon regressions bind source, replacement, retained original, and rollback recovery to exact storage-object identities; require durable verified bytes and capability-relative no-clobber mutations; preserve the queued retention decision; stop on cancellation; make a proved safe rollback retryable; and converge crash residue one committed row per tick. Settings and web contracts require validation before destructive persistence, allow Off without conversion tools, and preserve successful mutation results when a follow-up status read fails."

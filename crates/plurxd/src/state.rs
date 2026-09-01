@@ -27,13 +27,15 @@ use plurx_core::store::{
     cluster_fragment_index_blob_sha256, cluster_fragment_index_generation_key,
     cluster_fragment_index_key, encode_cluster_fragment_index_blob, keys, AnalysisRequest,
     ArtworkRepairFence, CatalogueReader, ClusterFragmentIndexArtifact,
-    ClusterFragmentIndexLocation, NewAnalysisRequest, NewClusterFragmentIndexJob,
-    PrometheusStoreSnapshot, PublicationStore, Store,
+    ClusterFragmentIndexLocation, DvConversionMode, DvConversionQueueBatch, DvConversionState,
+    DvRecoveryGuardState, NewAnalysisRequest, NewClusterFragmentIndexJob, PrometheusStoreSnapshot,
+    PublicationStore, QueueDvConversionOutcome, Store, DV_CONVERSION_QUEUE_BATCH_MAX,
 };
 use plurx_core::transcode::EncoderCaps;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::job_lease::{acquire_cluster_job, ActiveJobLease};
 use crate::logbuf::{LogBuffer, LogBuffers};
@@ -112,6 +114,10 @@ pub struct SystemInfo {
     /// the probes because a client asking why a title played as HDR10 rather
     /// than Dolby Vision needs all four answers in one place.
     pub dolby_vision_convert: bool,
+    /// Pinned on-disk conversion tools measured at boot. Queue admission uses
+    /// this exact record, so a missing binary is named before any media work
+    /// starts instead of after a 60–80 GB extraction.
+    pub dv_disk: crate::dv_disk::DvDiskCapabilities,
 }
 
 /// The daemon's managed directories across the configured storage roots.
@@ -576,6 +582,7 @@ impl AppState {
                 node_id.clone(),
                 Arc::new(membership.clone()),
             )
+            .with_dv_disk_capabilities(system.dv_disk.clone())
             .with_membership(membership.clone()),
         );
         let coming_soon = crate::http::ComingSoonCache::new();
@@ -940,6 +947,11 @@ pub struct JobManager {
     /// Queue execution is independent of discovery cadence. This guard keeps
     /// minute scheduler ticks from stacking drain loops on the same node.
     cluster_index_working: std::sync::atomic::AtomicBool,
+    /// Permanent-media conversion is a bounded queue, but one slow disc may
+    /// outlive many scheduler ticks. Keep exactly one local drain loop.
+    dv_disk_working: std::sync::atomic::AtomicBool,
+    /// Boot-time availability of the two pinned destructive-media tools.
+    dv_disk_capabilities: crate::dv_disk::DvDiskCapabilities,
     /// Throttle bounded, replicated analysis-history pruning so an idle queue
     /// does not produce a Raft write on every scheduler tick.
     last_analysis_prune_ms: AtomicI64,
@@ -1494,6 +1506,14 @@ impl Drop for ClusterIndexWorkingGuard {
     }
 }
 
+struct DvDiskWorkingGuard(Arc<JobManager>);
+
+impl Drop for DvDiskWorkingGuard {
+    fn drop(&mut self) {
+        self.0.dv_disk_working.store(false, Ordering::Relaxed);
+    }
+}
+
 /// Clears [`JobManager::producing`] however the pass ends — including the ways
 /// a `?` or a panic would leave it set forever, which would silently stop the
 /// producer for the life of the process.
@@ -1621,6 +1641,65 @@ pub struct ScanRequestRecord {
     pub items: Option<Vec<PlacedFile>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DvDiskMode {
+    #[default]
+    Off,
+    Manual,
+    Auto,
+}
+
+impl DvDiskMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "manual" => Some(Self::Manual),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+}
+
+fn parse_dv_disk_modes(raw: Option<&str>) -> BTreeMap<i64, DvDiskMode> {
+    let Some(object) = raw
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.as_object().cloned())
+    else {
+        return BTreeMap::new();
+    };
+    object
+        .into_iter()
+        .filter_map(|(id, mode)| {
+            Some((id.parse::<i64>().ok()?, DvDiskMode::parse(mode.as_str()?)?))
+        })
+        .filter(|(_, mode)| *mode != DvDiskMode::Off)
+        .collect()
+}
+
+fn parse_dv_disk_keep_original(raw: Option<&str>) -> bool {
+    !raw.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        )
+    })
+}
+
+fn parse_dv_disk_parallel(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, 8)
 }
 
 /// How many request records are kept. A debugging surface — "what happened
@@ -1906,6 +1985,8 @@ impl JobManager {
             producing: std::sync::atomic::AtomicBool::new(false),
             indexing: std::sync::atomic::AtomicBool::new(false),
             cluster_index_working: std::sync::atomic::AtomicBool::new(false),
+            dv_disk_working: std::sync::atomic::AtomicBool::new(false),
+            dv_disk_capabilities: crate::dv_disk::DvDiskCapabilities::default(),
             last_analysis_prune_ms: AtomicI64::new(0),
             analysis_progress: std::sync::Mutex::new(HashMap::new()),
             analysis_progress_epoch: AtomicU64::new(0),
@@ -1931,6 +2012,14 @@ impl JobManager {
         self
     }
 
+    fn with_dv_disk_capabilities(
+        mut self,
+        capabilities: crate::dv_disk::DvDiskCapabilities,
+    ) -> Self {
+        self.dv_disk_capabilities = capabilities;
+        self
+    }
+
     async fn acquire_job(&self, resource: String) -> Result<Option<ActiveJobLease>, StoreError> {
         acquire_cluster_job(&self.coordinator, self.job_authority.as_ref(), resource).await
     }
@@ -1938,6 +2027,1043 @@ impl JobManager {
     /// Whether this node may run cluster-wide scheduled work right now.
     pub(crate) async fn may_run_cluster_jobs(&self) -> bool {
         self.job_authority.may_run_cluster_jobs().await
+    }
+
+    pub fn dv_disk_capabilities(&self) -> &crate::dv_disk::DvDiskCapabilities {
+        &self.dv_disk_capabilities
+    }
+
+    fn require_dv_disk_tools(&self) -> Result<(), StoreError> {
+        if self.dv_disk_capabilities.available {
+            return Ok(());
+        }
+        Err(StoreError::Task(format!(
+            "{} unavailable: {}",
+            keys::LIBRARY_DV_DISK_CONVERT,
+            self.dv_disk_capabilities
+                .unavailable_reason()
+                .unwrap_or("dovi_tool or mkvmerge is unavailable")
+        )))
+    }
+
+    pub async fn queue_dv_file(
+        &self,
+        file_id: i64,
+    ) -> Result<QueueDvConversionOutcome, StoreError> {
+        self.require_dv_disk_tools()?;
+        self.store.queue_dv_conversion(file_id, clock_ms()).await
+    }
+
+    pub async fn queue_dv_library(
+        &self,
+        library_id: i64,
+        retry_failed: bool,
+    ) -> Result<DvConversionQueueBatch, StoreError> {
+        self.require_dv_disk_tools()?;
+        if self.store.get_library(library_id).await?.is_none() {
+            return Err(StoreError::Task("library does not exist".to_owned()));
+        }
+        self.store
+            .queue_library_dv_conversion_batch(
+                library_id,
+                clock_ms(),
+                retry_failed,
+                DV_CONVERSION_QUEUE_BATCH_MAX,
+            )
+            .await
+    }
+
+    pub async fn dv_disk_modes(&self) -> Result<BTreeMap<i64, DvDiskMode>, StoreError> {
+        let raw = self
+            .store
+            .get_setting(keys::LIBRARY_DV_DISK_CONVERT)
+            .await?;
+        Ok(parse_dv_disk_modes(raw.as_deref()))
+    }
+
+    pub async fn set_dv_disk_mode(
+        &self,
+        library_id: i64,
+        mode: DvDiskMode,
+    ) -> Result<(), StoreError> {
+        if self.store.get_library(library_id).await?.is_none() {
+            return Err(StoreError::Task("library does not exist".to_owned()));
+        }
+        if mode != DvDiskMode::Off {
+            self.require_dv_disk_tools()?;
+        }
+        let stored_mode = match mode {
+            DvDiskMode::Off => DvConversionMode::Off,
+            DvDiskMode::Manual => DvConversionMode::Manual,
+            DvDiskMode::Auto => DvConversionMode::Auto,
+        };
+        if self
+            .store
+            .set_library_dv_conversion_mode(library_id, stored_mode)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(StoreError::Task("library does not exist".to_owned()))
+        }
+    }
+
+    pub async fn dv_disk_keep_original(&self) -> bool {
+        parse_dv_disk_keep_original(
+            self.store
+                .get_setting(keys::LIBRARY_DV_DISK_KEEP_ORIGINAL)
+                .await
+                .ok()
+                .flatten()
+                .as_deref(),
+        )
+    }
+
+    pub async fn dv_disk_parallel(&self) -> usize {
+        parse_dv_disk_parallel(
+            self.store
+                .get_setting(keys::LIBRARY_DV_DISK_CONVERT_PARALLEL)
+                .await
+                .ok()
+                .flatten()
+                .as_deref(),
+        )
+    }
+
+    /// One authority read for the three admin-facing conversion settings.
+    pub async fn dv_disk_settings_snapshot(
+        &self,
+    ) -> Result<(BTreeMap<i64, DvDiskMode>, bool, usize), StoreError> {
+        let settings = self.store.settings_snapshot().await?;
+        Ok((
+            parse_dv_disk_modes(
+                settings
+                    .get(keys::LIBRARY_DV_DISK_CONVERT)
+                    .map(String::as_str),
+            ),
+            parse_dv_disk_keep_original(
+                settings
+                    .get(keys::LIBRARY_DV_DISK_KEEP_ORIGINAL)
+                    .map(String::as_str),
+            ),
+            parse_dv_disk_parallel(
+                settings
+                    .get(keys::LIBRARY_DV_DISK_CONVERT_PARALLEL)
+                    .map(String::as_str),
+            ),
+        ))
+    }
+
+    async fn enqueue_automatic_dv_conversions(&self) -> Result<DvConversionQueueBatch, StoreError> {
+        let Some(lease) = self
+            .acquire_job("media:dv-disk-convert:auto-discovery".to_owned())
+            .await?
+        else {
+            return Ok(DvConversionQueueBatch::default());
+        };
+        let loss = lease.loss_token();
+        let result = async {
+            let cursor_key = self.local_job_key(keys::JOB_DV_DISK_AUTO_LIBRARY_CURSOR);
+            let cursor = self
+                .store
+                .get_setting(&cursor_key)
+                .await?
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(0);
+            let modes = self.dv_disk_modes().await?;
+            let auto = modes
+                .into_iter()
+                .filter_map(|(library_id, mode)| (mode == DvDiskMode::Auto).then_some(library_id))
+                .collect::<Vec<_>>();
+            let selected = auto
+                .iter()
+                .copied()
+                .find(|library_id| *library_id > cursor)
+                .or_else(|| auto.first().copied());
+            let batch = if let Some(library_id) = selected {
+                if loss.is_cancelled() {
+                    DvConversionQueueBatch::default()
+                } else {
+                    let batch = self
+                        .store
+                        .queue_library_dv_conversion_batch(
+                            library_id,
+                            clock_ms(),
+                            false,
+                            DV_CONVERSION_QUEUE_BATCH_MAX,
+                        )
+                        .await?;
+                    if !loss.is_cancelled() {
+                        let _ = self
+                            .store
+                            .put_setting(&cursor_key, &library_id.to_string())
+                            .await;
+                    }
+                    batch
+                }
+            } else {
+                if cursor != 0 {
+                    let _ = self.store.put_setting(&cursor_key, "0").await;
+                }
+                DvConversionQueueBatch::default()
+            };
+            Ok::<_, StoreError>(batch)
+        }
+        .await;
+        let _ = lease.release().await;
+        result
+    }
+
+    async fn work_dv_disk_queue(self: Arc<Self>) {
+        const CANDIDATES_PER_TICK: i64 = 32;
+
+        if self.dv_disk_working.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let _guard = DvDiskWorkingGuard(Arc::clone(&self));
+        self.reconcile_one_committed_dv_cleanup().await;
+        self.reconcile_one_dv_recovery_guard().await;
+        if !self.dv_disk_capabilities.available {
+            return;
+        }
+        match self.enqueue_automatic_dv_conversions().await {
+            Ok(batch) if batch.queued > 0 => {
+                tracing::info!(
+                    queued = batch.queued,
+                    saturated = batch.saturated,
+                    "queued automatic Dolby Vision conversions"
+                )
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "discovering automatic Dolby Vision conversions");
+                return;
+            }
+        }
+
+        let cursor_key = self.local_job_key(keys::JOB_DV_DISK_CONVERT_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        let candidates = match self
+            .store
+            .dv_conversion_candidates(cursor, CANDIDATES_PER_TICK)
+            .await
+        {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(%error, "listing Dolby Vision conversion candidates");
+                return;
+            }
+        };
+        if candidates.is_empty() {
+            if cursor != 0 {
+                let _ = self.store.put_setting(&cursor_key, "0").await;
+            }
+            return;
+        }
+
+        let parallel = self.dv_disk_parallel().await;
+        let keep_original = self.dv_disk_keep_original().await;
+        let mut candidates = candidates.into_iter();
+        let mut last_examined = cursor;
+        let mut workers = tokio::task::JoinSet::new();
+        for slot in 0..parallel {
+            let slot_lease = match self
+                .acquire_job(format!("media:dv-disk-convert:{slot}"))
+                .await
+            {
+                Ok(Some(lease)) => lease,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(slot, %error, "acquiring Dolby Vision conversion slot");
+                    continue;
+                }
+            };
+            let mut selected = None;
+            for candidate in candidates.by_ref() {
+                last_examined = candidate.file_id;
+                match self
+                    .acquire_job(format!("media:dv-disk-convert:file:{}", candidate.file_id))
+                    .await
+                {
+                    Ok(Some(file_lease)) => {
+                        selected = Some((candidate, file_lease));
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        file_id = candidate.file_id,
+                        %error,
+                        "acquiring Dolby Vision file lease"
+                    ),
+                }
+            }
+            let Some((candidate, file_lease)) = selected else {
+                let _ = slot_lease.release().await;
+                break;
+            };
+            let manager = Arc::clone(&self);
+            workers.spawn(async move {
+                // The file lease protects this identity; the slot lease
+                // protects the cluster-wide I/O budget. Losing either proof
+                // must stop the same tool process before a successor can use
+                // the slot.
+                let file_loss = file_lease.loss_token();
+                let slot_loss = slot_lease.loss_token();
+                let conversion_loss = CancellationToken::new();
+                let cancel = conversion_loss.clone();
+                let loss_watcher = tokio::spawn(async move {
+                    tokio::select! {
+                        () = file_loss.cancelled() => {}
+                        () = slot_loss.cancelled() => {}
+                    }
+                    cancel.cancel();
+                });
+                manager
+                    .process_dv_candidate(
+                        candidate.file_id,
+                        keep_original,
+                        &file_lease,
+                        &conversion_loss,
+                    )
+                    .await;
+                loss_watcher.abort();
+                if let Err(error) = file_lease.release().await {
+                    tracing::warn!(%error, "releasing Dolby Vision file lease");
+                }
+                if let Err(error) = slot_lease.release().await {
+                    tracing::warn!(%error, "releasing Dolby Vision conversion slot");
+                }
+            });
+        }
+        if last_examined != cursor {
+            let _ = self
+                .store
+                .put_setting(&cursor_key, &last_examined.to_string())
+                .await;
+        }
+        while let Some(result) = workers.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "Dolby Vision conversion worker panicked");
+            }
+        }
+    }
+
+    /// Revisit one guardless committed conversion per worker tick. Publication
+    /// prunes every full-size intermediate before the ledger commit, so this
+    /// bounded pass only has to converge an owned marker directory left by a
+    /// process crash during post-commit cleanup. The same file and slot leases
+    /// as conversion work fence the filesystem mutation and its I/O budget.
+    async fn reconcile_one_committed_dv_cleanup(&self) {
+        const CURSOR: &str = "jobs.dv_disk_committed_cleanup_cursor";
+
+        let cursor_key = self.local_job_key(CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        let mut candidate = match self.store.dv_committed_cleanup_candidate(cursor).await {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                tracing::warn!(%error, "selecting committed Dolby Vision cleanup candidate");
+                return;
+            }
+        };
+        if candidate.is_none() && cursor != 0 {
+            candidate = match self.store.dv_committed_cleanup_candidate(0).await {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    tracing::warn!(%error, "wrapping committed Dolby Vision cleanup cursor");
+                    return;
+                }
+            };
+        }
+        let Some(file_id) = candidate else {
+            if cursor != 0 {
+                let _ = self.store.put_setting(&cursor_key, "0").await;
+            }
+            return;
+        };
+
+        let mut slot_lease = None;
+        for slot in 0..self.dv_disk_parallel().await {
+            match self
+                .acquire_job(format!("media:dv-disk-convert:{slot}"))
+                .await
+            {
+                Ok(Some(lease)) => {
+                    slot_lease = Some(lease);
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(slot, %error, "acquiring committed Dolby Vision cleanup slot")
+                }
+            }
+        }
+        let Some(slot_lease) = slot_lease else {
+            return;
+        };
+        let file_lease = match self
+            .acquire_job(format!("media:dv-disk-convert:file:{file_id}"))
+            .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => {
+                let _ = slot_lease.release().await;
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(file_id, %error, "acquiring committed Dolby Vision cleanup file lease");
+                let _ = slot_lease.release().await;
+                return;
+            }
+        };
+
+        let file_loss = file_lease.loss_token();
+        let slot_loss = slot_lease.loss_token();
+        let cleanup_loss = CancellationToken::new();
+        let cancel = cleanup_loss.clone();
+        let loss_watcher = tokio::spawn(async move {
+            tokio::select! {
+                () = file_loss.cancelled() => {}
+                () = slot_loss.cancelled() => {}
+            }
+            cancel.cancel();
+        });
+        match self.store.get_file(file_id).await {
+            Ok(Some(file)) => {
+                crate::dv_disk::cleanup_after_commit(
+                    &file,
+                    self.coordinator.node_id(),
+                    &cleanup_loss,
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(file_id, %error, "reading committed Dolby Vision cleanup file");
+                loss_watcher.abort();
+                let _ = file_lease.release().await;
+                let _ = slot_lease.release().await;
+                return;
+            }
+        }
+        loss_watcher.abort();
+        if let Err(error) = file_lease.release().await {
+            tracing::warn!(file_id, %error, "releasing committed Dolby Vision cleanup file lease");
+        }
+        if let Err(error) = slot_lease.release().await {
+            tracing::warn!(file_id, %error, "releasing committed Dolby Vision cleanup slot");
+        }
+        if let Err(error) = self
+            .store
+            .put_setting(&cursor_key, &file_id.to_string())
+            .await
+        {
+            tracing::warn!(file_id, %error, "advancing committed Dolby Vision cleanup cursor");
+        }
+    }
+
+    /// Converge exactly one non-cascading recovery guard whose file/conversion
+    /// row is gone. This runs before tool capability checks: retiring a guard
+    /// after confirmed scan deletion must not depend on dovi_tool or mkvmerge.
+    async fn reconcile_one_dv_recovery_guard(&self) {
+        const CURSOR: &str = "jobs.dv_disk_recovery_guard_cursor";
+
+        let cursor_key = self.local_job_key(CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let mut candidates = match self.store.dv_recovery_guard_orphans(&cursor, 1).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(%error, "selecting orphaned Dolby Vision recovery guard");
+                return;
+            }
+        };
+        if candidates.is_empty() && !cursor.is_empty() {
+            candidates = match self.store.dv_recovery_guard_orphans("", 1).await {
+                Ok(candidates) => candidates,
+                Err(error) => {
+                    tracing::warn!(%error, "wrapping Dolby Vision recovery-guard cursor");
+                    return;
+                }
+            };
+        }
+        let Some(guard) = candidates.into_iter().next() else {
+            if !cursor.is_empty() {
+                let _ = self.store.put_setting(&cursor_key, "").await;
+            }
+            return;
+        };
+        let file_id = guard.file_id;
+        let mut slot_lease = None;
+        for slot in 0..self.dv_disk_parallel().await {
+            match self
+                .acquire_job(format!("media:dv-disk-convert:{slot}"))
+                .await
+            {
+                Ok(Some(lease)) => {
+                    slot_lease = Some(lease);
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(slot, %error, "acquiring Dolby Vision recovery-guard cleanup slot")
+                }
+            }
+        }
+        let Some(slot_lease) = slot_lease else {
+            return;
+        };
+        let file_lease = match self
+            .acquire_job(format!("media:dv-disk-convert:file:{file_id}"))
+            .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => {
+                let _ = slot_lease.release().await;
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(file_id, %error, "acquiring Dolby Vision recovery-guard file lease");
+                let _ = slot_lease.release().await;
+                return;
+            }
+        };
+        let file_loss = file_lease.loss_token();
+        let slot_loss = slot_lease.loss_token();
+        let cleanup_loss = CancellationToken::new();
+        let cancel = cleanup_loss.clone();
+        let loss_watcher = tokio::spawn(async move {
+            tokio::select! {
+                () = file_loss.cancelled() => {}
+                () = slot_loss.cancelled() => {}
+            }
+            cancel.cancel();
+        });
+        let publisher = file_lease.publisher(self.store.as_ref());
+        let cleanup = async {
+            let mut state = guard.state;
+            if matches!(
+                state,
+                DvRecoveryGuardState::Intent | DvRecoveryGuardState::Active
+            ) {
+                crate::dv_disk::remove_orphan_recovery_guard(
+                    guard.file_id,
+                    &guard.source_path,
+                    &guard.recovery_path,
+                    &guard.guard_id,
+                    self.coordinator.node_id(),
+                    &cleanup_loss,
+                )
+                .await
+                .map_err(StoreError::Task)?;
+                if cleanup_loss.is_cancelled() {
+                    return Err(StoreError::Task(
+                        "recovery-guard lease was lost before recording guard removal".to_owned(),
+                    ));
+                }
+                if !publisher
+                    .advance_dv_recovery_guard(
+                        &guard.guard_id,
+                        state,
+                        DvRecoveryGuardState::GuardRemoved,
+                        clock_ms(),
+                    )
+                    .await?
+                {
+                    return Err(StoreError::Task(
+                        "recovery-guard ledger refused guard removal".to_owned(),
+                    ));
+                }
+                state = DvRecoveryGuardState::GuardRemoved;
+            }
+            if state == DvRecoveryGuardState::GuardRemoved {
+                crate::dv_disk::remove_orphan_recovery_scratch(
+                    guard.file_id,
+                    &guard.source_path,
+                    &guard.guard_id,
+                    &cleanup_loss,
+                )
+                .await
+                .map_err(StoreError::Task)?;
+                if cleanup_loss.is_cancelled() {
+                    return Err(StoreError::Task(
+                        "recovery-guard lease was lost before recording scratch removal".to_owned(),
+                    ));
+                }
+                if !publisher
+                    .advance_dv_recovery_guard(
+                        &guard.guard_id,
+                        DvRecoveryGuardState::GuardRemoved,
+                        DvRecoveryGuardState::ScratchRemoved,
+                        clock_ms(),
+                    )
+                    .await?
+                {
+                    return Err(StoreError::Task(
+                        "recovery-guard ledger refused scratch removal".to_owned(),
+                    ));
+                }
+                state = DvRecoveryGuardState::ScratchRemoved;
+            }
+            if state == DvRecoveryGuardState::ScratchRemoved && cleanup_loss.is_cancelled() {
+                return Err(StoreError::Task(
+                    "recovery-guard lease was lost before terminal row deletion".to_owned(),
+                ));
+            }
+            if state == DvRecoveryGuardState::ScratchRemoved {
+                // Keep the mounted source-parent capability alive through the
+                // fenced Store mutation. An empty underlying mount point must
+                // never make a missing scratch path authoritative.
+                let _tombstone = crate::dv_disk::attest_orphan_recovery_tombstone(
+                    guard.file_id,
+                    &guard.source_path,
+                    &guard.guard_id,
+                )
+                .await
+                .map_err(StoreError::Task)?;
+                if cleanup_loss.is_cancelled() {
+                    return Err(StoreError::Task(
+                        "recovery-guard lease was lost after tombstone attestation".to_owned(),
+                    ));
+                }
+                if !publisher.delete_dv_recovery_guard(&guard.guard_id).await? {
+                    return Err(StoreError::Task(
+                        "recovery-guard ledger refused terminal row deletion".to_owned(),
+                    ));
+                }
+            }
+            Ok::<_, StoreError>(())
+        }
+        .await;
+        if let Err(error) = cleanup {
+            tracing::warn!(file_id, guard_id = %guard.guard_id, %error, "reconciling orphaned Dolby Vision recovery guard");
+        }
+        loss_watcher.abort();
+        if let Err(error) = file_lease.release().await {
+            tracing::warn!(file_id, %error, "releasing Dolby Vision recovery-guard file lease");
+        }
+        if let Err(error) = slot_lease.release().await {
+            tracing::warn!(file_id, %error, "releasing Dolby Vision recovery-guard cleanup slot");
+        }
+        if let Err(error) = self.store.put_setting(&cursor_key, &guard.guard_id).await {
+            tracing::warn!(file_id, %error, "advancing Dolby Vision recovery-guard cursor");
+        }
+    }
+
+    async fn process_dv_candidate(
+        &self,
+        file_id: i64,
+        keep_original: bool,
+        lease: &ActiveJobLease,
+        loss: &CancellationToken,
+    ) {
+        let publisher = lease.publisher(self.store.as_ref());
+        let Some(file) = (match self.store.get_file(file_id).await {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(file_id, %error, "reading Dolby Vision source row");
+                return;
+            }
+        }) else {
+            return;
+        };
+        let Some(ledger) = (match self.store.dv_conversion(file_id).await {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::warn!(file_id, %error, "reading Dolby Vision conversion ledger");
+                return;
+            }
+        }) else {
+            return;
+        };
+
+        let verified = if ledger.state == DvConversionState::Verified {
+            let Some(bytes_after) = ledger.bytes_after else {
+                tracing::warn!(
+                    file_id,
+                    "verified Dolby Vision row has no verified byte count"
+                );
+                return;
+            };
+            if let Err(error) = self.begin_dv_recovery_guard_intent(&publisher, &file).await {
+                tracing::warn!(file_id, %error, "recording Dolby Vision recovery-guard intent");
+                return;
+            }
+            let published_recovery_error = match crate::dv_disk::recover_published(
+                &file,
+                self.coordinator.node_id(),
+                bytes_after,
+                loss,
+            )
+            .await
+            {
+                Ok(crate::dv_disk::PublicationOutcome::Published(published)) => {
+                    if let Err(error) = self
+                        .finish_dv_publication(&publisher, &file, *published, loss)
+                        .await
+                    {
+                        tracing::warn!(file_id, %error, "finishing recovered Dolby Vision publication");
+                    }
+                    return;
+                }
+                Ok(crate::dv_disk::PublicationOutcome::SafelyRolledBack { reason }) => {
+                    if let Err(error) = self
+                        .finish_dv_safe_rollback(&publisher, &file, loss, &reason)
+                        .await
+                    {
+                        tracing::warn!(file_id, %error, "recording recovered Dolby Vision rollback");
+                    }
+                    return;
+                }
+                Err(error) => Some(error),
+            };
+            match crate::dv_disk::verify_existing(
+                &file,
+                self.coordinator.node_id(),
+                loss,
+                ledger.el_type.as_deref().and_then(|value| match value {
+                    "mel" => Some("mel"),
+                    "fel" => Some("fel"),
+                    _ => None,
+                }),
+                bytes_after,
+            )
+            .await
+            {
+                Ok(verified) => verified,
+                Err(error) => {
+                    // A verified row may own the only recoverable original in
+                    // sibling scratch. A transient probe/read failure must not
+                    // turn that recovery state into a retryable fresh queue
+                    // entry, which could then strand the staged source. Leave
+                    // the row verified so the next leased pass resumes the
+                    // same publication artifacts.
+                    tracing::warn!(
+                        file_id,
+                        %error,
+                        published_recovery_error = published_recovery_error.as_deref(),
+                        "verified Dolby Vision publication remains pending recovery"
+                    );
+                    return;
+                }
+            }
+        } else {
+            match self.store.dv_conversion_eligible(file_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.fail_dv_conversion(
+                        &publisher,
+                        &file,
+                        loss,
+                        "file is no longer an eligible Profile 7 Matroska source",
+                    )
+                    .await;
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(file_id, %error, "rechecking Dolby Vision conversion eligibility");
+                    return;
+                }
+            }
+            match crate::fragment_index_cluster::inspect_source(&file).await {
+                Ok(_) => {}
+                Err(error) => {
+                    self.fail_dv_conversion(&publisher, &file, loss, &error)
+                        .await;
+                    return;
+                }
+            };
+            match publisher
+                .mark_dv_conversion_running(file_id, file.size)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    tracing::warn!(file_id, %error, "claiming Dolby Vision ledger row");
+                    return;
+                }
+            }
+            let tools = crate::dv_disk::DvDiskTools::from_environment();
+            let verified = match crate::dv_disk::build_and_verify(
+                &tools,
+                &file,
+                self.coordinator.node_id(),
+                loss,
+                keep_original,
+            )
+            .await
+            {
+                Ok(verified) => verified,
+                Err(error) => {
+                    self.fail_dv_conversion(&publisher, &file, loss, &error)
+                        .await;
+                    return;
+                }
+            };
+            if loss.is_cancelled() {
+                return;
+            }
+            match publisher
+                .mark_dv_conversion_verified(file_id, verified.el_type, verified.bytes_after)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.fail_dv_conversion(
+                        &publisher,
+                        &file,
+                        loss,
+                        "ledger refused the running-to-verified transition",
+                    )
+                    .await;
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(file_id, %error, "recording verified Dolby Vision replacement");
+                    return;
+                }
+            }
+            if let Err(error) = self.begin_dv_recovery_guard_intent(&publisher, &file).await {
+                tracing::warn!(file_id, %error, "recording Dolby Vision recovery-guard intent");
+                return;
+            }
+            // The object version captured before the long pipeline is checked
+            // again immediately before the first source rename below.
+            let published = match crate::dv_disk::publish_verified(
+                &file,
+                self.coordinator.node_id(),
+                loss,
+                verified.bytes_after,
+            )
+            .await
+            {
+                Ok(crate::dv_disk::PublicationOutcome::Published(published)) => *published,
+                Ok(crate::dv_disk::PublicationOutcome::SafelyRolledBack { reason }) => {
+                    if let Err(error) = self
+                        .finish_dv_safe_rollback(&publisher, &file, loss, &reason)
+                        .await
+                    {
+                        tracing::warn!(file_id, %error, "recording Dolby Vision publication rollback");
+                    }
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(file_id, %error, "publishing verified Dolby Vision replacement");
+                    return;
+                }
+            };
+            if let Err(error) = self
+                .finish_dv_publication(&publisher, &file, published, loss)
+                .await
+            {
+                tracing::warn!(file_id, %error, "finishing Dolby Vision publication");
+            }
+            return;
+        };
+
+        if let Err(error) = self.begin_dv_recovery_guard_intent(&publisher, &file).await {
+            tracing::warn!(file_id, %error, "recording Dolby Vision recovery-guard intent");
+            return;
+        }
+        let published = match crate::dv_disk::publish_verified(
+            &file,
+            self.coordinator.node_id(),
+            loss,
+            verified.bytes_after,
+        )
+        .await
+        {
+            Ok(crate::dv_disk::PublicationOutcome::Published(published)) => *published,
+            Ok(crate::dv_disk::PublicationOutcome::SafelyRolledBack { reason }) => {
+                if let Err(error) = self
+                    .finish_dv_safe_rollback(&publisher, &file, loss, &reason)
+                    .await
+                {
+                    tracing::warn!(file_id, %error, "recording resumed Dolby Vision rollback");
+                }
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(file_id, %error, "resuming verified Dolby Vision publication");
+                return;
+            }
+        };
+        if published.bytes_after != verified.bytes_after {
+            tracing::warn!(
+                file_id,
+                verified = verified.bytes_after,
+                published = published.bytes_after,
+                "published Dolby Vision size changed after verification"
+            );
+            return;
+        }
+        if let Err(error) = self
+            .finish_dv_publication(&publisher, &file, published, loss)
+            .await
+        {
+            tracing::warn!(file_id, %error, "finishing resumed Dolby Vision publication");
+        }
+    }
+
+    async fn finish_dv_publication(
+        &self,
+        publisher: &PublicationStore<'_>,
+        file: &MediaFile,
+        published: crate::dv_disk::PublishedReplacement,
+        loss: &CancellationToken,
+    ) -> Result<(), StoreError> {
+        let path = file.path.to_string_lossy();
+        publisher
+            .upsert_file(
+                file.item_id,
+                &path,
+                published.size,
+                published.mtime,
+                &published.probe,
+            )
+            .await?;
+        let original_path = crate::dv_disk::finalize_verified_original(
+            file,
+            self.coordinator.node_id(),
+            published.bytes_after,
+            loss,
+        )
+        .await
+        .map_err(StoreError::Task)?;
+        if original_path != published.original_path {
+            return Err(StoreError::Task(
+                "finalized original path disagrees with the verified publication".to_owned(),
+            ));
+        }
+        let committed = match (
+            published.recovery_guard_id.as_deref(),
+            published.recovery_guard_path.as_deref(),
+        ) {
+            (Some(guard_id), Some(_)) if original_path.is_none() => {
+                publisher
+                    .mark_dv_conversion_committed_with_guard(
+                        file.id,
+                        guard_id,
+                        published.bytes_after,
+                        clock_ms(),
+                    )
+                    .await?
+            }
+            (None, None) if original_path.is_some() => {
+                publisher
+                    .mark_dv_conversion_committed(
+                        file.id,
+                        original_path.as_deref(),
+                        published.bytes_after,
+                        clock_ms(),
+                    )
+                    .await?
+            }
+            _ => {
+                return Err(StoreError::Task(
+                    "publication retention and recovery-guard facts are inconsistent".to_owned(),
+                ));
+            }
+        };
+        if !committed {
+            return Err(StoreError::Task(
+                "ledger refused the verified-to-committed transition".to_owned(),
+            ));
+        }
+        crate::dv_disk::cleanup_after_commit(file, self.coordinator.node_id(), loss).await;
+        tracing::info!(file_id = file.id, path = %path, "Dolby Vision conversion committed");
+        Ok(())
+    }
+
+    async fn begin_dv_recovery_guard_intent(
+        &self,
+        publisher: &PublicationStore<'_>,
+        file: &MediaFile,
+    ) -> Result<(), StoreError> {
+        let Some(intent) = crate::dv_disk::recovery_guard_intent(file)
+            .await
+            .map_err(StoreError::Task)?
+        else {
+            return Ok(());
+        };
+        if !publisher
+            .begin_dv_recovery_guard(file.id, &intent.guard_id, &intent.recovery_path, clock_ms())
+            .await?
+        {
+            return Err(StoreError::Task(
+                "recovery-guard intent was not accepted for the verified conversion".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn finish_dv_safe_rollback(
+        &self,
+        publisher: &PublicationStore<'_>,
+        file: &MediaFile,
+        loss: &CancellationToken,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        let guarded = publisher.dv_recovery_guard(file.id).await?.is_some();
+        if !publisher
+            .mark_dv_conversion_failed(file.id, reason, clock_ms())
+            .await?
+        {
+            return Err(StoreError::Task(
+                "ledger refused the safely-rolled-back transition".to_owned(),
+            ));
+        }
+        if !guarded {
+            crate::dv_disk::cleanup_after_failure(file, loss).await;
+        }
+        Ok(())
+    }
+
+    async fn fail_dv_conversion(
+        &self,
+        publisher: &PublicationStore<'_>,
+        file: &MediaFile,
+        loss: &tokio_util::sync::CancellationToken,
+        error: &str,
+    ) {
+        if loss.is_cancelled() {
+            return;
+        }
+        crate::dv_disk::cleanup_after_failure(file, loss).await;
+        match publisher
+            .mark_dv_conversion_failed(file.id, error, clock_ms())
+            .await
+        {
+            Ok(true) => tracing::warn!(file_id = file.id, %error, "Dolby Vision conversion failed"),
+            Ok(false) => {
+                tracing::warn!(file_id = file.id, %error, "Dolby Vision failure was not recorded")
+            }
+            Err(store_error) => tracing::warn!(
+                file_id = file.id,
+                %error,
+                %store_error,
+                "recording Dolby Vision conversion failure"
+            ),
+        }
     }
 
     /// What the last genre-backfill pass did, if one has run since boot.
@@ -3562,6 +4688,16 @@ impl JobManager {
                 state.work_cluster_fragment_index_queue(transcode).await;
             });
         }
+
+        // Permanent conversion is an active durable queue. Discovery honors
+        // each library's `auto` policy; manual rows use the same worker and do
+        // not wait for a separate cadence.
+        // Orphan recovery guards are filesystem lifecycle state, not a media
+        // conversion. Always dispatch the bounded worker so it can retire one
+        // orphan even when this node has no usable dovi_tool/mkvmerge; the
+        // worker returns before discovery/conversion when tools are absent.
+        let state = Arc::clone(self);
+        tokio::spawn(async move { state.work_dv_disk_queue().await });
 
         // Not a `DueJob`: there is no interval to decide about. It runs on
         // every tick while it is armed and stops by disarming itself, which
@@ -6393,6 +7529,9 @@ fn error_status(message: &str) -> ScanStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plurx_core::domain::{
+        DolbyVisionFacts, ItemKind, NewItem, NewLibrary, PlaybackEventQuery, ProbeResult,
+    };
 
     #[test]
     fn transient_fragment_source_reads_are_retryable_not_stale() {
@@ -6409,9 +7548,9 @@ mod tests {
             Err(FragmentSourceReadFailure::Stale)
         ));
     }
-    use plurx_core::domain::{ItemKind, NewItem, NewLibrary, PlaybackEventQuery};
     use plurx_core::store::{
-        LibraryStore, MediaStore, PlaybackTelemetryStore, SettingsStore, SqliteStore,
+        DvConversionMode, DvConversionStore, LibraryStore, MediaStore, PlaybackTelemetryStore,
+        SettingsStore, SqliteStore,
     };
     use plurx_core::transcode::Pipeline;
     use serde_json::json;
@@ -7292,6 +8431,433 @@ mod tests {
             jobs.schedule_tick(&transcode).await,
             "and the same manager, never restarted, dispatches once it has a vote"
         );
+    }
+
+    #[tokio::test]
+    async fn scheduler_converges_guardless_committed_scratch_after_commit_crash() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Committed cleanup".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Committed cleanup movie".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let source = media.path().join("movie.mkv");
+        tokio::fs::write(&source, b"published profile eight")
+            .await
+            .expect("published source");
+        let file_id = store
+            .upsert_file(
+                item,
+                source.to_str().expect("utf8 source"),
+                80_000,
+                7,
+                &ProbeResult {
+                    container: Some("mkv".to_owned()),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(7),
+                        bl_compat_id: Some(6),
+                        el_present: Some(true),
+                        rpu_present: Some(true),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("P7 file");
+        assert!(store
+            .set_library_dv_conversion_mode(library.id, DvConversionMode::Manual)
+            .await
+            .expect("enable manual conversion"));
+        assert!(matches!(
+            store.queue_dv_conversion(file_id, 1).await.expect("queue"),
+            QueueDvConversionOutcome::Queued(_)
+        ));
+        assert!(store
+            .mark_dv_conversion_running(file_id, 80_000)
+            .await
+            .expect("running"));
+        assert!(store
+            .mark_dv_conversion_verified(file_id, Some("fel"), 60_000)
+            .await
+            .expect("verified"));
+        assert!(store
+            .mark_dv_conversion_committed(
+                file_id,
+                Some(
+                    source
+                        .with_extension("mkv.p7.orig")
+                        .to_str()
+                        .expect("retained path")
+                ),
+                60_000,
+                2,
+            )
+            .await
+            .expect("commit before simulated crash"));
+
+        let scratch = media.path().join(format!(".movie.mkv.plurx-dv-{file_id}"));
+        tokio::fs::create_dir(&scratch).await.expect("scratch root");
+        let owner = json!({
+            "version": 5,
+            "file_id": file_id,
+            "source_path": source.to_str().expect("utf8 source"),
+            "source": {
+                "content": { "size": 80_000, "sha256": "test-source" },
+                "local": {
+                    "node_id": "test-node",
+                    "identity": {
+                        "device": 1,
+                        "inode": 1,
+                        "size": 80_000,
+                        "modified_seconds": 1,
+                        "modified_nanoseconds": 0,
+                        "changed_seconds": 1,
+                        "changed_nanoseconds": 0
+                    }
+                }
+            },
+            "replacement": null,
+            "expected_bytes": 60_000,
+            "keep_original": true,
+            "rollback_reason": null,
+            "rollback_restore": null,
+            "discard_pending": false,
+            "recovery_guard_id": null
+        });
+        tokio::fs::write(
+            scratch.join(".plurx-dv-owner.json"),
+            serde_json::to_vec(&owner).expect("owner JSON"),
+        )
+        .await
+        .expect("owner marker");
+        tokio::fs::write(scratch.join("bounded-residue"), b"residue")
+            .await
+            .expect("residual scratch");
+
+        let store_handle: Arc<dyn Store> = store.clone();
+        let jobs = Arc::new(JobManager::new(store_handle, artwork.path().to_path_buf()));
+        assert!(!jobs.dv_disk_capabilities.available);
+
+        let slot = jobs
+            .acquire_job("media:dv-disk-convert:0".to_owned())
+            .await
+            .expect("slot claim")
+            .expect("hold cleanup slot");
+        Arc::clone(&jobs).work_dv_disk_queue().await;
+        assert!(scratch.exists(), "cleanup must respect the shared I/O slot");
+        slot.release().await.expect("release cleanup slot");
+
+        let file_lease = jobs
+            .acquire_job(format!("media:dv-disk-convert:file:{file_id}"))
+            .await
+            .expect("file claim")
+            .expect("hold cleanup file lease");
+        Arc::clone(&jobs).work_dv_disk_queue().await;
+        assert!(scratch.exists(), "cleanup must respect the per-file lease");
+        file_lease.release().await.expect("release file lease");
+
+        Arc::clone(&jobs).work_dv_disk_queue().await;
+        assert!(
+            !scratch.exists(),
+            "the next tool-independent bounded pass converges post-commit scratch"
+        );
+    }
+
+    #[tokio::test]
+    async fn safe_rollback_hands_guarded_scratch_to_tool_independent_orphan_retirement() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let work = crate::test_tempdir().expect("transcode work");
+        let media_root = media.path().join("library");
+        tokio::fs::create_dir(&media_root)
+            .await
+            .expect("media root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media_root.clone()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Guarded movie".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let source = media_root.join("movie.mkv");
+        tokio::fs::write(&source, vec![b'7'; 80_000])
+            .await
+            .expect("real Profile 7 source");
+        let source_metadata = tokio::fs::metadata(&source).await.expect("source metadata");
+        #[cfg(unix)]
+        let source_mtime = {
+            use std::os::unix::fs::MetadataExt;
+            source_metadata.mtime()
+        };
+        #[cfg(not(unix))]
+        let source_mtime = source_metadata
+            .modified()
+            .expect("source modified time")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("source modified after epoch")
+            .as_secs() as i64;
+        let file_id = store
+            .upsert_file(
+                item,
+                source.to_str().expect("utf8 source"),
+                source_metadata.len() as i64,
+                source_mtime,
+                &ProbeResult {
+                    container: Some("mkv".to_owned()),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(7),
+                        bl_compat_id: Some(6),
+                        el_present: Some(true),
+                        rpu_present: Some(true),
+                        ..Default::default()
+                    },
+                    raw_json: Some("{}".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("P7 file");
+        assert!(store
+            .set_library_dv_conversion_mode(library.id, DvConversionMode::Manual)
+            .await
+            .expect("enable manual conversion"));
+        assert!(matches!(
+            store.queue_dv_conversion(file_id, 1).await.expect("queue"),
+            QueueDvConversionOutcome::Queued(_)
+        ));
+        assert!(store
+            .mark_dv_conversion_running(file_id, 80_000)
+            .await
+            .expect("running"));
+        assert!(store
+            .mark_dv_conversion_verified(file_id, Some("fel"), 60_000)
+            .await
+            .expect("verified"));
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("read file")
+            .expect("stored file");
+        let intent = crate::dv_disk::prepare_test_published_recovery_guard(&file)
+            .await
+            .expect("real owned guarded scratch");
+        assert!(store
+            .begin_dv_recovery_guard(file_id, &intent.guard_id, &intent.recovery_path, 2,)
+            .await
+            .expect("guard intent"));
+        let store_handle: Arc<dyn Store> = store.clone();
+        let jobs = Arc::new(JobManager::new(
+            Arc::clone(&store_handle),
+            artwork.path().to_path_buf(),
+        ));
+        assert!(!jobs.dv_disk_capabilities.available);
+        jobs.finish_dv_safe_rollback(
+            &PublicationStore::unfenced(store.as_ref()),
+            &file,
+            &CancellationToken::new(),
+            "simulate safe rollback after guard publication",
+        )
+        .await
+        .expect("handoff guarded rollback to orphan cleanup");
+        assert!(
+            std::path::Path::new(&intent.recovery_path).exists(),
+            "safe rollback must preserve guard-owned scratch until the leased orphan lifecycle runs"
+        );
+        let failed = store
+            .dv_conversion(file_id)
+            .await
+            .expect("read failed conversion")
+            .expect("failed conversion row");
+        assert_eq!(failed.state, DvConversionState::Failed);
+        assert!(failed.recovery_guard.is_none());
+        assert!(store
+            .dv_recovery_guard_by_id(&intent.guard_id)
+            .await
+            .expect("read guard")
+            .is_some());
+
+        // Model a voter whose configured absolute path still exists but whose
+        // media filesystem disappeared. The empty underlying directory has no
+        // owned scratch and, critically, no source-parent witness.
+        let mounted_media = media.path().join("library-mounted");
+        tokio::fs::rename(&media_root, &mounted_media)
+            .await
+            .expect("hide real media mount");
+        tokio::fs::create_dir(&media_root)
+            .await
+            .expect("empty underlying mount point");
+        Arc::clone(&jobs).work_dv_disk_queue().await;
+        let stranded = store
+            .dv_recovery_guard_by_id(&intent.guard_id)
+            .await
+            .expect("guard after missing mount")
+            .expect("guard row remains");
+        assert_eq!(
+            stranded.state,
+            DvRecoveryGuardState::Intent,
+            "an empty underlying mount point must not advance any guard phase"
+        );
+        assert!(
+            tokio::fs::read_dir(&media_root)
+                .await
+                .expect("underlying mount contents")
+                .next_entry()
+                .await
+                .expect("underlying mount entry")
+                .is_none(),
+            "cleanup must not attest the empty underlying filesystem"
+        );
+        tokio::fs::remove_dir(&media_root)
+            .await
+            .expect("remove empty underlying mount point");
+        tokio::fs::rename(&mounted_media, &media_root)
+            .await
+            .expect("restore real media mount");
+
+        let cleanup_loss = CancellationToken::new();
+        crate::dv_disk::remove_orphan_recovery_guard(
+            file_id,
+            source.to_str().expect("utf8 source"),
+            &intent.recovery_path,
+            &intent.guard_id,
+            jobs.coordinator.node_id(),
+            &cleanup_loss,
+        )
+        .await
+        .expect("remove real guarded inode");
+        assert!(store
+            .advance_dv_recovery_guard(
+                &intent.guard_id,
+                DvRecoveryGuardState::Intent,
+                DvRecoveryGuardState::GuardRemoved,
+                4,
+            )
+            .await
+            .expect("record guard removal"));
+
+        tokio::fs::rename(&media_root, &mounted_media)
+            .await
+            .expect("hide media before scratch cleanup");
+        tokio::fs::create_dir(&media_root)
+            .await
+            .expect("second empty underlying mount point");
+        Arc::clone(&jobs).work_dv_disk_queue().await;
+        assert_eq!(
+            store
+                .dv_recovery_guard_by_id(&intent.guard_id)
+                .await
+                .expect("guard after second missing mount")
+                .expect("guard row remains before scratch cleanup")
+                .state,
+            DvRecoveryGuardState::GuardRemoved,
+            "missing-mounted witness must block the scratch-removed transition"
+        );
+        tokio::fs::remove_dir(&media_root)
+            .await
+            .expect("remove second empty underlying mount point");
+        tokio::fs::rename(&mounted_media, &media_root)
+            .await
+            .expect("restore media for scratch cleanup");
+
+        crate::dv_disk::remove_orphan_recovery_scratch(
+            file_id,
+            source.to_str().expect("utf8 source"),
+            &intent.guard_id,
+            &cleanup_loss,
+        )
+        .await
+        .expect("remove real recovery scratch and persist tombstone");
+        assert!(store
+            .advance_dv_recovery_guard(
+                &intent.guard_id,
+                DvRecoveryGuardState::GuardRemoved,
+                DvRecoveryGuardState::ScratchRemoved,
+                5,
+            )
+            .await
+            .expect("record scratch removal"));
+
+        tokio::fs::rename(&media_root, &mounted_media)
+            .await
+            .expect("hide media before ledger retirement");
+        tokio::fs::create_dir(&media_root)
+            .await
+            .expect("third empty underlying mount point");
+        Arc::clone(&jobs).work_dv_disk_queue().await;
+        assert_eq!(
+            store
+                .dv_recovery_guard_by_id(&intent.guard_id)
+                .await
+                .expect("guard after third missing mount")
+                .expect("terminal guard row remains")
+                .state,
+            DvRecoveryGuardState::ScratchRemoved,
+            "missing terminal tombstone must block ledger-row deletion"
+        );
+        tokio::fs::remove_dir(&media_root)
+            .await
+            .expect("remove third empty underlying mount point");
+        tokio::fs::rename(&mounted_media, &media_root)
+            .await
+            .expect("restore media for ledger retirement");
+
+        let transcode = Arc::new(TranscodeManager::new(
+            store_handle,
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        assert!(jobs.schedule_tick(&transcode).await);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if store
+                    .dv_recovery_guard_by_id(&intent.guard_id)
+                    .await
+                    .expect("poll guard")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("tool-independent cleanup completes");
     }
 
     /// The live property. The same manager, never restarted, starts acquiring

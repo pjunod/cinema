@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a2acb839"]
+points = ["core.media", "persistence.upgrades", "server.api", "validation.framework"]
+checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "catalog-contract", "history-regressions"]
+reason = "The full Rust gate inventories every Dolby Vision SQLite transaction, reconstructs the exact v41 stale-marker boundary before applying later migrations, and runs recovery fixtures through the same explicit Manual-mode admission required in production."

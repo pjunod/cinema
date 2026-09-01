@@ -1756,7 +1756,10 @@ impl MediaStore for SqliteStore {
             {
                 let mut delete = tx.prepare_cached(
                     "DELETE FROM files WHERE id = ?1 AND item_id IN \
-                     (SELECT id FROM items WHERE library_id = ?2)",
+                     (SELECT id FROM items WHERE library_id = ?2) \
+                     AND NOT EXISTS (SELECT 1 FROM dv_conversions d \
+                                     WHERE d.file_id = files.id \
+                                       AND d.state IN ('running', 'verified'))",
                 )?;
                 for id in ids {
                     deleted_files += delete.execute(params![id, library_id])? as u64;

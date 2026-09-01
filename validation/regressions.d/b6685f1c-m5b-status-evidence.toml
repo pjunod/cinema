@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b6685f1c"]
+points = ["validation.framework", "operations.packaging"]
+checks = ["catalog-contract", "operations-contract", "history-regressions"]
+reason = "The promotion status record pins the exact integrated base, review disposition, focused evidence, and pending qualification without preclaiming the gate or merge."

@@ -15,6 +15,7 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+mod dv_conversion;
 mod fragindex;
 mod fragment_index_cluster;
 mod renditionplan;
@@ -32,6 +33,8 @@ mod hiqlite_catalog;
 mod hiqlite_coordination;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_durable;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_dv_conversion;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
@@ -52,6 +55,14 @@ mod hiqlite_shared_cache;
 mod hiqlite_timeline_annotations;
 
 pub mod replicated;
+
+pub use dv_conversion::{
+    DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
+    DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
+    DvRecoveryGuard, DvRecoveryGuardSnapshot, DvRecoveryGuardState, DvRecoveryGuardSummary,
+    QueueDvConversionOutcome, DV_CONVERSION_LEDGER_READ_MAX, DV_CONVERSION_MODE_DISABLED_REASON,
+    DV_CONVERSION_QUEUE_BATCH_MAX, DV_RECOVERY_GUARD_READ_MAX,
+};
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -705,6 +716,22 @@ pub mod keys {
     /// whose stored probe has no configuration record — would otherwise sit at
     /// the front of every window forever, hiding every fixable row behind it.
     pub const JOB_DV_BACKFILL_CURSOR: &str = "jobs.dv_facts_backfill_cursor";
+    /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
+    /// object from decimal library id to `off`, `manual`, or `auto`. Missing
+    /// libraries are always off: an upgrade must never rewrite media by
+    /// surprise.
+    pub const LIBRARY_DV_DISK_CONVERT: &str = "library.dv_disk_convert";
+    /// Whether a verified source is retained as `<source>.p7.orig`. Missing is
+    /// on, because the safe default preserves the operator's original bytes.
+    pub const LIBRARY_DV_DISK_KEEP_ORIGINAL: &str = "library.dv_disk_keep_original";
+    /// Cluster-wide conversion slots. Missing or invalid is one.
+    pub const LIBRARY_DV_DISK_CONVERT_PARALLEL: &str = "library.dv_disk_convert_parallel";
+    /// Highest file id examined by this node's bounded queue walk.
+    pub const JOB_DV_DISK_CONVERT_CURSOR: &str = "jobs.dv_disk_convert_cursor";
+    /// Last auto-enabled library examined by this node. Discovery itself is
+    /// cluster-leased, but the cursor keeps a repeatedly busy library from
+    /// hiding later libraries when each tick admits only one bounded batch.
+    pub const JOB_DV_DISK_AUTO_LIBRARY_CURSOR: &str = "jobs.dv_disk_auto_library_cursor";
 }
 
 #[async_trait]
@@ -2362,6 +2389,75 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<(), StoreError>;
+    async fn mark_dv_conversion_running_fenced(
+        &self,
+        file_id: i64,
+        bytes_before: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    async fn mark_dv_conversion_verified_fenced(
+        &self,
+        file_id: i64,
+        el_type: Option<&str>,
+        bytes_after: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn begin_dv_recovery_guard_fenced(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        recovery_path: &str,
+        now_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn mark_dv_conversion_committed_fenced(
+        &self,
+        file_id: i64,
+        original_path: Option<&str>,
+        bytes_after: i64,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn mark_dv_conversion_committed_with_guard_fenced(
+        &self,
+        file_id: i64,
+        guard_id: &str,
+        bytes_after: i64,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn advance_dv_recovery_guard_fenced(
+        &self,
+        guard_id: &str,
+        expected: DvRecoveryGuardState,
+        next: DvRecoveryGuardState,
+        updated_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    async fn delete_dv_recovery_guard_fenced(
+        &self,
+        guard_id: &str,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    async fn mark_dv_conversion_failed_fenced(
+        &self,
+        file_id: i64,
+        error: &str,
+        finished_at_ms: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
 }
 
 /// Durable idempotency and routing for cluster-owned live HLS sessions.
@@ -2794,6 +2890,7 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
+    + DvConversionStore
     + MetricsStore
     + UserStore
     + ApiKeyStore
@@ -2824,6 +2921,7 @@ pub trait Store:
 
 impl<T> Store for T where
     T: SettingsStore
+        + DvConversionStore
         + MetricsStore
         + UserStore
         + ApiKeyStore

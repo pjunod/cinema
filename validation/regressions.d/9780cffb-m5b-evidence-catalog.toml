@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9780cffb"]
+points = ["validation.framework"]
+checks = ["catalog-contract", "history-regressions"]
+reason = "The catalog entries keep the final Store and media safety corrections attached to their focused current checks."

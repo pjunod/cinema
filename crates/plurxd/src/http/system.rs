@@ -1438,6 +1438,10 @@ pub struct SettingsDto {
     pub offline_max_rows_per_user: i64,
     /// Scan every library once, ~30s after the server starts.
     pub scan_on_startup: bool,
+    /// Permanent Profile 7 conversion keeps the original by default and
+    /// admits one sequential-I/O worker cluster-wide unless changed.
+    pub dv_disk_keep_original: bool,
+    pub dv_disk_convert_parallel: i64,
     /// Is the one-off genre backfill armed? It disarms itself when it reaches
     /// the end of the catalogue, so this reads `false` again afterwards.
     ///
@@ -1569,6 +1573,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         super::offline::DEFAULT_USER_ROWS,
     );
     let scan_on_startup = setting(keys::JOB_SCAN_ON_STARTUP).is_some_and(|v| v.trim() == "1");
+    let dv_disk_keep_original = !matches!(
+        setting(keys::LIBRARY_DV_DISK_KEEP_ORIGINAL).as_deref(),
+        Some("0" | "false" | "off" | "no")
+    );
+    let dv_disk_convert_parallel = setting(keys::LIBRARY_DV_DISK_CONVERT_PARALLEL)
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(1)
+        .clamp(1, 8);
     let genre_backfill = setting(keys::GENRE_BACKFILL).is_some_and(|v| v.trim() == "1");
     let cluster_media_pool_enabled =
         setting(keys::CLUSTER_MEDIA_POOL_ENABLED).as_deref() == Some("1");
@@ -1646,6 +1658,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         offline_max_gb_per_user,
         offline_max_rows_per_user,
         scan_on_startup,
+        dv_disk_keep_original,
+        dv_disk_convert_parallel,
         genre_backfill,
         genre_backfill_last: state.jobs.last_genre_backfill().await,
     })
@@ -1734,6 +1748,8 @@ pub struct UpdateSettings {
     pub offline_max_gb_per_user: Option<i64>,
     pub offline_max_rows_per_user: Option<i64>,
     pub scan_on_startup: Option<bool>,
+    pub dv_disk_keep_original: Option<bool>,
+    pub dv_disk_convert_parallel: Option<i64>,
     /// Arm or disarm the one-off genre backfill.
     pub genre_backfill: Option<bool>,
 }
@@ -1755,7 +1771,20 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateSettings>,
 ) -> Result<Json<SettingsDto>, ApiError> {
-    if req.analysis_max_attempts.is_some()
+    // This handler accepts a PATCH-shaped aggregate but persists one setting at
+    // a time. Validate and normalize every fallible input before the first
+    // write, so a later bad field cannot leave an earlier policy change in
+    // force despite returning 400/409. This matters especially for destructive
+    // policies such as `dv_disk_keep_original = false`.
+    if req
+        .dv_disk_convert_parallel
+        .is_some_and(|parallel| !(1..=8).contains(&parallel))
+    {
+        return Err(ApiError::BadRequest(
+            "dv_disk_convert_parallel must be between 1 and 8".into(),
+        ));
+    }
+    let analysis_settings = if req.analysis_max_attempts.is_some()
         || req.analysis_lease_secs.is_some()
         || req.analysis_backoff_base_secs.is_some()
         || req.analysis_backoff_max_secs.is_some()
@@ -1827,19 +1856,241 @@ pub async fn update_settings(
                 backoff_max_secs.to_string(),
             ),
         ];
-        let borrowed = values
-            .iter()
-            .map(|(key, value)| (*key, value.as_str()))
-            .collect::<Vec<_>>();
-        state.store.put_settings(&borrowed).await?;
-    }
-    if let Some(name) = &req.server_name {
+        Some(values)
+    } else {
+        None
+    };
+    let server_name = if let Some(name) = req.server_name.as_deref() {
         let name = name.trim();
         if name.is_empty() {
             return Err(ApiError::BadRequest("server_name must not be empty".into()));
         }
-        state.store.put_setting(keys::SERVER_NAME, name).await?;
+        Some(name)
+    } else {
+        None
+    };
+    let rate_control = match (&req.transcode_rate_mode, req.transcode_quality) {
+        (None, None) => None,
+        (Some(requested_mode), Some(quality)) => {
+            let mode = plurx_core::transcode::RateMode::parse(requested_mode).ok_or_else(|| {
+                ApiError::BadRequest("transcode_rate_mode must be bitrate or quality".into())
+            })?;
+            Some((mode, quality))
+        }
+        _ => {
+            return Err(ApiError::BadRequest(
+                "transcode_rate_mode and transcode_quality must be provided together".into(),
+            ));
+        }
+    };
+    let vod_working_set_bytes = match req.vod_working_set_bytes.as_deref() {
+        None => None,
+        Some(raw) if raw.trim().is_empty() => Some(None),
+        Some(raw) => {
+            let parsed: u64 = raw.trim().parse().map_err(|_| {
+                ApiError::BadRequest("vod_working_set_bytes must be a number".into())
+            })?;
+            // A parsed zero is refused rather than stored: 0 means "not
+            // configured" to the serving layer, and an operator who typed it
+            // meant "no working set" — an answer this presentation cannot run
+            // with. Offer the honest alternatives instead of silently keeping a
+            // default (M3 handoff §6).
+            if parsed == 0 {
+                return Err(ApiError::BadRequest(
+                    "vod_working_set_bytes cannot be 0: the smallest accepted working set is \
+                     268435456 (256 MiB); disabling VOD refuses HLS playback and does not restore \
+                     the removed live presentation"
+                        .into(),
+                ));
+            }
+            if parsed < 256 * 1024 * 1024 {
+                return Err(ApiError::BadRequest(
+                    "vod_working_set_bytes must be at least 268435456 (256 MiB)".into(),
+                ));
+            }
+            Some(Some(parsed))
+        }
+    };
+    let vod_block_budget_secs = match req.vod_block_budget_secs.as_deref() {
+        None => None,
+        Some(raw) if raw.trim().is_empty() => Some(None),
+        Some(raw) => {
+            let parsed: f64 = raw.trim().parse().map_err(|_| {
+                ApiError::BadRequest("vod_block_budget_secs must be a number".into())
+            })?;
+            if !(1.0..=30.0).contains(&parsed) {
+                return Err(ApiError::BadRequest(
+                    "vod_block_budget_secs must be between 1 and 30".into(),
+                ));
+            }
+            Some(Some(parsed))
+        }
+    };
+    let vod_materialize_budget_secs = match req.vod_materialize_budget_secs.as_deref() {
+        None => None,
+        Some(raw) if raw.trim().is_empty() => Some(None),
+        Some(raw) => {
+            let parsed: f64 = raw.trim().parse().map_err(|_| {
+                ApiError::BadRequest("vod_materialize_budget_secs must be a number".into())
+            })?;
+            if !(10.0..=300.0).contains(&parsed) {
+                return Err(ApiError::BadRequest(
+                    "vod_materialize_budget_secs must be between 10 and 300".into(),
+                ));
+            }
+            Some(Some(parsed))
+        }
+    };
+    let stream_readrate = if let Some(raw) = req.stream_readrate.as_deref() {
+        let parsed: f64 = raw
+            .trim()
+            .parse()
+            .map_err(|_| ApiError::BadRequest("stream_readrate must be a number".into()))?;
+        if !(0.0..=1000.0).contains(&parsed) {
+            return Err(ApiError::BadRequest(
+                "stream_readrate must be between 0 and 1000".into(),
+            ));
+        }
+        if parsed > 0.0 && parsed < 1.0 {
+            return Err(ApiError::BadRequest(
+                "stream_readrate below 1.0 cannot keep up with playback; use 0 to disable pacing"
+                    .into(),
+            ));
+        }
+        Some(parsed)
+    } else {
+        None
+    };
+    // HLS pacing. Same "store only what the streamer can act on" rule as the
+    // remux rate, with per-key bounds: a rate below real time cannot keep up
+    // by construction, a burst is seconds of content (an hour of it is not a
+    // burst), and the ahead-window is what stops a 4K session filling the
+    // disk — an enormous one is the same as none, so say so rather than
+    // silently accept it.
+    let mut hls_settings = Vec::with_capacity(5);
+    for (key, label, value, max) in [
+        (
+            keys::HLS_READRATE,
+            "hls_readrate",
+            req.hls_readrate.as_deref(),
+            1000.0,
+        ),
+        (
+            keys::HLS_BURST_SECS,
+            "hls_burst_secs",
+            req.hls_burst_secs.as_deref(),
+            600.0,
+        ),
+        (
+            keys::HLS_AHEAD_MAX_SECS,
+            "hls_ahead_max_secs",
+            req.hls_ahead_max_secs.as_deref(),
+            3600.0,
+        ),
+        (
+            keys::HLS_AHEAD_MAX_BYTES,
+            "hls_ahead_max_bytes",
+            req.hls_ahead_max_bytes.as_deref(),
+            1024.0 * 1024.0 * 1024.0 * 1024.0,
+        ),
+        (
+            keys::HLS_SCRATCH_MAX_BYTES,
+            "hls_scratch_max_bytes",
+            req.hls_scratch_max_bytes.as_deref(),
+            1024.0 * 1024.0 * 1024.0 * 1024.0,
+        ),
+    ] {
+        let Some(raw) = value else { continue };
+        let parsed: f64 = raw
+            .trim()
+            .parse()
+            .map_err(|_| ApiError::BadRequest(format!("{label} must be a number")))?;
+        if !(0.0..=max).contains(&parsed) {
+            return Err(ApiError::BadRequest(format!(
+                "{label} must be between 0 and {max:.0}"
+            )));
+        }
+        if key == keys::HLS_READRATE && parsed > 0.0 && parsed < 1.0 {
+            return Err(ApiError::BadRequest(
+                "hls_readrate below 1.0 cannot keep up with playback; use 0 to disable pacing"
+                    .into(),
+            ));
+        }
+        hls_settings.push((key, parsed));
     }
+    let job_settings = [
+        (
+            keys::JOB_PROBE_RETRY_MINS,
+            "probe_retry_mins",
+            req.probe_retry_mins,
+        ),
+        (
+            keys::JOB_ARTWORK_RETRY_MINS,
+            "artwork_retry_mins",
+            req.artwork_retry_mins,
+        ),
+        (
+            keys::JOB_TRANSCODE_CLEANUP_MINS,
+            "transcode_cleanup_mins",
+            req.transcode_cleanup_mins,
+        ),
+        (
+            keys::JOB_CACHE_PRODUCE_MINS,
+            "cache_produce_mins",
+            req.cache_produce_mins,
+        ),
+        (keys::VOD_INDEX_MINS, "vod_index_mins", req.vod_index_mins),
+    ];
+    for (_, label, value) in job_settings {
+        if value.is_some_and(|value| value < 0 || (value > 0 && value < 15)) {
+            return Err(ApiError::BadRequest(format!(
+                "{label} must be 0 (off) or at least 15 minutes"
+            )));
+        }
+    }
+    if req
+        .cache_max_gb
+        .is_some_and(|gb| !(0..=10_240).contains(&gb))
+    {
+        return Err(ApiError::BadRequest(
+            "cache_max_gb must be between 0 (off) and 10240".into(),
+        ));
+    }
+    if req
+        .telemetry_retain_days
+        .is_some_and(|days| !(0..=3650).contains(&days))
+    {
+        return Err(ApiError::BadRequest(
+            "telemetry_retain_days must be between 0 (off) and 3650".into(),
+        ));
+    }
+    let offline_gb_settings = [
+        (keys::OFFLINE_MAX_GB, "offline_max_gb", req.offline_max_gb),
+        (
+            keys::OFFLINE_MAX_GB_PER_USER,
+            "offline_max_gb_per_user",
+            req.offline_max_gb_per_user,
+        ),
+    ];
+    for (_, label, value) in offline_gb_settings {
+        if value.is_some_and(|gb| !(0..=10_240).contains(&gb)) {
+            return Err(ApiError::BadRequest(format!(
+                "{label} must be between 0 (disables offline admission) and 10240"
+            )));
+        }
+    }
+    if req
+        .offline_max_rows_per_user
+        .is_some_and(|rows| !(0..=10_000).contains(&rows))
+    {
+        return Err(ApiError::BadRequest(
+            "offline_max_rows_per_user must be between 0 (disables offline admission) and 10000"
+                .into(),
+        ));
+    }
+
+    // Dynamic preconditions are reads/probes, not persistence. Complete them
+    // after syntax/range validation and before any of this aggregate is stored.
     if req.cluster_media_pool_enabled == Some(true)
         && !state.media_pool.remote_rollout_ready().await
     {
@@ -1865,33 +2116,35 @@ pub async fn update_settings(
             ));
         }
     }
-    match (&req.transcode_rate_mode, req.transcode_quality) {
-        (None, None) => {}
-        (Some(requested_mode), Some(quality)) => {
-            let mode = plurx_core::transcode::RateMode::parse(requested_mode).ok_or_else(|| {
-                ApiError::BadRequest("transcode_rate_mode must be bitrate or quality".into())
-            })?;
-            match state
-                .transcode
-                .apply_rate_control_settings(mode, quality)
-                .await
-            {
-                Ok(()) => {}
-                Err(crate::transcode::ApplyRateControlError::Store(error)) => {
-                    return Err(error.into())
-                }
-                Err(crate::transcode::ApplyRateControlError::Busy) => {
-                    return Err(ApiError::Conflict(
-                        "rate-control validation deferred while playback, offline/speculative encoding, or encoder capacity is active; retry after the node is idle".into(),
-                    ))
-                }
+    // The behavior probe may persist the effective encoder mode. Run it before
+    // every ordinary store write so Busy/probe refusal also leaves the rest of
+    // this request untouched.
+    if let Some((mode, quality)) = rate_control {
+        match state
+            .transcode
+            .apply_rate_control_settings(mode, quality)
+            .await
+        {
+            Ok(()) => {}
+            Err(crate::transcode::ApplyRateControlError::Store(error)) => {
+                return Err(error.into())
+            }
+            Err(crate::transcode::ApplyRateControlError::Busy) => {
+                return Err(ApiError::Conflict(
+                    "rate-control validation deferred while playback, offline/speculative encoding, or encoder capacity is active; retry after the node is idle".into(),
+                ))
             }
         }
-        _ => {
-            return Err(ApiError::BadRequest(
-                "transcode_rate_mode and transcode_quality must be provided together".into(),
-            ));
-        }
+    }
+    if let Some(values) = &analysis_settings {
+        let borrowed = values
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        state.store.put_settings(&borrowed).await?;
+    }
+    if let Some(name) = server_name {
+        state.store.put_setting(keys::SERVER_NAME, name).await?;
     }
     let pairs: [(&str, &Option<String>); 8] = [
         (keys::TMDB_API_KEY, &req.tmdb_api_key),
@@ -1924,6 +2177,24 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::MONARR_WATCHED_SYNC, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dv_disk_keep_original {
+        state
+            .store
+            .put_setting(
+                keys::LIBRARY_DV_DISK_KEEP_ORIGINAL,
+                if on { "1" } else { "0" },
+            )
+            .await?;
+    }
+    if let Some(parallel) = req.dv_disk_convert_parallel {
+        state
+            .store
+            .put_setting(
+                keys::LIBRARY_DV_DISK_CONVERT_PARALLEL,
+                &parallel.to_string(),
+            )
             .await?;
     }
     if let Some(on) = req.hls_typeless_sliding {
@@ -1959,105 +2230,27 @@ pub async fn update_settings(
             .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, if on { "1" } else { "0" })
             .await?;
     }
-    if let Some(raw) = req
-        .vod_working_set_bytes
-        .as_deref()
-        .filter(|raw| !raw.trim().is_empty())
-    {
-        let parsed: u64 = raw
-            .trim()
-            .parse()
-            .map_err(|_| ApiError::BadRequest("vod_working_set_bytes must be a number".into()))?;
-        // A parsed zero is refused rather than stored: 0 means "not
-        // configured" to the serving layer, and an operator who typed it
-        // meant "no working set" — an answer this presentation cannot run
-        // with. Offer the honest alternatives instead of silently keeping a
-        // default (M3 handoff §6).
-        if parsed == 0 {
-            return Err(ApiError::BadRequest(
-                "vod_working_set_bytes cannot be 0: the smallest accepted working set is \
-                 268435456 (256 MiB); disabling VOD refuses HLS playback and does not restore \
-                 the removed live presentation"
-                    .into(),
-            ));
-        }
-        if parsed < 256 * 1024 * 1024 {
-            return Err(ApiError::BadRequest(
-                "vod_working_set_bytes must be at least 268435456 (256 MiB)".into(),
-            ));
-        }
-        state
-            .store
-            .put_setting(keys::VOD_WORKING_SET_BYTES, &parsed.to_string())
-            .await?;
-    }
-    if req
-        .vod_working_set_bytes
-        .as_deref()
-        .is_some_and(|raw| raw.trim().is_empty())
-    {
+    if let Some(value) = vod_working_set_bytes {
         // Empty resets to the built-in default — this is the one numeric
         // setting that refuses 0, so it needs an explicit way back.
+        let value = value.map(|parsed| parsed.to_string()).unwrap_or_default();
         state
             .store
-            .put_setting(keys::VOD_WORKING_SET_BYTES, "")
+            .put_setting(keys::VOD_WORKING_SET_BYTES, &value)
             .await?;
     }
-    if let Some(raw) = req
-        .vod_block_budget_secs
-        .as_deref()
-        .filter(|raw| !raw.trim().is_empty())
-    {
-        let parsed: f64 = raw
-            .trim()
-            .parse()
-            .map_err(|_| ApiError::BadRequest("vod_block_budget_secs must be a number".into()))?;
-        if !(1.0..=30.0).contains(&parsed) {
-            return Err(ApiError::BadRequest(
-                "vod_block_budget_secs must be between 1 and 30".into(),
-            ));
-        }
+    if let Some(value) = vod_block_budget_secs {
+        let value = value.map(|parsed| parsed.to_string()).unwrap_or_default();
         state
             .store
-            .put_setting(keys::VOD_BLOCK_BUDGET_SECS, &parsed.to_string())
+            .put_setting(keys::VOD_BLOCK_BUDGET_SECS, &value)
             .await?;
     }
-    if req
-        .vod_block_budget_secs
-        .as_deref()
-        .is_some_and(|raw| raw.trim().is_empty())
-    {
+    if let Some(value) = vod_materialize_budget_secs {
+        let value = value.map(|parsed| parsed.to_string()).unwrap_or_default();
         state
             .store
-            .put_setting(keys::VOD_BLOCK_BUDGET_SECS, "")
-            .await?;
-    }
-    if let Some(raw) = req
-        .vod_materialize_budget_secs
-        .as_deref()
-        .filter(|raw| !raw.trim().is_empty())
-    {
-        let parsed: f64 = raw.trim().parse().map_err(|_| {
-            ApiError::BadRequest("vod_materialize_budget_secs must be a number".into())
-        })?;
-        if !(10.0..=300.0).contains(&parsed) {
-            return Err(ApiError::BadRequest(
-                "vod_materialize_budget_secs must be between 10 and 300".into(),
-            ));
-        }
-        state
-            .store
-            .put_setting(keys::VOD_MATERIALIZE_BUDGET_SECS, &parsed.to_string())
-            .await?;
-    }
-    if req
-        .vod_materialize_budget_secs
-        .as_deref()
-        .is_some_and(|raw| raw.trim().is_empty())
-    {
-        state
-            .store
-            .put_setting(keys::VOD_MATERIALIZE_BUDGET_SECS, "")
+            .put_setting(keys::VOD_MATERIALIZE_BUDGET_SECS, &value)
             .await?;
     }
     if let Some(on) = req.cluster_media_pool_enabled {
@@ -2086,123 +2279,20 @@ pub async fn update_settings(
         let mode = plurx_core::tracks::SubMode::parse(mode.trim()).as_str();
         state.store.put_setting(keys::SUB_MODE, mode).await?;
     }
-    if let Some(rate) = &req.stream_readrate {
-        // Store only something the streamer can act on. A garbled value would
-        // otherwise fall back to the default silently and leave the settings
-        // page showing a number that isn't in force.
-        let parsed: f64 = rate
-            .trim()
-            .parse()
-            .map_err(|_| ApiError::BadRequest("stream_readrate must be a number".into()))?;
-        if !(0.0..=1000.0).contains(&parsed) {
-            return Err(ApiError::BadRequest(
-                "stream_readrate must be between 0 and 1000".into(),
-            ));
-        }
-        // Below real time the client can never buffer and playback stalls by
-        // construction; refuse rather than let someone quietly break streaming.
-        if parsed > 0.0 && parsed < 1.0 {
-            return Err(ApiError::BadRequest(
-                "stream_readrate below 1.0 cannot keep up with playback; use 0 to disable pacing"
-                    .into(),
-            ));
-        }
+    if let Some(parsed) = stream_readrate {
         state
             .store
             .put_setting(keys::STREAM_READRATE, &parsed.to_string())
             .await?;
     }
-    // HLS pacing. Same "store only what the streamer can act on" rule as the
-    // remux rate, with per-key bounds: a rate below real time cannot keep up
-    // by construction, a burst is seconds of content (an hour of it is not a
-    // burst), and the ahead-window is what stops a 4K session filling the
-    // disk — an enormous one is the same as none, so say so rather than
-    // silently accept it.
-    for (key, label, value, max) in [
-        (
-            keys::HLS_READRATE,
-            "hls_readrate",
-            &req.hls_readrate,
-            1000.0,
-        ),
-        (
-            keys::HLS_BURST_SECS,
-            "hls_burst_secs",
-            &req.hls_burst_secs,
-            600.0,
-        ),
-        (
-            keys::HLS_AHEAD_MAX_SECS,
-            "hls_ahead_max_secs",
-            &req.hls_ahead_max_secs,
-            3600.0,
-        ),
-        // Bytes. The ceiling is generous on purpose: this is a guard against a
-        // runaway stream, not a quota, and refusing a large disk would be the
-        // setting telling the operator they are wrong about their own hardware.
-        (
-            keys::HLS_AHEAD_MAX_BYTES,
-            "hls_ahead_max_bytes",
-            &req.hls_ahead_max_bytes,
-            1024.0 * 1024.0 * 1024.0 * 1024.0,
-        ),
-        (
-            keys::HLS_SCRATCH_MAX_BYTES,
-            "hls_scratch_max_bytes",
-            &req.hls_scratch_max_bytes,
-            1024.0 * 1024.0 * 1024.0 * 1024.0,
-        ),
-    ] {
-        let Some(raw) = value else { continue };
-        let parsed: f64 = raw
-            .trim()
-            .parse()
-            .map_err(|_| ApiError::BadRequest(format!("{label} must be a number")))?;
-        if !(0.0..=max).contains(&parsed) {
-            return Err(ApiError::BadRequest(format!(
-                "{label} must be between 0 and {max:.0}"
-            )));
-        }
-        if key == keys::HLS_READRATE && parsed > 0.0 && parsed < 1.0 {
-            return Err(ApiError::BadRequest(
-                "hls_readrate below 1.0 cannot keep up with playback; use 0 to disable pacing"
-                    .into(),
-            ));
-        }
+    for (key, parsed) in hls_settings {
         state.store.put_setting(key, &parsed.to_string()).await?;
     }
     // Job intervals: 0 = off, otherwise a floor of 15 minutes, matching the
     // per-library schedule. The scheduler ticks once a minute, so anything
     // shorter would be a lie dressed as a setting.
-    for (key, label, value) in [
-        (
-            keys::JOB_PROBE_RETRY_MINS,
-            "probe_retry_mins",
-            req.probe_retry_mins,
-        ),
-        (
-            keys::JOB_ARTWORK_RETRY_MINS,
-            "artwork_retry_mins",
-            req.artwork_retry_mins,
-        ),
-        (
-            keys::JOB_TRANSCODE_CLEANUP_MINS,
-            "transcode_cleanup_mins",
-            req.transcode_cleanup_mins,
-        ),
-        (
-            keys::JOB_CACHE_PRODUCE_MINS,
-            "cache_produce_mins",
-            req.cache_produce_mins,
-        ),
-        (keys::VOD_INDEX_MINS, "vod_index_mins", req.vod_index_mins),
-    ] {
+    for (key, _, value) in job_settings {
         if let Some(value) = value {
-            if value < 0 || (value > 0 && value < 15) {
-                return Err(ApiError::BadRequest(format!(
-                    "{label} must be 0 (off) or at least 15 minutes"
-                )));
-            }
             state.store.put_setting(key, &value.to_string()).await?;
         }
     }
@@ -2210,22 +2300,12 @@ pub async fn update_settings(
         // Ten terabytes is not a policy so much as a typo guard: the field is
         // in gigabytes, and somebody entering bytes would set a budget no disk
         // can reach — which reads as eviction being broken.
-        if !(0..=10_240).contains(&gb) {
-            return Err(ApiError::BadRequest(
-                "cache_max_gb must be between 0 (off) and 10240".into(),
-            ));
-        }
         state
             .store
             .put_setting(keys::CACHE_MAX_GB, &gb.to_string())
             .await?;
     }
     if let Some(days) = req.telemetry_retain_days {
-        if !(0..=3650).contains(&days) {
-            return Err(ApiError::BadRequest(
-                "telemetry_retain_days must be between 0 (off) and 3650".into(),
-            ));
-        }
         state
             .store
             .put_setting(keys::TELEMETRY_RETAIN_DAYS, &days.to_string())
@@ -2246,30 +2326,12 @@ pub async fn update_settings(
             .put_setting(keys::PLAYBACK_AUTO_ABR, if enabled { "1" } else { "0" })
             .await?;
     }
-    for (key, label, value) in [
-        (keys::OFFLINE_MAX_GB, "offline_max_gb", req.offline_max_gb),
-        (
-            keys::OFFLINE_MAX_GB_PER_USER,
-            "offline_max_gb_per_user",
-            req.offline_max_gb_per_user,
-        ),
-    ] {
+    for (key, _, value) in offline_gb_settings {
         if let Some(gb) = value {
-            if !(0..=10_240).contains(&gb) {
-                return Err(ApiError::BadRequest(format!(
-                    "{label} must be between 0 (disables offline admission) and 10240"
-                )));
-            }
             state.store.put_setting(key, &gb.to_string()).await?;
         }
     }
     if let Some(rows) = req.offline_max_rows_per_user {
-        if !(0..=10_000).contains(&rows) {
-            return Err(ApiError::BadRequest(
-                "offline_max_rows_per_user must be between 0 (disables offline admission) and 10000"
-                    .into(),
-            ));
-        }
         state
             .store
             .put_setting(keys::OFFLINE_MAX_ROWS_PER_USER, &rows.to_string())

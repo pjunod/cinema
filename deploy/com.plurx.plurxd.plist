@@ -8,6 +8,13 @@
   launchd does NOT expand ~ or $HOME, so every path below is absolute. Don't
   hand-edit YOUR_USERNAME — the install command in deploy/README.md substitutes
   your real username + the real plurxd/ffmpeg paths with sed.
+
+  This LaunchAgent runs as the interactive login uid. Permanent on-disk Dolby
+  Vision conversion is therefore unsupported and must stay Off: desktop apps,
+  downloaders, organizers, and shells share that uid and violate the cleanup
+  anchor's dedicated-account boundary. The optional dovi_tool/mkvmerge paths
+  below make startup probe output deterministic; they do not make conversion
+  safe in this service mode.
 -->
 <plist version="1.0">
 <dict>
@@ -38,6 +45,13 @@
         <string>/usr/local/bin/ffmpeg</string>
         <key>PLURX_FFPROBE</key>
         <string>/usr/local/bin/ffprobe</string>
+        <!-- Optional absolute probe paths. Replace these only with executable
+             paths you installed and verified. Permanent on-disk conversion
+             must still stay Off in this interactive-user LaunchAgent. -->
+        <key>PLURX_DOVI_TOOL</key>
+        <string>/absolute/path/to/dovi_tool</string>
+        <key>PLURX_MKVMERGE</key>
+        <string>/absolute/path/to/mkvmerge</string>
     </dict>
 
     <!-- Start at login, and restart if it crashes — but stay down when you
