@@ -31,7 +31,7 @@ one is deleted.
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike still **needs hardware**, and item 7 is not allowed to start without its numbers |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
-| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own M3 (seek coalescing) and M4 (burn-join) are unbuilt; detection is separately deferred |
+| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is written and blocked** on one decision — see §"M3's latch has nowhere to be read from" — and **M4 (burn-join) is the next buildable milestone**; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
 
@@ -365,6 +365,56 @@ ordinary h264 and play, and a genuine producer refusal needs a bad source
 placed on a node or a shell there, neither of which this session has. It
 stays established by ruling D1 and by `is_permanent` rather than by
 hardware.
+
+
+## M3's latch has nowhere to be read from
+
+**Written 2026-09-01.** The latch is on `agent/m7-m3-seek-coalescing` at
+`9915bc2` with four tests, including a twenty-seek storm. There is no pull
+request, and the reason is a gap in the plan rather than in the work. Full
+working in the agent notes as `M7-M3-BLOCKED.md`.
+
+`SettledTarget { sequence, anchor_ms }` records the destination the client
+actually wants, updated on every **accepted** snapshot — not only on a seek,
+because a client that stops seeking has settled on where it is, and a latch
+that only moved on `Seeking` would keep cancelling work for the position
+actually being played. `supersedes` is deliberately narrower than "not
+current": only a strictly later sequence supersedes, and only by naming a
+different destination, because work at or after the settled sequence is either
+this exchange's own or an exchange the actor has not accepted yet — cancelling
+the latter would cancel the honest seek that is arriving.
+
+One simplification the plan can absorb: §5.1's rule is **one condition, not
+two**. The validator at `playback_control.rs:220` already rejects `Seeking`
+without a valid `seek_target_ms` and a target without `Seeking`, so the
+existing `buffer_anchor_ms()` *is* the settled-target expression.
+
+**The gap.** §5.1 keys expensive production by "the control sequence that
+requested it", and neither consumer receives one. `CreateSession`
+(`http/hls.rs:530`) carries `playback_id` and `start` and no sequence; the M2
+window extraction is reached from a per-segment GET. Ordering by arrival
+instead is not a smaller version of the same rule — it inverts in the one case
+that matters:
+
+> A create for the new target arrives before its own snapshot. The latch still
+> holds the previous target, the anchors differ, and the honest seek is
+> skipped as obsolete.
+
+A debounce would paper over that and §5.1 already rules it out, correctly: it
+trades the storm for added latency on every honest seek. The sequence exists —
+it is simply not on the wire.
+
+**The decision, and it is one line of protocol.** Add
+`control_sequence: Option<u64>` to the media requests that trigger production
+(absent means today's behaviour, the additive pattern M5a used throughout), or
+move the restart behind the control exchange, which is really M6's design.
+The first is recommended and leaves the second available.
+
+Worth knowing for urgency: the client already tokens its own side
+(`_seekToken`, `index.html:3377`, `:3426`), so a browser storm does not
+produce twenty attached players. What it produces is up to twenty session
+creations the server honours. The cost is server-side waste, not client
+confusion.
 
 
 ## Open decisions
