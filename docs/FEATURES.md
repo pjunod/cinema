@@ -470,8 +470,12 @@ decoding shows what the file is versus what your browser is actually rendering.
   such a chapter starts there. Where the file labels the preview but nothing
   labels the credits, the inferred credits window stops where the preview
   begins rather than running over it, and is not invented at all when that
-  leaves no room. "Trailers" is deliberately not a preview: on a disc rip that
-  is the bonus reel, not a region inside the episode.
+  leaves no room — no boundary means no evidence, and a guess there would sit
+  over the last seconds of story. Only a chapter in the last 30% of the runtime
+  is trusted as a preview, the same positional rule every tail marker obeys, so
+  a scene title that happens to match the words cannot cost you the real Skip
+  Credits button. "Trailer" is deliberately not one of those words: on a disc
+  rip that is usually the bonus reel, not a region inside the episode.
 - **Auto-skip** intro, credits & preview — an opt-in, per-user, persisted toggle
   in the preferences menu (default off).
 - **Method-aware seek:** direct play seeks natively; remux and transcode restart

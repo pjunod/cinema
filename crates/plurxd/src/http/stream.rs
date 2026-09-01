@@ -1180,10 +1180,29 @@ pub(crate) fn markers_from_chapters(
             //
             // So the credits are inferred over what is left: up to where the
             // preview begins, from the last boundary before it.
-            let preview_start = out
+            //
+            // Read off `spans` rather than `out`, applying the one bound that
+            // decides whether a title is trusted — `CREDITS_MIN_START_PCT`,
+            // exactly as the emitting loop above applies it. `out` additionally
+            // requires the marker to END inside the runtime, and a trailing
+            // chapter whose end overruns `format.duration` by a millisecond —
+            // which MKV and ffprobe do routinely — is dropped by that check.
+            // It is still a teaser. Forgetting it here does not merely lose the
+            // Skip Preview button: `credits_end` reverts to the end of the
+            // file and the estimate is offered over next week's footage, which
+            // is the exact bug this whole change exists to stop, reachable
+            // through an ordinary rounding artefact.
+            //
+            // `.min()` and not `.max()`: a teaser split across two chapter
+            // marks is one teaser, and the credits stop at the first of them.
+            let preview_start = spans
                 .iter()
-                .filter(|m| m.kind == "preview")
-                .map(|m| m.start_ms)
+                .filter(|span| span.class.map(|c| c.0) == Some("preview"))
+                .filter(|span| {
+                    i128::from(span.start_ms) * 100
+                        >= i128::from(timeline_ms) * i128::from(CREDITS_MIN_START_PCT)
+                })
+                .map(|span| span.start_ms)
                 .min();
             let credits_end = preview_start.unwrap_or(dur);
             let tail = plausible_credits_tail_ms(dur);
@@ -3828,6 +3847,135 @@ mod tests {
         assert_eq!(credits.start_ms, 1_160_000);
         assert_eq!(credits.end_ms, preview.start_ms);
         assert!(credits.start_ms < credits.end_ms);
+        // Ticks and milliseconds describe the same span. Clients seek on the
+        // ticks and label on the milliseconds, so a marker whose halves
+        // disagree seeks somewhere other than where its button says.
+        let scale = i64::from(credits.timescale);
+        assert!(scale > 0);
+        assert_eq!(credits.start_ticks * 1_000 / scale, credits.start_ms);
+        assert_eq!(credits.end_ticks * 1_000 / scale, credits.end_ms);
+    }
+
+    /// A trailing preview whose end overruns the runtime still bounds the
+    /// guess.
+    ///
+    /// MKV and ffprobe routinely disagree with `format.duration` by a
+    /// millisecond or two, so a trailing chapter's end lands past the runtime
+    /// and the emitting loop's `end_ms > timeline_ms` check drops it. Reading
+    /// the preview off the emitted markers therefore forgets it on an ordinary
+    /// rounding artefact — and forgetting it is not a missing Skip Preview
+    /// button, it is `credits_end` reverting to the end of the file and the
+    /// proportional estimate being offered over next week's footage. Which is
+    /// the whole bug.
+    #[test]
+    fn a_preview_that_overruns_the_duration_still_bounds_the_guess() {
+        let chapters = vec![
+            chapter("Episode", "0.000", "1200.000"),
+            // Two seconds past the declared runtime.
+            chapter("Next Episode Preview", "1200.000", "1412.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_410_000));
+        assert!(
+            !markers.iter().any(|m| m.kind == "preview"),
+            "the overrunning chapter is out of bounds and is not emitted"
+        );
+        assert!(
+            !markers.iter().any(|m| m.kind == "credits"),
+            "but it is still seen, so no estimate is invented over it: {:?}",
+            markers
+                .iter()
+                .filter(|m| m.kind == "credits")
+                .map(|m| (m.start_ms, m.end_ms))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A "preview" matched in the middle of a film cannot move the window.
+    ///
+    /// `preview_kw` is substrings, so an ordinary scene title can match one
+    /// however carefully the list is drawn. When it does, the cost has to stay
+    /// a missing *preview* marker: a mid-film match that dragged `credits_end`
+    /// back with it would trade the real Skip Credits button at the end of the
+    /// film for nothing at all, which is strictly worse than the mislabelling
+    /// this change fixes. `CREDITS_MIN_START_PCT` is what prevents it, and it
+    /// is applied at the lookup as well as at the emit.
+    #[test]
+    fn a_mid_film_match_cannot_move_the_credits_window() {
+        let chapters = vec![
+            chapter("Opening", "0.000", "600.000"),
+            // 41% in, and nowhere near the end: whatever this is, it is story.
+            chapter("Next Time It Rains", "3000.000", "3200.000"),
+            chapter("Finale", "6900.000", "7200.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(7_200_000));
+        assert!(
+            !markers.iter().any(|m| m.kind == "preview"),
+            "a mid-film match is outside the credits window and is not offered"
+        );
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("the credits are still inferred at the end of the film");
+        assert_eq!(
+            credits.end_ms, 7_200_000,
+            "the guess still runs to the end of the file"
+        );
+        assert_eq!(
+            credits.start_ms, 6_900_000,
+            "and anchors on the last real boundary, which sits inside the \
+             plausible tail"
+        );
+    }
+
+    /// A teaser split across two chapter marks is one teaser.
+    ///
+    /// Some rips mark the next-episode preview and its title card separately.
+    /// The credits have to stop at the first of the pair; stopping at the
+    /// second calls the first half of the teaser "credits", which is the same
+    /// mislabelling in miniature.
+    #[test]
+    fn a_teaser_split_across_two_chapters_is_bounded_at_its_first() {
+        let chapters = vec![
+            chapter("Episode", "0.000", "1170.000"),
+            chapter("End", "1170.000", "1200.000"),
+            chapter("Next Episode", "1200.000", "1300.000"),
+            chapter("On The Next", "1300.000", "1410.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_410_000));
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("inferred credits");
+        assert_eq!(
+            credits.end_ms, 1_200_000,
+            "the guess stops at the first of the two teaser chapters"
+        );
+        assert_eq!(credits.start_ms, 1_170_000);
+    }
+
+    /// A boundary closer than 15s to the end is a stinger, not the credits.
+    ///
+    /// Post-credits scenes are chaptered on plenty of discs. Anchoring the
+    /// guess to one puts a "Skip Credits" button over ten seconds of the very
+    /// thing the viewer stayed for, so the boundary window has a floor as well
+    /// as a ceiling and the proportional estimate is used instead.
+    #[test]
+    fn a_post_credits_stinger_does_not_anchor_the_guess() {
+        let chapters = vec![
+            chapter("Opening", "0.000", "600.000"),
+            chapter("Finale", "600.000", "7190.000"),
+            chapter("Stinger", "7190.000", "7200.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(7_200_000));
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("credits");
+        assert_eq!(
+            credits.start_ms, 7_020_000,
+            "the proportional estimate, not the stinger's boundary at 7190s"
+        );
+        assert!(!credits.chapter, "still an inference");
     }
 
     #[test]
