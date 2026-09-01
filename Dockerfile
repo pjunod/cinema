@@ -8,16 +8,19 @@ FROM rust:1-bookworm AS build
 # honest about a context that genuinely has no commit in it.
 ARG PLURX_BUILD_REF=""
 ENV PLURX_BUILD_REF=${PLURX_BUILD_REF}
+ARG PLURX_BUILD_SHA=""
+ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}
+ARG TARGETARCH
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target-plurxd \
-    --mount=type=cache,target=/src/target-cluster-check \
+RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=plurx-target-plurxd-${TARGETARCH},sharing=locked,target=/src/target-plurxd \
+    --mount=type=cache,id=plurx-target-cluster-check-${TARGETARCH},sharing=locked,target=/src/target-cluster-check \
     ! cargo tree --locked -p plurxd -e features \
         | grep -q 'cluster-read-cost-validation' \
-    && CARGO_TARGET_DIR=/src/target-plurxd cargo build --release -p plurxd \
+    && CARGO_TARGET_DIR=/src/target-plurxd cargo build --locked --release -p plurxd \
     && cp target-plurxd/release/plurxd /plurxd \
-    && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --release -p plurx-cluster-check \
+    && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --locked --release -p plurx-cluster-check \
     && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check
 
 FROM debian:bookworm-slim

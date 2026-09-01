@@ -29,8 +29,7 @@ REQUIRED_JOBS = frozenset(
         "android_jvm",
         "apple",
         "android_device",
-        "build",
-        "docker",
+        "package_smoke",
     }
 )
 

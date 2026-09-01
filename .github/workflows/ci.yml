@@ -148,6 +148,9 @@ jobs:
         run: |
           make validation-lint
           python3 -m unittest discover -s tests/validation -p 'test_*.py'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Check CI, deploy, and shipping contracts
         run: make operations-check
       - name: Record the documentation-only lane
@@ -699,90 +702,126 @@ jobs:
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
-  build:
-    name: release build (${{ matrix.target }})
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+  package_smoke:
+    name: package and smoke (${{ matrix.arch }})
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
     needs: [scope, preflight]
-    if: needs.scope.outputs.release_build == 'true'
-    timeout-minutes: 30
+    if: needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true'
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
-        # Full history + tags so the build script can stamp the binary with a
-        # real `git describe`; the default shallow clone has no tags and every
-        # release binary would report a bare hash.
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: docker/setup-qemu-action@v3
+      - id: buildx-cache
+        uses: ./.github/actions/buildx-cache
         with:
-          targets: ${{ matrix.target }}
-      - id: cargo-cache
-        uses: ./.github/actions/cargo-cache
-        with:
-          lane: release-${{ matrix.target }}
+          lane: package-smoke-${{ matrix.arch }}
           execution-mode: ${{ needs.scope.outputs.execution_mode }}
-      - name: Provision or verify the aarch64 cross toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        # Also provides the C cross-compiler for rusqlite's bundled SQLite.
-        run: |
-          if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-            if [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ]; then
-              echo "::error::The aarch64 cross compiler must be provisioned on this runner"
-              exit 1
-            fi
-            sudo sed -i \
-              's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
-              /etc/apt/sources.list.d/ubuntu.sources
-            sudo apt-get -o Acquire::Retries=3 update
-            sudo apt-get -o Acquire::Retries=3 install -y gcc-aarch64-linux-gnu
-          fi
-          command -v aarch64-linux-gnu-gcc
-          aarch64-linux-gnu-gcc --version
-      - run: cargo build --release -p plurxd --target ${{ matrix.target }}
-        env:
-          # Linker for the arm64 target (harmlessly unused on x86_64).
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      - name: Record the release binary digest
-        if: github.event_name == 'push' || needs.scope.outputs.qualification == 'true'
+      - name: Derive the binary-only Bookworm build
         run: >-
-          sha256sum "${{ steps.cargo-cache.outputs.target-dir }}/${{ matrix.target }}/release/plurxd"
-          > "${{ steps.cargo-cache.outputs.target-dir }}/${{ matrix.target }}/release/plurxd.sha256"
-      # Ordinary PRs prove both release targets compile but retain no large
-      # artifacts. Push/tag runs and final effort qualifications keep the exact
-      # binary plus digest for one day, long enough to inspect or stage it.
-      - name: Retain release binary for push, tag, and qualification runs
+          python3 -m validation.release_dockerfile --binary-export
+          Dockerfile Dockerfile.binaries
+      - name: Compile and export the exact candidate binaries
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.binaries
+          target: release-binaries
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=local,dest=binary-export
+          build-args: |
+            PLURX_BUILD_REF=${{ github.sha }}
+            PLURX_BUILD_SHA=${{ github.sha }}
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-compile-{0}', matrix.arch) || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=max,scope=package-compile-{0}', matrix.arch) || '' }}
+      - name: Bind the binary set to this candidate tree
+        run: |
+          scripts/release-package-candidate \
+            . . binary-export release-bin \
+            "${{ matrix.target }}" "$GITHUB_SHA" "$GITHUB_SHA"
+          for name in plurxd plurx-cluster-check; do
+            max_glibc=$(readelf --version-info "release-bin/$name" \
+              | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
+              | sort -V | tail -1)
+            test -n "$max_glibc"
+            test "$(printf '%s\n' "$max_glibc" 2.36 | sort -V | tail -1)" = 2.36 || {
+              echo "::error::${{ matrix.arch }} $name requires GLIBC_$max_glibc; Bookworm provides 2.36"
+              exit 1
+            }
+          done
+      - name: Build the runtime from only the verified binaries
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.release
+          push: false
+          load: true
+          platforms: linux/${{ matrix.arch }}
+          tags: plurx/plurxd:ci-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            tv.plurx.build-ref=${{ github.sha }}
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-runtime-{0}', matrix.arch) || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=min,scope=package-runtime-{0}', matrix.arch) || '' }}
+      - name: Verify architecture, identity, and stop/start runtime
+        env:
+          ARCH: ${{ matrix.arch }}
+          IMAGE: plurx/plurxd:ci-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = "linux/$ARCH"
+          test "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' "$IMAGE")" = "$GITHUB_SHA"
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
+            | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          test "$(docker run --rm --platform "linux/$ARCH" "$IMAGE" --version)" = "plurxd $version ($GITHUB_SHA)"
+          test "$(docker run --rm --platform "linux/$ARCH" \
+            --entrypoint /usr/local/bin/plurx-cluster-check \
+            "$IMAGE" build-identity)" = "$GITHUB_SHA"
+          scripts/container-smoke "$IMAGE"
+      - name: Retain the exact package receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-smoke-receipt-${{ matrix.arch }}
+          path: |
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain candidate binaries for push, tag, and qualification runs
         if: github.event_name == 'push' || needs.scope.outputs.qualification == 'true'
-        # Qualification promises an inspectable exact-tree candidate, so an
-        # upload failure must fail that run. Push/tag retention remains
-        # best-effort because repository quota exhaustion must not block an
-        # otherwise valid post-merge or tag build.
         continue-on-error: ${{ needs.scope.outputs.qualification != 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: plurxd-${{ matrix.target }}
+          name: package-smoke-binaries-${{ matrix.arch }}
           path: |
-            ${{ steps.cargo-cache.outputs.target-dir }}/${{ matrix.target }}/release/plurxd
-            ${{ steps.cargo-cache.outputs.target-dir }}/${{ matrix.target }}/release/plurxd.sha256
+            release-bin/plurxd
+            release-bin/plurx-cluster-check
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
           retention-days: 1
-      - name: Enforce persistent Cargo bounds
-        if: always() && steps.cargo-cache.outputs.local == 'true'
-        uses: ./.github/actions/cargo-cache-finalize
-        with:
-          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
-          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
-          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Bound persistent BuildKit state
+        if: always() && steps.buildx-cache.outputs.local == 'true'
+        env:
+          BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
+        run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50
 
   # CD validates the tag in this workflow, then delegates artifact construction,
   # per-platform smoke, and alias publication to the manually recoverable release
   # workflow. A cancelled tag run can therefore be recovered without moving it.
   publish:
     name: publish image (ghcr)
-    needs: [check, build]
+    needs: [check, package_smoke]
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/publish-release.yml
     with:
@@ -790,54 +829,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-
-  # PR / branch smoke test that the image both builds and runs, without publishing.
-  docker:
-    name: docker runtime smoke
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
-    needs: [scope, preflight]
-    if: needs.scope.outputs.container == 'true' && !startsWith(github.ref, 'refs/tags/v')
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - id: buildx-cache
-        uses: ./.github/actions/buildx-cache
-        with:
-          lane: docker-smoke
-          execution-mode: ${{ needs.scope.outputs.execution_mode }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          load: true
-          platforms: linux/amd64
-          tags: plurx/plurxd:ci
-          # The runtime stage's layers (two full ffmpeg stacks) depend only on
-          # the Dockerfile, so the GHA layer cache spares their ~150 MB of
-          # downloads on every run; the cargo builder layer still rebuilds on
-          # source changes, which is exactly the part that must.
-          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha' || '' }}
-          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,mode=min' || '' }}
-      - name: Start, probe, restart, and re-probe the image
-        run: scripts/container-smoke plurx/plurxd:ci
-      # Release publication ships amd64 and arm64. The ordinary smoke loads
-      # amd64 into Docker, while this non-loading build exercises the other
-      # asset/checksum branch and its dovi_tool/mkvmerge version assertions
-      # under QEMU before a tag can be the first place arm64 fails.
-      - name: Build arm64 runtime and verify pinned conversion tools
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          platforms: linux/arm64
-          outputs: type=cacheonly
-          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha' || '' }}
-      - name: Bound persistent BuildKit state
-        if: always() && steps.buildx-cache.outputs.local == 'true'
-        env:
-          BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
-        run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50
 
   # Configure this as the single required check for main-bound PRs and the
   # merge queue when repository protections become available. Until then it is
@@ -861,8 +852,7 @@ jobs:
       - android_jvm
       - apple
       - android_device
-      - build
-      - docker
+      - package_smoke
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 2
     steps:
@@ -880,8 +870,7 @@ jobs:
           ANDROID_JVM_RESULT: ${{ needs.android_jvm.result }}
           APPLE_RESULT: ${{ needs.apple.result }}
           ANDROID_DEVICE_RESULT: ${{ needs.android_device.result }}
-          BUILD_RESULT: ${{ needs.build.result }}
-          DOCKER_RESULT: ${{ needs.docker.result }}
+          PACKAGE_SMOKE_RESULT: ${{ needs.package_smoke.result }}
         run: |
           for result in \
             "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
@@ -890,7 +879,7 @@ jobs:
             "$CLUSTER_DAEMON_RESULT" \
             "$WEB_LAYOUT_RESULT" "$VOD_WEB_RESULT" \
             "$ANDROID_JVM_RESULT" "$APPLE_RESULT" "$ANDROID_DEVICE_RESULT" \
-            "$BUILD_RESULT" "$DOCKER_RESULT"; do
+            "$PACKAGE_SMOKE_RESULT"; do
             case "$result" in
               success|skipped) ;;
               *) echo "A selected validation job ended with: $result"; exit 1 ;;
@@ -907,7 +896,7 @@ jobs:
           PLURX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PLURX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PLURX_QUALIFICATION_RESULTS: >-
-            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","cluster_auth":"${{ needs.cluster_auth.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","build":"${{ needs.build.result }}","docker":"${{ needs.docker.result }}"}
+            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","cluster_auth":"${{ needs.cluster_auth.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","package_smoke":"${{ needs.package_smoke.result }}"}
         run: >-
           python3 -m validation.qualification
           --output target/validation/qualification-receipt.json

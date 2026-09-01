@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() {
+  echo "release-package-candidate: $*" >&2
+  exit 1
+}
+
+[ "$#" -eq 7 ] || die \
+  "usage: release-package-candidate <source> <packaging> <export> <artifact> <target> <build-ref> <commit>"
+source_root=$1
+packaging_root=$2
+export_root=$3
+artifact_root=$4
+target=$5
+build_ref=$6
+expected_commit=$7
+
+for directory in "$source_root" "$packaging_root" "$export_root"; do
+  [ -d "$directory" ] || die "directory does not exist: $directory"
+done
+[[ "$target" =~ ^(x86_64|aarch64)-unknown-linux-gnu$ ]] \
+  || die "unsupported Linux target: $target"
+[[ "$expected_commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
+  || die "candidate commit must be a Git object id"
+[ -n "$build_ref" ] || die "build ref must not be empty"
+
+actual_commit=$(git -C "$source_root" rev-parse HEAD^{commit})
+[ "$actual_commit" = "$expected_commit" ] \
+  || die "source commit $actual_commit does not match $expected_commit"
+git_tree=$(git -C "$source_root" rev-parse HEAD^{tree})
+rustc_version=$(tr '\n' ' ' < "$export_root/rustc-version" | sed 's/[[:space:]]*$//')
+[ -n "$rustc_version" ] || die "binary export has no Rust toolchain identity"
+
+if [ -e "$artifact_root" ]; then
+  [ -d "$artifact_root" ] || die "artifact path is not a directory"
+  [ -z "$(find "$artifact_root" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || die "artifact directory must start empty"
+else
+  mkdir -p "$artifact_root"
+fi
+
+binaries=()
+binary_output=$(
+  PYTHONPATH="$packaging_root" python3 -m validation.release_dockerfile \
+    --list-binaries "$source_root/Dockerfile"
+) || die "cannot derive the tagged binary contract"
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  binaries+=("$name")
+done <<< "$binary_output"
+[ "${#binaries[@]}" -gt 0 ] || die "tagged runtime has no binaries"
+artifact_args=()
+for name in "${binaries[@]}"; do
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
+    || die "unsafe binary name from runtime contract: $name"
+  [ -f "$export_root/$name" ] || die "binary export is missing $name"
+  install -m 0755 "$export_root/$name" "$artifact_root/$name"
+  artifact_args+=(--binary "$name")
+done
+
+PYTHONPATH="$packaging_root" python3 -m validation.release_artifact create \
+  --directory "$artifact_root" \
+  --git-tree "$git_tree" \
+  --git-commit "$actual_commit" \
+  --build-ref "$build_ref" \
+  --rustc "$rustc_version" \
+  --target "$target" \
+  "${artifact_args[@]}"
+PYTHONPATH="$packaging_root" python3 -m validation.release_dockerfile \
+  "$source_root/Dockerfile" "$source_root/Dockerfile.release"
+PYTHONPATH="$packaging_root" python3 -m validation.release_artifact verify \
+  --directory "$artifact_root" \
+  --git-tree "$git_tree" \
+  --git-commit "$actual_commit" \
+  --build-ref "$build_ref" \
+  --target "$target" \
+  "${artifact_args[@]}"

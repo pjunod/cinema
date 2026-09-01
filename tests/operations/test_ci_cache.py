@@ -89,10 +89,6 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertIn("uses: Swatinem/rust-cache@v2", action)
         self.assertNotIn("uses: Swatinem/rust-cache@v2", workflow)
         self.assertIn("needs.scope.outputs.execution_mode", workflow)
-        self.assertIn(
-            'sha256sum "${{ steps.cargo-cache.outputs.target-dir }}/${{ matrix.target }}/release/plurxd"',
-            workflow,
-        )
         self.assertNotIn('$CARGO_TARGET_DIR/${{ matrix.target }}', workflow)
         self.assertEqual(
             workflow.count("uses: ./.github/actions/cargo-cache\n"),
@@ -111,7 +107,6 @@ class CiCacheContractCase(unittest.TestCase):
             "cluster-auth",
             "cluster-wal",
             "cluster-daemon",
-            "release-${{ matrix.target }}",
         ):
             self.assertIn(f"lane: {lane}", workflow)
 
@@ -304,7 +299,10 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertIn(
             'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', workflow
         )
-        self.assertIn("'type=gha,mode=min' || ''", workflow)
+        self.assertIn("scope=package-compile-{0}", workflow)
+        self.assertIn("mode=max,scope=package-compile-{0}", workflow)
+        self.assertIn("scope=package-runtime-{0}", workflow)
+        self.assertIn("mode=min,scope=package-runtime-{0}", workflow)
         self.assertNotIn("persistent-eligible: true", workflow)
 
     def test_buildkit_pruner_enforces_hostwide_budget_and_reserve(self):

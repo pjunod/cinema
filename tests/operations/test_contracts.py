@@ -214,6 +214,8 @@ class OperationsContractCase(unittest.TestCase):
         compose = read("deploy/docker-compose.yml")
         self.assertIn('ARG PLURX_BUILD_REF=""', dockerfile)
         self.assertIn("ENV PLURX_BUILD_REF=${PLURX_BUILD_REF}", dockerfile)
+        self.assertIn('ARG PLURX_BUILD_SHA=""', dockerfile)
+        self.assertIn("ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}", dockerfile)
         self.assertIn("PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}", compose)
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
@@ -259,35 +261,39 @@ class OperationsContractCase(unittest.TestCase):
 
         workflow = read(".github/workflows/ci.yml")
         self.assertIn("docker/setup-qemu-action@v3", workflow)
-        self.assertIn("Build arm64 runtime and verify pinned conversion tools", workflow)
-        self.assertIn("platforms: linux/arm64", workflow)
-        self.assertIn("outputs: type=cacheonly", workflow)
+        self.assertIn("name: package and smoke (${{ matrix.arch }})", workflow)
+        self.assertIn("- arch: arm64", workflow)
+        self.assertIn("platforms: linux/${{ matrix.arch }}", workflow)
+        self.assertIn("file: Dockerfile.release", workflow)
 
     def test_docker_build_keeps_cluster_validation_features_out_of_plurxd(self):
         dockerfile = read("Dockerfile")
         release = read(".github/workflows/publish-release.yml")
-        for source in (dockerfile, release):
-            self.assertNotIn(
-                "cargo build --release -p plurxd -p plurx-cluster-check",
-                source,
-            )
-            self.assertRegex(
-                source,
-                r"cargo build(?: --locked)? --release -p plurxd",
-            )
-            self.assertRegex(
-                source,
-                r"cargo build(?: --locked)? --release -p plurx-cluster-check",
-            )
-            self.assertIn("cargo tree --locked -p plurxd -e features", source)
-            self.assertIn("grep -q 'cluster-read-cost-validation'", source)
+        self.assertNotIn(
+            "cargo build --release -p plurxd -p plurx-cluster-check",
+            dockerfile,
+        )
+        self.assertRegex(
+            dockerfile,
+            r"cargo build(?: --locked)? --release -p plurxd",
+        )
+        self.assertRegex(
+            dockerfile,
+            r"cargo build(?: --locked)? --release -p plurx-cluster-check",
+        )
+        self.assertIn("cargo tree --locked -p plurxd -e features", dockerfile)
+        self.assertIn("grep -q 'cluster-read-cost-validation'", dockerfile)
         self.assertIn("CARGO_TARGET_DIR=/src/target-plurxd", dockerfile)
         self.assertIn("CARGO_TARGET_DIR=/src/target-cluster-check", dockerfile)
-        self.assertIn('CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-plurxd"', release)
+        self.assertIn("id=plurx-cargo-registry,sharing=locked", dockerfile)
+        self.assertIn("id=plurx-target-plurxd-${TARGETARCH},sharing=locked", dockerfile)
         self.assertIn(
-            'CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-cluster-check"',
-            release,
+            "id=plurx-target-cluster-check-${TARGETARCH},sharing=locked",
+            dockerfile,
         )
+        self.assertIn("--binary-export", release)
+        self.assertIn("target: release-binaries", release)
+        self.assertIn("trusted-packaging/scripts/release-package-candidate", release)
 
     def test_ship_routes_real_mobile_targets_through_ansible(self):
         ship = read("scripts/ship")
@@ -474,7 +480,11 @@ class OperationsContractCase(unittest.TestCase):
         )[0]
         self.assertIn("--case suspend-resume", vod_web)
         self.assertIn("docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
-        self.assertIn("if: needs.scope.outputs.release_build == 'true'", workflow)
+        self.assertIn(
+            "if: needs.scope.outputs.release_build == 'true' || "
+            "needs.scope.outputs.container == 'true'",
+            workflow,
+        )
         self.assertIn("needs.scope.outputs.hiqlite_spike == 'true'", workflow)
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", workflow)
         self.assertIn("name: replicated store and topology contracts", workflow)
@@ -553,9 +563,21 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("img.shields.io/endpoint", readme)
         self.assertNotIn("raw.githubusercontent.com/pjunod/plurx/badges", readme)
 
-        docker = workflow.split("  docker:", 1)[1].split("\n  pr_gate:", 1)[0]
-        self.assertNotIn("needs: check", docker)
-        self.assertIn("needs: [scope, preflight]", docker)
+        package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        self.assertNotIn("needs: check", package)
+        self.assertIn("needs: [scope, preflight]", package)
+
+        preflight = workflow_job_blocks(".github/workflows/ci.yml")["preflight"]
+        effort_preflight = workflow_job_blocks(".github/workflows/effort-ci.yml")[
+            "preflight"
+        ]
+        for contract_preflight in (preflight, effort_preflight):
+            self.assertIn("uses: actions/setup-node@v4", contract_preflight)
+            self.assertIn('node-version: "22"', contract_preflight)
+            self.assertLess(
+                contract_preflight.index("actions/setup-node@v4"),
+                contract_preflight.index("run: make operations-check"),
+            )
 
         lint = read(".github/workflows/lint.yml")
         self.assertNotIn("\n  pull_request:\n", lint)
@@ -563,10 +585,9 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("workflow_dispatch:", lint)
         self.assertIn("run: make fmt-check lint", lint)
 
-        self.assertIn(
-            "cargo build --release -p plurxd --target ${{ matrix.target }}",
-            workflow,
-        )
+        self.assertIn("target: release-binaries", package)
+        self.assertIn("scripts/release-package-candidate", package)
+        self.assertNotIn("actions/download-artifact", package)
         # Root container lanes still install ffmpeg through apt. Keep that one
         # package-manager boundary on the canonical archive with retries;
         # persistent runner jobs consume dependencies provisioned by Ansible.
@@ -820,14 +841,19 @@ class OperationsContractCase(unittest.TestCase):
         )
         self.assertIn("if-no-files-found: error", cluster)
 
-        # Hosted smoke keeps GHA cache; self-hosted smoke uses named bounded
-        # BuildKit state instead of uploading the same layers after each job.
-        docker = workflow.split("  docker:", 1)[1].split("\n  pr_gate:", 1)[0]
-        self.assertIn("uses: ./.github/actions/buildx-cache", docker)
-        self.assertIn("'type=gha' || ''", docker)
-        self.assertIn("'type=gha,mode=min' || ''", docker)
+        # Hosted smoke keeps scoped GHA state; an eligible self-hosted smoke
+        # uses the one named host builder and enforces its postcondition.
+        package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        self.assertIn("uses: ./.github/actions/buildx-cache", package)
+        self.assertIn("type=gha,scope=package-compile-{0}", package)
+        self.assertIn("type=gha,mode=max,scope=package-compile-{0}", package)
+        self.assertIn("type=gha,scope=package-runtime-{0}", package)
+        self.assertIn("type=gha,mode=min,scope=package-runtime-{0}", package)
+        self.assertIn("PLURX_BUILD_SHA=${{ github.sha }}", package)
+        self.assertIn("plurx-cluster-check", package)
+        self.assertIn("build-identity", package)
         self.assertIn(
-            'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', docker
+            'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', package
         )
 
     def test_hiqlite_shutdown_budget_covers_its_deliberate_cluster_waits(self):
@@ -853,21 +879,23 @@ class OperationsContractCase(unittest.TestCase):
         )
         self.assertIn("retention-days: 14", workflow)
 
-        # Ordinary PRs prove both release targets compile but retain no large
-        # artifacts. Final effort qualifications retain the exact binaries and
-        # checksums so the tested candidate can be inspected or staged.
-        build = workflow.split("  build:", 1)[1].split("\n  publish:", 1)[0]
+        # Ordinary PRs retain only the small identity/digest receipt. Pushes
+        # and final qualifications retain exact binaries for one day.
+        build = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
         self.assertIn(
-            "name: Retain release binary for push, tag, and qualification runs",
+            "name: Retain candidate binaries for push, tag, and qualification runs",
             build,
         )
         self.assertIn("needs.scope.outputs.qualification == 'true'", build)
-        self.assertIn("plurxd.sha256", build)
+        self.assertIn("name: Retain the exact package receipt", build)
+        self.assertIn("release-bin/*.sha256", build)
         self.assertIn(
             "continue-on-error: ${{ needs.scope.outputs.qualification != 'true' }}",
             build,
         )
-        self.assertIn("name: plurxd-${{ matrix.target }}", build)
+        self.assertIn("name: package-smoke-binaries-${{ matrix.arch }}", build)
+        self.assertIn("retention-days: 1", build)
+        self.assertIn("retention-days: 14", build)
 
         gate = workflow.split("  pr_gate:", 1)[1]
         self.assertIn("python3 -m validation.qualification", gate)
@@ -1004,7 +1032,7 @@ class OperationsContractCase(unittest.TestCase):
                     "check",
                     "cluster_auth",
                     "cluster_wal",
-                    "docker",
+                    "package_smoke",
                 }:
                     expected = high_cpu
                 elif (
