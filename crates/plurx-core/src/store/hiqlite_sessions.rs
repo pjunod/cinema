@@ -3552,7 +3552,7 @@ impl MediaSessionStore for HiqliteAuthStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        MEDIA_SESSIONS_SCHEMA, MEDIA_SESSIONS_V10_SCHEMA,
+        abort_statements, prepare_statements, MEDIA_SESSIONS_SCHEMA, MEDIA_SESSIONS_V10_SCHEMA,
         MEDIA_SESSION_PUBLICATION_FENCE_MIGRATION, MEDIA_SESSION_TERMINAL_REASON_MIGRATION,
     };
 
@@ -3570,19 +3570,21 @@ mod tests {
         &rest[..end]
     }
 
-    fn helper_source(helper: &str) -> &'static str {
-        let declaration = format!("\nfn {helper}(");
-        let start = SOURCE
-            .find(&declaration)
-            .unwrap_or_else(|| panic!("missing {declaration} in hiqlite_sessions.rs"))
-            + 1;
-        let rest = &SOURCE[start..];
-        let end = ["\nfn ", "\nstruct ", "\nimpl "]
-            .into_iter()
-            .filter_map(|next| rest[1..].find(next).map(|offset| offset + 1))
-            .min()
-            .unwrap_or(rest.len());
-        &rest[..end]
+    fn statement_test_preparation() -> crate::domain::MediaSessionPreparation {
+        crate::domain::MediaSessionPreparation {
+            incarnation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
+            session_id: "session".to_owned(),
+            user_id: 1,
+            playback_id: "playback".to_owned(),
+            expected_predecessor_incarnation_id: "00000000-0000-4000-8000-000000000001".to_owned(),
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "owner".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            media_origin_ms: 0,
+            now_ms: 1,
+            deadline_ms: 2,
+        }
     }
 
     /// Every `$N` placeholder in a replicated statement must be introduced in
@@ -3752,11 +3754,25 @@ mod tests {
     #[test]
     fn preparation_neither_reaps_nor_repoints() {
         let method = method_source("prepare_media_session");
+        let normalized_method = method.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            method.contains("prepare_statements(preparation)"),
-            "the public preparation path must use the shared statement builder"
+            normalized_method.contains("let statements = prepare_statements(preparation);")
+                && method.matches("let statements =").count() == 1
+                && method.matches(".txn(").count() == 1
+                && method.matches(".txn(statements)").count() == 1
+                && !method.contains("statements.push(")
+                && !method.contains("statements.extend(")
+                && !method.contains("statements.insert(")
+                && !method.contains("statements.pop("),
+            "the public preparation path must submit the shared statement vector unchanged"
         );
-        let source = helper_source("prepare_statements");
+        let preparation = statement_test_preparation();
+        let statement_sql = prepare_statements(&preparation)
+            .into_iter()
+            .map(|(sql, _)| sql)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = format!("{method}\n{statement_sql}");
         assert!(
             !source.contains("terminal_reason = 'superseded'"),
             "prepare must not run the supersession reap"
@@ -3792,12 +3808,26 @@ mod tests {
     #[test]
     fn preparation_abort_is_ledger_gated_in_every_statement() {
         let method = method_source("abort_media_session_preparation");
+        let normalized_method = method.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            method
-                .contains("abort_statements(user_id, playback_id, staged_incarnation_id, now_ms)"),
-            "the public abort path must use the shared statement builder"
+            normalized_method.contains(
+                "let statements = abort_statements(user_id, playback_id, staged_incarnation_id, now_ms);"
+            ) && method.matches("let statements =").count() == 1
+                && method.matches(".txn(").count() == 1
+                && method.matches(".txn(statements)").count() == 1
+                && !method.contains("statements.push(")
+                && !method.contains("statements.extend(")
+                && !method.contains("statements.insert(")
+                && !method.contains("statements.pop("),
+            "the public abort path must submit the shared statement vector unchanged"
         );
-        let source = helper_source("abort_statements");
+        let statement_sql =
+            abort_statements(1, "playback", "00000000-0000-4000-8000-000000000002", 1)
+                .into_iter()
+                .map(|(sql, _)| sql)
+                .collect::<Vec<_>>()
+                .join("\n");
+        let source = format!("{method}\n{statement_sql}");
         assert!(
             source.contains("EXISTS (SELECT 1 FROM media_session_preparations"),
             "the retirement is gated on the ledger row — the incarnation id \
