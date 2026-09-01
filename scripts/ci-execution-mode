@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/ci-execution-mode [status|legacy|shadow|accelerated|resolve [VALUE]]
+
+Read, set, or normalize the repository-wide CI_EXECUTION_MODE variable. An
+unset or unrecognized value resolves to legacy. Set GH_REPO to target a fork;
+otherwise the script targets pjunod/plurx.
+EOF
+}
+
+repo="${GH_REPO:-pjunod/plurx}"
+command="${1:-status}"
+
+case "$command" in
+  -h|--help)
+    usage
+    ;;
+  resolve)
+    [ "$#" -le 2 ] || { usage >&2; exit 2; }
+    requested="${2:-${CI_EXECUTION_MODE:-legacy}}"
+    case "$requested" in
+      legacy|shadow|accelerated)
+        printf '%s\n' "$requested"
+        ;;
+      *)
+        printf '::warning::Unknown CI_EXECUTION_MODE %q; using legacy\n' \
+          "$requested" >&2
+        printf '%s\n' legacy
+        ;;
+    esac
+    ;;
+  status)
+    [ "$#" -le 1 ] || { usage >&2; exit 2; }
+    value="$(
+      gh variable list --repo "$repo" --json name,value \
+        --jq '.[] | select(.name == "CI_EXECUTION_MODE") | .value'
+    )"
+    scripts/ci-execution-mode resolve "${value:-legacy}"
+    ;;
+  legacy|shadow|accelerated)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    gh variable set CI_EXECUTION_MODE --body "$command" --repo "$repo"
+    printf 'CI_EXECUTION_MODE=%s for %s; new workflow runs will use that graph.\n' \
+      "$command" "$repo"
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

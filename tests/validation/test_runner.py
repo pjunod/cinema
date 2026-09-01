@@ -177,6 +177,23 @@ class CatalogCase(unittest.TestCase):
         packaging = scope_for_paths(catalog, ("Cargo.toml", "Dockerfile"))
         self.assertTrue(packaging["release_build"])
         self.assertTrue(packaging["container"])
+        for build_only_path in (
+            ".github/actions/buildx-cache/action.yml",
+            ".github/buildkitd.toml",
+            "crates/plurxd/build.rs",
+            "scripts/ci-buildkit-prune",
+            "scripts/ci-execution-mode",
+            "vendor/hiqlite/Cargo.toml",
+            "validation/ci_scope.py",
+            "validation/release_dockerfile.py",
+            "tests/operations/test_release_publication.py",
+        ):
+            with self.subTest(build_only_path=build_only_path):
+                self.assertTrue(
+                    scope_for_paths(catalog, (build_only_path,))["release_build"]
+                )
+        unknown = scope_for_paths(catalog, ("unclassified/build-input.xyz",))
+        self.assertTrue(unknown["release_build"])
 
         web = scope_for_paths(catalog, ("crates/plurxd/src/web/app.js",))
         self.assertTrue(web["rust"])
@@ -206,6 +223,16 @@ class CatalogCase(unittest.TestCase):
         )
         self.assertFalse(cluster["hiqlite_spike"])
         self.assertTrue(cluster["cluster_auth"])
+
+        for store_shard_path in (
+            "Dockerfile.store-shard",
+            "validation/store_shard.py",
+            "tests/validation/test_store_shard.py",
+        ):
+            with self.subTest(store_shard_path=store_shard_path):
+                shard_scope = scope_for_paths(catalog, (store_shard_path,))
+                self.assertTrue(shard_scope["rust"])
+                self.assertTrue(shard_scope["cluster_auth"])
 
         topology_schema = scope_for_paths(
             catalog, ("benchmarks/cluster-topology.schema.json",)
@@ -347,9 +374,15 @@ class CatalogCase(unittest.TestCase):
         ):
             with self.subTest(scheduler_path=scheduler_path):
                 scheduler_scope = scope_for_paths(catalog, (scheduler_path,))
+                expected = {"rust", "cluster_auth"}
+                if scheduler_path in (
+                    ".github/workflows/ci.yml",
+                    "validation/ci_scope.py",
+                ):
+                    expected.add("release_build")
                 self.assertEqual(
                     {key for key, value in scheduler_scope.items() if value},
-                    {"rust", "cluster_auth"},
+                    expected,
                 )
                 self.assertFalse(scheduler_scope["docs_only"])
 
