@@ -340,7 +340,7 @@ pub(crate) fn peer_url(base: &str, path: &str) -> Option<reqwest::Url> {
     Some(url)
 }
 
-async fn read_bounded(
+pub(crate) async fn read_bounded(
     mut response: reqwest::Response,
     deadline: tokio::time::Instant,
     max_response_bytes: usize,

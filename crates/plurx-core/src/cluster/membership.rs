@@ -590,6 +590,24 @@ const MAX_JOIN_HOSTNAME_BYTES: usize = 253;
 const INTERNAL_AUTH_NONCE_BYTES: usize = 36;
 const ED25519_SIGNATURE_HEX_BYTES: usize = 128;
 const MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND: u8 = 4;
+static ACTIVITY_AUTH_ADMISSION_REFUSALS: AtomicU64 = AtomicU64::new(0);
+static ACTIVITY_KEY_LOOKUP_REFUSALS: AtomicU64 = AtomicU64::new(0);
+
+/// Render the two process-lifetime legacy Activity authentication admission
+/// counters. These atomics do not query membership or the Store.
+#[must_use]
+pub fn prometheus_cluster_activity_authority() -> String {
+    format!(
+        "# HELP plurx_cluster_activity_auth_admission_refusals_total Cryptographically valid Activity requests denied by the per-sender live-authority guard.\n\
+         # TYPE plurx_cluster_activity_auth_admission_refusals_total counter\n\
+         plurx_cluster_activity_auth_admission_refusals_total {}\n\
+         # HELP plurx_cluster_activity_key_lookup_refusals_total Cold or missing Activity signing-key lookups denied by the global guard.\n\
+         # TYPE plurx_cluster_activity_key_lookup_refusals_total counter\n\
+         plurx_cluster_activity_key_lookup_refusals_total {}\n",
+        ACTIVITY_AUTH_ADMISSION_REFUSALS.load(Ordering::Relaxed),
+        ACTIVITY_KEY_LOOKUP_REFUSALS.load(Ordering::Relaxed),
+    )
+}
 /// Keep cluster-wide ownership slightly longer than the target's local drain
 /// timer so a second claimant cannot win in the gap between replicated claim
 /// commit and local monotonic-fence installation.
@@ -5270,7 +5288,7 @@ impl MembershipManager {
     fn admit_activity_key_lookup(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let now = Instant::now();
-        Ok(inner
+        let admitted = inner
             .activity_key_lookup_admission
             .lock()
             .map_err(|_| {
@@ -5278,7 +5296,11 @@ impl MembershipManager {
                     "activity key-lookup admission lock was poisoned".to_owned(),
                 )
             })?
-            .admit(now, MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND))
+            .admit(now, MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND);
+        if !admitted {
+            ACTIVITY_KEY_LOOKUP_REFUSALS.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(admitted)
     }
 
     fn admit_activity_authority_check(&self, node_id: &str) -> Result<bool, MembershipError> {
@@ -5293,7 +5315,11 @@ impl MembershipManager {
                 window_started: now,
                 checks: 0,
             });
-        Ok(state.admit(now, MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND))
+        let admitted = state.admit(now, MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND);
+        if !admitted {
+            ACTIVITY_AUTH_ADMISSION_REFUSALS.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(admitted)
     }
 
     fn admit_internal_authority_check(&self, node_id: &str) -> Result<bool, MembershipError> {
@@ -9408,6 +9434,16 @@ mod tests {
             started + Duration::from_secs(1),
             MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND
         ));
+    }
+
+    #[test]
+    fn activity_authentication_metrics_have_fixed_privacy_safe_cardinality() {
+        let metrics = prometheus_cluster_activity_authority();
+        assert!(metrics.contains("plurx_cluster_activity_auth_admission_refusals_total "));
+        assert!(metrics.contains("plurx_cluster_activity_key_lookup_refusals_total "));
+        assert!(!metrics.contains("node_id="));
+        assert!(!metrics.contains("hostname="));
+        assert!(!metrics.contains("url="));
     }
 
     #[test]
