@@ -736,6 +736,20 @@ struct Decision: Codable {
     /// string equality. Optional because an older server does not send it;
     /// absent means "unknown", and the badges stay source-only.
     var deliveredDynamicRange: String?
+    /// Which Dolby Vision profile that grade is, when the delivery carries
+    /// Dolby Vision at all.
+    ///
+    /// `deliveredDynamicRange` answers `"dolby_vision"` for both a Profile 7
+    /// title preserved for a device that enumerates 7 and the same title
+    /// converted to 8.1 for one that does not — the grade really is the same.
+    /// What differs is that in the second case the profile on screen is not
+    /// the profile on disk.
+    ///
+    /// **Absent means "no answer", not "not Dolby Vision".** A transcode, a
+    /// strip, a source that never had any, and a row scanned before the
+    /// profile columns existed all produce it; `deliveredDynamicRange` beside
+    /// it is the field that answers "is this Dolby Vision".
+    var deliveredDolbyVisionProfile: Int?
 }
 
 struct HlsStart: Codable {
@@ -762,6 +776,15 @@ struct HlsStart: Codable {
     /// Nullable server-side too: a session whose source row could not be read
     /// omits it, and the client keeps whatever it had.
     var deliveredDynamicRange: String?
+    /// This session's answer for the Dolby Vision profile.
+    ///
+    /// Read together with `deliveredDynamicRange` and never on its own: a
+    /// session that reports a range must CLEAR a decision's profile when it
+    /// omits this. The legacy single-ffmpeg copy path serves the HDR10 base
+    /// for a title the decision said would be converted — the normal first
+    /// watch of a converting title, before its fragment index exists — and a
+    /// stale profile there paints `DV P7 → DV P8` over HDR10.
+    var deliveredDolbyVisionProfile: Int?
     /// Where this session's playback-control exchange lives, and the exact
     /// generation and owner epoch it addresses. Absent from an older server,
     /// and absent from a session the server does not consider controllable —

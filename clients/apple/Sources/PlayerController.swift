@@ -1366,6 +1366,36 @@ final class PlayerController: ObservableObject {
     /// reads it back, and no decision, capability, or session request depends
     /// on it (MEDIA-BADGES-PLAN.md §9).
     @Published private(set) var deliveredRange: String?
+    /// Take a delivery answer, both halves at once.
+    ///
+    /// The range and the profile are one answer and are assigned together,
+    /// deliberately. A session that reports a range but omits the profile is
+    /// saying "no profile", not "keep the one you had": the legacy
+    /// single-ffmpeg copy path serves the HDR10 base for a title the decision
+    /// said would be converted, which is the *normal first watch* of a
+    /// converting title, before its fragment index exists. Two independent
+    /// `??` fallbacks would keep the decision's profile through exactly that
+    /// and paint `DV P7 → DV P8` over HDR10 — and each half would look correct
+    /// on its own, which is why this is one function rather than two lines.
+    ///
+    /// A session that reports no range at all says nothing about either, and
+    /// the decision's answer stands for both.
+    private func adoptSessionDelivery(_ hls: HlsStart, decision: Decision) {
+        if let range = hls.deliveredDynamicRange {
+            deliveredRange = range
+            deliveredDolbyVisionProfile = hls.deliveredDolbyVisionProfile
+        } else {
+            deliveredRange = decision.deliveredDynamicRange
+            deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
+        }
+    }
+
+    /// The Dolby Vision profile on the wire, when the delivery carries any.
+    ///
+    /// Moves with `deliveredRange` and never on its own — see
+    /// `adoptSessionDelivery`. Read together they say "Dolby Vision, and it is
+    /// Profile 8"; read apart they can say "Profile 8" over an HDR10 stream.
+    @Published private(set) var deliveredDolbyVisionProfile: Int?
     @Published private(set) var isVOD = false
     @Published private(set) var failed = false
     @Published private(set) var playbackError: String?
@@ -2520,8 +2550,10 @@ final class PlayerController: ObservableObject {
             isVOD = true
             encoder = nil
             // Direct play has no session, so the decision's answer stands for
-            // the whole playback (MEDIA-BADGES-PLAN.md §3.2).
+            // the whole playback (MEDIA-BADGES-PLAN.md §3.2). Both halves of
+            // it, for the reason `adoptSessionDelivery` gives.
             deliveredRange = decision.deliveredDynamicRange
+            deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
             let deliveryPath = decision.delivery?.url ?? decision.playUrl
             activeMediaPath = clusterRelativeMediaPath(deliveryPath)
             activeMediaAuthenticated = true
@@ -2655,7 +2687,7 @@ final class PlayerController: ObservableObject {
             // value standing rather than blanking the badge. Set only after a
             // successful create, so a failed change leaves the still-playing
             // stream's answer alone.
-            deliveredRange = hls.deliveredDynamicRange ?? decision.deliveredDynamicRange
+            adoptSessionDelivery(hls, decision: decision)
             isVOD = hls.vod ?? false
             usesDirectTimeline = isVOD
             if knownDurationMs <= 0 { knownDurationMs = hls.durationMs ?? 0 }
