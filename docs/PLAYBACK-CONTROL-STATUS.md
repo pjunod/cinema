@@ -29,8 +29,8 @@ one is deleted.
 | 1-4 | protocol, transport, hold/resume barriers | — | merged |
 | 5 | delete detached recovery loops | — | merged as #663 |
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
-| — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike still **needs hardware**, and item 7 is not allowed to start without its numbers |
-| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
+| — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [execution](M5.5-SPIKE-EXECUTION-HANDOFF.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike **ran 2026-09-01 on web and Android and did not run on Apple** — see §"M5.5 ran, and two thirds of it settled" |
+| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | **design unblocked, acknowledgements not** — the fallback path is measured on two platforms; `first_frame_ready` cannot be frozen while Apple is unmeasured |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it" — and **M4 (burn-join) is the next buildable milestone**; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
@@ -424,6 +424,70 @@ produce twenty attached players. What it produces is up to twenty session
 creations the server honours. The cost is server-side waste, not client
 confusion.
 
+
+## M5.5 ran, and two thirds of it settled
+
+**Run 2026-09-01** on web and Android; **Apple produced nothing**. The full
+validation is `M5.5-RESULTS-VERDICT.md` in the agent notes. The run passes
+every acceptance check in the spike's §6, and twice declined a number it could
+have got away with — the Chromium codec/HDR row was discarded rather than
+launder a malformed asset into a platform result, and no Apple number was
+invented rather than reuse the production tvOS profile over installed build
+105.
+
+**The decision is to keep `dual_player_preparation` false**, which is the
+outcome [the spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) §4 anticipated: a
+measured `false` selects that platform's fallback and stops the UI calling
+that path seamless. It is not a failure.
+
+| platform | dual preparation | why |
+|---|---|---|
+| web | `false` | Safari same-codec reached 20 consecutive; codec/HDR only 13/20 |
+| Android | `false` platform-wide | both phones passed both cases; the tunneled Google TV passed codec/HDR and failed same-codec 0/3 |
+| Apple | unproven | iPhone blocked on local-network consent; Apple TV had no tvOS development profile |
+
+### The result is conditional, and the capability cannot say so
+
+Every platform came back recipe- and device-dependent. A bare
+`dual_player_preparation` boolean cannot express *yes for this recipe on this
+device*, so a correct `false` throws the finding away. That is a **protocol**
+observation rather than a client one — the field is frozen in v1, so a
+narrower capability keyed by device and recipe is a change M6 must decide on
+deliberately rather than discover.
+
+### The Google TV inversion is the finding worth chasing
+
+It passed the **harder** case and failed the easier one, which is backwards
+from the spike's stated expectation. Two successor-prime timeouts and one
+`ERROR_CODE_AUDIO_TRACK_WRITE_FAILED`, with tunneling on. Two *identical*
+tunneled pipelines plausibly contend for one decoder or audio track where two
+*different* codecs get distinct instances — which would make the constraint
+"one tunneled pipeline per codec" rather than "this device cannot prepare".
+
+That matters because a resolution change is same-codec, and same-codec is
+M6's common case: the exotic case works on that device and the ordinary one
+does not. Three attempts justify withholding the capability; they do not
+diagnose it. One targeted re-run — same-codec dual prime, tunneling forced
+off — would name the constraint exactly.
+
+### What is now measured, and what is still owed
+
+The fallback interruption is measured on two platforms, which answers the
+roadmap's open question about an acceptable `buffered_break_before_make`
+bound for them: web/Safari 271–2,246 ms (mean 1,121), Android/Google TV
+353–766 ms (mean 471). **Worst observed is 2,246 ms**, and that is the honest
+starting point.
+
+Still owed from the run: how the throwaway switch differed from M6's (the
+spike asks for it, and a runway measured against a switch M6 will not use is
+wrong in a way nobody can see later), and the prime-window duration — network
+duplication is reported as volume, so the rate cannot be derived, and rate is
+the only reason that field exists.
+
+Apple is a re-run rather than a dead end. Neither blocker is a property of the
+platform: the iPhone needs one consent tap, and the Apple TV needs a tvOS
+development provisioning profile for the throwaway bundle. It is the platform
+this matters most for — the Apple TV is where the 2160p pressure lives.
 
 ## Open decisions
 
