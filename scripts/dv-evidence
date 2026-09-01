@@ -107,8 +107,16 @@ curl -fsS "$BASE/index.m3u8"          > "$OUT/media.m3u8"
 #   · is the sample entry `hvc1` or `dvh1`
 #   · is there a `dvcC`/`dvvC` box beside it, and what profile/level/flags
 #   · what the `hvcC` itself declares (profile, tier, level, constraint bytes)
+#   · does the `ftyp` claim `dby1`, and does a record actually back that claim
 # A master that advertises one thing while the init declares another is the
 # most economical explanation of -12927 that has not been ruled out.
+#
+# The brand is read as a box rather than grepped, because the two Dolby
+# Vision failures are different and only one of them stutters. `dby1` beside a
+# sample entry that HAS a record is an ordinary DV stream. `dby1` beside one
+# with NONE is a contradictory initialization segment, and AVPlayer fails the
+# item immediately rather than falling back to software — the harder failure,
+# and the one a box-name scan alone reports as clean.
 printf '· init segment + boxes\n'
 if curl -fsS -o "$OUT/init.mp4" "$BASE/init.mp4"; then
   ffprobe -v error -show_streams -show_format -print_format json \
@@ -126,6 +134,32 @@ if curl -fsS -o "$OUT/init.mp4" "$BASE/init.mp4"; then
     if grep -qa "$box" "$OUT/init.mp4"; then printf ' %s' "$box"; fi
   done
   printf '\n'
+  # Walk the `ftyp` properly: major brand at 8, compatible brands from 16 to
+  # the declared size, four bytes at a time. Bytes 12..16 are the minor
+  # version — a number, not a brand — and a `dby1` sequence anywhere past the
+  # box is a coincidence, not a claim. Declines rather than guessing on a
+  # `largesize` box or a size that is not 16 plus whole brands.
+  BRAND="$(python3 - "$OUT/init.mp4" <<'EOF' || true
+import sys
+b = open(sys.argv[1], "rb").read()
+if len(b) < 16 or b[4:8] != b"ftyp":
+    print("unreadable"); raise SystemExit
+size = int.from_bytes(b[0:4], "big")
+if size < 16 or size > len(b) or (size - 16) % 4:
+    print("unreadable"); raise SystemExit
+offs = [8] + list(range(16, size, 4))
+print("dby1" if any(b[o:o+4] == b"dby1" for o in offs) else "none")
+EOF
+)"
+  RECORD=none
+  if grep -qa dvcC "$OUT/init.mp4" || grep -qa dvvC "$OUT/init.mp4"; then RECORD=present; fi
+  printf '  ftyp Dolby brand: %s · configuration record: %s\n' "$BRAND" "$RECORD"
+  if [ "$BRAND" = dby1 ] && [ "$RECORD" = none ]; then
+    printf '  ** the ftyp claims Dolby Vision and no record backs it. AVPlayer\n'
+    printf '     refuses that pair outright rather than software-decoding it,\n'
+    printf '     which is a harder failure than the stutter and is invisible to\n'
+    printf '     a dvcC/dvvC scan alone.\n'
+  fi
 else
   printf '  no init.mp4 — this session is not fMP4; note that, it is itself evidence\n' \
     | tee "$OUT/init.missing.txt"

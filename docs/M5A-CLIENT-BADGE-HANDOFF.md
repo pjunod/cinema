@@ -76,13 +76,20 @@ players deserves to know which one they are watching.
 
 ### Spelling
 
-Android's `dynamicRangeFact` and Apple's `DynamicRange.sourceMark` both label
-the source half `DV` with no profile number — that is a deliberate,
-already-shipped decision (MEDIA-BADGES-PLAN §2.3's note), and **do not change
-it**. Only the web chip carries a source profile number. So:
+**Corrected 2026-09-01, after reading the code rather than trusting this
+paragraph.** It previously said Apple and Android both label the source half
+`DV` with no profile number. Android does. **Apple does not** —
+`DynamicRange.sourceMark` already returns `"DV P\(profile)"` when it can read
+one out of `hdrFormat`, and has shipped that way. Building from the old claim
+would have produced a badge that disagreed with the same client's own detail
+screen. So:
 
-- **web** (already done): `DV P7 → DV P8`
-- **Apple and Android**: `DV → DV P8`
+- **web** (done): `DV P7 → DV P8`
+- **Apple** (done): `DV P7 → DV P8` — the source half already carries the
+  number, and this state must not take it away
+- **Android** (done): `DV → DV P8` — the source half is a bare `DV` there,
+  which is the deliberate already-shipped decision MEDIA-BADGES-PLAN §2.3
+  notes
 
 The arrow half carries the number in every client, because that number is the
 entire content of this state. `DV → DV` says nothing.

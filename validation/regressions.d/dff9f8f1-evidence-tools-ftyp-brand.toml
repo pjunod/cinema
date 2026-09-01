@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["dff9f8f1"]
+reason = "Field-evidence tooling and its documentation, not runtime behavior: scripts/perf-report and scripts/dv-evidence gain an ftyp brand reader so a report can tell a Dolby Vision stream from a contradictory init that claims dby1 with no configuration record behind it. Neither script is exercised by the Rust or Python suites, and the readers were instead proved directly before the commit was written — the Python one against eleven ftyp shapes including a dby1 in the minor version field, one past the end of the box, a ragged size, a largesize box and a non-ftyp first box, and the shell one against three constructed inits covering brand-without-record, brand-with-record and neither. The daemon serves the same bytes it served before this commit."
+ignore = true

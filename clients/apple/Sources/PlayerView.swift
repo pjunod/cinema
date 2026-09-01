@@ -623,6 +623,21 @@ enum DynamicRange {
         return rich.isEmpty ? longLabel(grade) : rich
     }
 
+    /// The source's profile as a number, for comparing against the delivered
+    /// one rather than for display.
+    ///
+    /// Reads the same label `sourceMark` already reads, so the two can never
+    /// disagree about which profile the file carries. A row scanned before the
+    /// profile columns existed carries the bare string "Dolby Vision" with no
+    /// number in it, and then there is no answer and no arrow — reading a
+    /// number out of prose that does not have one is how a badge invents a
+    /// conversion that never happened.
+    static func dolbyVisionProfileNumber(in hdrFormat: String?) -> Int? {
+        let rich = hdrFormat?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard let digits = dolbyVisionProfile(in: rich) else { return nil }
+        return Int(digits)
+    }
+
     private static func dolbyVisionProfile(in label: String) -> String? {
         guard let range = label.range(
             of: #"profile\s*[0-9]+"#,
@@ -1416,7 +1431,8 @@ struct PlayerView: View {
             source: controller.decision?.source,
             audio: audio,
             delivered: controller.deliveredRange,
-            displayHDR: Caps.displayIsHDR
+            displayHDR: Caps.displayIsHDR,
+            deliveredDolbyVisionProfile: controller.deliveredDolbyVisionProfile
         )
         return HStack(spacing: PlayerMetadataBadgeMetrics.rowSpacing) {
             ForEach(badges) { badge in
@@ -1443,7 +1459,8 @@ struct PlayerView: View {
         source: SourceSummary?,
         audio: AudioTrack?,
         delivered: String? = nil,
-        displayHDR: Bool = true
+        displayHDR: Bool = true,
+        deliveredDolbyVisionProfile: Int? = nil
     ) -> [PlayerMetadataBadge] {
         var badges: [PlayerMetadataBadge] = []
         if let label = playbackResolutionLabel(width: source?.width, height: source?.height) {
@@ -1458,7 +1475,8 @@ struct PlayerView: View {
             hdr: source?.hdr,
             hdrFormat: source?.hdrFormat,
             delivered: delivered,
-            displayHDR: displayHDR
+            displayHDR: displayHDR,
+            deliveredDolbyVisionProfile: deliveredDolbyVisionProfile
         ) {
             badges.append(range)
         }
@@ -1489,7 +1507,8 @@ struct PlayerView: View {
         hdr: String?,
         hdrFormat: String?,
         delivered: String?,
-        displayHDR: Bool
+        displayHDR: Bool,
+        deliveredDolbyVisionProfile: Int? = nil
     ) -> PlayerMetadataBadge? {
         guard let source = DynamicRange.source(hdr: hdr, hdrFormat: hdrFormat) else {
             return nil
@@ -1507,7 +1526,33 @@ struct PlayerView: View {
         )
         guard let delivered, !delivered.isEmpty else { return lit }
         let rendered = DynamicRange.rendered(delivered: delivered, displayHDR: displayHDR)
-        guard rendered != source else { return lit }
+        guard rendered != source else {
+            // Same grade — but not necessarily the same profile. A Profile 7
+            // disc remux reaching a device that takes 8 is converted on the
+            // fly: every picture byte is copied and only the per-frame
+            // metadata is rewritten, so the grade really is unchanged and what
+            // is on screen really is Dolby Vision.
+            //
+            // NOT DIMMED, and that is the whole reason this is its own state
+            // rather than a spelling of the downgrade below. The dimmed source
+            // half means "this capability is unavailable"; here it is
+            // *active*. Dimming it would say the opposite of what happened.
+            guard
+                source == DynamicRange.dolbyVision,
+                let deliveredProfile = deliveredDolbyVisionProfile,
+                let onDisk = DynamicRange.dolbyVisionProfileNumber(in: hdrFormat),
+                onDisk != deliveredProfile
+            else { return lit }
+            return PlayerMetadataBadge(
+                kind: .dynamicRange,
+                tone: tone,
+                mark: sourceMark,
+                accessibilityLabel:
+                    "\(DynamicRange.longLabel(source)), playing as Dolby Vision Profile \(deliveredProfile)",
+                renderedMark: "DV P\(deliveredProfile)",
+                dimmed: false
+            )
+        }
         return PlayerMetadataBadge(
             kind: .dynamicRange,
             tone: tone,

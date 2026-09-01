@@ -240,6 +240,39 @@ class Controller(
         private set
 
     /**
+     * The Dolby Vision profile on the wire, when the delivery carries any.
+     *
+     * Moves with [deliveredRange] and never on its own — see
+     * [adoptSessionDelivery]. Read together they say "Dolby Vision, and it is
+     * Profile 8"; read apart they can say "Dolby Vision Profile 8" over an
+     * HDR10 stream.
+     */
+    var deliveredDolbyVisionProfile: Int? by mutableStateOf(plan.deliveredDolbyVisionProfile)
+        private set
+
+    /**
+     * Take a session's delivery answer, both halves at once.
+     *
+     * The two fields are one answer and are assigned together, deliberately.
+     * A session that reports a range but omits the profile is saying "no
+     * profile", not "keep the one you had": the legacy single-ffmpeg copy path
+     * serves the HDR10 base for a title the decision said would be converted,
+     * which is the *normal* first watch of a converting title, before its
+     * fragment index exists. Two independent `?.let`s would keep the
+     * decision's profile through exactly that and paint `DV → DV P8` over
+     * HDR10 — and each half would look correct on its own, which is why this
+     * is one function rather than two lines at each of the two call sites.
+     *
+     * A session that omits the range entirely says nothing about either, and
+     * the standing values stand.
+     */
+    private fun adoptSessionDelivery(hls: HlsStart) {
+        val range = hls.delivered_dynamic_range ?: return
+        deliveredRange = range
+        deliveredDolbyVisionProfile = hls.delivered_dolby_vision_profile
+    }
+
+    /**
      * What the stats overlay and the menu call this. A native-rendition
      * session on a direct or remux verdict is still a remux — the video is
      * copied; only the playlist gained a subtitle group.
@@ -809,7 +842,7 @@ class Controller(
             stallReopenBudget.seed(hls.height)
             encoder = hls.encoder
             sessionIsVod = hls.vod
-            hls.delivered_dynamic_range?.let { deliveredRange = it }
+            adoptSessionDelivery(hls)
             // A cached session is the whole stream on disk: its timeline
             // starts at zero and the player seeks, exactly like direct play.
             val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
@@ -1009,7 +1042,7 @@ class Controller(
             startStatusPolling(hls.session_id)
             encoder = hls.encoder
             sessionIsVod = hls.vod
-            hls.delivered_dynamic_range?.let { deliveredRange = it }
+            adoptSessionDelivery(hls)
             val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
             baseMs = timeline.baseMs
             activeMediaPath = relativeMediaPath(hls.playlist_url)
@@ -1173,7 +1206,9 @@ class Controller(
         sessionIsVod = false
         // Back on the plan's own delivery, so back to the plan's own grade —
         // otherwise a chip would keep reporting the session that just ended.
+        // Both halves, for the same reason they are adopted together.
         deliveredRange = plan.deliveredDynamicRange
+        deliveredDolbyVisionProfile = plan.deliveredDolbyVisionProfile
     }
 
     /**
@@ -1538,6 +1573,13 @@ interface PlanLike {
 
     /** `decision.delivered_dynamic_range`: the badge's starting truth. */
     val deliveredDynamicRange: String?
+
+    /**
+     * `decision.delivered_dolby_vision_profile`: which Dolby Vision profile
+     * that grade is, when it is Dolby Vision at all. Null means "no answer" —
+     * see the field's own doc on [tv.plurx.app.data.Decision].
+     */
+    val deliveredDolbyVisionProfile: Int?
 }
 
 @UnstableApi
