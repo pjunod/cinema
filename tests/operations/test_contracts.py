@@ -327,10 +327,26 @@ class OperationsContractCase(unittest.TestCase):
             ci_build,
         )
         self.assertIn(". -> target-cluster-check", ci_build)
-        self.assertIn(
+        ci_build_steps = workflow_step_blocks(ci_build)
+        digest_step = ci_build_steps["Record the release binary digests"]
+        retention_step = ci_build_steps[
+            "Retain release binary for push, tag, and qualification runs"
+        ]
+        for digest_path in (
+            "target/${{ matrix.target }}/release/plurxd",
             "target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check",
-            ci_build,
-        )
+        ):
+            with self.subTest(release_digest=digest_path):
+                self.assertIn(f"sha256sum {digest_path}", digest_step)
+                self.assertIn(f"> {digest_path}.sha256", digest_step)
+        for retained_path in (
+            "target/${{ matrix.target }}/release/plurxd",
+            "target/${{ matrix.target }}/release/plurxd.sha256",
+            "target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check",
+            "target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check.sha256",
+        ):
+            with self.subTest(retained_release_evidence=retained_path):
+                self.assertIn(retained_path, retention_step)
 
     def test_ship_routes_real_mobile_targets_through_ansible(self):
         ship = read("scripts/ship")
