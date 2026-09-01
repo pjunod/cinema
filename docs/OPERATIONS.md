@@ -34,6 +34,79 @@ paths you type in the UI are **container-side** paths under Docker (e.g.
 `/media/movies`), which must be mounted in your override file. Full deploy matrix
 (Unraid, TrueNAS/k8s, ports, GPU passthrough): [`deploy/README.md`](../deploy/README.md).
 
+### The fleet registry — build once, pull everywhere
+
+The noirr fleet pulls `plurxd` from Forgejo at
+`192.168.4.7:3000/noirr/plurxd`. Forgejo 16.0.3 runs on nuc3 under
+`/opt/noirr/forgejo`; its database, repositories, and package layers all live
+under `/opt/noirr/forgejo/data`. Back up that directory. Once it carries OCI
+images and git mirrors, it is durable state rather than a recreatable cache.
+
+The registry is plain HTTP on the LAN by decision. Every Docker daemon must
+list the byte-identical address `192.168.4.7:3000` under
+`insecure-registries`; do not substitute a hostname, expose TCP 3000 to the
+WAN, or enable open registration. The fleet credential is stored at mode 0600
+on nuc3 as
+`/opt/noirr/plurx-agent/.forgejo-registry-token`. Stream it through SSH when a
+node needs to log in so it never enters a repository, command argument, or
+shell history:
+
+```bash
+ssh nuc3 'cat /opt/noirr/plurx-agent/.forgejo-registry-token' |
+  ssh nuc4 'docker login 192.168.4.7:3000 \
+    --username fleet --password-stdin'
+```
+
+Build only on nuc4, from the exact checkout being shipped. The script embeds
+the git description in the binary and publishes one rollback tag plus the
+moving fleet tag:
+
+```bash
+ssh nuc4
+cd /opt/noirr/plurx
+git fetch origin
+git switch --detach origin/main
+scripts/registry-push
+```
+
+Each voter keeps this gitignored setting in `deploy/.env`:
+
+```bash
+PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:latest
+```
+
+Pulling does not stop the running voter, so it may happen ahead of the rolling
+restart. Replacement remains serial: pull · `up -d` · `/readyz` 200, then the
+next voter.
+
+```bash
+cd /opt/noirr/plurx/deploy
+docker compose pull plurxd
+docker compose up -d
+curl -fsS http://127.0.0.1:32400/readyz
+curl -fsS http://127.0.0.1:32400/api/v1/server
+```
+
+**Rollback by digest-bearing tag, not by rebuilding an old tree on every
+node.** Replace `latest` in `deploy/.env` with the known-good
+`sha-<12hex>` tag, then run the same serial `up -d` and readiness gate. The
+Forgejo cleanup rule keeps the ten newest `sha-` tags, which bounds disk use
+and rollback depth together.
+
+If nuc3 or Forgejo is down, do not weaken the cluster sequence. Leave one
+voter down at most and use the retained local-build path on that voter:
+
+```bash
+cd /opt/noirr/plurx
+git switch --detach <known-good-sha>
+make docker-up                    # stamps and builds locally via Compose
+curl -fsS http://127.0.0.1:32400/readyz
+```
+
+This fallback is slower, but it keeps a registry outage from becoming a
+deployment dead end. Restore `deploy/.env` to `latest` only after Forgejo is
+healthy and that voter can pull the intended immutable tag.
+
 ### Rolling back a deploy
 
 The SQLite snapshot procedure below applies to a node that has not activated

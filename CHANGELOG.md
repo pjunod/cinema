@@ -8,6 +8,15 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- **The noirr fleet can build plurxd once and pull the same stamped image on
+  every voter.** Compose accepts `PLURX_IMAGE` while retaining its source-build
+  default, and `scripts/registry-push` publishes both `latest` and an immutable
+  `sha-<12hex>` rollback tag to the LAN Forgejo registry. The deployment and
+  operations guides cover authentication, serial restart discipline, rollback,
+  registry retention, and the local `--build` fallback when nuc3 is down.
+
 ## [0.3.0] — 2026-08-31
 
 ### Added
