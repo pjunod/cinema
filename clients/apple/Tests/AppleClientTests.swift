@@ -5285,6 +5285,128 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(legacy.deliveredDynamicRange)
     }
 
+    /// The profile rides beside the grade on both responses, and its absence
+    /// decodes as absence rather than failing.
+    ///
+    /// `delivered_dynamic_range` answers `"dolby_vision"` for both a preserved
+    /// Profile 7 and a converted one, so this field is the only thing that can
+    /// tell them apart. A client that cannot decode a response over a missing
+    /// optional field cannot play anything at all on an older server, which is
+    /// why the legacy cases are here and not assumed.
+    func testDeliveredDolbyVisionProfileDecodesFromBothResponses() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+
+        let converted = try decoder.decode(Decision.self, from: Data(#"""
+        {"file_id":6041,"method":"remux","play_url":"/api/v1/files/6041/direct",
+         "preserve_dolby_vision":true,"delivered_dynamic_range":"dolby_vision",
+         "delivered_dolby_vision_profile":8}
+        """#.utf8))
+        XCTAssertEqual(converted.deliveredDynamicRange, "dolby_vision")
+        XCTAssertEqual(converted.deliveredDolbyVisionProfile, 8)
+
+        // The case that fails silently: a session reporting a range and NO
+        // profile. The legacy copy path serves the HDR10 base for a title the
+        // decision said would be converted — the normal FIRST watch of a
+        // converting title — and the controller clears the decision's profile
+        // from exactly this.
+        let fellBack = try decoder.decode(HlsStart.self, from: Data(#"""
+        {"session_id":"s3","playlist_url":"/hls/s3/master.m3u8",
+         "delivered_dynamic_range":"hdr10"}
+        """#.utf8))
+        XCTAssertEqual(fellBack.deliveredDynamicRange, "hdr10")
+        XCTAssertNil(fellBack.deliveredDolbyVisionProfile)
+
+        let legacy = try decoder.decode(Decision.self, from: Data(#"""
+        {"file_id":1,"method":"direct_play","play_url":"/direct"}
+        """#.utf8))
+        XCTAssertNil(legacy.deliveredDolbyVisionProfile)
+    }
+
+    /// The converted state: same grade, different profile, and NOTHING dims.
+    func testAConvertedProfileSevenTitleKeepsBothHalvesLit() {
+        let badge = PlayerView.dynamicRangeBadge(
+            hdr: "dolby_vision",
+            hdrFormat: "Dolby Vision · Profile 7 (HDR10-compatible)",
+            delivered: "dolby_vision",
+            displayHDR: true,
+            deliveredDolbyVisionProfile: 8
+        )
+        // The dimmed source half means "this capability is unavailable". Here
+        // the base layer is copied byte for byte and what reaches the device
+        // IS Dolby Vision, so dimming it would say the opposite of what
+        // happened.
+        XCTAssertEqual(badge?.dimmed, false)
+        XCTAssertEqual(badge?.mark, "DV P7")
+        XCTAssertEqual(badge?.renderedMark, "DV P8")
+        XCTAssertEqual(badge?.displayMark, "DV P7 → DV P8")
+        XCTAssertEqual(
+            badge?.accessibilityLabel,
+            "Dolby Vision, playing as Dolby Vision Profile 8"
+        )
+    }
+
+    /// A device that genuinely decodes this profile gets the stream untouched,
+    /// so there is nothing to announce.
+    func testAPreservedTitleAtItsOwnProfileGetsNoArrow() {
+        let badge = PlayerView.dynamicRangeBadge(
+            hdr: "dolby_vision",
+            hdrFormat: "Dolby Vision · Profile 8 (HDR10-compatible)",
+            delivered: "dolby_vision",
+            displayHDR: true,
+            deliveredDolbyVisionProfile: 8
+        )
+        XCTAssertNil(badge?.renderedMark)
+        XCTAssertEqual(badge?.dimmed, false)
+        XCTAssertEqual(badge?.mark, "DV P8")
+    }
+
+    /// Absent means "no answer", not "not Dolby Vision": an older server sends
+    /// nothing and the badge is exactly what it was.
+    func testAServerThatOmitsTheProfileGetsExactlyTodaysBadge() {
+        let badge = PlayerView.dynamicRangeBadge(
+            hdr: "dolby_vision",
+            hdrFormat: "Dolby Vision · Profile 7 (HDR10-compatible)",
+            delivered: "dolby_vision",
+            displayHDR: true
+        )
+        XCTAssertNil(badge?.renderedMark)
+        XCTAssertEqual(badge?.mark, "DV P7")
+    }
+
+    /// A row scanned before the profile columns existed carries the bare
+    /// string with no number in it. Reading a number out of prose that does
+    /// not have one is how a badge invents a conversion that never happened.
+    func testARowWithNoProfileInItsLabelGetsNoArrow() {
+        let badge = PlayerView.dynamicRangeBadge(
+            hdr: "dolby_vision",
+            hdrFormat: "Dolby Vision",
+            delivered: "dolby_vision",
+            displayHDR: true,
+            deliveredDolbyVisionProfile: 8
+        )
+        XCTAssertNil(badge?.renderedMark)
+        XCTAssertEqual(badge?.mark, "DV")
+        XCTAssertNil(DynamicRange.dolbyVisionProfileNumber(in: "Dolby Vision"))
+        XCTAssertEqual(
+            DynamicRange.dolbyVisionProfileNumber(in: "Dolby Vision · Profile 7"),
+            7
+        )
+    }
+
+    /// The converted state must not swallow the real downgrade beside it: a
+    /// forced rung re-encodes and reports no profile, and that half MUST dim.
+    func testAForcedTranscodeStillDimsTheSourceHalf() {
+        let badge = PlayerView.dynamicRangeBadge(
+            hdr: "dolby_vision",
+            hdrFormat: "Dolby Vision · Profile 7 (HDR10-compatible)",
+            delivered: "sdr",
+            displayHDR: true
+        )
+        XCTAssertEqual(badge?.dimmed, true)
+        XCTAssertEqual(badge?.renderedMark, "SDR")
+    }
+
     func testHlsMediaOriginPrefersTheActualKeyframeAndFallsBackCompatibly() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
