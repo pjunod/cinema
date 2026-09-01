@@ -311,8 +311,32 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("platforms: linux/${{ matrix.arch }}", workflow)
         self.assertIn("file: Dockerfile.release", workflow)
 
+        runtime_assets_marker = "FROM debian:bookworm-slim AS runtime-assets"
+        runtime_image_marker = "FROM runtime-assets AS runtime"
+        runtime_assets = dockerfile.index(runtime_assets_marker)
+        runtime_image = dockerfile.index(runtime_image_marker)
+        binary_copy = dockerfile.index(
+            "COPY --from=build /plurxd /usr/local/bin/plurxd"
+        )
+        self.assertLess(runtime_assets, runtime_image)
+        self.assertLess(runtime_image, binary_copy)
+        runtime_assets_stage = dockerfile.split(runtime_assets_marker, 1)[1].split(
+            runtime_image_marker, 1
+        )[0]
+        for assertion in (
+            "dovi_sha=daf538c275f4e702219ce8eb61db28382193ac9d0126e1ef4185a88303af4485",
+            "sha256sum -c -",
+            'dovi_tool --version | grep -F "${DOVI_TOOL_VERSION}"',
+            'mkvmerge --version | grep -F "mkvmerge v74.0.0"',
+            "/usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -bsfs",
+            "/usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -h filter=tonemapx",
+        ):
+            with self.subTest(runtime_asset_assertion=assertion):
+                self.assertIn(assertion, runtime_assets_stage)
+
     def test_docker_build_keeps_cluster_validation_features_out_of_plurxd(self):
         dockerfile = read("Dockerfile")
+        ci = read(".github/workflows/ci.yml")
         release = read(".github/workflows/publish-release.yml")
         self.assertNotIn(
             "cargo build --release -p plurxd -p plurx-cluster-check",
@@ -339,6 +363,33 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("--binary-export", release)
         self.assertIn("target: release-binaries", release)
         self.assertIn("trusted-packaging/scripts/release-package-candidate", release)
+
+        ci_package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        ci_package_steps = workflow_step_blocks(ci_package)
+        compile_step = ci_package_steps[
+            "Compile and export the exact candidate binaries"
+        ]
+        bind_step = ci_package_steps["Bind the binary set to this candidate tree"]
+        self.assertIn("file: Dockerfile.binaries", compile_step)
+        self.assertIn("target: release-binaries", compile_step)
+        self.assertIn("scripts/release-package-candidate", bind_step)
+        self.assertIn("binary-export release-bin", bind_step)
+        self.assertIn("for name in plurxd plurx-cluster-check", bind_step)
+        retention_step = ci_package_steps[
+            "Retain candidate binaries for push, tag, and qualification runs"
+        ]
+        artifact_paths = retention_step.split("\n          path: |\n", 1)[1].split(
+            "\n          if-no-files-found:", 1
+        )[0]
+        self.assertEqual(
+            [line.strip() for line in artifact_paths.splitlines() if line.strip()],
+            [
+                "release-bin/plurxd",
+                "release-bin/plurx-cluster-check",
+                "release-bin/build-manifest.json",
+                "release-bin/*.sha256",
+            ],
+        )
 
     def test_ship_routes_real_mobile_targets_through_ansible(self):
         ship = read("scripts/ship")

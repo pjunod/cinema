@@ -23,7 +23,7 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
     && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --locked --release -p plurx-cluster-check \
     && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime-assets
 ARG TARGETARCH
 ARG DOVI_TOOL_VERSION=2.3.3
 ARG MKVTOOLNIX_VERSION=74.0.0-1
@@ -113,6 +113,13 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
     && useradd -r -g plurx -d /var/lib/plurx plurx \
     && mkdir -p /var/lib/plurx \
     && chown plurx:plurx /var/lib/plurx
+
+# Keep the expensive, architecture-specific runtime asset assertions available
+# as their own CI target. The native release-build matrix already proves both
+# Rust binaries for arm64; rebuilding the entire Rust graph under QEMU made a
+# cold qualification exceed the Docker job's one-hour bound before these
+# runtime assertions could report a result.
+FROM runtime-assets AS runtime
 COPY --from=build /plurxd /usr/local/bin/plurxd
 # Stopped-node recovery and cluster validation tooling. The WAL inspector is
 # read-only, refuses a live lock, and lets an operator diagnose the same image

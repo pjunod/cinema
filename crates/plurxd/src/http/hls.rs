@@ -6539,6 +6539,75 @@ fn should_serve_high_tier_media_playlist(
         })
 }
 
+/// Does this codec advertisement name Dolby Vision?
+///
+/// `dvh1`/`dvhe` are the Dolby Vision sample-entry spellings; a preserved
+/// Profile 5 session carries one in `codecs` with no `SUPPLEMENTAL-CODECS`
+/// beside it, which is why "no supplemental" alone is not the question.
+fn advertises_dolby_vision(context: &crate::transcode::HlsContext) -> bool {
+    let names_dv = |value: &str| value.contains("dvh1") || value.contains("dvhe");
+    names_dv(&context.codecs) || context.supplemental_codecs.as_deref().is_some_and(names_dv)
+}
+
+/// Refuse to serve an initialization segment that declares Dolby Vision the
+/// playlist does not advertise.
+///
+/// The invariant is the playlist's own claim: if neither `CODECS` nor
+/// `SUPPLEMENTAL-CODECS` names Dolby Vision, an init carrying a `dvcC`/`dvvC`
+/// record is describing a stream this session does not serve.
+///
+/// That pair is exactly what the legacy muxer path produces. A copy that
+/// strips Dolby Vision removes the RPU and enhancement-layer NAL units with
+/// `filter_units`, which works on NAL types and cannot see the DOVI side data
+/// ffmpeg copied out of the source container — so on an ffmpeg without
+/// `dovi_rpu` the muxer writes a Profile 7 record with `el_present_flag = 1`
+/// over a stream carrying neither layer. The segmenting path removes it in
+/// `copyseg`, and the VOD path through the promotion funnel; the legacy path
+/// has ffmpeg's own HLS muxer write `init.mp4` straight to disk with no reader
+/// in between, so this is where it is caught. Chrome ignores the box;
+/// VideoToolbox honours it, and Safari answers 4K10 HEVC so labelled with a
+/// software decode on hardware that has a dedicated block for it
+/// (`docs/STUTTER-4K.md` §6).
+///
+/// Gated on what the playlist says rather than on how the session was built,
+/// deliberately. The serve path has no copy options in hand, and the question
+/// it can answer is better anyway: the playlist and the init must describe the
+/// same stream, whatever produced them. A preserved or converted session
+/// advertises Dolby Vision and keeps its record untouched.
+///
+/// The brand goes with it — `remove_dolby_vision_record` rewrites `dby1` in
+/// the same call, because `dby1` over a sample entry with no record is a
+/// contradictory init AVPlayer refuses outright rather than merely
+/// software-decoding.
+fn strip_unadvertised_dolby_vision(
+    context: &crate::transcode::HlsContext,
+    init: &mut Vec<u8>,
+) -> bool {
+    use plurx_core::fmp4::{FragmentReader, Unit};
+
+    if advertises_dolby_vision(context) {
+        return false;
+    }
+    let mut reader = FragmentReader::new();
+    reader.push(init);
+    let Ok(Some(Unit::Init(mut parsed))) = reader.next_unit() else {
+        return false;
+    };
+    // Only when the parse round-trips: this rewrites a file a client is about
+    // to play, and an init this reader models incompletely must be served as
+    // it is rather than as this function's idea of it.
+    if parsed.bytes != *init {
+        return false;
+    }
+    match plurx_core::fmp4::remove_dolby_vision_record(&mut parsed) {
+        Ok(true) => {
+            *init = parsed.bytes;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Clear the HEVC High-tier declaration AVPlayer rejects for otherwise
 /// hardware-decodable HDR copy sessions.
 ///
@@ -8239,7 +8308,13 @@ async fn segment_local_before(
             .await?;
             return Err(ApiError::Internal(error.to_string()));
         }
-        if let Ok((_, file, _)) = session_file(state, session, publication_deadline).await {
+        if let Ok((context, file, _)) = session_file(state, session, publication_deadline).await {
+            if strip_unadvertised_dolby_vision(&context, &mut init) {
+                tracing::info!(
+                    session = %crate::transcode::session_log_id(session),
+                    "removed a Dolby Vision record the playlist does not advertise"
+                );
+            }
             if normalize_high_tier_hevc_init(&file, &mut init) {
                 tracing::info!(
                     session = %crate::transcode::session_log_id(session),
@@ -13015,6 +13090,136 @@ mod tests {
         sdr.hdr = None;
         init[9] |= 0x20;
         assert!(!normalize_high_tier_hevc_init(&sdr, &mut init));
+    }
+
+    fn hls_context_with(codecs: &str, supplemental: Option<&str>) -> crate::transcode::HlsContext {
+        crate::transcode::HlsContext {
+            file_id: 1,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: codecs.to_owned(),
+            supplemental_codecs: supplemental.map(str::to_owned),
+            frame_rate: None,
+        }
+    }
+
+    /// A real muxer init carrying the Profile 7 record a stripping copy leaves
+    /// behind, plus the `dby1` brand movenc writes beside it.
+    fn init_with_a_stale_dolby_vision_record() -> Vec<u8> {
+        use plurx_core::fmp4::{FragmentReader, Unit};
+        let feed = plurx_core::testfixtures::pipe("clean-cra");
+        let mut reader = FragmentReader::new();
+        reader.push(&feed);
+        let Ok(Some(Unit::Init(mut init))) = reader.next_unit() else {
+            panic!("the fixture opens with an init");
+        };
+        let record = plurx_core::fmp4::DolbyVisionRecord::new(7, 6, true, true, false, 0)
+            .expect("a describable record");
+        assert!(plurx_core::fmp4::set_dolby_vision_record(&mut init, &record).expect("insert"));
+        init.bytes[8..12].copy_from_slice(b"dby1");
+        init.bytes
+    }
+
+    /// The legacy muxer path's catch: a playlist that advertises no Dolby
+    /// Vision must not serve an init that declares it.
+    ///
+    /// That path has ffmpeg's own HLS muxer write `init.mp4` straight to disk
+    /// with no reader in between, so neither `copyseg`'s removal nor the VOD
+    /// promotion's runs. `filter_units` took the layers out by NAL type and
+    /// left the DOVI side data the record was written from, so the init
+    /// declares Profile 7 with an enhancement layer over a stream carrying
+    /// neither — which VideoToolbox honours by refusing the hardware path.
+    #[test]
+    fn an_init_declaring_dolby_vision_the_playlist_does_not_is_stripped() {
+        plurx_core::testfixtures::require_ffmpeg();
+        let mut init = init_with_a_stale_dolby_vision_record();
+        assert!(
+            init.windows(4).any(|f| f == b"dvcC" || f == b"dvvC"),
+            "the fixture must carry a record for this test to mean anything"
+        );
+
+        let stripped = hls_context_with("hvc1.2.4.L153.90", None);
+        assert!(strip_unadvertised_dolby_vision(&stripped, &mut init));
+        assert!(
+            !init.windows(4).any(|f| f == b"dvcC" || f == b"dvvC"),
+            "the record survived a playlist that advertises plain HEVC"
+        );
+        // The brand goes with it: `dby1` over a sample entry with no record is
+        // the contradictory init AVPlayer refuses outright, which is a harder
+        // failure than the stutter.
+        assert!(!init.windows(4).any(|f| f == b"dby1"));
+        // Idempotent — an init with nothing to remove is not an error.
+        assert!(!strip_unadvertised_dolby_vision(&stripped, &mut init));
+    }
+
+    /// …and a session that DOES advertise Dolby Vision keeps its record.
+    ///
+    /// Both spellings, because a preserved Profile 5 names Dolby Vision in
+    /// `CODECS` with no `SUPPLEMENTAL-CODECS` beside it — so "no supplemental"
+    /// is not the question, and asking it would strip the record off the one
+    /// kind of session that genuinely needs it.
+    #[test]
+    fn an_advertised_dolby_vision_session_keeps_its_record() {
+        plurx_core::testfixtures::require_ffmpeg();
+        let original = init_with_a_stale_dolby_vision_record();
+
+        // Converted, and preserved-8.1: named in SUPPLEMENTAL-CODECS.
+        for supplemental in ["dvh1.08.06/db1p", "dvh1.08.06/db4h"] {
+            let mut init = original.clone();
+            let context = hls_context_with("hvc1.2.4.L153.90", Some(supplemental));
+            assert!(!strip_unadvertised_dolby_vision(&context, &mut init));
+            assert_eq!(init, original, "{supplemental}");
+        }
+
+        // Preserved Profile 5: named in CODECS, nothing supplemental.
+        let mut init = original.clone();
+        let profile5 = hls_context_with("dvh1.05.06", None);
+        assert!(!strip_unadvertised_dolby_vision(&profile5, &mut init));
+        assert_eq!(init, original);
+    }
+
+    /// Anything this reader does not account for byte-for-byte is served as it
+    /// is, rather than as the reader's idea of it.
+    ///
+    /// Two shapes, and the second is the one that matters. Bytes that do not
+    /// parse at all are refused by the parse itself. Bytes that parse but
+    /// carry more than the init — a fragment appended, a trailing box this
+    /// model does not walk — would have their tail silently dropped, because
+    /// the rewrite replaces the whole buffer with what the reader accounted
+    /// for. This rewrites a file a client is about to play; truncating it is a
+    /// worse outcome than leaving the record in.
+    #[test]
+    fn anything_the_reader_does_not_fully_account_for_is_left_alone() {
+        let context = hls_context_with("hvc1.2.4.L153.90", None);
+
+        let mut garbage = b"\x00\x00\x00\x10ftypiso6\x00\x00\x00\x00not-a-moov".to_vec();
+        let before = garbage.clone();
+        assert!(!strip_unadvertised_dolby_vision(&context, &mut garbage));
+        assert_eq!(garbage, before);
+
+        let mut empty = Vec::new();
+        assert!(!strip_unadvertised_dolby_vision(&context, &mut empty));
+        assert!(empty.is_empty());
+
+        // A real init with a stale record — which this DOES strip — plus a
+        // trailing byte it does not account for, which must stop it.
+        plurx_core::testfixtures::require_ffmpeg();
+        let mut alone = init_with_a_stale_dolby_vision_record();
+        assert!(
+            strip_unadvertised_dolby_vision(&context, &mut alone),
+            "the control: this init on its own is rewritten"
+        );
+
+        let mut with_tail = init_with_a_stale_dolby_vision_record();
+        let expected = with_tail.clone();
+        with_tail.extend_from_slice(b"trailing");
+        let before_tail = with_tail.clone();
+        assert!(
+            !strip_unadvertised_dolby_vision(&context, &mut with_tail),
+            "an init with bytes past its end must not be rewritten"
+        );
+        assert_eq!(with_tail, before_tail, "and not truncated");
+        assert_ne!(with_tail.len(), expected.len());
     }
 
     #[test]

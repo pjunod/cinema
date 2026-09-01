@@ -309,7 +309,7 @@ timeout_seconds = 7200
 [[points]]
 id = "core.media"
 title = "Media facts, persistence, and domain rules"
-contract = "The core model classifies media and persists its durable state without corrupting existing libraries, including bounded idempotency, ownership, leases, and routes for live cluster media sessions."
+contract = "The core model classifies media and persists its durable state without corrupting existing libraries, including bounded idempotency, ownership, leases, and routes for live cluster media sessions; replacing an occupied preparation is one atomic abort-and-prepare mutation that never advances the playback pointer and whose exact retry reads back the staged merged route."
 paths = [
   "Cargo.lock",
   "Cargo.toml",
