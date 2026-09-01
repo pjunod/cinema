@@ -284,8 +284,8 @@ The full working lives in the agent notes as `M5C-VERDICT.md`, which is
 outside this repository; the short form is here because it closes a milestone
 and the evidence should not depend on a file the repository cannot show.
 
-**What the fleet answered.** Four induced conditions, actions recorded off the
-live control endpoint, counters read from `/metrics` before and after:
+**What the fleet answered, while the delivery was troubled.** Actions recorded
+off the live control endpoint, counters read from `/metrics` before and after:
 
 | induced | observation sent | action returned |
 |---|---|---|
@@ -294,9 +294,23 @@ live control endpoint, counters read from `/metrics` before and after:
 | resume 30m into a fresh transcode | — | `hold { reason: "ahead" }` |
 | paused, producer starting | — | `hold { reason: "demand" }` |
 
-Over the session: `hold` 40+, `none` 1. **No exchange returned `none` while
-the delivery was troubled**, which was the question
-its predecessor `M5C-BLOCKED.md` §5 posed.
+**No exchange returned `none` while the delivery was troubled**, which is the
+question its predecessor `M5C-BLOCKED.md` §5 posed, and it is not the question
+that decides the milestone.
+
+**What it answered while the delivery was healthy.** Repeated against a quiet
+node (`transcodes=0`, `readyz` 200 on all four):
+
+| induced | observation sent | action returned |
+|---|---|---|
+| nothing — healthy session | — | **`none`** |
+| `DELETE /api/v1/hls/{session}`, HTTP 204 | `failed` · `failed` · `media` | **`none`** |
+| stall report on the same session | `stalled` · `starved` · `network` | **`none`** |
+
+Thirteen exchanges spanned the session kill and every one returned `none`.
+Across the night on nuc4: web `none` **23 → 58**, web `hold` static at **55**,
+and `terminal` and `retry_resource` **never observed at all**, on any
+platform.
 
 **The first two rows are the finding.** A client reporting *starved* and a
 client reporting *a broken stream* received the same answer, because
@@ -344,9 +358,13 @@ frame in twelve minutes across two titles. `plurx_analysis_queue_depth` shows
 4 `claimed` and 18 `retry_wait` `fragment_index` jobs against 410 `failed`,
 and `plurx_analysis_lifecycle_total{event="failure",reason="attempt_limit"}`
 reads **564**. That is not a playback-control condition and it is not a queue
-that is catching up. It also means the counterpart measurement — what a
-*healthy* session answers when the client reports a failure — is unmeasured on
-hardware; the code says `none`, which is what the second bullet above rests on.
+that is catching up. The node was quiet again when the healthy-session rows
+above were taken, so those are not a saturation artefact. What remains
+unmeasured is the unsupported-source arm: the analysis-failed files are
+ordinary h264 and play, and a genuine producer refusal needs a bad source
+placed on a node or a shell there, neither of which this session has. It
+stays established by ruling D1 and by `is_permanent` rather than by
+hardware.
 
 
 ## Open decisions
