@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c7d8e9a7"]
+points = ["core.media"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained cross-backend rejoin contract advances the playback pointer through an independent activation while leaving the old preparation ledger present, then requires a replacement derived from the newer pointer to be rejected without retiring or retargeting the occupied preparation."
