@@ -6,8 +6,11 @@ first.
 
 ## Exact-count cluster assertions (the `v0.3.0` release blocker)
 
-**PR [#744](https://github.com/pjunod/plurx/pull/744)
-(`agent/exact-count-drill-accounting`) — built, verified, in review/CI.**
+**PR [#744](https://github.com/pjunod/plurx/pull/744) — MERGED to main
+(`0600459f`, 2026-09-01) after two adversarial review rounds, a green
+`make check` + `make cluster-harness-check`, and a fully green CI run
+including the release-blocking `replicated store and topology contracts`
+job.**
 
 The two exact-count assertions that failed the `v0.3.0` cut (#736) on a
 no-Rust-behaviour diff were investigated per the exact-count writeup,
@@ -43,14 +46,20 @@ evidence first:
       time, windows declare which classes are legitimate, undeclared classes
       stay hard contamination, and the topology artifact records the
       tolerated count as `window_background_entries` (schema extended).
-- [~] Verification: `make cluster-harness-check` green end to end; 10
+- [x] Verification: `make cluster-harness-check` green end to end; 10
       consecutive learner-drill runs green with the renewal accounted;
-      full-suite run and PR CI in progress — merge follows green.
+      `make check` green; PR CI fully green (the one red along the way was
+      the stale-base mobile-version trap below, cleared by rebasing).
+- [x] Merged as `0600459f`. Nothing to deploy: the change is harness and
+      validation-only; production `plurxd` compiles none of it.
 - [x] Topology's CI contaminant: attributed to the membership heartbeat
       class and tolerated by name; lease-class traffic there remains hard
       contamination, and any unclassified entry still fails with kinds and
       terms named.
 
-**Decision made without Paul (flagged for review):** no change to
-`docs/RELEASING.md`; the writeup's §7 suggestion (one cold-cache CI run
-before the tag) is raised in the PR body for Paul to rule on.
+**Decisions made without Paul (flagged for review):** no change to
+`docs/RELEASING.md` — the writeup's §7 suggestion (one cold-cache CI run
+before the tag) is raised in the PR body for Paul to rule on. Trap worth
+knowing: while a PR is open, client version bumps landing on main make the
+`mobile release version` gate blame the PR through its stale recorded base —
+the fix is a rebase, not a bump.
