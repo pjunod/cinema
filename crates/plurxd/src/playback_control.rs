@@ -668,8 +668,77 @@ pub(crate) struct DeliveryView {
     /// field, and absence means "not classified here", never "healthy".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer_decision: Option<String>,
+    /// Readiness of the native text subtitle track this client's selection
+    /// names, when this server evaluated it.
+    ///
+    /// One of `ready`, `warming`, or `unavailable`. `ready` means the cached
+    /// text is servable now — until bounded materialization lands that is the
+    /// whole-track sidecar, and afterwards it tightens to the demand window,
+    /// which is a narrowing of the same promise rather than a change of
+    /// meaning. `warming` means materialization is in flight and segments stay
+    /// empty until it lands. `unavailable` means stop asking: no such track,
+    /// a bitmap track that can only be burned in, or an extraction that failed
+    /// and whose memo is still live. The cause is deliberately not on the
+    /// wire — the client's behaviour is identical for all three, and the
+    /// distinctions are already in the logs and the 415 message.
+    ///
+    /// Absent means "not classified here", never "ready": an older peer
+    /// relaying a response carries no such field, and this is populated only
+    /// when the selection actually names a native text track. A value this
+    /// client does not recognise is treated as absent for the same reason.
+    ///
+    /// It exists so a client stops guessing when to re-fetch an empty subtitle
+    /// segment. The segment route answers `WEBVTT\n\n` with `no-store` while a
+    /// sidecar warms, and nothing told the client when that stopped being the
+    /// answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_readiness: Option<String>,
     pub owner_node_hash: String,
     pub owner_epoch: u64,
+}
+
+/// What the cache knows about the selected subtitle track, as the control
+/// plane needs it. Mirrors `subtitles::SidecarState` without depending on it,
+/// so the verdict below is decidable in a test with no filesystem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SubtitleTrackCache {
+    Ready,
+    /// Nothing cached yet, and this includes "nothing running": from the
+    /// client's side both mean the same thing — keep asking — and collapsing
+    /// them here is what keeps `warming` from having two meanings on the wire.
+    Warming,
+    /// Failed with a live memo, no such track, or a bitmap track.
+    Unavailable,
+}
+
+/// The wire value for [`DeliveryView::subtitle_readiness`], or `None` when
+/// there is nothing honest to say.
+///
+/// `None` for every mode but `Native`: burn-in subtitles are video and their
+/// readiness is the producer's, already reported; `Overlay` is rendered from a
+/// bitmap track by the overlay path, which has its own lifecycle; `Off` names
+/// no track at all. Reporting on a track nobody selected is noise a client
+/// would have to learn to ignore, and a field that is sometimes about
+/// something else is worse than a field that is sometimes absent.
+pub(crate) fn subtitle_readiness_value(
+    selection: &SubtitleSelection,
+    cache: Option<SubtitleTrackCache>,
+) -> Option<String> {
+    if !matches!(selection.mode, SubtitleMode::Native) {
+        return None;
+    }
+    // `Native` without a track fails validation before it reaches here, so a
+    // missing cache verdict means the caller could not resolve the track at
+    // all — which is `unavailable`, not silence: the client asked for a
+    // specific track and deserves to be told to stop waiting for it.
+    Some(
+        match cache {
+            Some(SubtitleTrackCache::Ready) => "ready",
+            Some(SubtitleTrackCache::Warming) => "warming",
+            Some(SubtitleTrackCache::Unavailable) | None => "unavailable",
+        }
+        .to_owned(),
+    )
 }
 
 impl DeliveryView {
@@ -679,6 +748,7 @@ impl DeliveryView {
         owner_node_id: &str,
         owner_epoch: u64,
         media_origin_ms: i64,
+        subtitle_readiness: Option<String>,
     ) -> Self {
         let buffer_anchor_ms = request.seek_target_ms.unwrap_or(request.position_ms);
         let client_runway_ms = request
@@ -712,6 +782,7 @@ impl DeliveryView {
                     }
                     .to_owned()
                 }),
+                subtitle_readiness: subtitle_readiness.clone(),
                 owner_node_hash: node_hash(owner_node_id),
                 owner_epoch,
             },
@@ -730,6 +801,7 @@ impl DeliveryView {
                 // absent rather than guessed.
                 producer_decision: None,
                 hold_reason: info.producer_hold.map(str::to_owned),
+                subtitle_readiness,
                 owner_node_hash: node_hash(owner_node_id),
                 owner_epoch,
             },
@@ -1472,6 +1544,7 @@ pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> Control
             admitted: None,
             producer_decision: None,
             hold_reason: None,
+            subtitle_readiness: None,
             owner_node_hash: "n-test".to_owned(),
             owner_epoch: 1,
         },
@@ -9437,6 +9510,7 @@ mod tests {
                     admitted: None,
                     producer_decision: None,
                     hold_reason: None,
+                    subtitle_readiness: None,
                     owner_node_hash: "n-test".to_owned(),
                     owner_epoch: 1,
                 },
@@ -9582,6 +9656,7 @@ mod tests {
             admitted: None,
             producer_decision: None,
             hold_reason: reason.map(str::to_owned),
+            subtitle_readiness: None,
             owner_node_hash: "n-0123456789abcdef".to_owned(),
             owner_epoch: 1,
         }
@@ -9717,6 +9792,77 @@ mod tests {
                 "{name} is not a wire-safe name",
             );
         }
+    }
+
+    /// The readiness value is a fact about the *selected* track, and silence
+    /// is a real answer rather than a missing one.
+    #[test]
+    fn subtitle_readiness_speaks_only_for_a_selected_native_track() {
+        let native = |track| SubtitleSelection {
+            mode: SubtitleMode::Native,
+            track: Some(track),
+        };
+
+        assert_eq!(
+            subtitle_readiness_value(&native(0), Some(SubtitleTrackCache::Ready)).as_deref(),
+            Some("ready")
+        );
+        assert_eq!(
+            subtitle_readiness_value(&native(0), Some(SubtitleTrackCache::Warming)).as_deref(),
+            Some("warming")
+        );
+        assert_eq!(
+            subtitle_readiness_value(&native(0), Some(SubtitleTrackCache::Unavailable)).as_deref(),
+            Some("unavailable")
+        );
+        // A track the caller could not resolve at all: the client asked for a
+        // specific one and deserves to be told to stop waiting, not silence.
+        assert_eq!(
+            subtitle_readiness_value(&native(0), None).as_deref(),
+            Some("unavailable")
+        );
+
+        // Every other mode names no sidecar. Burn-in is video and its
+        // readiness is the producer's, already reported; overlay is the bitmap
+        // path's own lifecycle; off names no track.
+        for mode in [SubtitleMode::Off, SubtitleMode::Overlay, SubtitleMode::Burn] {
+            let selection = SubtitleSelection {
+                mode,
+                // `Off` carries no track and the others must; validation
+                // enforces that upstream, so match it rather than fight it.
+                track: (!matches!(mode, SubtitleMode::Off)).then_some(0),
+            };
+            assert_eq!(
+                subtitle_readiness_value(&selection, Some(SubtitleTrackCache::Ready)),
+                None,
+                "{mode:?} must not report subtitle readiness"
+            );
+        }
+    }
+
+    /// An older peer relays a response it built before this field existed.
+    ///
+    /// `DeliveryView` is `deny_unknown_fields`, so the compatibility that
+    /// matters runs the other way: absence must deserialize, and must not be
+    /// read as `ready`. This mirrors the guarantee `producer_decision` already
+    /// carries — absence means "not classified here", never "healthy".
+    #[test]
+    fn a_delivery_without_subtitle_readiness_round_trips_as_absent() {
+        let json = serde_json::to_string(&delivery_with_hold(None)).expect("serialize");
+        assert!(
+            !json.contains("subtitle_readiness"),
+            "an absent readiness must not be written to the wire at all: {json}"
+        );
+
+        let relayed: DeliveryView = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(relayed.subtitle_readiness, None);
+
+        let mut ready = delivery_with_hold(None);
+        ready.subtitle_readiness = Some("ready".to_owned());
+        let round_tripped: DeliveryView =
+            serde_json::from_str(&serde_json::to_string(&ready).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(round_tripped.subtitle_readiness.as_deref(), Some("ready"));
     }
 
     fn delivery_with_decision(decision: &str) -> DeliveryView {
@@ -13538,6 +13684,7 @@ mod tests {
                 admitted: Some(true),
                 producer_decision: None,
                 hold_reason: None,
+                subtitle_readiness: None,
                 owner_node_hash: "n-0123456789abcdef".to_owned(),
                 owner_epoch: 1,
             },

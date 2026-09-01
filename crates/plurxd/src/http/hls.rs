@@ -3563,6 +3563,45 @@ struct RetainedTerminalResponse {
     response: crate::playback_control::ControlResponseV1,
 }
 
+/// Resolve the selected native text track's cache state for the control
+/// response.
+///
+/// Gated on `Native` before anything is read: `Off`, `Overlay` and `Burn` name
+/// no sidecar, so the common case costs one enum comparison and no store hit.
+/// Nothing here starts an extraction — a readiness probe that did would make
+/// every control exchange a reason to spawn ffmpeg.
+async fn subtitle_track_cache(
+    state: &AppState,
+    recipe: &RemoteStartRequest,
+    selection: &crate::playback_control::SubtitleSelection,
+) -> Option<crate::playback_control::SubtitleTrackCache> {
+    use crate::playback_control::{SubtitleMode, SubtitleTrackCache};
+
+    if !matches!(selection.mode, SubtitleMode::Native) {
+        return None;
+    }
+    let index = selection.track?;
+    let file = state.store.get_file(recipe.request.file_id).await.ok()??;
+    // A track that is not there, or is there as a bitmap, will never produce a
+    // sidecar however long the client waits. Saying `unavailable` is the whole
+    // point of distinguishing it from `warming`.
+    let Some(track) = usize::try_from(index).ok().and_then(|i| file.subtitle_streams.get(i)) else {
+        return Some(SubtitleTrackCache::Unavailable);
+    };
+    if !plurx_core::tracks::is_native_text_subtitle(&track.codec) {
+        return Some(SubtitleTrackCache::Unavailable);
+    }
+    Some(
+        match crate::subtitles::sidecar_state(&state.subs_dir, &file, index).await {
+            crate::subtitles::SidecarState::Ready => SubtitleTrackCache::Ready,
+            crate::subtitles::SidecarState::Failed => SubtitleTrackCache::Unavailable,
+            crate::subtitles::SidecarState::Warming | crate::subtitles::SidecarState::Absent => {
+                SubtitleTrackCache::Warming
+            }
+        },
+    )
+}
+
 fn local_control_response(
     route: &MediaSessionRoute,
     start: &StartResponse,
@@ -3570,6 +3609,7 @@ fn local_control_response(
     request: &crate::playback_control::ControlRequestV1,
     result: &crate::playback_control::LocalControlResult,
     server_time_unix_ms: i64,
+    subtitle_readiness: Option<String>,
 ) -> crate::playback_control::ControlResponseV1 {
     let owner_epoch = u64::try_from(route.owner_epoch).unwrap_or_default();
     let response = crate::playback_control::ControlResponseV1 {
@@ -3593,6 +3633,7 @@ fn local_control_response(
             &route.owner_node_id,
             owner_epoch,
             route.media_origin_ms,
+            subtitle_readiness,
         ),
         effective_selection: crate::playback_control::EffectiveSelection::from_recipe(
             recipe,
@@ -3773,6 +3814,11 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
             &self.request,
             result,
             server_time_unix_ms,
+            // The session is ending. Subtitle readiness is a fact about a
+            // stream that will keep serving segments, and this one will not;
+            // absent is the honest answer, and this trait method cannot await
+            // a probe anyway.
+            None,
         );
         let response_json = serde_json::to_string(&RetainedTerminalResponse {
             platform: result.platform,
@@ -4475,7 +4521,18 @@ async fn control_local_inner(
             }
         }
     } else {
-        local_control_response(route, &start, &recipe, &request, &result, unix_ms())
+        local_control_response(
+            route,
+            &start,
+            &recipe,
+            &request,
+            &result,
+            unix_ms(),
+            crate::playback_control::subtitle_readiness_value(
+                &request.selection.subtitle,
+                subtitle_track_cache(state, &recipe, &request.selection.subtitle).await,
+            ),
+        )
     };
     let outcome = match result.disposition {
         crate::playback_control::ControlDisposition::Accepted => {
@@ -9585,6 +9642,7 @@ mod tests {
                     admitted,
                     producer_decision: None,
                     hold_reason: None,
+                    subtitle_readiness: None,
                     owner_node_hash: "n-0123456789abcdef".to_owned(),
                     owner_epoch: 1,
                 },
