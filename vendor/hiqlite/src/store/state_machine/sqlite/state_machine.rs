@@ -39,6 +39,15 @@ static VALIDATION_APPLY_PAUSED: AtomicBool = AtomicBool::new(false);
 static VALIDATION_APPLY_PAUSE_OBSERVED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "validation-test-helpers")]
 static VALIDATION_APPLY_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+#[cfg(feature = "validation-test-helpers")]
+static VALIDATION_APPLIED_BLANK: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "validation-test-helpers")]
+static VALIDATION_APPLIED_MEMBERSHIP: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "validation-test-helpers")]
+static VALIDATION_APPLIED_NORMAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Pause this validation process immediately before its next SQLite
 /// state-machine apply. The feature is absent from production builds.
@@ -51,6 +60,21 @@ pub fn validation_pause_apply() {
 #[cfg(feature = "validation-test-helpers")]
 pub fn validation_apply_pause_observed() -> bool {
     VALIDATION_APPLY_PAUSE_OBSERVED.load(Ordering::Acquire)
+}
+
+/// Counts of Raft entries this process's SQLite state machine has applied,
+/// as `(blank, membership, normal)`. Blank entries are OpenRaft's
+/// leader-establishment commits and membership entries are configuration
+/// changes; neither runs SQL, so a drill that counts committed indexes cannot
+/// tell them apart from acknowledged writes without this breakdown. The
+/// counters are process-local, monotonic, and absent from production builds.
+#[cfg(feature = "validation-test-helpers")]
+pub fn validation_applied_payload_counts() -> (u64, u64, u64) {
+    (
+        VALIDATION_APPLIED_BLANK.load(Ordering::Acquire),
+        VALIDATION_APPLIED_MEMBERSHIP.load(Ordering::Acquire),
+        VALIDATION_APPLIED_NORMAL.load(Ordering::Acquire),
+    )
 }
 
 #[cfg(feature = "validation-test-helpers")]
@@ -994,6 +1018,40 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
             #[cfg(feature = "backup")]
             let backup_owner = committed_backup_owner(&entry.log_id);
             let last_applied_log_id = Some(entry.log_id);
+
+            #[cfg(feature = "validation-test-helpers")]
+            {
+                match &entry.payload {
+                    EntryPayload::Blank => &VALIDATION_APPLIED_BLANK,
+                    EntryPayload::Membership(_) => &VALIDATION_APPLIED_MEMBERSHIP,
+                    EntryPayload::Normal(_) => &VALIDATION_APPLIED_NORMAL,
+                }
+                .fetch_add(1, Ordering::Release);
+                // Env-gated apply log: one line per applied entry with its
+                // index and payload, so an exact-count investigation can name
+                // the precise entry that contaminated a window. Off unless
+                // PLURX_VALIDATION_LOG_APPLIED is set at process start.
+                static VALIDATION_LOG_APPLIED: std::sync::OnceLock<bool> =
+                    std::sync::OnceLock::new();
+                if *VALIDATION_LOG_APPLIED.get_or_init(|| {
+                    std::env::var_os("PLURX_VALIDATION_LOG_APPLIED").is_some()
+                }) {
+                    let mut payload = match &entry.payload {
+                        EntryPayload::Blank => "blank".to_owned(),
+                        EntryPayload::Membership(_) => "membership".to_owned(),
+                        EntryPayload::Normal(query) => format!("{query:?}"),
+                    };
+                    if payload.len() > 600 {
+                        let mut cut = 600;
+                        while !payload.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                        payload.truncate(cut);
+                        payload.push('…');
+                    }
+                    eprintln!("validation-applied {} {payload}", entry.log_id.index);
+                }
+            }
 
             // TODO if we always collect 1 in-flight req in a temp var to always have 1 req prepared
             // before we await the rx before, we could probably improve the throughput here a bit
