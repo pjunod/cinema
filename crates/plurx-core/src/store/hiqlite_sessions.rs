@@ -3763,39 +3763,61 @@ mod tests {
                 && !method.contains("statements.push(")
                 && !method.contains("statements.extend(")
                 && !method.contains("statements.insert(")
-                && !method.contains("statements.pop("),
+                && !method.contains("statements.pop(")
+                && !method.contains(".execute")
+                && !method.contains("\"INSERT ")
+                && !method.contains("\"UPDATE ")
+                && !method.contains("\"DELETE "),
             "the public preparation path must submit the shared statement vector unchanged"
         );
         let preparation = statement_test_preparation();
-        let statement_sql = prepare_statements(&preparation)
-            .into_iter()
+        let statements = prepare_statements(&preparation);
+        assert_eq!(
+            statements.len(),
+            3,
+            "preparation is exactly lease, session, then ledger"
+        );
+        let statement_sql = statements
+            .iter()
             .map(|(sql, _)| sql)
+            .copied()
             .collect::<Vec<_>>()
             .join("\n");
-        let source = format!("{method}\n{statement_sql}");
         assert!(
-            !source.contains("terminal_reason = 'superseded'"),
+            !method.contains("terminal_reason = 'superseded'")
+                && !statement_sql.contains("terminal_reason = 'superseded'"),
             "prepare must not run the supersession reap"
         );
         assert!(
-            !source.contains("UPDATE media_playback_pointers")
-                && !source.contains("INSERT INTO media_playback_pointers"),
+            !method.contains("media_playback_pointers")
+                && !statement_sql.contains("UPDATE media_playback_pointers")
+                && !statement_sql.contains("INSERT INTO media_playback_pointers")
+                && !statement_sql.contains("DELETE FROM media_playback_pointers"),
             "prepare must not write the pointer — a staged successor is \
              invisible to the current-session lookup precisely because it \
              holds none"
         );
-        let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        let lease_sql = statements[0]
+            .0
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let session_sql = statements[1]
+            .0
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
-            normalized.contains(
+            lease_sql.contains(
                 "NOT EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $5 AND playback_id = $6)"
-            ) && normalized.contains(
+            ) && session_sql.contains(
                 "NOT EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $3 AND playback_id = $4)"
             ),
             "both lease and session admission enforce one staged successor per \
              playback because a replicated transaction cannot read and branch"
         );
         assert!(
-            source.contains("INSERT INTO job_leases"),
+            statements[0].0.contains("INSERT INTO job_leases"),
             "a staged successor takes its own session lease, or it can never \
              be renewed or taken over once it commits"
         );
@@ -3818,48 +3840,54 @@ mod tests {
                 && !method.contains("statements.push(")
                 && !method.contains("statements.extend(")
                 && !method.contains("statements.insert(")
-                && !method.contains("statements.pop("),
+                && !method.contains("statements.pop(")
+                && !method.contains(".execute")
+                && !method.contains("\"INSERT ")
+                && !method.contains("\"UPDATE ")
+                && !method.contains("\"DELETE "),
             "the public abort path must submit the shared statement vector unchanged"
         );
-        let statement_sql =
-            abort_statements(1, "playback", "00000000-0000-4000-8000-000000000002", 1)
-                .into_iter()
-                .map(|(sql, _)| sql)
-                .collect::<Vec<_>>()
-                .join("\n");
-        let source = format!("{method}\n{statement_sql}");
-        assert!(
-            source.contains("EXISTS (SELECT 1 FROM media_session_preparations"),
-            "the retirement is gated on the ledger row — the incarnation id \
-             alone names any session in the database"
-        );
+        let statements = abort_statements(1, "playback", "00000000-0000-4000-8000-000000000002", 1);
         assert_eq!(
-            source
-                .matches("state = 'ended' AND updated_at_ms = $")
-                .count(),
-            2,
+            statements.len(),
+            4,
+            "abort is exactly retirement, pin delete, lease clamp, then ledger delete"
+        );
+        let retirement = statements[0].0;
+        let pin_delete = statements[1].0;
+        let lease_clamp = statements[2].0;
+        let ledger_delete = statements[3].0;
+        assert!(
+            retirement.contains("UPDATE media_sessions")
+                && pin_delete.contains("DELETE FROM cache_consumer_pins")
+                && lease_clamp.contains("UPDATE job_leases")
+                && ledger_delete.contains("DELETE FROM media_session_preparations"),
+            "the abort statement order is part of its transaction contract"
+        );
+        for (name, sql) in [
+            ("retirement", retirement),
+            ("pin delete", pin_delete),
+            ("lease clamp", lease_clamp),
+        ] {
+            assert!(
+                sql.contains("EXISTS (SELECT 1 FROM media_session_preparations"),
+                "the {name} is gated on the ledger row"
+            );
+        }
+        assert!(
+            pin_delete.contains("state = 'ended' AND updated_at_ms = $")
+                && lease_clamp.contains("state = 'ended' AND updated_at_ms = $"),
             "the pin delete and the lease clamp also chain on that retirement \
              having fired at this instant — `now_ms` is the caller's, so the \
              timestamp alone is not proof, and the ledger EXISTS alone does \
              not say the work is this abort's"
         );
         assert_eq!(
-            source
+            ledger_delete
                 .matches("EXISTS (SELECT 1 FROM media_session_preparations")
                 .count(),
-            3,
-            "all three mutations are ledger-gated; only the ledger DELETE \
-             itself is not, and it comes last"
-        );
-        let ledger_delete = source
-            .find("DELETE FROM media_session_preparations")
-            .expect("the ledger row is cleared");
-        assert!(
-            ledger_delete
-                > source
-                    .find("UPDATE media_sessions")
-                    .expect("the retirement exists"),
-            "the ledger DELETE comes last, because the retirement reads it"
+            0,
+            "only the final exact ledger DELETE is not ledger-existence gated"
         );
     }
 
