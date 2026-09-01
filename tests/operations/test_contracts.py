@@ -1214,6 +1214,12 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("PLURX_BUILD_SHA=${{ github.sha }}", package)
         self.assertIn("plurx-cluster-check", package)
         self.assertIn("build-identity", package)
+        label_template = (
+            "docker image inspect --format "
+            "'{{ index .Config.Labels \"org.opencontainers.image.revision\" }}'"
+        )
+        self.assertEqual(workflow.count(label_template), 2)
+        self.assertNotIn(r'index .Config.Labels \"', workflow)
         self.assertIn(
             'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', package
         )

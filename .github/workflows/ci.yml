@@ -946,7 +946,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = "linux/$ARCH"
-          test "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' "$IMAGE")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$GITHUB_SHA"
           version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
             | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
           test "$(docker run --rm --platform "linux/$ARCH" "$IMAGE" --version)" = "plurxd $version ($GITHUB_SHA)"
@@ -1056,7 +1056,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = linux/arm64
-          test "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' "$IMAGE")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$GITHUB_SHA"
           version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
             | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
           test "$(docker run --rm "$IMAGE" --version)" = "plurxd $version ($GITHUB_SHA)"
