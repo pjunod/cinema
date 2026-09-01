@@ -962,6 +962,7 @@ mod tests {
         // which is exactly what M0-P0 clause (d) turned out to have measured.
         let (first, _) = two_generations();
         let promoting = PromotionInputs {
+            strip_dolby_vision: false,
             dolby_vision: None,
             parameter_sets: vec![vec![0x40, 0x01, 0x0c]],
             hdr10_sei: Vec::new(),

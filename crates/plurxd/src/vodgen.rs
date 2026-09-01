@@ -601,7 +601,7 @@ mod tests {
     use plurx_core::testfixtures::{self, pipe};
     use plurx_core::transcode::{copy_pipe_args, Pacing};
 
-    use crate::fragindex::{index_stream, IndexOutcome};
+    use crate::fragindex::{index_stream, DolbyVisionPass, IndexOutcome};
 
     /// A sink that remembers what it was handed and can start refusing.
     #[derive(Default)]
@@ -695,7 +695,7 @@ mod tests {
             std::io::Cursor::new(index_pipe_bytes("clean-cra")),
             SourceIdentity::new(1, 1, "fingerprint"),
             None,
-            None,
+            DolbyVisionPass::Untouched,
         )
         .await
         {
@@ -744,7 +744,7 @@ mod tests {
             std::io::Cursor::new(indexed),
             SourceIdentity::new(1, 1, "fingerprint+p81"),
             None,
-            Some(record),
+            DolbyVisionPass::Rewrite(Box::new(record)),
         )
         .await
         {

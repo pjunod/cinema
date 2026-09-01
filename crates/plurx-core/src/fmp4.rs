@@ -815,6 +815,32 @@ pub struct PromotionInputs {
     /// written anywhere else would be written on one path and not the other.
     #[serde(default)]
     pub dolby_vision: Option<DolbyVisionRecord>,
+
+    /// Delete the muxer's Dolby Vision record instead of replacing it.
+    ///
+    /// The strip path's counterpart to `dolby_vision`, and it lives here for
+    /// the same reason: promotion has to be a pure function of stored facts,
+    /// or a regenerated init differs from the stored one and the generation is
+    /// refused. A removal performed anywhere else would happen on the live
+    /// path and not on a head regeneration.
+    ///
+    /// Set when the copy strips Dolby Vision on an ffmpeg without `dovi_rpu`.
+    /// `filter_units` removes the RPU and enhancement-layer NAL units by type
+    /// and knows nothing about the DOVI side data ffmpeg copied out of the
+    /// source container, so the muxer writes a Profile 7 record with
+    /// `el_present_flag = 1` over a stream that has neither layer. See
+    /// [`remove_dolby_vision_record`] for what that costs a viewer.
+    ///
+    /// Mutually exclusive with `dolby_vision`: one says "make the record
+    /// describe the converted stream", the other says "there is no Dolby
+    /// Vision stream to describe". [`promote_from`] refuses both at once
+    /// rather than picking, because a caller that set both has a bug that a
+    /// precedence rule would hide.
+    ///
+    /// `#[serde(default)]`, so a rendition stored before this field existed
+    /// deserializes as `false` and promotes exactly as it did.
+    #[serde(default)]
+    pub strip_dolby_vision: bool,
 }
 
 impl PromotionInputs {
@@ -835,8 +861,10 @@ impl PromotionInputs {
         };
         PromotionInputs {
             // Never from a fragment: a fragment has no record and no facts to
-            // build one from. The caller supplies it from the source file.
+            // build one from. Both answers are the caller's, taken from the
+            // source file and the session's own copy options.
             dolby_vision: None,
+            strip_dolby_vision: false,
             parameter_sets: hevc_parameter_set_nals(sample, video.nal_length_size)
                 .into_iter()
                 .map(<[u8]>::to_vec)
@@ -849,7 +877,10 @@ impl PromotionInputs {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.parameter_sets.is_empty() && self.hdr10_sei.is_empty() && self.dolby_vision.is_none()
+        self.parameter_sets.is_empty()
+            && self.hdr10_sei.is_empty()
+            && self.dolby_vision.is_none()
+            && !self.strip_dolby_vision
     }
 }
 
@@ -1162,9 +1193,17 @@ pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, F
     // most needs it — a converted 8.1 stream over an HDR10 base, whose
     // mastering-display metadata is exactly as worth promoting as any other
     // HDR10 title's.
-    let dolby_vision = match inputs.dolby_vision.as_ref() {
-        Some(record) => set_dolby_vision_record(init, record)?,
-        None => false,
+    let dolby_vision = match (inputs.dolby_vision.as_ref(), inputs.strip_dolby_vision) {
+        (Some(_), true) => {
+            return Err(Fmp4Error::Unsupported(
+                "the promotion inputs ask to both rewrite and remove the Dolby Vision \
+                 record; one of those callers is wrong and picking would hide it"
+                    .into(),
+            ))
+        }
+        (Some(record), false) => set_dolby_vision_record(init, record)?,
+        (None, true) => remove_dolby_vision_record(init)?,
+        (None, false) => false,
     };
     Ok(hevc || hdr10 || dolby_vision)
 }
@@ -1573,7 +1612,76 @@ pub fn set_dolby_vision_record(
     Ok(changed)
 }
 
-/// Whether the HEVC decoder configuration carries VPS, SPS, and PPS arrays./// Whether the HEVC decoder configuration carries VPS, SPS, and PPS arrays.
+/// Delete the Dolby Vision configuration record from the video sample entry.
+///
+/// Answers whether the init changed; an init that never carried one is not an
+/// error.
+///
+/// This is the counterpart to [`set_dolby_vision_record`], and the two are not
+/// interchangeable. A rewrite can say "Profile 8, no enhancement layer"; it
+/// cannot say "this is not a Dolby Vision stream", because a record declaring
+/// `rpu_present_flag = 0` still puts a `dvcC`/`dvvC` box in front of a decoder
+/// that reads the box as the claim. Only removing it is honest about a stream
+/// whose RPUs are gone.
+///
+/// The caller is the strip path on an ffmpeg without `dovi_rpu`. There, the
+/// bitstream filter removes the RPU and enhancement-layer NAL units by type
+/// while the DOVI *side data* ffmpeg copied out of the source survives, and
+/// the muxer writes it out as a Profile 7 record with `el_present_flag = 1`
+/// over a stream that has neither layer. Chrome ignores the box; VideoToolbox
+/// honours it, and Safari answers with a software decode of 4K10 HEVC on
+/// hardware that has a dedicated block for it — the 4K stutter
+/// `docs/STUTTER-4K.md` exists to fix, reintroduced by the very filter meant
+/// to prevent it.
+///
+/// The record is a sibling of `hvcC` inside the sample entry, not a child of
+/// it, so `hvcC`'s own size is untouched and every box from the sample entry
+/// up through `moov` shrinks by the whole box.
+pub fn remove_dolby_vision_record(init: &mut Init) -> Result<bool, Fmp4Error> {
+    let Some(location) = locate_hvcc(&init.bytes)? else {
+        return Ok(false);
+    };
+    let Some(existing) = location.dolby_vision else {
+        return Ok(false);
+    };
+    let box_start = existing
+        .payload
+        .start
+        .checked_sub(existing.header_len)
+        .ok_or_else(|| {
+            Fmp4Error::Unsupported("the Dolby Vision record's header lies before the init".into())
+        })?;
+    let delta = existing.payload.end - box_start;
+
+    // Sizes first, offsets second. Every ancestor's start lies before the
+    // record, so its recorded offset is still valid here; after the removal
+    // some would not be, and patching a size through a stale offset writes
+    // four bytes into the middle of a box.
+    //
+    // `ancestors[0]` is `hvcC` and is deliberately skipped: the record sits
+    // beside it, and shrinking `hvcC` would swallow whatever follows it.
+    for &box_at in location.ancestors.iter().skip(1) {
+        shrink_box(&mut init.bytes, box_at, delta)?;
+    }
+    init.bytes.drain(box_start..existing.payload.end);
+
+    // `Init.tracks` is parsed metadata and `dolby_vision_config` was parsed
+    // from the box just deleted. Two live guards read it and both would now do
+    // the wrong thing on a stale `true`: HDR10 static-metadata promotion
+    // refuses to run on a Dolby Vision entry, and `sanitize_stale_dolby_brand`
+    // refuses to drop the `dby1` file-type brand from one — so the init would
+    // keep advertising Dolby Vision in its `ftyp` with no record behind it,
+    // which is the same class of lie one box further out.
+    let video_id = init.video().map(|track| track.id);
+    if let Some(id) = video_id {
+        if let Some(track) = init.tracks.iter_mut().find(|track| track.id == id) {
+            track.dolby_vision_config = false;
+        }
+    }
+    Ok(true)
+}
+
+/// Whether the HEVC decoder configuration carries VPS, SPS, and PPS arrays.
 ///
 /// The minimal legal hvcC record carries none. It is parseable, but it cannot
 /// satisfy an `hvc1`/`dvh1` sample entry until promotion supplies all three.
@@ -2172,6 +2280,49 @@ fn grow_box(bytes: &mut [u8], at: BoxAt, delta: usize) -> Result<(), Fmp4Error> 
         other => {
             return Err(Fmp4Error::Unsupported(format!(
                 "cannot grow a box with a {other}-byte header"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The same patch downward, for a box that is losing a child.
+///
+/// Underflow is an error rather than a saturation: a box that claims to be
+/// smaller than the child being removed from it is not a box we understand,
+/// and clamping its size to zero would produce an init that parses as a
+/// different file.
+fn shrink_box(bytes: &mut [u8], at: BoxAt, delta: usize) -> Result<(), Fmp4Error> {
+    match at.header_len {
+        8 => {
+            let old = be_u32(bytes, at.start) as usize;
+            let new = old
+                .checked_sub(delta)
+                .filter(|size| *size >= at.header_len)
+                .and_then(|size| u32::try_from(size).ok())
+                .ok_or_else(|| {
+                    Fmp4Error::Unsupported(
+                        "a box is too small to have contained the record being removed".into(),
+                    )
+                })?;
+            bytes[at.start..at.start + 4].copy_from_slice(&new.to_be_bytes());
+        }
+        16 => {
+            let old = be_u64(bytes, at.start + 8);
+            let new = old
+                .checked_sub(delta as u64)
+                .filter(|size| *size >= at.header_len as u64)
+                .ok_or_else(|| {
+                    Fmp4Error::Unsupported(
+                        "an extended box is too small to have contained the record being removed"
+                            .into(),
+                    )
+                })?;
+            bytes[at.start + 8..at.start + 16].copy_from_slice(&new.to_be_bytes());
+        }
+        other => {
+            return Err(Fmp4Error::Unsupported(format!(
+                "cannot shrink a box with a {other}-byte header"
             )));
         }
     }
@@ -4744,6 +4895,104 @@ mod tests {
         assert_eq!(dolby_vision_record(&untouched).expect("read"), None);
     }
 
+    /// Removing the record leaves an init that parses, with every enclosing
+    /// box's size correct — and no Dolby Vision claim anywhere.
+    ///
+    /// This is the strip path's counterpart to writing one. `filter_units`
+    /// takes the RPU and enhancement-layer NAL units out by type and leaves
+    /// the DOVI side data ffmpeg copied from the source container untouched,
+    /// so on an ffmpeg without `dovi_rpu` the muxer writes a Profile 7 record
+    /// with `el_present_flag = 1` over a stream carrying neither layer.
+    /// VideoToolbox believes it; Safari software-decodes 4K10 HEVC on hardware
+    /// with a block for it.
+    #[test]
+    fn removing_the_dolby_vision_record_keeps_the_box_tree_consistent() {
+        let feed = pipe("open-gop");
+        let (mut init, _, _) = read_all(&feed);
+        let stale = DolbyVisionRecord::new(7, 6, true, true, false, 0)
+            .expect("the record a stripping muxer copies out of a P7 source");
+        assert!(set_dolby_vision_record(&mut init, &stale).expect("insert"));
+        assert!(init.video().expect("video").dolby_vision_config);
+        let with_record = init.bytes.len();
+
+        assert!(remove_dolby_vision_record(&mut init).expect("remove"));
+
+        // The box is gone, and so is every trace of its name: a size field
+        // left too large would leave the four fourcc bytes readable inside
+        // whatever now follows.
+        assert!(
+            !init.bytes.windows(4).any(|f| f == b"dvcC" || f == b"dvvC"),
+            "the record's box is still in the init"
+        );
+        assert!(init.bytes.len() < with_record);
+
+        // Parsed metadata agrees with the bytes. Two live guards read this
+        // flag and both do the wrong thing on a stale `true`: HDR10 promotion
+        // refuses to run on a Dolby Vision entry, and the stale-brand
+        // sanitizer refuses to drop `dby1` from one.
+        assert!(!init.video().expect("video").dolby_vision_config);
+
+        // The real check: every ancestor's size was patched, so the ordinary
+        // reader can parse the result from bytes and find the same tracks.
+        let reread = reparse_init(&init.bytes);
+        assert_eq!(dolby_vision_record(&reread).expect("read"), None);
+        assert_eq!(
+            reread.video().expect("video").id,
+            init.video().expect("video").id
+        );
+        assert!(!reread.video().expect("video").dolby_vision_config);
+        assert!(hevc_parameter_sets_complete(&reread).expect("parses"));
+
+        // Idempotent, and not an error on an init that never had one — the
+        // strip path runs on every fragment head, including ones ffmpeg wrote
+        // no record into.
+        assert!(!remove_dolby_vision_record(&mut init).expect("no-op"));
+    }
+
+    /// The removal rides the same promotion funnel the rewrite does.
+    ///
+    /// Load-bearing, not tidy: the live path and the head regeneration both
+    /// promote from the same stored inputs, so a removal performed anywhere
+    /// else would happen on one and not the other, and the regeneration would
+    /// be refused for drift against an init it produced correctly.
+    #[test]
+    fn a_removal_rides_the_promotion_and_refuses_to_be_a_rewrite_too() {
+        let feed = pipe("open-gop");
+        let (mut muxer, _, _) = read_all(&feed);
+        let stale = DolbyVisionRecord::new(7, 6, true, true, false, 0).expect("record");
+        assert!(set_dolby_vision_record(&mut muxer, &stale).expect("insert"));
+
+        let inputs = PromotionInputs {
+            strip_dolby_vision: true,
+            ..PromotionInputs::default()
+        };
+        assert!(!inputs.is_empty(), "a removal is a promotion, not a no-op");
+
+        let mut live = muxer.clone();
+        assert!(promote_from(&mut live, &inputs).expect("promote"));
+        assert_eq!(dolby_vision_record(&live).expect("read back"), None);
+
+        let mut regenerated = muxer.clone();
+        assert!(promote_from(&mut regenerated, &inputs).expect("promote"));
+        assert_eq!(
+            regenerated.bytes, live.bytes,
+            "the two paths must agree byte for byte"
+        );
+
+        // Asking for both is a caller bug, and a precedence rule would hide
+        // it. The inputs are stored and replayed on every head regeneration,
+        // so a contradiction has to be loud the first time rather than
+        // silently resolved forever.
+        let contradiction = PromotionInputs {
+            dolby_vision: Some(DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("record")),
+            strip_dolby_vision: true,
+            ..PromotionInputs::default()
+        };
+        let error =
+            promote_from(&mut muxer.clone(), &contradiction).expect_err("both at once is refused");
+        assert!(error.to_string().contains("rewrite and remove"), "{error}");
+    }
+
     /// Rewriting a record in place and inserting one where there is none —
     /// the two shapes the writer has to get right — both leaving a parseable
     /// init.
@@ -5770,6 +6019,7 @@ mod tests {
         let init = muxed_init();
         let inputs = PromotionInputs {
             dolby_vision: None,
+            strip_dolby_vision: false,
             parameter_sets: vec![vec![0x40, 0x01, 0x0c], vec![0x42, 0x01, 0x01]],
             hdr10_sei: vec![vec![0x4e, 0x01, 0x89]],
         };

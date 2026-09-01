@@ -67,31 +67,50 @@ pub enum IndexOutcome {
 /// Generic over the source for the same reason [`crate::copyseg::run`] is:
 /// everything between the pipe and the index is worth testing and none of it
 /// needs a real child process to be worth testing.
-/// `dolby_vision` is **both** answers, and deliberately one parameter rather
-/// than two: `Some(record)` means "this pass converts Profile 7 to 8.1, and
-/// its output must declare this record". They have to agree — a pass that
-/// converts must store the record its stream needs, and a pass that does not
-/// must store none — and two parameters is how they come to disagree, on a
-/// pair nothing downstream would notice: the rows would be byte counts for
-/// one stream and the served init a description of the other.
+/// `dolby_vision` is **every** answer, and deliberately one parameter rather
+/// than a flag per outcome. The three are mutually exclusive by construction:
+/// a pass either rewrites the record, deletes it, or leaves it alone, and the
+/// pass's rows and its served init have to describe the same stream. Separate
+/// flags are how those come to disagree, on a pair nothing downstream would
+/// notice — the rows would be byte counts for one stream and the served init a
+/// description of another.
 #[cfg_attr(not(test), allow(dead_code))]
 pub async fn index_stream<R: AsyncRead + Unpin>(
     src: R,
     identity: SourceIdentity,
     expected_ms: Option<i64>,
-    dolby_vision: Option<plurx_core::fmp4::DolbyVisionRecord>,
+    dolby_vision: DolbyVisionPass,
 ) -> IndexOutcome {
     index_stream_with_progress(src, identity, expected_ms, dolby_vision, None).await
+}
+
+/// What this index pass does about the muxer's Dolby Vision record.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum DolbyVisionPass {
+    /// Leave it. Every ordinary copy, and every preserved Dolby Vision copy:
+    /// what the muxer wrote already describes the stream.
+    #[default]
+    Untouched,
+    /// Rewrite it to this record. The Profile 7 → 8.1 conversion, whose RPUs
+    /// are rewritten after the muxer, so the record ffmpeg copied out of the
+    /// source container describes a stream that no longer exists.
+    Rewrite(Box<plurx_core::fmp4::DolbyVisionRecord>),
+    /// Delete it. The strip on an ffmpeg without `dovi_rpu`: `filter_units`
+    /// removed the RPU and enhancement-layer NAL units by type, and the DOVI
+    /// side data the muxer wrote the record from survived, so the output
+    /// declares Profile 7 with an enhancement layer over a stream that has
+    /// neither.
+    Remove,
 }
 
 async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     mut src: R,
     identity: SourceIdentity,
     expected_ms: Option<i64>,
-    dolby_vision: Option<plurx_core::fmp4::DolbyVisionRecord>,
+    dolby_vision: DolbyVisionPass,
     progress: Option<&IndexProgress>,
 ) -> IndexOutcome {
-    let convert = dolby_vision.is_some();
+    let convert = matches!(dolby_vision, DolbyVisionPass::Rewrite(_));
     // A converting identity's index has to describe the CONVERTED bytes. An
     // index is a list of the producer's own output byte counts and the landing
     // matcher compares them, so an index built from the unconverted stream
@@ -332,7 +351,11 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     // supplies its own. It rides in the stored promotion inputs so the served
     // init this pass validates and the served init a later generation promotes
     // are produced by the same function from the same facts.
-    promotion.dolby_vision = dolby_vision;
+    match dolby_vision {
+        DolbyVisionPass::Untouched => {}
+        DolbyVisionPass::Rewrite(record) => promotion.dolby_vision = Some(*record),
+        DolbyVisionPass::Remove => promotion.strip_dolby_vision = true,
+    }
     let Some(mut served_init) = init.clone() else {
         return IndexOutcome::Unsupported(
             "the index pipe ended without an init to validate".into(),
@@ -590,7 +613,7 @@ async fn build_with_args(
     // pass's served init and every later generation's go through.
     let dolby_vision = if video.converts_dolby_vision() {
         match converted_dolby_vision_record(file) {
-            Ok(record) => Some(record),
+            Ok(record) => DolbyVisionPass::Rewrite(Box::new(record)),
             Err(reason) => {
                 return IndexOutcome::Unsupported(format!(
                     "a converting index needs a Dolby Vision record and this file cannot \
@@ -598,8 +621,18 @@ async fn build_with_args(
                 ))
             }
         }
+    } else if video.leaves_a_stale_dolby_vision_record(file) {
+        // The mirror image of the conversion, and it lands here for the same
+        // reason: what the muxer wrote describes the source, not the stream
+        // this pass produces. `filter_units` took the RPU and enhancement-layer
+        // NAL units out by type, and the DOVI side data ffmpeg copied from the
+        // source container is not a NAL unit, so the output declares Profile 7
+        // with an enhancement layer over a stream carrying neither. Chrome
+        // ignores it; VideoToolbox believes it, and Safari answers 4K10 HEVC so
+        // labelled with a software decode on hardware that has a block for it.
+        DolbyVisionPass::Remove
     } else {
-        None
+        DolbyVisionPass::Untouched
     };
     // The probe's duration, carried in so a short read is caught. Passed in
     // milliseconds and converted against the pipe's own timescale inside the
@@ -929,6 +962,50 @@ mod tests {
         assert_ne!(held[0], held[1]);
     }
 
+    /// A stripping pass on an ffmpeg without `dovi_rpu` asks for the record to
+    /// be removed, and the ask reaches the stored promotion inputs.
+    ///
+    /// The wire between "this filter chain leaves a record describing a stream
+    /// that no longer exists" and "no served init carries it". Without it the
+    /// removal happens nowhere: the muxer writes a Profile 7 record with an
+    /// enhancement layer over a stream with neither, VideoToolbox believes it,
+    /// and Safari software-decodes 4K10 HEVC on hardware built to do it in
+    /// silicon.
+    #[test]
+    fn a_strip_without_dovi_rpu_asks_the_promotion_to_remove_the_record() {
+        let dv = hevc_file(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        );
+        let plain = hevc_file(None, None);
+
+        let strip_no_bsf = transcode::CopyVideoOptions::new(false, false);
+        assert!(
+            strip_no_bsf.leaves_a_stale_dolby_vision_record(&dv),
+            "the one branch that half-strips"
+        );
+
+        // Every neighbouring answer is a whole one and needs no help.
+        assert!(
+            !transcode::CopyVideoOptions::new(true, false).leaves_a_stale_dolby_vision_record(&dv),
+            "dovi_rpu removes the side data, so the muxer writes no record"
+        );
+        assert!(
+            !transcode::CopyVideoOptions::new(false, true).leaves_a_stale_dolby_vision_record(&dv),
+            "a preserved stream's record is true"
+        );
+        assert!(
+            !transcode::CopyVideoOptions::new(false, true)
+                .with_dolby_vision_conversion(true)
+                .leaves_a_stale_dolby_vision_record(&dv),
+            "a conversion rewrites the record rather than removing it"
+        );
+        assert!(
+            !strip_no_bsf.leaves_a_stale_dolby_vision_record(&plain),
+            "a source with no Dolby Vision has no record to be stale"
+        );
+    }
+
     /// The record the caller supplies reaches the stored promotion inputs, and
     /// therefore the served init every later generation is promoted to.
     ///
@@ -942,7 +1019,13 @@ mod tests {
         testfixtures::require_ffmpeg();
         let bytes = index_pipe_bytes("closed-gop");
 
-        let plain = index_stream(std::io::Cursor::new(bytes.clone()), identity(), None, None).await;
+        let plain = index_stream(
+            std::io::Cursor::new(bytes.clone()),
+            identity(),
+            None,
+            DolbyVisionPass::Untouched,
+        )
+        .await;
         let IndexOutcome::Built(plain) = plain else {
             panic!("{plain:?}");
         };
@@ -959,7 +1042,7 @@ mod tests {
             std::io::Cursor::new(testfixtures::with_dolby_vision_rpus(&bytes)),
             identity(),
             None,
-            Some(record.clone()),
+            DolbyVisionPass::Rewrite(Box::new(record.clone())),
         )
         .await;
         let IndexOutcome::Built(converted) = converted else {
@@ -993,7 +1076,7 @@ mod tests {
             std::io::Cursor::new(dv_bytes.clone()),
             identity(),
             None,
-            None,
+            DolbyVisionPass::Untouched,
         )
         .await;
         let IndexOutcome::Built(unconverted) = unconverted else {
@@ -1004,7 +1087,7 @@ mod tests {
             std::io::Cursor::new(dv_bytes),
             identity(),
             None,
-            Some(converting_record()),
+            DolbyVisionPass::Rewrite(Box::new(converting_record())),
         )
         .await;
         let IndexOutcome::Built(converted) = converted else {
@@ -1041,7 +1124,7 @@ mod tests {
             std::io::Cursor::new(bytes),
             identity(),
             None,
-            Some(converting_record()),
+            DolbyVisionPass::Rewrite(Box::new(converting_record())),
         )
         .await;
         let IndexOutcome::Unsupported(reason) = outcome else {
@@ -1053,7 +1136,13 @@ mod tests {
     /// The index pipe over a real fixture, read the way the daemon reads it.
     async fn index_fixture(kind: &str) -> IndexOutcome {
         let bytes = index_pipe_bytes(kind);
-        index_stream(std::io::Cursor::new(bytes), identity(), None, None).await
+        index_stream(
+            std::io::Cursor::new(bytes),
+            identity(),
+            None,
+            DolbyVisionPass::Untouched,
+        )
+        .await
     }
 
     /// The video-only pipe's own output, cached beside the fixture.
@@ -1142,7 +1231,13 @@ mod tests {
         // duplicate SPS array. The ordinary fixture pipe has already removed
         // in-band sets, so there is no hidden PPS from which to "succeed".
         replace_hvcc_array_type(&mut bytes, 34, 33);
-        let outcome = index_stream(std::io::Cursor::new(bytes), identity(), None, None).await;
+        let outcome = index_stream(
+            std::io::Cursor::new(bytes),
+            identity(),
+            None,
+            DolbyVisionPass::Untouched,
+        )
+        .await;
         let IndexOutcome::Unsupported(reason) = outcome else {
             panic!("an incomplete emitted hvcC must not be indexed: {outcome:?}");
         };
@@ -1155,8 +1250,13 @@ mod tests {
         // single-invocation encodes, which are structurally incapable of
         // per-IDR parameter-set variation. The check still has to work.
         let bytes = index_pipe_bytes("closed-gop");
-        let IndexOutcome::Built(index) =
-            index_stream(std::io::Cursor::new(bytes), identity(), None, None).await
+        let IndexOutcome::Built(index) = index_stream(
+            std::io::Cursor::new(bytes),
+            identity(),
+            None,
+            DolbyVisionPass::Untouched,
+        )
+        .await
         else {
             panic!("must index");
         };
@@ -1168,11 +1268,13 @@ mod tests {
         // makes.
         use plurx_core::fmp4::PromotionInputs;
         let canonical = PromotionInputs {
+            strip_dolby_vision: false,
             dolby_vision: None,
             parameter_sets: vec![vec![0x40, 0x01, 0x0c]],
             hdr10_sei: Vec::new(),
         };
         let differing = PromotionInputs {
+            strip_dolby_vision: false,
             dolby_vision: None,
             parameter_sets: vec![vec![0x40, 0x01, 0x0d]],
             hdr10_sei: Vec::new(),
@@ -1243,7 +1345,7 @@ mod tests {
             std::io::Cursor::new(bytes[..half].to_vec()),
             identity(),
             None,
-            None,
+            DolbyVisionPass::Untouched,
         )
         .await;
         assert!(
@@ -1255,8 +1357,13 @@ mod tests {
     #[tokio::test]
     async fn a_pipe_that_stops_short_of_the_probed_duration_is_truncated() {
         let bytes = index_pipe_bytes("closed-gop");
-        let IndexOutcome::Built(full) =
-            index_stream(std::io::Cursor::new(bytes.clone()), identity(), None, None).await
+        let IndexOutcome::Built(full) = index_stream(
+            std::io::Cursor::new(bytes.clone()),
+            identity(),
+            None,
+            DolbyVisionPass::Untouched,
+        )
+        .await
         else {
             panic!("the full pipe indexes");
         };
@@ -1267,7 +1374,7 @@ mod tests {
             std::io::Cursor::new(bytes),
             identity(),
             Some(60_000 + 12_000),
-            None,
+            DolbyVisionPass::Untouched,
         )
         .await;
         assert!(
@@ -1379,7 +1486,7 @@ mod equality_tests {
                 std::io::Cursor::new(super::tests::index_pipe_bytes(kind)),
                 SourceIdentity::new(1, 1, "fingerprint"),
                 None,
-                None,
+                DolbyVisionPass::Untouched,
             )
             .await
             else {

@@ -447,12 +447,29 @@ unsupported-profile declaration is exactly Safari’s observed behaviour.
 **Fix shipped:** the DV strip now runs `dovi_rpu=strip=1` ahead of
 `filter_units` (`hevc_copy_bsf`), which removes the RPUs *and* the DOVI
 side data, so nothing remains to write a `dvcC` from and the stream is
-signalled as what it is: plain HDR10. Version-gated on ffmpeg ≥ 7.1
-(production runs jellyfin-ffmpeg 7.1.4; the gate is tested against real
-version lines, and an older ffmpeg falls back to the NAL-only strip rather
-than hard-exiting on an unknown filter). The perf report now fetches the
-live session’s init segment and states outright whether any DV box
-survives — the wire is proven clean or the report says why not.
+signalled as what it is: plain HDR10. Gated on the filter's presence, asked
+of the binary (production runs jellyfin-ffmpeg 7.1.4).
+
+**The fallback shipped the original bug (fixed 2026-09-01).** "An older
+ffmpeg falls back to the NAL-only strip rather than hard-exiting on an
+unknown filter" is exactly the half-strip described two paragraphs up: the
+layers go, the side data stays, and the muxer writes the `dvcC` that costs
+the hardware path. The automatic ladder never reached it — `dv_handling`
+gates a strip on the same `dovi_rpu` probe and re-encodes instead — but
+**forced Original does**, because that control means "no video re-encode"
+whatever the ladder decided, and the comment claiming the client's error
+path rescues it assumed a client that refuses the stream. Safari does not
+refuse it; it plays it, in software.
+
+plurx now removes the record itself, in the init, on the far side of the
+muxer — the same place the Profile 7 → 8.1 conversion rewrites RPUs, and
+through the same promotion funnel, so a regenerated head is byte-identical
+to the live one. `filter_units` takes out the layers, the promotion takes
+out the claim, and the two halves of the strip are complete on any ffmpeg.
+
+The perf report fetches the live session's init segment and states outright
+whether any DV box survives — the wire is proven clean or the report says
+why not.
 
 Also shipped: the detector discloses blindness. Safari’s stutter produced
 an *empty* Hitches row, which read as exoneration but meant
