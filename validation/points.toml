@@ -82,7 +82,7 @@ timeout_seconds = 1800
 
 # The CI profile splits the local gate so nothing runs twice per PR: this check
 # owns formatting, Clippy, unit, and SQLite contracts, while WAL, replicated
-# Store, topology, and real-daemon contracts run in three parallel cluster
+# Store, topology, WAL, and real-daemon contracts run in four parallel cluster
 # jobs. Local profiles keep `make rust-check`.
 [[checks]]
 id = "rust-gate-ci"

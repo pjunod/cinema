@@ -186,17 +186,70 @@ jobs:
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
-  cluster_auth:
-    name: replicated store and topology contracts
+  cluster_store:
+    name: replicated Store contracts
+    needs: [scope, preflight]
+    if: needs.scope.outputs.cluster_auth == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-store"]') }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: cluster-store
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
+          persistent-eligible: "true"
+      - name: Run replicated Store contracts
+        id: store_contracts
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/validation
+          make cluster-store-check 2>&1 | tee target/validation/cluster-store.log
+      - name: Record the Store lane result
+        if: always()
+        env:
+          LANE_RESULT: ${{ steps.store_contracts.outcome }}
+        run: >-
+          python3 -m validation.ci_lane_receipt
+          --output target/validation/cluster-store-receipt.json
+          --log target/validation/cluster-store.log
+          --lane cluster-store
+          --result "$LANE_RESULT"
+          --command "make cluster-store-check"
+      - name: Retain the Store lane log and receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-store-contracts
+          path: |
+            target/validation/cluster-store.log
+            target/validation/cluster-store-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Propagate the Store contract result
+        if: always() && steps.store_contracts.outcome != 'success'
+        run: exit 1
+
+  cluster_topology:
+    name: replicated topology contracts
     needs: [scope, preflight]
     if: >-
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
-    # The first cold lab run reached the final three-voter proof but crossed
-    # the old 25-minute guard while building the command-profile dependency
-    # graph. Keep enough headroom for a cold NUC and artifact cleanup; warm
-    # persistent-runner caches make subsequent runs substantially faster.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-topology"]') }}
+    # A cold runner builds the command-profile dependency graph before the
+    # three-voter proof. Persistent non-voter caches shorten later runs.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -211,11 +264,65 @@ jobs:
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
-          lane: cluster-auth
+          lane: cluster-topology
           execution-mode: ${{ needs.scope.outputs.execution_mode }}
-      - name: Run replicated Store and topology contracts
-        if: needs.scope.outputs.cluster_auth == 'true'
-        run: make cluster-store-check cluster-harness-check
+          persistent-eligible: "true"
+      - name: Run replicated topology contracts
+        id: topology_contracts
+        continue-on-error: true
+        shell: bash
+        env:
+          RUN_CLUSTER_AUTH: ${{ needs.scope.outputs.cluster_auth }}
+          RUN_HIQLITE_SPIKE: ${{ needs.scope.outputs.hiqlite_spike }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/validation
+          {
+            if [ "$RUN_CLUSTER_AUTH" = true ]; then
+              make cluster-harness-check
+            fi
+            if [ "$RUN_HIQLITE_SPIKE" = true ]; then
+              cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml \
+                --tests --no-deps -- -D warnings
+              make hiqlite-spike
+            fi
+          } 2>&1 | tee target/validation/cluster-topology.log
+      - name: Record the topology lane result
+        if: always()
+        shell: bash
+        env:
+          LANE_RESULT: ${{ steps.topology_contracts.outcome }}
+          RUN_CLUSTER_AUTH: ${{ needs.scope.outputs.cluster_auth }}
+          RUN_HIQLITE_SPIKE: ${{ needs.scope.outputs.hiqlite_spike }}
+        run: |
+          set -euo pipefail
+          receipt=(
+            python3 -m validation.ci_lane_receipt
+            --output target/validation/cluster-topology-receipt.json
+            --log target/validation/cluster-topology.log
+            --lane cluster-topology
+            --result "$LANE_RESULT"
+          )
+          if [ "$RUN_CLUSTER_AUTH" = true ]; then
+            receipt+=(--command "make cluster-harness-check")
+          fi
+          if [ "$RUN_HIQLITE_SPIKE" = true ]; then
+            receipt+=(
+              --command "cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings"
+              --command "make hiqlite-spike"
+            )
+          fi
+          "${receipt[@]}"
+      - name: Retain the topology lane log and receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-topology-contracts
+          path: |
+            target/validation/cluster-topology.log
+            target/validation/cluster-topology-receipt.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain deterministic topology evidence
         if: always() && needs.scope.outputs.cluster_auth == 'true'
         continue-on-error: true
@@ -234,12 +341,6 @@ jobs:
           path: target/validation/cluster-failure-drills.json
           if-no-files-found: error
           retention-days: 1
-      - name: Lint the isolated semantic harness
-        if: needs.scope.outputs.hiqlite_spike == 'true'
-        run: cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings
-      - name: Run the three-voter semantic proof
-        if: needs.scope.outputs.hiqlite_spike == 'true'
-        run: make hiqlite-spike
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
@@ -247,6 +348,9 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Propagate the topology contract result
+        if: always() && steps.topology_contracts.outcome != 'success'
+        run: exit 1
 
   cluster_wal:
     name: replicated WAL recovery contracts
@@ -844,7 +948,8 @@ jobs:
       - mobile_version
       - preflight
       - check
-      - cluster_auth
+      - cluster_store
+      - cluster_topology
       - cluster_wal
       - cluster_daemon
       - web_layout
@@ -862,7 +967,8 @@ jobs:
           MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           CHECK_RESULT: ${{ needs.check.result }}
-          CLUSTER_AUTH_RESULT: ${{ needs.cluster_auth.result }}
+          CLUSTER_STORE_RESULT: ${{ needs.cluster_store.result }}
+          CLUSTER_TOPOLOGY_RESULT: ${{ needs.cluster_topology.result }}
           CLUSTER_WAL_RESULT: ${{ needs.cluster_wal.result }}
           CLUSTER_DAEMON_RESULT: ${{ needs.cluster_daemon.result }}
           WEB_LAYOUT_RESULT: ${{ needs.web_layout.result }}
@@ -875,7 +981,8 @@ jobs:
           for result in \
             "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
             "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
-            "$CLUSTER_AUTH_RESULT" "$CLUSTER_WAL_RESULT" \
+            "$CLUSTER_STORE_RESULT" "$CLUSTER_TOPOLOGY_RESULT" \
+            "$CLUSTER_WAL_RESULT" \
             "$CLUSTER_DAEMON_RESULT" \
             "$WEB_LAYOUT_RESULT" "$VOD_WEB_RESULT" \
             "$ANDROID_JVM_RESULT" "$APPLE_RESULT" "$ANDROID_DEVICE_RESULT" \
@@ -896,7 +1003,7 @@ jobs:
           PLURX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PLURX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PLURX_QUALIFICATION_RESULTS: >-
-            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","cluster_auth":"${{ needs.cluster_auth.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","package_smoke":"${{ needs.package_smoke.result }}"}
+            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","cluster_store":"${{ needs.cluster_store.result }}","cluster_topology":"${{ needs.cluster_topology.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","package_smoke":"${{ needs.package_smoke.result }}"}
         run: >-
           python3 -m validation.qualification
           --output target/validation/qualification-receipt.json
