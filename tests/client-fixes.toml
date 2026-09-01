@@ -636,3 +636,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
 source_anchor = "kind == \"preview\" -> false"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/MarkerLabelTest.kt"
 test_anchor = "aPreviewIsNeverAutomaticWhateverItsProvenance"
+
+[[fixes]]
+id = "apple.subtitle-readiness-directed-retry"
+commits = ["bca640c5"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "final class SubtitleReadinessRetryState: @unchecked Sendable"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testSubtitleReadinessDecisionAndTransitionAreClosedAndSingleShot"
