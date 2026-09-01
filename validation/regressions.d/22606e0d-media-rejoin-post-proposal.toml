@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["22606e0d"]
+points = ["core.media"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained three-voter contract pauses rejoin after its Raft proposal commits, consumes the replacement ledger through an ordinary preparation commit, and requires the successful rejoin to return its exact route rather than misclassifying later durable advancement as a partial-commit error."

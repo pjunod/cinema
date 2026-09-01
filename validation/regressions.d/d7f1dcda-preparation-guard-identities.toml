@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d7f1dcda"]
+points = ["core.media"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained Hiqlite source contracts identify the exact prepare and abort statement order and bind every abort retirement, pin, lease, and final ledger predicate to the same user, playback, and staged incarnation while allowing pointer reads but rejecting pointer mutations."
