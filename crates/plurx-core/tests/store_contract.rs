@@ -1198,19 +1198,21 @@ async fn media_session_rejoin_preserves_a_present_named_slot_on_invalid_replacem
         );
 
         // A separately terminalled staged route leaves its ledger until
-        // maintenance. Rejoin still must not call that occupied row "gone".
+        // maintenance. Use the same reason and timestamp rejoin's abort would
+        // write: neither value is proof that this transaction retired it.
         store
-            .end_media_session(occupied_session, "admin_stop", 2_600)
+            .end_media_session(occupied_session, "replaced", 2_600)
             .await
             .unwrap_or_else(|error| panic!("{backend}: terminal present slot: {error}"))
             .unwrap_or_else(|| panic!("{backend}: terminal present route must resolve"));
-        let replacement = staged_preparation(
+        let mut replacement = staged_preparation(
             user.id,
             playback,
             "00000000-0000-4000-8000-00000000d357",
             "00000000-0000-4000-8000-00000000d358",
             predecessor,
         );
+        replacement.now_ms = 2_600;
         let error = store
             .rejoin_media_session_preparation(occupied, &replacement)
             .await

@@ -537,7 +537,8 @@ fn abort_statements(
               WHERE incarnation_id = $2 AND state != 'ended'
                 AND EXISTS (SELECT 1 FROM media_session_preparations
                   WHERE user_id = $3 AND playback_id = $4
-                    AND staged_incarnation_id = $2)",
+                    AND staged_incarnation_id = $2)
+              RETURNING incarnation_id",
             params!(now_ms, staged_incarnation_id, user_id, playback_id),
         ),
         (
@@ -1579,6 +1580,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             ),
         ));
         let guarded_delete_index = statements.len() - 1;
+        statements[guarded_delete_index].1[2] = Param::StmtOutputNamed(0, "incarnation_id".into());
         let mut prepare = prepare_statements(preparation);
         // Each stage is observable and the next stage consumes its output.
         // Missing old ledger, refused lease mutation, or refused session
@@ -1630,6 +1632,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             Err(error) => {
                 let message = error.to_string();
                 let guarded_step_lost = [
+                    0,
                     guarded_delete_index,
                     prepare_lease_index,
                     prepare_session_index,

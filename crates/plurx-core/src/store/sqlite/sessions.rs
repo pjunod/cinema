@@ -206,8 +206,8 @@ fn abort_staged_generation(
     playback_id: &str,
     staged_incarnation_id: &str,
     now_ms: i64,
-) -> rusqlite::Result<()> {
-    tx.execute(
+) -> rusqlite::Result<usize> {
+    let retired = tx.execute(
         "UPDATE media_sessions
             SET state = 'ended', terminal_reason = 'replaced',
                 lease_expires_at_ms = ?1, updated_at_ms = ?1
@@ -256,7 +256,7 @@ fn abort_staged_generation(
           WHERE user_id = ?1 AND playback_id = ?2 AND staged_incarnation_id = ?3",
         params![user_id, playback_id, staged_incarnation_id],
     )?;
-    Ok(())
+    Ok(retired)
 }
 
 /// Stage one preparation inside the caller's transaction.
@@ -1535,13 +1535,19 @@ impl MediaSessionStore for SqliteStore {
                 tx.rollback()?;
                 return Ok(None);
             }
-            abort_staged_generation(
+            let retired = abort_staged_generation(
                 &tx,
                 preparation.user_id,
                 &preparation.playback_id,
                 &staged_incarnation_id,
                 preparation.now_ms,
             )?;
+            if retired != 1 {
+                tx.rollback()?;
+                return Err(StoreError::Task(
+                    "media-session rejoin replacement is no longer admissible".to_owned(),
+                ));
+            }
             let route = prepare_within(&tx, &preparation)?;
             // This is the same second-line predicate as explicit abort. SQL
             // ledger guards are the safety boundary; the projection prevents
