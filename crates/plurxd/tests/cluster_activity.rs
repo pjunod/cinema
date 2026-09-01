@@ -891,14 +891,17 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
         .to_owned();
     // Admin and household reads share one peer wave. The roster projection is
     // still made per caller, so sharing peer data cannot leak machine names.
+    // Do not enable the eight-request receiver-admission barrier used by the
+    // burst proof below: fixed code sends one peer request, so that barrier
+    // can only consume 500 ms of the real two-second peer deadline. The
+    // physical request count is sufficient to prove this two-caller wave was
+    // coalesced without making Store scheduling part of the privacy verdict.
     tokio::time::sleep(Duration::from_millis(1_500)).await;
-    proxy.begin_collection(8);
     let before_privacy_wave = proxy.request_count();
     let (admin_view, household_view) = tokio::join!(
         activity_detail(&client, &a_base, &token),
         activity_detail(&client, &a_base, &household),
     );
-    proxy.end_collection();
     assert_eq!(
         proxy.request_count() - before_privacy_wave,
         1,
@@ -914,12 +917,21 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
         household_view.get("node_hostnames").is_none(),
         "a household member was sent the fleet's machine names"
     );
-    // …and still sees the streams themselves, so the gate narrows one field.
-    assert!(household_view["deliveries"]
-        .as_array()
-        .expect("deliveries")
-        .iter()
-        .any(|delivery| delivery["node_id"] == remote_node));
+    // …and both callers still see the streams themselves, so the gate narrows
+    // one field rather than changing the shared peer snapshot.
+    for (reader, detail) in [("admin", &admin_view), ("household", &household_view)] {
+        assert!(
+            detail["deliveries"]
+                .as_array()
+                .expect("deliveries")
+                .iter()
+                .any(|delivery| delivery["node_id"] == remote_node),
+            "{reader} lost node B's delivery during the shared privacy wave: {detail}\n\
+             node A log:\n{}\nnode B log:\n{}",
+            node_a.diagnostics(),
+            node_b.diagnostics(),
+        );
+    }
 
     // Collect the burst that used to exceed the receiver's two-per-second
     // legacy authority guard. Fixed code performs one authenticated request;
