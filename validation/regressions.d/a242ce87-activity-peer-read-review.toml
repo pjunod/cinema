@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a242ce87"]
+points = ["cluster.membership", "cluster.page-reads", "web.experience"]
+checks = ["rust-gate", "cluster-auth", "web-static"]
+reason = "The retained review regressions refresh the sender floor at the actual wire boundary after delayed directory resolution, classify non-success HTTP responses before consuming hostile bodies, and project a live peer without an Activity origin as unsupported rather than inventing a transport failure."
