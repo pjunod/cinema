@@ -468,19 +468,34 @@ to the live one. The live-HLS recovery path builds its served init directly
 rather than through that funnel, so it asks for the removal separately.
 `filter_units` takes out the layers, the removal takes out the claim.
 
-**Two of plurx's three copy paths, not all three.** The legacy muxer path —
+**All three copy paths, since 2026-09-01.** The third is the legacy muxer —
 a cluster takeover, or the one frozen retry after a structural `Unsupported`
-— has ffmpeg's own HLS muxer write `init.mp4` directly. There is no
-`copyseg` reader and no promotion in between, so nothing removes anything,
-and that init keeps both the record and the `dby1` brand. It is a fallback
-for a fallback (`copyseg::supports` covers HEVC, so a fresh session on a
-Dolby Vision title always segments) and it is the same defect `main` has
-had all along, but it is not fixed and the claim should not be read wider
-than it is. A removal failure is deliberately reported as
-`InvalidHevcConfiguration` rather than `Unsupported` for this reason:
-`Unsupported` is the one classification the actor may retry, and the retry
-it permits is that legacy path — reporting it that way would hand the
-session to the path this removal exists to keep it off.
+— where ffmpeg's own HLS muxer writes `init.mp4` straight to disk with no
+`copyseg` reader and no promotion in between, so neither of the removals
+above runs. It is caught on the way out instead, in the segment handler that
+already rewrites init records for Apple: **an init that declares Dolby
+Vision the playlist does not advertise is stripped before it is served.**
+
+That gate is the playlist's own claim rather than the session's build, and
+deliberately so. The serve path has no copy options in hand, and the
+question it *can* answer is the better one: `CODECS` and
+`SUPPLEMENTAL-CODECS` and the init must describe the same stream, whatever
+produced them. A preserved or converted session advertises Dolby Vision and
+keeps its record untouched — including a preserved Profile 5, which names
+`dvh1` in `CODECS` with nothing supplemental beside it, so "no supplemental
+codecs" is not the question and asking it would strip the record off the one
+session that most needs it.
+
+The rewrite is refused unless the parse accounts for the file byte for byte:
+it replaces the whole buffer with what the reader modelled, so an init
+carrying anything past its end would be silently truncated, and truncating a
+file a client is about to play is worse than leaving the record in.
+
+A removal failure on the segmenting path is still reported as
+`InvalidHevcConfiguration` rather than `Unsupported`: `Unsupported` is the
+one classification the actor may retry, and the retry it permits is this
+legacy path. Now that the legacy path is covered too, that is defence in
+depth rather than the only thing standing between a failure and the stutter.
 
 The removal also rewrites the `dby1` file-type brand, in the same call. It
 has to: the sanitizer that normally does that runs on the muxer init, where
