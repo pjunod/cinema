@@ -738,16 +738,18 @@ jobs:
           cache-to: type=gha,mode=min
       - name: Start, probe, restart, and re-probe the image
         run: scripts/container-smoke plurx/plurxd:ci
-      # Release publication ships amd64 and arm64. The ordinary smoke loads
-      # amd64 into Docker, while this non-loading build exercises the other
-      # asset/checksum branch and its dovi_tool/mkvmerge version assertions
-      # under QEMU before a tag can be the first place arm64 fails.
+      # Release publication ships amd64 and arm64. The native release-build
+      # matrix already compiles both arm64 Rust binaries. Target only the
+      # architecture-specific runtime assets here so QEMU exercises the other
+      # checksum branch plus dovi_tool/mkvmerge assertions without redundantly
+      # cold-compiling the complete Rust graph for nearly an hour.
       - name: Build arm64 runtime and verify pinned conversion tools
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           platforms: linux/arm64
+          target: runtime-assets
           outputs: type=cacheonly
           cache-from: type=gha
 

@@ -260,8 +260,22 @@ class OperationsContractCase(unittest.TestCase):
         workflow = read(".github/workflows/ci.yml")
         self.assertIn("docker/setup-qemu-action@v3", workflow)
         self.assertIn("Build arm64 runtime and verify pinned conversion tools", workflow)
-        self.assertIn("platforms: linux/arm64", workflow)
-        self.assertIn("outputs: type=cacheonly", workflow)
+        arm_runtime = workflow.split(
+            "- name: Build arm64 runtime and verify pinned conversion tools", 1
+        )[1].split("\n  # Configure this as the single required check", 1)[0]
+        self.assertIn("platforms: linux/arm64", arm_runtime)
+        self.assertIn("target: runtime-assets", arm_runtime)
+        self.assertIn("outputs: type=cacheonly", arm_runtime)
+
+        runtime_assets = dockerfile.index(
+            "FROM debian:bookworm-slim AS runtime-assets"
+        )
+        runtime_image = dockerfile.index("FROM runtime-assets AS runtime")
+        binary_copy = dockerfile.index(
+            "COPY --from=build /plurxd /usr/local/bin/plurxd"
+        )
+        self.assertLess(runtime_assets, runtime_image)
+        self.assertLess(runtime_image, binary_copy)
 
     def test_docker_build_keeps_cluster_validation_features_out_of_plurxd(self):
         dockerfile = read("Dockerfile")
