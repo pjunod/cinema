@@ -3626,12 +3626,14 @@ function fmtUptime(s){ const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=
 function fmtTs(ms){ const d=new Date(ms); return d.toLocaleTimeString([], {hour12:false})+"."+String(ms%1000).padStart(3,"0"); }
 function fmtAgo(unix){ if(!unix) return ""; const s=Math.max(0,Math.floor(Date.now()/1000)-unix);
   if(s<60) return "just now"; if(s<3600) return Math.floor(s/60)+"m ago"; if(s<86400) return Math.floor(s/3600)+"h ago"; return Math.floor(s/86400)+"d ago"; }
-// HTML-escape for text and attribute values. Escapes BOTH quote characters:
+// HTML-escape for text and attribute values. API DTOs contain numeric limits
+// and counts, so normalize template scalars before applying string methods.
+// Escapes BOTH quote characters:
 // `'` matters because inline on* handlers are single-quoted, and an unescaped
 // apostrophe in interpolated data (e.g. a title like "Can't") closes the
 // attribute early and silently breaks the handler. Compose with JSON.stringify
 // for a JS string inside an attribute: esc(JSON.stringify(value)).
-function esc(s){ return (s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 // A recorded/EXIF date for display. Parsed by hand rather than through
 // `new Date("2019-06-14")`, which is UTC midnight and shows the day before in
 // every western timezone.
