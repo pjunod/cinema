@@ -145,6 +145,7 @@ asyncTest("every web HLS session requests the bounded VOD presentation", async (
     "api",
     "newRequestId",
     "vodClientContract",
+    "PLAYER",
     [
       'const PLAYBACK_ID="playback-1";',
       shippedSource("openSession"),
@@ -158,6 +159,7 @@ asyncTest("every web HLS session requests the bounded VOD presentation", async (
       session: { presentation: "vod", block_budget_secs: 8 },
       fragLoadPolicy: {},
     }),
+    { controlReporter: { sequence: 17 } },
   );
 
   await Promise.all([
@@ -170,6 +172,7 @@ asyncTest("every web HLS session requests the bounded VOD presentation", async (
     assert.equal(request.options.body.presentation, "vod");
     assert.equal(request.options.body.block_budget_secs, 8);
     assert.match(request.options.body.request_id, /^request-/);
+    assert.equal(request.options.body.control_sequence, 17);
   }
   assert.equal("height" in requests[0].options.body, false);
 });
@@ -209,6 +212,7 @@ asyncTest("a temporary live recovery presentation remains playable", async () =>
     "newRequestId",
     "vodClientContract",
     "PlaybackPolicy",
+    "PLAYER",
     [
       'const PLAYBACK_ID="playback-1";',
       shippedSource("openSession"),
@@ -220,6 +224,7 @@ asyncTest("a temporary live recovery presentation remains playable", async () =>
     () => "request-1",
     () => ({ session: { presentation: "vod", block_budget_secs: 8 } }),
     policy,
+    null,
   );
   const started = await openSession(42, { copy: true });
   assert.equal(started.vod, false);
