@@ -242,14 +242,20 @@ labels resolve to distinct non-production x86 hosts with verified identity and
 bounded persistent storage. The weekly `replicated Store backstop` workflow is
 unsharded in every mode and remains the assignment-independent safety net.
 
-Eligible packaging changes also schedule `native Linux ARM64 package shadow`
-outside the promotion gate when the mode is `shadow` or `accelerated`. That job
-accepts only the dedicated Linux/ARM64 VM label, proves both the kernel and
-Docker engine are native `aarch64`, and performs the same exact-candidate
-binary export, runtime-only image build, identity checks, health probe, and
-stop/start smoke without QEMU. Its small manifest/digest artifact is campaign
-evidence; laptop or VM absence cannot delay a required job because nothing in
-the required graph depends on it.
+Eligible packaging changes require both rows of the `package_smoke` matrix.
+The arm64 row selects the self-hosted Linux/ARM64 `ci-arm64` VM pool, or
+`ubuntu-24.04-arm` in GitHub-hosted mode. It proves both the kernel and Docker
+engine are native `aarch64`, then performs the same exact-candidate binary
+export, runtime-only image build, identity checks, health probe, and stop/start
+smoke as amd64 without QEMU. Its manifest and digests are retained as required
+qualification evidence, and `Main promotion gate` depends directly on the
+complete matrix.
+
+At least one `ci-arm64` VM must therefore remain online for self-hosted
+qualification. The ARM package row shares the `plurx-apple-silicon-heavy`
+concurrency group with Apple tests so laptop capacity is not oversubscribed;
+`queue: max` preserves every pending required job instead of replacing an
+older pending candidate.
 
 GitHub-hosted mode also requires an account with usable Actions billing and
 spending limits. If GitHub refuses the job before assigning a runner, repair
