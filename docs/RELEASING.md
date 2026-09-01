@@ -104,6 +104,34 @@ CI passes the tag name automatically when it publishes an image.
    `{major}.{minor}`, and `latest`. Pushes to `main` build but do not publish,
    so releases are always deliberate.
 
+### The release pull request is the gate the cut depends on
+
+Two `v0.3.0` failures shared a lesson: some gates only fire in regimes the
+cutting machine may not reproduce. The spike workspace's own `Cargo.lock`
+pin needs a toolchain to check at all (`make spike-lock-check` could not run
+on the toolchain-less host that cut the release; CI caught it). The
+exact-count cluster windows only failed once a loaded runner slowed them
+past a background heartbeat interval — a speed regime, not a cache one, and
+one a fast development machine never enters (root-caused and fixed after
+that cut). Local green is therefore evidence, not proof.
+
+What makes the cut safe is step 5, followed exactly: the tag goes on the
+merged release commit only after its required checks pass, so the release
+pull request's CI run — real runners, real load, full toolchain — is the
+run the tag actually depends on. A red required check there stops the cut.
+The one exception is the standing infrastructure rule, stated here for the
+release path: if the tests ran and passed and the job then died on a
+GitHub-side fault — artifact upload, a quota refusal, runner capacity —
+note it in the release pull request and proceed. A `FAILED` or `panicked`
+test line is never that exception; on the release path it is a gate doing
+its job.
+
+One honest limit: CI's dependency caches restore across version bumps, so
+no step of this procedure produces a provably cold compile. Nothing above
+relies on one — but if a cold build per cycle is ever wanted as policy, it
+has to be arranged deliberately (a cache-disabled job on the release pull
+request), not assumed.
+
 ### Recovering a cancelled publication without moving the tag
 
 A cancelled image build does not justify retagging a different commit. Run the
