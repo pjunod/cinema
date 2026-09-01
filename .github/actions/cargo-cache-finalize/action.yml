@@ -23,6 +23,7 @@ runs:
         CACHE_ROOT: ${{ inputs.cache-root }}
       run: |
         set -euo pipefail
-        touch "$CACHE_LAST_USED"
+        "$GITHUB_WORKSPACE/scripts/ci-cargo-cache-refresh" \
+          "$CACHE_ROOT" "$CACHE_LAST_USED"
         "$GITHUB_WORKSPACE/scripts/ci-cache-prune" \
           "$CACHE_ROOT" "$CACHE_BUDGET_GB"

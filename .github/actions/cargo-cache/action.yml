@@ -73,12 +73,18 @@ runs:
           echo "::error::Cannot derive the pinned Rust toolchain"
           exit 1
         }
-        cache_root="$RUNNER_TOOL_CACHE/plurx-ci/cargo/$runner_name/rust-$toolchain"
-        target_dir="$cache_root/$CACHE_LANE/target"
-        last_used="$cache_root/$CACHE_LANE/.last-used"
-        cargo_home="$cache_root/cargo-home"
-        mkdir -p "$target_dir" "$cargo_home"
-        touch "$last_used"
+        mapfile -t cache_paths < <(
+          "$GITHUB_WORKSPACE/scripts/ci-cargo-cache-prepare" \
+            "$RUNNER_TOOL_CACHE" "$runner_name" "$toolchain" "$CACHE_LANE"
+        )
+        [ "${#cache_paths[@]}" -eq 4 ] || {
+          echo "::error::Cargo cache preparation returned an incomplete path set"
+          exit 1
+        }
+        cache_root=${cache_paths[0]}
+        target_dir=${cache_paths[1]}
+        cargo_home=${cache_paths[2]}
+        last_used=${cache_paths[3]}
         "$GITHUB_WORKSPACE/scripts/ci-cache-prune" \
           "$cache_root" "$CACHE_BUDGET_GB"
         {

@@ -739,6 +739,8 @@ paths = [
   "crates/plurxd/src/version.rs",
   "scripts/ci-runner-mode",
   "scripts/ci-execution-mode",
+  "scripts/ci-cargo-cache-prepare",
+  "scripts/ci-cargo-cache-refresh",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/release-package-candidate",

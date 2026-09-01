@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() {
+  echo "ci-cargo-cache-refresh: $*" >&2
+  exit 1
+}
+
+[ "$#" -eq 2 ] \
+  || die "usage: ci-cargo-cache-refresh <cache-root> <last-used>"
+requested_cache_root=$1
+last_used=$2
+
+[ ! -L "$requested_cache_root" ] && [ -d "$requested_cache_root" ] \
+  || die "cache root is missing or symbolic: $requested_cache_root"
+cache_root=$(cd -P -- "$requested_cache_root" 2>/dev/null && pwd -P) \
+  || die "cannot resolve cache root: $requested_cache_root"
+[ "$cache_root" = "$requested_cache_root" ] \
+  || die "cache root is not canonical: $requested_cache_root"
+
+case "$last_used" in
+  "$cache_root"/*/.last-used) relative=${last_used#"$cache_root"/} ;;
+  *) die "cache marker is outside the active toolchain: $last_used" ;;
+esac
+IFS=/ read -r lane marker extra <<< "$relative"
+[[ "$lane" =~ ^[a-z0-9][a-z0-9.-]*$ ]] \
+  || die "cache marker has an unsafe lane: $last_used"
+[ "$marker" = .last-used ] && [ -z "$extra" ] \
+  || die "cache marker has an invalid shape: $last_used"
+
+require_exact_directory() {
+  local candidate canonical
+  candidate=$1
+  [ ! -L "$candidate" ] && [ -d "$candidate" ] \
+    || die "cache component is missing or symbolic: $candidate"
+  canonical=$(cd -P -- "$candidate" 2>/dev/null && pwd -P) \
+    || die "cannot resolve cache component: $candidate"
+  [ "$canonical" = "$candidate" ] \
+    || die "cache component escaped its expected path: $candidate"
+}
+
+lane_root="$cache_root/$lane"
+require_exact_directory "$cache_root/cargo-home"
+require_exact_directory "$lane_root"
+require_exact_directory "$lane_root/target"
+[ ! -L "$last_used" ] && [ -f "$last_used" ] \
+  || die "cache marker is missing or symbolic: $last_used"
+[ "$(cd -P -- "$(dirname -- "$last_used")" && pwd -P)" = "$lane_root" ] \
+  || die "cache marker escaped its lane: $last_used"
+
+touch -- "$last_used"
+[ ! -L "$last_used" ] && [ -f "$last_used" ] \
+  || die "cache marker changed identity: $last_used"

@@ -77,13 +77,18 @@ class CiCacheContractCase(unittest.TestCase):
         action = (ROOT / ".github/actions/cargo-cache/action.yml").read_text(
             encoding="utf-8"
         )
+        prepare = (ROOT / "scripts/ci-cargo-cache-prepare").read_text(
+            encoding="utf-8"
+        )
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
         self.assertIn('"${RUNNER_ENVIRONMENT:-}" = github-hosted', action)
         self.assertIn('"$EXECUTION_MODE" != shadow', action)
         self.assertIn('"$PERSISTENT_ELIGIBLE" != true', action)
         self.assertIn('default: "false"', action)
-        self.assertIn("$RUNNER_TOOL_CACHE/plurx-ci/cargo/", action)
+        self.assertIn("scripts/ci-cargo-cache-prepare", action)
+        self.assertIn("ensure_child_directory", prepare)
+        self.assertIn("plurx-ci", prepare)
         self.assertIn("toolchain=$(rustc -Vv", action)
         self.assertIn("CARGO_INCREMENTAL=0", action)
         self.assertIn("uses: Swatinem/rust-cache@v2", action)
@@ -181,6 +186,171 @@ class CiCacheContractCase(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("refusing unsafe cache root", result.stderr)
                     self.assertTrue((victim / "proof").is_file())
+
+    def test_cargo_cache_prepare_rejects_every_child_symlink(self):
+        script = ROOT / "scripts/ci-cargo-cache-prepare"
+        subprocess.run(["bash", "-n", str(script)], check=True)
+
+        components = {
+            "runner": "plurx-ci/cargo/runner-01",
+            "toolchain": "plurx-ci/cargo/runner-01/rust-1.97.1",
+            "cargo-home": (
+                "plurx-ci/cargo/runner-01/rust-1.97.1/cargo-home"
+            ),
+            "lane": "plurx-ci/cargo/runner-01/rust-1.97.1/rust-gate",
+            "target": (
+                "plurx-ci/cargo/runner-01/rust-1.97.1/rust-gate/target"
+            ),
+            "marker": (
+                "plurx-ci/cargo/runner-01/rust-1.97.1/"
+                "rust-gate/.last-used"
+            ),
+        }
+        for name, relative in components.items():
+            with (
+                self.subTest(component=name),
+                tempfile.TemporaryDirectory() as raw,
+            ):
+                fixture = Path(raw)
+                tool_cache = fixture / "tool"
+                tool_cache.mkdir()
+                victim_directory = fixture / "victim"
+                victim_directory.mkdir()
+                victim_file = fixture / "victim-marker"
+                victim_file.write_text("outside cache", encoding="utf-8")
+                candidate = tool_cache / relative
+                candidate.parent.mkdir(parents=True)
+                if name == "marker":
+                    candidate.symlink_to(victim_file)
+                else:
+                    candidate.symlink_to(
+                        victim_directory, target_is_directory=True
+                    )
+
+                result = subprocess.run(
+                    [
+                        str(script),
+                        str(tool_cache),
+                        "runner-01",
+                        "1.97.1",
+                        "rust-gate",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("refusing symbolic-link cache", result.stderr)
+                self.assertEqual(
+                    victim_file.read_text(encoding="utf-8"), "outside cache"
+                )
+                self.assertEqual(list(victim_directory.iterdir()), [])
+
+    def test_cargo_cache_prepare_returns_canonical_bounded_paths(self):
+        script = ROOT / "scripts/ci-cargo-cache-prepare"
+        with tempfile.TemporaryDirectory() as raw:
+            tool_cache = Path(raw) / "tool"
+            tool_cache.mkdir()
+            result = subprocess.run(
+                [
+                    str(script),
+                    str(tool_cache),
+                    "runner-01",
+                    "1.97.1",
+                    "rust-gate",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            cache_root, target_dir, cargo_home, marker = map(
+                Path, result.stdout.splitlines()
+            )
+            expected_root = (
+                tool_cache / "plurx-ci/cargo/runner-01/rust-1.97.1"
+            ).resolve()
+            self.assertEqual(cache_root, expected_root)
+            self.assertEqual(target_dir, expected_root / "rust-gate/target")
+            self.assertEqual(cargo_home, expected_root / "cargo-home")
+            self.assertEqual(marker, expected_root / "rust-gate/.last-used")
+            self.assertTrue(target_dir.is_dir())
+            self.assertTrue(cargo_home.is_dir())
+            self.assertTrue(marker.is_file())
+            subprocess.run(
+                [
+                    str(ROOT / "scripts/ci-cargo-cache-refresh"),
+                    str(cache_root),
+                    str(marker),
+                ],
+                check=True,
+            )
+
+    def test_cargo_cache_refresh_rejects_post_job_symlink_swaps(self):
+        prepare = ROOT / "scripts/ci-cargo-cache-prepare"
+        refresh = ROOT / "scripts/ci-cargo-cache-refresh"
+        subprocess.run(["bash", "-n", str(refresh)], check=True)
+
+        for component in ("cargo-home", "lane", "target", "marker"):
+            with (
+                self.subTest(component=component),
+                tempfile.TemporaryDirectory() as raw,
+            ):
+                fixture = Path(raw)
+                tool_cache = fixture / "tool"
+                tool_cache.mkdir()
+                prepared = subprocess.run(
+                    [
+                        str(prepare),
+                        str(tool_cache),
+                        "runner-01",
+                        "1.97.1",
+                        "rust-gate",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                cache_root, target, cargo_home, marker = map(
+                    Path, prepared.stdout.splitlines()
+                )
+                lane = target.parent
+                victim_directory = fixture / "victim"
+                victim_directory.mkdir()
+                victim_marker = fixture / "victim-marker"
+                victim_marker.write_text("outside cache", encoding="utf-8")
+
+                if component == "cargo-home":
+                    cargo_home.rmdir()
+                    cargo_home.symlink_to(
+                        victim_directory, target_is_directory=True
+                    )
+                elif component == "lane":
+                    marker.unlink()
+                    target.rmdir()
+                    lane.rmdir()
+                    lane.symlink_to(victim_directory, target_is_directory=True)
+                elif component == "target":
+                    target.rmdir()
+                    target.symlink_to(
+                        victim_directory, target_is_directory=True
+                    )
+                else:
+                    marker.unlink()
+                    marker.symlink_to(victim_marker)
+
+                result = subprocess.run(
+                    [str(refresh), str(cache_root), str(marker)],
+                    capture_output=True,
+                    text=True,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("missing or symbolic", result.stderr)
+                self.assertEqual(
+                    victim_marker.read_text(encoding="utf-8"), "outside cache"
+                )
+                self.assertEqual(list(victim_directory.iterdir()), [])
 
     def test_cache_pruner_fails_when_pressure_cannot_be_restored(self):
         script = ROOT / "scripts/ci-cache-prune"
@@ -483,9 +653,13 @@ class CiCacheContractCase(unittest.TestCase):
             ROOT / ".github/actions/cargo-cache-finalize/action.yml"
         ).read_text(encoding="utf-8")
         pruner = (ROOT / "scripts/ci-cache-prune").read_text(encoding="utf-8")
+        refresh = (ROOT / "scripts/ci-cargo-cache-refresh").read_text(
+            encoding="utf-8"
+        )
 
-        self.assertIn(".last-used", action)
-        self.assertIn('touch "$CACHE_LAST_USED"', finalizer)
+        self.assertIn("scripts/ci-cargo-cache-prepare", action)
+        self.assertIn("scripts/ci-cargo-cache-refresh", finalizer)
+        self.assertIn('touch -- "$last_used"', refresh)
         self.assertIn("always() && steps.cargo-cache.outputs.local == 'true'", (
             ROOT / ".github/workflows/ci.yml"
         ).read_text(encoding="utf-8"))
