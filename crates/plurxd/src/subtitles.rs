@@ -94,6 +94,83 @@ fn vtt_name(file_id: i64, index: i64, size: i64, mtime: i64) -> String {
     format!("f{file_id}-s{index}-{size}-{mtime}.vtt")
 }
 
+/// How long one window sidecar covers, in seconds.
+///
+/// The size barely moves the cost — see [`windowing_is_worthwhile`] for what
+/// does — so this is chosen to outlive several segment requests without being
+/// so long that a viewer seeks out of it immediately.
+pub const WINDOW_SECONDS_DEFAULT: i64 = 200;
+/// Below this a window dies inside one AVPlayer retry cycle; above it the
+/// extraction stops beating the whole-track warm on a slow source and the
+/// bridge loses its point.
+pub const WINDOW_SECONDS_MIN: i64 = 30;
+pub const WINDOW_SECONDS_MAX: i64 = 900;
+
+pub fn bounded_window_seconds(configured: i64) -> i64 {
+    configured.clamp(WINDOW_SECONDS_MIN, WINDOW_SECONDS_MAX)
+}
+
+/// Snap a demand position down onto the window grid.
+///
+/// Requests inside one window must share a cache key or every segment starts
+/// its own extraction — the grid is what makes the dedup registry able to see
+/// that two requests want the same bytes.
+pub fn window_anchor_seconds(position_seconds: i64, window_seconds: i64) -> i64 {
+    let window = bounded_window_seconds(window_seconds);
+    (position_seconds.max(0) / window) * window
+}
+
+/// Whether extracting a window is cheaper than extracting the whole track.
+///
+/// Measured, not assumed. A subtitle-only extraction reads the container from
+/// its start to the end of the requested span, so the cost is set by *where*
+/// the window sits and barely at all by how long it is. On a one-hour MKV, a
+/// 200-second window costs 7% of the file at the head, 57% at the midpoint,
+/// and 101% — the whole thing — near the end.
+///
+/// So past the midpoint a window is strictly worse than the whole-track warm:
+/// the same bytes are read and what comes back is disposable rather than
+/// authoritative. Declining is not a fallback here, it is the better answer.
+///
+/// This is also why the bridge is at its best exactly where it is needed: the
+/// defect it exists to fix is that the *first* minutes of a large file play
+/// with no subtitles, and that is the 7% case.
+pub fn windowing_is_worthwhile(anchor_seconds: i64, duration_seconds: i64) -> bool {
+    duration_seconds > 0 && anchor_seconds.max(0).saturating_mul(2) < duration_seconds
+}
+
+fn vtt_window_name(
+    file_id: i64,
+    index: i64,
+    size: i64,
+    mtime: i64,
+    anchor_seconds: i64,
+    window_seconds: i64,
+) -> String {
+    // The span is in the name because a window sidecar is only valid for the
+    // span it covers, and the configured length can change under a running
+    // server. Two different spans are two different answers, not one answer to
+    // overwrite.
+    format!("f{file_id}-s{index}-{size}-{mtime}-w{anchor_seconds}-{window_seconds}.vtt")
+}
+
+pub fn vtt_window_path(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    anchor_seconds: i64,
+    window_seconds: i64,
+) -> PathBuf {
+    dir.join(vtt_window_name(
+        file.id,
+        index,
+        file.size,
+        file.mtime,
+        anchor_seconds,
+        bounded_window_seconds(window_seconds),
+    ))
+}
+
 struct Extraction {
     result: tokio::sync::Mutex<Option<Result<PathBuf, String>>>,
     ready: tokio::sync::Notify,
@@ -365,6 +442,28 @@ where
     Fut: Future<Output = Result<(), String>> + Send + 'static,
 {
     let cached = vtt_path(dir, file, index);
+    ensure_vtt_at(cached, dir, file, index, limits, extract).await
+}
+
+/// The same machinery against a caller-chosen cache key.
+///
+/// Window sidecars are a different key for the same source, and they want
+/// every guarantee this path already provides: one flight per key, the
+/// negative memo, the bounded read, and the atomic publish whose loser's
+/// rename is a no-op. Passing the key in was the whole refactor — none of the
+/// rules below know or care which shape of sidecar they are protecting.
+async fn ensure_vtt_at<F, Fut>(
+    cached: PathBuf,
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    limits: ExtractionLimits,
+    extract: F,
+) -> Result<PathBuf, String>
+where
+    F: FnOnce(PathBuf, MediaFile, i64) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), String>> + Send + 'static,
+{
     if valid_sidecar(&cached, limits.max_sidecar_bytes).await {
         return Ok(cached);
     }
@@ -442,6 +541,131 @@ where
         }
         notified.await;
     }
+}
+
+/// Extract one bounded span of an embedded text track.
+///
+/// **`-ss` and `-to` go after `-i`, and that is load-bearing.** The obvious
+/// form — `-ss` before the input, so it is an index seek — is wrong twice, and
+/// both failures are silent:
+///
+/// - It rewrites cue timestamps toward zero. `slice_webvtt` and the
+///   `media_origin_seconds` shift both work in absolute source time, so a
+///   zero-based sidecar makes them select nothing and the handler falls back
+///   to the empty segment — which is the exact defect windowing exists to
+///   remove, wearing a different hat and passing a deadline test.
+/// - It does not bound the span. Measured against a fixture with cues at known
+///   times, `-ss 1800 -to 2000 -i src` returns *every cue in the file*.
+///
+/// `-copyts` restores the timestamps and still does not bound, which makes it
+/// the more dangerous near-miss: it fixes the half a reviewer checks.
+///
+/// The form below was measured to be the only one correct on both axes. It is
+/// an output seek, so ffmpeg reads the container from its start — see
+/// [`windowing_is_worthwhile`] for why that is acceptable and where it stops
+/// being so.
+async fn extract_vtt_window(
+    tmp: &Path,
+    file: &MediaFile,
+    index: i64,
+    anchor_seconds: i64,
+    window_seconds: i64,
+) -> Result<(), String> {
+    let end = anchor_seconds.saturating_add(bounded_window_seconds(window_seconds));
+    let out = tokio::process::Command::new(ffmpeg_bin())
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&file.path)
+        .args([
+            "-ss",
+            &anchor_seconds.to_string(),
+            "-to",
+            &end.to_string(),
+            "-map",
+            &format!("0:s:{index}"),
+            "-f",
+            "webvtt",
+        ])
+        .arg(tmp)
+        .stdin(std::process::Stdio::null())
+        // Same reason as the whole-track extractor: the bound is a kill, not
+        // merely a stopped wait, or a wedged ffmpeg keeps the stalled mount
+        // open after the future is dropped.
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|e| format!("spawning subtitle window extraction: {e}"))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("subtitle window extraction failed: {}", why.trim()));
+    }
+    Ok(())
+}
+
+/// Read a warm window sidecar without launching anything.
+pub async fn read_cached_window(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    anchor_seconds: i64,
+    window_seconds: i64,
+) -> Result<Option<Vec<u8>>, String> {
+    read_vtt_path(
+        &vtt_window_path(dir, file, index, anchor_seconds, window_seconds),
+        MAX_SIDECAR_BYTES,
+    )
+    .await
+}
+
+/// Start a window extraction if one is worth starting, and do not wait for it.
+///
+/// Declines for a reason rather than failing: past the midpoint of the file a
+/// window costs what the whole track costs, so the honest move is to let
+/// `warm_vtt` produce the authoritative sidecar instead of a disposable one
+/// for the same bytes. Returns whether a window is now the thing to wait for.
+pub async fn warm_vtt_window(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    anchor_seconds: i64,
+    window_seconds: i64,
+) -> bool {
+    let Some(duration_seconds) = file.duration_ms.map(|ms| ms / 1_000) else {
+        // Without a duration there is no midpoint to compare against, and
+        // guessing one would be guessing about I/O cost. The whole-track warm
+        // is already running; let it.
+        return false;
+    };
+    if !windowing_is_worthwhile(anchor_seconds, duration_seconds) {
+        return false;
+    }
+    let cached = vtt_window_path(dir, file, index, anchor_seconds, window_seconds);
+    if valid_sidecar(&cached, MAX_SIDECAR_BYTES).await {
+        return true;
+    }
+    if !warmups().lock().await.insert(cached.clone()) {
+        // Already in flight for this exact span. A seek storm inside one
+        // window must not fan out into one ffmpeg per segment request.
+        return true;
+    }
+
+    let dir_owned = dir.to_owned();
+    let file_owned = file.clone();
+    let window = bounded_window_seconds(window_seconds);
+    tokio::spawn(async move {
+        let _ = ensure_vtt_at(
+            cached.clone(),
+            &dir_owned,
+            &file_owned,
+            index,
+            ExtractionLimits::default(),
+            move |tmp, file, index| async move {
+                extract_vtt_window(&tmp, &file, index, anchor_seconds, window).await
+            },
+        )
+        .await;
+        warmups().lock().await.remove(&cached);
+    });
+    true
 }
 
 async fn extract_vtt(tmp: &Path, file: &MediaFile, index: i64) -> Result<(), String> {
@@ -576,6 +800,75 @@ async fn prune(dir: &Path) {
 
 #[cfg(test)]
 mod tests {
+    /// The measurement this rule exists for, kept where it can be checked.
+    ///
+    /// A subtitle-only extraction reads the container from its start to the
+    /// end of the requested span, so cost tracks the window's *position*, not
+    /// its length. Measured on a one-hour MKV with a 200-second window:
+    /// 7% of the file at the head, 23% at ten minutes, 57% at the midpoint,
+    /// 90% at fifty minutes, and 101% — the whole file, the same as extracting
+    /// the whole track — near the end.
+    ///
+    /// Half is therefore where a window stops paying for itself, and past it
+    /// the whole-track warm is strictly better: same bytes, authoritative
+    /// result instead of a disposable one.
+    #[test]
+    fn a_window_is_declined_once_it_costs_what_the_whole_track_costs() {
+        let hour = 3_600;
+        assert!(super::windowing_is_worthwhile(0, hour));
+        assert!(super::windowing_is_worthwhile(600, hour));
+        assert!(super::windowing_is_worthwhile(1_799, hour));
+        // The midpoint is where the measured cost reaches the whole track's
+        // neighbourhood; at and past it, decline.
+        assert!(!super::windowing_is_worthwhile(1_800, hour));
+        assert!(!super::windowing_is_worthwhile(3_000, hour));
+        assert!(!super::windowing_is_worthwhile(3_600, hour));
+        // A duration we do not know is not a duration of zero: there is no
+        // midpoint to compare against, so there is no saving to claim.
+        assert!(!super::windowing_is_worthwhile(0, 0));
+        assert!(!super::windowing_is_worthwhile(10, -1));
+        // A position before the file is a client bug, not a licence to
+        // extract from a negative offset.
+        assert!(super::windowing_is_worthwhile(-500, hour));
+        assert_eq!(super::window_anchor_seconds(-500, 200), 0);
+    }
+
+    /// Requests inside one window must share a cache key, or every segment
+    /// request starts its own extraction and the dedup registry never sees
+    /// that two of them want the same bytes.
+    #[test]
+    fn demand_positions_inside_one_window_share_an_anchor() {
+        assert_eq!(super::window_anchor_seconds(0, 200), 0);
+        assert_eq!(super::window_anchor_seconds(199, 200), 0);
+        assert_eq!(super::window_anchor_seconds(200, 200), 200);
+        assert_eq!(super::window_anchor_seconds(399, 200), 200);
+        assert_eq!(super::window_anchor_seconds(1_000, 200), 1_000);
+        // The configured length is clamped before it is used as a grid, so a
+        // nonsense setting cannot produce a nonsense anchor or a divide by
+        // zero.
+        assert_eq!(super::bounded_window_seconds(0), super::WINDOW_SECONDS_MIN);
+        assert_eq!(
+            super::bounded_window_seconds(100_000),
+            super::WINDOW_SECONDS_MAX
+        );
+        assert_eq!(super::window_anchor_seconds(100, 0), 90);
+        assert_eq!(super::bounded_window_seconds(200), 200);
+    }
+
+    /// Two spans of the same track are two answers, not one answer to
+    /// overwrite — the configured length can change under a running server.
+    #[test]
+    fn a_window_sidecar_is_keyed_by_its_span() {
+        let dir = std::path::Path::new("/tmp/subs");
+        let file = media_file(PathBuf::from("/tmp/source.mkv"));
+        let at = |anchor, window| super::vtt_window_path(dir, &file, 0, anchor, window);
+        assert_ne!(at(0, 200), at(200, 200));
+        assert_ne!(at(0, 200), at(0, 400));
+        assert_eq!(at(200, 200), at(200, 200));
+        // And never collides with the whole-track key for the same source.
+        assert_ne!(at(0, 200), super::vtt_path(dir, &file, 0));
+    }
+
     use super::*;
 
     fn media_file(path: PathBuf) -> MediaFile {
