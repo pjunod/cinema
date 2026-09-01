@@ -6773,6 +6773,14 @@ async function openSession(fileId, opts){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
     {playback_id:PLAYBACK_ID,request_id:newRequestId()},contract.session);
+  // Where this start sits in the control ordering, so a server that has since
+  // accepted a later seek can refuse to produce a destination the viewer has
+  // already scrolled past. The client's own `_seekToken` discards the response
+  // either way; this saves the server the work rather than the client the
+  // confusion. Omitted when no exchange has been accepted yet — a first play
+  // has no earlier ask to be stale against.
+  const acceptedSequence=PLAYER&&PLAYER.controlReporter&&Number(PLAYER.controlReporter.sequence);
+  if(Number.isFinite(acceptedSequence)&&acceptedSequence>0) body.control_sequence=acceptedSequence;
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
   if(body.height==null) delete body.height;

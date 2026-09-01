@@ -1675,6 +1675,20 @@ impl From<&ControlRequestV1> for PlaybackDemandSnapshot {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SettledTarget {
+    pub sequence: u64,
+    pub anchor_ms: i64,
+}
+
+const SETTLED_TARGET_SLACK_MS: i64 = 1_000;
+
+impl SettledTarget {
+    pub(crate) fn supersedes(&self, sequence: u64, anchor_ms: i64) -> bool {
+        self.sequence > sequence && (self.anchor_ms - anchor_ms).abs() > SETTLED_TARGET_SLACK_MS
+    }
+}
+
 impl PlaybackDemandSnapshot {
     pub(crate) fn buffer_anchor_ms(&self) -> i64 {
         self.seek_target_ms.unwrap_or(self.position_ms)
@@ -1943,6 +1957,11 @@ pub(crate) struct RollingLeaseSnapshot {
     deadline: Instant,
     pub last_renewal_kind: &'static str,
     pub demand: Option<PlaybackDemandSnapshot>,
+    /// The destination the client actually wants, and the exchange that
+    /// settled it. Rides the existing snapshot rather than a query of its own:
+    /// every caller that needs to ask "is this work still wanted" already has
+    /// a reason to hold the lease.
+    pub settled_target: Option<SettledTarget>,
     pub delivery: RollingDeliverySnapshot,
     pub retired: bool,
     /// Immutable cause of the actor's first terminal transition. `None` is
@@ -4736,6 +4755,7 @@ struct RollingControlActor {
     last_renewal_kind: &'static str,
     mode: RollingLeaseMode,
     demand: Option<PlaybackDemandSnapshot>,
+    settled_target: Option<SettledTarget>,
     delivery: RollingDeliverySnapshot,
     producer_progress_at: Option<Instant>,
     producer_exit_at: Option<Instant>,
@@ -4836,6 +4856,7 @@ impl RollingControlActor {
             last_renewal_kind: initial_kind,
             mode: RollingLeaseMode::Legacy,
             demand: None,
+            settled_target: None,
             delivery: RollingDeliverySnapshot::default(),
             producer_progress_at: None,
             producer_exit_at: None,
@@ -4906,6 +4927,7 @@ impl RollingControlActor {
             deadline,
             last_renewal_kind: self.last_renewal_kind,
             demand: self.demand.clone(),
+            settled_target: self.settled_target,
             delivery,
             retired: self.retired,
             terminal: self.terminal,
@@ -5481,6 +5503,10 @@ impl RollingControlActor {
             && request.snapshot.demand == PlaybackDemand::End;
         if disposition == ControlDisposition::Accepted {
             self.mode = RollingLeaseMode::Explicit;
+            self.settled_target = Some(SettledTarget {
+                sequence: accepted_sequence,
+                anchor_ms: request.snapshot.buffer_anchor_ms(),
+            });
             self.demand = Some(request.snapshot);
             if accepted_end {
                 self.last_renewal_kind = "control-end";
@@ -10469,6 +10495,107 @@ mod tests {
             sequence: request.sequence,
             snapshot: PlaybackDemandSnapshot::from(request),
         }
+    }
+
+    #[test]
+    fn a_seek_storm_settles_on_one_target_and_supersedes_every_earlier_one() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let base = request();
+        let mut asked = Vec::new();
+        for step in 0..20u64 {
+            let mut seek = base.clone();
+            seek.sequence = step + 1;
+            seek.render_state = RenderState::Seeking;
+            let target = 600_000 + (step as i64 % 5) * 300_000 - (step as i64) * 7_000;
+            seek.seek_target_ms = Some(target);
+            seek.position_ms = target;
+            seek.buffered_from_ms = None;
+            seek.buffered_through_ms = target;
+            let outcome = actor
+                .control_at(
+                    // Above the server's own 250 ms exchange floor. A storm
+                    // faster than that is already refused as `RateLimited`, so
+                    // spacing these tighter would measure the rate limiter
+                    // rather than the latch -- and is worth knowing on its own:
+                    // the cadence already bounds how many restarts one storm
+                    // can ask for.
+                    started + Duration::from_millis(300 * (step + 1)),
+                    owned_control(&seek),
+                )
+                .expect("each seek in the storm is accepted");
+            assert_eq!(outcome.disposition, ControlDisposition::Accepted);
+            asked.push((seek.sequence, target));
+        }
+        let settled = actor.settled_target.expect("a storm settles a target");
+        let (last_sequence, last_target) = *asked.last().expect("twenty seeks");
+        assert_eq!(settled.sequence, last_sequence);
+        assert_eq!(settled.anchor_ms, last_target);
+        let superseded = asked
+            .iter()
+            .filter(|(sequence, target)| settled.supersedes(*sequence, *target))
+            .count();
+        assert_eq!(superseded, 19, "nineteen of twenty seeks are obsolete");
+        assert!(!settled.supersedes(last_sequence, last_target));
+    }
+
+    #[test]
+    fn a_settled_target_never_supersedes_an_exchange_it_has_not_seen() {
+        let settled = SettledTarget {
+            sequence: 12,
+            anchor_ms: 900_000,
+        };
+        assert!(settled.supersedes(11, 100_000));
+        assert!(!settled.supersedes(12, 100_000), "equal is not later");
+        assert!(
+            !settled.supersedes(13, 100_000),
+            "later demand is not stale"
+        );
+    }
+
+    #[test]
+    fn a_seek_that_lands_beside_its_target_is_not_a_new_destination() {
+        let settled = SettledTarget {
+            sequence: 40,
+            anchor_ms: 1_800_000,
+        };
+        assert!(!settled.supersedes(39, 1_799_640));
+        assert!(!settled.supersedes(39, 1_800_000 + SETTLED_TARGET_SLACK_MS));
+        assert!(settled.supersedes(39, 1_800_000 + SETTLED_TARGET_SLACK_MS + 1));
+    }
+
+    #[test]
+    fn the_latch_follows_ordinary_playback_once_the_seek_is_over() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let base = request();
+        let mut seek = base.clone();
+        seek.sequence = 1;
+        seek.render_state = RenderState::Seeking;
+        seek.seek_target_ms = Some(1_500_000);
+        seek.position_ms = 1_500_000;
+        seek.buffered_from_ms = None;
+        seek.buffered_through_ms = 1_500_000;
+        actor
+            .control_at(started + Duration::from_secs(1), owned_control(&seek))
+            .expect("seek accepted");
+        assert_eq!(
+            actor.settled_target.expect("seek settles").anchor_ms,
+            1_500_000
+        );
+        let mut playing = base.clone();
+        playing.sequence = 2;
+        playing.position_ms = 1_512_000;
+        playing.buffered_from_ms = Some(1_511_000);
+        playing.buffered_through_ms = 1_540_000;
+        actor
+            .control_at(started + Duration::from_secs(2), owned_control(&playing))
+            .expect("playback accepted");
+        let settled = actor.settled_target.expect("playback settles too");
+        assert_eq!(settled.sequence, 2);
+        assert_eq!(settled.anchor_ms, 1_512_000);
     }
 
     #[test]

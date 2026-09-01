@@ -533,6 +533,16 @@ pub struct CreateSession {
     pub playback_id: String,
     /// Optional idempotency key for this one attempt.
     pub request_id: Option<String>,
+    /// The control exchange this restart was decided from, when the client has
+    /// one. A seek storm asks for a session per destination; the sequence is
+    /// what orders those asks against the destination the client has since
+    /// settled on, so a restart the viewer has already scrolled past can be
+    /// skipped rather than produced and thrown away.
+    ///
+    /// Absent means "do the work", which is what every client did before this
+    /// field existed and what a first play still means -- there is no earlier
+    /// exchange to be stale against.
+    pub control_sequence: Option<u64>,
     /// Exact predecessor for a typed recovery. Both fields are required for a
     /// stall reopen, which also requires `request_id`; ordinary seeks and
     /// track changes omit them.
@@ -654,6 +664,7 @@ impl CreateSession {
             file_id,
             playback_id: self.playback_id,
             request_id: self.request_id,
+            control_sequence: self.control_sequence,
             automatic,
             previous_session_id: self.previous_session_id,
             reopen_reason: self.reopen_reason,
@@ -1486,6 +1497,37 @@ pub async fn create(
             "media_session_handoff_pending",
             "the current session is still completing its predecessor handoff; retry shortly",
         ));
+    }
+    // A seek storm asks for one session per destination. The control actor
+    // already knows which destination the client settled on, and the sequence
+    // on this request says where in that ordering this ask belongs -- so a
+    // restart for a target the viewer has since scrolled past can be refused
+    // before it spawns a producer.
+    //
+    // Refused, not deferred: waiting to see whether a newer exchange arrives
+    // would add latency to every honest seek, and the ordering is already
+    // decided. Only a strictly later exchange naming a different destination
+    // supersedes, so the honest seek arriving next is never the one skipped.
+    if let (Some(control_sequence), Some(predecessor)) =
+        (request.control_sequence, activation_predecessor.as_ref())
+    {
+        let requested_anchor_ms = if request.start_seconds.is_finite() {
+            (request.start_seconds.max(0.0) * 1_000.0) as i64
+        } else {
+            0
+        };
+        if state
+            .transcode
+            .settled_target_for_session(&predecessor.session_id)
+            .await
+            .is_some_and(|settled| settled.supersedes(control_sequence, requested_anchor_ms))
+        {
+            return Err(ApiError::typed(
+                StatusCode::CONFLICT,
+                "playback_target_superseded",
+                "a later seek replaced this destination, so no session was started for it",
+            ));
+        }
     }
     let expected_predecessor_incarnation_id = activation_predecessor
         .as_ref()
@@ -3455,6 +3497,9 @@ pub async fn start(
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
 ) -> Result<Json<StartResponse>, ApiError> {
     let legacy = CreateSession {
+        // No control exchange precedes a legacy start, so there is no
+        // ordering for it to be stale against.
+        control_sequence: None,
         playback_id: format!("legacy:{}:{id}", user.username),
         request_id: None,
         previous_session_id: None,
@@ -8760,6 +8805,7 @@ mod tests {
             source_mtime: 1,
             typeless_playlist: true,
             request: crate::transcode::SessionRequest {
+                control_sequence: None,
                 file_id: 1,
                 playback_id: "control-transition".to_owned(),
                 request_id: Some(generation.clone()),
@@ -9377,6 +9423,7 @@ mod tests {
             source_mtime: 1,
             typeless_playlist: true,
             request: crate::transcode::SessionRequest {
+                control_sequence: None,
                 file_id: fixture.file_id(),
                 playback_id: "terminal-cancellation".to_owned(),
                 request_id: Some(generation.clone()),
@@ -9607,6 +9654,7 @@ mod tests {
                 source_mtime: 1,
                 typeless_playlist: true,
                 request: crate::transcode::SessionRequest {
+                    control_sequence: None,
                     file_id: fixture.file_id(),
                     playback_id: format!("terminal-{label}"),
                     request_id: Some(generation.clone()),
@@ -10303,6 +10351,7 @@ mod tests {
         let dir = crate::test_tempdir().expect("state dir");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "guard-lifetime").await;
         let request = crate::transcode::SessionRequest {
+            control_sequence: None,
             file_id: 1,
             playback_id: "guard-lifetime-player".to_owned(),
             request_id: None,
@@ -12030,6 +12079,7 @@ mod tests {
     /// A create body with nothing set, to be spread over.
     fn bare_create() -> CreateSession {
         CreateSession {
+            control_sequence: None,
             playback_id: String::new(),
             request_id: None,
             previous_session_id: None,
@@ -12640,6 +12690,7 @@ mod tests {
     #[test]
     fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
         let request = CreateSession {
+            control_sequence: None,
             playback_id: "player".into(),
             request_id: Some("attempt".into()),
             previous_session_id: None,
@@ -12671,6 +12722,7 @@ mod tests {
     #[test]
     fn bitmap_fallback_still_carries_an_explicit_burn_request() {
         let request = CreateSession {
+            control_sequence: None,
             playback_id: "apple-bitmap".into(),
             request_id: None,
             previous_session_id: None,

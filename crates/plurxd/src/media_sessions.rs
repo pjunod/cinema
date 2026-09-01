@@ -4739,6 +4739,7 @@ mod tests {
             source_mtime: 1_700_000_000,
             typeless_playlist: true,
             request: SessionRequest {
+                control_sequence: None,
                 file_id: 11,
                 playback_id: "player-a".to_owned(),
                 request_id: Some(incarnation_id),
