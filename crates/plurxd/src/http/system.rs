@@ -924,6 +924,7 @@ fn emit_client_playback_event(
     info: Option<&crate::transcode::SessionInfo>,
     network: Option<crate::telemetry::NetworkIdentity>,
 ) {
+    normalize_client_marker_prewarm(&mut event);
     if let Some(info) = info {
         join_session_truth(&mut event, info);
     }
@@ -932,6 +933,16 @@ fn emit_client_playback_event(
         .as_deref()
         .map(crate::transcode::session_log_id);
     crate::telemetry::emit_with_network(store, event, network);
+}
+
+fn normalize_client_marker_prewarm(event: &mut PlaybackEvent) {
+    // A client can report that it attempted a marker skip, but only VOD's
+    // production ledger can prove that prewarm produced the landed range.
+    // Keep this normalization at the final client-telemetry boundary as well
+    // as in the payload conversion below so no caller can manufacture a hit.
+    if event.event == "marker_prewarm" {
+        event.detail = Some("miss".to_owned());
+    }
 }
 
 fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
@@ -1173,7 +1184,7 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
             .filter(|value| value.is_finite() && *value > 0.0)
             .map(|value| (value / 1_000.0).round().min(i64::MAX as f64) as i64)
     });
-    PlaybackEvent {
+    let mut event = PlaybackEvent {
         at_unix_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
@@ -1211,7 +1222,9 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
         ua: clipped(&ev.ua, 24),
         extra: (!extra.is_empty()).then(|| serde_json::Value::Object(extra).to_string()),
         ..PlaybackEvent::default()
-    }
+    };
+    normalize_client_marker_prewarm(&mut event);
+    event
 }
 
 /// One client report as a log line.
@@ -3781,13 +3794,24 @@ mod tests {
             vod_marker_prewarm_placeholder(&android_direct).is_none(),
             "the Android legacy direct label also keeps its client-owned miss"
         );
-        let future_hit = PlaybackEvent {
-            detail: Some("hit".to_owned()),
-            ..vod
-        };
+        let mut supplied_hit = beacon("marker_prewarm", 0);
+        supplied_hit.file_id = Some(7);
+        supplied_hit.detail = Some("hit".to_owned());
+        supplied_hit.method = Some("direct_play".to_owned());
+        let normalized_direct = client_playback_event(&supplied_hit, 11);
+        assert_eq!(normalized_direct.detail.as_deref(), Some("miss"));
         assert!(
-            vod_marker_prewarm_placeholder(&future_hit).is_none(),
-            "a future client-owned hit is not a historical placeholder"
+            vod_marker_prewarm_placeholder(&normalized_direct).is_none(),
+            "client-supplied direct-play hits stay client-owned misses"
+        );
+
+        supplied_hit.method = Some("remux".to_owned());
+        let normalized_vod = client_playback_event(&supplied_hit, 11);
+        assert_eq!(normalized_vod.detail.as_deref(), Some("miss"));
+        assert_eq!(
+            vod_marker_prewarm_placeholder(&normalized_vod),
+            Some((7, "remux")),
+            "only server bookkeeping may upgrade a normalized client miss"
         );
 
         let streams = crate::progressive::Streams::new();
