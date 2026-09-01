@@ -304,11 +304,54 @@ pub fn hevc_copy_bsf_for_copy(
         if have_dovi_bsf {
             "dovi_rpu=strip=1,filter_units=remove_types=32-34|62-63".to_owned()
         } else {
+            // Removes the layers but not the claim. See
+            // `copy_leaves_a_stale_dolby_vision_record`: the caller has to
+            // delete the record from the muxer's init afterwards, or this
+            // filter reintroduces the exact stutter it exists to prevent.
             "filter_units=remove_types=32-34|62-63".to_owned()
         }
     } else {
         "filter_units=remove_types=32-34".to_owned()
     }
+}
+
+/// Whether the filter [`hevc_copy_bsf_for_copy`] just chose leaves the muxer
+/// writing a Dolby Vision configuration record over a stream that no longer
+/// has one.
+///
+/// True for exactly one branch: a Dolby Vision source being stripped on an
+/// ffmpeg without `dovi_rpu`. `filter_units` removes the RPU and
+/// enhancement-layer NAL units *by type*, and knows nothing about the DOVI
+/// side data ffmpeg copied out of the source container — so movenc writes that
+/// side data out as a `dvcC` declaring Profile 7 with `el_present_flag = 1`,
+/// in front of a stream carrying neither layer.
+///
+/// That is not a cosmetic mismatch. Chrome ignores the box; VideoToolbox
+/// honours it, and Safari answers a 4K10 HEVC stream so labelled with a
+/// *software* decode on hardware that has a dedicated block for it — the
+/// stutter `docs/STUTTER-4K.md` exists to fix, reintroduced by the filter
+/// meant to prevent it. The half-strip is worse than either whole answer, so
+/// the init must have the record removed
+/// (`crate::fmp4::remove_dolby_vision_record`) before a client sees it.
+///
+/// It is reachable. The automatic ladder never picks this branch —
+/// `dv_handling` gates a strip on `node.dv_strippable`, which is this same
+/// `dovi_rpu` probe, and re-encodes instead. But forced Original means "no
+/// video re-encode" whatever the ladder said, so it serves the copy, and the
+/// comment claiming the client's error path rescues it assumed a client that
+/// refuses the stream. Safari does not refuse it. It plays it, badly.
+///
+/// Derived from the same four inputs as the filter and deliberately in the
+/// same function's module: the two answers are one decision, and a caller
+/// reading them from different places could compensate for a filter it did not
+/// get.
+pub fn copy_leaves_a_stale_dolby_vision_record(
+    hdr: Option<&str>,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+    convert_dolby_vision: bool,
+) -> bool {
+    hdr == Some("dolby_vision") && !convert_dolby_vision && !preserve_dolby_vision && !have_dovi_bsf
 }
 
 /// Whether the stored probe describes HEVC with the smallest legal hvcC
@@ -427,6 +470,23 @@ impl CopyVideoOptions {
 
     pub const fn preserves_dolby_vision(self) -> bool {
         self.preserve_dolby_vision
+    }
+
+    /// Whether this copy's bitstream filter removes the Dolby Vision layers
+    /// while leaving the muxer a record that still declares them.
+    ///
+    /// See [`copy_leaves_a_stale_dolby_vision_record`], which this is the
+    /// options-shaped spelling of. It is a method rather than four arguments
+    /// at each call site because the three flags it reads are private, and
+    /// keeping them private is what stops a caller compensating for a filter
+    /// it did not get.
+    pub fn leaves_a_stale_dolby_vision_record(self, source: &MediaFile) -> bool {
+        copy_leaves_a_stale_dolby_vision_record(
+            source.hdr.as_deref(),
+            self.have_dovi_bsf,
+            self.preserve_dolby_vision,
+            self.dv_convert,
+        )
     }
 }
 
@@ -3845,6 +3905,86 @@ mod index_pipe_tests {
         assert!(contradicted.join(" ").contains("-tag:v dvh1"));
         let rescued = copy_video_args(&row(Some(1), Some("Dolby Vision · Profile 5")), preserving);
         assert!(rescued.join(" ").contains("-tag:v hvc1"));
+    }
+
+    /// The stale-record predicate agrees with the filter it compensates for.
+    ///
+    /// The two are one decision, and this is the assertion that keeps them so.
+    /// The predicate must be true for exactly the branches whose filter removes
+    /// the Dolby Vision NAL units *without* `dovi_rpu` — the only ones where
+    /// the DOVI side data survives into the muxer and becomes a record over a
+    /// stream that has neither layer. Derived from the rendered filter rather
+    /// than restated, so a future branch cannot be added to one and forgotten
+    /// in the other.
+    #[test]
+    fn the_stale_record_predicate_matches_every_filter_that_leaves_one() {
+        for hdr in [Some("dolby_vision"), Some("hdr10"), None] {
+            for have_dovi_bsf in [false, true] {
+                for preserve in [false, true] {
+                    for convert in [false, true] {
+                        let filter = hevc_copy_bsf_for_copy(hdr, have_dovi_bsf, preserve, convert);
+                        // Removes the RPU units (62) by type, and does not ask
+                        // ffmpeg to drop the side data they were described by.
+                        let strips_the_layers_only =
+                            filter.contains("62-63") && !filter.contains("dovi_rpu");
+                        assert_eq!(
+                            copy_leaves_a_stale_dolby_vision_record(
+                                hdr,
+                                have_dovi_bsf,
+                                preserve,
+                                convert
+                            ),
+                            strips_the_layers_only,
+                            "hdr={hdr:?} dovi_bsf={have_dovi_bsf} preserve={preserve} \
+                             convert={convert} rendered {filter}"
+                        );
+                    }
+                }
+            }
+        }
+        // And it is not vacuous: the branch exists.
+        assert!(copy_leaves_a_stale_dolby_vision_record(
+            Some("dolby_vision"),
+            false,
+            false,
+            false
+        ));
+
+        // The same equality against the OTHER filter builder. `copy_video_args`
+        // hand-rolls its filter list on the parameter-set-promotion branch
+        // instead of calling `hevc_copy_bsf_for_copy`, so the predicate's
+        // agreement with it is a separate fact and held only by luck until
+        // this asserted it.
+        for hdr in [Some("dolby_vision"), Some("hdr10"), None] {
+            for have_dovi_bsf in [false, true] {
+                for preserve in [false, true] {
+                    for convert in [false, true] {
+                        for promote in [false, true] {
+                            let mut file = hevc_dv();
+                            file.hdr = hdr.map(str::to_owned);
+                            let options = CopyVideoOptions::new(have_dovi_bsf, preserve)
+                                .with_parameter_set_promotion(promote)
+                                .with_dolby_vision_conversion(convert);
+                            let args = copy_video_args(&file, options);
+                            let filter = args
+                                .windows(2)
+                                .find(|pair| pair[0] == "-bsf:v")
+                                .map(|pair| pair[1].clone())
+                                .unwrap_or_default();
+                            let strips_the_layers_only = (filter.contains("62-63")
+                                || filter.contains("remove_types=62-63"))
+                                && !filter.contains("dovi_rpu");
+                            assert_eq!(
+                                options.leaves_a_stale_dolby_vision_record(&file),
+                                strips_the_layers_only,
+                                "hdr={hdr:?} dovi_bsf={have_dovi_bsf} preserve={preserve} \
+                                 convert={convert} promote={promote} rendered {filter}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// A converting copy preserves the RPUs it converts.

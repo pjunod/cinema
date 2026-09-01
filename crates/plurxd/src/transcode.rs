@@ -3222,6 +3222,16 @@ fn spawn_copy_reader_owner(
     dir: PathBuf,
     sid: String,
     producer_attempt: u64,
+    // The options the pipe's argv was built from, not a bool derived from
+    // them. There is exactly one function that answers whether a copy leaves a
+    // Dolby Vision record behind, and it reads these; taking its answer here
+    // would put a second, plausible `false` in the tree — one word, and a
+    // forced-Original Profile 7 title ships an init declaring an enhancement
+    // layer it does not have, with every test green. Taking the options
+    // instead means the only way to get it wrong is to pass options the child
+    // did not get, which reads as wrong on sight.
+    source: plurx_core::domain::MediaFile,
+    video: plurx_core::transcode::CopyVideoOptions,
 ) {
     tokio::spawn(async move {
         // The outer owner retains the pipe until the actor has accepted the
@@ -3236,7 +3246,15 @@ fn spawn_copy_reader_owner(
         let worker_sid = sid.clone();
         let worker = tokio::spawn(async move {
             let mut stdout = reader_stdout.lock_owned().await;
-            copyseg::run(&mut *stdout, dir, &worker_sid, copyseg::Limits::default()).await
+            copyseg::run(
+                &mut *stdout,
+                dir,
+                &worker_sid,
+                copyseg::Limits::default(),
+                &source,
+                video,
+            )
+            .await
         });
         let outcome = match worker.await {
             Ok(outcome) => outcome,
@@ -15870,6 +15888,8 @@ impl TranscodeManager {
                 dir.clone(),
                 session_id.clone(),
                 generation,
+                file.clone(),
+                video_options,
             );
         }
         tracing::info!(
