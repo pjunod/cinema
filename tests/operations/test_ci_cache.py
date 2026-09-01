@@ -104,7 +104,7 @@ class CiCacheContractCase(unittest.TestCase):
         )
         for lane in (
             "rust-gate",
-            "cluster-store",
+            "cluster-store-legacy",
             "cluster-topology",
             "cluster-wal",
             "cluster-daemon",

@@ -224,6 +224,16 @@ class CatalogCase(unittest.TestCase):
         self.assertFalse(cluster["hiqlite_spike"])
         self.assertTrue(cluster["cluster_auth"])
 
+        for store_shard_path in (
+            "Dockerfile.store-shard",
+            "validation/store_shard.py",
+            "tests/validation/test_store_shard.py",
+        ):
+            with self.subTest(store_shard_path=store_shard_path):
+                shard_scope = scope_for_paths(catalog, (store_shard_path,))
+                self.assertTrue(shard_scope["rust"])
+                self.assertTrue(shard_scope["cluster_auth"])
+
         topology_schema = scope_for_paths(
             catalog, ("benchmarks/cluster-topology.schema.json",)
         )

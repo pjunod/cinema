@@ -186,10 +186,12 @@ jobs:
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
-  cluster_store:
-    name: replicated Store contracts
+  cluster_store_legacy:
+    name: replicated Store contracts (legacy)
     needs: [scope, preflight]
-    if: needs.scope.outputs.cluster_auth == 'true'
+    if: >-
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.execution_mode != 'accelerated'
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-store"]') }}
     timeout-minutes: 40
     steps:
@@ -198,7 +200,7 @@ jobs:
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
-          lane: cluster-store
+          lane: cluster-store-legacy
           execution-mode: ${{ needs.scope.outputs.execution_mode }}
           persistent-eligible: "true"
       - name: Run replicated Store contracts
@@ -217,14 +219,14 @@ jobs:
           python3 -m validation.ci_lane_receipt
           --output target/validation/cluster-store-receipt.json
           --log target/validation/cluster-store.log
-          --lane cluster-store
+          --lane cluster-store-legacy
           --result "$LANE_RESULT"
           --command "make cluster-store-check"
       - name: Retain the Store lane log and receipt
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cluster-store-contracts
+          name: cluster-store-legacy-contracts
           path: |
             target/validation/cluster-store.log
             target/validation/cluster-store-receipt.json
@@ -240,6 +242,66 @@ jobs:
       - name: Propagate the Store contract result
         if: always() && steps.store_contracts.outcome != 'success'
         run: exit 1
+
+  cluster_store_shards:
+    name: required replicated Store shard graph
+    needs: [scope, preflight]
+    if: >-
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.execution_mode == 'accelerated'
+    uses: ./.github/workflows/store-shards.yml
+    with:
+      execution-mode: accelerated
+
+  # Shadow evidence is deliberately absent from every required job's `needs`
+  # graph. An offline experimental runner can leave this call queued without
+  # delaying the legacy Store verdict or Main promotion gate.
+  cluster_store_shadow:
+    name: non-blocking replicated Store shard shadow
+    needs: [scope, preflight]
+    if: >-
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.execution_mode == 'shadow'
+    uses: ./.github/workflows/store-shards.yml
+    with:
+      execution-mode: shadow
+
+  cluster_store:
+    name: replicated Store contracts
+    needs:
+      - scope
+      - preflight
+      - cluster_store_legacy
+      - cluster_store_shards
+    if: always() && needs.scope.outputs.cluster_auth == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    timeout-minutes: 2
+    steps:
+      - name: Select the required Store graph
+        env:
+          EXECUTION_MODE: ${{ needs.scope.outputs.execution_mode }}
+          LEGACY_RESULT: ${{ needs.cluster_store_legacy.result }}
+          SHARD_RESULT: ${{ needs.cluster_store_shards.result }}
+        run: |
+          case "$EXECUTION_MODE" in
+            legacy)
+              test "$LEGACY_RESULT" = success
+              test "$SHARD_RESULT" = skipped
+              ;;
+            shadow)
+              test "$LEGACY_RESULT" = success
+              test "$SHARD_RESULT" = skipped
+              echo "Store shadow evidence is intentionally outside this gate"
+              ;;
+            accelerated)
+              test "$LEGACY_RESULT" = skipped
+              test "$SHARD_RESULT" = success
+              ;;
+            *)
+              echo "::error::Unknown resolved execution mode: $EXECUTION_MODE"
+              exit 1
+              ;;
+          esac
 
   cluster_topology:
     name: replicated topology contracts

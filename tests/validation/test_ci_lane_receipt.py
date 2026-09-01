@@ -52,6 +52,15 @@ class CiLaneReceiptCase(unittest.TestCase):
 
         self.assertEqual(receipt["result"], "failure")
 
+    def test_receipt_accepts_every_store_rollout_lane(self):
+        for lane in (
+            "cluster-store",
+            "cluster-store-legacy",
+            "cluster-store-backstop",
+        ):
+            with self.subTest(lane=lane):
+                self.assertEqual(self.receipt(lane=lane)["lane"], lane)
+
     def test_receipt_refuses_unknown_lanes_results_or_empty_commands(self):
         for overrides in (
             {"lane": "cluster-wal"},
