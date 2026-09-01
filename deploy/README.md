@@ -103,6 +103,41 @@ configuration error the companion is designed to avoid. If the Docker host
 cannot provide host networking, the server still works at
 `http://<host>:<PLURX_HTTP_PORT>`, but native clients must use manual entry.
 
+### Pull a prebuilt fleet image
+
+The Compose service still builds from the checked-out Dockerfile by default.
+Set `PLURX_IMAGE` only when one builder publishes an image that every server
+should pull:
+
+```bash
+cd deploy
+printf '%s\n' \
+  'PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:latest' >> .env
+docker compose pull plurxd   # downloads without touching the running voter
+docker compose up -d         # swaps this voter only after the pull completes
+curl -fsS http://127.0.0.1:32400/readyz
+```
+
+On a replicated cluster, run the final two commands on one voter at a time and
+require `/readyz` to return 200 before advancing. A pull is harmless to the
+running process; the `up -d` is the quorum boundary.
+
+The fleet builder runs `scripts/registry-push` from the repository root. It
+stamps `git describe --tags --always --dirty` into the binary and publishes
+both moving `latest` and immutable `sha-<12hex>` tags. Use the immutable tag
+for rollback:
+
+```bash
+PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:sha-<old-sha> \
+  docker compose up -d
+```
+
+If the registry is unavailable, the tracked `build:` block remains the local
+fallback. Build the checked-out revision with `make docker-up`; it preserves
+the build stamp and does not require the registry to answer. The noirr fleet's
+registry operations and recovery runbook live in
+[`docs/OPERATIONS.md`](../docs/OPERATIONS.md#the-fleet-registry--build-once-pull-everywhere).
+
 ### Project name
 
 The compose file pins `name: plurx`. Left to itself, Compose names the project

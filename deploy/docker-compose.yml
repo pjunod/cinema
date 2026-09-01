@@ -60,7 +60,7 @@ services:
         # still reports its compile time, which at least tells one deploy from
         # the next.
         PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}
-    image: plurx/plurxd:latest
+    image: ${PLURX_IMAGE:-plurx/plurxd:latest}
     container_name: plurxd
     restart: unless-stopped
     # At the supported 3,600s snapshot-transfer maximum, a recovering voter can
