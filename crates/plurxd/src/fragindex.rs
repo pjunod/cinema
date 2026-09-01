@@ -489,6 +489,44 @@ pub fn video_identities(
     identities
 }
 
+/// What this pass must do about the muxer's Dolby Vision record.
+///
+/// A free function, not three lines inside the pipe builder, because the pipe
+/// builder spawns ffmpeg and cannot be driven from a test — and this choice is
+/// the whole of the fix on both sides of it. Left inline, deleting it changes
+/// no test.
+fn dolby_vision_pass_for(
+    file: &MediaFile,
+    video: transcode::CopyVideoOptions,
+) -> Result<DolbyVisionPass, String> {
+    if video.converts_dolby_vision() {
+        // A converting pass produces a stream whose sample entry declares the
+        // *source's* record: ffmpeg copies it from the input container, and
+        // the rewrite that makes the RPUs say 8.1 runs after that muxer. So
+        // plurx builds the right one from the source's own stored facts.
+        return converted_dolby_vision_record(file)
+            .map(|record| DolbyVisionPass::Rewrite(Box::new(record)))
+            .map_err(|reason| {
+                format!(
+                    "a converting index needs a Dolby Vision record and this file cannot \
+                     describe one: {reason}"
+                )
+            });
+    }
+    if video.leaves_a_stale_dolby_vision_record(file) {
+        // The mirror image, and it lands here for the same reason: what the
+        // muxer wrote describes the source, not the stream this pass produces.
+        // `filter_units` took the RPU and enhancement-layer NAL units out by
+        // type, and the DOVI side data ffmpeg copied from the source container
+        // is not a NAL unit, so the output declares Profile 7 with an
+        // enhancement layer over a stream carrying neither. Chrome ignores it;
+        // VideoToolbox believes it, and Safari answers 4K10 HEVC so labelled
+        // with a software decode on hardware that has a block for it.
+        return Ok(DolbyVisionPass::Remove);
+    }
+    Ok(DolbyVisionPass::Untouched)
+}
+
 /// Build a file's index by running the index pipe.
 ///
 /// `budget` bounds the whole pass. An index is background work; a NAS read
@@ -611,28 +649,9 @@ async fn build_with_args(
     // muxer. So plurx builds the right one from the source's own stored facts
     // and hands it to the promotion, which is the single funnel both this
     // pass's served init and every later generation's go through.
-    let dolby_vision = if video.converts_dolby_vision() {
-        match converted_dolby_vision_record(file) {
-            Ok(record) => DolbyVisionPass::Rewrite(Box::new(record)),
-            Err(reason) => {
-                return IndexOutcome::Unsupported(format!(
-                    "a converting index needs a Dolby Vision record and this file cannot \
-                     describe one: {reason}"
-                ))
-            }
-        }
-    } else if video.leaves_a_stale_dolby_vision_record(file) {
-        // The mirror image of the conversion, and it lands here for the same
-        // reason: what the muxer wrote describes the source, not the stream
-        // this pass produces. `filter_units` took the RPU and enhancement-layer
-        // NAL units out by type, and the DOVI side data ffmpeg copied from the
-        // source container is not a NAL unit, so the output declares Profile 7
-        // with an enhancement layer over a stream carrying neither. Chrome
-        // ignores it; VideoToolbox believes it, and Safari answers 4K10 HEVC so
-        // labelled with a software decode on hardware that has a block for it.
-        DolbyVisionPass::Remove
-    } else {
-        DolbyVisionPass::Untouched
+    let dolby_vision = match dolby_vision_pass_for(file, video) {
+        Ok(pass) => pass,
+        Err(reason) => return IndexOutcome::Unsupported(reason),
     };
     // The probe's duration, carried in so a short read is caught. Passed in
     // milliseconds and converted against the pipe's own timescale inside the
@@ -1003,6 +1022,90 @@ mod tests {
         assert!(
             !strip_no_bsf.leaves_a_stale_dolby_vision_record(&plain),
             "a source with no Dolby Vision has no record to be stale"
+        );
+
+        // …and the pass the index pipe actually selects from it. This is the
+        // half that was untested: with the selection inline in the pipe
+        // builder, which spawns ffmpeg and cannot be driven from a test, the
+        // whole fix could be deleted and the suite stayed green.
+        assert_eq!(
+            dolby_vision_pass_for(&dv, strip_no_bsf).expect("a strip needs no record"),
+            DolbyVisionPass::Remove
+        );
+        assert_eq!(
+            dolby_vision_pass_for(&dv, transcode::CopyVideoOptions::new(true, false))
+                .expect("dovi_rpu"),
+            DolbyVisionPass::Untouched
+        );
+        assert_eq!(
+            dolby_vision_pass_for(&dv, transcode::CopyVideoOptions::new(false, true))
+                .expect("preserve"),
+            DolbyVisionPass::Untouched
+        );
+        assert_eq!(
+            dolby_vision_pass_for(&plain, strip_no_bsf).expect("not Dolby Vision"),
+            DolbyVisionPass::Untouched
+        );
+
+        // A conversion rewrites rather than removes — and asks for a record
+        // this file can describe.
+        let mut p7 = dv.clone();
+        p7.dolby_vision.profile = Some(7);
+        p7.dolby_vision.level = Some(6);
+        p7.dolby_vision.bl_compat_id = Some(1);
+        let converting =
+            transcode::CopyVideoOptions::new(false, true).with_dolby_vision_conversion(true);
+        assert!(matches!(
+            dolby_vision_pass_for(&p7, converting).expect("describable"),
+            DolbyVisionPass::Rewrite(_)
+        ));
+    }
+
+    /// A `Remove` pass reaches the stored promotion inputs, and an ordinary
+    /// one does not.
+    ///
+    /// The wire the fix is, end to end within this module: the predicate above
+    /// says the compensation is needed, and this says the ask survives to the
+    /// place every served init — live and regenerated — is promoted from.
+    /// Without it the whole fix can be deleted from `build_with_args` and the
+    /// suite stays green.
+    #[tokio::test]
+    async fn a_removing_pass_stores_the_ask_in_the_promotion_inputs() {
+        testfixtures::require_ffmpeg();
+        let bytes = index_pipe_bytes("closed-gop");
+
+        let removing = index_stream(
+            std::io::Cursor::new(bytes.clone()),
+            identity(),
+            None,
+            DolbyVisionPass::Remove,
+        )
+        .await;
+        let IndexOutcome::Built(removing) = removing else {
+            panic!("{removing:?}");
+        };
+        assert!(
+            removing.promotion.strip_dolby_vision,
+            "a removing pass must record the ask, or nothing removes the record"
+        );
+        assert!(
+            removing.promotion.dolby_vision.is_none(),
+            "and must not also ask for a rewrite, which promotion refuses"
+        );
+
+        let ordinary = index_stream(
+            std::io::Cursor::new(bytes),
+            identity(),
+            None,
+            DolbyVisionPass::Untouched,
+        )
+        .await;
+        let IndexOutcome::Built(ordinary) = ordinary else {
+            panic!("{ordinary:?}");
+        };
+        assert!(
+            !ordinary.promotion.strip_dolby_vision,
+            "every other pass leaves the muxer's record alone"
         );
     }
 

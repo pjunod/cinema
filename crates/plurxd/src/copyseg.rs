@@ -278,6 +278,7 @@ pub async fn run<R: AsyncRead + Unpin>(
     dir: PathBuf,
     session_id: &str,
     limits: Limits,
+    strip_dolby_vision_record: bool,
 ) -> Outcome {
     match tokio::fs::metadata(&dir).await {
         Ok(metadata) if metadata.is_dir() => {}
@@ -374,6 +375,36 @@ pub async fn run<R: AsyncRead + Unpin>(
                         ));
                     }
                     let video_timescale = video.timescale;
+                    // This path builds its served init itself rather than
+                    // through `fmp4::promote_from`, so the removal the VOD
+                    // path gets from the stored promotion inputs has to be
+                    // asked for here too. It is the same defect either way:
+                    // `filter_units` took the Dolby Vision layers out by NAL
+                    // type and the DOVI side data the muxer wrote the record
+                    // from is not a NAL unit, so on an ffmpeg without
+                    // `dovi_rpu` the init declares Profile 7 with an
+                    // enhancement layer over a stream carrying neither.
+                    //
+                    // Before the brand sanitizer, not after: the sanitizer
+                    // declines on an entry that still has a record, which is
+                    // exactly the state this leaves if the order is reversed —
+                    // and `dby1` over an entry with no record is the
+                    // contradictory init AVPlayer refuses outright.
+                    if strip_dolby_vision_record {
+                        match fmp4::remove_dolby_vision_record(&mut init) {
+                            Ok(true) => tracing::info!(
+                                session = %crate::transcode::session_log_id(session_id),
+                                "removed the stale Dolby Vision record from the HLS init segment"
+                            ),
+                            Ok(false) => {}
+                            Err(error) => {
+                                return Outcome::Unsupported(format!(
+                                    "the stale Dolby Vision record could not be removed \
+                                     from the init: {error}"
+                                ))
+                            }
+                        }
+                    }
                     sanitize_stale_dolby_brand(&mut init);
                     let policy = fmp4::CutPolicy::new(
                         limits.floor_seconds,
@@ -533,23 +564,11 @@ pub(crate) fn sanitize_stale_dolby_brand(init: &mut Init) -> bool {
         return false;
     }
 
-    let bytes = &mut init.bytes;
-    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
-        return false;
-    }
-    let size = u32::from_be_bytes(bytes[0..4].try_into().expect("four-byte ftyp size")) as usize;
-    if size < 16 || size > bytes.len() || !(size - 16).is_multiple_of(4) {
-        return false;
-    }
-
-    let mut changed = false;
-    for offset in std::iter::once(8).chain((16..size).step_by(4)) {
-        if &bytes[offset..offset + 4] == b"dby1" {
-            bytes[offset..offset + 4].copy_from_slice(b"iso6");
-            changed = true;
-        }
-    }
-    changed
+    // The rewrite itself lives in `fmp4` because a second caller needs it:
+    // `remove_dolby_vision_record` creates this same contradiction when it
+    // deletes a record the muxer had written, and it has to fix the brand in
+    // the same call rather than depending on this one running again.
+    fmp4::replace_dolby_file_type_brand(&mut init.bytes)
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -740,7 +759,7 @@ mod tests {
     async fn session(kind: &str, limits: Limits) -> (tempfile::TempDir, Outcome) {
         let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe(kind);
-        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", limits).await;
+        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", limits, false).await;
         (dir, outcome)
     }
 
@@ -803,6 +822,45 @@ mod tests {
         }
     }
 
+    /// The recovery path removes the record too.
+    ///
+    /// This path builds its served init itself rather than through
+    /// `fmp4::promote_from`, so the removal the VOD path gets from its stored
+    /// promotion inputs has to be asked for here separately — and it is the
+    /// path a freshly added file takes, which is exactly when a forced-Original
+    /// Dolby Vision play is most likely.
+    ///
+    /// The order matters as much as the removal: the brand sanitizer declines
+    /// on an entry that still carries a record, so removing afterwards would
+    /// leave `dby1` over an entry with none, which is the contradictory init
+    /// AVPlayer refuses outright.
+    #[test]
+    fn the_recovery_path_removes_a_stale_dolby_vision_record_and_its_brand() {
+        let feed = plurx_core::testfixtures::pipe("open-gop");
+        let mut reader = FragmentReader::new();
+        reader.push(&feed);
+        let Some(Unit::Init(mut init)) = reader.next_unit().expect("parses") else {
+            panic!("the fixture opens with an init");
+        };
+        let record = plurx_core::fmp4::DolbyVisionRecord::new(7, 6, true, true, false, 0)
+            .expect("the record a stripping muxer copies out of a P7 source");
+        assert!(fmp4::set_dolby_vision_record(&mut init, &record).expect("insert"));
+        init.bytes[8..12].copy_from_slice(b"dby1");
+
+        // The production sequence, in production order.
+        assert!(fmp4::remove_dolby_vision_record(&mut init).expect("remove"));
+        sanitize_stale_dolby_brand(&mut init);
+
+        assert!(
+            !init.bytes.windows(4).any(|f| f == b"dvcC" || f == b"dvvC"),
+            "the record survived the recovery path"
+        );
+        assert!(
+            !init.bytes.windows(4).any(|f| f == b"dby1"),
+            "the brand survived, which AVPlayer refuses over an entry with no record"
+        );
+    }
+
     #[test]
     fn stripped_dolby_vision_init_drops_the_stale_dby1_brand() {
         let mut init = init_with_dolby_brand(false);
@@ -826,7 +884,7 @@ mod tests {
         // hidden sample data can complete the configuration.
         replace_hvcc_array_type(&mut feed, 34, 33);
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk(), false).await;
         let Outcome::InvalidHevcConfiguration(reason) = outcome else {
             panic!("an incomplete emitted hvcC was not terminal: {outcome:?}");
         };
@@ -998,7 +1056,14 @@ mod tests {
         let feed = pipe("clean-cra");
         // Two thirds of the stream, which lands inside a fragment.
         let cut = feed.len() * 2 / 3;
-        let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(
+            &feed[..cut],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            false,
+        )
+        .await;
         let Outcome::ReaderFailed { counts, .. } = outcome else {
             panic!("{outcome:?}");
         };
@@ -1028,7 +1093,14 @@ mod tests {
         let cut = feed.len() * 2 / 3;
         let mut limits = brisk();
         limits.publish_gate_secs = 999;
-        let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", limits).await;
+        let outcome = run(
+            &feed[..cut],
+            dir.path().to_path_buf(),
+            "test",
+            limits,
+            false,
+        )
+        .await;
         let Outcome::ReaderFailed { counts, .. } = outcome else {
             panic!("{outcome:?}");
         };
@@ -1056,7 +1128,14 @@ mod tests {
         let cut = feed.len() * 2 / 3;
         let mut limits = brisk();
         limits.publish_gate_secs = 4;
-        let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", limits).await;
+        let outcome = run(
+            &feed[..cut],
+            dir.path().to_path_buf(),
+            "test",
+            limits,
+            false,
+        )
+        .await;
         let Outcome::ReaderFailed { counts, .. } = outcome else {
             panic!("{outcome:?}");
         };
@@ -1133,7 +1212,7 @@ mod tests {
         // its parent, which is the malformed case, not the truncated one.
         let head = 28 + 8; // past ftyp and the moov header
         feed[head..head + 4].copy_from_slice(&0xffff_ffffu32.to_be_bytes());
-        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk(), false).await;
         assert!(
             matches!(outcome, Outcome::ReaderFailed { .. }),
             "a broken moov minted a fallback request: {outcome:?}"
@@ -1183,7 +1262,14 @@ mod tests {
         );
 
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(&out.stdout[..], dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(
+            &out.stdout[..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            false,
+        )
+        .await;
         match outcome {
             Outcome::Unsupported(reason) => {
                 assert!(reason.contains("never asked for"), "{reason}");
@@ -1198,7 +1284,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_pipe_is_reader_failure_not_fallback() {
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(&[][..], dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(&[][..], dir.path().to_path_buf(), "test", brisk(), false).await;
         assert!(
             matches!(outcome, Outcome::ReaderFailed { .. }),
             "{outcome:?}"
@@ -1208,7 +1294,7 @@ mod tests {
     #[tokio::test]
     async fn a_supported_reader_failure_is_not_a_fallback_request() {
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(BrokenPipe, dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(BrokenPipe, dir.path().to_path_buf(), "test", brisk(), false).await;
         let Outcome::ReaderFailed { reason, counts } = outcome else {
             panic!("a pipe read error was not classified as reader failure: {outcome:?}");
         };
@@ -1222,7 +1308,7 @@ mod tests {
         let dir = crate::test_tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
         std::fs::remove_dir_all(&path).expect("remove fixture session directory");
-        let outcome = run(&feed[..], path, "test", brisk()).await;
+        let outcome = run(&feed[..], path, "test", brisk(), false).await;
         assert!(
             matches!(outcome, Outcome::ReaderFailed { .. }),
             "a directory that never existed masqueraded as teardown: {outcome:?}"
@@ -1235,7 +1321,7 @@ mod tests {
         let parent = crate::test_tempdir().expect("tempdir");
         let path = parent.path().join("not-a-directory");
         std::fs::write(&path, b"fixture").expect("write fixture file");
-        let outcome = run(&feed[..], path, "test", brisk()).await;
+        let outcome = run(&feed[..], path, "test", brisk(), false).await;
         let Outcome::ReaderFailed { reason, .. } = outcome else {
             panic!("a non-directory scratch path became cancellation: {outcome:?}");
         };
@@ -1252,6 +1338,7 @@ mod tests {
             dir.path().to_path_buf(),
             "test",
             brisk(),
+            false,
         )
         .await;
         assert!(
@@ -1270,7 +1357,7 @@ mod tests {
         let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe("clean-cra");
         let trickle = tokio::io::BufReader::with_capacity(1, &feed[..]);
-        let outcome = run(trickle, dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(trickle, dir.path().to_path_buf(), "test", brisk(), false).await;
         assert_eq!(outcome, whole_outcome);
         assert_eq!(playlist(dir.path()), playlist(whole.path()));
         assert_eq!(segment_files(dir.path()), segment_files(whole.path()));
@@ -1337,7 +1424,7 @@ mod tests {
             max_seconds: 15,
             publish_gate_secs: 0,
         };
-        let outcome = run(stdout, dir.path().to_path_buf(), "live", limits).await;
+        let outcome = run(stdout, dir.path().to_path_buf(), "live", limits, false).await;
         let _ = child.wait().await;
 
         let Outcome::Completed(counts) = outcome else {

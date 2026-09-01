@@ -3124,6 +3124,7 @@ fn spawn_copy_reader_owner(
     dir: PathBuf,
     sid: String,
     producer_attempt: u64,
+    strip_dolby_vision_record: bool,
 ) {
     tokio::spawn(async move {
         // The outer owner retains the pipe until the actor has accepted the
@@ -3138,7 +3139,14 @@ fn spawn_copy_reader_owner(
         let worker_sid = sid.clone();
         let worker = tokio::spawn(async move {
             let mut stdout = reader_stdout.lock_owned().await;
-            copyseg::run(&mut *stdout, dir, &worker_sid, copyseg::Limits::default()).await
+            copyseg::run(
+                &mut *stdout,
+                dir,
+                &worker_sid,
+                copyseg::Limits::default(),
+                strip_dolby_vision_record,
+            )
+            .await
         });
         let outcome = match worker.await {
             Ok(outcome) => outcome,
@@ -15757,6 +15765,7 @@ impl TranscodeManager {
                 dir.clone(),
                 session_id.clone(),
                 generation,
+                video_options.leaves_a_stale_dolby_vision_record(&file),
             );
         }
         tracing::info!(

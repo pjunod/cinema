@@ -1186,6 +1186,21 @@ fn write_be_u32(bytes: &mut [u8], at: usize, value: u32) -> Result<(), Fmp4Error
 /// the init it fetched has to describe both.
 pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, Fmp4Error> {
     let hevc = promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)?;
+    // The removal goes FIRST, and the rewrite below goes last, for the same
+    // reason pointing opposite ways: `promote_hdr10_static_metadata_from`
+    // refuses to run on a sample entry that carries a Dolby Vision record.
+    //
+    // A stripped stream is an HDR10 stream — that is the entire claim the
+    // strip makes — and its mastering-display metadata is exactly as worth
+    // promoting as any other HDR10 title's. Removing the record afterwards
+    // would leave the promotion inhibited by a record that is about to be
+    // deleted, and the one stream this whole change exists to fix would be the
+    // one served without its HDR10 static metadata.
+    let removed = if inputs.strip_dolby_vision && inputs.dolby_vision.is_none() {
+        remove_dolby_vision_record(init)?
+    } else {
+        false
+    };
     let hdr10 = promote_hdr10_static_metadata_from(init, &inputs.hdr10_sei)?;
     // Last, and deliberately so. The HDR10 promotion above refuses to run on a
     // sample entry that already carries a Dolby Vision configuration, and
@@ -1202,7 +1217,10 @@ pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, F
             ))
         }
         (Some(record), false) => set_dolby_vision_record(init, record)?,
-        (None, true) => remove_dolby_vision_record(init)?,
+        // Already done above, before the HDR10 promotion it would otherwise
+        // inhibit. Carried through so the "did anything change" answer is
+        // still the union of all three.
+        (None, true) => removed,
         (None, false) => false,
     };
     Ok(hevc || hdr10 || dolby_vision)
@@ -1638,32 +1656,47 @@ pub fn set_dolby_vision_record(
 /// it, so `hvcC`'s own size is untouched and every box from the sample entry
 /// up through `moov` shrinks by the whole box.
 pub fn remove_dolby_vision_record(init: &mut Init) -> Result<bool, Fmp4Error> {
-    let Some(location) = locate_hvcc(&init.bytes)? else {
-        return Ok(false);
-    };
-    let Some(existing) = location.dolby_vision else {
-        return Ok(false);
-    };
-    let box_start = existing
-        .payload
-        .start
-        .checked_sub(existing.header_len)
-        .ok_or_else(|| {
-            Fmp4Error::Unsupported("the Dolby Vision record's header lies before the init".into())
-        })?;
-    let delta = existing.payload.end - box_start;
+    // A loop, not a single removal. `locate_hvcc` reports the first of `dvvC`
+    // and `dvcC` it finds and stops, so an entry carrying both — which no
+    // muxer in the corpus writes, and which this function must therefore not
+    // silently half-fix — would keep one box while the parsed
+    // `dolby_vision_config` flag below said there were none, leaving the
+    // in-memory init wrong about its own bytes with nothing to run again.
+    let mut removed = false;
+    while let Some(existing) = locate_hvcc(&init.bytes)?.and_then(|location| {
+        location
+            .dolby_vision
+            .clone()
+            .map(|record| (record, location.ancestors))
+    }) {
+        let (existing, ancestors) = existing;
+        let box_start = existing
+            .payload
+            .start
+            .checked_sub(existing.header_len)
+            .ok_or_else(|| {
+                Fmp4Error::Unsupported(
+                    "the Dolby Vision record's header lies before the init".into(),
+                )
+            })?;
+        let delta = existing.payload.end - box_start;
 
-    // Sizes first, offsets second. Every ancestor's start lies before the
-    // record, so its recorded offset is still valid here; after the removal
-    // some would not be, and patching a size through a stale offset writes
-    // four bytes into the middle of a box.
-    //
-    // `ancestors[0]` is `hvcC` and is deliberately skipped: the record sits
-    // beside it, and shrinking `hvcC` would swallow whatever follows it.
-    for &box_at in location.ancestors.iter().skip(1) {
-        shrink_box(&mut init.bytes, box_at, delta)?;
+        // Sizes first, offsets second. Every ancestor's start lies before the
+        // record, so its recorded offset is still valid here; after the
+        // removal some would not be, and patching a size through a stale
+        // offset writes four bytes into the middle of a box.
+        //
+        // `ancestors[0]` is `hvcC` and is deliberately skipped: the record
+        // sits beside it, and shrinking `hvcC` would swallow whatever follows.
+        for &box_at in ancestors.iter().skip(1) {
+            shrink_box(&mut init.bytes, box_at, delta)?;
+        }
+        init.bytes.drain(box_start..existing.payload.end);
+        removed = true;
     }
-    init.bytes.drain(box_start..existing.payload.end);
+    if !removed {
+        return Ok(false);
+    }
 
     // `Init.tracks` is parsed metadata and `dolby_vision_config` was parsed
     // from the box just deleted. Two live guards read it and both would now do
@@ -1678,7 +1711,55 @@ pub fn remove_dolby_vision_record(init: &mut Init) -> Result<bool, Fmp4Error> {
             track.dolby_vision_config = false;
         }
     }
+
+    // And the file-type brand, in the same call rather than in a second pass a
+    // caller has to remember. `dby1` in `ftyp` beside a sample entry with no
+    // record is the shape AVPlayer refuses outright — a contradictory
+    // initialization segment — which is a worse failure than the software
+    // decode this removal exists to prevent, and it is the failure this
+    // function would otherwise create: the sanitizer that removes the brand
+    // runs on the MUXER init, where the record is still present, so it
+    // correctly declines, and nothing runs again after the record goes.
+    //
+    // Here rather than at the call site because the removal has to stay a pure
+    // function of the stored promotion inputs: a brand fix applied anywhere
+    // else would land on the live path and not on a head regeneration, and the
+    // regeneration would then be refused for drift against an init it built
+    // correctly.
+    replace_dolby_file_type_brand(&mut init.bytes);
     Ok(true)
+}
+
+/// Rewrite the Dolby Vision `dby1` file-type brand to the plain ISO one.
+///
+/// Answers whether anything changed. Both the major brand and every entry in
+/// the compatible-brands list, because a reader may consult either.
+///
+/// A `dby1` claim over a sample entry carrying no Dolby Vision record is not a
+/// cosmetic leftover: AVPlayer treats the pair as a contradictory
+/// initialization segment and fails the item immediately. Two callers reach
+/// this — the copy segmenter, which sees an init ffmpeg's `dovi_rpu` filter
+/// already emptied but whose brand movenc had written before the filter's
+/// output parameters reached it, and [`remove_dolby_vision_record`], which
+/// creates the same contradiction itself.
+pub fn replace_dolby_file_type_brand(bytes: &mut [u8]) -> bool {
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    let size = u32::from_be_bytes(bytes[0..4].try_into().expect("four-byte ftyp size")) as usize;
+    if size < 16 || size > bytes.len() || !(size - 16).is_multiple_of(4) {
+        return false;
+    }
+    let mut changed = false;
+    // The major brand at 8, then the compatible-brands list from 16 on. Bytes
+    // 12..16 are the minor version, which is a number and not a brand.
+    for offset in std::iter::once(8).chain((16..size).step_by(4)) {
+        if &bytes[offset..offset + 4] == b"dby1" {
+            bytes[offset..offset + 4].copy_from_slice(b"iso6");
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Whether the HEVC decoder configuration carries VPS, SPS, and PPS arrays.
@@ -4949,6 +5030,195 @@ mod tests {
         assert!(!remove_dolby_vision_record(&mut init).expect("no-op"));
     }
 
+    /// Removing the record also removes the `dby1` file-type brand.
+    ///
+    /// The stale-brand sanitizer runs on the MUXER init, where the record is
+    /// still present, so it correctly declines — and nothing runs again after
+    /// the record is gone. `dby1` in `ftyp` over a sample entry with no record
+    /// is the contradictory initialization segment AVPlayer refuses outright,
+    /// which would be a worse failure than the software decode this removal
+    /// exists to prevent: this change would have created it.
+    #[test]
+    fn removing_the_record_also_removes_the_dolby_file_type_brand() {
+        let feed = pipe("open-gop");
+        let (mut init, _, _) = read_all(&feed);
+        let stale = DolbyVisionRecord::new(7, 6, true, true, false, 0).expect("record");
+        assert!(set_dolby_vision_record(&mut init, &stale).expect("insert"));
+        // Stamp the brand movenc writes beside a Dolby Vision sample entry.
+        // Major brand and compatible-brands entry both, because a reader may
+        // consult either.
+        init.bytes[8..12].copy_from_slice(b"dby1");
+        let size = u32::from_be_bytes(init.bytes[0..4].try_into().expect("ftyp size")) as usize;
+        assert!(size >= 20, "the fixture ftyp has a compatible-brands list");
+        init.bytes[16..20].copy_from_slice(b"dby1");
+
+        assert!(remove_dolby_vision_record(&mut init).expect("remove"));
+        assert!(
+            !init.bytes[..size].windows(4).any(|f| f == b"dby1"),
+            "the ftyp still claims Dolby Vision over an entry that has none"
+        );
+        assert_eq!(&init.bytes[8..12], b"iso6");
+        assert_eq!(&init.bytes[16..20], b"iso6");
+        // And the init still parses: the brand is rewritten in place, never
+        // resized.
+        let reread = reparse_init(&init.bytes);
+        assert_eq!(dolby_vision_record(&reread).expect("read"), None);
+    }
+
+    /// A stripped stream keeps its HDR10 static metadata.
+    ///
+    /// `promote_hdr10_static_metadata_from` refuses to run on a sample entry
+    /// carrying a Dolby Vision record. If the removal ran after it, the record
+    /// would still be there to inhibit the promotion and then be deleted — so
+    /// the one stream this whole change exists to fix, a Profile 7 title
+    /// stripped to its HDR10 base, would be the one served without its
+    /// mastering-display metadata.
+    #[test]
+    fn a_stripped_stream_still_gets_its_hdr10_static_metadata() {
+        let feed = pipe("open-gop");
+        let (muxer, _, _) = read_all(&feed);
+        // The same hand-built prefix SEIs the ordinary promotion test uses:
+        // mdcv (payload type 137, 24 bytes) and clli (144, 4 bytes).
+        let mut mastering = vec![0x4e, 0x01, 137, 24];
+        mastering.extend_from_slice(&[0; 24]);
+        mastering.push(0x80);
+        let mut content_light = vec![0x4e, 0x01, 144, 4];
+        content_light.extend_from_slice(&[0; 4]);
+        content_light.push(0x80);
+        let hdr10_sei = vec![mastering, content_light];
+
+        // The control: this metadata is promotable and promotion moves bytes.
+        // Without it the comparison below could pass by promoting nothing on
+        // either side.
+        let mut control = muxer.clone();
+        assert!(
+            promote_hdr10_static_metadata_from(&mut control, &hdr10_sei).expect("promote"),
+            "the control must promote for this test to mean anything"
+        );
+        let promoted_len = control.bytes.len();
+        assert!(promoted_len > muxer.bytes.len());
+
+        let mut stale = muxer.clone();
+        let record = DolbyVisionRecord::new(7, 6, true, true, false, 0).expect("record");
+        assert!(set_dolby_vision_record(&mut stale, &record).expect("insert"));
+        let inputs = PromotionInputs {
+            strip_dolby_vision: true,
+            hdr10_sei,
+            ..PromotionInputs::default()
+        };
+        assert!(promote_from(&mut stale, &inputs).expect("promote"));
+        assert_eq!(dolby_vision_record(&stale).expect("read"), None);
+
+        let location = locate_hvcc(&stale.bytes).expect("parse").expect("hvcC");
+        assert!(
+            location.has_mdcv && location.has_clli,
+            "the stripped stream lost the HDR10 static metadata the record inhibited"
+        );
+        assert_eq!(
+            stale.bytes.len(),
+            promoted_len,
+            "and carries exactly what a stream that never had a record carries"
+        );
+    }
+
+    /// Both record spellings go, not just the first one found.
+    ///
+    /// `locate_hvcc` reports the first of `dvvC`/`dvcC` and stops. No muxer in
+    /// the corpus writes both, which is exactly why a half-removal here would
+    /// go unnoticed: the parsed flag would say there is no record while one box
+    /// remained, and nothing would run again to find it.
+    #[test]
+    fn removing_the_record_removes_every_spelling_of_it() {
+        let feed = pipe("open-gop");
+        let (mut init, _, _) = read_all(&feed);
+        let p7 = DolbyVisionRecord::new(7, 6, true, true, false, 0).expect("record");
+        assert!(set_dolby_vision_record(&mut init, &p7).expect("dvcC"));
+        // Hand-splice a second box, in the other spelling, beside the first.
+        let location = locate_hvcc(&init.bytes).expect("parse").expect("hvcC");
+        let existing = location
+            .dolby_vision
+            .clone()
+            .expect("the dvcC just written");
+        let box_start = existing.payload.start - existing.header_len;
+        let clone: Vec<u8> = init.bytes[box_start..existing.payload.end].to_vec();
+        let mut second = clone.clone();
+        second[4..8].copy_from_slice(b"dvvC");
+        for &box_at in location.ancestors.iter().skip(1) {
+            grow_box(&mut init.bytes, box_at, second.len()).expect("grow");
+        }
+        init.bytes.splice(box_start..box_start, second);
+        assert_eq!(
+            init.bytes
+                .windows(4)
+                .filter(|f| *f == b"dvcC" || *f == b"dvvC")
+                .count(),
+            2
+        );
+
+        assert!(remove_dolby_vision_record(&mut init).expect("remove"));
+        assert!(
+            !init.bytes.windows(4).any(|f| f == b"dvcC" || f == b"dvvC"),
+            "one spelling survived while the parsed flag said there were none"
+        );
+        let reread = reparse_init(&init.bytes);
+        assert_eq!(dolby_vision_record(&reread).expect("read"), None);
+    }
+
+    /// A box too small to have contained the record is an error, not a clamp.
+    ///
+    /// `shrink_box`'s guards are unreachable through the removal itself, so
+    /// they are driven directly. Saturating to zero would produce an init that
+    /// parses as a different file — every box after the corrupted size would be
+    /// read at the wrong offset — which is the failure a `checked_sub` with a
+    /// `saturating_sub` beside it is one keystroke away from.
+    #[test]
+    fn shrinking_a_box_past_its_own_header_is_refused() {
+        // An 8-byte-header box claiming 24 bytes, asked to lose 40.
+        let mut bytes = vec![0u8; 24];
+        bytes[0..4].copy_from_slice(&24u32.to_be_bytes());
+        bytes[4..8].copy_from_slice(b"stsd");
+        let at = BoxAt {
+            start: 0,
+            header_len: 8,
+        };
+        let error = shrink_box(&mut bytes, at, 40).expect_err("underflow is refused");
+        assert!(error.to_string().contains("too small"), "{error}");
+        assert_eq!(
+            u32::from_be_bytes(bytes[0..4].try_into().expect("size")),
+            24,
+            "and the size is left alone rather than clamped"
+        );
+        // Shrinking to exactly the header is legal; below it is not.
+        assert!(shrink_box(&mut bytes, at, 16).is_ok());
+        assert_eq!(u32::from_be_bytes(bytes[0..4].try_into().expect("size")), 8);
+        assert!(shrink_box(&mut bytes, at, 1).is_err());
+
+        // The `largesize` arm, which no fixture in the corpus reaches.
+        let mut large = vec![0u8; 40];
+        large[0..4].copy_from_slice(&1u32.to_be_bytes());
+        large[4..8].copy_from_slice(b"moov");
+        large[8..16].copy_from_slice(&40u64.to_be_bytes());
+        let large_at = BoxAt {
+            start: 0,
+            header_len: 16,
+        };
+        shrink_box(&mut large, large_at, 8).expect("a largesize box shrinks");
+        assert_eq!(
+            u64::from_be_bytes(large[8..16].try_into().expect("size")),
+            32
+        );
+        assert!(shrink_box(&mut large, large_at, 40).is_err());
+
+        // A header length this file does not understand is refused by name
+        // rather than silently patched at the wrong offset.
+        let odd = BoxAt {
+            start: 0,
+            header_len: 12,
+        };
+        let error = shrink_box(&mut large, odd, 4).expect_err("unknown header");
+        assert!(error.to_string().contains("12-byte header"), "{error}");
+    }
+
     /// The removal rides the same promotion funnel the rewrite does.
     ///
     /// Load-bearing, not tidy: the live path and the head regeneration both
@@ -4972,12 +5242,35 @@ mod tests {
         assert!(promote_from(&mut live, &inputs).expect("promote"));
         assert_eq!(dolby_vision_record(&live).expect("read back"), None);
 
+        // Through a serde round trip, which is what a head regeneration
+        // actually promotes from: the inputs are stored as JSON in the
+        // rendition and read back on another request, possibly on another
+        // node. Promoting the same in-memory value twice would assert only
+        // that promotion is deterministic, which it trivially is; the property
+        // that matters is that the stored form carries everything the
+        // promotion needs.
+        let stored = serde_json::to_string(&inputs).expect("encode");
+        let restored: PromotionInputs = serde_json::from_str(&stored).expect("decode");
+        assert!(
+            restored.strip_dolby_vision,
+            "the removal must survive being stored"
+        );
         let mut regenerated = muxer.clone();
-        assert!(promote_from(&mut regenerated, &inputs).expect("promote"));
+        assert!(promote_from(&mut regenerated, &restored).expect("promote"));
         assert_eq!(
             regenerated.bytes, live.bytes,
             "the two paths must agree byte for byte"
         );
+
+        // And an init stored before this field existed promotes exactly as it
+        // did: a mixed-version cluster is normal here, and a rendition written
+        // by an older node must not start regenerating differently.
+        let legacy: PromotionInputs =
+            serde_json::from_str(r#"{"parameter_sets":[],"hdr10_sei":[]}"#).expect("decode");
+        assert!(!legacy.strip_dolby_vision);
+        let mut old_rendition = muxer.clone();
+        assert!(!promote_from(&mut old_rendition, &legacy).expect("promote"));
+        assert_eq!(old_rendition.bytes, muxer.bytes);
 
         // Asking for both is a caller bug, and a precedence rule would hide
         // it. The inputs are stored and replayed on every head regeneration,

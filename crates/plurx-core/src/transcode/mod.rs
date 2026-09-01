@@ -3949,6 +3949,42 @@ mod index_pipe_tests {
             false,
             false
         ));
+
+        // The same equality against the OTHER filter builder. `copy_video_args`
+        // hand-rolls its filter list on the parameter-set-promotion branch
+        // instead of calling `hevc_copy_bsf_for_copy`, so the predicate's
+        // agreement with it is a separate fact and held only by luck until
+        // this asserted it.
+        for hdr in [Some("dolby_vision"), Some("hdr10"), None] {
+            for have_dovi_bsf in [false, true] {
+                for preserve in [false, true] {
+                    for convert in [false, true] {
+                        for promote in [false, true] {
+                            let mut file = hevc_dv();
+                            file.hdr = hdr.map(str::to_owned);
+                            let options = CopyVideoOptions::new(have_dovi_bsf, preserve)
+                                .with_parameter_set_promotion(promote)
+                                .with_dolby_vision_conversion(convert);
+                            let args = copy_video_args(&file, options);
+                            let filter = args
+                                .windows(2)
+                                .find(|pair| pair[0] == "-bsf:v")
+                                .map(|pair| pair[1].clone())
+                                .unwrap_or_default();
+                            let strips_the_layers_only = (filter.contains("62-63")
+                                || filter.contains("remove_types=62-63"))
+                                && !filter.contains("dovi_rpu");
+                            assert_eq!(
+                                options.leaves_a_stale_dolby_vision_record(&file),
+                                strips_the_layers_only,
+                                "hdr={hdr:?} dovi_bsf={have_dovi_bsf} preserve={preserve} \
+                                 convert={convert} promote={promote} rendered {filter}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// A converting copy preserves the RPUs it converts.

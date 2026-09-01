@@ -72,9 +72,24 @@ pub enum InitRefused {
     /// The muxer init differs from the rendition's. Real pipeline drift.
     MuxerDrift { stored: String, found: String },
     /// The muxer init matched and the served init did not, which means
-    /// promotion is no longer a pure function of the stored inputs. Nothing
-    /// should be able to cause this; it is here so that if something does, it
-    /// is a loud refusal rather than a viewer receiving different bytes.
+    /// promotion is no longer a pure function of the stored inputs. It is here
+    /// so that when something does cause it, it is a loud refusal rather than
+    /// a viewer receiving different bytes.
+    ///
+    /// One cause is ordinary and expected, and is worth knowing before an
+    /// operator goes hunting a pipeline bug: **version skew inside a
+    /// cluster.** [`plurx_core::fmp4::PromotionInputs`] gains fields over
+    /// time, each `#[serde(default)]` so a newer node reads an older
+    /// rendition correctly. The reverse does not hold — an older node
+    /// deserializing a newer rendition silently drops the field it does not
+    /// know, promotes without it, and lands here. `strip_dolby_vision` is the
+    /// first field with that property.
+    ///
+    /// The refusal is the right answer: the older node genuinely cannot build
+    /// the bytes the rendition promised, and serving what it can build would
+    /// hand a viewer holding one generation's playlist a different
+    /// generation's media. The remedy is to finish the rollout, not to relax
+    /// the check.
     PromotionDrift { stored: String, found: String },
 }
 

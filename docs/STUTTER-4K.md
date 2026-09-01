@@ -464,8 +464,18 @@ refuse it; it plays it, in software.
 plurx now removes the record itself, in the init, on the far side of the
 muxer — the same place the Profile 7 → 8.1 conversion rewrites RPUs, and
 through the same promotion funnel, so a regenerated head is byte-identical
-to the live one. `filter_units` takes out the layers, the promotion takes
+to the live one. The live-HLS recovery path builds its served init directly
+rather than through that funnel, so it asks for the removal separately; both
+paths are covered. `filter_units` takes out the layers, the removal takes
 out the claim, and the two halves of the strip are complete on any ffmpeg.
+
+The removal also rewrites the `dby1` file-type brand, in the same call. It
+has to: the sanitizer that normally does that runs on the muxer init, where
+the record is still present, so it correctly declines — and `dby1` over a
+sample entry with no record is a *contradictory* initialization segment,
+which AVPlayer refuses outright rather than merely software-decoding. Note
+for anyone reading `scripts/perf-report` as the evidence: it scans for
+`dvcC`/`dvvC` only, so it would call that wire clean.
 
 The perf report fetches the live session's init segment and states outright
 whether any DV box survives — the wire is proven clean or the report says
