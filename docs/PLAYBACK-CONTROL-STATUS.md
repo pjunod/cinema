@@ -31,7 +31,7 @@ one is deleted.
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike still **needs hardware**, and item 7 is not allowed to start without its numbers |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
-| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is written and blocked** on one decision — see §"M3's latch has nowhere to be read from" — and **M4 (burn-join) is the next buildable milestone**; detection is separately deferred |
+| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it" — and **M4 (burn-join) is the next buildable milestone**; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
 
@@ -367,12 +367,12 @@ stays established by ruling D1 and by `is_permanent` rather than by
 hardware.
 
 
-## M3's latch has nowhere to be read from
+## M3's latch, and the decision that landed it
 
-**Written 2026-09-01.** The latch is on `agent/m7-m3-seek-coalescing` at
-`9915bc2` with four tests, including a twenty-seek storm. There is no pull
-request, and the reason is a gap in the plan rather than in the work. Full
-working in the agent notes as `M7-M3-BLOCKED.md`.
+**Written 2026-09-01, updated the same day.** Built as
+[#754](https://github.com/pjunod/plurx/pull/754). The section is kept because
+the reasoning is the part worth inheriting, and because it records a gap the
+plan had.
 
 `SettledTarget { sequence, anchor_ms }` records the destination the client
 actually wants, updated on every **accepted** snapshot — not only on a seek,
@@ -404,11 +404,19 @@ A debounce would paper over that and §5.1 already rules it out, correctly: it
 trades the storm for added latency on every honest seek. The sequence exists —
 it is simply not on the wire.
 
-**The decision, and it is one line of protocol.** Add
-`control_sequence: Option<u64>` to the media requests that trigger production
-(absent means today's behaviour, the additive pattern M5a used throughout), or
-move the restart behind the control exchange, which is really M6's design.
-The first is recommended and leaves the second available.
+**The decision, and it was one line of protocol.** Paul chose the additive
+field: `control_sequence: Option<u64>` on `CreateSession`, absent meaning
+today's behaviour — the pattern M5a used throughout. The alternative, moving
+the restart behind the control exchange, stays available and is really M6's
+design; if that happens the field simply stops being sent. `hls::create` now
+consults the latch through the existing lease snapshot and refuses a
+superseded restart with a typed 409 before anything is spawned.
+
+**One thing the storm test found.** The server already refuses exchanges
+faster than its own 250 ms cadence, returning `RateLimited`. That
+independently bounds how many restarts a single storm can ask for, and the
+test spaces its seeks above the floor so it measures the latch rather than the
+rate limiter.
 
 Worth knowing for urgency: the client already tokens its own side
 (`_seekToken`, `index.html:3377`, `:3426`), so a browser storm does not
