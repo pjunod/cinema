@@ -26,6 +26,10 @@ pub const TOPOLOGY_CATALOGUE_READ_OPERATIONS: u64 = 256;
 pub const TOPOLOGY_CATALOGUE_READ_CONCURRENCY: u64 = 32;
 pub(crate) const TOPOLOGY_CATALOGUE_TITLE_PREFIX: &str = "Topology Catalogue Read";
 const TOPOLOGY_VALUE_BYTES: usize = 64;
+/// The background SQL classes a topology write window tolerates - the
+/// membership heartbeat only. Topology nodes hold no cluster-job lease, so
+/// job_leases traffic there is contamination, not background.
+const TOPOLOGY_BACKGROUND_SQL: [&str; 1] = ["cluster_node_heartbeat_intents"];
 const SEMANTIC_EVIDENCE_SCOPE: &str = "semantic_ci";
 const NAMED_RUNNER_EVIDENCE_SCOPE: &str = "named_runner";
 
@@ -76,6 +80,11 @@ pub struct TopologyRun {
     pub applied_index_before: u64,
     pub applied_index_after: u64,
     pub physical_commit_entries: u64,
+    /// Raft entries the write window applied from declared background
+    /// writers (the membership heartbeat), counted by SQL class at apply
+    /// time. The applied-index delta equals `physical_commit_entries` plus
+    /// this - named traffic, never absorbed into the per-write cost.
+    pub window_background_entries: u64,
     pub acknowledged_write_round_trip_p50_us: f64,
     pub acknowledged_write_round_trip_p95_us: f64,
     pub acknowledged_write_round_trip_p99_us: f64,
@@ -390,20 +399,60 @@ pub(super) async fn exercise_topology(
             .normal
             .saturating_sub(payload_counts_before.normal),
     );
-    if window_entries != workload.operations {
+    // Topology nodes run the membership heartbeat (one transaction per node
+    // per round), so its entries are tolerated by SQL class and recorded, not
+    // absorbed. No node holds a cluster-job lease here, so lease-class
+    // traffic stays hard contamination.
+    let mut tolerated = 0_u64;
+    let mut foreign = 0_u64;
+    let mut classified = 0_u64;
+    let mut class_report = String::new();
+    for (position, class) in super::BACKGROUND_SQL_CLASSES.iter().enumerate() {
+        let delta = payload_counts_after
+            .class_counts
+            .get(position)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(
+                payload_counts_before
+                    .class_counts
+                    .get(position)
+                    .copied()
+                    .unwrap_or(0),
+            );
+        classified = classified.saturating_add(delta);
+        if TOPOLOGY_BACKGROUND_SQL.contains(class) {
+            tolerated = tolerated.saturating_add(delta);
+        } else {
+            foreign = foreign.saturating_add(delta);
+        }
+        if !class_report.is_empty() {
+            class_report.push(' ');
+        }
+        class_report.push_str(&format!("{class}={delta}"));
+    }
+    let unclassified = window_normal.saturating_sub(classified);
+    if unclassified != workload.operations
+        || window_entries != workload.operations.saturating_add(tolerated)
+        || window_blank != 0
+        || window_membership != 0
+        || foreign != 0
+    {
         bail!(
             "topology write window did not cost exactly one Raft entry per acknowledged \
              write: {} operations advanced the applied index by {window_entries} \
              ({applied_index_before} -> {applied_index_after}); the window applied \
              {window_blank} blank, {window_membership} membership, and {window_normal} \
-             normal entries; leader term {} before, {} after",
+             normal entries (background [{class_report}]; {foreign} undeclared \
+             background, {unclassified} unclassified); leader term {} before, {} after",
             workload.operations,
             payload_counts_before.current_term,
             payload_counts_after.current_term
         );
     }
     println!(
-        "cluster-check: topology write window accounted: operations={} blank={window_blank} \
+        "cluster-check: topology write window accounted: operations={} \
+         background=[{class_report}] blank={window_blank} \
          membership={window_membership} normal={window_normal} term={}..{}",
         workload.operations, payload_counts_before.current_term, payload_counts_after.current_term
     );
@@ -488,7 +537,10 @@ pub(super) async fn exercise_topology(
         errors: 0,
         applied_index_before,
         applied_index_after,
-        physical_commit_entries: applied_index_after.saturating_sub(applied_index_before),
+        physical_commit_entries: applied_index_after
+            .saturating_sub(applied_index_before)
+            .saturating_sub(tolerated),
+        window_background_entries: tolerated,
         acknowledged_write_round_trip_p50_us: percentile_type7(
             &raw_acknowledged_write_round_trip_us,
             0.50,
@@ -739,6 +791,7 @@ struct PayloadCounts {
     normal: u64,
     current_term: u64,
     applied_index: u64,
+    class_counts: Vec<u64>,
 }
 
 async fn applied_payload_counts(
@@ -755,12 +808,14 @@ async fn applied_payload_counts(
             normal,
             current_term,
             applied_index,
+            class_counts,
         } => Ok(PayloadCounts {
             blank,
             membership,
             normal,
             current_term,
             applied_index,
+            class_counts,
         }),
         response => bail!("topology voter {node_id} omitted payload counts: {response:?}"),
     }
@@ -987,7 +1042,9 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
             || run
                 .applied_index_after
                 .saturating_sub(run.applied_index_before)
-                != run.physical_commit_entries
+                != run
+                    .physical_commit_entries
+                    .saturating_add(run.window_background_entries)
         {
             bail!("topology run did not observe exactly one Raft entry per acknowledged write");
         }
@@ -1175,6 +1232,7 @@ mod tests {
             applied_index_before: 100,
             applied_index_after: 100 + TOPOLOGY_WRITE_OPERATIONS,
             physical_commit_entries: TOPOLOGY_WRITE_OPERATIONS,
+            window_background_entries: 0,
             acknowledged_write_round_trip_p50_us: percentile_type7(
                 &raw_acknowledged_write_round_trip_us,
                 0.50,

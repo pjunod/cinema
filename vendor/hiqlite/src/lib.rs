@@ -69,8 +69,9 @@ pub use crate::{client::Client, error::Error};
 pub use crate::network::raft_client::validation_set_raft_partitioned;
 #[cfg(feature = "validation-test-helpers")]
 pub use crate::store::state_machine::sqlite::state_machine::{
-    validation_applied_payload_counts, validation_apply_pause_observed, validation_pause_apply,
-    validation_resume_apply,
+    validation_applied_payload_counts, validation_applied_sql_class_counts,
+    validation_apply_pause_observed, validation_pause_apply,
+    validation_register_applied_sql_classes, validation_resume_apply,
 };
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use config::{NodeConfig, RaftConfig, RateLimitConfig};

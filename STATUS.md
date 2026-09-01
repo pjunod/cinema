@@ -30,16 +30,23 @@ evidence first:
       (`PLURX_VALIDATION_LOG_APPLIED=1`); both exact-count windows print a
       full accounting line and name contaminating entries in their bails.
 - [x] Adversarial review round: clippy blocker fixed; boundary sampling
-      made consistent (retried until no entry commits mid-sample); lease
-      identity (owner + fence) asserted across the window; experiment
+      made consistent (retried until no entry commits mid-sample); experiment
       argument rejections tested.
+- [x] Second background writer caught by the first post-fix CI run: the
+      membership heartbeat (one `cluster_node_heartbeat_intents` transaction
+      per node per round) plus failed lease-renewal CAS attempts, neither
+      visible to the lease row's revision. Reworked to SQL-class accounting:
+      applied normal entries are attributed to registered classes at apply
+      time, windows declare which classes are legitimate, undeclared classes
+      stay hard contamination, and the topology artifact records the
+      tolerated count as `window_background_entries` (schema extended).
 - [~] Verification: `make cluster-harness-check` green end to end; 10
       consecutive learner-drill runs green with the renewal accounted;
       full-suite run and PR CI in progress — merge follows green.
-- [ ] Topology's CI contaminant: not reproduced locally (all windows
-      64/64 normal). Deliberately left strict; the run-time check now
-      names payload kinds and terms, so the next occurrence is a one-look
-      diagnosis.
+- [x] Topology's CI contaminant: attributed to the membership heartbeat
+      class and tolerated by name; lease-class traffic there remains hard
+      contamination, and any unclassified entry still fails with kinds and
+      terms named.
 
 **Decision made without Paul (flagged for review):** no change to
 `docs/RELEASING.md`; the writeup's §7 suggestion (one cold-cache CI run

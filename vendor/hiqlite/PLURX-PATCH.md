@@ -72,13 +72,18 @@ Apache-2.0. Plurx carries eleven compatibility patches for clustered deployments
 - Under `validation-test-helpers` only, the SQLite state machine keeps
   process-local monotonic counters of applied Raft entries by payload kind
   (blank, membership, normal), exposed as
-  `validation_applied_payload_counts()`. Exact-count drills sample them around
-  their write windows so a contaminating entry — a blank leader-establishment
-  commit or a membership change, both invisible to SQL — is named rather than
-  merely counted. Setting `PLURX_VALIDATION_LOG_APPLIED` in a validation
-  process additionally logs each applied entry's index and payload to stderr,
-  which is how a contaminating entry is identified down to its SQL. Production
-  binaries do not compile the counters or the log.
+  `validation_applied_payload_counts()`, and attributes applied normal
+  entries to caller-registered SQL classes
+  (`validation_register_applied_sql_classes` — set-once before the node
+  starts; `validation_applied_sql_class_counts` reads them in registration
+  order; an entry counts toward the first class whose substring its SQL
+  contains). Exact-count drills sample both around their write windows so a
+  contaminating entry — a blank leader-establishment commit, a membership
+  change, or a background writer's SQL — is named rather than merely
+  counted. Setting `PLURX_VALIDATION_LOG_APPLIED` in a validation process
+  additionally logs each applied entry's index and payload to stderr, which
+  is how a contaminating entry is identified down to its SQL. Production
+  binaries compile none of it.
 
 Remove this vendor when an upstream Hiqlite release contains all eleven patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in

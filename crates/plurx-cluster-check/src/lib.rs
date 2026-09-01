@@ -269,8 +269,20 @@ pub fn validate_compacted_growth(report: &CompactedGrowthReport) -> Result<()> {
 ///
 /// `main` passes `std::env::args()` straight through, so the argument
 /// contract — including every rejection — is exercised by the crate's tests.
+/// The SQL substrings that classify the replicated store's legitimate
+/// background writers, in reporting order. Registered once per process before
+/// any node starts, so every applied normal entry is attributed to the first
+/// matching class: the cluster-job lease keeper (successful and failed
+/// renewal CAS attempts both commit a `job_leases` entry) and the membership
+/// heartbeat (one `cluster_node_heartbeat_intents` transaction per node per
+/// round). Exact-count windows declare which classes are legitimate for that
+/// window; entries in undeclared classes remain hard contamination.
+pub(crate) const BACKGROUND_SQL_CLASSES: [&str; 2] =
+    ["job_leases", "cluster_node_heartbeat_intents"];
+
 pub async fn run(args: Vec<String>) -> Result<()> {
     install_crypto_provider();
+    hiqlite::validation_register_applied_sql_classes(&BACKGROUND_SQL_CLASSES);
     match args.get(1).map(String::as_str) {
         None | Some("check") => {
             run_growth_subprocess().await?;
@@ -5369,11 +5381,17 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
             leader,
             Request::ForceCompaction {
                 phase: "learner-snapshot".to_owned(),
-                // The leader holds FIRST_JOB, so its production heartbeat
-                // legitimately renews the lease while the 10,000-entry trigger
-                // load is being written; the drill accounts for each renewal
-                // by the row's revision advance instead of failing on it.
-                renewing_lease: Some(FIRST_JOB.to_owned()),
+                // The leader holds FIRST_JOB, so its production lease
+                // heartbeat legitimately commits while the 10,000-entry
+                // trigger load is being written — successful renewals and
+                // failed CAS attempts alike — and every node's membership
+                // heartbeat commits one transaction per round. The drill
+                // accounts for each such entry by its SQL class instead of
+                // failing on it.
+                background: BACKGROUND_SQL_CLASSES
+                    .iter()
+                    .map(|class| (*class).to_owned())
+                    .collect(),
             },
         )
         .await?
@@ -5990,7 +6008,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         initial_snapshot,
         "baseline warm-up",
-        None,
+        &[],
     )
     .await?;
     // The first snapshot also lets SQLite settle its state-machine WAL. Take a
@@ -6001,7 +6019,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         Some(warm_snapshot),
         "baseline settle",
-        None,
+        &[],
     )
     .await?;
     settle_post_snapshot_tail(
@@ -6073,7 +6091,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         Some(baseline_snapshot),
         "coalesced load",
-        None,
+        &[],
     )
     .await?;
     // hiqlite's retained WAL segment alternates allocation across adjacent
@@ -6084,7 +6102,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         Some(measured_snapshot),
         "coalesced settle",
-        None,
+        &[],
     )
     .await?;
     settle_post_snapshot_tail(
@@ -6123,7 +6141,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         raw_snapshot,
         "raw control",
-        None,
+        &[],
     )
     .await?;
     let raw_settled_snapshot = ensure_compaction_after(
@@ -6131,7 +6149,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         Some(raw_measured_snapshot),
         "raw settle",
-        None,
+        &[],
     )
     .await?;
     settle_post_snapshot_tail(&metrics_client, store.as_ref(), raw_settled_snapshot, "raw").await?;
@@ -6268,7 +6286,7 @@ async fn ensure_compaction_after(
     store: &HiqliteAuthStore,
     previous_snapshot: Option<u64>,
     phase: &str,
-    renewing_lease: Option<&str>,
+    background: &[String],
 ) -> Result<u64> {
     let metrics = client.metrics_db().await?;
     if let Some(snapshot) = metrics
@@ -6293,14 +6311,14 @@ async fn ensure_compaction_after(
     // boundaries are sampled by `window_boundary`, which retries until no
     // entry committed mid-sample, so a renewal landing during sampling moves
     // the boundary instead of corrupting the account on either side of it.
-    let anchor = window_boundary(client, phase, renewing_lease).await?;
+    let anchor = window_boundary(client, phase).await?;
     let committed = anchor.watermark.committed_index;
     let writes = snapshot_trigger_plan(previous_snapshot, committed)?;
     let marker = format!("cluster.growth.compaction.{phase}");
     for ordinal in 0..writes {
         store.put_setting(&marker, &ordinal.to_string()).await?;
     }
-    let confirm = window_boundary(client, phase, renewing_lease).await?;
+    let confirm = window_boundary(client, phase).await?;
     let final_committed = confirm.watermark.committed_index;
     // Account for every entry the window applied, by payload kind, so a
     // mismatch names the contaminating entry instead of only counting it.
@@ -6313,45 +6331,34 @@ async fn ensure_compaction_after(
         confirm.counts.1.saturating_sub(anchor.counts.1),
         confirm.counts.2.saturating_sub(anchor.counts.2),
     );
-    let renewals = match (&anchor.lease, &confirm.lease) {
-        (Some(before), Some(after)) => {
-            if after.owner_node_id != before.owner_node_id || after.fence != before.fence {
-                bail!(
-                    "{phase} declared renewing lease changed hands across the compaction \
-                     window: owner {} fence {} at the anchor, owner {} fence {} at \
-                     confirmation — its row commits cannot be attributed to heartbeat \
-                     renewals",
-                    before.owner_node_id,
-                    before.fence,
-                    after.owner_node_id,
-                    after.fence
-                );
-            }
-            after
-                .revision
-                .checked_sub(before.revision)
-                .with_context(|| {
-                    format!(
-                        "{phase} lease revision moved backward across the compaction \
-                     window ({} -> {})",
-                        before.revision, after.revision
-                    )
-                })?
-        }
-        _ => 0,
-    };
+    let account = window_account(
+        &anchor.class_counts,
+        &confirm.class_counts,
+        background,
+        normal,
+    );
     let expected_final = committed
         .checked_add(writes)
-        .and_then(|total| total.checked_add(renewals))
+        .and_then(|total| total.checked_add(account.tolerated))
         .context("compaction trigger commit index overflowed")?;
-    if final_committed != expected_final || blank != 0 || membership != 0 {
+    if final_committed != expected_final
+        || blank != 0
+        || membership != 0
+        || account.foreign != 0
+        || account.unclassified != writes
+    {
         bail!(
             "{phase} compaction trigger was contaminated by concurrent writes: \
-             committed {committed} + {writes} planned writes + {renewals} lease \
-             renewals reached {final_committed}, expected exact {expected_final}; \
-             the window applied {blank} blank, {membership} membership, and \
-             {normal} normal entries; watermark term {} leader {} at the anchor, \
-             term {} leader {} at confirmation",
+             committed {committed} + {writes} planned writes + {} declared background \
+             entries reached {final_committed}, expected exact {expected_final}; the \
+             window applied {blank} blank, {membership} membership, and {normal} \
+             normal entries (background [{}]; {} undeclared background, {} \
+             unclassified); watermark term {} leader {} at the anchor, term {} \
+             leader {} at confirmation",
+            account.tolerated,
+            account.report,
+            account.foreign,
+            account.unclassified,
             anchor.watermark.term,
             anchor.watermark.leader_id,
             confirm.watermark.term,
@@ -6363,9 +6370,9 @@ async fn ensure_compaction_after(
     // one foreign stdout line breaks response decoding on the controller.
     eprintln!(
         "cluster-check: {phase} compaction window accounted: writes={writes} \
-         renewals={renewals} blank={blank} membership={membership} normal={normal} \
+         background=[{}] blank={blank} membership={membership} normal={normal} \
          term={}..{}",
-        anchor.watermark.term, confirm.watermark.term
+        account.report, anchor.watermark.term, confirm.watermark.term
     );
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -6384,34 +6391,27 @@ async fn ensure_compaction_after(
 }
 
 /// One consistent boundary of an exact-count window: the quorum watermark,
-/// this process's applied payload counters, and — when a renewing lease is
-/// declared — the durable lease row, all belonging to the same committed
-/// index. The watermark is read again after the samples and the whole set is
-/// retried until both reads agree on term and index; applied never exceeds
-/// committed, so samples taken while the committed index held still are exact
-/// for that boundary. The watermark read itself appends nothing, which the
-/// `watermark-experiment` subcommand proves standalone.
+/// this process's applied payload counters, and its applied SQL-class counts,
+/// all belonging to the same committed index. The watermark is read again
+/// after the samples and the whole set is retried until both reads agree on
+/// term and index; applied never exceeds committed, so samples taken while
+/// the committed index held still are exact for that boundary. The watermark
+/// read itself appends nothing, which the `watermark-experiment` subcommand
+/// proves standalone.
 struct WindowBoundary {
     watermark: hiqlite::DbQuorumWatermark,
     counts: (u64, u64, u64),
-    lease: Option<LeaseObservation>,
+    class_counts: Vec<u64>,
 }
 
-async fn window_boundary(
-    client: &Client,
-    phase: &str,
-    renewing_lease: Option<&str>,
-) -> Result<WindowBoundary> {
+async fn window_boundary(client: &Client, phase: &str) -> Result<WindowBoundary> {
     for _ in 0..10 {
         let first = client
             .db_quorum_watermark()
             .await
             .with_context(|| format!("{phase} obtain window-boundary watermark"))?;
         let counts = applied_payload_counts_at(client, first.committed_index, phase).await?;
-        let lease = match renewing_lease {
-            Some(resource) => Some(local_lease_observation(client, resource, phase).await?),
-            None => None,
-        };
+        let class_counts = hiqlite::validation_applied_sql_class_counts();
         let second = client
             .db_quorum_watermark()
             .await
@@ -6420,11 +6420,59 @@ async fn window_boundary(
             return Ok(WindowBoundary {
                 watermark: first,
                 counts,
-                lease,
+                class_counts,
             });
         }
     }
     bail!("{phase} window boundary would not settle across 10 sampling attempts");
+}
+
+/// The class-attributed account of one exact-count window: entries in classes
+/// the window declared as legitimate background (`tolerated`), entries in
+/// registered classes the window did not declare (`foreign` — contamination),
+/// and normal entries no class matched (`unclassified` — the drill's own
+/// writes, and nothing else). `report` names every class with its delta for
+/// the success line and the bail message alike.
+struct WindowAccount {
+    tolerated: u64,
+    foreign: u64,
+    unclassified: u64,
+    report: String,
+}
+
+fn window_account(
+    before: &[u64],
+    after: &[u64],
+    background: &[String],
+    normal: u64,
+) -> WindowAccount {
+    let mut tolerated = 0_u64;
+    let mut foreign = 0_u64;
+    let mut classified = 0_u64;
+    let mut report = String::new();
+    for (position, class) in BACKGROUND_SQL_CLASSES.iter().enumerate() {
+        let delta = after
+            .get(position)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(before.get(position).copied().unwrap_or(0));
+        classified = classified.saturating_add(delta);
+        if background.iter().any(|declared| declared == class) {
+            tolerated = tolerated.saturating_add(delta);
+        } else {
+            foreign = foreign.saturating_add(delta);
+        }
+        if !report.is_empty() {
+            report.push(' ');
+        }
+        report.push_str(&format!("{class}={delta}"));
+    }
+    WindowAccount {
+        tolerated,
+        foreign,
+        unclassified: normal.saturating_sub(classified),
+        report,
+    }
 }
 
 /// Sample this process's applied-payload counters once its state machine has
@@ -7244,13 +7292,14 @@ pub enum Request {
     },
     ForceCompaction {
         phase: String,
-        /// The cluster-job lease whose production heartbeat is legitimately
-        /// renewing on this node while the drill writes its exact trigger
-        /// load. Each renewal commits one Raft entry (`UPDATE job_leases ...
-        /// revision = revision + 1`), so the drill subtracts the observed
-        /// revision advance — a named, per-entry account, not slack. `None`
-        /// asserts no lease writer exists and keeps the window fully strict.
-        renewing_lease: Option<String>,
+        /// The `BACKGROUND_SQL_CLASSES` entries whose background writers are
+        /// legitimately committing on this node while the drill writes its
+        /// exact trigger load — the cluster-job lease heartbeat, the
+        /// membership heartbeat. Each such entry is counted by SQL class at
+        /// apply time and subtracted exactly — a named, per-entry account,
+        /// not slack. An empty list asserts no background writer exists and
+        /// keeps the window fully strict.
+        background: Vec<String>,
     },
     ReleaseArtworkRepair {
         fence: ArtworkRepairFence,
@@ -7484,6 +7533,9 @@ pub enum Response {
         normal: u64,
         current_term: u64,
         applied_index: u64,
+        /// Per-class applied-entry counts for `BACKGROUND_SQL_CLASSES`, in
+        /// that order.
+        class_counts: Vec<u64>,
     },
     ApplyPauseObserved {
         observed: bool,
@@ -9987,17 +10039,10 @@ async fn handle_request(
         }),
         Request::ForceCompaction {
             ref phase,
-            ref renewing_lease,
+            ref background,
         } => {
             let previous = snapshot_index(client).await?;
-            ensure_compaction_after(
-                client,
-                store_ref(store)?,
-                previous,
-                phase,
-                renewing_lease.as_deref(),
-            )
-            .await?;
+            ensure_compaction_after(client, store_ref(store)?, previous, phase, background).await?;
             Ok(Response::Ok)
         }
         Request::ReleaseArtworkRepair { ref fence } => membership_ref(membership)?
@@ -10315,10 +10360,11 @@ async fn handle_request(
         }
         Request::AppliedPayloadCounts => {
             // Counters first, metrics after: the reported applied_index then
-            // upper-bounds the counter sample, so a caller that saw the same
+            // upper-bounds the counter samples, so a caller that saw the same
             // applied index before this request knows no entry applied while
             // the counters were read.
             let (blank, membership, normal) = hiqlite::validation_applied_payload_counts();
+            let class_counts = hiqlite::validation_applied_sql_class_counts();
             let metrics = client.metrics_db().await?;
             Ok(Response::AppliedPayloadCounts {
                 blank,
@@ -10326,6 +10372,7 @@ async fn handle_request(
                 normal,
                 current_term: metrics.current_term,
                 applied_index: metrics.last_applied.map(|log| log.index).unwrap_or(0),
+                class_counts,
             })
         }
         Request::PauseApply => {
@@ -10617,45 +10664,6 @@ impl From<&mut Row<'_>> for HarnessArtworkRepairRow {
             generation: row.get("generation"),
         }
     }
-}
-
-/// One job lease row's identity and revision, from this node's local applied
-/// state. Plain local read: the exact-count windows sample it, so it must not
-/// itself commit anything. Owner and fence come along so the window can prove
-/// the row's commits belong to one unbroken tenure — a steal or re-acquisition
-/// also advances `revision`, and attributing those to heartbeat renewals would
-/// mask the very contamination the count exists to catch. A drill that
-/// declares a renewing lease is asserting the row exists, so absence fails
-/// loudly instead of reading as revision zero.
-struct LeaseObservation {
-    owner_node_id: String,
-    fence: u64,
-    revision: u64,
-}
-
-async fn local_lease_observation(
-    client: &Client,
-    resource: &str,
-    phase: &str,
-) -> Result<LeaseObservation> {
-    let mut rows = client
-        .query_map::<SingletonLeaseRow, _>(
-            "SELECT resource, owner_node_id, fence, revision, expires_at_ms \
-             FROM job_leases WHERE resource = $1",
-            params!(resource),
-        )
-        .await?;
-    if rows.len() > 1 {
-        bail!("singleton lease primary key returned multiple rows");
-    }
-    let row = rows
-        .pop()
-        .with_context(|| format!("{phase} declared renewing lease {resource} has no row"))?;
-    Ok(LeaseObservation {
-        owner_node_id: row.owner_node_id,
-        fence: u64::try_from(row.fence).context("job lease fence was negative")?,
-        revision: u64::try_from(row.revision).context("job lease revision was negative")?,
-    })
 }
 
 async fn read_job_lease(client: &Client, resource: &str) -> Result<Option<Lease>> {
@@ -12705,7 +12713,7 @@ mod tests {
     fn compaction_request_outlives_snapshot_publication_and_purge_bounds() {
         let request = Request::ForceCompaction {
             phase: "response-timeout-contract".to_owned(),
-            renewing_lease: None,
+            background: Vec::new(),
         };
         assert!(request.response_timeout() > Duration::from_secs(60));
         assert_eq!(Request::Metrics.response_timeout(), REQUEST_TIMEOUT);
