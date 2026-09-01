@@ -987,7 +987,9 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn('test "$(uname -s)/$(uname -m)"', proof)
         self.assertIn("Linux/$KERNEL_ARCH", proof)
         self.assertIn("docker info --format '{{.OSType}}/{{.Architecture}}'", proof)
-        self.assertIn("linux/$ARCH", proof)
+        self.assertIn("DOCKER_ARCH: ${{ matrix.docker_machine }}", package)
+        self.assertIn("docker_machine: aarch64", package)
+        self.assertIn("linux/$DOCKER_ARCH", proof)
         self.assertIn(
             "persistent-eligible: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}",
             package,

@@ -354,7 +354,7 @@ gain authority to restart the Docker daemon.
 Native ARM runs in isolated Lima Linux VMs, not in the macOS runner and not as
 an x86 QEMU compile. The MacBook Pro hosts the primary VM; the MacBook Air
 hosts a smaller backup VM alongside its existing macOS/Xcode runner. Both
-guests prove `Linux/aarch64` and a `linux/arm64` Docker engine before building,
+guests prove `Linux/aarch64` and a `linux/aarch64` Docker engine before building,
 then compile, package, start, and probe the exact candidate natively.
 
 The first final qualification disproved the proposed required-QEMU fallback:
