@@ -3404,33 +3404,32 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         Response::ItemId { item_id } => item_id,
         response => bail!("unexpected cross-item fence fixture response: {response:?}"),
     };
-    let before_repair = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics { applied_index, .. } => {
-            applied_index.context("repair budget missing initial applied index")?
-        }
+    let (before_repair, initial_term) = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics {
+            applied_index,
+            current_term,
+            ..
+        } => (
+            applied_index.context("repair budget missing initial applied index")?,
+            current_term,
+        ),
         response => bail!("unexpected pre-repair metrics: {response:?}"),
     };
     let mut first_winners = Vec::new();
     let mut initial_fence = None;
     for node_id in 1..=3 {
         if node_id == leader {
-            match cluster
-                .request(
-                    node_id,
-                    Request::ClaimArtworkRepairFence {
-                        item_id: repair_item,
-                        lease_ms: repair_lease_ms,
-                        inject_leader_change: false,
-                    },
-                )
-                .await?
+            if let Some(fence) = claim_artwork_repair_fence_as_leader(
+                &mut cluster,
+                node_id,
+                initial_term,
+                repair_item,
+                repair_lease_ms,
+            )
+            .await?
             {
-                Response::ArtworkRepairFence { fence: Some(fence) } => {
-                    first_winners.push(node_id);
-                    initial_fence = Some(fence);
-                }
-                Response::ArtworkRepairFence { fence: None } => {}
-                response => bail!("unexpected initial artwork fence response: {response:?}"),
+                first_winners.push(node_id);
+                initial_fence = Some(fence);
             }
         } else {
             match cluster
@@ -3450,7 +3449,14 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         }
     }
     if first_winners != [leader] {
-        bail!("artwork repair authority was not exactly leader {leader}: {first_winners:?}");
+        // Evidence only: a failed evidence read must never replace the
+        // verdict, so both results are printed as-is rather than propagated.
+        let raft = cluster.request(leader, Request::RaftDebug).await;
+        let row = try_read_artwork_repair_observation(&mut cluster, leader, repair_item).await;
+        bail!(
+            "artwork repair authority was not exactly leader {leader}: {first_winners:?}; \
+             leader raft: {raft:?}; durable repair row: {row:?}"
+        );
     }
     let after_repair = match cluster.request(leader, Request::Metrics).await? {
         Response::Metrics { applied_index, .. } => {
@@ -3714,12 +3720,12 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let mut new_fence = None;
     for node_id in 1..=3 {
         if node_id == handoff {
-            if let Some(fence) = claim_artwork_repair_fence_once(
+            if let Some(fence) = claim_artwork_repair_fence_as_leader(
                 &mut cluster,
                 node_id,
+                handoff_term,
                 repair_item,
                 repair_lease_ms,
-                false,
             )
             .await?
             {
@@ -3749,7 +3755,14 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         handoff_term,
     )?;
     if handoff_winners != [handoff] {
-        bail!("new leader did not exclusively fence artwork repair: {handoff_winners:?}");
+        // Evidence only: a failed evidence read must never replace the
+        // verdict, so both results are printed as-is rather than propagated.
+        let raft = cluster.request(handoff, Request::RaftDebug).await;
+        let row = try_read_artwork_repair_observation(&mut cluster, handoff, repair_item).await;
+        bail!(
+            "new leader did not exclusively fence artwork repair: {handoff_winners:?}; \
+             handoff raft: {raft:?}; durable repair row: {row:?}"
+        );
     }
     let (before_ambiguous_fence, before_ambiguous_index) =
         read_artwork_repair_observation(&mut cluster, handoff, wrong_target_item).await?;
@@ -4699,6 +4712,62 @@ fn require_artwork_repair_cas_topology(
              {expected_leader} term {expected_term}, observed leader {leader:?} term {current_term}"
         ),
         response => bail!("unexpected post-CAS successor metrics response: {response:?}"),
+    }
+}
+
+/// Claim the artwork repair fence on the node the drill expects to win,
+/// retrying only the explicitly retry-safe outcome. `claim_artwork_source_repair`
+/// declines with an explicit `fence: None` when the leader's quorum
+/// acknowledgement is older than one second at the instant of the claim, and
+/// a loaded host can age it past that between the drill's stability proof and
+/// the claim reaching the node — the same one-second window the successor
+/// proof already re-enters for its read-only probes. Retry while the same
+/// node still reports itself the quorum-acknowledged leader in the same
+/// term, bounded WELL BELOW one repair lease: the bound must absorb a
+/// quorum-freshness gap but must never be long enough to complete a fresh
+/// receiver-local observation window from scratch, or the claim would stop
+/// proving that the successor proof established that window. At this drill's
+/// call sites a `None` precedes the generation CAS — the freshness and
+/// observation guards decline before it and no competing claimant exists —
+/// so these retries consume no Raft entries and keep the one-entry
+/// contention budget intact; a losing CAS elsewhere would also answer
+/// `None` while committing an entry, so this helper is not a general-purpose
+/// retry.
+async fn claim_artwork_repair_fence_as_leader(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    expected_term: u64,
+    item_id: i64,
+    lease_ms: u64,
+) -> Result<Option<ArtworkRepairFence>> {
+    let deadline = Instant::now() + Duration::from_millis(lease_ms / 2);
+    loop {
+        if let Some(fence) =
+            claim_artwork_repair_fence_once(cluster, node_id, item_id, lease_ms, false).await?
+        {
+            return Ok(Some(fence));
+        }
+        // Retry a None only while the same election era provably still
+        // holds: same node, same term. Quorum freshness is deliberately NOT
+        // required here — a stale quorum acknowledgement is exactly the
+        // transient this loop exists to wait out (the first CI capture of
+        // the enriched bail showed the leader stable in its term with
+        // since_last_ack at 1036 ms), and requiring it back before retrying
+        // reproduces the one-shot behavior. A quorum that is genuinely gone
+        // ends the term or exhausts the deadline; either way the drill still
+        // receives the node's real verdict.
+        match cluster.request(node_id, Request::Metrics).await? {
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                ..
+            } if current_leader == node_id && current_term == expected_term => {}
+            _ => return Ok(None),
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
