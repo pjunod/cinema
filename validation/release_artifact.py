@@ -1,4 +1,4 @@
-"""Create and verify the exact two-binary Plurx release artifact."""
+"""Create and verify an exact, version-aware Plurx release artifact."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Any
 
 SCHEMA = 1
 BINARIES = ("plurxd", "plurx-cluster-check")
+SUPPORTED_BINARY_SETS = frozenset((("plurxd",), BINARIES))
 GIT_OBJECT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -37,6 +38,14 @@ def _require_git_object(value: object, field: str) -> str:
     return value
 
 
+def _require_binary_set(binary_names: tuple[str, ...]) -> tuple[str, ...]:
+    if binary_names not in SUPPORTED_BINARY_SETS:
+        raise ValueError(
+            "release artifact binaries must match a supported tagged runtime"
+        )
+    return binary_names
+
+
 def create(
     directory: Path,
     *,
@@ -45,6 +54,7 @@ def create(
     build_ref: str,
     rustc: str,
     target: str,
+    binary_names: tuple[str, ...] = BINARIES,
 ) -> dict[str, Any]:
     """Write sidecars and a manifest for the exact shipped binary set."""
 
@@ -53,9 +63,10 @@ def create(
     build_ref = _require_text(build_ref, "build_ref")
     rustc = _require_text(rustc, "rustc")
     target = _require_text(target, "target")
+    binary_names = _require_binary_set(binary_names)
 
     binaries: dict[str, dict[str, str]] = {}
-    for name in BINARIES:
+    for name in binary_names:
         path = directory / name
         if not path.is_file():
             raise ValueError(f"release artifact is missing binary {name}")
@@ -88,6 +99,7 @@ def verify(
     git_commit: str,
     build_ref: str,
     target: str,
+    binary_names: tuple[str, ...] = BINARIES,
 ) -> dict[str, Any]:
     """Verify identity, sidecars, and bytes before packaging an image."""
 
@@ -95,6 +107,7 @@ def verify(
     expected_commit = _require_git_object(git_commit, "expected git_commit")
     expected_ref = _require_text(build_ref, "expected build_ref")
     expected_target = _require_text(target, "expected target")
+    binary_names = _require_binary_set(binary_names)
 
     manifest_path = directory / "build-manifest.json"
     try:
@@ -121,9 +134,11 @@ def verify(
     _require_text(manifest.get("rustc"), "rustc")
 
     binaries = manifest.get("binaries")
-    if not isinstance(binaries, dict) or set(binaries) != set(BINARIES):
-        raise ValueError("release artifact manifest must name exactly both binaries")
-    for name in BINARIES:
+    if not isinstance(binaries, dict) or set(binaries) != set(binary_names):
+        raise ValueError(
+            "release artifact manifest binary set does not match the tagged runtime"
+        )
+    for name in binary_names:
         record = binaries.get(name)
         if not isinstance(record, dict) or set(record) != {"sha256"}:
             raise ValueError(f"release artifact manifest has invalid record for {name}")
@@ -156,6 +171,7 @@ def main() -> int:
         action.add_argument("--git-commit", required=True)
         action.add_argument("--build-ref", required=True)
         action.add_argument("--target", required=True)
+        action.add_argument("--binary", action="append", required=True)
         if command == "create":
             action.add_argument("--rustc", required=True)
     args = parser.parse_args()
@@ -166,9 +182,14 @@ def main() -> int:
         "target": args.target,
     }
     if args.command == "create":
-        create(args.directory, rustc=args.rustc, **common)
+        create(
+            args.directory,
+            rustc=args.rustc,
+            binary_names=tuple(args.binary),
+            **common,
+        )
     else:
-        verify(args.directory, **common)
+        verify(args.directory, binary_names=tuple(args.binary), **common)
     return 0
 
 

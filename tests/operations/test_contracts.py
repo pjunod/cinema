@@ -265,20 +265,29 @@ class OperationsContractCase(unittest.TestCase):
 
     def test_docker_build_keeps_cluster_validation_features_out_of_plurxd(self):
         dockerfile = read("Dockerfile")
-        self.assertNotIn(
-            "cargo build --release -p plurxd -p plurx-cluster-check",
-            dockerfile,
-        )
+        release = read(".github/workflows/publish-release.yml")
+        for source in (dockerfile, release):
+            self.assertNotIn(
+                "cargo build --release -p plurxd -p plurx-cluster-check",
+                source,
+            )
+            self.assertRegex(
+                source,
+                r"cargo build(?: --locked)? --release -p plurxd",
+            )
+            self.assertRegex(
+                source,
+                r"cargo build(?: --locked)? --release -p plurx-cluster-check",
+            )
+            self.assertIn("cargo tree --locked -p plurxd -e features", source)
+            self.assertIn("grep -q 'cluster-read-cost-validation'", source)
+        self.assertIn("CARGO_TARGET_DIR=/src/target-plurxd", dockerfile)
+        self.assertIn("CARGO_TARGET_DIR=/src/target-cluster-check", dockerfile)
+        self.assertIn('CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-plurxd"', release)
         self.assertIn(
-            "CARGO_TARGET_DIR=/src/target-plurxd cargo build --release -p plurxd",
-            dockerfile,
+            'CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-cluster-check"',
+            release,
         )
-        self.assertIn(
-            "CARGO_TARGET_DIR=/src/target-cluster-check cargo build --release -p plurx-cluster-check",
-            dockerfile,
-        )
-        self.assertIn("cargo tree --locked -p plurxd -e features", dockerfile)
-        self.assertIn("grep -q 'cluster-read-cost-validation'", dockerfile)
 
     def test_ship_routes_real_mobile_targets_through_ansible(self):
         ship = read("scripts/ship")

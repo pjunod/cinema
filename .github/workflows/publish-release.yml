@@ -132,10 +132,22 @@ jobs:
           - arch: arm64
             target: aarch64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the trusted packaging tool
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.packaging_sha }}
+          path: trusted-packaging
+      - name: Check out the exact tagged source
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ needs.resolve.outputs.commit_sha }}
+          path: release-source
+      - name: Derive the tagged binary contract
+        run: >-
+          PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging"
+          python3 -m validation.release_dockerfile --list-binaries
+          release-source/Dockerfile > "$GITHUB_WORKSPACE/release-binaries.txt"
       - name: Install the target and compatibility tools
         env:
           TARGET: ${{ matrix.target }}
@@ -152,14 +164,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-bookworm-${{ matrix.target }}
+          workspaces: release-source
+          cache-targets: false
       - name: Build the exact tagged binaries
         env:
           TARGET: ${{ matrix.target }}
           PLURX_BUILD_REF: ${{ needs.resolve.outputs.release_tag }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: >-
-          cargo build --locked --release
-          -p plurxd -p plurx-cluster-check --target "$TARGET"
+        working-directory: release-source
+        run: |
+          set -euo pipefail
+          ! cargo tree --locked -p plurxd -e features \
+            | grep -q 'cluster-read-cost-validation'
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-plurxd" \
+            cargo build --locked --release -p plurxd --target "$TARGET"
+          if grep -Fxq plurx-cluster-check "$GITHUB_WORKSPACE/release-binaries.txt"; then
+            CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-cluster-check" \
+              cargo build --locked --release -p plurx-cluster-check --target "$TARGET"
+          fi
       - name: Verify version, ABI ceiling, and release artifact
         env:
           TARGET: ${{ matrix.target }}
@@ -169,8 +191,15 @@ jobs:
           SOURCE_SHA: ${{ needs.resolve.outputs.commit_sha }}
         run: |
           set -euo pipefail
-          for name in plurxd plurx-cluster-check; do
-            binary="target/$TARGET/release/$name"
+          mapfile -t binaries < "$GITHUB_WORKSPACE/release-binaries.txt"
+          artifact_args=()
+          artifact_paths=()
+          for name in "${binaries[@]}"; do
+            target_directory="target-$name"
+            if [ "$name" = plurx-cluster-check ]; then
+              target_directory=target-cluster-check
+            fi
+            binary="$GITHUB_WORKSPACE/$target_directory/$TARGET/release/$name"
             test "$(file -b "$binary")" != ""
             max_glibc=$(readelf --version-info "$binary" \
               | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
@@ -180,8 +209,10 @@ jobs:
               echo "::error::$ARCH $name requires GLIBC_$max_glibc; Bookworm provides 2.36"
               exit 1
             }
+            artifact_args+=(--binary "$name")
+            artifact_paths+=("$binary")
           done
-          binary="target/$TARGET/release/plurxd"
+          binary="$GITHUB_WORKSPACE/target-plurxd/$TARGET/release/plurxd"
           if [ "$ARCH" = arm64 ]; then
             reported=$(qemu-aarch64 -L /usr/aarch64-linux-gnu "$binary" --version)
           else
@@ -192,17 +223,16 @@ jobs:
             exit 1
           }
           mkdir -p release-binary
-          install -m 0755 \
-            "target/$TARGET/release/plurxd" \
-            "target/$TARGET/release/plurx-cluster-check" \
-            release-binary/
-          python3 -m validation.release_artifact create \
+          install -m 0755 "${artifact_paths[@]}" release-binary/
+          PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging" \
+            python3 -m validation.release_artifact create \
             --directory release-binary \
-            --git-tree "$(git rev-parse HEAD^{tree})" \
+            --git-tree "$(git -C release-source rev-parse HEAD^{tree})" \
             --git-commit "$SOURCE_SHA" \
             --build-ref "$RELEASE_TAG" \
             --rustc "$(rustc -Vv)" \
-            --target "$TARGET"
+            --target "$TARGET" \
+            "${artifact_args[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: release-binary-${{ matrix.arch }}
@@ -248,6 +278,14 @@ jobs:
           SOURCE_SHA: ${{ needs.resolve.outputs.commit_sha }}
         run: |
           set -euo pipefail
+          mapfile -t binaries < <(python3 -m validation.release_dockerfile \
+            --list-binaries release-source/Dockerfile)
+          artifact_args=()
+          artifact_paths=()
+          for name in "${binaries[@]}"; do
+            artifact_args+=(--binary "$name")
+            artifact_paths+=("release-source/release-bin/$name")
+          done
           python3 -m validation.release_dockerfile \
             release-source/Dockerfile release-source/Dockerfile.release
           python3 -m validation.release_artifact verify \
@@ -255,10 +293,9 @@ jobs:
             --git-tree "$(git -C release-source rev-parse HEAD^{tree})" \
             --git-commit "$SOURCE_SHA" \
             --build-ref "$RELEASE_TAG" \
-            --target "$TARGET"
-          chmod 0755 \
-            release-source/release-bin/plurxd \
-            release-source/release-bin/plurx-cluster-check
+            --target "$TARGET" \
+            "${artifact_args[@]}"
+          chmod 0755 "${artifact_paths[@]}"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
