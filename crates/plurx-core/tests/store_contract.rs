@@ -1638,6 +1638,117 @@ async fn hiqlite_media_session_rejoin_survives_a_post_proposal_commit() {
     );
 }
 
+/// Abort can consume the replacement in the same post-proposal window as
+/// commit. The rejoin succeeded at its proposal, but its replacement is no
+/// longer staged or active when projection resumes, so durable classification
+/// is a named-gone `None`, never an impossible partial-commit error or stale
+/// `Some`.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn hiqlite_media_session_rejoin_classifies_a_post_proposal_abort() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated post-proposal abort state");
+    let user = store
+        .create_user("staged-rejoin-post-proposal-abort-user", "hash", false)
+        .await
+        .expect("create post-proposal abort user");
+    let playback = "staged-rejoin-post-proposal-abort-playback";
+    let predecessor = "00000000-0000-4000-8000-00000000d471";
+    current_media_session(
+        &store,
+        user.id,
+        playback,
+        predecessor,
+        "00000000-0000-4000-8000-00000000d472",
+        "hiqlite",
+    )
+    .await;
+    let occupied = "00000000-0000-4000-8000-00000000d473";
+    store
+        .prepare_media_session(&staged_preparation(
+            user.id,
+            playback,
+            occupied,
+            "00000000-0000-4000-8000-00000000d474",
+            predecessor,
+        ))
+        .await
+        .expect("prepare post-proposal abort fixture")
+        .expect("post-proposal abort fixture occupies the slot");
+    let mut merged = staged_preparation(
+        user.id,
+        playback,
+        "00000000-0000-4000-8000-00000000d475",
+        "00000000-0000-4000-8000-00000000d476",
+        predecessor,
+    );
+    merged.now_ms = 2_500;
+    merged.recipe_json = r#"{"subtitle":"burn:9"}"#.to_owned();
+
+    let (proposal_complete, release_projection) =
+        HiqliteAuthStore::validation_pause_next_rejoin_after_proposal();
+    let rejoin_store = store.clone();
+    let rejoin_preparation = merged.clone();
+    let rejoin = tokio::spawn(async move {
+        rejoin_store
+            .rejoin_media_session_preparation(occupied, &rejoin_preparation)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), proposal_complete)
+        .await
+        .expect("rejoin reaches post-proposal abort seam")
+        .expect("rejoin publishes post-proposal abort seam");
+    let aborted = store
+        .abort_media_session_preparation(user.id, playback, &merged.incarnation_id, 3_000)
+        .await
+        .expect("abort merged replacement")
+        .expect("merged replacement aborts while rejoin projection is paused");
+    assert_eq!(aborted.state, "ended");
+    assert_eq!(aborted.terminal_reason.as_deref(), Some("replaced"));
+    release_projection
+        .send(())
+        .expect("release rejoin projection after abort");
+    assert!(
+        rejoin
+            .await
+            .expect("join post-proposal abort task")
+            .expect("post-proposal abort is not an error")
+            .is_none(),
+        "an already-aborted replacement is no longer staged"
+    );
+    assert!(
+        store
+            .staged_media_session_for_playback(user.id, playback)
+            .await
+            .expect("inspect aborted replacement ledger")
+            .is_none(),
+        "the concurrent abort consumed the replacement ledger"
+    );
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(&merged.incarnation_id)
+            .await
+            .expect("inspect aborted merged route")
+            .expect("aborted merged route remains readable")
+            .state,
+        "ended"
+    );
+    assert_eq!(
+        store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .expect("inspect pointer after post-proposal abort")
+            .expect("predecessor remains current")
+            .incarnation_id,
+        predecessor
+    );
+}
+
 /// Acceptance 5 — commit advances the exact expected pointer, once.
 #[tokio::test]
 async fn media_session_commit_advances_the_exact_expected_pointer_once() {
