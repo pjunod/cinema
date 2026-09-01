@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ceec4315"]
+points = ["core.media"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained Hiqlite source contracts execute the shared prepare and abort statement builders, preserve their statement boundaries, and require the public entry points to submit those vectors unchanged so pointer writes, ungated retirement, or reordered ledger deletion cannot reappear behind the extraction boundary."

@@ -3552,7 +3552,7 @@ impl MediaSessionStore for HiqliteAuthStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        MEDIA_SESSIONS_SCHEMA, MEDIA_SESSIONS_V10_SCHEMA,
+        abort_statements, prepare_statements, MEDIA_SESSIONS_SCHEMA, MEDIA_SESSIONS_V10_SCHEMA,
         MEDIA_SESSION_PUBLICATION_FENCE_MIGRATION, MEDIA_SESSION_TERMINAL_REASON_MIGRATION,
     };
 
@@ -3568,6 +3568,23 @@ mod tests {
             .find("\n    async fn ")
             .map_or(rest.len(), |offset| offset + 1);
         &rest[..end]
+    }
+
+    fn statement_test_preparation() -> crate::domain::MediaSessionPreparation {
+        crate::domain::MediaSessionPreparation {
+            incarnation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
+            session_id: "session".to_owned(),
+            user_id: 1,
+            playback_id: "playback".to_owned(),
+            expected_predecessor_incarnation_id: "00000000-0000-4000-8000-000000000001".to_owned(),
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "owner".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            media_origin_ms: 0,
+            now_ms: 1,
+            deadline_ms: 2,
+        }
     }
 
     /// Every `$N` placeholder in a replicated statement must be introduced in
@@ -3736,28 +3753,86 @@ mod tests {
     /// a three-voter cluster and does not run in the fast loop.
     #[test]
     fn preparation_neither_reaps_nor_repoints() {
-        let source = method_source("prepare_media_session");
+        let method = method_source("prepare_media_session");
+        let normalized_method = method.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            !source.contains("terminal_reason = 'superseded'"),
-            "prepare must not run the supersession reap"
+            normalized_method.contains("let statements = prepare_statements(preparation);")
+                && method.matches("let statements =").count() == 1
+                && method.matches(".txn(").count() == 1
+                && method.matches(".txn(statements)").count() == 1
+                && !method.contains("statements.push(")
+                && !method.contains("statements.extend(")
+                && !method.contains("statements.insert(")
+                && !method.contains("statements.pop(")
+                && !method.contains(".execute")
+                && !method.contains("\"INSERT ")
+                && !method.contains("\"UPDATE ")
+                && !method.contains("\"DELETE "),
+            "the public preparation path must submit the shared statement vector unchanged"
+        );
+        let preparation = statement_test_preparation();
+        let statements = prepare_statements(&preparation);
+        assert_eq!(
+            statements.len(),
+            3,
+            "preparation is exactly lease, session, then ledger"
         );
         assert!(
-            !source.contains("UPDATE media_playback_pointers")
-                && !source.contains("INSERT INTO media_playback_pointers"),
+            statements[0].0.contains("INSERT INTO job_leases")
+                && statements[1].0.contains("INSERT INTO media_sessions")
+                && statements[2]
+                    .0
+                    .contains("INSERT INTO media_session_preparations"),
+            "preparation statement order is lease, session, then ledger"
+        );
+        let statement_sql = statements
+            .iter()
+            .map(|(sql, _)| sql)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !method.contains("terminal_reason = 'superseded'")
+                && !statement_sql.contains("terminal_reason = 'superseded'"),
+            "prepare must not run the supersession reap"
+        );
+        let normalized_statements = statement_sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !normalized_method.contains("UPDATE media_playback_pointers")
+                && !normalized_method.contains("INSERT INTO media_playback_pointers")
+                && !normalized_method.contains("DELETE FROM media_playback_pointers")
+                && !normalized_statements.contains("UPDATE media_playback_pointers")
+                && !normalized_statements.contains("INSERT INTO media_playback_pointers")
+                && !normalized_statements.contains("DELETE FROM media_playback_pointers"),
             "prepare must not write the pointer — a staged successor is \
              invisible to the current-session lookup precisely because it \
              holds none"
         );
+        let lease_sql = statements[0]
+            .0
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let session_sql = statements[1]
+            .0
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
-            source.contains("NOT EXISTS (SELECT 1 FROM media_session_preparations\n                      WHERE user_id = $3 AND playback_id = $4)"),
-            "one staged successor per playback, inlined because a replicated \
-             transaction cannot read and branch"
+            lease_sql.contains(
+                "NOT EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $5 AND playback_id = $6)"
+            ) && session_sql.contains(
+                "NOT EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $3 AND playback_id = $4)"
+            ),
+            "both lease and session admission enforce one staged successor per \
+             playback because a replicated transaction cannot read and branch"
         );
-        assert!(
-            source.contains("INSERT INTO job_leases"),
-            "a staged successor takes its own session lease, or it can never \
-             be renewed or taken over once it commits"
-        );
+        // The ordered identity assertion above also proves that a staged
+        // successor takes its own session lease, without which it could never
+        // be renewed or taken over once it commits.
     }
 
     /// Every write an abort performs is gated on the ledger row.
@@ -3766,39 +3841,78 @@ mod tests {
     /// ungated `WHERE incarnation_id = ?` ends a stranger's live stream.
     #[test]
     fn preparation_abort_is_ledger_gated_in_every_statement() {
-        let source = method_source("abort_media_session_preparation");
+        let method = method_source("abort_media_session_preparation");
+        let normalized_method = method.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            source.contains("EXISTS (SELECT 1 FROM media_session_preparations"),
-            "the retirement is gated on the ledger row — the incarnation id \
-             alone names any session in the database"
+            normalized_method.contains(
+                "let statements = abort_statements(user_id, playback_id, staged_incarnation_id, now_ms);"
+            ) && method.matches("let statements =").count() == 1
+                && method.matches(".txn(").count() == 1
+                && method.matches(".txn(statements)").count() == 1
+                && !method.contains("statements.push(")
+                && !method.contains("statements.extend(")
+                && !method.contains("statements.insert(")
+                && !method.contains("statements.pop(")
+                && !method.contains(".execute")
+                && !method.contains("\"INSERT ")
+                && !method.contains("\"UPDATE ")
+                && !method.contains("\"DELETE "),
+            "the public abort path must submit the shared statement vector unchanged"
         );
+        let statements = abort_statements(1, "playback", "00000000-0000-4000-8000-000000000002", 1);
         assert_eq!(
-            source
-                .matches("state = 'ended' AND updated_at_ms = $")
-                .count(),
-            2,
+            statements.len(),
+            4,
+            "abort is exactly retirement, pin delete, lease clamp, then ledger delete"
+        );
+        let retirement = statements[0].0;
+        let pin_delete = statements[1].0;
+        let lease_clamp = statements[2].0;
+        let ledger_delete = statements[3].0;
+        let normalized_retirement = retirement.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_pin_delete = pin_delete.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_lease_clamp = lease_clamp.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_ledger_delete = ledger_delete
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            retirement.contains("UPDATE media_sessions")
+                && pin_delete.contains("DELETE FROM cache_consumer_pins")
+                && lease_clamp.contains("UPDATE job_leases")
+                && ledger_delete.contains("DELETE FROM media_session_preparations"),
+            "the abort statement order is part of its transaction contract"
+        );
+        assert!(
+            normalized_retirement.contains(
+                "EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $3 AND playback_id = $4 AND staged_incarnation_id = $2)"
+            ),
+            "retirement is gated on the exact ledger identity"
+        );
+        assert!(
+            normalized_pin_delete.contains(
+                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)"
+            ) && normalized_pin_delete.contains(
+                "EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $3 AND playback_id = $4 AND staged_incarnation_id = $1)"
+            ),
+            "pin deletion is gated on this retirement and exact ledger identity"
+        );
+        assert!(
+            normalized_lease_clamp.contains(
+                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)"
+            ) && normalized_lease_clamp.contains(
+                "EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $4 AND playback_id = $5 AND staged_incarnation_id = $3)"
+            ),
             "the pin delete and the lease clamp also chain on that retirement \
              having fired at this instant — `now_ms` is the caller's, so the \
              timestamp alone is not proof, and the ledger EXISTS alone does \
              not say the work is this abort's"
         );
-        assert_eq!(
-            source
-                .matches("EXISTS (SELECT 1 FROM media_session_preparations")
-                .count(),
-            3,
-            "all three mutations are ledger-gated; only the ledger DELETE \
-             itself is not, and it comes last"
-        );
-        let ledger_delete = source
-            .find("DELETE FROM media_session_preparations")
-            .expect("the ledger row is cleared");
         assert!(
-            ledger_delete
-                > source
-                    .find("UPDATE media_sessions")
-                    .expect("the retirement exists"),
-            "the ledger DELETE comes last, because the retirement reads it"
+            normalized_ledger_delete
+                .contains("WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3")
+                && !ledger_delete.contains("EXISTS (SELECT 1 FROM media_session_preparations"),
+            "only the final exact-identity ledger DELETE is not ledger-existence gated"
         );
     }
 
