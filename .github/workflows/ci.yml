@@ -654,6 +654,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          workspaces: |
+            . -> target
+            . -> target-cluster-check
       - name: Provision or verify the aarch64 cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         # Also provides the C cross-compiler for rusqlite's bundled SQLite.
@@ -671,15 +674,25 @@ jobs:
           fi
           command -v aarch64-linux-gnu-gcc
           aarch64-linux-gnu-gcc --version
-      - run: cargo build --release -p plurxd --target ${{ matrix.target }}
+      # Build the two shipped binaries independently. The cluster inspector
+      # enables validation-only dependencies that must never feature-unify
+      # into plurxd, so it gets its own target directory just as it does in the
+      # release-publication workflow and source Dockerfile.
+      - name: Build both release binaries without feature union
+        run: |
+          cargo build --release -p plurxd --target ${{ matrix.target }}
+          CARGO_TARGET_DIR=target-cluster-check \
+            cargo build --release -p plurx-cluster-check --target ${{ matrix.target }}
         env:
           # Linker for the arm64 target (harmlessly unused on x86_64).
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      - name: Record the release binary digest
+      - name: Record the release binary digests
         if: github.event_name == 'push' || needs.scope.outputs.qualification == 'true'
-        run: >-
-          sha256sum target/${{ matrix.target }}/release/plurxd
-          > target/${{ matrix.target }}/release/plurxd.sha256
+        run: |
+          sha256sum target/${{ matrix.target }}/release/plurxd \
+            > target/${{ matrix.target }}/release/plurxd.sha256
+          sha256sum target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check \
+            > target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check.sha256
       # Ordinary PRs prove both release targets compile but retain no large
       # artifacts. Push/tag runs and final effort qualifications keep the exact
       # binary plus digest for one day, long enough to inspect or stage it.
@@ -696,6 +709,8 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/plurxd
             target/${{ matrix.target }}/release/plurxd.sha256
+            target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check
+            target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check.sha256
           retention-days: 1
 
   # CD validates the tag in this workflow, then delegates artifact construction,
@@ -739,7 +754,7 @@ jobs:
       - name: Start, probe, restart, and re-probe the image
         run: scripts/container-smoke plurx/plurxd:ci
       # Release publication ships amd64 and arm64. The native release-build
-      # matrix already compiles both arm64 Rust binaries. Target only the
+      # matrix above compiles both arm64 Rust binaries. Target only the
       # architecture-specific runtime assets here so QEMU exercises the other
       # checksum branch plus dovi_tool/mkvmerge assertions without redundantly
       # cold-compiling the complete Rust graph for nearly an hour.

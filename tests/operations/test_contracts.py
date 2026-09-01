@@ -267,18 +267,32 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("target: runtime-assets", arm_runtime)
         self.assertIn("outputs: type=cacheonly", arm_runtime)
 
-        runtime_assets = dockerfile.index(
-            "FROM debian:bookworm-slim AS runtime-assets"
-        )
-        runtime_image = dockerfile.index("FROM runtime-assets AS runtime")
+        runtime_assets_marker = "FROM debian:bookworm-slim AS runtime-assets"
+        runtime_image_marker = "FROM runtime-assets AS runtime"
+        runtime_assets = dockerfile.index(runtime_assets_marker)
+        runtime_image = dockerfile.index(runtime_image_marker)
         binary_copy = dockerfile.index(
             "COPY --from=build /plurxd /usr/local/bin/plurxd"
         )
         self.assertLess(runtime_assets, runtime_image)
         self.assertLess(runtime_image, binary_copy)
+        runtime_assets_stage = dockerfile.split(runtime_assets_marker, 1)[1].split(
+            runtime_image_marker, 1
+        )[0]
+        for assertion in (
+            "dovi_sha=daf538c275f4e702219ce8eb61db28382193ac9d0126e1ef4185a88303af4485",
+            "sha256sum -c -",
+            'dovi_tool --version | grep -F "${DOVI_TOOL_VERSION}"',
+            'mkvmerge --version | grep -F "mkvmerge v74.0.0"',
+            "/usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -bsfs",
+            "/usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -h filter=tonemapx",
+        ):
+            with self.subTest(runtime_asset_assertion=assertion):
+                self.assertIn(assertion, runtime_assets_stage)
 
     def test_docker_build_keeps_cluster_validation_features_out_of_plurxd(self):
         dockerfile = read("Dockerfile")
+        ci = read(".github/workflows/ci.yml")
         release = read(".github/workflows/publish-release.yml")
         for source in (dockerfile, release):
             self.assertNotIn(
@@ -301,6 +315,21 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn(
             'CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-cluster-check"',
             release,
+        )
+
+        ci_build = workflow_job_blocks(".github/workflows/ci.yml")["build"]
+        self.assertIn(
+            "cargo build --release -p plurxd --target ${{ matrix.target }}",
+            ci_build,
+        )
+        self.assertIn(
+            "CARGO_TARGET_DIR=target-cluster-check \\\n            cargo build --release -p plurx-cluster-check --target ${{ matrix.target }}",
+            ci_build,
+        )
+        self.assertIn(". -> target-cluster-check", ci_build)
+        self.assertIn(
+            "target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check",
+            ci_build,
         )
 
     def test_ship_routes_real_mobile_targets_through_ansible(self):
