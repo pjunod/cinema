@@ -1,0 +1,28 @@
+name: Finalize Cargo cache
+description: Refresh explicit LRU state and enforce the post-job cache bounds.
+
+inputs:
+  cache-root:
+    description: Canonical root emitted by the Cargo cache setup action.
+    required: true
+  budget-gb:
+    description: Whole-GiB runner Cargo budget.
+    required: true
+  last-used:
+    description: Lane LRU marker emitted by the Cargo cache setup action.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Refresh use and enforce the postcondition
+      shell: bash
+      env:
+        CACHE_BUDGET_GB: ${{ inputs.budget-gb }}
+        CACHE_LAST_USED: ${{ inputs.last-used }}
+        CACHE_ROOT: ${{ inputs.cache-root }}
+      run: |
+        set -euo pipefail
+        touch "$CACHE_LAST_USED"
+        "$GITHUB_WORKSPACE/scripts/ci-cache-prune" \
+          "$CACHE_ROOT" "$CACHE_BUDGET_GB"
