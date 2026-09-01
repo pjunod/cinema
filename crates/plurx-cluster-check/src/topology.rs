@@ -335,8 +335,8 @@ pub(super) async fn exercise_topology(
         &format!("{TOPOLOGY_CATALOGUE_TITLE_PREFIX} 0000"),
     )
     .await?;
-    let applied_index_before = metric_index(cluster, leader).await?;
-    let payload_counts_before = applied_payload_counts(cluster, leader).await?;
+    let (applied_index_before, payload_counts_before) =
+        stable_applied_sample(cluster, leader).await?;
     let resource_baseline = if let Some(identities) = evidence.resources {
         Some(
             collect_named_resources(cluster, &voters, identities, true)
@@ -372,12 +372,12 @@ pub(super) async fn exercise_topology(
             .require_ok()?;
         raw_acknowledged_write_round_trip_us.push(duration_us(started.elapsed()));
     }
-    let applied_index_after = metric_index(cluster, leader).await?;
+    let (applied_index_after, payload_counts_after) =
+        stable_applied_sample(cluster, leader).await?;
     // Account for every entry the write window applied, by payload kind, so a
     // per-write entry-cost violation names the contaminating entry (a blank
     // leader-establishment commit, a membership change, or a genuinely
     // unaccounted normal write) instead of only counting it at verify time.
-    let payload_counts_after = applied_payload_counts(cluster, leader).await?;
     let window_entries = applied_index_after.saturating_sub(applied_index_before);
     let (window_blank, window_membership, window_normal) = (
         payload_counts_after
@@ -738,6 +738,7 @@ struct PayloadCounts {
     membership: u64,
     normal: u64,
     current_term: u64,
+    applied_index: u64,
 }
 
 async fn applied_payload_counts(
@@ -753,15 +754,36 @@ async fn applied_payload_counts(
             membership,
             normal,
             current_term,
-            ..
+            applied_index,
         } => Ok(PayloadCounts {
             blank,
             membership,
             normal,
             current_term,
+            applied_index,
         }),
         response => bail!("topology voter {node_id} omitted payload counts: {response:?}"),
     }
+}
+
+/// One consistent (applied index, payload counters) pair from a node. The
+/// node reads its counters before its applied index, so when the index seen
+/// before the request equals the index reported with the counters, no entry
+/// applied while the counters were read and the sample belongs exactly to
+/// that index. Retried until stable so a concurrent apply moves the sample
+/// point instead of skewing the breakdown.
+async fn stable_applied_sample(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+) -> Result<(u64, PayloadCounts)> {
+    for _ in 0..10 {
+        let index = metric_index(cluster, node_id).await?;
+        let counts = applied_payload_counts(cluster, node_id).await?;
+        if counts.applied_index == index {
+            return Ok((index, counts));
+        }
+    }
+    bail!("topology voter {node_id} applied index would not settle across 10 sampling attempts");
 }
 
 async fn metric_index(cluster: &mut ClusterProcesses, node_id: u64) -> Result<u64> {

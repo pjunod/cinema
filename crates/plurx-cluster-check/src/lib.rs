@@ -4974,6 +4974,9 @@ async fn run_watermark_double_read_experiment(pairs: Option<&String>) -> Result<
             .context("watermark-experiment takes an optional pair count")?,
         None => 50,
     };
+    if pairs == 0 {
+        bail!("watermark-experiment needs at least one pair");
+    }
     println!("cluster-check: watermark double-read experiment over {pairs} pairs");
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("watermark experiment data root")?;
@@ -5057,7 +5060,6 @@ async fn run_watermark_double_read_experiment(pairs: Option<&String>) -> Result<
 ///   same authority from its durable role;
 /// - the capacity projection never confuses a non-voting copy with voter
 ///   failure tolerance, and protocol rollback becomes safe after promotion.
-
 async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObservation> {
     /// The voter that starts on a binary predating the learner protocol.
     const OLD_BINARY_VOTER: u64 = 3;
@@ -6282,53 +6284,59 @@ async fn ensure_compaction_after(
     // tail and contaminates the fixed-tail size comparison. Quorum-anchor the
     // starting point, submit exactly enough writes to reach the trigger, then
     // stop all writes while the snapshot builds and publishes.
-    let anchor = client
-        .db_quorum_watermark()
-        .await
-        .with_context(|| format!("{phase} obtain pre-compaction commit watermark"))?;
-    let committed = anchor.committed_index;
-    let counts_before = applied_payload_counts_at(client, committed, phase).await?;
     // A held cluster-job lease keeps its production heartbeat running on this
     // node — `acquire_cluster_job` renews every `JOB_LEASE_HEARTBEAT` — and
     // each renewal commits one Raft entry the plan below cannot see. Every
-    // renewal advances the durable row's `revision` by exactly one, so the
-    // revision delta across the window is an exact, named count of those
-    // entries. Local reads only: sampling must not append anything itself.
-    let lease_revision_before = match renewing_lease {
-        Some(resource) => Some(local_lease_revision(client, resource).await?),
-        None => None,
-    };
+    // lease-row commit under an unchanged owner and fence advances the durable
+    // row's `revision` by exactly one, so the revision delta between two
+    // consistent boundaries is an exact, named count of those entries. Both
+    // boundaries are sampled by `window_boundary`, which retries until no
+    // entry committed mid-sample, so a renewal landing during sampling moves
+    // the boundary instead of corrupting the account on either side of it.
+    let anchor = window_boundary(client, phase, renewing_lease).await?;
+    let committed = anchor.watermark.committed_index;
     let writes = snapshot_trigger_plan(previous_snapshot, committed)?;
     let marker = format!("cluster.growth.compaction.{phase}");
     for ordinal in 0..writes {
         store.put_setting(&marker, &ordinal.to_string()).await?;
     }
-    let confirm = client
-        .db_quorum_watermark()
-        .await
-        .with_context(|| format!("{phase} confirm exact compaction trigger"))?;
-    let final_committed = confirm.committed_index;
+    let confirm = window_boundary(client, phase, renewing_lease).await?;
+    let final_committed = confirm.watermark.committed_index;
     // Account for every entry the window applied, by payload kind, so a
     // mismatch names the contaminating entry instead of only counting it.
     // Blank entries are leader-establishment commits (an election happened
     // inside the window); membership entries are configuration changes; only
     // normal entries carry SQL, and of those, exactly the declared lease's
     // renewals are legitimate beyond the drill's own writes.
-    let counts_after = applied_payload_counts_at(client, final_committed, phase).await?;
     let (blank, membership, normal) = (
-        counts_after.0.saturating_sub(counts_before.0),
-        counts_after.1.saturating_sub(counts_before.1),
-        counts_after.2.saturating_sub(counts_before.2),
+        confirm.counts.0.saturating_sub(anchor.counts.0),
+        confirm.counts.1.saturating_sub(anchor.counts.1),
+        confirm.counts.2.saturating_sub(anchor.counts.2),
     );
-    let renewals = match (renewing_lease, lease_revision_before) {
-        (Some(resource), Some(before)) => {
-            let after = local_lease_revision(client, resource).await?;
-            after.checked_sub(before).with_context(|| {
-                format!(
-                    "{phase} lease {resource} revision moved backward across the \
-                     compaction window ({before} -> {after})"
-                )
-            })?
+    let renewals = match (&anchor.lease, &confirm.lease) {
+        (Some(before), Some(after)) => {
+            if after.owner_node_id != before.owner_node_id || after.fence != before.fence {
+                bail!(
+                    "{phase} declared renewing lease changed hands across the compaction \
+                     window: owner {} fence {} at the anchor, owner {} fence {} at \
+                     confirmation — its row commits cannot be attributed to heartbeat \
+                     renewals",
+                    before.owner_node_id,
+                    before.fence,
+                    after.owner_node_id,
+                    after.fence
+                );
+            }
+            after
+                .revision
+                .checked_sub(before.revision)
+                .with_context(|| {
+                    format!(
+                        "{phase} lease revision moved backward across the compaction \
+                     window ({} -> {})",
+                        before.revision, after.revision
+                    )
+                })?
         }
         _ => 0,
     };
@@ -6344,10 +6352,10 @@ async fn ensure_compaction_after(
              the window applied {blank} blank, {membership} membership, and \
              {normal} normal entries; watermark term {} leader {} at the anchor, \
              term {} leader {} at confirmation",
-            anchor.term,
-            anchor.leader_id,
-            confirm.term,
-            confirm.leader_id
+            anchor.watermark.term,
+            anchor.watermark.leader_id,
+            confirm.watermark.term,
+            confirm.watermark.leader_id
         );
     }
     // stderr deliberately: in node mode this function runs inside a harness
@@ -6357,7 +6365,7 @@ async fn ensure_compaction_after(
         "cluster-check: {phase} compaction window accounted: writes={writes} \
          renewals={renewals} blank={blank} membership={membership} normal={normal} \
          term={}..{}",
-        anchor.term, confirm.term
+        anchor.watermark.term, confirm.watermark.term
     );
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -6373,6 +6381,50 @@ async fn ensure_compaction_after(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// One consistent boundary of an exact-count window: the quorum watermark,
+/// this process's applied payload counters, and — when a renewing lease is
+/// declared — the durable lease row, all belonging to the same committed
+/// index. The watermark is read again after the samples and the whole set is
+/// retried until both reads agree on term and index; applied never exceeds
+/// committed, so samples taken while the committed index held still are exact
+/// for that boundary. The watermark read itself appends nothing, which the
+/// `watermark-experiment` subcommand proves standalone.
+struct WindowBoundary {
+    watermark: hiqlite::DbQuorumWatermark,
+    counts: (u64, u64, u64),
+    lease: Option<LeaseObservation>,
+}
+
+async fn window_boundary(
+    client: &Client,
+    phase: &str,
+    renewing_lease: Option<&str>,
+) -> Result<WindowBoundary> {
+    for _ in 0..10 {
+        let first = client
+            .db_quorum_watermark()
+            .await
+            .with_context(|| format!("{phase} obtain window-boundary watermark"))?;
+        let counts = applied_payload_counts_at(client, first.committed_index, phase).await?;
+        let lease = match renewing_lease {
+            Some(resource) => Some(local_lease_observation(client, resource, phase).await?),
+            None => None,
+        };
+        let second = client
+            .db_quorum_watermark()
+            .await
+            .with_context(|| format!("{phase} confirm window-boundary watermark"))?;
+        if second.committed_index == first.committed_index && second.term == first.term {
+            return Ok(WindowBoundary {
+                watermark: first,
+                counts,
+                lease,
+            });
+        }
+    }
+    bail!("{phase} window boundary would not settle across 10 sampling attempts");
 }
 
 /// Sample this process's applied-payload counters once its state machine has
@@ -10262,8 +10314,12 @@ async fn handle_request(
             })
         }
         Request::AppliedPayloadCounts => {
-            let metrics = client.metrics_db().await?;
+            // Counters first, metrics after: the reported applied_index then
+            // upper-bounds the counter sample, so a caller that saw the same
+            // applied index before this request knows no entry applied while
+            // the counters were read.
             let (blank, membership, normal) = hiqlite::validation_applied_payload_counts();
+            let metrics = client.metrics_db().await?;
             Ok(Response::AppliedPayloadCounts {
                 blank,
                 membership,
@@ -10563,12 +10619,25 @@ impl From<&mut Row<'_>> for HarnessArtworkRepairRow {
     }
 }
 
-/// The durable revision of one job lease, from this node's local applied
+/// One job lease row's identity and revision, from this node's local applied
 /// state. Plain local read: the exact-count windows sample it, so it must not
-/// itself commit anything. An absent row reads as revision 0, which makes a
-/// vanished lease visible as a backward revision move rather than a silent
-/// zero delta.
-async fn local_lease_revision(client: &Client, resource: &str) -> Result<u64> {
+/// itself commit anything. Owner and fence come along so the window can prove
+/// the row's commits belong to one unbroken tenure — a steal or re-acquisition
+/// also advances `revision`, and attributing those to heartbeat renewals would
+/// mask the very contamination the count exists to catch. A drill that
+/// declares a renewing lease is asserting the row exists, so absence fails
+/// loudly instead of reading as revision zero.
+struct LeaseObservation {
+    owner_node_id: String,
+    fence: u64,
+    revision: u64,
+}
+
+async fn local_lease_observation(
+    client: &Client,
+    resource: &str,
+    phase: &str,
+) -> Result<LeaseObservation> {
     let mut rows = client
         .query_map::<SingletonLeaseRow, _>(
             "SELECT resource, owner_node_id, fence, revision, expires_at_ms \
@@ -10579,10 +10648,14 @@ async fn local_lease_revision(client: &Client, resource: &str) -> Result<u64> {
     if rows.len() > 1 {
         bail!("singleton lease primary key returned multiple rows");
     }
-    rows.pop()
-        .map(|row| u64::try_from(row.revision).context("job lease revision was negative"))
-        .transpose()
-        .map(|revision| revision.unwrap_or(0))
+    let row = rows
+        .pop()
+        .with_context(|| format!("{phase} declared renewing lease {resource} has no row"))?;
+    Ok(LeaseObservation {
+        owner_node_id: row.owner_node_id,
+        fence: u64::try_from(row.fence).context("job lease fence was negative")?,
+        revision: u64::try_from(row.revision).context("job lease revision was negative")?,
+    })
 }
 
 async fn read_job_lease(client: &Client, resource: &str) -> Result<Option<Lease>> {
