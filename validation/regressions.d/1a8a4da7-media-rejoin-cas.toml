@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1a8a4da7"]
+points = ["core.media"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained media-session store contracts deterministically pause a replicated rejoin after its optimistic ledger read, commit a competing abort, and require the stale Raft proposal to return no route without recreating the staged generation; adjacent cases require immutable recipe replay identity, replay after retired-row pruning, and rollback while a named row remains present."

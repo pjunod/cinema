@@ -260,11 +260,39 @@ class OperationsContractCase(unittest.TestCase):
         workflow = read(".github/workflows/ci.yml")
         self.assertIn("docker/setup-qemu-action@v3", workflow)
         self.assertIn("Build arm64 runtime and verify pinned conversion tools", workflow)
-        self.assertIn("platforms: linux/arm64", workflow)
-        self.assertIn("outputs: type=cacheonly", workflow)
+        arm_runtime = workflow.split(
+            "- name: Build arm64 runtime and verify pinned conversion tools", 1
+        )[1].split("\n  # Configure this as the single required check", 1)[0]
+        self.assertIn("platforms: linux/arm64", arm_runtime)
+        self.assertIn("target: runtime-assets", arm_runtime)
+        self.assertIn("outputs: type=cacheonly", arm_runtime)
+
+        runtime_assets_marker = "FROM debian:bookworm-slim AS runtime-assets"
+        runtime_image_marker = "FROM runtime-assets AS runtime"
+        runtime_assets = dockerfile.index(runtime_assets_marker)
+        runtime_image = dockerfile.index(runtime_image_marker)
+        binary_copy = dockerfile.index(
+            "COPY --from=build /plurxd /usr/local/bin/plurxd"
+        )
+        self.assertLess(runtime_assets, runtime_image)
+        self.assertLess(runtime_image, binary_copy)
+        runtime_assets_stage = dockerfile.split(runtime_assets_marker, 1)[1].split(
+            runtime_image_marker, 1
+        )[0]
+        for assertion in (
+            "dovi_sha=daf538c275f4e702219ce8eb61db28382193ac9d0126e1ef4185a88303af4485",
+            "sha256sum -c -",
+            'dovi_tool --version | grep -F "${DOVI_TOOL_VERSION}"',
+            'mkvmerge --version | grep -F "mkvmerge v74.0.0"',
+            "/usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -bsfs",
+            "/usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -h filter=tonemapx",
+        ):
+            with self.subTest(runtime_asset_assertion=assertion):
+                self.assertIn(assertion, runtime_assets_stage)
 
     def test_docker_build_keeps_cluster_validation_features_out_of_plurxd(self):
         dockerfile = read("Dockerfile")
+        ci = read(".github/workflows/ci.yml")
         release = read(".github/workflows/publish-release.yml")
         for source in (dockerfile, release):
             self.assertNotIn(
@@ -287,6 +315,41 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn(
             'CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-cluster-check"',
             release,
+        )
+
+        ci_build = workflow_job_blocks(".github/workflows/ci.yml")["build"]
+        self.assertIn(
+            "cargo build --release -p plurxd --target ${{ matrix.target }}",
+            ci_build,
+        )
+        self.assertIn(
+            "CARGO_TARGET_DIR=target-cluster-check \\\n            cargo build --release -p plurx-cluster-check --target ${{ matrix.target }}",
+            ci_build,
+        )
+        self.assertIn(". -> target-cluster-check", ci_build)
+        ci_build_steps = workflow_step_blocks(ci_build)
+        digest_step = ci_build_steps["Record the release binary digests"]
+        retention_step = ci_build_steps[
+            "Retain release binary for push, tag, and qualification runs"
+        ]
+        binary_paths = (
+            "target/${{ matrix.target }}/release/plurxd",
+            "target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check",
+        )
+        digest_pairs = re.findall(
+            r"(?m)^\s*sha256sum (.+) \\\n\s*> (.+)$",
+            digest_step,
+        )
+        self.assertEqual(
+            digest_pairs,
+            [(path, f"{path}.sha256") for path in binary_paths],
+        )
+        artifact_paths = retention_step.split("\n          path: |\n", 1)[1].split(
+            "\n          retention-days:", 1
+        )[0]
+        self.assertEqual(
+            [line.strip() for line in artifact_paths.splitlines() if line.strip()],
+            [path for binary in binary_paths for path in (binary, f"{binary}.sha256")],
         )
 
     def test_ship_routes_real_mobile_targets_through_ansible(self):
