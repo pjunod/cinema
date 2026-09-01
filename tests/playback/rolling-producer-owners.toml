@@ -1014,11 +1014,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # halves of its deterministic barrier, and the spawned handle is always joined.
 # 506 with the detached marker telemetry assertion: one test-only sleep yields
 # to the handler's bounded background recorder; it owns no process or producer.
+# 521 with marker prewarm attribution: one test-only sleep yields to the
+# handler's bounded background recorder while the fixture waits for the exact
+# prewarm proof; it owns no process or producer.
 # +11 M5b: conversion deadlines and cancellation/race fixtures. Production
 # subprocess and hash deadlines are paired with kill-on-drop or a bounded
 # residual-I/O permit; every test-only timer is awaited by its fixture.
 # +3 with the bounded subtitle window: the window read and the two warm starts in the subtitle segment arm.
-expected_occurrences = 520
+expected_occurrences = 521
 
 [[module_structures]]
 id = "bare-time-constructor"

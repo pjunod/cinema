@@ -24,6 +24,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -41,6 +42,17 @@ fn now_unix() -> i64 {
 /// dropped rather than accumulating. Reaching it means something is leaking
 /// registrations, since a browser holds one stream per open player.
 const MAX_PER_USER: usize = 8;
+const MARKER_AMBIGUITY_TTL: Duration = Duration::from_secs(60);
+const MAX_MARKER_AMBIGUITIES: usize = 256;
+
+#[derive(Debug, Default)]
+struct RecentMarkerAmbiguities {
+    entries: HashMap<(i64, i64), Instant>,
+    /// When the exact ledger is saturated, every sessionless beacon is
+    /// ambiguous until the newest unrepresented retirement could no longer
+    /// arrive. Bounded memory must fail closed, not evict live provenance.
+    overflow_ambiguous_until: Option<Instant>,
+}
 
 /// One in-flight progressive remux.
 #[derive(Debug)]
@@ -116,6 +128,7 @@ impl Stream {
 #[derive(Debug, Default)]
 pub struct Streams {
     live: Mutex<HashMap<String, Arc<Stream>>>,
+    recent_marker_ambiguities: Mutex<RecentMarkerAmbiguities>,
     seq: AtomicI64,
 }
 
@@ -162,7 +175,9 @@ impl Streams {
                 let mut mine = mine;
                 mine.sort_by_key(|(_, seq)| *seq);
                 for (key, _) in mine.iter().take(mine.len() - MAX_PER_USER) {
-                    live.remove(key);
+                    if let Some(removed) = live.remove(key) {
+                        self.remember_marker_ambiguity(removed.user_id, removed.file_id);
+                    }
                     tracing::warn!(stream = %key, user = user_id, "evicted a progressive stream registration over the cap");
                 }
             }
@@ -189,6 +204,68 @@ impl Streams {
         self.live.lock().map_or(usize::MAX, |live| live.len())
     }
 
+    /// Whether a progressive remux could own a sessionless playback beacon.
+    /// Marker telemetry uses this as an ambiguity guard before assigning an
+    /// old client's event to a VOD session with the same user and file.
+    pub(crate) fn contains_delivery(&self, user_id: i64, file_id: i64) -> bool {
+        let Ok(live) = self.live.lock() else {
+            return true;
+        };
+        if live
+            .values()
+            .any(|stream| stream.user_id == user_id && stream.file_id == file_id)
+        {
+            return true;
+        }
+        let Ok(mut recent) = self.recent_marker_ambiguities.lock() else {
+            return true;
+        };
+        let now = Instant::now();
+        recent.entries.retain(|_, deadline| *deadline > now);
+        if recent
+            .overflow_ambiguous_until
+            .is_some_and(|deadline| deadline <= now)
+        {
+            recent.overflow_ambiguous_until = None;
+        }
+        recent.overflow_ambiguous_until.is_some()
+            || recent.entries.contains_key(&(user_id, file_id))
+    }
+
+    fn remember_marker_ambiguity(&self, user_id: i64, file_id: i64) {
+        let Ok(mut recent) = self.recent_marker_ambiguities.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        let deadline = now + MARKER_AMBIGUITY_TTL;
+        recent.entries.retain(|_, deadline| *deadline > now);
+        if recent
+            .overflow_ambiguous_until
+            .is_some_and(|deadline| deadline <= now)
+        {
+            recent.overflow_ambiguous_until = None;
+        }
+        if let Some(existing) = recent.entries.get_mut(&(user_id, file_id)) {
+            *existing = deadline;
+        } else if recent.entries.len() < MAX_MARKER_AMBIGUITIES {
+            recent.entries.insert((user_id, file_id), deadline);
+        } else {
+            recent.overflow_ambiguous_until = Some(
+                recent
+                    .overflow_ambiguous_until
+                    .map_or(deadline, |existing| existing.max(deadline)),
+            );
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_marker_ambiguities(&self) {
+        if let Ok(mut recent) = self.recent_marker_ambiguities.lock() {
+            recent.entries.clear();
+            recent.overflow_ambiguous_until = None;
+        }
+    }
+
     /// Remove `id`, but only if it is still the registration `seq` made.
     ///
     /// A seek re-registers under the same id and the superseded guard is
@@ -198,7 +275,9 @@ impl Streams {
     fn remove_if_current(&self, id: &str, seq: i64) {
         let mut live = self.live.lock().expect("streams mutex");
         if live.get(id).is_some_and(|s| s.seq == seq) {
-            live.remove(id);
+            if let Some(removed) = live.remove(id) {
+                self.remember_marker_ambiguity(removed.user_id, removed.file_id);
+            }
         }
     }
 
@@ -359,5 +438,34 @@ mod tests {
         assert_eq!(listed.first().expect("newest").file_id, 599);
         assert_eq!(listed.last().expect("oldest retained").file_id, 88);
         assert!(listed.iter().all(|stream| stream.file_id >= 88));
+    }
+
+    #[test]
+    fn progressive_marker_prewarm_ambiguity_saturation_fails_closed() {
+        let streams = Streams::new();
+        let deadline = Instant::now() + MARKER_AMBIGUITY_TTL;
+        {
+            let mut recent = streams
+                .recent_marker_ambiguities
+                .lock()
+                .expect("recent marker ambiguities");
+            recent
+                .entries
+                .extend((0..MAX_MARKER_AMBIGUITIES as i64).map(|id| ((id, id), deadline)));
+        }
+
+        streams.remember_marker_ambiguity(i64::MAX, i64::MAX);
+
+        let recent = streams
+            .recent_marker_ambiguities
+            .lock()
+            .expect("recent marker ambiguities");
+        assert_eq!(recent.entries.len(), MAX_MARKER_AMBIGUITIES);
+        assert!(recent.overflow_ambiguous_until.is_some());
+        drop(recent);
+        assert!(
+            streams.contains_delivery(-1, -1),
+            "an unrepresented retirement makes every placeholder ambiguous"
+        );
     }
 }

@@ -806,9 +806,28 @@ pub async fn client_log(
         let _ = hook.captured.send(());
         let _ = hook.release.await;
     }
+    let marker_placeholder = vod_marker_prewarm_placeholder(&event)
+        .map(|(file_id, method)| (file_id, method.to_owned()));
+    let progressive_ambiguous = marker_placeholder
+        .as_ref()
+        .is_some_and(|(file_id, _)| state.streams.contains_delivery(user.id, *file_id));
     let transcode = Arc::clone(&state.transcode);
     let store = Arc::clone(&state.store);
+    let user_id = user.id;
     tokio::spawn(async move {
+        // The shipped clients send this historical placeholder without a
+        // session id. Correlate it by authenticated user, file and delivery
+        // method to exactly one VOD ledger; that ledger then waits for a
+        // server-observed landing before emitting the authoritative result.
+        if let Some((file_id, method)) = marker_placeholder {
+            if !progressive_ambiguous
+                && transcode
+                    .consume_vod_marker_prewarm_placeholder(user_id, file_id, &method)
+                    .await
+            {
+                return;
+            }
+        }
         let session_id = event.session_id.clone();
         let info = match session_id.as_deref() {
             Some(session_id) => transcode.session_status(session_id).await,
@@ -817,6 +836,17 @@ pub async fn client_log(
         emit_client_playback_event(store, event, info.as_ref(), network);
     });
     StatusCode::NO_CONTENT
+}
+
+fn vod_marker_prewarm_placeholder(event: &PlaybackEvent) -> Option<(i64, &str)> {
+    let method = event.method.as_deref()?;
+    if event.event != "marker_prewarm"
+        || event.detail.as_deref() != Some("miss")
+        || !matches!(method, "remux" | "transcode")
+    {
+        return None;
+    }
+    Some((event.file_id?, method))
 }
 
 fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::SessionInfo) {
@@ -894,6 +924,7 @@ fn emit_client_playback_event(
     info: Option<&crate::transcode::SessionInfo>,
     network: Option<crate::telemetry::NetworkIdentity>,
 ) {
+    normalize_client_marker_prewarm(&mut event);
     if let Some(info) = info {
         join_session_truth(&mut event, info);
     }
@@ -902,6 +933,16 @@ fn emit_client_playback_event(
         .as_deref()
         .map(crate::transcode::session_log_id);
     crate::telemetry::emit_with_network(store, event, network);
+}
+
+fn normalize_client_marker_prewarm(event: &mut PlaybackEvent) {
+    // A client can report that it attempted a marker skip, but only VOD's
+    // production ledger can prove that prewarm produced the landed range.
+    // Keep this normalization at the final client-telemetry boundary as well
+    // as in the payload conversion below so no caller can manufacture a hit.
+    if event.event == "marker_prewarm" {
+        event.detail = Some("miss".to_owned());
+    }
 }
 
 fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
@@ -1143,7 +1184,7 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
             .filter(|value| value.is_finite() && *value > 0.0)
             .map(|value| (value / 1_000.0).round().min(i64::MAX as f64) as i64)
     });
-    PlaybackEvent {
+    let mut event = PlaybackEvent {
         at_unix_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
@@ -1181,7 +1222,9 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
         ua: clipped(&ev.ua, 24),
         extra: (!extra.is_empty()).then(|| serde_json::Value::Object(extra).to_string()),
         ..PlaybackEvent::default()
-    }
+    };
+    normalize_client_marker_prewarm(&mut event);
+    event
 }
 
 /// One client report as a log line.
@@ -3721,6 +3764,69 @@ mod tests {
             delivered_bytes: Some(4_096),
             delivered_bps: Some(8_000),
         }
+    }
+
+    #[test]
+    fn shipped_marker_prewarm_placeholder_is_correlatable_without_a_session_id() {
+        let vod = PlaybackEvent {
+            event: "marker_prewarm".to_owned(),
+            detail: Some("miss".to_owned()),
+            file_id: Some(7),
+            method: Some("remux".to_owned()),
+            ..PlaybackEvent::default()
+        };
+        assert_eq!(vod.session_id, None, "this is the shipped payload shape");
+        assert_eq!(vod_marker_prewarm_placeholder(&vod), Some((7, "remux")));
+
+        let direct = PlaybackEvent {
+            method: Some("direct_play".to_owned()),
+            ..vod.clone()
+        };
+        assert!(
+            vod_marker_prewarm_placeholder(&direct).is_none(),
+            "direct play keeps emitting its client-owned miss"
+        );
+        let android_direct = PlaybackEvent {
+            method: Some("direct".to_owned()),
+            ..direct
+        };
+        assert!(
+            vod_marker_prewarm_placeholder(&android_direct).is_none(),
+            "the Android legacy direct label also keeps its client-owned miss"
+        );
+        let mut supplied_hit = beacon("marker_prewarm", 0);
+        supplied_hit.file_id = Some(7);
+        supplied_hit.detail = Some("hit".to_owned());
+        supplied_hit.method = Some("direct_play".to_owned());
+        let normalized_direct = client_playback_event(&supplied_hit, 11);
+        assert_eq!(normalized_direct.detail.as_deref(), Some("miss"));
+        assert!(
+            vod_marker_prewarm_placeholder(&normalized_direct).is_none(),
+            "client-supplied direct-play hits stay client-owned misses"
+        );
+
+        supplied_hit.method = Some("remux".to_owned());
+        let normalized_vod = client_playback_event(&supplied_hit, 11);
+        assert_eq!(normalized_vod.detail.as_deref(), Some("miss"));
+        assert_eq!(
+            vod_marker_prewarm_placeholder(&normalized_vod),
+            Some((7, "remux")),
+            "only server bookkeeping may upgrade a normalized client miss"
+        );
+
+        let streams = crate::progressive::Streams::new();
+        let (_stream, guard) = streams.register("progressive", 11, "paul", 7, 70, 1.0);
+        assert!(
+            streams.contains_delivery(11, 7),
+            "a concurrent progressive remux blocks sessionless VOD attribution"
+        );
+        drop(guard);
+        assert!(
+            streams.contains_delivery(11, 7),
+            "a delayed fire-and-forget beacon stays ambiguous after deregistration"
+        );
+        streams.expire_marker_ambiguities();
+        assert!(!streams.contains_delivery(11, 7));
     }
 
     #[test]
