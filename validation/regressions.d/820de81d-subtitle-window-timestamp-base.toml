@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["820de81d"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained normalization regression pins the timestamp base of a windowed subtitle extraction, which is a property of the ffmpeg build rather than of this code: 7.0.2 and 6.1.1 return absolute cue times and 4.4.2 returns them rebased, and the Dockerfile installs jellyfin-ffmpeg unpinned. It asserts both directions -- a rebased window is shifted onto the source clock and an absolute one is left alone -- because a second shift produces well-formed WebVTT at the wrong offset, which slice_webvtt then discards silently while the handler logs a success."
