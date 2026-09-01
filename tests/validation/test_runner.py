@@ -178,8 +178,13 @@ class CatalogCase(unittest.TestCase):
         self.assertTrue(packaging["release_build"])
         self.assertTrue(packaging["container"])
         for build_only_path in (
+            ".github/actions/buildx-cache/action.yml",
+            ".github/buildkitd.toml",
             "crates/plurxd/build.rs",
+            "scripts/ci-buildkit-prune",
+            "scripts/ci-execution-mode",
             "vendor/hiqlite/Cargo.toml",
+            "validation/ci_scope.py",
             "validation/release_dockerfile.py",
             "tests/operations/test_release_publication.py",
         ):
@@ -360,7 +365,10 @@ class CatalogCase(unittest.TestCase):
             with self.subTest(scheduler_path=scheduler_path):
                 scheduler_scope = scope_for_paths(catalog, (scheduler_path,))
                 expected = {"rust", "cluster_auth"}
-                if scheduler_path == ".github/workflows/ci.yml":
+                if scheduler_path in (
+                    ".github/workflows/ci.yml",
+                    "validation/ci_scope.py",
+                ):
                     expected.add("release_build")
                 self.assertEqual(
                     {key for key, value in scheduler_scope.items() if value},

@@ -164,7 +164,9 @@ jobs:
           target: release-binaries
           platforms: linux/${{ matrix.arch }}
           outputs: type=local,dest=release-source/binary-export
-          build-args: PLURX_BUILD_REF=${{ needs.resolve.outputs.release_tag }}
+          build-args: |
+            PLURX_BUILD_REF=${{ needs.resolve.outputs.release_tag }}
+            PLURX_BUILD_SHA=${{ needs.resolve.outputs.commit_sha }}
       - name: Bind the binary set to the tagged tree and verify its ABI
         env:
           TARGET: ${{ matrix.target }}
@@ -226,22 +228,29 @@ jobs:
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$image_ref")" = "$SOURCE_URL"
           reported=$(docker run --rm --platform "linux/$ARCH" "$image_ref" --version)
           test "$reported" = "plurxd $RELEASE_VERSION ($RELEASE_TAG)"
+          if [ -x release-source/release-bin/plurx-cluster-check ]; then
+            cluster_identity=$(docker run --rm --platform "linux/$ARCH" \
+              --entrypoint /usr/local/bin/plurx-cluster-check \
+              "$image_ref" build-identity)
+            test "$cluster_identity" = "$SOURCE_SHA"
+          fi
           release-source/scripts/container-smoke "$image_ref"
           mkdir -p digests
           printf '%s\n' "$DIGEST" > "digests/$ARCH"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image-digest-${{ matrix.arch }}
+          path: digests
+          if-no-files-found: error
+          retention-days: 1
       - name: Retain the exact tagged binary receipt for one day
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: release-binary-receipt-${{ matrix.arch }}
           path: release-source/release-bin
           if-no-files-found: error
           compression-level: 0
-          retention-days: 1
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-image-digest-${{ matrix.arch }}
-          path: digests
-          if-no-files-found: error
           retention-days: 1
 
   reuse:

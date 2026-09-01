@@ -130,6 +130,8 @@ ANDROID_DEVICE_PATHS = (
 # contract, artifact identity, runtime image, or smoke lifecycle selects it.
 RELEASE_BUILD_PATHS = (
     ".dockerignore",
+    ".github/actions/buildx-cache/**",
+    ".github/buildkitd.toml",
     ".github/workflows/ci.yml",
     ".github/workflows/publish-release.yml",
     "Cargo.lock",
@@ -138,10 +140,13 @@ RELEASE_BUILD_PATHS = (
     "**/build.rs",
     "Dockerfile",
     "rust-toolchain.toml",
+    "scripts/ci-buildkit-prune",
+    "scripts/ci-execution-mode",
     "scripts/release-package-candidate",
     "tests/operations/test_release_publication.py",
     "validation/release_artifact.py",
     "validation/release_dockerfile.py",
+    "validation/ci_scope.py",
     "vendor/**",
 )
 

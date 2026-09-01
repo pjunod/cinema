@@ -299,7 +299,10 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertIn(
             'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', workflow
         )
-        self.assertIn("format('type=gha,mode=min,scope=package-", workflow)
+        self.assertIn("scope=package-compile-{0}", workflow)
+        self.assertIn("mode=max,scope=package-compile-{0}", workflow)
+        self.assertIn("scope=package-runtime-{0}", workflow)
+        self.assertIn("mode=min,scope=package-runtime-{0}", workflow)
         self.assertNotIn("persistent-eligible: true", workflow)
 
     def test_buildkit_pruner_enforces_hostwide_budget_and_reserve(self):

@@ -310,6 +310,8 @@ builder stage. Its fail-open selector includes:
 - `vendor/**`;
 - every Rust `build.rs` and tracked build helper;
 - `validation/release_dockerfile.py` and its tests;
+- the package job's Buildx composite, BuildKit configuration, execution-mode
+  selector, and bounded-prune helper;
 - unknown paths that the selector cannot classify safely.
 
 The generated binary-export target retains only the tagged Bookworm build
@@ -317,6 +319,22 @@ stage and copies the exact runtime binary set plus `rustc -Vv` identity into a
 scratch export. The runtime build consumes a different generated Dockerfile
 that contains no Rust base, Cargo command, or `COPY --from=build`, proving the
 workspace was compiled once per architecture job.
+
+The strict artifact verifier reads each binary's ELF header and requires its
+machine to match the declared GNU target. It does not accept the manifest's
+target string as proof. Images containing `plurx-cluster-check` also execute
+that binary's `build-identity` command and compare it with the exact candidate
+commit, so the secondary binary receives both architecture and identity
+coverage instead of merely being copied beside the daemon.
+
+Hosted compile and runtime graphs use distinct GitHub cache scopes. The
+binary-export build imports and exports a `mode=max` compile cache; the
+runtime-only build round-trips a separate `mode=min` image cache. This prevents
+the smaller runtime graph from overwriting the expensive compile graph. On a
+persistent builder, Cargo registry access is locked and each Cargo target
+mount is both locked and architecture-specific. Debug-only tagged binary
+retention is best effort and runs after the required small digest receipt, so
+artifact quota cannot block alias publication.
 
 The smoke wording says stop/start where that is the actual operation. The
 script may change its error text from “restart” to “stop/start”; it does not

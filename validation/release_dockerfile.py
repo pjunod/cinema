@@ -75,6 +75,16 @@ def render_binary_export(source: str) -> str:
     build_stage = source.split(RUNTIME_STAGE, 1)[0].rstrip()
     if " AS build" not in build_stage:
         raise ValueError("tagged Dockerfile must name its Rust stage build")
+    if "ARG PLURX_BUILD_SHA" not in build_stage:
+        marker = "WORKDIR /src\n"
+        if build_stage.count(marker) != 1:
+            raise ValueError("tagged Dockerfile must contain one /src build workdir")
+        build_stage = build_stage.replace(
+            marker,
+            'ARG PLURX_BUILD_SHA=""\n'
+            "ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}\n"
+            + marker,
+        )
     copies = "\n".join(
         f"COPY --from=build /{name} /{name}" for name in binaries
     )

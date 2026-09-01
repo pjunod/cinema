@@ -15,6 +15,12 @@ BINARIES = ("plurxd", "plurx-cluster-check")
 SUPPORTED_BINARY_SETS = frozenset((("plurxd",), BINARIES))
 GIT_OBJECT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+ELF64 = 2
+ELF_LITTLE_ENDIAN = 1
+TARGET_MACHINES = {
+    "x86_64-unknown-linux-gnu": 62,
+    "aarch64-unknown-linux-gnu": 183,
+}
 
 
 def _digest(path: Path) -> str:
@@ -36,6 +42,41 @@ def _require_git_object(value: object, field: str) -> str:
     if GIT_OBJECT.fullmatch(value) is None:
         raise ValueError(f"release artifact {field} must be a Git object id")
     return value
+
+
+def _require_target(value: object, field: str) -> str:
+    target = _require_text(value, field)
+    if target not in TARGET_MACHINES:
+        raise ValueError(f"release artifact {field} is unsupported: {target}")
+    return target
+
+
+def _require_binary_machine(path: Path, target: str) -> None:
+    """Prove a candidate is a little-endian ELF64 for its declared target."""
+
+    if path.is_symlink():
+        raise ValueError(f"release artifact binary {path.name} must not be a symlink")
+    try:
+        with path.open("rb") as source:
+            header = source.read(20)
+    except OSError as error:
+        raise ValueError(f"cannot read release artifact binary {path.name}: {error}") from error
+    if (
+        len(header) < 20
+        or header[:4] != b"\x7fELF"
+        or header[4] != ELF64
+        or header[5] != ELF_LITTLE_ENDIAN
+    ):
+        raise ValueError(
+            f"release artifact binary {path.name} must be a little-endian ELF64"
+        )
+    machine = int.from_bytes(header[18:20], byteorder="little")
+    expected = TARGET_MACHINES[target]
+    if machine != expected:
+        raise ValueError(
+            f"release artifact binary {path.name} machine mismatch: "
+            f"target {target} requires {expected}, got {machine}"
+        )
 
 
 def _require_binary_set(binary_names: tuple[str, ...]) -> tuple[str, ...]:
@@ -62,7 +103,7 @@ def create(
     git_commit = _require_git_object(git_commit, "git_commit")
     build_ref = _require_text(build_ref, "build_ref")
     rustc = _require_text(rustc, "rustc")
-    target = _require_text(target, "target")
+    target = _require_target(target, "target")
     binary_names = _require_binary_set(binary_names)
 
     binaries: dict[str, dict[str, str]] = {}
@@ -70,6 +111,7 @@ def create(
         path = directory / name
         if not path.is_file():
             raise ValueError(f"release artifact is missing binary {name}")
+        _require_binary_machine(path, target)
         digest = _digest(path)
         (directory / f"{name}.sha256").write_text(
             f"{digest}  {name}\n", encoding="utf-8"
@@ -106,7 +148,7 @@ def verify(
     expected_tree = _require_git_object(git_tree, "expected git_tree")
     expected_commit = _require_git_object(git_commit, "expected git_commit")
     expected_ref = _require_text(build_ref, "expected build_ref")
-    expected_target = _require_text(target, "expected target")
+    expected_target = _require_target(target, "expected target")
     binary_names = _require_binary_set(binary_names)
 
     expected_files = {
@@ -167,6 +209,7 @@ def verify(
         actual_digest = _digest(path)
         if actual_digest != expected_digest:
             raise ValueError(f"release artifact digest mismatch for {name}")
+        _require_binary_machine(path, expected_target)
         sidecar = directory / f"{name}.sha256"
         try:
             sidecar_value = sidecar.read_text(encoding="utf-8")

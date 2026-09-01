@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -18,6 +20,22 @@ from validation.release_dockerfile import (
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/publish-release.yml"
+ELF_MACHINES = {
+    "x86_64-unknown-linux-gnu": 62,
+    "aarch64-unknown-linux-gnu": 183,
+}
+
+
+def write_elf(path: Path, target: str, payload: bytes = b"fixture") -> None:
+    header = bytearray(64)
+    header[:4] = b"\x7fELF"
+    header[4] = 2
+    header[5] = 1
+    header[6] = 1
+    header[16:18] = (3).to_bytes(2, byteorder="little")
+    header[18:20] = ELF_MACHINES[target].to_bytes(2, byteorder="little")
+    path.write_bytes(header + payload)
+    path.chmod(0o755)
 
 
 class ReleasePublicationContractCase(unittest.TestCase):
@@ -43,10 +61,10 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertIn("target: release-binaries", image)
         self.assertIn("trusted-packaging/scripts/release-package-candidate", image)
         self.assertNotIn("actions/download-artifact", image)
-        self.assertIn(
-            "build-args: PLURX_BUILD_REF=${{ needs.resolve.outputs.release_tag }}",
-            image,
-        )
+        self.assertIn("PLURX_BUILD_REF=${{ needs.resolve.outputs.release_tag }}", image)
+        self.assertIn("PLURX_BUILD_SHA=${{ needs.resolve.outputs.commit_sha }}", image)
+        self.assertIn("plurx-cluster-check", image)
+        self.assertIn("build-identity", image)
         self.assertIn("GLIBC_$max_glibc; Bookworm provides 2.36", workflow)
 
     def test_aliases_wait_for_both_smoked_platform_digests(self):
@@ -61,6 +79,14 @@ class ReleasePublicationContractCase(unittest.TestCase):
             image.index("Verify the pushed platform image"),
             image.index("release-image-digest-${{ matrix.arch }}"),
         )
+        self.assertLess(
+            image.index("release-image-digest-${{ matrix.arch }}"),
+            image.index("release-binary-receipt-${{ matrix.arch }}"),
+        )
+        binary_receipt = image.split(
+            "- name: Retain the exact tagged binary receipt for one day", 1
+        )[1].split("\n  reuse:", 1)[0]
+        self.assertIn("continue-on-error: true", binary_receipt)
         self.assertIn("needs: [resolve, image, reuse]", publish)
         self.assertIn("Reconfirm the remote tag has not moved", publish)
         self.assertIn("appeared after source resolution", publish)
@@ -157,6 +183,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         exporter = render_binary_export(source)
         self.assertIn("FROM scratch AS release-binaries", exporter)
         self.assertIn("RUN rustc -Vv > /rustc-version", exporter)
+        self.assertEqual(exporter.count("ARG PLURX_BUILD_SHA"), 1)
         for name in BINARIES:
             self.assertIn(f"COPY --from=build /{name} /{name}", exporter)
         self.assertNotIn("FROM debian:bookworm-slim", exporter)
@@ -202,12 +229,13 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                         "plurx-cluster-check" in exporter,
                         "plurx-cluster-check" in expected,
                     )
+                    self.assertEqual(exporter.count("ARG PLURX_BUILD_SHA"), 1)
 
     def test_release_artifact_binds_both_binaries_to_the_candidate(self):
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
             for name in BINARIES:
-                (directory / name).write_bytes(f"binary:{name}".encode())
+                write_elf(directory / name, "x86_64-unknown-linux-gnu", name.encode())
             manifest = create(
                 directory,
                 git_tree="1" * 40,
@@ -257,7 +285,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
             for name in BINARIES:
-                (directory / name).write_bytes(f"binary:{name}".encode())
+                write_elf(directory / name, "x86_64-unknown-linux-gnu", name.encode())
             create(
                 directory,
                 git_tree="1" * 40,
@@ -292,7 +320,11 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
     def test_release_artifact_supports_historical_one_binary_set(self):
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
-            (directory / "plurxd").write_bytes(b"historical daemon")
+            write_elf(
+                directory / "plurxd",
+                "x86_64-unknown-linux-gnu",
+                b"historical daemon",
+            )
             manifest = create(
                 directory,
                 git_tree="1" * 40,
@@ -314,6 +346,43 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
 
             self.assertEqual(verified, manifest)
             self.assertEqual(tuple(verified["binaries"]), ("plurxd",))
+
+    def test_release_artifact_verifier_rejects_wrong_binary_machine(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            for name in BINARIES:
+                write_elf(directory / name, "x86_64-unknown-linux-gnu", name.encode())
+            manifest = create(
+                directory,
+                git_tree="1" * 40,
+                git_commit="2" * 40,
+                build_ref="v0.3.0",
+                rustc="rustc 1.97.1 (fixture)",
+                target="x86_64-unknown-linux-gnu",
+                binary_names=BINARIES,
+            )
+
+            binary = directory / "plurx-cluster-check"
+            write_elf(binary, "aarch64-unknown-linux-gnu", b"wrong machine")
+            digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+            manifest["binaries"]["plurx-cluster-check"]["sha256"] = digest
+            (directory / "build-manifest.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            (directory / "plurx-cluster-check.sha256").write_text(
+                f"{digest}  plurx-cluster-check\n", encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ValueError, "machine mismatch"):
+                verify(
+                    directory,
+                    git_tree="1" * 40,
+                    git_commit="2" * 40,
+                    build_ref="v0.3.0",
+                    target="x86_64-unknown-linux-gnu",
+                    binary_names=BINARIES,
+                )
 
     def test_candidate_packager_binds_export_to_exact_source_tree(self):
         with tempfile.TemporaryDirectory() as raw_directory:
@@ -352,7 +421,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                 text=True,
             ).stdout.strip()
             for name in BINARIES:
-                (export / name).write_bytes(f"binary:{name}".encode())
+                write_elf(export / name, "x86_64-unknown-linux-gnu", name.encode())
             (export / "rustc-version").write_text(
                 "rustc 1.97.1 (fixture)\nbinary: rustc\n", encoding="utf-8"
             )

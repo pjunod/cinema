@@ -214,6 +214,8 @@ class OperationsContractCase(unittest.TestCase):
         compose = read("deploy/docker-compose.yml")
         self.assertIn('ARG PLURX_BUILD_REF=""', dockerfile)
         self.assertIn("ENV PLURX_BUILD_REF=${PLURX_BUILD_REF}", dockerfile)
+        self.assertIn('ARG PLURX_BUILD_SHA=""', dockerfile)
+        self.assertIn("ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}", dockerfile)
         self.assertIn("PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}", compose)
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
@@ -283,6 +285,12 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("grep -q 'cluster-read-cost-validation'", dockerfile)
         self.assertIn("CARGO_TARGET_DIR=/src/target-plurxd", dockerfile)
         self.assertIn("CARGO_TARGET_DIR=/src/target-cluster-check", dockerfile)
+        self.assertIn("id=plurx-cargo-registry,sharing=locked", dockerfile)
+        self.assertIn("id=plurx-target-plurxd-${TARGETARCH},sharing=locked", dockerfile)
+        self.assertIn(
+            "id=plurx-target-cluster-check-${TARGETARCH},sharing=locked",
+            dockerfile,
+        )
         self.assertIn("--binary-export", release)
         self.assertIn("target: release-binaries", release)
         self.assertIn("trusted-packaging/scripts/release-package-candidate", release)
@@ -825,8 +833,13 @@ class OperationsContractCase(unittest.TestCase):
         # uses the one named host builder and enforces its postcondition.
         package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
         self.assertIn("uses: ./.github/actions/buildx-cache", package)
-        self.assertIn("type=gha,scope=package-", package)
-        self.assertIn("type=gha,mode=min,scope=package-", package)
+        self.assertIn("type=gha,scope=package-compile-{0}", package)
+        self.assertIn("type=gha,mode=max,scope=package-compile-{0}", package)
+        self.assertIn("type=gha,scope=package-runtime-{0}", package)
+        self.assertIn("type=gha,mode=min,scope=package-runtime-{0}", package)
+        self.assertIn("PLURX_BUILD_SHA=${{ github.sha }}", package)
+        self.assertIn("plurx-cluster-check", package)
+        self.assertIn("build-identity", package)
         self.assertIn(
             'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', package
         )

@@ -735,8 +735,11 @@ jobs:
           target: release-binaries
           platforms: linux/${{ matrix.arch }}
           outputs: type=local,dest=binary-export
-          build-args: PLURX_BUILD_REF=${{ github.sha }}
-          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-{0}', matrix.arch) || '' }}
+          build-args: |
+            PLURX_BUILD_REF=${{ github.sha }}
+            PLURX_BUILD_SHA=${{ github.sha }}
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-compile-{0}', matrix.arch) || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=max,scope=package-compile-{0}', matrix.arch) || '' }}
       - name: Bind the binary set to this candidate tree
         run: |
           scripts/release-package-candidate \
@@ -765,8 +768,8 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             tv.plurx.build-ref=${{ github.sha }}
-          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-{0}', matrix.arch) || '' }}
-          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=min,scope=package-{0}', matrix.arch) || '' }}
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-runtime-{0}', matrix.arch) || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=min,scope=package-runtime-{0}', matrix.arch) || '' }}
       - name: Verify architecture, identity, and stop/start runtime
         env:
           ARCH: ${{ matrix.arch }}
@@ -778,6 +781,9 @@ jobs:
           version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
             | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
           test "$(docker run --rm --platform "linux/$ARCH" "$IMAGE" --version)" = "plurxd $version ($GITHUB_SHA)"
+          test "$(docker run --rm --platform "linux/$ARCH" \
+            --entrypoint /usr/local/bin/plurx-cluster-check \
+            "$IMAGE" build-identity)" = "$GITHUB_SHA"
           scripts/container-smoke "$IMAGE"
       - name: Retain the exact package receipt
         uses: actions/upload-artifact@v4
