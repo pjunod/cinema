@@ -223,7 +223,9 @@ did not select.
 `legacy`, `shadow`, or `accelerated`; an unset or unknown value resolves to
 `legacy`. In legacy mode the complete Store command is required and shards are
 not scheduled. In shadow mode the complete command remains required while the
-shard graph records non-blocking comparison evidence. In accelerated mode the
+shard graph records comparison evidence through a separate reusable-workflow
+call that no required job depends on; an offline shadow runner therefore cannot
+delay the Store verdict or promotion gate. In accelerated mode the
 verified shard union becomes required and the legacy job is skipped. The
 stable `replicated Store contracts` verdict translates those internal results,
 so branch rules and the promotion gate never depend on rollout-only job names.

@@ -29,6 +29,17 @@ class StoreShardCase(unittest.TestCase):
             "GITHUB_JOB": "cluster_store_shard",
         }
 
+    def expected_identity(self) -> dict[str, str]:
+        environment = self.environment()
+        return {
+            "repository": environment["GITHUB_REPOSITORY"],
+            "workflow_ref": environment["GITHUB_WORKFLOW_REF"],
+            "run_id": environment["GITHUB_RUN_ID"],
+            "run_attempt": environment["GITHUB_RUN_ATTEMPT"],
+            "tested_sha": "a" * 40,
+            "tested_tree": "b" * 40,
+        }
+
     def fixture(self, root: Path) -> tuple[Path, Path, Path, list[str], list[str]]:
         inventory = [f"contract_case_{index}" for index in range(16)]
         ignored = ["contract_case_3", "contract_case_11"]
@@ -147,6 +158,14 @@ class StoreShardCase(unittest.TestCase):
                 with self.subTest(name=name):
                     with self.assertRaisesRegex(StoreShardError, message):
                         validate_receipts(candidate)
+
+            stale_candidate = copy.deepcopy(receipts)
+            for receipt in stale_candidate:
+                receipt["tested_tree"] = "c" * 40
+            with self.assertRaisesRegex(StoreShardError, "current tested_tree"):
+                validate_receipts(
+                    stale_candidate, expected_identity=self.expected_identity()
+                )
 
     def test_preexecution_failure_retains_tree_and_fails_aggregation(self):
         with tempfile.TemporaryDirectory() as directory:

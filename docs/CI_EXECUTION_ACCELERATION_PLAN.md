@@ -536,6 +536,9 @@ These are explicitly separate efforts:
 - Deterministic Store sharding is implemented default-dark with a stable
   required verdict, dynamic SHA-256 partitioning, exact-union validation, and a
   weekly full unsharded backstop.
+- Shadow invokes the same-commit reusable shard workflow outside every required
+  job's dependency graph; accelerated execution calls that workflow from the
+  required Store path. An offline shadow runner cannot delay promotion.
 - M0's voter audit is complete for the active Store/topology labels. The changed
   `nuc2` host key, a verified third non-voter x86 host, disk facts, and the
   `ci-store-shard-1` runner remain activation gates for `shadow`.

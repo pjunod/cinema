@@ -822,15 +822,23 @@ class OperationsContractCase(unittest.TestCase):
     def test_store_shards_are_dynamic_disjoint_and_roll_out_behind_one_verdict(self):
         workflow = read(".github/workflows/ci.yml")
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        shard_jobs = workflow_job_blocks(".github/workflows/store-shards.yml")
         legacy = jobs["cluster_store_legacy"]
-        shard = jobs["cluster_store_shard"]
-        aggregate = jobs["cluster_store_shard_receipts"]
+        required = jobs["cluster_store_shards"]
+        shadow = jobs["cluster_store_shadow"]
+        shard = shard_jobs["shard"]
+        aggregate = shard_jobs["aggregate"]
         verdict = jobs["cluster_store"]
 
         self.assertIn("execution_mode != 'accelerated'", legacy)
-        self.assertIn("execution_mode != 'legacy'", shard)
+        self.assertIn("execution_mode == 'accelerated'", required)
+        self.assertIn("uses: ./.github/workflows/store-shards.yml", required)
+        self.assertIn("execution-mode: accelerated", required)
+        self.assertIn("execution_mode == 'shadow'", shadow)
+        self.assertIn("uses: ./.github/workflows/store-shards.yml", shadow)
+        self.assertIn("execution-mode: shadow", shadow)
         self.assertIn(
-            "continue-on-error: ${{ needs.scope.outputs.execution_mode == 'shadow' }}",
+            "continue-on-error: ${{ inputs.execution-mode == 'shadow' }}",
             shard,
         )
         self.assertIn("shard_index: 0", shard)
@@ -868,12 +876,13 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("steps.build_store_binary.outcome != 'success'", propagate)
         self.assertIn("steps.store_shard.outcome != 'success'", propagate)
 
-        self.assertIn("needs: [scope, preflight, cluster_store_shard]", aggregate)
+        self.assertIn("needs: shard", aggregate)
         self.assertIn("python3 -m validation.store_shard validate", aggregate)
         self.assertIn("mkdir -p target/validation", aggregate)
         self.assertIn("pattern: cluster-store-shard-*", aggregate)
         self.assertIn("merge-multiple: true", aggregate)
         self.assertIn("cluster-store-shard-aggregate.json", aggregate)
+        self.assertIn("needs.shard.result != 'success'", aggregate)
         self.assertIn("steps.validate_store_shards.outcome != 'success'", aggregate)
 
         self.assertIn("name: replicated Store contracts", verdict)
@@ -884,14 +893,17 @@ class OperationsContractCase(unittest.TestCase):
             'test "$LEGACY_RESULT" = skipped',
             'test "$SHARD_RESULT" = skipped',
             'test "$SHARD_RESULT" = success',
-            'echo "Store shard shadow result: $SHARD_RESULT"',
+            'echo "Store shadow evidence is intentionally outside this gate"',
         ):
             self.assertIn(contract, select)
+        self.assertIn("needs.cluster_store_shards.result", verdict)
+        self.assertNotIn("cluster_store_shadow", verdict)
+        self.assertEqual(workflow.count("cluster_store_shadow"), 1)
         pr_gate = jobs["pr_gate"]
         self.assertIn("      - cluster_store\n", pr_gate)
         self.assertNotIn("      - cluster_store_legacy\n", pr_gate)
-        self.assertNotIn("      - cluster_store_shard\n", pr_gate)
-        self.assertNotIn("      - cluster_store_shard_receipts\n", pr_gate)
+        self.assertNotIn("      - cluster_store_shards\n", pr_gate)
+        self.assertNotIn("      - cluster_store_shadow\n", pr_gate)
 
         dockerfile = read("Dockerfile.store-shard")
         self.assertIn("FROM rust:1.97.1-bookworm", dockerfile)
@@ -1268,6 +1280,7 @@ class OperationsContractCase(unittest.TestCase):
             ".github/workflows/lint.yml",
             ".github/workflows/release-readiness.yml",
             ".github/workflows/rust-audit.yml",
+            ".github/workflows/store-shards.yml",
             ".github/workflows/validation-nightly.yml",
         ):
             for name, block in workflow_job_blocks(path).items():
@@ -1296,8 +1309,8 @@ class OperationsContractCase(unittest.TestCase):
                 ):
                     expected = ci_store
                 elif (
-                    path == ".github/workflows/ci.yml"
-                    and name == "cluster_store_shard"
+                    path == ".github/workflows/store-shards.yml"
+                    and name == "shard"
                 ):
                     expected = (
                         "    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == "

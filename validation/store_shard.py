@@ -408,7 +408,11 @@ def _require_string_list(value: object, field: str) -> list[str]:
     return value
 
 
-def validate_receipts(receipts: Sequence[Mapping[str, Any]]) -> dict[str, object]:
+def validate_receipts(
+    receipts: Sequence[Mapping[str, Any]],
+    *,
+    expected_identity: Mapping[str, str] | None = None,
+) -> dict[str, object]:
     """Prove exact union, disjointness, completion, tree, and binary identity."""
 
     if len(receipts) < 2:
@@ -440,6 +444,20 @@ def validate_receipts(receipts: Sequence[Mapping[str, Any]]) -> dict[str, object
         "inventory",
         "ignored",
     )
+    if expected_identity is not None:
+        for field in (
+            "repository",
+            "workflow_ref",
+            "run_id",
+            "run_attempt",
+            "tested_sha",
+            "tested_tree",
+        ):
+            expected = expected_identity.get(field)
+            if not expected or first.get(field) != expected:
+                raise StoreShardError(
+                    f"Store shard receipts do not match current {field}"
+                )
     inventory = _require_string_list(first.get("inventory"), "inventory")
     ignored = _require_string_list(first.get("ignored"), "ignored")
     if not set(ignored).issubset(inventory):
@@ -657,7 +675,20 @@ def main(argv: list[str] | None = None) -> int:
         paths = list(args.receipt)
         if args.receipts_directory is not None:
             paths.extend(args.receipts_directory.glob("*-receipt.json"))
-        aggregate = validate_receipts(load_receipts(paths))
+        tested_sha = git_object(Path.cwd(), "HEAD^{commit}")
+        tested_tree = git_object(Path.cwd(), "HEAD^{tree}")
+        metadata = require_metadata(os.environ, tested_sha)
+        expected_identity = {
+            "repository": metadata["github_repository"],
+            "workflow_ref": metadata["github_workflow_ref"],
+            "run_id": metadata["github_run_id"],
+            "run_attempt": metadata["github_run_attempt"],
+            "tested_sha": tested_sha,
+            "tested_tree": tested_tree,
+        }
+        aggregate = validate_receipts(
+            load_receipts(paths), expected_identity=expected_identity
+        )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
             json.dumps(aggregate, indent=2, sort_keys=True) + "\n",
