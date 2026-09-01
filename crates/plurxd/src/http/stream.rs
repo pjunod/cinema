@@ -3732,7 +3732,7 @@ mod tests {
             manual_override_revision: None,
         };
         let set = |annotations| TimelineAnnotationSet {
-            source_identity: SourceIdentity::default(),
+            source_identity: SourceIdentity::new(11, 13, "chapters"),
             generation_id: "g".to_owned(),
             version: 1,
             annotations,
