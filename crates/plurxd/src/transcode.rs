@@ -61,7 +61,16 @@ const MAX_CLUSTER_REPLACEMENT_GATES: usize = 4_096;
 const CLUSTER_REPLACEMENT_GATE_WAIT: Duration = Duration::from_secs(3);
 const MARKER_AMBIGUITY_TTL: Duration = Duration::from_secs(60);
 const MAX_MARKER_AMBIGUITIES: usize = 4_096;
-type RecentMarkerAmbiguities = Arc<std::sync::Mutex<HashMap<(String, i64, &'static str), Instant>>>;
+#[derive(Debug, Default)]
+struct RecentMarkerAmbiguityLedger {
+    entries: HashMap<(String, i64, &'static str), Instant>,
+    /// Saturation cannot discard a live retirement identity: doing so could
+    /// let its delayed placeholder steal a VOD ledger. A single bounded
+    /// global tombstone fails closed until every unrepresented retirement
+    /// admitted during saturation has aged out.
+    overflow_ambiguous_until: Option<Instant>,
+}
+type RecentMarkerAmbiguities = Arc<std::sync::Mutex<RecentMarkerAmbiguityLedger>>;
 const SHARED_LOOKUP_PIN_MS: i64 = 30_000;
 /// One retained owner per actor-managed generation is sufficient, but the
 /// global bound also protects the process when many request futures vanish
@@ -2666,7 +2675,7 @@ fn spawn_rolling_retirement_owner(
 }
 
 fn remember_rolling_marker_ambiguity(
-    registry: &std::sync::Mutex<HashMap<(String, i64, &'static str), Instant>>,
+    registry: &std::sync::Mutex<RecentMarkerAmbiguityLedger>,
     session: &Session,
 ) {
     let method = match session.kind {
@@ -2682,7 +2691,7 @@ fn remember_rolling_marker_ambiguity(
 }
 
 fn remember_rolling_marker_ambiguity_key(
-    registry: &std::sync::Mutex<HashMap<(String, i64, &'static str), Instant>>,
+    registry: &std::sync::Mutex<RecentMarkerAmbiguityLedger>,
     user_scope: &str,
     file_id: i64,
     method: &'static str,
@@ -2691,36 +2700,50 @@ fn remember_rolling_marker_ambiguity_key(
         return;
     };
     let now = Instant::now();
-    recent.retain(|_, deadline| *deadline > now);
-    if recent.len() >= MAX_MARKER_AMBIGUITIES {
-        if let Some(oldest) = recent
-            .iter()
-            .min_by_key(|(_, deadline)| **deadline)
-            .map(|(key, _)| key.clone())
-        {
-            recent.remove(&oldest);
-        }
+    let deadline = now + MARKER_AMBIGUITY_TTL;
+    recent.entries.retain(|_, deadline| *deadline > now);
+    if recent
+        .overflow_ambiguous_until
+        .is_some_and(|deadline| deadline <= now)
+    {
+        recent.overflow_ambiguous_until = None;
     }
-    recent.insert(
-        (user_scope.to_owned(), file_id, method),
-        now + MARKER_AMBIGUITY_TTL,
-    );
+    let key = (user_scope.to_owned(), file_id, method);
+    if let Some(existing) = recent.entries.get_mut(&key) {
+        *existing = deadline;
+    } else if recent.entries.len() < MAX_MARKER_AMBIGUITIES {
+        recent.entries.insert(key, deadline);
+    } else {
+        recent.overflow_ambiguous_until = Some(
+            recent
+                .overflow_ambiguous_until
+                .map_or(deadline, |existing| existing.max(deadline)),
+        );
+    }
 }
 
 fn recent_rolling_marker_ambiguity(
-    registry: &std::sync::Mutex<HashMap<(String, i64, &'static str), Instant>>,
+    registry: &std::sync::Mutex<RecentMarkerAmbiguityLedger>,
     user_scope: &str,
     file_id: i64,
 ) -> bool {
     registry.lock().map_or(true, |mut recent| {
         let now = Instant::now();
-        recent.retain(|_, deadline| *deadline > now);
+        recent.entries.retain(|_, deadline| *deadline > now);
+        if recent
+            .overflow_ambiguous_until
+            .is_some_and(|deadline| deadline <= now)
+        {
+            recent.overflow_ambiguous_until = None;
+        }
         // The shipped method is plan-time and a rolling session may be
         // promoted later (for example, subtitle burn). Any recently retired
         // same-user/file rolling presentation is therefore ambiguous.
-        recent
-            .keys()
-            .any(|(scope, id, _)| scope == user_scope && *id == file_id)
+        recent.overflow_ambiguous_until.is_some()
+            || recent
+                .entries
+                .keys()
+                .any(|(scope, id, _)| scope == user_scope && *id == file_id)
     })
 }
 
@@ -9540,7 +9563,9 @@ impl TranscodeManager {
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            recent_marker_ambiguities: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            recent_marker_ambiguities: Arc::new(std::sync::Mutex::new(
+                RecentMarkerAmbiguityLedger::default(),
+            )),
             terminal_controls: std::sync::Mutex::new(HashMap::new()),
             cluster_replacement_gates: Arc::new(ClusterReplacementGates::default()),
             session_release_gates: Arc::new(SessionReleaseGates::default()),
@@ -21075,14 +21100,14 @@ mod tests {
     fn retired_rolling_marker_prewarm_ambiguity_survives_plan_method_drift() {
         let scope = "[\"user_id\",1]";
         let key = (scope.to_owned(), 7, "transcode");
-        let recent = std::sync::Mutex::new(HashMap::from([(
-            key.clone(),
-            Instant::now() - Duration::from_secs(1),
-        )]));
+        let recent = std::sync::Mutex::new(RecentMarkerAmbiguityLedger {
+            entries: HashMap::from([(key.clone(), Instant::now() - Duration::from_secs(1))]),
+            overflow_ambiguous_until: None,
+        });
         assert!(!recent_rolling_marker_ambiguity(&recent, scope, 7));
         remember_rolling_marker_ambiguity_key(&recent, scope, 7, "transcode");
         assert!(recent_rolling_marker_ambiguity(&recent, scope, 7,));
-        assert!(recent.lock().expect("recent lock")[&key] > Instant::now());
+        assert!(recent.lock().expect("recent lock").entries[&key] > Instant::now());
         assert!(!recent_rolling_marker_ambiguity(
             &recent,
             "[\"user_id\",2]",
@@ -21093,6 +21118,28 @@ mod tests {
             "[\"user_id\",1]",
             8,
         ));
+    }
+
+    #[test]
+    fn rolling_marker_prewarm_ambiguity_saturation_fails_closed() {
+        let deadline = Instant::now() + MARKER_AMBIGUITY_TTL;
+        let recent = std::sync::Mutex::new(RecentMarkerAmbiguityLedger {
+            entries: (0..MAX_MARKER_AMBIGUITIES)
+                .map(|id| ((format!("user-{id}"), id as i64, "remux"), deadline))
+                .collect(),
+            overflow_ambiguous_until: None,
+        });
+
+        remember_rolling_marker_ambiguity_key(&recent, "overflow", i64::MAX, "transcode");
+
+        let ledger = recent.lock().expect("recent lock");
+        assert_eq!(ledger.entries.len(), MAX_MARKER_AMBIGUITIES);
+        assert!(ledger.overflow_ambiguous_until.is_some());
+        drop(ledger);
+        assert!(
+            recent_rolling_marker_ambiguity(&recent, "unrepresented", -1),
+            "an unrepresented retirement makes every placeholder ambiguous"
+        );
     }
 
     #[tokio::test]

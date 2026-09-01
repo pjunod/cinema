@@ -45,6 +45,15 @@ const MAX_PER_USER: usize = 8;
 const MARKER_AMBIGUITY_TTL: Duration = Duration::from_secs(60);
 const MAX_MARKER_AMBIGUITIES: usize = 256;
 
+#[derive(Debug, Default)]
+struct RecentMarkerAmbiguities {
+    entries: HashMap<(i64, i64), Instant>,
+    /// When the exact ledger is saturated, every sessionless beacon is
+    /// ambiguous until the newest unrepresented retirement could no longer
+    /// arrive. Bounded memory must fail closed, not evict live provenance.
+    overflow_ambiguous_until: Option<Instant>,
+}
+
 /// One in-flight progressive remux.
 #[derive(Debug)]
 pub struct Stream {
@@ -119,7 +128,7 @@ impl Stream {
 #[derive(Debug, Default)]
 pub struct Streams {
     live: Mutex<HashMap<String, Arc<Stream>>>,
-    recent_marker_ambiguities: Mutex<HashMap<(i64, i64), Instant>>,
+    recent_marker_ambiguities: Mutex<RecentMarkerAmbiguities>,
     seq: AtomicI64,
 }
 
@@ -212,8 +221,15 @@ impl Streams {
             return true;
         };
         let now = Instant::now();
-        recent.retain(|_, deadline| *deadline > now);
-        recent.contains_key(&(user_id, file_id))
+        recent.entries.retain(|_, deadline| *deadline > now);
+        if recent
+            .overflow_ambiguous_until
+            .is_some_and(|deadline| deadline <= now)
+        {
+            recent.overflow_ambiguous_until = None;
+        }
+        recent.overflow_ambiguous_until.is_some()
+            || recent.entries.contains_key(&(user_id, file_id))
     }
 
     fn remember_marker_ambiguity(&self, user_id: i64, file_id: i64) {
@@ -221,23 +237,32 @@ impl Streams {
             return;
         };
         let now = Instant::now();
-        recent.retain(|_, deadline| *deadline > now);
-        if recent.len() >= MAX_MARKER_AMBIGUITIES {
-            if let Some(oldest) = recent
-                .iter()
-                .min_by_key(|(_, deadline)| **deadline)
-                .map(|(key, _)| *key)
-            {
-                recent.remove(&oldest);
-            }
+        let deadline = now + MARKER_AMBIGUITY_TTL;
+        recent.entries.retain(|_, deadline| *deadline > now);
+        if recent
+            .overflow_ambiguous_until
+            .is_some_and(|deadline| deadline <= now)
+        {
+            recent.overflow_ambiguous_until = None;
         }
-        recent.insert((user_id, file_id), now + MARKER_AMBIGUITY_TTL);
+        if let Some(existing) = recent.entries.get_mut(&(user_id, file_id)) {
+            *existing = deadline;
+        } else if recent.entries.len() < MAX_MARKER_AMBIGUITIES {
+            recent.entries.insert((user_id, file_id), deadline);
+        } else {
+            recent.overflow_ambiguous_until = Some(
+                recent
+                    .overflow_ambiguous_until
+                    .map_or(deadline, |existing| existing.max(deadline)),
+            );
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn expire_marker_ambiguities(&self) {
         if let Ok(mut recent) = self.recent_marker_ambiguities.lock() {
-            recent.clear();
+            recent.entries.clear();
+            recent.overflow_ambiguous_until = None;
         }
     }
 
@@ -413,5 +438,34 @@ mod tests {
         assert_eq!(listed.first().expect("newest").file_id, 599);
         assert_eq!(listed.last().expect("oldest retained").file_id, 88);
         assert!(listed.iter().all(|stream| stream.file_id >= 88));
+    }
+
+    #[test]
+    fn progressive_marker_prewarm_ambiguity_saturation_fails_closed() {
+        let streams = Streams::new();
+        let deadline = Instant::now() + MARKER_AMBIGUITY_TTL;
+        {
+            let mut recent = streams
+                .recent_marker_ambiguities
+                .lock()
+                .expect("recent marker ambiguities");
+            recent
+                .entries
+                .extend((0..MAX_MARKER_AMBIGUITIES as i64).map(|id| ((id, id), deadline)));
+        }
+
+        streams.remember_marker_ambiguity(i64::MAX, i64::MAX);
+
+        let recent = streams
+            .recent_marker_ambiguities
+            .lock()
+            .expect("recent marker ambiguities");
+        assert_eq!(recent.entries.len(), MAX_MARKER_AMBIGUITIES);
+        assert!(recent.overflow_ambiguous_until.is_some());
+        drop(recent);
+        assert!(
+            streams.contains_delivery(-1, -1),
+            "an unrepresented retirement makes every placeholder ambiguous"
+        );
     }
 }
