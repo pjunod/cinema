@@ -1,8 +1,30 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-01 · Kept current by the working agent in the same
+**Updated:** 2026-09-01 (evening) · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Artwork repair-fence claim flake (same CI job)
+
+**PR [#753](https://github.com/pjunod/plurx/pull/753) — MERGED to main
+(`36da0497`, 2026-09-01).** While running #744's acceptance loop, the other
+intermittent failure in `replicated store and topology contracts` fired —
+`new leader did not exclusively fence artwork repair: []`, previously seen
+on the effort-train qualification. Root cause: `claim_artwork_source_repair`
+declines with an explicit `fence: None` when the leader's quorum
+acknowledgement is older than 1s at the claim instant; on a loaded runner
+that instant can fall in a scheduling gap the drill's own successor proof
+already tolerates. The drill now retries only that classified no-op while
+the same node reports itself leader in the same term, bounded well below
+one repair lease; both exclusivity bails carry the node's raft state and
+the durable repair row — CI's first capture of that evidence
+(`since_last_ack: 1036 ms`, term stable) confirmed the mechanism and
+exposed a self-defeating freshness guard in the first cut, fixed before
+merge. Two adversarial review rounds; 21/21 local drill runs green; CI
+green (one unrelated `activity proof` flake on the first run, green on
+re-run — noted for a future look if it recurs). Also merged today:
+[#752](https://github.com/pjunod/plurx/pull/752), the RELEASING.md answer
+to the writeup's §7 question.
 
 ## Exact-count cluster assertions (the `v0.3.0` release blocker)
 
