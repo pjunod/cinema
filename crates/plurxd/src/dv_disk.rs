@@ -6337,6 +6337,13 @@ mod tests {
         tokio::fs::write(&source, b"new pathname winner")
             .await
             .expect("winner");
+        // Some CI filesystems expose ctime at a granularity coarse enough for
+        // the rename and the following fstat to land on the same tick. Change
+        // the held inode's size as well so this fixture always exercises the
+        // identity fence rather than depending on timestamp resolution.
+        tokio::fs::write(&moved, b"held verified bytes changed after binding")
+            .await
+            .expect("change held inode facts");
         let script = format!(
             "#!/bin/sh\nlast=''\nfor arg in \"$@\"; do last=\"$arg\"; done\ncat \"$last\" > '{}'\nprintf '%s\\n' '{{\"format\":{{\"duration\":\"1.0\"}},\"streams\":[],\"chapters\":[]}}'\n",
             captured.display()
@@ -6354,7 +6361,7 @@ mod tests {
             Duration::from_secs(5),
         )
         .await
-        .expect_err("rename changed the held inode ctime fence");
+        .expect_err("pathname swap changed the held inode facts");
         assert!(error.contains("inode facts changed"));
         assert!(!path_entry_exists(&captured)
             .await
