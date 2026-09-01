@@ -694,6 +694,92 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("run: make cluster-wal-check", workflow)
         self.assertIn("run: make cluster-daemon-check", workflow)
 
+    def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):
+        workflow = read(".github/workflows/ci.yml")
+        makefile = read("Makefile")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        store = workflow_step_blocks(jobs["cluster_store"])
+        topology = workflow_step_blocks(jobs["cluster_topology"])
+
+        store_run = store["Run replicated Store contracts"]
+        self.assertEqual(workflow_step_scalar(store_run, "id"), "store_contracts")
+        self.assertEqual(workflow_step_scalar(store_run, "continue-on-error"), "true")
+        self.assertEqual(workflow_step_scalar(store_run, "run"), "|")
+        self.assertEqual(store_run.count("make cluster-store-check 2>&1 | tee"), 1)
+        self.assertNotIn("make cluster-harness-check", store_run)
+
+        store_receipt = store["Record the Store lane result"]
+        self.assertEqual(workflow_step_scalar(store_receipt, "if"), "always()")
+        self.assertIn(
+            "LANE_RESULT: ${{ steps.store_contracts.outcome }}", store_receipt
+        )
+        self.assertIn('--result "$LANE_RESULT"', store_receipt)
+        self.assertIn('--command "make cluster-store-check"', store_receipt)
+        store_upload = store["Retain the Store lane log and receipt"]
+        self.assertEqual(workflow_step_scalar(store_upload, "if"), "always()")
+        self.assertIn("target/validation/cluster-store.log", store_upload)
+        self.assertIn("target/validation/cluster-store-receipt.json", store_upload)
+        store_propagate = store["Propagate the Store contract result"]
+        self.assertEqual(
+            workflow_step_scalar(store_propagate, "if"),
+            "always() && steps.store_contracts.outcome != 'success'",
+        )
+        self.assertEqual(workflow_step_scalar(store_propagate, "run"), "exit 1")
+
+        topology_run = topology["Run replicated topology contracts"]
+        self.assertEqual(
+            workflow_step_scalar(topology_run, "id"), "topology_contracts"
+        )
+        self.assertEqual(
+            workflow_step_scalar(topology_run, "continue-on-error"), "true"
+        )
+        self.assertEqual(workflow_step_scalar(topology_run, "run"), "|")
+        self.assertEqual(topology_run.count("make cluster-harness-check"), 1)
+        self.assertEqual(topology_run.count("make hiqlite-spike"), 1)
+        self.assertEqual(
+            topology_run.count(
+                "cargo clippy --locked --manifest-path "
+                "spikes/hiqlite-m0/Cargo.toml"
+            ),
+            1,
+        )
+        self.assertNotIn("make cluster-store-check", topology_run)
+
+        topology_receipt = topology["Record the topology lane result"]
+        self.assertEqual(workflow_step_scalar(topology_receipt, "if"), "always()")
+        self.assertIn(
+            "LANE_RESULT: ${{ steps.topology_contracts.outcome }}",
+            topology_receipt,
+        )
+        self.assertIn('--result "$LANE_RESULT"', topology_receipt)
+        for command in (
+            "make cluster-harness-check",
+            "cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml "
+            "--tests --no-deps -- -D warnings",
+            "make hiqlite-spike",
+        ):
+            self.assertIn(f'--command "{command}"', topology_receipt)
+        topology_upload = topology["Retain the topology lane log and receipt"]
+        self.assertEqual(workflow_step_scalar(topology_upload, "if"), "always()")
+        self.assertIn("target/validation/cluster-topology.log", topology_upload)
+        self.assertIn(
+            "target/validation/cluster-topology-receipt.json", topology_upload
+        )
+        topology_propagate = topology["Propagate the topology contract result"]
+        self.assertEqual(
+            workflow_step_scalar(topology_propagate, "if"),
+            "always() && steps.topology_contracts.outcome != 'success'",
+        )
+        self.assertEqual(
+            workflow_step_scalar(topology_propagate, "run"), "exit 1"
+        )
+
+        self.assertIn(
+            "cluster-check: cluster-wal-check cluster-store-check "
+            "cluster-harness-check cluster-daemon-check",
+            makefile,
+        )
+
     def test_ci_caches_are_keyed_to_what_they_cache(self):
         workflow = read(".github/workflows/ci.yml")
         action = read(".github/actions/playwright/action.yml")
