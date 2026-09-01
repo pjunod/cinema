@@ -68,6 +68,9 @@ jobs:
         run: |
           make validation-lint
           python3 -m unittest discover -s tests/validation -p 'test_*.py'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Check CI, deploy, and shipping contracts
         run: make operations-check
       - name: Record the documentation-only lane

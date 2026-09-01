@@ -567,6 +567,18 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("needs: check", package)
         self.assertIn("needs: [scope, preflight]", package)
 
+        preflight = workflow_job_blocks(".github/workflows/ci.yml")["preflight"]
+        effort_preflight = workflow_job_blocks(".github/workflows/effort-ci.yml")[
+            "preflight"
+        ]
+        for contract_preflight in (preflight, effort_preflight):
+            self.assertIn("uses: actions/setup-node@v4", contract_preflight)
+            self.assertIn('node-version: "22"', contract_preflight)
+            self.assertLess(
+                contract_preflight.index("actions/setup-node@v4"),
+                contract_preflight.index("run: make operations-check"),
+            )
+
         lint = read(".github/workflows/lint.yml")
         self.assertNotIn("\n  pull_request:\n", lint)
         self.assertNotIn("\n  merge_group:\n", lint)
