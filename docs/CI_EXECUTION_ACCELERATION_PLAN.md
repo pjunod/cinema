@@ -181,12 +181,25 @@ CARGO_INCREMENTAL=0
 must never introduce whitespace into it. Release artifact paths consume the
 action's explicit `target-dir` output rather than assuming `./target`.
 
-`scripts/ci-cache-prune` enforces the destructive boundary before deleting
-anything. It refuses roots outside
-`$RUNNER_TOOL_CACHE/plurx-ci/cargo/*/rust-x.y.z`, deletes only lane `target`
-directories, and leaves `cargo-home` intact. It prunes oldest targets when
-either the toolchain root exceeds its budget or the filesystem crosses its
-reserve floor, and records the before/after decision in the step summary.
+Persistent state also requires the action's explicit `persistent-eligible`
+input. It defaults to false and the cache foundation does not set it. Only a
+later job route that mechanically selects the dedicated non-voter label may
+pass true; changing `CI_EXECUTION_MODE` alone can therefore never activate
+persistence on the generic labels currently carried by production voters.
+
+`scripts/ci-cache-prune` canonicalizes every root and candidate before deleting
+anything. It refuses traversal, symlink escapes, prefix-confusable roots, and
+unrecognized path segments outside
+`$RUNNER_TOOL_CACHE/plurx-ci/cargo/<runner>/rust-x.y.z`. Under pressure it can
+remove stale toolchain epochs, lane targets, and recreatable Cargo registry/git
+cache directories. Explicit `.last-used` markers, refreshed after each job,
+provide the eviction order instead of unreliable directory mtimes.
+
+The pruner runs before work and through an `always()` finalizer after work. It
+rechecks both conditions after exhausting safe candidates and fails the job if
+the Cargo root is still over budget or the filesystem remains below its
+reserve. The stated limit is therefore a postcondition, not a best-effort
+preflight observation.
 
 The initial Cargo ceiling is 30 GiB per runner/toolchain. Exactly one runner
 service per physical builder is eligible for persistent-heavy work, so this is

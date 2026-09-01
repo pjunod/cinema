@@ -1445,7 +1445,8 @@ async function startServer(options, fixtureDirectory) {
   await fsp.writeFile(config,
     `[server]\nname = "plurx playback lab"\nbind = "127.0.0.1:${port}"\n\n` +
     `[storage]\ndata_dir = ${tomlString(dataDir)}\n`, "utf8");
-  const serverBin = path.resolve(options.server || path.join(ROOT, "target", "debug", "plurxd"));
+  const cargoTarget = path.resolve(ROOT, process.env.CARGO_TARGET_DIR || "target");
+  const serverBin = path.resolve(options.server || path.join(cargoTarget, "debug", "plurxd"));
   if (!fs.existsSync(serverBin)) {
     if (options.server) throw new Error(`server binary does not exist: ${serverBin}`);
     process.stdout.write("BUILD   plurxd debug binary\n");

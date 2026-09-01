@@ -648,7 +648,10 @@ class SelfHost:
             if not path.exists():
                 raise Fail(f"no such server binary: {path}")
             return path
-        path = ROOT / "target" / "debug" / "plurxd"
+        target_dir = Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
+        if not target_dir.is_absolute():
+            target_dir = ROOT / target_dir
+        path = target_dir / "debug" / "plurxd"
         # A binary merely existing says nothing about whether it contains this
         # tree's embedded HTML. Cargo's incremental no-op is cheap; serving a
         # stale binary can bless the exact pre-change UI as the new golden.

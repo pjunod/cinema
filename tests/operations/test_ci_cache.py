@@ -80,12 +80,31 @@ class CiCacheContractCase(unittest.TestCase):
 
         self.assertIn('"${RUNNER_ENVIRONMENT:-}" = github-hosted', action)
         self.assertIn('"$EXECUTION_MODE" != shadow', action)
+        self.assertIn('"$PERSISTENT_ELIGIBLE" != true', action)
+        self.assertIn('default: "false"', action)
         self.assertIn("$RUNNER_TOOL_CACHE/plurx-ci/cargo/", action)
         self.assertIn("toolchain=$(rustc -Vv", action)
         self.assertIn("CARGO_INCREMENTAL=0", action)
         self.assertIn("uses: Swatinem/rust-cache@v2", action)
         self.assertNotIn("uses: Swatinem/rust-cache@v2", workflow)
         self.assertIn("needs.scope.outputs.execution_mode", workflow)
+        self.assertIn(
+            'sha256sum "${{ steps.cargo-cache.outputs.target-dir }}/${{ matrix.target }}/release/plurxd"',
+            workflow,
+        )
+        self.assertNotIn('$CARGO_TARGET_DIR/${{ matrix.target }}', workflow)
+        self.assertEqual(
+            workflow.count("uses: ./.github/actions/cargo-cache\n"),
+            workflow.count("uses: ./.github/actions/cargo-cache-finalize\n"),
+        )
+        self.assertNotIn("persistent-eligible: true", workflow)
+        effort = (ROOT / ".github/workflows/effort-ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            effort.count("uses: ./.github/actions/cargo-cache\n"),
+            effort.count("uses: ./.github/actions/cargo-cache-finalize\n"),
+        )
         for lane in (
             "rust-gate",
             "cluster-auth",
@@ -99,7 +118,19 @@ class CiCacheContractCase(unittest.TestCase):
         script = ROOT / "scripts/ci-cache-prune"
         subprocess.run(["bash", "-n", str(script)], check=True)
         with tempfile.TemporaryDirectory() as raw_directory:
-            tool_cache = Path(raw_directory)
+            tool_cache = Path(raw_directory) / "tool"
+            tool_cache.mkdir()
+            fake_bin = tool_cache / "bin"
+            fake_bin.mkdir()
+            fake_df = fake_bin / "df"
+            fake_df.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'Filesystem 1024-blocks Used Available Capacity Mounted' "
+                "'fixture 524288000 104857600 419430400 20% /fixture'\n",
+                encoding="utf-8",
+            )
+            fake_df.chmod(0o755)
             cache_root = (
                 tool_cache / "plurx-ci/cargo/runner-01/rust-1.97.1"
             )
@@ -111,6 +142,7 @@ class CiCacheContractCase(unittest.TestCase):
             environment.update(
                 {
                     "GITHUB_STEP_SUMMARY": str(summary),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
                     "RUNNER_TOOL_CACHE": str(tool_cache),
                 }
             )
@@ -130,7 +162,127 @@ class CiCacheContractCase(unittest.TestCase):
             self.assertTrue(target.is_dir())
             self.assertIn("prune decision: `within-budget`", summary.read_text())
             self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("refusing unsafe cache root", rejected.stderr)
+            self.assertIn("cache root does not exist", rejected.stderr)
+
+            victim = tool_cache / "victim"
+            victim.mkdir()
+            (victim / "proof").write_text("outside cache", encoding="utf-8")
+            escaped = str(cache_root / "../../../../victim")
+            prefix_confusion = Path(f"{tool_cache}-other")
+            confused_root = prefix_confusion / "plurx-ci/cargo/runner/rust-1.2.3"
+            confused_root.mkdir(parents=True)
+            symlink_root = cache_root.parent / "rust-9.9.9"
+            symlink_root.symlink_to(victim, target_is_directory=True)
+            for unsafe in (escaped, str(confused_root), str(symlink_root)):
+                with self.subTest(unsafe=unsafe):
+                    result = subprocess.run(
+                        [str(script), unsafe, "1"],
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("refusing unsafe cache root", result.stderr)
+                    self.assertTrue((victim / "proof").is_file())
+
+    def test_cache_pruner_fails_when_pressure_cannot_be_restored(self):
+        script = ROOT / "scripts/ci-cache-prune"
+        with tempfile.TemporaryDirectory() as raw_directory:
+            tool_cache = Path(raw_directory) / "tool"
+            tool_cache.mkdir()
+            fake_bin = tool_cache / "bin"
+            fake_bin.mkdir()
+            fake_df = fake_bin / "df"
+            fake_df.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'Filesystem 1024-blocks Used Available Capacity Mounted' "
+                "'fixture 524288000 523239424 1048576 99% /fixture'\n",
+                encoding="utf-8",
+            )
+            fake_df.chmod(0o755)
+            runner_root = tool_cache / "plurx-ci/cargo/runner-01"
+            cache_root = runner_root / "rust-1.97.1"
+            target = cache_root / "rust-gate/target"
+            target.mkdir(parents=True)
+            (target / "proof").write_bytes(b"cache")
+            stale = runner_root / "rust-1.96.0/stale/target"
+            stale.mkdir(parents=True)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                    "RUNNER_TOOL_CACHE": str(tool_cache),
+                }
+            )
+
+            result = subprocess.run(
+                [str(script), str(cache_root), "1"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("below reserve", result.stderr)
+            self.assertFalse((runner_root / "rust-1.96.0").exists())
+            self.assertFalse(target.exists())
+
+    def test_cache_pruner_uses_explicit_lru_markers(self):
+        script = ROOT / "scripts/ci-cache-prune"
+        with tempfile.TemporaryDirectory() as raw_directory:
+            tool_cache = Path(raw_directory) / "tool"
+            fake_bin = tool_cache / "bin"
+            fake_bin.mkdir(parents=True)
+            fake_df = fake_bin / "df"
+            fake_df.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'Filesystem 1024-blocks Used Available Capacity Mounted' "
+                "'fixture 524288000 104857600 419430400 20% /fixture'\n",
+                encoding="utf-8",
+            )
+            fake_df.chmod(0o755)
+            fake_du = fake_bin / "du"
+            fake_du.write_text(
+                "#!/bin/sh\n"
+                "if [ -d \"$STALE_TARGET\" ] && [ -d \"$HOT_TARGET\" ]; then\n"
+                "  printf '2097152 %s\\n' \"$2\"\n"
+                "else\n"
+                "  printf '1 %s\\n' \"$2\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            fake_du.chmod(0o755)
+            cache_root = tool_cache / "plurx-ci/cargo/runner-01/rust-1.97.1"
+            stale_target = cache_root / "stale/target"
+            hot_target = cache_root / "hot/target"
+            stale_target.mkdir(parents=True)
+            hot_target.mkdir(parents=True)
+            stale_marker = stale_target.parent / ".last-used"
+            hot_marker = hot_target.parent / ".last-used"
+            stale_marker.touch()
+            hot_marker.touch()
+            os.utime(stale_marker, (1_000_000_000, 1_000_000_000))
+            os.utime(hot_marker, (2_000_000_000, 2_000_000_000))
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "HOT_TARGET": str(hot_target),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                    "RUNNER_TOOL_CACHE": str(tool_cache),
+                    "STALE_TARGET": str(stale_target),
+                }
+            )
+
+            subprocess.run(
+                [str(script), str(cache_root), "1"],
+                check=True,
+                env=environment,
+            )
+
+            self.assertFalse(stale_target.exists())
+            self.assertTrue(hot_target.is_dir())
 
     def test_buildkit_state_is_named_bounded_and_registry_aware(self):
         action = (ROOT / ".github/actions/buildx-cache/action.yml").read_text(
@@ -141,12 +293,61 @@ class CiCacheContractCase(unittest.TestCase):
 
         self.assertIn("keep-state: true", action)
         self.assertIn('"$EXECUTION_MODE" != shadow', action)
+        self.assertIn('"$PERSISTENT_ELIGIBLE" != true', action)
+        self.assertIn('default: "false"', action)
         self.assertIn("plurx-$runner_name-$CACHE_LANE", action)
         self.assertIn("buildkitd-config:", action)
         self.assertIn('[registry."192.168.4.7:3000"]', config)
         self.assertIn("http = true", config)
         self.assertIn("--max-used-space 50GB --min-free-space 100GB", workflow)
         self.assertIn("'type=gha,mode=min' || ''", workflow)
+        self.assertNotIn("persistent-eligible: true", workflow)
+
+    def test_external_cargo_targets_reach_browser_harnesses(self):
+        ui = (ROOT / "scripts/ui-baseline").read_text(encoding="utf-8")
+        playback = (ROOT / "scripts/playback-lab").read_text(encoding="utf-8")
+        action = (ROOT / ".github/actions/cargo-cache/action.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('os.environ.get("CARGO_TARGET_DIR"', ui)
+        self.assertIn("process.env.CARGO_TARGET_DIR", playback)
+        self.assertIn('echo "CARGO_TARGET_DIR=$target_dir"', action)
+
+    def test_scope_outputs_are_only_read_by_direct_dependents(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        matches = list(re.finditer(r"(?m)^  ([A-Za-z0-9_]+):\n", workflow))
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(workflow)
+            block = workflow[match.start() : end]
+            if "needs.scope.outputs." not in block:
+                continue
+            with self.subTest(job=match.group(1)):
+                direct_scope = re.search(
+                    r"(?m)^    needs: (?:scope|\[[^\n\]]*\bscope\b[^\n\]]*\])$",
+                    block,
+                ) or re.search(
+                    r"(?m)^    needs:\n(?:      - [^\n]+\n)*      - scope$",
+                    block,
+                )
+                self.assertIsNotNone(direct_scope)
+
+    def test_lru_and_post_job_enforcement_are_explicit(self):
+        action = (ROOT / ".github/actions/cargo-cache/action.yml").read_text(
+            encoding="utf-8"
+        )
+        finalizer = (
+            ROOT / ".github/actions/cargo-cache-finalize/action.yml"
+        ).read_text(encoding="utf-8")
+        pruner = (ROOT / "scripts/ci-cache-prune").read_text(encoding="utf-8")
+
+        self.assertIn(".last-used", action)
+        self.assertIn('touch "$CACHE_LAST_USED"', finalizer)
+        self.assertIn("always() && steps.cargo-cache.outputs.local == 'true'", (
+            ROOT / ".github/workflows/ci.yml"
+        ).read_text(encoding="utf-8"))
+        self.assertIn('marker="$(dirname -- "$target_dir")/.last-used"', pruner)
+        self.assertIn("cache remains over budget", pruner)
 
     def test_execution_mode_is_explicit_and_fails_safe_to_legacy(self):
         script = ROOT / "scripts/ci-execution-mode"

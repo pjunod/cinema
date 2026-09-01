@@ -11,6 +11,10 @@ inputs:
     description: CI execution rollout mode; local state is disabled in legacy mode.
     required: false
     default: legacy
+  persistent-eligible:
+    description: Explicit non-voter scheduling proof; defaults off.
+    required: false
+    default: "false"
   budget-gb:
     description: Maximum runner-local bytes retained for this Rust toolchain.
     required: false
@@ -23,6 +27,15 @@ outputs:
   target-dir:
     description: Absolute Cargo target directory selected for this lane.
     value: ${{ steps.configure.outputs.target_dir }}
+  cache-root:
+    description: Canonical persistent Cargo root, empty for legacy/hosted jobs.
+    value: ${{ steps.configure.outputs.cache_root }}
+  budget-gb:
+    description: Enforced persistent Cargo budget, empty for legacy/hosted jobs.
+    value: ${{ steps.configure.outputs.budget_gb }}
+  last-used:
+    description: Explicit LRU marker for the selected persistent lane.
+    value: ${{ steps.configure.outputs.last_used }}
 
 runs:
   using: composite
@@ -34,6 +47,7 @@ runs:
         CACHE_BUDGET_GB: ${{ inputs.budget-gb }}
         CACHE_LANE: ${{ inputs.lane }}
         EXECUTION_MODE: ${{ inputs.execution-mode }}
+        PERSISTENT_ELIGIBLE: ${{ inputs.persistent-eligible }}
       run: |
         set -euo pipefail
         [[ "$CACHE_LANE" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || {
@@ -41,9 +55,15 @@ runs:
           exit 1
         }
         if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] \
+          || [ "$PERSISTENT_ELIGIBLE" != true ] \
           || [ "$EXECUTION_MODE" != shadow -a "$EXECUTION_MODE" != accelerated ]; then
+          target_dir="$GITHUB_WORKSPACE/target"
+          echo "CARGO_TARGET_DIR=$target_dir" >> "$GITHUB_ENV"
           echo "local=false" >> "$GITHUB_OUTPUT"
-          echo "target_dir=$GITHUB_WORKSPACE/target" >> "$GITHUB_OUTPUT"
+          echo "target_dir=$target_dir" >> "$GITHUB_OUTPUT"
+          echo "cache_root=" >> "$GITHUB_OUTPUT"
+          echo "budget_gb=" >> "$GITHUB_OUTPUT"
+          echo "last_used=" >> "$GITHUB_OUTPUT"
           exit 0
         fi
         test -n "${RUNNER_TOOL_CACHE:-}"
@@ -55,8 +75,10 @@ runs:
         }
         cache_root="$RUNNER_TOOL_CACHE/plurx-ci/cargo/$runner_name/rust-$toolchain"
         target_dir="$cache_root/$CACHE_LANE/target"
+        last_used="$cache_root/$CACHE_LANE/.last-used"
         cargo_home="$cache_root/cargo-home"
         mkdir -p "$target_dir" "$cargo_home"
+        touch "$last_used"
         "$GITHUB_WORKSPACE/scripts/ci-cache-prune" \
           "$cache_root" "$CACHE_BUDGET_GB"
         {
@@ -66,6 +88,9 @@ runs:
         } >> "$GITHUB_ENV"
         echo "local=true" >> "$GITHUB_OUTPUT"
         echo "target_dir=$target_dir" >> "$GITHUB_OUTPUT"
+        echo "cache_root=$cache_root" >> "$GITHUB_OUTPUT"
+        echo "budget_gb=$CACHE_BUDGET_GB" >> "$GITHUB_OUTPUT"
+        echo "last_used=$last_used" >> "$GITHUB_OUTPUT"
 
     - name: Restore the hosted Cargo cache
       if: steps.configure.outputs.local != 'true'

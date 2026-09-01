@@ -11,6 +11,10 @@ inputs:
     description: CI execution rollout mode; local state is disabled in legacy mode.
     required: false
     default: legacy
+  persistent-eligible:
+    description: Explicit non-voter scheduling proof; defaults off.
+    required: false
+    default: "false"
 
 outputs:
   builder-name:
@@ -29,6 +33,7 @@ runs:
       env:
         CACHE_LANE: ${{ inputs.lane }}
         EXECUTION_MODE: ${{ inputs.execution-mode }}
+        PERSISTENT_ELIGIBLE: ${{ inputs.persistent-eligible }}
       run: |
         set -euo pipefail
         [[ "$CACHE_LANE" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || {
@@ -36,6 +41,7 @@ runs:
           exit 1
         }
         if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] \
+          || [ "$PERSISTENT_ELIGIBLE" != true ] \
           || [ "$EXECUTION_MODE" != shadow -a "$EXECUTION_MODE" != accelerated ]; then
           echo "local=false" >> "$GITHUB_OUTPUT"
           echo "builder_name=" >> "$GITHUB_OUTPUT"

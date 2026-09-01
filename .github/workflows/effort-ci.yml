@@ -85,12 +85,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt
-      - uses: ./.github/actions/cargo-cache
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
         with:
           lane: effort-rust
           execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - name: Compile every Rust target without executing tests
         run: make effort-rust-check
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
   web_static:
     name: effort web static contracts
