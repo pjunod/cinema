@@ -486,9 +486,18 @@ The removal also rewrites the `dby1` file-type brand, in the same call. It
 has to: the sanitizer that normally does that runs on the muxer init, where
 the record is still present, so it correctly declines — and `dby1` over a
 sample entry with no record is a *contradictory* initialization segment,
-which AVPlayer refuses outright rather than merely software-decoding. Note
-for anyone reading `scripts/perf-report` as the evidence: it scans for
-`dvcC`/`dvvC` only, so it would call that wire clean.
+which AVPlayer refuses outright rather than merely software-decoding.
+
+Both field tools read the brand now — [`scripts/perf-report`](../scripts/perf-report)
+and [`scripts/dv-evidence`](../scripts/dv-evidence) — and report it *beside*
+the record rather than instead of it, because the two failures are different:
+`dby1` **with** a record is an ordinary Dolby Vision stream, and `dby1` with
+**none** is the contradictory init. Until 2026-09-01 they scanned for
+`dvcC`/`dvvC` only, so on the one shape this work most recently got wrong they
+reported the wire clean. Read as a box, not grepped — the major brand at
+offset 8 and the compatible-brands list from 16 to the declared size — so a
+`dby1` sequence elsewhere in the file is not mistaken for a claim, and a
+`largesize` `ftyp` declines rather than guessing.
 
 The perf report fetches the live session's init segment and states outright
 whether any DV box survives — the wire is proven clean or the report says
