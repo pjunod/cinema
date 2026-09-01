@@ -242,6 +242,15 @@ labels resolve to distinct non-production x86 hosts with verified identity and
 bounded persistent storage. The weekly `replicated Store backstop` workflow is
 unsharded in every mode and remains the assignment-independent safety net.
 
+Eligible packaging changes also schedule `native Linux ARM64 package shadow`
+outside the promotion gate when the mode is `shadow` or `accelerated`. That job
+accepts only the dedicated Linux/ARM64 VM label, proves both the kernel and
+Docker engine are native `aarch64`, and performs the same exact-candidate
+binary export, runtime-only image build, identity checks, health probe, and
+stop/start smoke without QEMU. Its small manifest/digest artifact is campaign
+evidence; laptop or VM absence cannot delay a required job because nothing in
+the required graph depends on it.
+
 GitHub-hosted mode also requires an account with usable Actions billing and
 spending limits. If GitHub refuses the job before assigning a runner, repair
 the account billing limit or switch back to `self-hosted`; workflow code cannot

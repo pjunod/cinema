@@ -938,6 +938,64 @@ class OperationsContractCase(unittest.TestCase):
             "if: always() && steps.store_backstop.outcome != 'success'", job
         )
 
+    def test_native_arm_shadow_is_native_receipted_and_never_required(self):
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        arm = jobs["native_arm_shadow"]
+        pr_gate = jobs["pr_gate"]
+
+        self.assertIn("execution_mode != 'legacy'", arm)
+        self.assertIn("needs.scope.outputs.release_build == 'true'", arm)
+        self.assertIn("needs.scope.outputs.container == 'true'", arm)
+        self.assertIn(
+            "runs-on: [self-hosted, Linux, ARM64, lab, ci-arm64-shadow]", arm
+        )
+        self.assertNotIn("continue-on-error:", arm)
+        self.assertNotIn("docker/setup-qemu-action", arm)
+        self.assertNotIn("native_arm_shadow", pr_gate)
+        self.assertNotIn("native_arm_shadow", jobs["cluster_store"])
+
+        native = workflow_step_blocks(arm)[
+            "Prove the runner and Docker engine are native Linux ARM64"
+        ]
+        self.assertIn('test "$(uname -s)/$(uname -m)" = Linux/aarch64', native)
+        self.assertIn("docker info --format '{{.OSType}}/{{.Architecture}}'", native)
+
+        self.assertIn("uses: ./.github/actions/buildx-cache", arm)
+        self.assertIn("lane: native-arm-shadow", arm)
+        self.assertIn('persistent-eligible: "true"', arm)
+        self.assertEqual(arm.count("uses: docker/build-push-action@v6"), 2)
+        compile_step = workflow_step_blocks(arm)[
+            "Compile and export the exact native ARM64 binaries"
+        ]
+        self.assertIn("file: Dockerfile.binaries", compile_step)
+        self.assertIn("target: release-binaries", compile_step)
+        self.assertIn("platforms: linux/arm64", compile_step)
+        self.assertIn("outputs: type=local,dest=binary-export", compile_step)
+        self.assertIn("aarch64-unknown-linux-gnu", arm)
+
+        runtime_step = workflow_step_blocks(arm)[
+            "Build the native runtime from only the verified binaries"
+        ]
+        self.assertIn("file: Dockerfile.release", runtime_step)
+        self.assertIn("load: true", runtime_step)
+        self.assertIn("platforms: linux/arm64", runtime_step)
+        verify = workflow_step_blocks(arm)[
+            "Verify native architecture, identity, and stop/start runtime"
+        ]
+        self.assertIn("linux/arm64", verify)
+        self.assertIn("plurx-cluster-check", verify)
+        self.assertIn('scripts/container-smoke "$IMAGE"', verify)
+        self.assertNotIn("--platform", verify)
+
+        receipt = workflow_step_blocks(arm)[
+            "Retain the native ARM64 package receipt"
+        ]
+        self.assertIn("release-bin/build-manifest.json", receipt)
+        self.assertIn("release-bin/*.sha256", receipt)
+        self.assertIn("retention-days: 14", receipt)
+        self.assertNotIn("release-bin/plurxd", receipt)
+        self.assertIn('scripts/ci-buildkit-prune "$BUILDER_NAME" 50', arm)
+
     def test_ci_caches_are_keyed_to_what_they_cache(self):
         workflow = read(".github/workflows/ci.yml")
         action = read(".github/actions/playwright/action.yml")
@@ -1303,6 +1361,14 @@ class OperationsContractCase(unittest.TestCase):
                     expected = high_cpu_ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "web_layout":
                     expected = ffmpeg6
+                elif (
+                    path == ".github/workflows/ci.yml"
+                    and name == "native_arm_shadow"
+                ):
+                    expected = (
+                        "    runs-on: [self-hosted, Linux, ARM64, lab, "
+                        "ci-arm64-shadow]"
+                    )
                 elif (
                     path == ".github/workflows/ci.yml"
                     and name == "cluster_store_legacy"
