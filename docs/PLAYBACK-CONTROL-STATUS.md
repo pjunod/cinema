@@ -1,6 +1,6 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-31 · **Baseline:** `main` at `347d7457` ·
+**Updated:** 2026-09-01 · **Baseline:** `main` at `347d7457` ·
 **Fleet:** nuc3 · nuc4 · m6 serve `v0.2.8-106-g55abad8f`; nynuc serves a
 later untagged build · **Devices:** Apple 99 and Android 56 were **installed**
 on 2026-08-31 and neither has produced a control exchange — see
@@ -30,7 +30,7 @@ one is deleted.
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **complete in source on all three clients**; the deletions wait on a fleet run |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike still **needs hardware**, and item 7 is not allowed to start without its numbers |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
-| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); **subtitle windows are not built**; detection is separately deferred |
+| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); **subtitle windows are not built** — the remainder is scoped in [M7-REMAINDER-HANDOFF.md](M7-REMAINDER-HANDOFF.md); detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
 
@@ -69,7 +69,8 @@ merge target: two client PRs in flight means the second always fails.
 | spike lock | catch the stranded lockfile in the fast lane, not in CI | [#733](https://github.com/pjunod/plurx/pull/733) | merged |
 | browser gate | two real exchanges, in real Chromium, in CI | [#729](https://github.com/pjunod/plurx/pull/729) | merged |
 | acceptance | read the commit and the builds, do not quote them | [#734](https://github.com/pjunod/plurx/pull/734) | merged |
-| status | what item 8 actually delivered, and the M5.5 store half | — | this change |
+| status | what item 8 actually delivered, and the M5.5 store half | — | merged |
+| plan | the M7 remainder scoped: readiness, bounded subtitle windows, seek coalescing, burn-join, prewarm | [M7 remainder](M7-REMAINDER-HANDOFF.md) | this change |
 
 **What item 8 did not deliver.** §6 item 8 names five things: exact
 intro/credits annotations, subtitle windows, force-analysis controls,
@@ -84,7 +85,8 @@ missing.
   gap is between the two documents, not inside either one. Client-demand-driven
   subtitle materialization is specified in
   [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) §13.8
-  and has no owner.
+  and, as of 2026-09-01, is scoped milestone by milestone in
+  [M7-REMAINDER-HANDOFF.md](M7-REMAINDER-HANDOFF.md).
 
 **A separate defect the same reading found.** Marker-destination prewarm is
 *not* one of item 8's five — it is a §13.8 bullet — but its instrumentation
@@ -98,7 +100,8 @@ rate is hunting a bug that does not exist. This one *is* deliberate on the
 index side — [CONTENT-ANALYSIS-INDEX-HANDOFF.md](CONTENT-ANALYSIS-INDEX-HANDOFF.md)
 §6.1 forbids that branch from touching `playback_control.rs`, and §4.5 defers
 actor-side consumption to this programme. The counter is waiting for a consumer
-this programme owes it.
+this programme owes it — scoped as the separable final milestone of
+[M7-REMAINDER-HANDOFF.md](M7-REMAINDER-HANDOFF.md).
 
 **What is left in M5.** Nothing buildable. M5c and M5h — deleting the web and
 mobile budgets — are all that remains, and both are gated on
