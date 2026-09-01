@@ -97,6 +97,22 @@ async function main() {
   assert.equal(control.validResponse(bootstrap(),secondRequest,
     Object.assign(response(secondRequest),{accepted_sequence:1})),false);
 
+  const subtitleReadinessMeansReady=new Function([
+    shippedSource("subtitleReadinessMeansReady"),
+    "return subtitleReadinessMeansReady;",
+  ].join("\n"))();
+  for(const [label,delivery,expected] of [
+    ["ready",{subtitle_readiness:"ready"},true],
+    ["warming",{subtitle_readiness:"warming"},false],
+    ["unavailable",{subtitle_readiness:"unavailable"},false],
+    ["absent",{},false],
+    ["unknown",{subtitle_readiness:"a_value_from_next_year"},false],
+    ["empty",{subtitle_readiness:""},false],
+  ]){
+    assert.equal(subtitleReadinessMeansReady(delivery),expected,
+      `${label} readiness has one closed consumer decision`);
+  }
+
   const first = deferred();
   const calls = [];
   const timers = [];

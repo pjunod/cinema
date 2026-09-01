@@ -9891,6 +9891,25 @@ mod tests {
         assert_eq!(round_tripped.subtitle_readiness.as_deref(), Some("ready"));
     }
 
+    /// Relays preserve extension values they do not understand. The consumer,
+    /// not an intermediate server, decides whether a value means `ready`; if a
+    /// relay normalized this to absence, a value introduced by a future peer
+    /// could never cross an older node.
+    #[test]
+    fn subtitle_readiness_relay_preserves_an_unknown_value() {
+        let mut delivery = delivery_with_hold(None);
+        delivery.subtitle_readiness = Some("a_value_from_next_year".to_owned());
+
+        let relayed: DeliveryView =
+            serde_json::from_str(&serde_json::to_string(&delivery).expect("serialize"))
+                .expect("deserialize");
+
+        assert_eq!(
+            relayed.subtitle_readiness.as_deref(),
+            Some("a_value_from_next_year")
+        );
+    }
+
     fn delivery_with_decision(decision: &str) -> DeliveryView {
         let mut delivery = delivery_with_hold(None);
         delivery.producer_state = "failed".to_owned();
