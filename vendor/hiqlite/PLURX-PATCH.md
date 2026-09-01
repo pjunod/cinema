@@ -76,8 +76,11 @@ Apache-2.0. Plurx carries eleven compatibility patches for clustered deployments
   entries to caller-registered SQL classes
   (`validation_register_applied_sql_classes` — set-once before the node
   starts; `validation_applied_sql_class_counts` reads them in registration
-  order; an entry counts toward the first class whose substring its SQL
-  contains). Exact-count drills sample both around their write windows so a
+  order; an entry carrying statement SQL counts toward the first class whose
+  needle matches — a `^` prefix anchors the match to the statement start —
+  while migration, backup, and RTT payloads stay unclassified and therefore
+  fail exact counts loudly). Exact-count drills sample both around their
+  write windows so a
   contaminating entry — a blank leader-establishment commit, a membership
   change, or a background writer's SQL — is named rather than merely
   counted. Setting `PLURX_VALIDATION_LOG_APPLIED` in a validation process

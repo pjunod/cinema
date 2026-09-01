@@ -26,10 +26,10 @@ pub const TOPOLOGY_CATALOGUE_READ_OPERATIONS: u64 = 256;
 pub const TOPOLOGY_CATALOGUE_READ_CONCURRENCY: u64 = 32;
 pub(crate) const TOPOLOGY_CATALOGUE_TITLE_PREFIX: &str = "Topology Catalogue Read";
 const TOPOLOGY_VALUE_BYTES: usize = 64;
-/// The background SQL classes a topology write window tolerates - the
+/// The background class labels a topology write window tolerates - the
 /// membership heartbeat only. Topology nodes hold no cluster-job lease, so
-/// job_leases traffic there is contamination, not background.
-const TOPOLOGY_BACKGROUND_SQL: [&str; 1] = ["cluster_node_heartbeat_intents"];
+/// lease-CAS traffic there is contamination, not background.
+const TOPOLOGY_BACKGROUND_SQL: [&str; 1] = ["membership_heartbeat"];
 const SEMANTIC_EVIDENCE_SCOPE: &str = "semantic_ci";
 const NAMED_RUNNER_EVIDENCE_SCOPE: &str = "named_runner";
 
@@ -421,7 +421,7 @@ pub(super) async fn exercise_topology(
                     .unwrap_or(0),
             );
         classified = classified.saturating_add(delta);
-        if TOPOLOGY_BACKGROUND_SQL.contains(class) {
+        if TOPOLOGY_BACKGROUND_SQL.contains(&class.label) {
             tolerated = tolerated.saturating_add(delta);
         } else {
             foreign = foreign.saturating_add(delta);
@@ -429,7 +429,7 @@ pub(super) async fn exercise_topology(
         if !class_report.is_empty() {
             class_report.push(' ');
         }
-        class_report.push_str(&format!("{class}={delta}"));
+        class_report.push_str(&format!("{}={delta}", class.label));
     }
     let unclassified = window_normal.saturating_sub(classified);
     if unclassified != workload.operations
@@ -790,7 +790,6 @@ struct PayloadCounts {
     membership: u64,
     normal: u64,
     current_term: u64,
-    applied_index: u64,
     class_counts: Vec<u64>,
 }
 
@@ -807,38 +806,69 @@ async fn applied_payload_counts(
             membership,
             normal,
             current_term,
-            applied_index,
+            applied_index: _,
             class_counts,
         } => Ok(PayloadCounts {
             blank,
             membership,
             normal,
             current_term,
-            applied_index,
             class_counts,
         }),
         response => bail!("topology voter {node_id} omitted payload counts: {response:?}"),
     }
 }
 
-/// One consistent (applied index, payload counters) pair from a node. The
-/// node reads its counters before its applied index, so when the index seen
-/// before the request equals the index reported with the counters, no entry
-/// applied while the counters were read and the sample belongs exactly to
-/// that index. Retried until stable so a concurrent apply moves the sample
-/// point instead of skewing the breakdown.
+/// One consistent (boundary index, payload counters) pair from a node,
+/// bracketed by the commit watermark: read the watermark, wait until the
+/// node has applied everything committed at it, sample the counters, then
+/// read the watermark again and accept only if term and committed index held
+/// still. The counters advance at apply start while `last_applied` moves
+/// after a batch, so an applied-index bracket alone can lead or lag them; a
+/// commit bracket cannot, because apply never precedes commit and every
+/// committed entry finished applying before the sample. The watermark read
+/// itself appends nothing, which the `watermark-experiment` subcommand
+/// proves. Retried so a background commit landing mid-sample moves the
+/// boundary instead of skewing the breakdown.
 async fn stable_applied_sample(
     cluster: &mut ClusterProcesses,
     node_id: u64,
 ) -> Result<(u64, PayloadCounts)> {
     for _ in 0..10 {
-        let index = metric_index(cluster, node_id).await?;
+        let first = boundary_watermark(cluster, node_id).await?;
+        let applied_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if metric_index(cluster, node_id).await? >= first.1 {
+                break;
+            }
+            if Instant::now() >= applied_deadline {
+                bail!(
+                    "topology voter {node_id} did not apply up to committed {} while \
+                     sampling payload counters",
+                    first.1
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         let counts = applied_payload_counts(cluster, node_id).await?;
-        if counts.applied_index == index {
-            return Ok((index, counts));
+        let second = boundary_watermark(cluster, node_id).await?;
+        if first == second {
+            return Ok((first.1, counts));
         }
     }
-    bail!("topology voter {node_id} applied index would not settle across 10 sampling attempts");
+    bail!("topology voter {node_id} window boundary would not settle across 10 sampling attempts");
+}
+
+/// The (term, committed index) pair proving one quorum watermark read.
+async fn boundary_watermark(cluster: &mut ClusterProcesses, node_id: u64) -> Result<(u64, u64)> {
+    match cluster.request(node_id, Request::QuorumWatermark).await? {
+        Response::QuorumWatermark {
+            term,
+            committed_index,
+            ..
+        } => Ok((term, committed_index)),
+        response => bail!("topology voter {node_id} omitted its quorum watermark: {response:?}"),
+    }
 }
 
 async fn metric_index(cluster: &mut ClusterProcesses, node_id: u64) -> Result<u64> {

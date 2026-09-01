@@ -21,10 +21,13 @@ evidence first:
 - [x] §4.3 (watermark read appends per call) refuted by experiment — new
       `plurx-cluster-check -- watermark-experiment N` subcommand, 100 idle
       pairs, zero movement.
-- [x] Fix: the drill declares its renewing lease in `ForceCompaction`; the
-      window subtracts exactly the lease row's `revision` advance under an
-      unchanged owner and fence. Blank/membership entries stay hard
-      failures. No tolerance, no widened assertion, no retry.
+- [x] Fix, first round: the drill declares its renewing lease in
+      `ForceCompaction` and subtracts the lease row's `revision` advance.
+      Superseded by the SQL-class accounting below after the next CI run
+      showed revision-invisible background entries; in every round the
+      assertion stays `!=`, blank/membership entries stay hard failures, and
+      nothing is absorbed into slack — tolerance exists only for entries
+      attributed to a declared, named class.
 - [x] Instrumentation (validation builds only): applied-entry counters by
       payload kind in vendored hiqlite + env-gated per-entry apply log
       (`PLURX_VALIDATION_LOG_APPLIED=1`); both exact-count windows print a

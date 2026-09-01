@@ -267,22 +267,43 @@ pub fn validate_compacted_growth(report: &CompactedGrowthReport) -> Result<()> {
 
 /// Dispatch one harness mode from a full `argv`.
 ///
+/// One legitimate background writer in the replicated store: a report label
+/// and the SQL needle that identifies its statements at apply time (a `^`
+/// prefix anchors the match to the start of a statement). The needles are
+/// deliberately statement-leading so guard subqueries that merely reference
+/// the same tables — every fenced publication carries a `SELECT 1 FROM
+/// job_leases` guard — can never classify as background.
+pub(crate) struct BackgroundSqlClass {
+    pub(crate) label: &'static str,
+    pub(crate) needle: &'static str,
+}
+
+/// The replicated store's legitimate background writers, in reporting order,
+/// registered once per process before any node starts: the cluster-job lease
+/// CAS family (acquire, renew — successful and failed attempts both commit an
+/// entry — and release all lead with the same UPDATE), and the membership
+/// heartbeat (one `cluster_node_heartbeat_intents` transaction per node per
+/// round; join and finalize seed the same statement, outside any window).
+/// Exact-count windows declare which class labels are legitimate for that
+/// window; entries in undeclared classes remain hard contamination.
+pub(crate) const BACKGROUND_SQL_CLASSES: [BackgroundSqlClass; 2] = [
+    BackgroundSqlClass {
+        label: "job_lease_cas",
+        needle: "^UPDATE job_leases",
+    },
+    BackgroundSqlClass {
+        label: "membership_heartbeat",
+        needle: "^INSERT INTO cluster_node_heartbeat_intents",
+    },
+];
+
 /// `main` passes `std::env::args()` straight through, so the argument
 /// contract — including every rejection — is exercised by the crate's tests.
-/// The SQL substrings that classify the replicated store's legitimate
-/// background writers, in reporting order. Registered once per process before
-/// any node starts, so every applied normal entry is attributed to the first
-/// matching class: the cluster-job lease keeper (successful and failed
-/// renewal CAS attempts both commit a `job_leases` entry) and the membership
-/// heartbeat (one `cluster_node_heartbeat_intents` transaction per node per
-/// round). Exact-count windows declare which classes are legitimate for that
-/// window; entries in undeclared classes remain hard contamination.
-pub(crate) const BACKGROUND_SQL_CLASSES: [&str; 2] =
-    ["job_leases", "cluster_node_heartbeat_intents"];
-
 pub async fn run(args: Vec<String>) -> Result<()> {
     install_crypto_provider();
-    hiqlite::validation_register_applied_sql_classes(&BACKGROUND_SQL_CLASSES);
+    hiqlite::validation_register_applied_sql_classes(
+        &BACKGROUND_SQL_CLASSES.map(|class| class.needle),
+    );
     match args.get(1).map(String::as_str) {
         None | Some("check") => {
             run_growth_subprocess().await?;
@@ -5390,7 +5411,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
                 // failing on it.
                 background: BACKGROUND_SQL_CLASSES
                     .iter()
-                    .map(|class| (*class).to_owned())
+                    .map(|class| class.label.to_owned())
                     .collect(),
             },
         )
@@ -6457,7 +6478,7 @@ fn window_account(
             .unwrap_or(0)
             .saturating_sub(before.get(position).copied().unwrap_or(0));
         classified = classified.saturating_add(delta);
-        if background.iter().any(|declared| declared == class) {
+        if background.iter().any(|declared| declared == class.label) {
             tolerated = tolerated.saturating_add(delta);
         } else {
             foreign = foreign.saturating_add(delta);
@@ -6465,7 +6486,7 @@ fn window_account(
         if !report.is_empty() {
             report.push(' ');
         }
-        report.push_str(&format!("{class}={delta}"));
+        report.push_str(&format!("{}={delta}", class.label));
     }
     WindowAccount {
         tolerated,
@@ -10359,10 +10380,11 @@ async fn handle_request(
             })
         }
         Request::AppliedPayloadCounts => {
-            // Counters first, metrics after: the reported applied_index then
-            // upper-bounds the counter samples, so a caller that saw the same
-            // applied index before this request knows no entry applied while
-            // the counters were read.
+            // The counters advance at apply start while last_applied moves
+            // after a batch completes, so this pair alone is not a consistent
+            // sample; exact-count callers bracket it with commit-watermark
+            // reads (see the topology window's stable sample) and treat the
+            // applied_index here as informational.
             let (blank, membership, normal) = hiqlite::validation_applied_payload_counts();
             let class_counts = hiqlite::validation_applied_sql_class_counts();
             let metrics = client.metrics_db().await?;

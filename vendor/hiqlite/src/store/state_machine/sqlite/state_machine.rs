@@ -82,14 +82,16 @@ pub fn validation_applied_payload_counts() -> (u64, u64, u64) {
     )
 }
 
-/// Register the substrings that classify applied normal entries by the SQL
-/// they carry, in reporting order. Set-once per process, before the node
-/// starts, so every counted entry saw the same classes; later calls are
-/// ignored and return false. An applied normal entry increments the count of
-/// the FIRST class whose substring appears in any of its statements, so
-/// classes should be disjoint in practice. Exact-count drills use this to
-/// attribute background writers (a lease heartbeat, a membership heartbeat)
-/// by name instead of failing on them or absorbing them in slack.
+/// Register the needles that classify applied normal entries by the SQL they
+/// carry, in reporting order. Set-once per process, before the node starts,
+/// so every counted entry saw the same classes; later calls are ignored and
+/// return false. A needle starting with `^` matches a statement whose
+/// (trimmed) text begins with the rest of the needle; any other needle
+/// matches as a plain substring. An applied normal entry increments the
+/// count of the FIRST class matching any of its statements, so classes
+/// should be disjoint in practice. Exact-count drills use this to attribute
+/// background writers (a lease CAS, a membership heartbeat) by name instead
+/// of failing on them or absorbing them in slack.
 #[cfg(feature = "validation-test-helpers")]
 pub fn validation_register_applied_sql_classes(classes: &[&str]) -> bool {
     let owned: Vec<String> = classes.iter().map(|class| (*class).to_owned()).collect();
@@ -130,14 +132,18 @@ fn validation_classify_applied_sql(payload: &QueryWrite) {
     let Some(counters) = VALIDATION_SQL_CLASS_COUNTS.get() else {
         return;
     };
+    let statement_matches = |sql: &str, needle: &str| match needle.strip_prefix('^') {
+        Some(prefix) => sql.trim_start().starts_with(prefix),
+        None => sql.contains(needle),
+    };
     let matches = |needle: &str| match payload {
         QueryWrite::Execute(query) | QueryWrite::ExecuteReturning(query) => {
-            query.sql.contains(needle)
+            statement_matches(&query.sql, needle)
         }
-        QueryWrite::Transaction(queries) => {
-            queries.iter().any(|query| query.sql.contains(needle))
-        }
-        QueryWrite::Batch(sql) => sql.contains(needle),
+        QueryWrite::Transaction(queries) => queries
+            .iter()
+            .any(|query| statement_matches(&query.sql, needle)),
+        QueryWrite::Batch(sql) => statement_matches(sql, needle),
         _ => false,
     };
     if let Some(position) = classes.iter().position(|class| matches(class)) {
