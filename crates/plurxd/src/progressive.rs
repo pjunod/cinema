@@ -24,6 +24,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -41,6 +42,8 @@ fn now_unix() -> i64 {
 /// dropped rather than accumulating. Reaching it means something is leaking
 /// registrations, since a browser holds one stream per open player.
 const MAX_PER_USER: usize = 8;
+const MARKER_AMBIGUITY_TTL: Duration = Duration::from_secs(60);
+const MAX_MARKER_AMBIGUITIES: usize = 256;
 
 /// One in-flight progressive remux.
 #[derive(Debug)]
@@ -116,6 +119,7 @@ impl Stream {
 #[derive(Debug, Default)]
 pub struct Streams {
     live: Mutex<HashMap<String, Arc<Stream>>>,
+    recent_marker_ambiguities: Mutex<HashMap<(i64, i64), Instant>>,
     seq: AtomicI64,
 }
 
@@ -162,7 +166,9 @@ impl Streams {
                 let mut mine = mine;
                 mine.sort_by_key(|(_, seq)| *seq);
                 for (key, _) in mine.iter().take(mine.len() - MAX_PER_USER) {
-                    live.remove(key);
+                    if let Some(removed) = live.remove(key) {
+                        self.remember_marker_ambiguity(removed.user_id, removed.file_id);
+                    }
                     tracing::warn!(stream = %key, user = user_id, "evicted a progressive stream registration over the cap");
                 }
             }
@@ -189,6 +195,52 @@ impl Streams {
         self.live.lock().map_or(usize::MAX, |live| live.len())
     }
 
+    /// Whether a progressive remux could own a sessionless playback beacon.
+    /// Marker telemetry uses this as an ambiguity guard before assigning an
+    /// old client's event to a VOD session with the same user and file.
+    pub(crate) fn contains_delivery(&self, user_id: i64, file_id: i64) -> bool {
+        let Ok(live) = self.live.lock() else {
+            return true;
+        };
+        if live
+            .values()
+            .any(|stream| stream.user_id == user_id && stream.file_id == file_id)
+        {
+            return true;
+        }
+        let Ok(mut recent) = self.recent_marker_ambiguities.lock() else {
+            return true;
+        };
+        let now = Instant::now();
+        recent.retain(|_, deadline| *deadline > now);
+        recent.contains_key(&(user_id, file_id))
+    }
+
+    fn remember_marker_ambiguity(&self, user_id: i64, file_id: i64) {
+        let Ok(mut recent) = self.recent_marker_ambiguities.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        recent.retain(|_, deadline| *deadline > now);
+        if recent.len() >= MAX_MARKER_AMBIGUITIES {
+            if let Some(oldest) = recent
+                .iter()
+                .min_by_key(|(_, deadline)| **deadline)
+                .map(|(key, _)| *key)
+            {
+                recent.remove(&oldest);
+            }
+        }
+        recent.insert((user_id, file_id), now + MARKER_AMBIGUITY_TTL);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_marker_ambiguities(&self) {
+        if let Ok(mut recent) = self.recent_marker_ambiguities.lock() {
+            recent.clear();
+        }
+    }
+
     /// Remove `id`, but only if it is still the registration `seq` made.
     ///
     /// A seek re-registers under the same id and the superseded guard is
@@ -198,7 +250,9 @@ impl Streams {
     fn remove_if_current(&self, id: &str, seq: i64) {
         let mut live = self.live.lock().expect("streams mutex");
         if live.get(id).is_some_and(|s| s.seq == seq) {
-            live.remove(id);
+            if let Some(removed) = live.remove(id) {
+                self.remember_marker_ambiguity(removed.user_id, removed.file_id);
+            }
         }
     }
 

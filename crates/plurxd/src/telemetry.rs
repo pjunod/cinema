@@ -474,6 +474,12 @@ mod tests {
                 ..PlaybackEvent::default()
             });
         }
+        metrics.record(&PlaybackEvent {
+            event: "marker_prewarm".to_owned(),
+            detail: Some("miss".to_owned()),
+            method: Some("direct_play".to_owned()),
+            ..PlaybackEvent::default()
+        });
         let text = metrics.render();
         assert!(text.contains("plurx_ttff_ms_count{method=\"remux\"} 1"));
         assert!(text.contains("plurx_ttff_ms_bucket{method=\"remux\",le=\"1000\"} 1"));
@@ -487,15 +493,8 @@ mod tests {
         assert!(text.contains("plurx_playback_marker_actions_total{action=\"automatic_skip\"} 1"));
         assert!(text.contains("plurx_playback_marker_actions_total{action=\"undo_seek_back\"} 1"));
         assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"hit\"} 1"));
-        assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"miss\"} 1"));
-        assert!(text.contains("plurx_playback_marker_prewarm_hit_ratio 0.500000"));
-        // The existing case above feeds a hit synthetically, so the gauge is
-        // published there. The product cannot: nothing prewarms a marker
-        // destination, so every real callsite reports a miss truthfully and
-        // the quotient would be a permanent 0.000000 -- the shape of a feature
-        // that is failing rather than one that does not exist. Prove the
-        // suppression instead, because it is the whole behaviour of the change
-        // and a later edit would restore the gauge without noticing.
+        assert!(text.contains("plurx_playback_marker_prewarm_total{result=\"miss\"} 2"));
+        assert!(text.contains("plurx_playback_marker_prewarm_hit_ratio 0.333333"));
         assert!(!text.contains("title="));
         assert!(!text.contains("user="));
         assert!(!text.contains("path="));

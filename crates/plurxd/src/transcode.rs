@@ -59,6 +59,9 @@ const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
 const MAX_CACHE_OFFER_VERDICTS: usize = 256;
 const MAX_CLUSTER_REPLACEMENT_GATES: usize = 4_096;
 const CLUSTER_REPLACEMENT_GATE_WAIT: Duration = Duration::from_secs(3);
+const MARKER_AMBIGUITY_TTL: Duration = Duration::from_secs(60);
+const MAX_MARKER_AMBIGUITIES: usize = 4_096;
+type RecentMarkerAmbiguities = Arc<std::sync::Mutex<HashMap<(String, i64, &'static str), Instant>>>;
 const SHARED_LOOKUP_PIN_MS: i64 = 30_000;
 /// One retained owner per actor-managed generation is sufficient, but the
 /// global bound also protects the process when many request futures vanish
@@ -2225,6 +2228,7 @@ struct RollingRetirementContext {
     sessions: Weak<Mutex<HashMap<String, Arc<Session>>>>,
     active_session_count: Arc<AtomicUsize>,
     store: Arc<dyn Store>,
+    recent_marker_ambiguities: RecentMarkerAmbiguities,
 }
 
 impl RollingRetirementTicket {
@@ -2423,6 +2427,7 @@ fn spawn_prepublication_cleanup_owner(
 #[allow(clippy::too_many_arguments)]
 async fn own_rolling_retirement(
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    recent_marker_ambiguities: RecentMarkerAmbiguities,
     active_session_count: Arc<AtomicUsize>,
     store: Arc<dyn Store>,
     session_id: String,
@@ -2532,6 +2537,10 @@ async fn own_rolling_retirement(
                         Arc::ptr_eq(registered, &session).then_some(id.clone())
                     });
                     if let Some(exact_key) = exact_key.as_deref() {
+                        // Refresh while the live registry lock is still held.
+                        // Consumers check live first and recent second, so
+                        // there is no instant where both forms are absent.
+                        remember_rolling_marker_ambiguity(&recent_marker_ambiguities, &session);
                         registry.remove(exact_key);
                         active_session_count.store(registry.len(), Relaxed);
                     }
@@ -2584,10 +2593,12 @@ async fn own_rolling_retirement(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_rolling_retirement_owner(
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
     active_session_count: Arc<AtomicUsize>,
     store: Arc<dyn Store>,
+    recent_marker_ambiguities: RecentMarkerAmbiguities,
     session_id: String,
     session: Arc<Session>,
     deadline: Option<tokio::time::Instant>,
@@ -2612,10 +2623,12 @@ fn spawn_rolling_retirement_owner(
     };
     let (committed, commit) = tokio::sync::oneshot::channel();
     if participation == RollingRetirementParticipation::Won {
+        remember_rolling_marker_ambiguity(&recent_marker_ambiguities, &session);
         let owner_settlement = Arc::clone(&settlement);
         tokio::spawn(async move {
             let outcome = own_rolling_retirement(
                 sessions,
+                recent_marker_ambiguities,
                 active_session_count,
                 store,
                 session_id,
@@ -2652,6 +2665,65 @@ fn spawn_rolling_retirement_owner(
     )
 }
 
+fn remember_rolling_marker_ambiguity(
+    registry: &std::sync::Mutex<HashMap<(String, i64, &'static str), Instant>>,
+    session: &Session,
+) {
+    let method = match session.kind {
+        SessionKind::Copy { .. } => "remux",
+        SessionKind::Transcode { .. } => "transcode",
+    };
+    remember_rolling_marker_ambiguity_key(
+        registry,
+        &session.supersession_user,
+        session.file_id,
+        method,
+    );
+}
+
+fn remember_rolling_marker_ambiguity_key(
+    registry: &std::sync::Mutex<HashMap<(String, i64, &'static str), Instant>>,
+    user_scope: &str,
+    file_id: i64,
+    method: &'static str,
+) {
+    let Ok(mut recent) = registry.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    recent.retain(|_, deadline| *deadline > now);
+    if recent.len() >= MAX_MARKER_AMBIGUITIES {
+        if let Some(oldest) = recent
+            .iter()
+            .min_by_key(|(_, deadline)| **deadline)
+            .map(|(key, _)| key.clone())
+        {
+            recent.remove(&oldest);
+        }
+    }
+    recent.insert(
+        (user_scope.to_owned(), file_id, method),
+        now + MARKER_AMBIGUITY_TTL,
+    );
+}
+
+fn recent_rolling_marker_ambiguity(
+    registry: &std::sync::Mutex<HashMap<(String, i64, &'static str), Instant>>,
+    user_scope: &str,
+    file_id: i64,
+) -> bool {
+    registry.lock().map_or(true, |mut recent| {
+        let now = Instant::now();
+        recent.retain(|_, deadline| *deadline > now);
+        // The shipped method is plan-time and a rolling session may be
+        // promoted later (for example, subtitle burn). Any recently retired
+        // same-user/file rolling presentation is therefore ambiguous.
+        recent
+            .keys()
+            .any(|(scope, id, _)| scope == user_scope && *id == file_id)
+    })
+}
+
 fn spawn_context_retirement_owner(
     session: &Arc<Session>,
     deadline: Option<tokio::time::Instant>,
@@ -2663,6 +2735,7 @@ fn spawn_context_retirement_owner(
         sessions,
         Arc::clone(&context.active_session_count),
         Arc::clone(&context.store),
+        Arc::clone(&context.recent_marker_ambiguities),
         "prepublication".to_owned(),
         Arc::clone(session),
         deadline,
@@ -2682,6 +2755,7 @@ async fn own_supersession_convergence(
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
     active_session_count: Arc<AtomicUsize>,
     store: Arc<dyn Store>,
+    recent_marker_ambiguities: RecentMarkerAmbiguities,
     doomed: Vec<(String, Arc<Session>)>,
     deadline: Option<tokio::time::Instant>,
     supersession_user: String,
@@ -2700,6 +2774,7 @@ async fn own_supersession_convergence(
             Arc::clone(&sessions),
             Arc::clone(&active_session_count),
             Arc::clone(&store),
+            Arc::clone(&recent_marker_ambiguities),
             session_id.clone(),
             Arc::clone(&session),
             retirement_deadline,
@@ -9163,6 +9238,9 @@ pub struct TranscodeManager {
     /// The detached owner never needs to retain the complete manager merely
     /// to converge one registry entry.
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    /// Recently retired rolling presentations remain ambiguous for delayed
+    /// fire-and-forget marker beacons after their live registry row is gone.
+    recent_marker_ambiguities: RecentMarkerAmbiguities,
     /// Bounded terminal operations outlive rolling-session cleanup so an
     /// exact End can retry the original immutable durable acknowledgement
     /// after one Store-attempt window expires.
@@ -9414,6 +9492,7 @@ impl TranscodeManager {
             sessions: Arc::downgrade(&self.sessions),
             active_session_count: Arc::clone(&self.active_session_count),
             store: Arc::clone(&self.store),
+            recent_marker_ambiguities: Arc::clone(&self.recent_marker_ambiguities),
         }
     }
 
@@ -9461,6 +9540,7 @@ impl TranscodeManager {
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            recent_marker_ambiguities: Arc::new(std::sync::Mutex::new(HashMap::new())),
             terminal_controls: std::sync::Mutex::new(HashMap::new()),
             cluster_replacement_gates: Arc::new(ClusterReplacementGates::default()),
             session_release_gates: Arc::new(SessionReleaseGates::default()),
@@ -10872,6 +10952,7 @@ impl TranscodeManager {
             Arc::clone(&self.sessions),
             Arc::clone(&self.active_session_count),
             Arc::clone(&self.store),
+            Arc::clone(&self.recent_marker_ambiguities),
             session_id.clone(),
             Arc::clone(&session),
             None,
@@ -14593,6 +14674,7 @@ impl TranscodeManager {
         let sessions = Arc::clone(&self.sessions);
         let active_session_count = Arc::clone(&self.active_session_count);
         let store = Arc::clone(&self.store);
+        let recent_marker_ambiguities = Arc::clone(&self.recent_marker_ambiguities);
         let supersession_user = supersession_user.to_owned();
         let owned_playback_id = playback_id.to_owned();
         tokio::spawn(async move {
@@ -14601,6 +14683,7 @@ impl TranscodeManager {
                 sessions,
                 active_session_count,
                 store,
+                recent_marker_ambiguities,
                 doomed,
                 deadline,
                 supersession_user,
@@ -16135,6 +16218,38 @@ impl TranscodeManager {
         )
     }
 
+    /// Correlate a shipped marker-prewarm placeholder with one authoritative
+    /// VOD playback. Direct play (reported as either legacy `direct` or
+    /// telemetry `direct_play`) and rolling sessions deliberately return
+    /// false so their client-emitted miss remains the metric truth.
+    pub(crate) async fn consume_vod_marker_prewarm_placeholder(
+        &self,
+        user_id: i64,
+        file_id: i64,
+        method: &str,
+    ) -> bool {
+        if !matches!(method, "remux" | "transcode") {
+            return false;
+        }
+        let user_scope = serde_json::json!(["user_id", user_id]).to_string();
+        let live_rolling =
+            self.sessions.lock().await.values().any(|session| {
+                session.file_id == file_id && session.supersession_user == user_scope
+            });
+        let recently_rolling =
+            recent_rolling_marker_ambiguity(&self.recent_marker_ambiguities, &user_scope, file_id);
+        let rolling_ambiguous = live_rolling || recently_rolling;
+        if rolling_ambiguous {
+            // The shipped marker payload has no playback identity. Keep its
+            // miss instead of assigning it to a same-file VOD session when a
+            // rolling presentation could have sent it.
+            return false;
+        }
+        self.vod
+            .consume_marker_prewarm_placeholder(user_id, file_id, method)
+            .await
+    }
+
     /// Status for either HLS presentation. A VOD lookup goes first because a
     /// session id belongs to exactly one registry and its diagnostics have no
     /// honest live-transcode equivalent.
@@ -16520,6 +16635,7 @@ impl TranscodeManager {
                 Arc::clone(&self.sessions),
                 Arc::clone(&self.active_session_count),
                 Arc::clone(&self.store),
+                Arc::clone(&self.recent_marker_ambiguities),
                 session_id.to_owned(),
                 Arc::clone(session),
                 deadline,
@@ -16569,6 +16685,7 @@ impl TranscodeManager {
                     Arc::clone(&self.sessions),
                     Arc::clone(&self.active_session_count),
                     Arc::clone(&self.store),
+                    Arc::clone(&self.recent_marker_ambiguities),
                     session_id.to_owned(),
                     Arc::clone(&session),
                     None,
@@ -16668,6 +16785,7 @@ impl TranscodeManager {
             Arc::clone(&self.sessions),
             Arc::clone(&self.active_session_count),
             Arc::clone(&self.store),
+            Arc::clone(&self.recent_marker_ambiguities),
             session_id.to_owned(),
             Arc::clone(&session),
             None,
@@ -20952,6 +21070,30 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_rolling_marker_prewarm_ambiguity_survives_plan_method_drift() {
+        let scope = "[\"user_id\",1]";
+        let key = (scope.to_owned(), 7, "transcode");
+        let recent = std::sync::Mutex::new(HashMap::from([(
+            key.clone(),
+            Instant::now() - Duration::from_secs(1),
+        )]));
+        assert!(!recent_rolling_marker_ambiguity(&recent, scope, 7));
+        remember_rolling_marker_ambiguity_key(&recent, scope, 7, "transcode");
+        assert!(recent_rolling_marker_ambiguity(&recent, scope, 7,));
+        assert!(recent.lock().expect("recent lock")[&key] > Instant::now());
+        assert!(!recent_rolling_marker_ambiguity(
+            &recent,
+            "[\"user_id\",2]",
+            7,
+        ));
+        assert!(!recent_rolling_marker_ambiguity(
+            &recent,
+            "[\"user_id\",1]",
+            8,
+        ));
+    }
 
     #[tokio::test]
     async fn rolling_etag_changes_with_incarnation_and_producer_attempt() {

@@ -806,36 +806,47 @@ pub async fn client_log(
         let _ = hook.captured.send(());
         let _ = hook.release.await;
     }
+    let marker_placeholder = vod_marker_prewarm_placeholder(&event)
+        .map(|(file_id, method)| (file_id, method.to_owned()));
+    let progressive_ambiguous = marker_placeholder
+        .as_ref()
+        .is_some_and(|(file_id, _)| state.streams.contains_delivery(user.id, *file_id));
     let transcode = Arc::clone(&state.transcode);
     let store = Arc::clone(&state.store);
+    let user_id = user.id;
     tokio::spawn(async move {
+        // The shipped clients send this historical placeholder without a
+        // session id. Correlate it by authenticated user, file and delivery
+        // method to exactly one VOD ledger; that ledger then waits for a
+        // server-observed landing before emitting the authoritative result.
+        if let Some((file_id, method)) = marker_placeholder {
+            if !progressive_ambiguous
+                && transcode
+                    .consume_vod_marker_prewarm_placeholder(user_id, file_id, &method)
+                    .await
+            {
+                return;
+            }
+        }
         let session_id = event.session_id.clone();
         let info = match session_id.as_deref() {
             Some(session_id) => transcode.session_status(session_id).await,
             None => None,
         };
-        // VOD marker outcomes are emitted by the authoritative control path
-        // after it verifies the exact seek target against prewarm's own
-        // production ledger. The shipped clients still send their historical
-        // hard-coded `miss`; retaining it here would double-count every VOD
-        // skip and overwrite the fact the server just proved. Direct play has
-        // no VOD session and therefore keeps reporting `miss` unchanged.
-        if suppress_vod_marker_prewarm_placeholder(
-            &event,
-            info.as_ref().map(|info| info.presentation),
-        ) {
-            return;
-        }
         emit_client_playback_event(store, event, info.as_ref(), network);
     });
     StatusCode::NO_CONTENT
 }
 
-fn suppress_vod_marker_prewarm_placeholder(
-    event: &PlaybackEvent,
-    presentation: Option<&str>,
-) -> bool {
-    event.event == "marker_prewarm" && presentation == Some("vod")
+fn vod_marker_prewarm_placeholder(event: &PlaybackEvent) -> Option<(i64, &str)> {
+    let method = event.method.as_deref()?;
+    if event.event != "marker_prewarm"
+        || event.detail.as_deref() != Some("miss")
+        || !matches!(method, "remux" | "transcode")
+    {
+        return None;
+    }
+    Some((event.file_id?, method))
 }
 
 fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::SessionInfo) {
@@ -3743,21 +3754,55 @@ mod tests {
     }
 
     #[test]
-    fn only_vod_suppresses_the_clients_placeholder_prewarm_miss() {
-        let event = PlaybackEvent {
+    fn shipped_marker_prewarm_placeholder_is_correlatable_without_a_session_id() {
+        let vod = PlaybackEvent {
             event: "marker_prewarm".to_owned(),
             detail: Some("miss".to_owned()),
+            file_id: Some(7),
+            method: Some("remux".to_owned()),
             ..PlaybackEvent::default()
         };
-        assert!(suppress_vod_marker_prewarm_placeholder(&event, Some("vod")));
+        assert_eq!(vod.session_id, None, "this is the shipped payload shape");
+        assert_eq!(vod_marker_prewarm_placeholder(&vod), Some((7, "remux")));
+
+        let direct = PlaybackEvent {
+            method: Some("direct_play".to_owned()),
+            ..vod.clone()
+        };
         assert!(
-            !suppress_vod_marker_prewarm_placeholder(&event, Some("live-recovery")),
-            "a live session has no server-side destination prewarm"
+            vod_marker_prewarm_placeholder(&direct).is_none(),
+            "direct play keeps emitting its client-owned miss"
         );
+        let android_direct = PlaybackEvent {
+            method: Some("direct".to_owned()),
+            ..direct
+        };
         assert!(
-            !suppress_vod_marker_prewarm_placeholder(&event, None),
-            "direct play has no server session and must keep emitting miss"
+            vod_marker_prewarm_placeholder(&android_direct).is_none(),
+            "the Android legacy direct label also keeps its client-owned miss"
         );
+        let future_hit = PlaybackEvent {
+            detail: Some("hit".to_owned()),
+            ..vod
+        };
+        assert!(
+            vod_marker_prewarm_placeholder(&future_hit).is_none(),
+            "a future client-owned hit is not a historical placeholder"
+        );
+
+        let streams = crate::progressive::Streams::new();
+        let (_stream, guard) = streams.register("progressive", 11, "paul", 7, 70, 1.0);
+        assert!(
+            streams.contains_delivery(11, 7),
+            "a concurrent progressive remux blocks sessionless VOD attribution"
+        );
+        drop(guard);
+        assert!(
+            streams.contains_delivery(11, 7),
+            "a delayed fire-and-forget beacon stays ambiguous after deregistration"
+        );
+        streams.expire_marker_ambiguities();
+        assert!(!streams.contains_delivery(11, 7));
     }
 
     #[test]
