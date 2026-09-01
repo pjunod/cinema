@@ -28,3 +28,18 @@ below.
 Ordinary independent changes may continue to target `main` and use its
 affected-surface validation. The complete commands and rationale live in
 [docs/DEVELOPMENT_PIPELINE.md](docs/DEVELOPMENT_PIPELINE.md).
+
+## Prove it locally before you push
+
+If your session has the clone on one machine and `cargo` on another — the
+usual shape for a coding agent here — set up the compile loop in
+[docs/AGENT-COMPILE-LOOP.md](docs/AGENT-COMPILE-LOOP.md) **before** writing
+Rust, not after a gate rejects something. `git archive` carries source to a
+toolchain without carrying a credential, and it puts `cargo check`, `clippy
+-D warnings`, the unit suite and `rustfmt` inside ten minutes.
+
+The rule it exists to enforce: **do not use CI as a compiler.** A branch
+pushed to discover whether it builds costs fifteen to forty minutes and
+reports one error; the same branch checked locally reports all of them at
+once. Re-verify against current `main` after porting a change, or the suite
+you ran describes a snapshot rather than the branch.
