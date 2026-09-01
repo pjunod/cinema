@@ -38,6 +38,24 @@ def workflow_step_blocks(job: str) -> dict[str, str]:
     }
 
 
+def workflow_job_needs(job: str) -> tuple[str, ...]:
+    inline = re.search(r"(?m)^    needs: (.+)$", job)
+    if inline is not None:
+        value = inline.group(1).strip()
+        if value.startswith("[") and value.endswith("]"):
+            return tuple(
+                item.strip() for item in value[1:-1].split(",") if item.strip()
+            )
+        return (value,)
+    block = re.search(r"(?m)^    needs:\n((?:      - [^\n]+\n)+)", job)
+    if block is None:
+        return ()
+    return tuple(
+        line.removeprefix("      - ")
+        for line in block.group(1).splitlines()
+    )
+
+
 def workflow_step_scalar(step: str, key: str) -> str:
     values = re.findall(rf"(?m)^        {re.escape(key)}: ([^\n]+)$", step)
     if len(values) != 1:
@@ -939,6 +957,7 @@ class OperationsContractCase(unittest.TestCase):
         )
 
     def test_native_arm_shadow_is_native_receipted_and_never_required(self):
+        workflow = read(".github/workflows/ci.yml")
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
         arm = jobs["native_arm_shadow"]
         pr_gate = jobs["pr_gate"]
@@ -953,6 +972,24 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("docker/setup-qemu-action", arm)
         self.assertNotIn("native_arm_shadow", pr_gate)
         self.assertNotIn("native_arm_shadow", jobs["cluster_store"])
+        self.assertEqual(
+            workflow.count("native_arm_shadow"),
+            1,
+            "native ARM shadow must never enter another job's dependency graph",
+        )
+        reachable: set[str] = set()
+        pending = ["pr_gate"]
+        while pending:
+            job_name = pending.pop()
+            for dependency in workflow_job_needs(jobs[job_name]):
+                if dependency not in reachable:
+                    reachable.add(dependency)
+                    pending.append(dependency)
+        self.assertNotIn(
+            "native_arm_shadow",
+            reachable,
+            "native ARM shadow must be unreachable from Main promotion gate",
+        )
 
         native = workflow_step_blocks(arm)[
             "Prove the runner and Docker engine are native Linux ARM64"
