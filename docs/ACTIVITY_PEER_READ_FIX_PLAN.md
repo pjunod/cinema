@@ -2,7 +2,7 @@
 
 **Status:** Implemented and focused validation complete; rollout not started ·
 **Executes:** C1–C5 and the accepted decisions in §11 · **Written:** 2026-09-01 ·
-**Re-pinned:** 2026-09-01 · **Code:** `origin/main` at `69d3f3de`
+**Re-pinned:** 2026-09-01 · **Code:** `origin/main` at `918e0464`
 
 This is the standalone implementation plan for the intermittent **Activity is
 incomplete** warning observed on `nynuc`. It treats the corrected
@@ -15,7 +15,7 @@ public outcomes.
 Fable approved the architecture with five required corrections. Those
 corrections are folded into the controlling contracts, tests, metrics, and
 operator boundary below; §11 records the accepted review answers. The current
-base is 28 commits ahead of the original `1a64fa8a` plan pin. Across the files
+base is 36 commits ahead of the original `1a64fa8a` plan pin. Across the files
 this plan targets, that delta adds only eight unrelated lines to `index.html`;
 the Activity functions and named tests are unchanged. Re-verify the exact
 branch after rebasing anyway.
@@ -208,10 +208,13 @@ pub struct PeerActivityClient {
 1. Acquire ownership of the shared gate.
 2. If an `Ok` snapshot set completed less than one second ago, return its
    `Arc` and perform no directory or network work.
-3. Otherwise enforce at least one second between physical fan-out starts. Set
-   `last_started` before the first await that may issue a peer request.
-4. Resolve the directory and perform exactly the existing sorted, bounded
-   fan-out under the existing common two-second peer deadline.
+3. Otherwise enforce at least one second between attempts, then reserve the
+   attempt before directory resolution so cancellation or a directory error
+   cannot create a retry storm.
+4. Resolve the directory, refresh `last_started` at the actual HTTP fan-out
+   boundary, and perform exactly the existing sorted, bounded fan-out under
+   the existing common two-second peer deadline. The refresh is required when
+   directory resolution itself took longer than one second.
 5. Store an `Ok` vector at its monotonic completion time, including any typed
    per-peer failures, and return the shared `Arc`.
 6. Return a directory `MembershipError` without storing it as a completed
@@ -254,6 +257,7 @@ projection with `refused` and `http_error`.
 |---|---|---|
 | `answered` | A bounded `2xx` payload decoded and named the expected node. | No warning entry. |
 | `unhealthy` | The peer directory's heartbeat projection was stale, so no HTTP call was made. | `unhealthy` |
+| `unsupported` | A live peer has no published Activity HTTP origin, usually during a rolling or legacy state; no transport was attempted. | `does not publish Activity HTTP` |
 | `unreachable` | DNS, connection, TLS, or socket transport failed before an HTTP response. | `unreachable` |
 | `timed_out` | The common peer deadline expired. | `timed out` |
 | `refused` | The protected route answered `401` or `403`. | `refused the activity request` |
@@ -262,7 +266,7 @@ projection with `refused` and `http_error`.
 | `unavailable` | The sending node could not obtain the cluster peer directory; this remains the node-less pseudo-entry. | `directory unavailable` |
 
 Do not put raw status codes, peer URLs, hostnames, signatures, or authority
-details into household-visible JSON. The two new stable strings are enough for
+details into household-visible JSON. The three new stable strings are enough for
 the UI to tell the truth. The banner still leads with **Activity is
 incomplete** and still warns that streams may be missing.
 
@@ -277,6 +281,7 @@ plurx_cluster_activity_aggregations_total{path="reuse"}
 plurx_cluster_activity_aggregations_total{path="directory_error"}
 plurx_cluster_activity_peer_outcomes_total{outcome="answered"}
 plurx_cluster_activity_peer_outcomes_total{outcome="unhealthy"}
+plurx_cluster_activity_peer_outcomes_total{outcome="unsupported"}
 plurx_cluster_activity_peer_outcomes_total{outcome="unreachable"}
 plurx_cluster_activity_peer_outcomes_total{outcome="timed_out"}
 plurx_cluster_activity_peer_outcomes_total{outcome="refused"}
@@ -375,6 +380,10 @@ Extend the real-daemon proxy modes and focused transport tests so that:
 
 - `401` and `403` produce `refused`, never `unreachable`;
 - `503` produces `http_error`, never `unreachable`;
+- oversized or never-ending non-success bodies retain their header-derived
+  `refused` or `http_error` result without being buffered;
+- a live peer without a published Activity origin produces `unsupported`
+  without claiming that a network attempt failed;
 - a stopped listener or unused address produces `unreachable`;
 - the existing ten-second hang returns `timed_out` inside the common bound; and
 - malformed, oversized, redirected, or wrong-node `2xx` responses remain
@@ -593,9 +602,9 @@ The implementation is ready to merge only when all of the following are true:
   live consistent authority proof are unchanged;
 - completed reuse is less than one second, process-local, non-persistent, and
   cancellation-bounded;
-- `unreachable` is emitted only for a transport failure, while `401`/`403`,
-  other HTTP failure, timeout, stale heartbeat, and malformed success retain
-  distinct typed outcomes;
+- `unreachable` is emitted only for a transport failure, while a missing
+  Activity origin, `401`/`403`, other HTTP failure, timeout, stale heartbeat,
+  and malformed success retain distinct typed outcomes;
 - Activity continues to warn and omit rows whenever a peer did not answer;
 - one shared wave preserves the admin-present and household-absent
   `node_hostnames` projection without changing permitted deliveries;
@@ -619,7 +628,7 @@ serial exact-build rollout and the post-last-upgrade two-minute observation in
 | Rust 1.97.1 source-only `cargo check --locked -p plurxd --all-targets` | Pass |
 | Rust 1.97.1 source-only Clippy for all daemon targets with `cluster-integration-tests` and `-D warnings` | Pass |
 | Focused `plurx-core` Activity/authentication tests | 7 passed |
-| Focused `plurxd` internal Activity tests | 14 passed |
+| Focused `plurxd` internal Activity tests | 16 passed after adversarial review fixes |
 | `/metrics` no-Store/no-manager contract | Pass |
 | Real two-daemon `cluster_activity` regression with ffmpeg | 2 passed |
 | `activity-node-names.test.js` and `page-read-budget.test.js` | Pass |
@@ -651,6 +660,18 @@ this evidence.
 8. **The missing cases are now explicit.** Cold-key admission (§5.1), shared
    admin/household projection (§5.4), 500-millisecond real-clock margins
    (§5.1), and post-last-upgrade counter acceptance (§8) are controlling.
+9. **Refresh the reservation at wire start.** Adversarial review found that a
+   directory read longer than one second could expire the initial reservation
+   before HTTP began. The gate now retains the pre-directory attempt bound and
+   refreshes it immediately before fan-out; paused time covers cancellation
+   after that delayed boundary.
+10. **Classify non-success responses from headers.** Error bodies are unused,
+    so buffering them could turn a proven `401`, `403`, or `5xx` into timeout,
+    invalid-content, or transport language. Only successful responses consume
+    the bounded body reader.
+11. **Do not invent a transport failure for a missing origin.** A fresh voter
+    without an Activity HTTP origin is `unsupported`, with its own metric and
+    web text, until its rollout state publishes that capability.
 
 ## 12. Source map — implementation anchors and controlling contracts
 

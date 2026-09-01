@@ -2554,10 +2554,12 @@ protocol.
 
 An incomplete cluster read leads with **Activity incomplete**. The page names
 each known voter that was unhealthy, unreachable, timed out, or returned an
-invalid response. It also distinguishes a voter that **refused the activity
-request** (HTTP 401/403) from one that **returned an HTTP error**. The latter
-means the server answered; it is not a network-reachability claim. A peer
-directory failure is visible by the same rule. Do not read a short table below
+invalid response. A live rolling/legacy voter that has not published an
+Activity HTTP origin says it **does not publish Activity HTTP**; no network
+attempt was made. The page also distinguishes a voter that **refused the
+activity request** (HTTP 401/403) from one that **returned an HTTP error**. The
+latter means the server answered; it is not a network-reachability claim. A
+peer directory failure is visible by the same rule. Do not read a short table below
 that warning as proof that the cluster is idle; restore the named voter or the
 cluster directory and wait for the next three-second refresh. Ordinary SQLite
 and never-joined installations perform no peer read and retain the historical

@@ -216,11 +216,14 @@ test("Activity names missing cluster nodes and attributes delivered rows", () =>
       { node_id: "node-c", status: "unhealthy" },
       { node_id: "node-d", status: "refused" },
       { node_id: "node-e", status: "http_error" },
+      { node_id: "node-f", status: "unsupported" },
     ],
     scans: [], producing: null, offline: [], trakt: { syncing: false },
   };
   const missing = harness.activityNodeFailures(detail);
-  assert.deepEqual(missing.map((node) => node.node_id), ["node-b", "node-c", "node-d", "node-e"]);
+  assert.deepEqual(missing.map((node) => node.node_id), [
+    "node-b", "node-c", "node-d", "node-e", "node-f",
+  ]);
   assert.equal(
     harness.activityNodeFailureText(missing[0], {}),
     "Node node-b · timed out",
@@ -239,9 +242,13 @@ test("Activity names missing cluster nodes and attributes delivered rows", () =>
     harness.activityNodeFailureText(missing[3], {}),
     "Node node-e · returned an HTTP error",
   );
+  assert.equal(
+    harness.activityNodeFailureText(missing[4], {}),
+    "Node node-f · does not publish Activity HTTP",
+  );
   assert.deepEqual(harness.detailActivitySummary(detail, []), [{
     label: "Activity incomplete",
-    detail: "4 cluster nodes did not answer",
+    detail: "5 cluster nodes did not answer",
   }]);
 
   const painter = shippedSource("paintActivityBody");

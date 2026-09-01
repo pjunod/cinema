@@ -198,10 +198,12 @@ test("authentication refusals and HTTP failures stay distinct in the banner", ()
       activity_nodes: [
         { node_id: NODE_A, status: "refused" },
         { node_id: NODE_B, status: "http_error" },
+        { node_id: "node-c", status: "unsupported" },
       ],
     }),
   );
   assert.match(html, /Node nuc3 · refused the activity request/);
+  assert.match(html, /Node node-c · does not publish Activity HTTP/);
   assert.match(html, /Node m6 · returned an HTTP error/);
   assert.doesNotMatch(html, /Node (nuc3|m6) · unreachable/);
 });

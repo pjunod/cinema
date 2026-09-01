@@ -2554,6 +2554,7 @@ fn peer_status(outcome: &PeerActivityOutcome) -> &'static str {
     match outcome {
         PeerActivityOutcome::Answered(_) => "answered",
         PeerActivityOutcome::Unhealthy => "unhealthy",
+        PeerActivityOutcome::Unsupported => "unsupported",
         PeerActivityOutcome::Unreachable => "unreachable",
         PeerActivityOutcome::TimedOut => "timed_out",
         PeerActivityOutcome::Refused => "refused",
@@ -3860,6 +3861,7 @@ mod tests {
                 ),
                 ("node-c".to_owned(), PeerActivityOutcome::TimedOut),
                 ("node-d".to_owned(), PeerActivityOutcome::Unhealthy),
+                ("node-e".to_owned(), PeerActivityOutcome::Unsupported),
             ]
             .into(),
         );
@@ -3885,10 +3887,12 @@ mod tests {
         assert_eq!(nodes[1]["status"], "answered");
         assert_eq!(nodes[2]["status"], "timed_out");
         assert_eq!(nodes[3]["status"], "unhealthy");
+        assert_eq!(nodes[4]["status"], "unsupported");
 
         let missing = missing_activity_summary(&peers).expect("missing-node summary");
         assert!(missing.contains("node-c (timed_out)"), "{missing}");
         assert!(missing.contains("node-d (unhealthy)"), "{missing}");
+        assert!(missing.contains("node-e (unsupported)"), "{missing}");
         assert!(missing.ends_with("did not answer"), "{missing}");
     }
 
