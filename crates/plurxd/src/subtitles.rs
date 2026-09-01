@@ -1128,10 +1128,16 @@ mod tests {
         let window = super::vtt_window_path(dir, &file, 0, 200, 200);
         let whole = super::vtt_path(dir, &file, 0);
         assert!(super::is_window_name(
-            &window.file_name().unwrap().to_string_lossy()
+            &window
+                .file_name()
+                .expect("window path has a file name")
+                .to_string_lossy()
         ));
         assert!(!super::is_window_name(
-            &whole.file_name().unwrap().to_string_lossy()
+            &whole
+                .file_name()
+                .expect("whole-track path has a file name")
+                .to_string_lossy()
         ));
     }
 
