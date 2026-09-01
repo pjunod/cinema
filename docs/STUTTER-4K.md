@@ -465,9 +465,22 @@ plurx now removes the record itself, in the init, on the far side of the
 muxer — the same place the Profile 7 → 8.1 conversion rewrites RPUs, and
 through the same promotion funnel, so a regenerated head is byte-identical
 to the live one. The live-HLS recovery path builds its served init directly
-rather than through that funnel, so it asks for the removal separately; both
-paths are covered. `filter_units` takes out the layers, the removal takes
-out the claim, and the two halves of the strip are complete on any ffmpeg.
+rather than through that funnel, so it asks for the removal separately.
+`filter_units` takes out the layers, the removal takes out the claim.
+
+**Two of plurx's three copy paths, not all three.** The legacy muxer path —
+a cluster takeover, or the one frozen retry after a structural `Unsupported`
+— has ffmpeg's own HLS muxer write `init.mp4` directly. There is no
+`copyseg` reader and no promotion in between, so nothing removes anything,
+and that init keeps both the record and the `dby1` brand. It is a fallback
+for a fallback (`copyseg::supports` covers HEVC, so a fresh session on a
+Dolby Vision title always segments) and it is the same defect `main` has
+had all along, but it is not fixed and the claim should not be read wider
+than it is. A removal failure is deliberately reported as
+`InvalidHevcConfiguration` rather than `Unsupported` for this reason:
+`Unsupported` is the one classification the actor may retry, and the retry
+it permits is that legacy path — reporting it that way would hand the
+session to the path this removal exists to keep it off.
 
 The removal also rewrites the `dby1` file-type brand, in the same call. It
 has to: the sanitizer that normally does that runs on the muxer init, where

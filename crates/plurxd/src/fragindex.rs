@@ -527,6 +527,34 @@ fn dolby_vision_pass_for(
     Ok(DolbyVisionPass::Untouched)
 }
 
+/// One index pass's whole recipe: the argv ffmpeg receives, and what plurx
+/// must do afterwards to the Dolby Vision record that argv leaves behind.
+///
+/// A struct rather than two values threaded side by side, and that is the
+/// point. The argv and the record answer are one decision read off one
+/// `CopyVideoOptions`; carried separately, a caller can build the argv and
+/// drop the answer, and the result is a pass whose bytes and whose served init
+/// describe different streams — with nothing to notice, because each half is
+/// individually correct. The only way to get the argv is to get both.
+struct IndexPass {
+    args: Vec<String>,
+    dolby_vision: DolbyVisionPass,
+}
+
+fn index_pass(
+    file: &MediaFile,
+    video: transcode::CopyVideoOptions,
+    input: Option<&str>,
+) -> Result<IndexPass, String> {
+    Ok(IndexPass {
+        args: match input {
+            Some(path) => transcode::copy_index_pipe_args_with_input(file, path, video),
+            None => transcode::copy_index_pipe_args(file, video),
+        },
+        dolby_vision: dolby_vision_pass_for(file, video)?,
+    })
+}
+
 /// Build a file's index by running the index pipe.
 ///
 /// `budget` bounds the whole pass. An index is background work; a NAS read
@@ -538,8 +566,11 @@ pub async fn build(
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    let args = transcode::copy_index_pipe_args(file, video);
-    build_with_args(file, args, None, video, runtime_cache, budget, None).await
+    let pass = match index_pass(file, video, None) {
+        Ok(pass) => pass,
+        Err(reason) => return IndexOutcome::Unsupported(reason),
+    };
+    build_with_args(file, pass, None, video, runtime_cache, budget, None).await
 }
 
 /// Build from the exact file descriptor whose complete digest was observed.
@@ -555,10 +586,13 @@ pub async fn build_from_attested_file(
 ) -> IndexOutcome {
     use std::os::fd::AsRawFd;
 
-    let args = transcode::copy_index_pipe_args_with_input(file, "/dev/fd/3", video);
+    let pass = match index_pass(file, video, Some("/dev/fd/3")) {
+        Ok(pass) => pass,
+        Err(reason) => return IndexOutcome::Unsupported(reason),
+    };
     build_with_args(
         file,
-        args,
+        pass,
         Some(source.as_raw_fd()),
         video,
         runtime_cache,
@@ -582,10 +616,13 @@ where
 {
     use std::os::fd::AsRawFd;
 
-    let args = transcode::copy_index_pipe_args_with_input(file, "/dev/fd/3", video);
+    let pass = match index_pass(file, video, Some("/dev/fd/3")) {
+        Ok(pass) => pass,
+        Err(reason) => return IndexOutcome::Unsupported(reason),
+    };
     build_with_args(
         file,
-        args,
+        pass,
         Some(source.as_raw_fd()),
         video,
         runtime_cache,
@@ -619,10 +656,13 @@ pub async fn build_from_attested_file_with_progress<F>(
 where
     F: Fn(u64, i64, usize) + Send + Sync + 'static,
 {
-    let args = transcode::copy_index_pipe_args(file, video);
+    let pass = match index_pass(file, video, None) {
+        Ok(pass) => pass,
+        Err(reason) => return IndexOutcome::Unsupported(reason),
+    };
     build_with_args(
         file,
-        args,
+        pass,
         None,
         video,
         runtime_cache,
@@ -635,7 +675,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn build_with_args(
     file: &MediaFile,
-    args: Vec<String>,
+    pass: IndexPass,
     source_fd: Option<SourceFd>,
     video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
@@ -643,16 +683,7 @@ async fn build_with_args(
     progress: Option<SharedIndexProgress>,
 ) -> IndexOutcome {
     let identity = identity_for(file, video);
-    // A converting pass produces a stream whose sample entry declares the
-    // *source's* Dolby Vision record: ffmpeg copies it from the input
-    // container, and the rewrite that makes the RPUs say 8.1 runs after that
-    // muxer. So plurx builds the right one from the source's own stored facts
-    // and hands it to the promotion, which is the single funnel both this
-    // pass's served init and every later generation's go through.
-    let dolby_vision = match dolby_vision_pass_for(file, video) {
-        Ok(pass) => pass,
-        Err(reason) => return IndexOutcome::Unsupported(reason),
-    };
+    let IndexPass { args, dolby_vision } = pass;
     // The probe's duration, carried in so a short read is caught. Passed in
     // milliseconds and converted against the pipe's own timescale inside the
     // reader, because the timescale is not known until the moov arrives.
@@ -1059,6 +1090,62 @@ mod tests {
             dolby_vision_pass_for(&p7, converting).expect("describable"),
             DolbyVisionPass::Rewrite(_)
         ));
+    }
+
+    /// The argv and the record answer are one recipe, for every identity the
+    /// indexer actually enumerates.
+    ///
+    /// This is the invariant, and it is asserted against the rendered argv
+    /// rather than restated: a pass removes the record exactly when its own
+    /// filter chain strips the Dolby Vision NAL units without asking ffmpeg to
+    /// drop the side data too. Carrying the two halves separately is how they
+    /// come apart — each is individually correct, and together they describe
+    /// two different streams with nothing to notice.
+    #[test]
+    fn every_index_pass_agrees_with_the_argv_it_carries() {
+        let mut removing = 0;
+        for hdr in [
+            Some((
+                "dolby_vision",
+                "Dolby Vision · Profile 7 (HDR10-compatible)",
+            )),
+            Some(("dolby_vision", "Dolby Vision · Profile 5")),
+            Some(("hdr10", "HDR10")),
+            None,
+        ] {
+            let mut file = hevc_file(hdr.map(|h| h.0), hdr.map(|h| h.1));
+            file.dolby_vision.profile = Some(7);
+            file.dolby_vision.level = Some(6);
+            file.dolby_vision.bl_compat_id = Some(1);
+            for have_dovi in [false, true] {
+                for convert in [false, true] {
+                    for video in video_identities(&file, None, have_dovi, convert) {
+                        let pass = index_pass(&file, video, None).expect("a describable pass");
+                        let filter = pass
+                            .args
+                            .windows(2)
+                            .find(|pair| pair[0] == "-bsf:v")
+                            .map(|pair| pair[1].clone())
+                            .unwrap_or_default();
+                        let leaves_a_record =
+                            filter.contains("62-63") && !filter.contains("dovi_rpu");
+                        assert_eq!(
+                            pass.dolby_vision == DolbyVisionPass::Remove,
+                            leaves_a_record,
+                            "hdr={hdr:?} dovi={have_dovi} convert={convert} rendered {filter}"
+                        );
+                        if leaves_a_record {
+                            removing += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            removing > 0,
+            "no enumerated identity reached the removing branch, so the \
+             equality above held vacuously"
+        );
     }
 
     /// A `Remove` pass reaches the stored promotion inputs, and an ordinary

@@ -3124,8 +3124,18 @@ fn spawn_copy_reader_owner(
     dir: PathBuf,
     sid: String,
     producer_attempt: u64,
-    strip_dolby_vision_record: bool,
+    // The options the pipe's argv was built from, not a bool derived from
+    // them. There is exactly one function that answers whether a copy leaves a
+    // Dolby Vision record behind, and it reads these; taking its answer here
+    // would put a second, plausible `false` in the tree — one word, and a
+    // forced-Original Profile 7 title ships an init declaring an enhancement
+    // layer it does not have, with every test green. Taking the options
+    // instead means the only way to get it wrong is to pass options the child
+    // did not get, which reads as wrong on sight.
+    source: &plurx_core::domain::MediaFile,
+    video: plurx_core::transcode::CopyVideoOptions,
 ) {
+    let strip_dolby_vision_record = video.leaves_a_stale_dolby_vision_record(source);
     tokio::spawn(async move {
         // The outer owner retains the pipe until the actor has accepted the
         // typed reader fact. Structural `Unsupported` deliberately stops
@@ -15765,7 +15775,8 @@ impl TranscodeManager {
                 dir.clone(),
                 session_id.clone(),
                 generation,
-                video_options.leaves_a_stale_dolby_vision_record(&file),
+                &file,
+                video_options,
             );
         }
         tracing::info!(

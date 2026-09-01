@@ -385,11 +385,11 @@ pub async fn run<R: AsyncRead + Unpin>(
                     // `dovi_rpu` the init declares Profile 7 with an
                     // enhancement layer over a stream carrying neither.
                     //
-                    // Before the brand sanitizer, not after: the sanitizer
-                    // declines on an entry that still has a record, which is
-                    // exactly the state this leaves if the order is reversed —
-                    // and `dby1` over an entry with no record is the
-                    // contradictory init AVPlayer refuses outright.
+                    // The removal fixes the `dby1` file-type brand itself, so
+                    // the sanitizer below is a no-op after it fires. It runs
+                    // anyway, for the sessions where `strip_dolby_vision_record`
+                    // is false and ffmpeg's own `dovi_rpu` filter emptied the
+                    // sample entry while movenc had already written the brand.
                     if strip_dolby_vision_record {
                         match fmp4::remove_dolby_vision_record(&mut init) {
                             Ok(true) => tracing::info!(
@@ -397,8 +397,19 @@ pub async fn run<R: AsyncRead + Unpin>(
                                 "removed the stale Dolby Vision record from the HLS init segment"
                             ),
                             Ok(false) => {}
+                            // Terminal, deliberately, and not `Unsupported`.
+                            //
+                            // `Unsupported` is the one classification the actor
+                            // may retry, and the retry it permits is the legacy
+                            // muxer — which renders the same half-strip and
+                            // writes its own `init.mp4` with nothing to remove
+                            // the record from it. Reporting a failed removal
+                            // that way would hand the session to the path this
+                            // removal exists to keep it off, which is worse
+                            // than failing: the viewer would get the stutter
+                            // silently instead of an error.
                             Err(error) => {
-                                return Outcome::Unsupported(format!(
+                                return Outcome::InvalidHevcConfiguration(format!(
                                     "the stale Dolby Vision record could not be removed \
                                      from the init: {error}"
                                 ))
@@ -830,10 +841,11 @@ mod tests {
     /// path a freshly added file takes, which is exactly when a forced-Original
     /// Dolby Vision play is most likely.
     ///
-    /// The order matters as much as the removal: the brand sanitizer declines
-    /// on an entry that still carries a record, so removing afterwards would
-    /// leave `dby1` over an entry with none, which is the contradictory init
-    /// AVPlayer refuses outright.
+    /// Both halves in one assertion, because the removal owns both: it deletes
+    /// the record and rewrites the `dby1` brand in the same call. It has to —
+    /// the sanitizer below it declines on an entry that still carries a
+    /// record, which is the state the removal is called in, and `dby1` over an
+    /// entry with none is the contradictory init AVPlayer refuses outright.
     #[test]
     fn the_recovery_path_removes_a_stale_dolby_vision_record_and_its_brand() {
         let feed = plurx_core::testfixtures::pipe("open-gop");
@@ -847,7 +859,9 @@ mod tests {
         assert!(fmp4::set_dolby_vision_record(&mut init, &record).expect("insert"));
         init.bytes[8..12].copy_from_slice(b"dby1");
 
-        // The production sequence, in production order.
+        // The production sequence. The sanitizer is a no-op after the removal
+        // and runs for the sessions that do not strip; it is here so this
+        // reproduces the order `run` uses rather than a tidier one.
         assert!(fmp4::remove_dolby_vision_record(&mut init).expect("remove"));
         sanitize_stale_dolby_brand(&mut init);
 
@@ -859,6 +873,86 @@ mod tests {
             !init.bytes.windows(4).any(|f| f == b"dby1"),
             "the brand survived, which AVPlayer refuses over an entry with no record"
         );
+    }
+
+    /// …and the wire that asks for it, driven through `run` to the file a
+    /// client actually fetches.
+    ///
+    /// The test above proves the two calls do the right thing. This proves the
+    /// session makes them: with the flag threaded but unconsumed — one word at
+    /// the `transcode.rs` call site, or the branch here deleted — every other
+    /// assertion in this module still passes, and a forced-Original Profile 7
+    /// title ships an `init.mp4` declaring an enhancement layer it does not
+    /// have.
+    #[tokio::test]
+    async fn a_stripping_session_writes_an_init_with_no_dolby_vision_claim() {
+        let feed = with_a_stale_dolby_vision_record(&plurx_core::testfixtures::pipe("clean-cra"));
+        let served = |strip: bool| {
+            let feed = feed.clone();
+            async move {
+                let dir = tempfile::tempdir().expect("scratch");
+                let outcome =
+                    run(&feed[..], dir.path().to_path_buf(), "test", brisk(), strip).await;
+                assert!(
+                    matches!(outcome, Outcome::Completed(_)),
+                    "the session must finish to write an init: {outcome:?}"
+                );
+                std::fs::read(dir.path().join("init.mp4")).expect("init.mp4")
+            }
+        };
+
+        // The control: without the ask, the record the muxer wrote is served
+        // as-is. Without this the assertion below could pass because the
+        // fixture never carried a record at all.
+        let kept = served(false).await;
+        assert!(
+            kept.windows(4).any(|f| f == b"dvcC" || f == b"dvvC"),
+            "the fixture must carry a record for this test to mean anything"
+        );
+
+        let stripped = served(true).await;
+        assert!(
+            !stripped.windows(4).any(|f| f == b"dvcC" || f == b"dvvC"),
+            "the session served an init still declaring Dolby Vision"
+        );
+        assert!(
+            !stripped.windows(4).any(|f| f == b"dby1"),
+            "…and one still branding it, which AVPlayer refuses outright"
+        );
+    }
+
+    /// A pipe whose init carries the Profile 7 record a stripping muxer copies
+    /// out of the source container, plus the `dby1` brand movenc writes beside
+    /// it. Exactly the shape `filter_units` leaves on an ffmpeg without
+    /// `dovi_rpu`: the layers gone from every sample, the claim still in the
+    /// sample entry.
+    fn with_a_stale_dolby_vision_record(feed: &[u8]) -> Vec<u8> {
+        let mut reader = FragmentReader::new();
+        reader.push(feed);
+        let Some(Unit::Init(mut init)) = reader.next_unit().expect("parses") else {
+            panic!("the fixture opens with an init");
+        };
+        let record = plurx_core::fmp4::DolbyVisionRecord::new(7, 6, true, true, false, 0)
+            .expect("a describable record");
+        assert!(fmp4::set_dolby_vision_record(&mut init, &record).expect("insert"));
+        init.bytes[8..12].copy_from_slice(b"dby1");
+        let mut out = init.bytes.clone();
+        out.extend_from_slice(&feed[init_len(feed)..]);
+        out
+    }
+
+    /// How many bytes of `feed` the initialization segment occupies.
+    fn init_len(feed: &[u8]) -> usize {
+        let mut at = 0;
+        while at + 8 <= feed.len() {
+            let size = u32::from_be_bytes(feed[at..at + 4].try_into().expect("size")) as usize;
+            let kind = &feed[at + 4..at + 8];
+            at += size;
+            if kind == b"moov" {
+                return at;
+            }
+        }
+        panic!("the fixture has no moov");
     }
 
     #[test]

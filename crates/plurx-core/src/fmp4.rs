@@ -1185,6 +1185,18 @@ fn write_be_u32(bytes: &mut [u8], at: usize, value: u32) -> Result<(), Fmp4Error
 /// holding a playlist from one generation is served media from another, and
 /// the init it fetched has to describe both.
 pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, Fmp4Error> {
+    // Before anything mutates the init. The refusal exists to catch a caller
+    // bug, and a promotion that appends parameter sets and HDR10 metadata and
+    // *then* refuses has already changed the bytes it was asked not to build —
+    // so the caller's error path discards an init that is no longer the
+    // muxer's, and a reader comparing digests sees drift it cannot explain.
+    if inputs.dolby_vision.is_some() && inputs.strip_dolby_vision {
+        return Err(Fmp4Error::Unsupported(
+            "the promotion inputs ask to both rewrite and remove the Dolby Vision \
+             record; one of those callers is wrong and picking would hide it"
+                .into(),
+        ));
+    }
     let hevc = promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)?;
     // The removal goes FIRST, and the rewrite below goes last, for the same
     // reason pointing opposite ways: `promote_hdr10_static_metadata_from`
@@ -1196,7 +1208,7 @@ pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, F
     // would leave the promotion inhibited by a record that is about to be
     // deleted, and the one stream this whole change exists to fix would be the
     // one served without its HDR10 static metadata.
-    let removed = if inputs.strip_dolby_vision && inputs.dolby_vision.is_none() {
+    let removed = if inputs.strip_dolby_vision {
         remove_dolby_vision_record(init)?
     } else {
         false
@@ -1208,20 +1220,13 @@ pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, F
     // most needs it — a converted 8.1 stream over an HDR10 base, whose
     // mastering-display metadata is exactly as worth promoting as any other
     // HDR10 title's.
-    let dolby_vision = match (inputs.dolby_vision.as_ref(), inputs.strip_dolby_vision) {
-        (Some(_), true) => {
-            return Err(Fmp4Error::Unsupported(
-                "the promotion inputs ask to both rewrite and remove the Dolby Vision \
-                 record; one of those callers is wrong and picking would hide it"
-                    .into(),
-            ))
-        }
-        (Some(record), false) => set_dolby_vision_record(init, record)?,
+    // The contradiction is already refused above, before the first mutation.
+    let dolby_vision = match inputs.dolby_vision.as_ref() {
+        Some(record) => set_dolby_vision_record(init, record)?,
         // Already done above, before the HDR10 promotion it would otherwise
         // inhibit. Carried through so the "did anything change" answer is
         // still the union of all three.
-        (None, true) => removed,
-        (None, false) => false,
+        None => removed,
     };
     Ok(hevc || hdr10 || dolby_vision)
 }
@@ -5065,6 +5070,62 @@ mod tests {
         assert_eq!(dolby_vision_record(&reread).expect("read"), None);
     }
 
+    /// The brand rewrite declines on every `ftyp` it does not fully
+    /// understand, rather than writing near one.
+    ///
+    /// It walks the compatible-brands list by stepping four bytes at a time to
+    /// the declared size, so the `(size - 16) % 4` check is what guarantees the
+    /// last step lands exactly on `size` instead of past it. A `largesize`
+    /// `ftyp` (`size == 1`) and one claiming more bytes than exist both
+    /// decline; a `dby1` in a `largesize` box is left alone, which is
+    /// correct-by-decline rather than correct-by-handling and is worth knowing.
+    #[test]
+    fn the_brand_rewrite_declines_on_an_ftyp_it_cannot_walk() {
+        let ftyp = |size: u32, brands: usize| {
+            let mut b = vec![0u8; 16 + brands * 4];
+            b[0..4].copy_from_slice(&size.to_be_bytes());
+            b[4..8].copy_from_slice(b"ftyp");
+            b[8..12].copy_from_slice(b"dby1");
+            for i in 0..brands {
+                b[16 + i * 4..20 + i * 4].copy_from_slice(b"dby1");
+            }
+            b
+        };
+
+        // The shape it does understand.
+        let mut good = ftyp(24, 2);
+        assert!(replace_dolby_file_type_brand(&mut good));
+        assert!(!good[..24].windows(4).any(|f| f == b"dby1"));
+
+        // A size that is not 16 + a whole number of brands. Walking it would
+        // read the last four bytes starting inside the previous brand and
+        // write across the boundary.
+        let mut ragged = ftyp(22, 2);
+        assert!(!replace_dolby_file_type_brand(&mut ragged));
+        assert_eq!(&ragged[8..12], b"dby1", "and it changed nothing");
+
+        // `largesize`, and a size larger than the buffer.
+        let mut large = ftyp(1, 2);
+        assert!(!replace_dolby_file_type_brand(&mut large));
+        let mut overlong = ftyp(64, 2);
+        assert!(!replace_dolby_file_type_brand(&mut overlong));
+
+        // Not an ftyp at all, and too short to be one.
+        let mut moov = ftyp(24, 2);
+        moov[4..8].copy_from_slice(b"moov");
+        assert!(!replace_dolby_file_type_brand(&mut moov));
+        assert!(!replace_dolby_file_type_brand(
+            &mut ftyp(24, 2)[..12].to_vec()
+        ));
+
+        // The minor version at 12..16 is a number, not a brand: four bytes
+        // that happen to spell `dby1` there are left alone.
+        let mut minor = ftyp(24, 2);
+        minor[12..16].copy_from_slice(b"dby1");
+        assert!(replace_dolby_file_type_brand(&mut minor));
+        assert_eq!(&minor[12..16], b"dby1", "the minor version is not a brand");
+    }
+
     /// A stripped stream keeps its HDR10 static metadata.
     ///
     /// `promote_hdr10_static_metadata_from` refuses to run on a sample entry
@@ -5276,14 +5337,47 @@ mod tests {
         // it. The inputs are stored and replayed on every head regeneration,
         // so a contradiction has to be loud the first time rather than
         // silently resolved forever.
+        // With work for the parameter-set promotion that runs before the
+        // Dolby Vision arm — an init whose hvcC has no arrays, which is the
+        // one shape that promotion fires on. Without something that actually
+        // mutates, the byte-equality assertion below holds however late the
+        // refusal runs, which is exactly how an earlier version of this test
+        // passed against a late one.
+        let mut minimal = minimal_hvcc_dv_init();
+        assert!(set_dolby_vision_record(&mut minimal, &stale).expect("insert"));
+        let parameter_sets = vec![
+            vec![0x40, 0x01, 0x0c],
+            vec![0x42, 0x01, 0x01],
+            vec![0x44, 0x01, 0xc0],
+        ];
+        // The control: those inputs on their own do move bytes.
+        let mut moves = minimal.clone();
+        assert!(
+            promote_hevc_parameter_sets_from(&mut moves, &parameter_sets).expect("promote"),
+            "the fixture must promote for the atomicity check to mean anything"
+        );
+        assert_ne!(moves.bytes, minimal.bytes);
+
         let contradiction = PromotionInputs {
             dolby_vision: Some(DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("record")),
             strip_dolby_vision: true,
+            parameter_sets,
             ..PromotionInputs::default()
         };
+        // Promoted into a named binding, not a temporary: the property is not
+        // only that it errors, it is that it errors having changed nothing.
+        // Refusing after appending parameter sets and HDR10 metadata leaves
+        // the caller discarding an init that is no longer the muxer's, and a
+        // reader comparing digests later sees drift with no cause.
+        let mut half_applied = minimal.clone();
+        let before = half_applied.bytes.clone();
         let error =
-            promote_from(&mut muxer.clone(), &contradiction).expect_err("both at once is refused");
+            promote_from(&mut half_applied, &contradiction).expect_err("both at once is refused");
         assert!(error.to_string().contains("rewrite and remove"), "{error}");
+        assert_eq!(
+            half_applied.bytes, before,
+            "the refusal mutated the init before returning"
+        );
     }
 
     /// Rewriting a record in place and inserting one where there is none —
