@@ -1,10 +1,11 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-31 · **Baseline:** `main` at `e1876cce` (`v0.3.0`) ·
-**Fleet:** nuc3 · nuc4 · m6 serve `v0.2.8-106-g55abad8f`; nynuc serves a
-later untagged build · **Devices:** Apple 99 and Android 56 were **installed**
-on 2026-08-31 and neither has produced a control exchange — see
-§"The first fleet run" · the tree is Android 58 · Apple 102
+**Updated:** 2026-09-01 · **Baseline:** `main` at `1888647` (`v0.3.0`) ·
+**Fleet:** all four nodes serve `v0.3.0-49-g03b4daa3`, verified off
+`/api/v1/server` · **Devices:** Apple 99 and Android 56 were **installed** on
+2026-08-31; the web arm of the acceptance has since passed on nuc3 and the
+device arms remain unrun — see §"The first fleet run" and §"M5c is struck" ·
+the tree is Android 60 · Apple 104
 
 Companion to
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) (what
@@ -27,10 +28,10 @@ one is deleted.
 |---|---|---|---|
 | 1-4 | protocol, transport, hold/resume barriers | — | merged |
 | 5 | delete detached recovery loops | — | merged as #663 |
-| 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **complete in source on all three clients**; the deletions wait on a fleet run |
+| 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike still **needs hardware**, and item 7 is not allowed to start without its numbers |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | not started |
-| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); **subtitle windows are not built**; detection is separately deferred |
+| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own M3 (seek coalescing) and M4 (burn-join) are unbuilt; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
 
@@ -248,10 +249,16 @@ auto-lock disabled. Web can be settled without one, and should be settled first.
 plurx_playback_control_vocabulary_total{complete="true",platform="…"}
 ```
 
-reads **zero on all four nodes** as of 2026-08-31, measured directly off
+read **zero on all four nodes** on 2026-08-31, measured directly off
 `/metrics`. It counts accepted exchanges from clients that declared every
-action this server can send, and the fleet has never run a build that can
-receive one.
+action this server can send, and at that date the fleet had never run a build
+that could receive one.
+
+**That gate has since opened.** On 2026-09-01 the web arm of the acceptance
+completed sixteen exchanges on nuc3 with zero `complete="false"`, and nuc4 has
+since carried both web and Apple exchanges under induced conditions. The
+paragraphs below are kept because the reasoning they record — why deletion is
+gated and construction is not — is what §"M5c is struck" then applied.
 
 **The server does emit actions.** `resolve_action` is called from
 `local_control_response` (`crates/plurxd/src/http/hls.rs:3609`) on the live
@@ -268,6 +275,97 @@ the metric moves: the client gains a path that defers to the server action,
 and keeps its existing path as the `none`-or-timeout fallback. The fallback
 is not a hedge — a server that has not yet decided must not strand a stalled
 viewer.
+
+## M5c is struck, and this is the measurement that struck it
+
+**Written 2026-09-01** from induced control exchanges on nuc4 at
+`v0.3.0-49-g03b4daa3` and from the two client recovery handlers on `main`.
+The full working lives in the agent notes as `M5C-VERDICT.md`, which is
+outside this repository; the short form is here because it closes a milestone
+and the evidence should not depend on a file the repository cannot show.
+
+**What the fleet answered, while the delivery was troubled.** Actions recorded
+off the live control endpoint, counters read from `/metrics` before and after:
+
+| induced | observation sent | action returned |
+|---|---|---|
+| stall | `stalled` · `starved` · `network` | `hold { reason: "time" }` |
+| truncated stream | `failed` · `failed` · `media` | `hold { reason: "time" }` |
+| resume 30m into a fresh transcode | — | `hold { reason: "ahead" }` |
+| paused, producer starting | — | `hold { reason: "demand" }` |
+
+**No exchange returned `none` while the delivery was troubled**, which is the
+question its predecessor `M5C-BLOCKED.md` §5 posed, and it is not the question
+that decides the milestone.
+
+**What it answered while the delivery was healthy.** Repeated against a quiet
+node (`transcodes=0`, `readyz` 200 on all four):
+
+| induced | observation sent | action returned |
+|---|---|---|
+| nothing — healthy session | — | **`none`** |
+| `DELETE /api/v1/hls/{session}`, HTTP 204 | `failed` · `failed` · `media` | **`none`** |
+| stall report on the same session | `stalled` · `starved` · `network` | **`none`** |
+
+Thirteen exchanges spanned the session kill and every one returned `none`.
+Across the night on nuc4: web `none` **23 → 58**, web `hold` static at **55**,
+and `terminal` and `retry_resource` **never observed at all**, on any
+platform.
+
+**The first two rows are the finding.** A client reporting *starved* and a
+client reporting *a broken stream* received the same answer, because
+`resolve_action` never reads the client's observation — `request` is consulted
+only for `accepts()` and `accepts_hold()`. The server answers its own view of
+the delivery, never the client's report of it. That is sound: the server knows
+the producer and the client does not. It is also why M5c cannot ship.
+
+**The server does answer producer failures**, and the blocked note was wrong
+to say otherwise. `producer_failure_reason` commits a decision off
+`PRODUCER_PROGRESS_BUDGET` (10 s), `PRODUCER_STARTUP_BUDGET` (30 s), or a bare
+process exit; `is_permanent` is `Unsupported | InvalidConfiguration` alone, so
+an unsupported source resolves `terminal` and everything else `retry_resource`.
+
+**Why each deletion is still refused:**
+
+- **`endedTries` bounds the server, not the client.** `handleEnded` honours a
+  `retry_resource` only while `endedTries <= CONTROL_DEFER_LIMIT`, because
+  `retry_resource { after_ms }` bounds the *rate* of reconnection and nothing
+  in the protocol bounds the *count*. M5b made the legacy counter the bound on
+  its own replacement. `stallDeferrals` does the same for stalls.
+- **`stallRecoveries` covers what the server structurally cannot see.**
+  `stallRecoveryAction` is reached only after the `retry_resource` and `hold`
+  branches have returned — that is, only on `none`. A wedged decoder or a bad
+  link between viewer and node leaves the producer healthy, so `none` is the
+  permanent answer, and the budget is the only bound.
+- **The transcode fallback has no replacement.** The server's recipe swap is
+  guarded on `!producer_media_published`, so it is unavailable for a remux
+  that starts and then fails. For that case it builds an
+  `ActionProposal { kind: "replace_failed_producer" }` — a string that appears
+  exactly once in the repository, at its construction site. No handler
+  serializes it; no client decodes it.
+
+**Consequence for the roadmap.** M5 is finished at M5b. M5h inherits §1 and
+§2 of the verdict unchanged and should be checked against the Apple and
+Android handlers before it is scheduled rather than assumed either way. The
+one remaining M5 client change is a comment correction at the truncated-stream
+site, which still calls `endedTries` "a guess standing in for exactly that
+answer" — now only half true.
+
+**An operational note from the same session.** nuc4 could not serve an HLS
+manifest in under twenty seconds (`20001 ms` / `0 bytes`, `55148 ms` /
+`457 bytes`, `21001 ms` / `0 bytes`) and playback never reached a buffered
+frame in twelve minutes across two titles. `plurx_analysis_queue_depth` shows
+4 `claimed` and 18 `retry_wait` `fragment_index` jobs against 410 `failed`,
+and `plurx_analysis_lifecycle_total{event="failure",reason="attempt_limit"}`
+reads **564**. That is not a playback-control condition and it is not a queue
+that is catching up. The node was quiet again when the healthy-session rows
+above were taken, so those are not a saturation artefact. What remains
+unmeasured is the unsupported-source arm: the analysis-failed files are
+ordinary h264 and play, and a genuine producer refusal needs a bad source
+placed on a node or a shell there, neither of which this session has. It
+stays established by ruling D1 and by `is_permanent` rather than by
+hardware.
+
 
 ## Open decisions
 
