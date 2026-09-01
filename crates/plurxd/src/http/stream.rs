@@ -920,17 +920,28 @@ fn classify_chapter(title: &str) -> Option<(&'static str, &'static str)> {
         "main titles",
     ];
     let credit_kw = ["end credit", "credits", "ending", "outro", "closing"];
-    // Anime discs and TV rips label the tail teaser several ways. "Trailer" is
-    // deliberately absent: on a disc rip that is the bonus-features reel, not a
-    // region inside the episode, and skipping into it is worse than not
-    // offering the button.
+    // Anime discs and TV rips label the tail teaser several ways. Every entry
+    // here is also bounded by CREDITS_MIN_START_PCT, so a front-of-disc reel or
+    // a mid-act tease is rejected on position before its title is ever trusted.
+    //
+    // Two words that look like they belong are absent, for opposite reasons.
+    // "Trailer" is a judgement call: on a disc rip it is usually the
+    // bonus-features reel, and although the position bound would catch a
+    // front-of-disc one, a *tail* extras reel on a single-title rip would slip
+    // through and skip a viewer into supplements. "Coming up" is absent because
+    // unscripted television uses it for the act-break tease before an ad, which
+    // is a mid-programme label the position bound cannot always reject on a
+    // short episode.
+    //
+    // "next on" is spelled with its space and colon-free forms only via the
+    // longer keys: bare `next on` substring-matches "the next one", and a
+    // chapter so titled is story.
     let preview_kw = [
         "next episode",
         "next time",
-        "next on",
-        "preview",
-        "coming up",
         "on the next",
+        "next week",
+        "preview",
     ];
     // "Opening Credits" is the front titles, not the tail — intro wins.
     let is_opening_titles = t.contains("opening") && t.contains("credits");
@@ -1184,12 +1195,26 @@ pub(crate) fn markers_from_chapters(
             // not, and falls back to the estimate rather than opening the
             // button early. The 15s floor keeps a post-credits stinger from
             // becoming the button.
-            let boundary = spans
-                .iter()
-                .rev()
-                .find(|span| span.start_ms < credits_end)
-                .copied()
-                .filter(|span| (15_000..=tail * 2).contains(&(credits_end - span.start_ms)));
+            let boundary = if preview_start.is_some() {
+                // Walk back past the preview's own boundary to the one before
+                // it: the preview's start is `credits_end`, not a candidate.
+                spans
+                    .iter()
+                    .rev()
+                    .find(|span| span.start_ms < credits_end)
+                    .copied()
+            } else {
+                // No preview, so this is unchanged from before this slice.
+                // Walking back here would be a silent behaviour change on
+                // every ordinary file: a container whose chapters overrun its
+                // declared duration used to fall through to the estimate, and
+                // a walk-back would newly accept an earlier boundary as exact.
+                spans
+                    .last()
+                    .copied()
+                    .filter(|span| span.start_ms <= credits_end)
+            }
+            .filter(|span| (15_000..=tail * 2).contains(&(credits_end - span.start_ms)));
             let exact_boundary = boundary.and_then(|span| {
                 let timescale = common_timebase(span.timescale, 1_000)?;
                 let start_ticks = span
@@ -1203,20 +1228,40 @@ pub(crate) fn markers_from_chapters(
                     timescale,
                 ))
             });
-            let (start_ms, start_ticks, end_ticks, timescale) = exact_boundary.unwrap_or((
-                credits_end - tail,
-                credits_end - tail,
-                credits_end,
-                1_000,
-            ));
-            // A preview that begins before a plausible credits run leaves no
-            // room to guess one. Saying nothing is right: the region between is
-            // story, and an invented "Skip Credits" over it would seek a viewer
-            // out of the episode.
-            if start_ms < 0 || start_ms >= credits_end {
+            // Without a chapter boundary to anchor on, the start is a
+            // proportion of runtime. That is defensible when the credits run to
+            // the end of the file — the estimate is bounded by the end, and the
+            // worst case is a button that opens slightly early over credits
+            // that are really there.
+            //
+            // It is not defensible when a labelled preview bounds them. The
+            // muxer named the preview and did not name the credits, so there is
+            // no evidence they are the length this estimate assumes;
+            // `credits_end - tail` then lands inside *story*, and an invented
+            // "Skip Credits" there seeks a viewer out of the episode. Saying
+            // nothing is right.
+            //
+            // The earlier form of this guard tested the computed start against
+            // `credits_end` and could never fire: a preview clears
+            // CREDITS_MIN_START_PCT of the runtime, `tail` is at most a
+            // fortieth of it or 180s, and the exact branch already filters
+            // `start_ms < credits_end`. Every file with a labelled preview and
+            // no labelled credits got the invented marker the comment said it
+            // was preventing.
+            let inferred = match exact_boundary {
+                Some(exact) => Some(exact),
+                None if preview_start.is_none() => Some((
+                    credits_end - tail,
+                    credits_end - tail,
+                    credits_end,
+                    1_000,
+                )),
+                None => None,
+            };
+            let Some((start_ms, start_ticks, end_ticks, timescale)) = inferred else {
                 out.sort_by_key(|m| m.start_ms);
                 return out;
-            }
+            };
             out.push(Marker {
                 kind: "credits".to_owned(),
                 label: "Skip Credits".to_owned(),
@@ -1327,6 +1372,24 @@ pub(crate) fn annotation_set_from_markers(
     }
 }
 
+/// Whether a persisted set is entirely the work of a superseded chapter
+/// classifier, and so should be re-derived rather than served.
+///
+/// Only chapter-derived annotations carry [`CHAPTER_ANNOTATION_VERSION`]; a
+/// set holding anything else — a manual override, or a future detector's
+/// output — is left alone, because this function's job is to expire one
+/// classifier's conclusions, not to arbitrate between producers.
+fn chapter_annotations_are_stale(set: &plurx_core::segplan::TimelineAnnotationSet) -> bool {
+    use plurx_core::segplan::AnnotationProvenance;
+
+    !set.annotations.is_empty()
+        && set.annotations.iter().all(|annotation| {
+            annotation.provenance != AnnotationProvenance::Manual
+                && annotation.detector_version.starts_with("chapter-classifier-")
+                && annotation.detector_version != CHAPTER_ANNOTATION_VERSION
+        })
+}
+
 fn markers_from_annotation_set(set: plurx_core::segplan::TimelineAnnotationSet) -> Vec<Marker> {
     use plurx_core::segplan::AnnotationProvenance;
 
@@ -1409,7 +1472,25 @@ async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
         .timeline_annotation_set(file.id, &source_identity)
         .await
     {
-        Ok(Some(set)) => return markers_from_annotation_set(set),
+        Ok(Some(set)) if !chapter_annotations_are_stale(&set) => {
+            return markers_from_annotation_set(set)
+        }
+        // A persisted set whose automatic annotations all came from a
+        // superseded chapter classifier is worse than no set: it is a
+        // conclusion we have since decided was wrong, and it wins over the
+        // live path forever. Falling through re-derives those markers with the
+        // current classifier — the same thing an unindexed file already gets —
+        // so a library indexed before the classifier changed heals itself the
+        // next time it is played, instead of needing one admin re-analysis per
+        // file with no bulk endpoint to do it with.
+        //
+        // A set carrying any manual override is never stale: the override is
+        // the viewer's own correction and outranks every classifier, present
+        // or future. That does mean an override written to work around a
+        // classifier bug keeps suppressing the corrected automatic marker —
+        // which is the manual-wins invariant behaving exactly as #700 intended,
+        // and is undone by discarding the override, not by this code.
+        Ok(Some(_)) => {}
         Ok(None) => {}
         Err(error) => {
             tracing::warn!(file_id = file.id, %error, "could not read timeline annotations");
@@ -3451,9 +3532,10 @@ mod tests {
         for title in [
             "Next Episode Preview",
             "Preview",
+            "Previews",
             "Next Time On",
             "On the Next",
-            "Coming Up",
+            "Next Week On",
             "next episode",
         ] {
             assert_eq!(
@@ -3462,6 +3544,20 @@ mod tests {
                 "{title}"
             );
         }
+        // Titles that must NOT become a preview button. "The Next One" is the
+        // trap a bare `next on` substring would spring — it contains those
+        // characters and is story. "Coming Up" is unscripted television's
+        // act-break tease before an ad break, mid-programme by definition.
+        // "Previously On" is a recap and belongs to intro, which is checked
+        // first; assert that ordering rather than trusting it.
+        for title in ["The Next One", "Coming Up", "Trailers"] {
+            assert_eq!(classify_chapter(title).map(|m| m.0), None, "{title}");
+        }
+        assert_eq!(
+            classify_chapter("Previously On").map(|m| m.0),
+            Some("intro"),
+            "a recap is not a preview"
+        );
         assert_eq!(
             classify_chapter("Next Episode Preview").map(|m| m.1),
             Some("Skip Preview"),
@@ -3610,6 +3706,68 @@ mod tests {
         );
     }
 
+    /// A library indexed before the classifier changed must heal itself.
+    ///
+    /// Without this, every file analysed under v1 keeps a `credits` marker
+    /// sitting over its preview for good: the persisted set outranks the live
+    /// path, queued jobs carrying the old version fail terminally rather than
+    /// requeue, and the only remedy is one admin re-analysis POST per file
+    /// with no bulk endpoint behind it.
+    #[test]
+    fn a_set_from_a_superseded_classifier_is_re_derived() {
+        use plurx_core::segplan::{
+            AnnotationKind, AnnotationProvenance, SourceIdentity, TimelineAnnotation,
+            TimelineAnnotationSet,
+        };
+
+        let annotation = |version: &str, provenance| TimelineAnnotation {
+            kind: AnnotationKind::Credits,
+            start_ticks: 1_200_000,
+            end_ticks: 1_410_000,
+            timescale: 1_000,
+            start_ms: 1_200_000,
+            end_ms: 1_410_000,
+            provenance,
+            confidence_millis: 1_000,
+            detector_version: version.to_owned(),
+            manual_override_revision: None,
+        };
+        let set = |annotations| TimelineAnnotationSet {
+            source_identity: SourceIdentity::default(),
+            generation_id: "g".to_owned(),
+            version: 1,
+            annotations,
+        };
+
+        assert!(chapter_annotations_are_stale(&set(vec![annotation(
+            "chapter-classifier-v1",
+            AnnotationProvenance::Authored
+        )])));
+        assert!(!chapter_annotations_are_stale(&set(vec![annotation(
+            CHAPTER_ANNOTATION_VERSION,
+            AnnotationProvenance::Authored
+        )])));
+        // A manual override is the viewer's own correction and outranks every
+        // classifier, so its set is never expired.
+        assert!(!chapter_annotations_are_stale(&set(vec![annotation(
+            "chapter-classifier-v1",
+            AnnotationProvenance::Manual
+        )])));
+        // Mixed: one current annotation is enough to keep the set.
+        assert!(!chapter_annotations_are_stale(&set(vec![
+            annotation("chapter-classifier-v1", AnnotationProvenance::Authored),
+            annotation(CHAPTER_ANNOTATION_VERSION, AnnotationProvenance::Authored),
+        ])));
+        // A future detector's output is not this function's business.
+        assert!(!chapter_annotations_are_stale(&set(vec![annotation(
+            "visual-detector-v1",
+            AnnotationProvenance::Estimated
+        )])));
+        // An empty set is not stale — it is empty, and falling through on it
+        // would re-derive markers a publisher deliberately recorded as none.
+        assert!(!chapter_annotations_are_stale(&set(Vec::new())));
+    }
+
     /// With no credits chapter at all, the guess still runs — bounded.
     ///
     /// Inferring credits inside unlabelled story is the fallback's whole job
@@ -3619,9 +3777,43 @@ mod tests {
     /// viewer pressing an estimated "Skip Credits" can never be seeking into
     /// footage they have not seen.
     #[test]
-    fn an_inferred_credits_marker_never_overlaps_the_preview() {
+    fn a_preview_with_no_credits_boundary_invents_no_credits_marker() {
+        // One story chapter and a preview. There is no boundary inside a
+        // plausible credits tail before the preview, so there is no evidence
+        // for where credits would start — and the proportional estimate would
+        // put a "Skip Credits" button over the last 35 s of *story*, seeking a
+        // viewer out of the episode.
+        //
+        // The earlier guard for this could never fire: it compared the
+        // computed start against `credits_end`, and a preview clears 70% of
+        // the runtime while the tail is at most a fortieth of it. Every such
+        // file got the invented marker. Assert the absence, not the overlap.
         let chapters = vec![
             chapter("Episode", "0.000", "1200.000"),
+            chapter("Preview", "1200.000", "1410.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_410_000));
+        assert!(markers.iter().any(|m| m.kind == "preview"));
+        assert!(
+            !markers.iter().any(|m| m.kind == "credits"),
+            "invented credits over story: {:?}",
+            markers
+                .iter()
+                .filter(|m| m.kind == "credits")
+                .map(|m| (m.start_ms, m.end_ms))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_preview_with_a_real_boundary_infers_credits_up_to_it() {
+        // The other half of the rule. Here the muxer did leave a boundary
+        // inside a plausible tail — the story chapter ends 40 s before the
+        // preview — so the credits are inferred exactly, from evidence, and
+        // stop where the preview starts rather than running to the file end.
+        let chapters = vec![
+            chapter("Episode", "0.000", "1160.000"),
+            chapter("End", "1160.000", "1200.000"),
             chapter("Preview", "1200.000", "1410.000"),
         ];
         let markers = markers_from_chapters(&chapters, Some(1_410_000));
@@ -3629,17 +3821,44 @@ mod tests {
             .iter()
             .find(|m| m.kind == "preview")
             .expect("preview");
-        for credits in markers.iter().filter(|m| m.kind == "credits") {
-            assert!(!credits.chapter);
-            assert!(
-                credits.end_ms <= preview.start_ms,
-                "estimated credits {}..{} overlap the preview at {}",
-                credits.start_ms,
-                credits.end_ms,
-                preview.start_ms
-            );
-            assert!(credits.start_ms < credits.end_ms);
-        }
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("inferred credits");
+        assert!(!credits.chapter);
+        assert_eq!(credits.start_ms, 1_160_000);
+        assert_eq!(credits.end_ms, preview.start_ms);
+        assert!(credits.start_ms < credits.end_ms);
+    }
+
+    #[test]
+    fn chapters_overrunning_the_duration_still_fall_through_to_the_estimate() {
+        // With no preview the boundary search is the pre-existing one: only
+        // the final span is a candidate. Walking back would newly accept an
+        // earlier boundary as exact on containers whose chapters overrun their
+        // declared duration, which is common with mismatched metadata — the
+        // estimate is the honest answer there, not a boundary chosen because
+        // it happened to fit the window.
+        // The final span starts past the declared duration, so it is not a
+        // candidate. A walk-back would land on the 1370 s boundary — 30 s of
+        // window, comfortably inside the filter — and call it exact. The
+        // estimate is the honest answer, and asserting its exact value is what
+        // distinguishes the two.
+        let chapters = vec![
+            chapter("Story", "0.000", "1370.000"),
+            chapter("Tail", "1370.000", "1450.000"),
+            chapter("Extra", "1450.000", "1500.000"),
+        ];
+        let markers = markers_from_chapters(&chapters, Some(1_400_000));
+        let credits = markers
+            .iter()
+            .find(|m| m.kind == "credits")
+            .expect("estimated credits");
+        assert!(!credits.chapter, "the final span starts past the duration");
+        assert_eq!(credits.end_ms, 1_400_000);
+        // duration/40 = 35 s of tail, not the 1_370_000 boundary a walk-back
+        // would have taken.
+        assert_eq!(credits.start_ms, 1_400_000 - 35_000);
     }
 
     /// Markers are built from a chapters array, whatever produced it — which is
