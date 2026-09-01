@@ -45,6 +45,27 @@ def workflow_step_scalar(step: str, key: str) -> str:
     return values[0]
 
 
+def workflow_step_literal(step: str, key: str) -> list[str]:
+    marker = f"        {key}: |"
+    lines = step.splitlines()
+    try:
+        start = lines.index(marker) + 1
+    except ValueError as exc:
+        raise AssertionError(f"expected one literal {key!r}") from exc
+
+    value: list[str] = []
+    for line in lines[start:]:
+        if line and len(line) - len(line.lstrip(" ")) <= 8:
+            break
+        if not line:
+            value.append("")
+            continue
+        if not line.startswith("          "):
+            raise AssertionError(f"malformed literal {key!r}: {line!r}")
+        value.append(line[10:])
+    return value
+
+
 class OperationsContractCase(unittest.TestCase):
     def test_browser_validation_never_claims_host_audio_or_media_controls(self):
         for path in ("scripts/playback-lab", "scripts/ui-baseline"):
@@ -705,8 +726,15 @@ class OperationsContractCase(unittest.TestCase):
         self.assertEqual(workflow_step_scalar(store_run, "id"), "store_contracts")
         self.assertEqual(workflow_step_scalar(store_run, "continue-on-error"), "true")
         self.assertEqual(workflow_step_scalar(store_run, "run"), "|")
-        self.assertEqual(store_run.count("make cluster-store-check 2>&1 | tee"), 1)
-        self.assertNotIn("make cluster-harness-check", store_run)
+        self.assertEqual(
+            workflow_step_literal(store_run, "run"),
+            [
+                "set -euo pipefail",
+                "mkdir -p target/validation",
+                "make cluster-store-check 2>&1 | tee "
+                "target/validation/cluster-store.log",
+            ],
+        )
 
         store_receipt = store["Record the Store lane result"]
         self.assertEqual(workflow_step_scalar(store_receipt, "if"), "always()")
@@ -734,16 +762,24 @@ class OperationsContractCase(unittest.TestCase):
             workflow_step_scalar(topology_run, "continue-on-error"), "true"
         )
         self.assertEqual(workflow_step_scalar(topology_run, "run"), "|")
-        self.assertEqual(topology_run.count("make cluster-harness-check"), 1)
-        self.assertEqual(topology_run.count("make hiqlite-spike"), 1)
         self.assertEqual(
-            topology_run.count(
-                "cargo clippy --locked --manifest-path "
-                "spikes/hiqlite-m0/Cargo.toml"
-            ),
-            1,
+            workflow_step_literal(topology_run, "run"),
+            [
+                "set -euo pipefail",
+                "mkdir -p target/validation",
+                "{",
+                '  if [ "$RUN_CLUSTER_AUTH" = true ]; then',
+                "    make cluster-harness-check",
+                "  fi",
+                '  if [ "$RUN_HIQLITE_SPIKE" = true ]; then',
+                "    cargo clippy --locked --manifest-path "
+                "spikes/hiqlite-m0/Cargo.toml \\",
+                "      --tests --no-deps -- -D warnings",
+                "    make hiqlite-spike",
+                "  fi",
+                "} 2>&1 | tee target/validation/cluster-topology.log",
+            ],
         )
-        self.assertNotIn("make cluster-store-check", topology_run)
 
         topology_receipt = topology["Record the topology lane result"]
         self.assertEqual(workflow_step_scalar(topology_receipt, "if"), "always()")
