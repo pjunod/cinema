@@ -539,6 +539,13 @@ These are explicitly separate efforts:
 - Shadow invokes the same-commit reusable shard workflow outside every required
   job's dependency graph; accelerated execution calls that workflow from the
   required Store path. An offline shadow runner cannot delay promotion.
+- The native ARM64 shadow job is implemented default-dark on the dedicated
+  `[self-hosted, Linux, ARM64, lab, ci-arm64-shadow]` label. It refuses a
+  non-`aarch64` kernel or Docker engine, uses no QEMU, compiles and packages the
+  exact two-binary candidate in one job, runs identity plus stop/start smoke,
+  and retains only the small manifest/digest receipt. The label is intentionally
+  unassigned until the Linux VM and host-level non-overlap policy are ready;
+  the job is absent from every required dependency chain.
 - M0's voter audit is complete for the active Store/topology labels. The changed
   `nuc2` host key, a verified third non-voter x86 host, disk facts, and the
   `ci-store-shard-1` runner remain activation gates for `shadow`.
