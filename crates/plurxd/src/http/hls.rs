@@ -6129,28 +6129,109 @@ async fn subtitle_vtt_local_before(
             (bytes, "private, max-age=3600")
         }
         Ok(None) | Err(_) => {
-            // AVPlayer gives a subtitle segment only about two seconds to
-            // answer and blocks the muxed video while it waits. Extracting an
-            // embedded text track is a full-source scan that can legitimately
-            // take minutes on a large MKV over a NAS, so awaiting `ensure_vtt`
-            // here turns healthy Dolby Vision, HDR and H.264 streams into a
-            // black screen. Publish a syntactically valid empty segment now
-            // and let the deduplicated cache extraction finish independently.
-            // `no-store` lets a player retry this window once the sidecar is
-            // ready instead of pinning the temporary empty answer.
-            tokio::time::timeout_at(
+            // The whole-track sidecar is not there yet. Before falling back to
+            // an empty segment, ask whether a bounded window covering the
+            // position this segment actually wants is available or worth
+            // starting.
+            //
+            // Cue times in a sidecar are absolute source time and
+            // `segment_start` is session-local, so the demand position is the
+            // session's media origin plus this segment's start — the same
+            // mapping `slice_webvtt` undoes below.
+            let demand_seconds = (context.media_origin_seconds + segment_start).max(0.0) as i64;
+            let anchor = crate::subtitles::window_anchor_seconds(
+                demand_seconds,
+                crate::subtitles::WINDOW_SECONDS_DEFAULT,
+            );
+            let window_bytes = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(publication_deadline),
-                crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+                crate::subtitles::read_cached_window(
+                    &state.subs_dir,
+                    &file,
+                    index,
+                    anchor,
+                    crate::subtitles::WINDOW_SECONDS_DEFAULT,
+                ),
             )
             .await
             .map_err(|_| response_publication_timeout())?;
-            tracing::debug!(
-                session = %crate::transcode::session_log_id(session),
-                file_id = file.id,
-                index,
-                "serving an empty subtitle segment while its sidecar cache warms"
-            );
-            (b"WEBVTT\n\n".to_vec(), "no-store")
+            if let Ok(Some(bytes)) = window_bytes {
+                // Start the whole-track warm even though this request is
+                // answered. A window is a bridge: it persists on disk across
+                // restarts while the whole-track sidecar may not exist yet, so
+                // returning here without warming would leave a viewer parked
+                // past the first window served by a window forever, with the
+                // authoritative extraction never kicked from this route.
+                tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(publication_deadline),
+                    crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+                )
+                .await
+                .map_err(|_| response_publication_timeout())?;
+                tracing::info!(
+                    session = %crate::transcode::session_log_id(session),
+                    file_id = file.id,
+                    index,
+                    anchor,
+                    "serving a windowed WebVTT subtitle while the whole track warms"
+                );
+                // `no-store`: a window covers this position and not the next
+                // one, and the whole-track sidecar will supersede it. Letting
+                // a player pin these bytes would pin a partial answer.
+                (bytes, "no-store")
+            } else {
+                // AVPlayer gives a subtitle segment only about two seconds to
+                // answer and blocks the muxed video while it waits. Extracting
+                // an embedded text track is a full-source scan that can
+                // legitimately take minutes on a large MKV over a NAS, so
+                // awaiting `ensure_vtt` here turns healthy Dolby Vision, HDR
+                // and H.264 streams into a black screen. Publish a
+                // syntactically valid empty segment now and let the
+                // deduplicated cache extraction finish independently.
+                // `no-store` lets a player retry this window once the sidecar
+                // is ready instead of pinning the temporary empty answer.
+                //
+                // Both warms are started, and neither is awaited. The window
+                // is the bridge over the head of playback; the whole track is
+                // what supersedes it and what every other consumer needs. The
+                // window declines itself past the midpoint of the file, where
+                // it would read the same bytes as the whole track for a
+                // disposable result.
+                // The whole-track warm keeps its original contract, including
+                // that a timeout here fails the request rather than being
+                // swallowed: it is the path every other consumer depends on.
+                tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(publication_deadline),
+                    crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+                )
+                .await
+                .map_err(|_| response_publication_timeout())?;
+                // The window is best effort by construction — it is a bridge,
+                // and the empty segment below is already a correct answer — so
+                // a timeout starting it means "no window", not a failed
+                // request.
+                let windowing = tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(publication_deadline),
+                    crate::subtitles::warm_vtt_window(
+                        &state.subs_dir,
+                        &file,
+                        index,
+                        anchor,
+                        crate::subtitles::WINDOW_SECONDS_DEFAULT,
+                    ),
+                )
+                .await
+                .unwrap_or(false);
+                tracing::debug!(
+                    session = %crate::transcode::session_log_id(session),
+                    file_id = file.id,
+                    index,
+                    anchor,
+                    windowing,
+                    "serving an empty subtitle segment while its sidecar cache warms"
+                );
+                (b"WEBVTT\n\n".to_vec(), "no-store")
+            }
         }
     };
     let response = (
