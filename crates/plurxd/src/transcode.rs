@@ -3132,10 +3132,9 @@ fn spawn_copy_reader_owner(
     // layer it does not have, with every test green. Taking the options
     // instead means the only way to get it wrong is to pass options the child
     // did not get, which reads as wrong on sight.
-    source: &plurx_core::domain::MediaFile,
+    source: plurx_core::domain::MediaFile,
     video: plurx_core::transcode::CopyVideoOptions,
 ) {
-    let strip_dolby_vision_record = video.leaves_a_stale_dolby_vision_record(source);
     tokio::spawn(async move {
         // The outer owner retains the pipe until the actor has accepted the
         // typed reader fact. Structural `Unsupported` deliberately stops
@@ -3154,7 +3153,8 @@ fn spawn_copy_reader_owner(
                 dir,
                 &worker_sid,
                 copyseg::Limits::default(),
-                strip_dolby_vision_record,
+                &source,
+                video,
             )
             .await
         });
@@ -15775,7 +15775,7 @@ impl TranscodeManager {
                 dir.clone(),
                 session_id.clone(),
                 generation,
-                &file,
+                file.clone(),
                 video_options,
             );
         }

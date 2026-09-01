@@ -539,6 +539,13 @@ fn dolby_vision_pass_for(
 struct IndexPass {
     args: Vec<String>,
     dolby_vision: DolbyVisionPass,
+    /// The options all three of the above were derived from, carried so the
+    /// index key is derived from them too. Passed separately, a caller could
+    /// hand the runner a recipe built from one set of options and an identity
+    /// computed from another — the rows would be byte counts for one stream
+    /// filed under another's key, which is the same class of mismatch as the
+    /// argv and the record answer disagreeing.
+    video: transcode::CopyVideoOptions,
 }
 
 fn index_pass(
@@ -552,6 +559,7 @@ fn index_pass(
             None => transcode::copy_index_pipe_args(file, video),
         },
         dolby_vision: dolby_vision_pass_for(file, video)?,
+        video,
     })
 }
 
@@ -570,7 +578,7 @@ pub async fn build(
         Ok(pass) => pass,
         Err(reason) => return IndexOutcome::Unsupported(reason),
     };
-    build_with_args(file, pass, None, video, runtime_cache, budget, None).await
+    build_with_args(file, pass, None, runtime_cache, budget, None).await
 }
 
 /// Build from the exact file descriptor whose complete digest was observed.
@@ -594,7 +602,6 @@ pub async fn build_from_attested_file(
         file,
         pass,
         Some(source.as_raw_fd()),
-        video,
         runtime_cache,
         budget,
         None,
@@ -624,7 +631,6 @@ where
         file,
         pass,
         Some(source.as_raw_fd()),
-        video,
         runtime_cache,
         budget,
         Some(Arc::new(progress)),
@@ -664,7 +670,6 @@ where
         file,
         pass,
         None,
-        video,
         runtime_cache,
         budget,
         Some(Arc::new(progress)),
@@ -677,13 +682,16 @@ async fn build_with_args(
     file: &MediaFile,
     pass: IndexPass,
     source_fd: Option<SourceFd>,
-    video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
     progress: Option<SharedIndexProgress>,
 ) -> IndexOutcome {
+    let IndexPass {
+        args,
+        dolby_vision,
+        video,
+    } = pass;
     let identity = identity_for(file, video);
-    let IndexPass { args, dolby_vision } = pass;
     // The probe's duration, carried in so a short read is caught. Passed in
     // milliseconds and converted against the pipe's own timescale inside the
     // reader, because the timescale is not known until the moov arrives.
@@ -1092,6 +1100,11 @@ mod tests {
         ));
     }
 
+    /// A probe describing the minimal 23-byte hvcC — the WEB-DL Matroska
+    /// shape whose parameter sets live only in band, and the only one
+    /// `hevc_parameter_set_promotion_required` fires on.
+    const MINIMAL_HVCC_PROBE: &str = r#"{"streams":[{"codec_type":"video","extradata_size":23}]}"#;
+
     /// The argv and the record answer are one recipe, for every identity the
     /// indexer actually enumerates.
     ///
@@ -1104,38 +1117,63 @@ mod tests {
     #[test]
     fn every_index_pass_agrees_with_the_argv_it_carries() {
         let mut removing = 0;
-        for hdr in [
-            Some((
-                "dolby_vision",
-                "Dolby Vision · Profile 7 (HDR10-compatible)",
-            )),
-            Some(("dolby_vision", "Dolby Vision · Profile 5")),
-            Some(("hdr10", "HDR10")),
-            None,
+        let mut promoting = 0;
+        // Each row carries the columns its label describes. Stamping Profile 7
+        // over all of them made the "Profile 5" row a duplicate of the Profile
+        // 7 one — `file_can_convert_to_p81` reads the columns, not the label —
+        // so a real Profile 5 file, which has no compatible base and therefore
+        // one identity fewer, was never enumerated.
+        for (hdr, label, profile, compat) in [
+            (
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+                Some(7i64),
+                Some(1i64),
+            ),
+            (
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 5"),
+                Some(5),
+                Some(0),
+            ),
+            (Some("hdr10"), Some("HDR10"), None, None),
+            (None, None, None, None),
         ] {
-            let mut file = hevc_file(hdr.map(|h| h.0), hdr.map(|h| h.1));
-            file.dolby_vision.profile = Some(7);
-            file.dolby_vision.level = Some(6);
-            file.dolby_vision.bl_compat_id = Some(1);
+            let mut file = hevc_file(hdr, label);
+            file.dolby_vision.profile = profile;
+            file.dolby_vision.level = profile.map(|_| 6i64);
+            file.dolby_vision.bl_compat_id = compat;
             for have_dovi in [false, true] {
                 for convert in [false, true] {
-                    for video in video_identities(&file, None, have_dovi, convert) {
-                        let pass = index_pass(&file, video, None).expect("a describable pass");
-                        let filter = pass
-                            .args
-                            .windows(2)
-                            .find(|pair| pair[0] == "-bsf:v")
-                            .map(|pair| pair[1].clone())
-                            .unwrap_or_default();
-                        let leaves_a_record =
-                            filter.contains("62-63") && !filter.contains("dovi_rpu");
-                        assert_eq!(
-                            pass.dolby_vision == DolbyVisionPass::Remove,
-                            leaves_a_record,
-                            "hdr={hdr:?} dovi={have_dovi} convert={convert} rendered {filter}"
-                        );
-                        if leaves_a_record {
-                            removing += 1;
+                    // `probe_json` both ways. `Some` turns on parameter-set
+                    // promotion, which is the branch of `copy_video_args` that
+                    // hand-rolls its filter list instead of calling
+                    // `hevc_copy_bsf_for_copy` — the one place the two
+                    // builders could most plausibly disagree.
+                    for probe in [None, Some(MINIMAL_HVCC_PROBE)] {
+                        for video in video_identities(&file, probe, have_dovi, convert) {
+                            let pass = index_pass(&file, video, None).expect("a describable pass");
+                            let filter = pass
+                                .args
+                                .windows(2)
+                                .find(|pair| pair[0] == "-bsf:v")
+                                .map(|pair| pair[1].clone())
+                                .unwrap_or_default();
+                            let leaves_a_record =
+                                filter.contains("62-63") && !filter.contains("dovi_rpu");
+                            assert_eq!(
+                                pass.dolby_vision == DolbyVisionPass::Remove,
+                                leaves_a_record,
+                                "hdr={hdr:?} label={label:?} dovi={have_dovi} convert={convert} \
+                                 promote={} rendered {filter}",
+                                video.promotes_parameter_sets()
+                            );
+                            if leaves_a_record {
+                                removing += 1;
+                            }
+                            if video.promotes_parameter_sets() {
+                                promoting += 1;
+                            }
                         }
                     }
                 }
@@ -1145,6 +1183,11 @@ mod tests {
             removing > 0,
             "no enumerated identity reached the removing branch, so the \
              equality above held vacuously"
+        );
+        assert!(
+            promoting > 0,
+            "no enumerated identity reached the parameter-set-promotion \
+             branch, which is the filter list the two builders could disagree in"
         );
     }
 

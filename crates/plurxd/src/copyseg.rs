@@ -26,6 +26,7 @@
 #[cfg(any(test, feature = "live-hls-recovery"))]
 use std::path::{Path, PathBuf};
 
+use plurx_core::domain::MediaFile;
 use plurx_core::fmp4::Init;
 #[cfg(any(test, feature = "live-hls-recovery"))]
 use plurx_core::fmp4::{
@@ -278,8 +279,19 @@ pub async fn run<R: AsyncRead + Unpin>(
     dir: PathBuf,
     session_id: &str,
     limits: Limits,
-    strip_dolby_vision_record: bool,
+    // The source and the options the pipe's argv was built from, not a bool
+    // derived from them by the caller.
+    //
+    // The bool was the whole defect twice over. As a call-site argument it
+    // could be written `false` with every test green; moved into the caller's
+    // body it could still be written `false` with every test green, because
+    // nothing reaches that caller — it spawns a real ffmpeg child. Here it is
+    // one line inside the function this module's end-to-end test drives, so
+    // the answer is finally observed rather than trusted.
+    source: &MediaFile,
+    video: plurx_core::transcode::CopyVideoOptions,
 ) -> Outcome {
+    let strip_dolby_vision_record = video.leaves_a_stale_dolby_vision_record(source);
     match tokio::fs::metadata(&dir).await {
         Ok(metadata) if metadata.is_dir() => {}
         Ok(_) => {
@@ -400,14 +412,29 @@ pub async fn run<R: AsyncRead + Unpin>(
                             // Terminal, deliberately, and not `Unsupported`.
                             //
                             // `Unsupported` is the one classification the actor
-                            // may retry, and the retry it permits is the legacy
-                            // muxer — which renders the same half-strip and
-                            // writes its own `init.mp4` with nothing to remove
-                            // the record from it. Reporting a failed removal
-                            // that way would hand the session to the path this
-                            // removal exists to keep it off, which is worse
-                            // than failing: the viewer would get the stutter
+                            // may retry — `copy_retry_is_unsupported_only_and_\
+                            // successor_classifier_is_recipe_owned` in
+                            // `playback_control` pins that, and pins that
+                            // `InvalidConfiguration` fails outright instead.
+                            // The retry it permits is the legacy muxer, which
+                            // renders the same half-strip and writes its own
+                            // `init.mp4` with nothing to remove the record from
+                            // it. Reporting a failed removal that way would
+                            // hand the session to the path this removal exists
+                            // to keep it off: the viewer would get the stutter
                             // silently instead of an error.
+                            //
+                            // This choice of variant is NOT pinned by a test,
+                            // and it is worth saying so rather than leaving a
+                            // reader to assume it is. Reaching it needs an init
+                            // that parses as an init and whose removal then
+                            // fails, and every corruption that makes
+                            // `shrink_box` refuse — a box size smaller than the
+                            // record it contains — is one `FragmentReader`
+                            // rejects first. The trigger is correspondingly
+                            // unlikely in production: the ancestors are movenc's
+                            // own `moov/trak/mdia/minf/stbl/stsd/hvc1`, all
+                            // 32-bit sized.
                             Err(error) => {
                                 return Outcome::InvalidHevcConfiguration(format!(
                                     "the stale Dolby Vision record could not be removed \
@@ -770,7 +797,15 @@ mod tests {
     async fn session(kind: &str, limits: Limits) -> (tempfile::TempDir, Outcome) {
         let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe(kind);
-        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", limits, false).await;
+        let outcome = run(
+            &feed[..],
+            dir.path().to_path_buf(),
+            "test",
+            limits,
+            &plain().0,
+            plain().1,
+        )
+        .await;
         (dir, outcome)
     }
 
@@ -887,12 +922,19 @@ mod tests {
     #[tokio::test]
     async fn a_stripping_session_writes_an_init_with_no_dolby_vision_claim() {
         let feed = with_a_stale_dolby_vision_record(&plurx_core::testfixtures::pipe("clean-cra"));
-        let served = |strip: bool| {
+        let served = |(source, video): (MediaFile, plurx_core::transcode::CopyVideoOptions)| {
             let feed = feed.clone();
             async move {
                 let dir = tempfile::tempdir().expect("scratch");
-                let outcome =
-                    run(&feed[..], dir.path().to_path_buf(), "test", brisk(), strip).await;
+                let outcome = run(
+                    &feed[..],
+                    dir.path().to_path_buf(),
+                    "test",
+                    brisk(),
+                    &source,
+                    video,
+                )
+                .await;
                 assert!(
                     matches!(outcome, Outcome::Completed(_)),
                     "the session must finish to write an init: {outcome:?}"
@@ -904,13 +946,13 @@ mod tests {
         // The control: without the ask, the record the muxer wrote is served
         // as-is. Without this the assertion below could pass because the
         // fixture never carried a record at all.
-        let kept = served(false).await;
+        let kept = served(plain()).await;
         assert!(
             kept.windows(4).any(|f| f == b"dvcC" || f == b"dvvC"),
             "the fixture must carry a record for this test to mean anything"
         );
 
-        let stripped = served(true).await;
+        let stripped = served(half_stripping()).await;
         assert!(
             !stripped.windows(4).any(|f| f == b"dvcC" || f == b"dvvC"),
             "the session served an init still declaring Dolby Vision"
@@ -918,6 +960,40 @@ mod tests {
         assert!(
             !stripped.windows(4).any(|f| f == b"dby1"),
             "…and one still branding it, which AVPlayer refuses outright"
+        );
+    }
+
+    /// The brand also goes when the record was never ours to remove.
+    ///
+    /// The other half of the same contradiction, and it needs its own session
+    /// because the removal and the sanitizer cover for each other otherwise:
+    /// deleting either one alone leaves the test above green, because whichever
+    /// still runs rewrites the brand. This is the case only the sanitizer
+    /// reaches — a session that does NOT strip, on an ffmpeg whose own
+    /// `dovi_rpu` filter emptied the sample entry while movenc had already
+    /// written `dby1` from the source's side data.
+    #[tokio::test]
+    async fn a_session_that_strips_nothing_still_drops_a_brand_with_no_record() {
+        let feed = with_a_dolby_brand_and_no_record(&plurx_core::testfixtures::pipe("clean-cra"));
+        let dir = tempfile::tempdir().expect("scratch");
+        let outcome = run(
+            &feed[..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::Completed(_)),
+            "the session must finish to write an init: {outcome:?}"
+        );
+        let init = std::fs::read(dir.path().join("init.mp4")).expect("init.mp4");
+        assert!(
+            !init.windows(4).any(|f| f == b"dby1"),
+            "a Dolby Vision brand over a sample entry with no record is the \
+             contradictory init AVPlayer refuses outright"
         );
     }
 
@@ -941,6 +1017,17 @@ mod tests {
         out
     }
 
+    /// A pipe whose init carries the `dby1` brand and no record — what
+    /// ffmpeg's own `dovi_rpu=strip=1` leaves, because it empties the sample
+    /// entry while movenc has already written the brand from the source's
+    /// side data.
+    fn with_a_dolby_brand_and_no_record(feed: &[u8]) -> Vec<u8> {
+        let mut out = feed.to_vec();
+        assert_eq!(&out[4..8], b"ftyp", "the fixture opens with an ftyp");
+        out[8..12].copy_from_slice(b"dby1");
+        out
+    }
+
     /// How many bytes of `feed` the initialization segment occupies.
     fn init_len(feed: &[u8]) -> usize {
         let mut at = 0;
@@ -953,6 +1040,50 @@ mod tests {
             }
         }
         panic!("the fixture has no moov");
+    }
+
+    /// A source and options that ask for nothing: an ordinary HDR10 HEVC copy.
+    /// What most of this module's sessions are.
+    fn plain() -> (MediaFile, plurx_core::transcode::CopyVideoOptions) {
+        (
+            hevc_source(None),
+            plurx_core::transcode::CopyVideoOptions::new(true, false),
+        )
+    }
+
+    /// …and the one shape that asks for the record to go: a Dolby Vision
+    /// source, stripped, on an ffmpeg with no `dovi_rpu`.
+    fn half_stripping() -> (MediaFile, plurx_core::transcode::CopyVideoOptions) {
+        (
+            hevc_source(Some("dolby_vision")),
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+        )
+    }
+
+    fn hevc_source(hdr: Option<&str>) -> MediaFile {
+        MediaFile {
+            id: 1,
+            item_id: 1,
+            path: "/library/film.mkv".into(),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(12_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            video_profile: Some("Main 10".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            hdr: hdr.map(str::to_owned),
+            hdr_format: None,
+            bitrate: Some(1_000_000),
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        }
     }
 
     #[test]
@@ -978,7 +1109,15 @@ mod tests {
         // hidden sample data can complete the configuration.
         replace_hvcc_array_type(&mut feed, 34, 33);
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk(), false).await;
+        let outcome = run(
+            &feed[..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+        )
+        .await;
         let Outcome::InvalidHevcConfiguration(reason) = outcome else {
             panic!("an incomplete emitted hvcC was not terminal: {outcome:?}");
         };
@@ -1155,7 +1294,8 @@ mod tests {
             dir.path().to_path_buf(),
             "test",
             brisk(),
-            false,
+            &plain().0,
+            plain().1,
         )
         .await;
         let Outcome::ReaderFailed { counts, .. } = outcome else {
@@ -1192,7 +1332,8 @@ mod tests {
             dir.path().to_path_buf(),
             "test",
             limits,
-            false,
+            &plain().0,
+            plain().1,
         )
         .await;
         let Outcome::ReaderFailed { counts, .. } = outcome else {
@@ -1227,7 +1368,8 @@ mod tests {
             dir.path().to_path_buf(),
             "test",
             limits,
-            false,
+            &plain().0,
+            plain().1,
         )
         .await;
         let Outcome::ReaderFailed { counts, .. } = outcome else {
@@ -1306,7 +1448,15 @@ mod tests {
         // its parent, which is the malformed case, not the truncated one.
         let head = 28 + 8; // past ftyp and the moov header
         feed[head..head + 4].copy_from_slice(&0xffff_ffffu32.to_be_bytes());
-        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk(), false).await;
+        let outcome = run(
+            &feed[..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+        )
+        .await;
         assert!(
             matches!(outcome, Outcome::ReaderFailed { .. }),
             "a broken moov minted a fallback request: {outcome:?}"
@@ -1361,7 +1511,8 @@ mod tests {
             dir.path().to_path_buf(),
             "test",
             brisk(),
-            false,
+            &plain().0,
+            plain().1,
         )
         .await;
         match outcome {
@@ -1378,7 +1529,15 @@ mod tests {
     #[tokio::test]
     async fn an_empty_pipe_is_reader_failure_not_fallback() {
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(&[][..], dir.path().to_path_buf(), "test", brisk(), false).await;
+        let outcome = run(
+            &[][..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+        )
+        .await;
         assert!(
             matches!(outcome, Outcome::ReaderFailed { .. }),
             "{outcome:?}"
@@ -1388,7 +1547,15 @@ mod tests {
     #[tokio::test]
     async fn a_supported_reader_failure_is_not_a_fallback_request() {
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(BrokenPipe, dir.path().to_path_buf(), "test", brisk(), false).await;
+        let outcome = run(
+            BrokenPipe,
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+        )
+        .await;
         let Outcome::ReaderFailed { reason, counts } = outcome else {
             panic!("a pipe read error was not classified as reader failure: {outcome:?}");
         };
@@ -1402,7 +1569,7 @@ mod tests {
         let dir = crate::test_tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
         std::fs::remove_dir_all(&path).expect("remove fixture session directory");
-        let outcome = run(&feed[..], path, "test", brisk(), false).await;
+        let outcome = run(&feed[..], path, "test", brisk(), &plain().0, plain().1).await;
         assert!(
             matches!(outcome, Outcome::ReaderFailed { .. }),
             "a directory that never existed masqueraded as teardown: {outcome:?}"
@@ -1415,7 +1582,7 @@ mod tests {
         let parent = crate::test_tempdir().expect("tempdir");
         let path = parent.path().join("not-a-directory");
         std::fs::write(&path, b"fixture").expect("write fixture file");
-        let outcome = run(&feed[..], path, "test", brisk(), false).await;
+        let outcome = run(&feed[..], path, "test", brisk(), &plain().0, plain().1).await;
         let Outcome::ReaderFailed { reason, .. } = outcome else {
             panic!("a non-directory scratch path became cancellation: {outcome:?}");
         };
@@ -1432,7 +1599,8 @@ mod tests {
             dir.path().to_path_buf(),
             "test",
             brisk(),
-            false,
+            &plain().0,
+            plain().1,
         )
         .await;
         assert!(
@@ -1451,7 +1619,15 @@ mod tests {
         let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe("clean-cra");
         let trickle = tokio::io::BufReader::with_capacity(1, &feed[..]);
-        let outcome = run(trickle, dir.path().to_path_buf(), "test", brisk(), false).await;
+        let outcome = run(
+            trickle,
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+        )
+        .await;
         assert_eq!(outcome, whole_outcome);
         assert_eq!(playlist(dir.path()), playlist(whole.path()));
         assert_eq!(segment_files(dir.path()), segment_files(whole.path()));
@@ -1518,7 +1694,15 @@ mod tests {
             max_seconds: 15,
             publish_gate_secs: 0,
         };
-        let outcome = run(stdout, dir.path().to_path_buf(), "live", limits, false).await;
+        let outcome = run(
+            stdout,
+            dir.path().to_path_buf(),
+            "live",
+            limits,
+            &plain().0,
+            plain().1,
+        )
+        .await;
         let _ = child.wait().await;
 
         let Outcome::Completed(counts) = outcome else {
