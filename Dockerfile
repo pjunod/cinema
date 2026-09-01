@@ -15,9 +15,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target-cluster-check \
     ! cargo tree --locked -p plurxd -e features \
         | grep -q 'cluster-read-cost-validation' \
-    && CARGO_TARGET_DIR=/src/target-plurxd cargo build --release -p plurxd \
+    && CARGO_TARGET_DIR=/src/target-plurxd cargo build --locked --release -p plurxd \
     && cp target-plurxd/release/plurxd /plurxd \
-    && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --release -p plurx-cluster-check \
+    && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --locked --release -p plurx-cluster-check \
     && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check
 
 FROM debian:bookworm-slim

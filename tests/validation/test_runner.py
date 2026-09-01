@@ -177,6 +177,18 @@ class CatalogCase(unittest.TestCase):
         packaging = scope_for_paths(catalog, ("Cargo.toml", "Dockerfile"))
         self.assertTrue(packaging["release_build"])
         self.assertTrue(packaging["container"])
+        for build_only_path in (
+            "crates/plurxd/build.rs",
+            "vendor/hiqlite/Cargo.toml",
+            "validation/release_dockerfile.py",
+            "tests/operations/test_release_publication.py",
+        ):
+            with self.subTest(build_only_path=build_only_path):
+                self.assertTrue(
+                    scope_for_paths(catalog, (build_only_path,))["release_build"]
+                )
+        unknown = scope_for_paths(catalog, ("unclassified/build-input.xyz",))
+        self.assertTrue(unknown["release_build"])
 
         web = scope_for_paths(catalog, ("crates/plurxd/src/web/app.js",))
         self.assertTrue(web["rust"])
@@ -347,9 +359,12 @@ class CatalogCase(unittest.TestCase):
         ):
             with self.subTest(scheduler_path=scheduler_path):
                 scheduler_scope = scope_for_paths(catalog, (scheduler_path,))
+                expected = {"rust", "cluster_auth"}
+                if scheduler_path == ".github/workflows/ci.yml":
+                    expected.add("release_build")
                 self.assertEqual(
                     {key for key, value in scheduler_scope.items() if value},
-                    {"rust", "cluster_auth"},
+                    expected,
                 )
                 self.assertFalse(scheduler_scope["docs_only"])
 

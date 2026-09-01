@@ -109,6 +109,22 @@ def verify(
     expected_target = _require_text(target, "expected target")
     binary_names = _require_binary_set(binary_names)
 
+    expected_files = {
+        "build-manifest.json",
+        *(name for name in binary_names),
+        *(f"{name}.sha256" for name in binary_names),
+    }
+    try:
+        actual_files = {path.name for path in directory.iterdir()}
+    except OSError as error:
+        raise ValueError(f"cannot inspect release artifact directory: {error}") from error
+    if actual_files != expected_files:
+        missing = sorted(expected_files - actual_files)
+        extra = sorted(actual_files - expected_files)
+        raise ValueError(
+            f"release artifact entry set mismatch: missing={missing}, extra={extra}"
+        )
+
     manifest_path = directory / "build-manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

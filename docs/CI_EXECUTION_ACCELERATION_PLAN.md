@@ -296,6 +296,11 @@ There is no release-binary artifact hand-off between jobs. Pushes and final
 qualifications keep the existing one-day binary retention rule. The manifest
 validator rejects at least: a missing binary, an extra binary, a digest
 mismatch, an architecture mismatch, and a `git_tree` from another candidate.
+The tag publisher uses the same shape: a trusted helper derives a
+binary-export Dockerfile from the exact historical tag, then that
+architecture's job compiles, manifests, packages, pushes by digest, and smokes
+without uploading binaries for a second job to download. Only the two small
+smoked platform-digest receipts cross into alias publication.
 
 The focused source-build lane remains for inputs whose risk exists only in the
 builder stage. Its fail-open selector includes:
@@ -306,6 +311,12 @@ builder stage. Its fail-open selector includes:
 - every Rust `build.rs` and tracked build helper;
 - `validation/release_dockerfile.py` and its tests;
 - unknown paths that the selector cannot classify safely.
+
+The generated binary-export target retains only the tagged Bookworm build
+stage and copies the exact runtime binary set plus `rustc -Vv` identity into a
+scratch export. The runtime build consumes a different generated Dockerfile
+that contains no Rust base, Cargo command, or `COPY --from=build`, proving the
+workspace was compiled once per architecture job.
 
 The smoke wording says stop/start where that is the actual operation. The
 script may change its error text from “restart” to “stop/start”; it does not

@@ -124,12 +124,25 @@ ANDROID_DEVICE_PATHS = (
     "clients/android/settings.gradle.kts",
 )
 
-# Cross-target release builds are evidence about the Rust server and its
-# toolchain. Native-client and documentation changes cannot affect them.
+# The package-smoke job compiles in the Dockerfile's Bookworm stage and then
+# packages those exact exported binaries. Its selector is deliberately broader
+# than ordinary Rust source: any input that can change the builder, binary
+# contract, artifact identity, runtime image, or smoke lifecycle selects it.
 RELEASE_BUILD_PATHS = (
+    ".dockerignore",
+    ".github/workflows/ci.yml",
+    ".github/workflows/publish-release.yml",
     "Cargo.lock",
     "Cargo.toml",
+    "**/Cargo.toml",
+    "**/build.rs",
+    "Dockerfile",
     "rust-toolchain.toml",
+    "scripts/release-package-candidate",
+    "tests/operations/test_release_publication.py",
+    "validation/release_artifact.py",
+    "validation/release_dockerfile.py",
+    "vendor/**",
 )
 
 # The container smoke test additionally owns image, Compose, runtime-config,
@@ -189,13 +202,19 @@ def scope_for_paths(catalog: Catalog, paths: tuple[str, ...]) -> dict[str, bool]
         check.id for check in selected_checks(catalog, selection, profile="ci")
     }
     point_ids = set(selection.point_ids)
+    unknown_paths = tuple(
+        path
+        for path in paths
+        if not any(matches(path, point.paths) for point in catalog.points)
+    )
     scope = {
         "rust": needs_rust_gate(paths),
         "apple": any(matches(path, APPLE_PATHS) for path in paths),
         "android_jvm": any(matches(path, ANDROID_JVM_PATHS) for path in paths),
         "android_device": any(matches(path, ANDROID_DEVICE_PATHS) for path in paths),
         "web_layout": any(matches(path, WEB_LAYOUT_PATHS) for path in paths),
-        "release_build": any(matches(path, RELEASE_BUILD_PATHS) for path in paths),
+        "release_build": bool(unknown_paths)
+        or any(matches(path, RELEASE_BUILD_PATHS) for path in paths),
         "container": any(matches(path, CONTAINER_PATHS) for path in paths),
         "mobile_version": "mobile-version" in check_ids,
         "hiqlite_spike": "core.media" in point_ids,

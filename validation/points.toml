@@ -735,6 +735,7 @@ paths = [
   "scripts/ci-execution-mode",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
+  "scripts/release-package-candidate",
   "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/container-smoke",
   "scripts/registry-push",

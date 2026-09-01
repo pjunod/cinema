@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -8,7 +9,11 @@ import unittest
 
 from validation.release_artifact import BINARIES, create, verify
 from validation.release_aliases import alias_action
-from validation.release_dockerfile import render, required_binaries
+from validation.release_dockerfile import (
+    render,
+    render_binary_export,
+    required_binaries,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,25 +32,20 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertIn('EVENT_REF" != refs/heads/main', workflow)
         self.assertIn("ref: ${{ github.sha }}", workflow)
         self.assertIn("ref: ${{ needs.resolve.outputs.packaging_sha }}", workflow)
-        self.assertIn("container: rust:1.97.1-bookworm", workflow)
-        binary = workflow.split("\n  binary:\n", 1)[1].split("\n  image:\n", 1)[0]
-        self.assertIn("defaults:\n      run:\n        shell: bash", binary)
-        self.assertIn("cargo build --locked --release", workflow)
-        self.assertNotIn("-p plurxd -p plurx-cluster-check", workflow)
-        self.assertIn("cargo build --locked --release -p plurxd", workflow)
+        self.assertNotIn("\n  binary:\n", workflow)
+        image = workflow.split("\n  image:\n", 1)[1].split("\n  reuse:\n", 1)[0]
+        self.assertIn("path: trusted-packaging", image)
         self.assertIn(
-            "cargo build --locked --release -p plurx-cluster-check", workflow
+            'PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging"', image
         )
-        self.assertIn("path: trusted-packaging", binary)
+        self.assertIn("--binary-export", image)
+        self.assertIn("--list-binaries", image)
+        self.assertIn("target: release-binaries", image)
+        self.assertIn("trusted-packaging/scripts/release-package-candidate", image)
+        self.assertNotIn("actions/download-artifact", image)
         self.assertIn(
-            'PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging"', binary
-        )
-        self.assertIn("--list-binaries", binary)
-        self.assertIn("python3 -m validation.release_artifact create", workflow)
-        self.assertIn("python3 -m validation.release_artifact verify", workflow)
-        self.assertIn(
-            "PLURX_BUILD_REF: ${{ needs.resolve.outputs.release_tag }}",
-            workflow,
+            "build-args: PLURX_BUILD_REF=${{ needs.resolve.outputs.release_tag }}",
+            image,
         )
         self.assertIn("GLIBC_$max_glibc; Bookworm provides 2.36", workflow)
 
@@ -154,6 +154,12 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertEqual(required_binaries(source), BINARIES)
+        exporter = render_binary_export(source)
+        self.assertIn("FROM scratch AS release-binaries", exporter)
+        self.assertIn("RUN rustc -Vv > /rustc-version", exporter)
+        for name in BINARIES:
+            self.assertIn(f"COPY --from=build /{name} /{name}", exporter)
+        self.assertNotIn("FROM debian:bookworm-slim", exporter)
 
     def test_trusted_helper_can_inspect_real_isolated_tag_checkouts(self):
         tagged_contracts = {
@@ -188,6 +194,14 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                     )
 
                     self.assertEqual(result.stdout.splitlines(), list(expected))
+                    exporter = render_binary_export(source)
+                    self.assertEqual(
+                        exporter.count("COPY --from=build /plurxd /plurxd"), 1
+                    )
+                    self.assertEqual(
+                        "plurx-cluster-check" in exporter,
+                        "plurx-cluster-check" in expected,
+                    )
 
     def test_release_artifact_binds_both_binaries_to_the_candidate(self):
         with tempfile.TemporaryDirectory() as raw_directory:
@@ -215,6 +229,29 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
 
             self.assertEqual(verified, manifest)
             self.assertEqual(set(verified["binaries"]), set(BINARIES))
+
+            (directory / "unexpected-binary").write_bytes(b"extra")
+            with self.assertRaisesRegex(ValueError, "entry set mismatch"):
+                verify(
+                    directory,
+                    git_tree="1" * 40,
+                    git_commit="2" * 40,
+                    build_ref="v0.3.0",
+                    target="x86_64-unknown-linux-gnu",
+                    binary_names=BINARIES,
+                )
+
+            (directory / "unexpected-binary").unlink()
+            (directory / "unexpected-directory").mkdir()
+            with self.assertRaisesRegex(ValueError, "entry set mismatch"):
+                verify(
+                    directory,
+                    git_tree="1" * 40,
+                    git_commit="2" * 40,
+                    build_ref="v0.3.0",
+                    target="x86_64-unknown-linux-gnu",
+                    binary_names=BINARIES,
+                )
 
     def test_release_artifact_rejects_tampering_and_wrong_tree(self):
         with tempfile.TemporaryDirectory() as raw_directory:
@@ -277,6 +314,93 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
 
             self.assertEqual(verified, manifest)
             self.assertEqual(tuple(verified["binaries"]), ("plurxd",))
+
+    def test_candidate_packager_binds_export_to_exact_source_tree(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            fixture = Path(raw_directory)
+            source = fixture / "source"
+            export = fixture / "export"
+            artifact = fixture / "artifact"
+            source.mkdir()
+            export.mkdir()
+            shutil.copy2(ROOT / "Dockerfile", source / "Dockerfile")
+            subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=CI", "-c", "user.email=ci@example.test", "add", "Dockerfile"],
+                cwd=source,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=CI",
+                    "-c",
+                    "user.email=ci@example.test",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+                cwd=source,
+                check=True,
+            )
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            for name in BINARIES:
+                (export / name).write_bytes(f"binary:{name}".encode())
+            (export / "rustc-version").write_text(
+                "rustc 1.97.1 (fixture)\nbinary: rustc\n", encoding="utf-8"
+            )
+
+            subprocess.run(
+                [
+                    str(ROOT / "scripts/release-package-candidate"),
+                    str(source),
+                    str(ROOT),
+                    str(export),
+                    str(artifact),
+                    "x86_64-unknown-linux-gnu",
+                    commit,
+                    commit,
+                ],
+                check=True,
+            )
+
+            self.assertEqual(
+                {path.name for path in artifact.iterdir()},
+                {
+                    "build-manifest.json",
+                    "plurxd",
+                    "plurxd.sha256",
+                    "plurx-cluster-check",
+                    "plurx-cluster-check.sha256",
+                },
+            )
+            self.assertIn(
+                "COPY --chmod=0755 release-bin/plurxd",
+                (source / "Dockerfile.release").read_text(encoding="utf-8"),
+            )
+            wrong_tree = subprocess.run(
+                [
+                    str(ROOT / "scripts/release-package-candidate"),
+                    str(source),
+                    str(ROOT),
+                    str(export),
+                    str(fixture / "wrong"),
+                    "x86_64-unknown-linux-gnu",
+                    commit,
+                    "f" * 40,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(wrong_tree.returncode, 0)
+            self.assertIn("does not match", wrong_tree.stderr)
 
 
 if __name__ == "__main__":
