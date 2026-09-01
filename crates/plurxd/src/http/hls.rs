@@ -3585,7 +3585,10 @@ async fn subtitle_track_cache(
     // A track that is not there, or is there as a bitmap, will never produce a
     // sidecar however long the client waits. Saying `unavailable` is the whole
     // point of distinguishing it from `warming`.
-    let Some(track) = usize::try_from(index).ok().and_then(|i| file.subtitle_streams.get(i)) else {
+    let Some(track) = usize::try_from(index)
+        .ok()
+        .and_then(|i| file.subtitle_streams.get(i))
+    else {
         return Some(SubtitleTrackCache::Unavailable);
     };
     if !plurx_core::tracks::is_native_text_subtitle(&track.codec) {
