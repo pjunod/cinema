@@ -39,6 +39,25 @@ def write_elf(path: Path, target: str, payload: bytes = b"fixture") -> None:
 
 
 class ReleasePublicationContractCase(unittest.TestCase):
+    def test_release_label_templates_are_valid_docker_go_templates(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        for label in (
+            "org.opencontainers.image.revision",
+            "org.opencontainers.image.version",
+            "org.opencontainers.image.source",
+        ):
+            template = (
+                "docker image inspect --format "
+                f"'{{{{ index .Config.Labels \"{label}\" }}}}'"
+            )
+            self.assertEqual(
+                workflow.count(template),
+                3,
+                f"release workflow must inspect {label} in image, reuse, and alias paths",
+            )
+        self.assertNotIn(r'index .Config.Labels \"', workflow)
+
     def test_release_source_is_immutable_and_bookworm_compatible(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
