@@ -1237,6 +1237,130 @@ async fn media_session_rejoin_preserves_a_present_named_slot_on_invalid_replacem
     .await;
 }
 
+/// An occupied preparation records the predecessor it was derived from. A
+/// later activation may move the pointer while that ledger row remains, but
+/// rejoin must not reinterpret the old slot as work derived from the newer
+/// current generation.
+#[tokio::test]
+async fn media_session_rejoin_cannot_retarget_an_occupied_preparation_after_pointer_advance() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-rejoin-retarget-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create retarget user: {error}"));
+        let playback = "staged-rejoin-retarget-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000d361";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000d362",
+            backend,
+        )
+        .await;
+        let occupied = "00000000-0000-4000-8000-00000000d363";
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                occupied,
+                "00000000-0000-4000-8000-00000000d364",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare retarget fixture: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retarget fixture occupies the slot"));
+
+        let current = "00000000-0000-4000-8000-00000000d365";
+        let activation = MediaSessionActivation {
+            incarnation_id: current.to_owned(),
+            session_id: "00000000-0000-4000-8000-00000000d366".to_owned(),
+            user_id: user.id,
+            playback_id: playback.to_owned(),
+            expected_predecessor_incarnation_id: Some(predecessor.to_owned()),
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: "c".repeat(64),
+            owner_node_id: "staged-rejoin-retarget-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"advanced"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 2_400,
+            lease_expires_at_ms: 900_000,
+        };
+        store
+            .activate_media_session(&activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: advance pointer: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: pointer advance must win"));
+        confirm_media_activation(
+            store.as_ref(),
+            &activation,
+            activation
+                .now_ms
+                .saturating_add(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS),
+            backend,
+        )
+        .await;
+
+        let mut retargeted = staged_preparation(
+            user.id,
+            playback,
+            "00000000-0000-4000-8000-00000000d367",
+            "00000000-0000-4000-8000-00000000d368",
+            current,
+        );
+        retargeted.now_ms = 2_500;
+        let error = store
+            .rejoin_media_session_preparation(occupied, &retargeted)
+            .await
+            .expect_err("an occupied preparation cannot be retargeted to a newer pointer");
+        assert!(
+            error
+                .to_string()
+                .contains("rejoin replacement is no longer admissible"),
+            "{backend}: {error}"
+        );
+        assert_eq!(
+            store
+                .staged_media_session_for_playback(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: ledger after retarget refusal: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: old ledger remains occupied"))
+                .staged_incarnation_id,
+            occupied,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(occupied)
+                .await
+                .unwrap_or_else(|error| panic!(
+                    "{backend}: old route after retarget refusal: {error}"
+                ))
+                .unwrap_or_else(|| panic!("{backend}: old staged route remains"))
+                .state,
+            "active",
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!(
+                    "{backend}: current route after retarget refusal: {error}"
+                ))
+                .unwrap_or_else(|| panic!("{backend}: advanced route remains current"))
+                .incarnation_id,
+            current,
+            "{backend}"
+        );
+    })
+    .await;
+}
+
 /// Rejoin is all-or-nothing even when admission changes after the first
 /// preparation. In particular, fencing its owner cannot leave the old row
 /// retired with no merged successor.

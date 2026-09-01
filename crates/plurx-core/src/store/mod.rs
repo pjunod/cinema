@@ -2540,10 +2540,13 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// crashed before observing the response. `Ok(None)` means the named row
     /// is gone and the caller's own merged preparation is not the staged row;
     /// the caller must re-read the current generation before deriving another
-    /// preparation. If the named row still owns the slot but the replacement
-    /// no longer satisfies prepare admission, the transaction leaves that row
-    /// intact and returns `Err`; silently dropping occupied work is not a CAS
-    /// loss. Malformed identities and database faults are also `Err`.
+    /// preparation. The merged preparation's expected predecessor must equal
+    /// the predecessor recorded by the named ledger row: a pointer advance
+    /// never retargets an occupied slot. If that identity differs, or the
+    /// named row still owns the slot but the replacement no longer satisfies
+    /// prepare admission, the transaction leaves the row intact and returns
+    /// `Err`; silently dropping occupied work is not a CAS loss. Malformed
+    /// identities and database faults are also `Err`.
     async fn rejoin_media_session_preparation(
         &self,
         staged_incarnation_id: &str,

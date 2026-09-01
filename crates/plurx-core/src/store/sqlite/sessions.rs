@@ -1535,6 +1535,16 @@ impl MediaSessionStore for SqliteStore {
                 tx.rollback()?;
                 return Ok(None);
             }
+            let named_predecessor_matches = existing.as_ref().is_some_and(|staged| {
+                staged.expected_predecessor_incarnation_id
+                    == preparation.expected_predecessor_incarnation_id
+            });
+            if !named_predecessor_matches {
+                tx.rollback()?;
+                return Err(StoreError::Task(
+                    "media-session rejoin replacement is no longer admissible".to_owned(),
+                ));
+            }
             let retired = abort_staged_generation(
                 &tx,
                 preparation.user_id,
