@@ -332,21 +332,25 @@ class OperationsContractCase(unittest.TestCase):
         retention_step = ci_build_steps[
             "Retain release binary for push, tag, and qualification runs"
         ]
-        for digest_path in (
+        binary_paths = (
             "target/${{ matrix.target }}/release/plurxd",
             "target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check",
-        ):
-            with self.subTest(release_digest=digest_path):
-                self.assertIn(f"sha256sum {digest_path}", digest_step)
-                self.assertIn(f"> {digest_path}.sha256", digest_step)
-        for retained_path in (
-            "target/${{ matrix.target }}/release/plurxd",
-            "target/${{ matrix.target }}/release/plurxd.sha256",
-            "target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check",
-            "target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check.sha256",
-        ):
-            with self.subTest(retained_release_evidence=retained_path):
-                self.assertIn(retained_path, retention_step)
+        )
+        digest_pairs = re.findall(
+            r"(?m)^\s*sha256sum (.+) \\\n\s*> (.+)$",
+            digest_step,
+        )
+        self.assertEqual(
+            digest_pairs,
+            [(path, f"{path}.sha256") for path in binary_paths],
+        )
+        artifact_paths = retention_step.split("\n          path: |\n", 1)[1].split(
+            "\n          retention-days:", 1
+        )[0]
+        self.assertEqual(
+            [line.strip() for line in artifact_paths.splitlines() if line.strip()],
+            [path for binary in binary_paths for path in (binary, f"{binary}.sha256")],
+        )
 
     def test_ship_routes_real_mobile_targets_through_ansible(self):
         ship = read("scripts/ship")
