@@ -1,8 +1,9 @@
 # M5b status — permanent Dolby Vision Profile 7 conversion
 
-**Status:** reviewed candidate · qualification pending · **Branch:**
-`effort/playback-caps-v2-m5b` · **PR:**
-[#710](https://github.com/pjunod/plurx/pull/710) · **Updated:** 2026-08-31
+**Status:** merged under an owner-approved capacity exception · **PR:**
+[#710](https://github.com/pjunod/plurx/pull/710) · **Frozen head:**
+`0126fcca532cdeac60da3156e47bdce576ec8d17` · **Merge:**
+`03b4daa3473e4f697a1722f9e1a2736421956d18` · **Updated:** 2026-08-31
 
 Companion to [PLAYBACK-CAPS-V2-PLAN.md](PLAYBACK-CAPS-V2-PLAN.md), which owns
 the contract, and [OPERATIONS.md](OPERATIONS.md), which will own the finished
@@ -16,20 +17,21 @@ a forecast.
 > size/mtime identity and the exact storage-object identity captured after the
 > row is leased, before the long conversion begins.
 
-## Progress — one candidate, one complete qualification
+## Progress — one frozen candidate, one documented promotion exception
 
 | Stage | State | Evidence or next action |
 |---|---|---|
 | Isolated workspace | Complete | Fresh clone at `/private/tmp/plurx-m5b.lQcDxU/repo`; the user's existing checkouts are untouched |
-| Integration line | Complete | Current `main` at `e1876cce` is merged into the effort. M5b follows the intervening timeline, analysis, and staged-generation schemas instead of reusing their version numbers; the v0.3.0 release line carries Apple build 103 |
+| Integration line | Complete | The frozen candidate integrated `main` at `3cd41916`. M5b follows the intervening timeline, analysis, and staged-generation schemas instead of reusing their version numbers; the v0.3.0 release line carries Apple build 103 |
 | Store ledger | Complete | SQLite v43/v44 and replicated v24/v25 implement the same conversion and non-cascading replacement-guard lifecycle; direct and fenced SQLite/three-voter contracts, fail-closed migrations, and current/v14 import parity pass |
 | Conversion worker | Complete | The destructive pipeline and crash-convergent cleanup pass 74 focused worker tests. Source-consuming tools inherit the manifest-bound descriptor instead of reopening a pathname; output must prove Profile 8.1 compatibility, explicit RPU presence, and no enhancement layer. Every absent guard/scratch decision requires a durable source-parent witness, terminal ledger deletion requires its `scratch_removed` tombstone, and the exact missing-mount regression proves all three cleanup boundaries fail closed |
 | Operator surface | Complete | The admin guard projection is coherent and bounded. Operations names the filesystem witness, permanent terminal tombstone, missing-mount refusal, private cleanup anchor, dedicated-account trust boundary, and manual-removal prohibition. Shipped mounts remain read-only by default; Compose, systemd, Unraid, and Kubernetes now name the exact opt-in writable-library contract, while the interactive-user macOS LaunchAgent explicitly keeps conversion Off |
 | Image and probes | Complete | Image installs checksum-pinned `dovi_tool` 2.3.3 assets and exact Bookworm MKVToolNix 74.0.0-1; the boot probe names command, version, availability, and an exact refusal reason |
 | Focused evidence | Complete | The pre-integration attestation tree passes 74 worker tests, the focused admin API regression, the unavailable-tools/mount-disappearance state regression, production compile, strict daemon-test Clippy, rustfmt, and patch hygiene. SQLite and three-voter migration/import/queue contracts, the deterministic concurrent queue-outcome race, guarded rollback retirement, operations/package contracts, and web checks pass. After the `main` merge, the full locked workspace compiles and the rebased v42-to-v44 migration success/refusal/retry checks pass |
 | Adversarial review | Complete | Earlier severity-ordered passes found and fixed mount-loss retirement, reusable-path deletion, transient source-path tool reads, incomplete Profile 8.1 verification, legacy guardless claims, non-atomic replicated queue outcomes and upgrade trigger installation, guarded rollback cleanup, retry truth, API bounds, stale status claims, read-only deployment contradictions, the macOS same-uid trust violation, and launchd tool discovery. Final review then found and fixed Off-mode admission bypass, mismatched guard half-commit/import links, pre-proof orphan scratch convergence, parser stuffing, and status truth; three narrow fix re-reviews are clean |
-| Complete qualification | Not started | Run once after review fixes on the frozen effort-to-main candidate; every promotion job and the exact-tree receipt must pass |
-| Merge | Not started | Merge only while the qualified head and `main` base are unchanged |
+| Promotion qualification | Gate failed; owner-approved capacity exception | [Run 33456377027](https://github.com/pjunod/plurx/actions/runs/33456377027) exercised the frozen head after all fixes. Every test suite completed successfully. The amd64 image built and passed start, probe, restart, and reprobe; the final arm64 QEMU cross-build was still compiling dependencies when its 60-minute guard canceled it, with no compiler or pinned-tool failure. The aggregate gate therefore failed as designed, and the owner approved that runner-capacity-only exception before merge |
+| Merge | Complete | PR #710 merged as `03b4daa3`. Its tree `2f13915722527a65c4d546cff4a95d107478c78f` is byte-identical to the frozen head's tree |
+| Post-merge audit | Complete | In [run 33460453428](https://github.com/pjunod/plurx/actions/runs/33460453428), every lane that reached a verdict before supersession passed. PR #738 then advanced `main`, and the workflow's documented main-push concurrency interrupted the replicated Store/topology tests and the Docker arm64 build; the aggregate was canceled without running. This superseded run is not substituted for the frozen candidate evidence above |
 
 ## Guardrails — active throughout the build
 
@@ -124,6 +126,9 @@ a forecast.
 |---|---|
 | Focused local regressions | `cargo test -p plurxd dv_disk::tests:: --no-fail-fast` (74/74); guarded rollback plus unavailable-tools/mount-disappearance scheduler regression (1/1); focused admin API; SQLite and three-voter Store/migration/import contracts plus the concurrent queue-outcome race; rebased SQLite v42-to-v44 migration success/refusal/retry (3/3); `make operations-check`; `make web-check`; `make apple-build-bump`; `cargo check --workspace --locked --all-targets`; `cargo clippy -p plurxd --bin plurxd --tests -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check` |
 | Adversarial review findings | Fixed cleanup lease/slot races, exact-object identity and portable rebaseline persistence, descriptor-bound tool inputs, exact Profile 8.1/RPU verification, bounded residual filesystem I/O and tool/probe output, proof-creation/removal namespace races, private-anchor retirement, failure-cleanup fencing, durable parent syncs, truthful guarded commit, non-cascading orphan lifecycle, missing-tool cleanup scheduling, mounted-filesystem absence attestation, legacy guardless claims, atomic replicated queue outcomes and upgrade trigger installation, guarded rollback convergence, row-id reuse, missing-link fail-closed projection, migration/import failures, retry eligibility truth, atomic Off-mode admission, pre-proof orphan convergence, UI/API request bounds, operator visibility, read-only packaging contradictions, macOS service-account safety, launchd tool discovery, and stale documentation. Three final narrow re-reviews are clean |
-| Main promotion gate | Pending |
-| Qualification receipt | Pending |
-| Merge commit | Pending |
+| Main promotion gate | Failed as designed because the final arm64 QEMU image cross-build exceeded its 60-minute runner guard; the owner approved that capacity exception before merge |
+| Promotion exception record | [PR #710 receipt](https://github.com/pjunod/plurx/pull/710#issuecomment-5486210376): frozen head `0126fcca`, base `3cd41916`, run `33456377027` |
+| Merge commit | `03b4daa3473e4f697a1722f9e1a2736421956d18`; tree matches the frozen candidate exactly |
+
+Runtime rollout is a separate operator activity and is not claimed by this
+repository status record.

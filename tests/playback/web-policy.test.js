@@ -433,6 +433,82 @@ return checkMarkers;`,
   assert.equal(skipped.length, 2);
 });
 
+test("a preview is offered but never auto-skipped", () => {
+  // The preference this gates is spelled "Auto-skip intro & credits" on every
+  // surface that offers it. A preview is the one kind that is new footage each
+  // week, so auto-skipping it would silently widen an opt-in the viewer made
+  // about repeated material. The button still appears — that is the point.
+  const eligible = new Function(
+    `${shippedSource("markerAutoSkipEligible")}
+return markerAutoSkipEligible;`,
+  )();
+  const marker = (kind, provenance) => ({ kind, provenance, chapter: true });
+
+  assert.equal(eligible(marker("credits", "authored")), true);
+  assert.equal(eligible(marker("intro", "authored")), true);
+  assert.equal(eligible(marker("credits", "manual")), true);
+  assert.equal(eligible(marker("preview", "authored")), false);
+  assert.equal(eligible(marker("preview", "manual")), false);
+  // Not a provenance rule — a preview from an older server without provenance
+  // is refused on kind alone.
+  assert.equal(eligible({ kind: "preview", chapter: true }), false);
+  assert.equal(eligible({ kind: "credits", chapter: true }), true);
+});
+
+test("only a tail kind that runs to the end finishes playback", () => {
+  // `kind !== "intro"` also caught `recap`, and any marker whose kind this
+  // build does not recognise. Marking an episode watched and advancing to the
+  // next one is not a thing to do on a kind we cannot name.
+  const finished = [];
+  const sought = [];
+  const skipMarker = new Function(
+    "PLAYER",
+    "document",
+    "clientLog",
+    "reportProgress",
+    "finishPlayback",
+    "seekTo",
+    `${shippedSource("skipMarker")}
+return skipMarker;`,
+  )(
+    { durMs: 100_000, fileId: 7, markers: [] },
+    { getElementById: () => null },
+    () => {},
+    (id, done) => finished.push({ id, done }),
+    () => finished.push("finish"),
+    (sec) => sought.push(sec),
+  );
+
+  const tail = (kind) => ({ kind, start_ms: 97_000, end_ms: 100_000 });
+
+  skipMarker(tail("credits"));
+  assert.deepEqual(finished, [{ id: 7, done: true }, "finish"]);
+
+  finished.length = 0;
+  skipMarker(tail("preview"));
+  assert.deepEqual(finished, [{ id: 7, done: true }, "finish"]);
+
+  // A recap at the end of a file is a mislabelled chapter, not an ending.
+  finished.length = 0;
+  sought.length = 0;
+  skipMarker(tail("recap"));
+  assert.deepEqual(finished, []);
+  assert.deepEqual(sought, [100]);
+
+  // A kind this build does not know must not silently mark an episode watched.
+  finished.length = 0;
+  sought.length = 0;
+  skipMarker(tail("sponsor"));
+  assert.deepEqual(finished, []);
+  assert.deepEqual(sought, [100]);
+
+  finished.length = 0;
+  sought.length = 0;
+  skipMarker({ start_ms: 97_000, end_ms: 100_000 });
+  assert.deepEqual(finished, []);
+  assert.deepEqual(sought, [100]);
+});
+
 test("every server verdict reaches exactly one initial web transport", () => {
   const rows = [
     [{ method: "direct_play" }, "direct"],
