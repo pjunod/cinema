@@ -20,7 +20,7 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `59` — native viewer parity across phone, foldable,
+> Status: **v0.3.0**, build `61` — native viewer parity across phone, foldable,
 > and TV. Build 57 skips the unchanged-recipe retry when the server has
 > already ruled that recipe out, which is the only rung its verdict
 > licenses skipping. Build 46 accepts the temporary live-HLS recovery presentation while

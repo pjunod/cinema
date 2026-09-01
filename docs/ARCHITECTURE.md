@@ -375,7 +375,7 @@ against the API it talks to.
 5. **ffprobe output is treated as ground truth and stored verbatim.** The raw
    JSON is kept so a future decision-engine rule can use a field we didn't parse
    yet, without a re-scan of the whole library.
-6. **Chapters, not fingerprinting, for skip intro/credits.** Real chapter titles
+6. **Chapters, not fingerprinting, for skip intro/credits/preview.** Real chapter titles
    (MakeMKV, anime OP/ED, hand-authored) are honest and cheap — one ffprobe at
    playback start. We do *not* guess an intro from a model, because a "Skip Intro"
    button that jumps into the middle of a scene is worse than no button. A title
@@ -385,6 +385,17 @@ against the API it talks to.
    When no title names the credits we infer the window — from the final chapter
    boundary when it lands in a plausible tail, from the runtime when it does not
    — and the API marks either inference `chapter:false` so the UI can hedge.
+   A labelled *preview* ends that window rather than starting it, and when it
+   leaves no chapter boundary to infer from we say nothing at all: the region
+   before a preview is story, and a guessed "Skip Credits" over it would seek a
+   viewer out of the episode. A chapter earns the preview kind on position and
+   structure, not on its title: it must sit in the credits window *and* be the
+   last thing in the file. Title matching alone is not safe there, because the
+   position bound rejects nothing above 70% and a false preview in the tail
+   does not add a spare button — it deletes the file's real Skip Credits marker
+   and, on the web, offers one that reports the episode watched. A preview is offered but never auto-skipped —
+   it is new footage every week, and the toggle is a standing preference about
+   repeated material.
 7. **The NFO is a seed, not a store.** A Kodi `<basename>.nfo` in a home
    library is read once, at first ingest, to build the item — and after that
    the DB owns the metadata: plurx never re-reads the sidecar and never writes
