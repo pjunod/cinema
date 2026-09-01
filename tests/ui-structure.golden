@@ -1718,6 +1718,7 @@ catalog|player@1280x860|req|GET /api/v1/me|1
 catalog|player@1280x860|req|GET /api/v1/server|1
 catalog|player@1280x860|req|POST /api/v1/client-log|1
 catalog|player@1280x860|req|POST /api/v1/files/<id>/decision|1
+catalog|player@1280x860|req|POST /api/v1/items/<id>/progress|1
 catalog|player@390x780|dom|^ > div#app|1
 catalog|player@390x780|dom|^ > div#modal.modal.open|1
 catalog|player@390x780|dom|a > span.px-lbl[text]|6
@@ -1897,6 +1898,7 @@ catalog|player@390x780|req|GET /api/v1/me|1
 catalog|player@390x780|req|GET /api/v1/server|1
 catalog|player@390x780|req|POST /api/v1/client-log|1
 catalog|player@390x780|req|POST /api/v1/files/<id>/decision|1
+catalog|player@390x780|req|POST /api/v1/items/<id>/progress|1
 catalog|search@1280x860|dom|^ > div#app|1
 catalog|search@1280x860|dom|a > span.px-lbl[text]|3
 catalog|search@1280x860|dom|a > svg.px-ico[aria-hidden=true]|3
@@ -3756,6 +3758,7 @@ classic|player@1280x860|req|GET /api/v1/me|1
 classic|player@1280x860|req|GET /api/v1/server|1
 classic|player@1280x860|req|POST /api/v1/client-log|1
 classic|player@1280x860|req|POST /api/v1/files/<id>/decision|1
+classic|player@1280x860|req|POST /api/v1/items/<id>/progress|1
 classic|player@390x780|dom|^ > div#app|1
 classic|player@390x780|dom|^ > div#modal.modal.open|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -3902,6 +3905,7 @@ classic|player@390x780|req|GET /api/v1/me|1
 classic|player@390x780|req|GET /api/v1/server|1
 classic|player@390x780|req|POST /api/v1/client-log|1
 classic|player@390x780|req|POST /api/v1/files/<id>/decision|1
+classic|player@390x780|req|POST /api/v1/items/<id>/progress|1
 classic|search@1280x860|dom|^ > div#app|1
 classic|search@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|search@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
@@ -5754,6 +5758,7 @@ theater|player@1280x860|req|GET /api/v1/me|1
 theater|player@1280x860|req|GET /api/v1/server|1
 theater|player@1280x860|req|POST /api/v1/client-log|1
 theater|player@1280x860|req|POST /api/v1/files/<id>/decision|1
+theater|player@1280x860|req|POST /api/v1/items/<id>/progress|1
 theater|player@390x780|dom|^ > div#app|1
 theater|player@390x780|dom|^ > div#modal.modal.open|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -5907,6 +5912,7 @@ theater|player@390x780|req|GET /api/v1/me|1
 theater|player@390x780|req|GET /api/v1/server|1
 theater|player@390x780|req|POST /api/v1/client-log|1
 theater|player@390x780|req|POST /api/v1/files/<id>/decision|1
+theater|player@390x780|req|POST /api/v1/items/<id>/progress|1
 theater|search@1280x860|dom|^ > div#app|1
 theater|search@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|search@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
