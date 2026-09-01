@@ -42,7 +42,7 @@ use futures_util::StreamExt;
 use plurx_core::domain::MediaFile;
 use plurx_core::fmp4::{segment_name, CutPolicy, FragmentReader, Init, Unit};
 use plurx_core::segplan::{
-    FragmentIndex, PlanEntryKind, SegmentPlan, SourceIdentity, TrackDurations,
+    AnnotationKind, FragmentIndex, PlanEntryKind, SegmentPlan, SourceIdentity, TrackDurations,
 };
 use plurx_core::store::Store;
 use plurx_core::transcode::{
@@ -57,7 +57,7 @@ use crate::copyseg::sanitize_stale_dolby_brand;
 use crate::ffmpeg::ffmpeg_bin;
 use crate::prodexec::{next_step, Producer, Step, Termination};
 use crate::prodrun::{Performed, ProducerSlot};
-use crate::prodsched::{decide, Demand, Position, WorkingSet, AHEAD_HORIZON_SECONDS};
+use crate::prodsched::{decide, Action, Demand, Position, WorkingSet, AHEAD_HORIZON_SECONDS};
 use crate::renditiondir::{InitIdentity, InitRefused, RenditionDir, INIT_NAME};
 use crate::titlestore::{Budgets, Manifest, ReaderWindow, SegState};
 use crate::transcode::{session_log_id, SessionKind, SessionRequest};
@@ -84,6 +84,11 @@ const DORMANT_RENDITION_TTL: Duration = Duration::from_secs(1800);
 const TERMINAL_TOMBSTONE_RETENTION: Duration = Duration::from_secs(60);
 const TERMINAL_ROUTE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 const TERMINAL_ROUTE_CONFIRM_FANOUT: usize = 16;
+/// Begin speculative marker work this many seconds of playback time before a
+/// stored marker. The distance in film time is scaled by the client's current
+/// playback rate, so 2x playback still gives the producer the same wall-clock
+/// opportunity to warm the destination.
+const MARKER_PREWARM_APPROACH_WALL_MS: i64 = 60_000;
 /// One maintenance pass confirms at most one fanout wave. The cursor below
 /// advances the window so a persistently unavailable route cannot starve
 /// later tombstones while also preventing an unavailable Store from turning
@@ -448,12 +453,272 @@ struct Recipe {
 }
 
 /// One attached reader, in plan indexes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Reader {
     /// The furthest segment this session has asked for.
     frontier: u32,
     /// The last segment actually served — the eviction window's playhead.
     last_served: Option<u32>,
+    /// Per-playback provenance for speculative marker production. This is
+    /// deliberately separate from the ordinary reader frontier: moving the
+    /// frontier to a marker would make speculative work outrank the playhead.
+    marker_prewarm: Arc<StdMutex<MarkerPrewarmLedger>>,
+}
+
+impl Reader {
+    fn new(frontier: u32) -> Self {
+        Self {
+            frontier,
+            last_served: None,
+            marker_prewarm: Arc::new(StdMutex::new(MarkerPrewarmLedger::default())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerDestination {
+    kind: AnnotationKind,
+    start_ms: i64,
+    end_ms: i64,
+    target_entry: u32,
+    window_end_entry: u32,
+    eligible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrewarmedRange {
+    first: u32,
+    last: u32,
+}
+
+impl PrewarmedRange {
+    fn covers(self, entry: u32) -> bool {
+        (self.first..=self.last).contains(&entry)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MarkerPrewarmRecord {
+    destination: MarkerDestination,
+    requested_sequence: u64,
+    active: bool,
+    settled: bool,
+    produced: Vec<PrewarmedRange>,
+}
+
+impl MarkerPrewarmRecord {
+    fn credited(&self, entry: u32) -> bool {
+        self.produced.iter().any(|range| range.covers(entry))
+    }
+
+    fn credit(&mut self, entry: u32) {
+        if entry > self.destination.window_end_entry || self.credited(entry) {
+            return;
+        }
+        if let Some(last) = self.produced.last_mut() {
+            if last.last.checked_add(1) == Some(entry) {
+                last.last = entry;
+                return;
+            }
+        }
+        self.produced.push(PrewarmedRange {
+            first: entry,
+            last: entry,
+        });
+    }
+}
+
+/// Bounded provenance ledger for one playback. There can be at most one row
+/// per stored annotation (the store itself caps that set), and rows survive
+/// settlement so a later marker seek can prove who produced its landing
+/// segment rather than consulting the ordinary forward buffer.
+#[derive(Debug, Default)]
+struct MarkerPrewarmLedger {
+    enabled: bool,
+    records: Vec<MarkerPrewarmRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerPrewarmCandidate {
+    target_entry: u32,
+    window_end_entry: u32,
+    target_materialized: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerPrewarmOutcome {
+    hit: bool,
+    destination: MarkerDestination,
+    requested_sequence: Option<u64>,
+    produced_range: Option<PrewarmedRange>,
+}
+
+struct MarkerPrewarmControl {
+    rendition: Arc<Rendition>,
+    snapshot: crate::playback_control::PlaybackDemandSnapshot,
+    previous_snapshot: Option<crate::playback_control::PlaybackDemandSnapshot>,
+    destinations: Vec<MarkerDestination>,
+    sequence: u64,
+    file_id: i64,
+    kind: SessionKind,
+}
+
+impl MarkerPrewarmLedger {
+    fn update_control(
+        &mut self,
+        sequence: u64,
+        snapshot: &crate::playback_control::PlaybackDemandSnapshot,
+        destinations: &[MarkerDestination],
+        manifest: &Manifest,
+    ) {
+        self.enabled = snapshot.demand == crate::playback_control::PlaybackDemand::Active
+            && snapshot.render_state != crate::playback_control::RenderState::Seeking
+            && snapshot.playback_rate > 0.0;
+        if !self.enabled {
+            self.deactivate();
+            return;
+        }
+
+        let approach_ms = (MARKER_PREWARM_APPROACH_WALL_MS as f64 * snapshot.playback_rate)
+            .round()
+            .clamp(0.0, i64::MAX as f64) as i64;
+        let approach_end_ms = snapshot.position_ms.saturating_add(approach_ms);
+        let mut any_approaching = false;
+        for destination in destinations.iter().copied().filter(|destination| {
+            destination.eligible
+                && snapshot.position_ms < destination.end_ms
+                && destination.start_ms <= approach_end_ms
+        }) {
+            any_approaching = true;
+            if manifest
+                .state(destination.target_entry)
+                .is_some_and(SegState::is_materialized)
+            {
+                continue;
+            }
+            if let Some(existing) = self
+                .records
+                .iter_mut()
+                .find(|record| record.destination.end_ms == destination.end_ms)
+            {
+                if existing.settled && !existing.credited(destination.target_entry) {
+                    *existing = MarkerPrewarmRecord {
+                        destination,
+                        requested_sequence: sequence,
+                        active: false,
+                        settled: false,
+                        produced: Vec::new(),
+                    };
+                }
+                continue;
+            }
+            self.records.push(MarkerPrewarmRecord {
+                destination,
+                requested_sequence: sequence,
+                active: false,
+                settled: false,
+                produced: Vec::new(),
+            });
+        }
+        self.enabled &= any_approaching;
+        if !self.enabled {
+            self.deactivate();
+        }
+    }
+
+    fn candidate(&mut self, manifest: &Manifest) -> Option<MarkerPrewarmCandidate> {
+        if !self.enabled {
+            return None;
+        }
+        let mut candidate: Option<MarkerPrewarmCandidate> = None;
+        for record in &mut self.records {
+            if record.settled {
+                continue;
+            }
+            let target_materialized = manifest
+                .state(record.destination.target_entry)
+                .is_some_and(SegState::is_materialized);
+            if target_materialized && !record.credited(record.destination.target_entry) {
+                // Ordinary playback or another reader won the race. It is
+                // useful media, but it is not this prewarm's production.
+                record.active = false;
+                record.settled = true;
+                continue;
+            }
+            if target_materialized {
+                let has_window_gap = manifest
+                    .next_gap(record.destination.target_entry)
+                    .is_some_and(|gap| gap <= record.destination.window_end_entry);
+                if !has_window_gap {
+                    record.active = false;
+                    record.settled = true;
+                    continue;
+                }
+            }
+            let proposed = MarkerPrewarmCandidate {
+                target_entry: record.destination.target_entry,
+                window_end_entry: record.destination.window_end_entry,
+                target_materialized,
+            };
+            if candidate.is_none_or(|current| proposed.target_entry < current.target_entry) {
+                candidate = Some(proposed);
+            }
+        }
+        candidate
+    }
+
+    fn activate(&mut self, candidate: MarkerPrewarmCandidate) {
+        for record in &mut self.records {
+            record.active = !record.settled
+                && record.destination.target_entry == candidate.target_entry
+                && record.destination.window_end_entry == candidate.window_end_entry;
+        }
+    }
+
+    fn deactivate(&mut self) {
+        for record in &mut self.records {
+            record.active = false;
+        }
+    }
+
+    fn credit(&mut self, entry: u32) {
+        for record in self.records.iter_mut().filter(|record| record.active) {
+            record.credit(entry);
+        }
+    }
+
+    fn settle_skip(
+        &mut self,
+        destination: MarkerDestination,
+        manifest: &Manifest,
+    ) -> MarkerPrewarmOutcome {
+        self.enabled = false;
+        self.deactivate();
+        let record = self
+            .records
+            .iter_mut()
+            .find(|record| record.destination.end_ms == destination.end_ms);
+        let (requested_sequence, produced_range) = record.map_or((None, None), |record| {
+            record.settled = true;
+            (
+                Some(record.requested_sequence),
+                record
+                    .produced
+                    .iter()
+                    .copied()
+                    .find(|range| range.covers(destination.target_entry)),
+            )
+        });
+        MarkerPrewarmOutcome {
+            hit: produced_range.is_some()
+                && manifest
+                    .state(destination.target_entry)
+                    .is_some_and(SegState::is_materialized),
+            destination,
+            requested_sequence,
+            produced_range,
+        }
+    }
 }
 
 /// The rendition's init identity and where it came from — `from_disk` marks a
@@ -536,13 +801,10 @@ impl Rendition {
 
     #[cfg(test)]
     async fn attach_reader(&self, session_id: &str, frontier: u32) {
-        self.readers.lock().await.insert(
-            session_id.to_string(),
-            Reader {
-                frontier,
-                last_served: None,
-            },
-        );
+        self.readers
+            .lock()
+            .await
+            .insert(session_id.to_string(), Reader::new(frontier));
         *self.dormant_since.lock().expect("dormant lock") = None;
     }
 
@@ -559,7 +821,7 @@ impl Rendition {
         let readers = self.readers.lock().await;
         readers
             .values()
-            .map(|reader| reader_window(*reader, self.seconds_per_segment))
+            .map(|reader| reader_window(reader, self.seconds_per_segment))
             .collect()
     }
 }
@@ -812,6 +1074,12 @@ struct Session {
     last_touch: StdMutex<Instant>,
     /// Owner-local sequence fence kept separate from media-object touches.
     control: StdMutex<crate::playback_control::ControlState>,
+    /// Stored, source-fenced marker boundaries projected onto this rendition's
+    /// immutable plan. No request-path probing or detector runs here.
+    marker_destinations: Vec<MarkerDestination>,
+    /// Previous accepted snapshot, used only to deduplicate a seeking
+    /// transition. Replays never replace it or emit a second outcome.
+    last_control_snapshot: Option<crate::playback_control::PlaybackDemandSnapshot>,
     /// Exact terminal acknowledgement retained after a client `demand=end`
     /// tombstones the attachment. Other lifecycle causes never populate it.
     control_end: Option<crate::playback_control::LocalControlResult>,
@@ -1105,6 +1373,8 @@ impl VodServe {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -1331,6 +1601,52 @@ impl VodServe {
                 suspended: Some(false),
                 reason: reason.map(str::to_owned),
                 extra: Some(r#"{"presentation":"vod"}"#.to_owned()),
+                ..plurx_core::domain::PlaybackEvent::default()
+            },
+        );
+    }
+
+    fn emit_marker_prewarm(
+        &self,
+        session_id: &str,
+        file_id: i64,
+        kind: SessionKind,
+        outcome: MarkerPrewarmOutcome,
+    ) {
+        let produced_range = outcome.produced_range.map(|range| {
+            serde_json::json!({
+                "first_entry": range.first,
+                "last_entry": range.last,
+            })
+        });
+        crate::telemetry::emit(
+            Arc::clone(&self.shared.store),
+            plurx_core::domain::PlaybackEvent {
+                at_unix_ms: now_ms(),
+                session_id: Some(session_log_id(session_id)),
+                file_id: Some(file_id),
+                event: "marker_prewarm".to_owned(),
+                level: Some("info".to_owned()),
+                method: Some(
+                    match kind {
+                        SessionKind::Copy { .. } => "remux",
+                        SessionKind::Transcode { .. } => "transcode",
+                    }
+                    .to_owned(),
+                ),
+                encoder: Some("vod".to_owned()),
+                detail: Some(if outcome.hit { "hit" } else { "miss" }.to_owned()),
+                extra: Some(
+                    serde_json::json!({
+                        "presentation": "vod",
+                        "marker": outcome.destination.kind.as_str(),
+                        "destination_ms": outcome.destination.end_ms,
+                        "destination_entry": outcome.destination.target_entry,
+                        "requested_sequence": outcome.requested_sequence,
+                        "produced_range": produced_range,
+                    })
+                    .to_string(),
+                ),
                 ..plurx_core::domain::PlaybackEvent::default()
             },
         );
@@ -1603,6 +1919,13 @@ impl VodServe {
         let rendition = Arc::clone(&attachment.rendition);
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
+        let marker_destinations = stored_marker_destinations(
+            self.shared.store.as_ref(),
+            file,
+            &rendition.plan,
+            rendition.seconds_per_segment,
+        )
+        .await;
         let _release_transition = if let Some(release_fence) = fences.release_fence {
             let guard = release_fence.transition.lock_owned().await;
             if release_fence.released.load(Acquire) {
@@ -1637,6 +1960,8 @@ impl VodServe {
             incarnation: Arc::new(()),
             last_touch: StdMutex::new(Instant::now()),
             control: StdMutex::new(crate::playback_control::ControlState::default()),
+            marker_destinations,
+            last_control_snapshot: None,
             control_end: None,
             control_end_snapshot: None,
             terminal_cleanup: None,
@@ -1683,13 +2008,7 @@ impl VodServe {
                 }
             }
         }
-        replacement_readers.insert(
-            session_id.clone(),
-            Reader {
-                frontier: start_entry,
-                last_served: None,
-            },
-        );
+        replacement_readers.insert(session_id.clone(), Reader::new(start_entry));
         *rendition.dormant_since.lock().expect("dormant lock") = None;
         sessions.insert(session_id.clone(), replacement);
         drop(_serving_transition);
@@ -2564,6 +2883,7 @@ impl VodServe {
                 action: crate::playback_control::ControlAction,
                 platform: crate::playback_control::ClientPlatform,
                 lease_expires_at_unix_ms: i64,
+                marker_prewarm: Option<MarkerPrewarmControl>,
             },
         }
         let outcome = {
@@ -2622,6 +2942,22 @@ impl VodServe {
                     kind: session.kind,
                 })
             } else {
+                let marker_prewarm = (disposition
+                    == crate::playback_control::ControlDisposition::Accepted)
+                    .then(|| MarkerPrewarmControl {
+                        rendition: session
+                            .live_rendition()
+                            .map(Arc::clone)
+                            .expect("a live VOD control has a rendition"),
+                        snapshot: control.snapshot.clone(),
+                        previous_snapshot: session
+                            .last_control_snapshot
+                            .replace(control.snapshot.clone()),
+                        destinations: session.marker_destinations.clone(),
+                        sequence: control.sequence,
+                        file_id: session.file.id,
+                        kind: session.kind,
+                    });
                 let mut last_touch = session.last_touch.lock().expect("touch lock");
                 if disposition == crate::playback_control::ControlDisposition::Accepted {
                     *last_touch = Instant::now();
@@ -2635,6 +2971,7 @@ impl VodServe {
                     platform,
                     lease_expires_at_unix_ms: crate::media_sessions::unix_ms()
                         .saturating_add(remaining_ms),
+                    marker_prewarm,
                 })
             }
         };
@@ -2642,44 +2979,71 @@ impl VodServe {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
-        let (disposition, accepted_sequence, action, platform, lease_expires_at_unix_ms) =
-            match outcome {
-                AppliedControl::End {
-                    result,
-                    terminal_commit,
-                    cleanup,
+        let (
+            disposition,
+            accepted_sequence,
+            action,
+            platform,
+            lease_expires_at_unix_ms,
+            marker_prewarm,
+        ) = match outcome {
+            AppliedControl::End {
+                result,
+                terminal_commit,
+                cleanup,
+                rendition,
+                file_id,
+                height,
+                kind,
+            } => {
+                self.spawn_terminal_cleanup(
+                    control.session_id.to_owned(),
+                    Arc::clone(&cleanup),
                     rendition,
                     file_id,
                     height,
                     kind,
-                } => {
-                    self.spawn_terminal_cleanup(
-                        control.session_id.to_owned(),
-                        Arc::clone(&cleanup),
-                        rendition,
-                        file_id,
-                        height,
-                        kind,
-                        Terminal::Deleted,
-                        terminal_commit,
-                    );
-                    cleanup.wait().await;
-                    return Some(Ok(result));
-                }
-                AppliedControl::Live {
-                    disposition,
-                    accepted_sequence,
-                    action,
-                    platform,
-                    lease_expires_at_unix_ms,
-                } => (
-                    disposition,
-                    accepted_sequence,
-                    action,
-                    platform,
-                    lease_expires_at_unix_ms,
-                ),
-            };
+                    Terminal::Deleted,
+                    terminal_commit,
+                );
+                cleanup.wait().await;
+                return Some(Ok(result));
+            }
+            AppliedControl::Live {
+                disposition,
+                accepted_sequence,
+                action,
+                platform,
+                lease_expires_at_unix_ms,
+                marker_prewarm,
+            } => (
+                disposition,
+                accepted_sequence,
+                action,
+                platform,
+                lease_expires_at_unix_ms,
+                marker_prewarm,
+            ),
+        };
+        if let Some(marker_prewarm) = marker_prewarm {
+            if let Some(outcome) = apply_marker_prewarm_control(
+                &marker_prewarm.rendition,
+                control.session_id,
+                marker_prewarm.sequence,
+                &marker_prewarm.snapshot,
+                marker_prewarm.previous_snapshot.as_ref(),
+                &marker_prewarm.destinations,
+            )
+            .await
+            {
+                self.emit_marker_prewarm(
+                    control.session_id,
+                    marker_prewarm.file_id,
+                    marker_prewarm.kind,
+                    outcome,
+                );
+            }
+        }
         drop(lifecycle_guard);
         let status = self.status(control.session_id).await?;
         Some(Ok(crate::playback_control::LocalControlResult {
@@ -3951,12 +4315,16 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
     if let Some(blocked) = shared.pool.blocked_on(&rendition.key) {
         demands.push(Demand::waiting_on(blocked));
     }
-    {
+    let prewarm_ledgers = {
         let readers = rendition.readers.lock().await;
         for reader in readers.values() {
             demands.push(Demand::idle_at(reader.frontier));
         }
-    }
+        readers
+            .values()
+            .map(|reader| Arc::clone(&reader.marker_prewarm))
+            .collect::<Vec<_>>()
+    };
     let belief = rendition.slot.belief().await;
     let mut manifest = rendition.manifest.lock().await;
     let position = Position {
@@ -3969,7 +4337,7 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             held: matches!(belief, Producer::Stopped { .. }),
         },
     };
-    let action = decide(&manifest, &demands, position);
+    let action = decide_with_marker_prewarm(&manifest, &demands, position, &prewarm_ledgers);
     let step = next_step(belief, action);
     match step {
         Step::Nothing => {}
@@ -4029,6 +4397,69 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             tracing::warn!(rendition = %rendition.key, "producer stalled: {hold:?}");
         }
     }
+}
+
+fn decide_with_marker_prewarm(
+    manifest: &Manifest,
+    demands: &[Demand],
+    position: Position,
+    prewarm_ledgers: &[Arc<StdMutex<MarkerPrewarmLedger>>],
+) -> Action {
+    let foreground_action = decide(manifest, demands, position);
+    // Real reader demand is always decided first. Only an idle producer or
+    // one that would otherwise stop at the ordinary ahead horizon may spend
+    // work on a marker destination. Capacity holds never evict or make room
+    // for speculative bytes.
+    let selected_prewarm = if matches!(
+        foreground_action,
+        crate::prodsched::Action::Idle
+            | crate::prodsched::Action::Suspend {
+                reason: crate::prodsched::Hold::Ahead { .. },
+                ..
+            }
+    ) {
+        prewarm_ledgers
+            .iter()
+            .filter_map(|ledger| {
+                ledger
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .candidate(manifest)
+            })
+            .min_by_key(|candidate| candidate.target_entry)
+    } else {
+        None
+    };
+    let action = selected_prewarm
+        .map(|candidate| {
+            let demand = if candidate.target_materialized {
+                Demand::idle_at(candidate.target_entry)
+            } else {
+                // This internal demand gets the same repositioning decision a
+                // blocked GET would, but only after the foreground decision
+                // above proved the playhead has no work left.
+                Demand::waiting_on(candidate.target_entry)
+            };
+            (candidate, decide(manifest, &[demand], position))
+        })
+        .filter(|(_, action)| {
+            matches!(
+                action,
+                crate::prodsched::Action::Produce { .. }
+                    | crate::prodsched::Action::Reposition { .. }
+            )
+        });
+    for ledger in prewarm_ledgers {
+        let mut ledger = ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((candidate, _)) = action {
+            ledger.activate(candidate);
+        } else {
+            ledger.deactivate();
+        }
+    }
+    action.map_or(foreground_action, |(_, action)| action)
 }
 
 /// Spawn a real generation positioned at plan entry `at` and hand its stdout
@@ -4542,6 +4973,23 @@ impl vodgen::Sink for RenditionSink {
             self.rendition.clear_demand(entry);
         }
         self.rendition.slot.produced(entry).await;
+        // Credit only work the driver explicitly attributed to prewarm. A
+        // segment that was already present, arrived for a blocked GET, or was
+        // ordinary ahead-fill never reaches an active ledger row here.
+        let prewarm_ledgers = self
+            .rendition
+            .readers
+            .lock()
+            .await
+            .values()
+            .map(|reader| Arc::clone(&reader.marker_prewarm))
+            .collect::<Vec<_>>();
+        for ledger in prewarm_ledgers {
+            ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .credit(entry);
+        }
         self.shared.pool.satisfy(&self.rendition.key, entry);
         self.rendition.kick();
         Ok(())
@@ -4675,6 +5123,106 @@ fn entry_containing(plan: &SegmentPlan, start_seconds: f64) -> u32 {
     video_entry_at_or_before(plan, at)
 }
 
+/// Apply one accepted control snapshot to the playback's speculative ledger.
+/// The marker seek result is settled before the reader frontier moves, using
+/// only ranges credited by `RenditionSink` and still materialized at this
+/// exact instant.
+async fn apply_marker_prewarm_control(
+    rendition: &Arc<Rendition>,
+    session_id: &str,
+    sequence: u64,
+    snapshot: &crate::playback_control::PlaybackDemandSnapshot,
+    previous_snapshot: Option<&crate::playback_control::PlaybackDemandSnapshot>,
+    destinations: &[MarkerDestination],
+) -> Option<MarkerPrewarmOutcome> {
+    let ledger = rendition
+        .readers
+        .lock()
+        .await
+        .get(session_id)
+        .map(|reader| Arc::clone(&reader.marker_prewarm))?;
+    let manifest = rendition.manifest.lock().await;
+    let mut ledger = ledger
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    if snapshot.render_state == crate::playback_control::RenderState::Seeking {
+        ledger.enabled = false;
+        ledger.deactivate();
+        let target_ms = snapshot.seek_target_ms?;
+        let repeated = previous_snapshot.is_some_and(|previous| {
+            previous.render_state == crate::playback_control::RenderState::Seeking
+                && previous.seek_target_ms == Some(target_ms)
+        });
+        if repeated {
+            return None;
+        }
+        let destination = destinations
+            .iter()
+            .copied()
+            .find(|destination| destination.end_ms == target_ms)?;
+        return Some(ledger.settle_skip(destination, &manifest));
+    }
+
+    ledger.update_control(sequence, snapshot, destinations, &manifest);
+    drop(ledger);
+    drop(manifest);
+    rendition.kick();
+    None
+}
+
+/// Read only the persisted annotation index and project each exact client
+/// landing time onto the immutable VOD plan. A store miss is intentionally a
+/// no-op: marker probing belongs to `/decision`, and prewarm must never add a
+/// detector or source read to the control path.
+async fn stored_marker_destinations(
+    store: &dyn Store,
+    file: &MediaFile,
+    plan: &SegmentPlan,
+    seconds_per_segment: f64,
+) -> Vec<MarkerDestination> {
+    let source = crate::http::stream::annotation_source_identity(file);
+    let set = match store.timeline_annotation_set(file.id, &source).await {
+        Ok(Some(set)) => set,
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(
+                file_id = file.id,
+                %error,
+                "could not read timeline annotations for marker prewarm"
+            );
+            return Vec::new();
+        }
+    };
+    let per = if seconds_per_segment > 0.0 {
+        seconds_per_segment
+    } else {
+        1.0
+    };
+    let window_entries = ((f64::from(AHEAD_HORIZON_SECONDS) / per).ceil() as u32).max(1);
+    let last_entry = plan.entries.last().map_or(0, |entry| entry.index);
+    let mut destinations = set
+        .annotations
+        .into_iter()
+        .map(|annotation| {
+            let target_entry = entry_containing(plan, annotation.end_ms as f64 / 1_000.0);
+            MarkerDestination {
+                kind: annotation.kind,
+                start_ms: annotation.start_ms,
+                end_ms: annotation.end_ms,
+                target_entry,
+                window_end_entry: target_entry.saturating_add(window_entries).min(last_entry),
+                eligible: matches!(
+                    annotation.kind,
+                    AnnotationKind::Intro | AnnotationKind::Credits
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+    destinations.sort_by_key(|destination| (destination.start_ms, destination.end_ms));
+    destinations
+}
+
 /// The last VIDEO entry at or before `at` — the only kind a generation may be
 /// positioned on. Audio-tail entries carry no video boundary of their own
 /// ([`crate::titlestore::Manifest::is_audio_tail`]'s "a scheduler must not
@@ -4708,7 +5256,7 @@ fn plan_duration_ms(plan: &SegmentPlan) -> i64 {
 /// and a window that forgot it would let `make_room` evict the just-
 /// materialized seek target before the waiter opens it — a Pending → produce
 /// → evict livelock under working-set pressure.
-fn reader_window(reader: Reader, seconds_per_segment: f64) -> ReaderWindow {
+fn reader_window(reader: &Reader, seconds_per_segment: f64) -> ReaderWindow {
     let playhead = reader.last_served.unwrap_or(reader.frontier);
     let frontier = reader
         .last_served
@@ -4997,7 +5545,10 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering::AcqRel};
 
-    use plurx_core::store::{FragmentIndexStore, MediaSessionStore as _, SqliteStore};
+    use plurx_core::store::{
+        FragmentIndexStore, LibraryStore as _, MediaSessionStore as _, MediaStore as _,
+        SqliteStore, TimelineAnnotationStore as _,
+    };
     use plurx_core::testfixtures;
 
     use crate::fragindex::IndexOutcome;
@@ -5316,6 +5867,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -5351,6 +5904,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: Some(cleanup),
@@ -5438,6 +5993,276 @@ mod tests {
             warned_admission: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
         })
+    }
+
+    #[tokio::test]
+    async fn stored_marker_prewarm_is_subordinate_and_hits_only_its_own_production() {
+        use plurx_core::segplan::{
+            AnnotationProvenance, TimelineAnnotation, TimelineAnnotationSet,
+        };
+
+        let base = crate::test_tempdir().expect("base");
+        let rendition = synthetic_rendition(base.path()).await;
+        let file = &rendition.recipe.file;
+        let duration_ms = file.duration_ms.expect("synthetic duration");
+        assert!(
+            duration_ms > 400_000,
+            "fixture must contain the credits marker"
+        );
+        let store = SqliteStore::open_in_memory().expect("store");
+        let library = store
+            .create_library(&plurx_core::domain::NewLibrary {
+                name: "Markers".to_owned(),
+                kind: plurx_core::domain::LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&plurx_core::domain::NewItem {
+                library_id: library.id,
+                kind: plurx_core::domain::ItemKind::Movie,
+                parent_id: None,
+                title: "Marker fixture".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let stored_file_id = store
+            .upsert_file(
+                item,
+                &file.path.to_string_lossy(),
+                file.size,
+                file.mtime,
+                &plurx_core::domain::ProbeResult {
+                    duration_ms: Some(duration_ms),
+                    ..plurx_core::domain::ProbeResult::default()
+                },
+            )
+            .await
+            .expect("file");
+        assert_eq!(stored_file_id, file.id);
+        let annotations = TimelineAnnotationSet {
+            source_identity: crate::http::stream::annotation_source_identity(file),
+            generation_id: uuid::Uuid::new_v4().to_string(),
+            version: 1,
+            annotations: vec![TimelineAnnotation {
+                kind: AnnotationKind::Credits,
+                start_ticks: 200_000,
+                end_ticks: 400_000,
+                timescale: 1_000,
+                start_ms: 200_000,
+                end_ms: 400_000,
+                provenance: AnnotationProvenance::Authored,
+                confidence_millis: 1_000,
+                detector_version: "stored-marker-fixture".to_owned(),
+                manual_override_revision: None,
+            }],
+        };
+        store
+            .put_timeline_annotation_set(file.id, duration_ms, &annotations)
+            .await
+            .expect("store exact marker");
+        let destinations = stored_marker_destinations(
+            &store,
+            file,
+            &rendition.plan,
+            rendition.seconds_per_segment,
+        )
+        .await;
+        assert_eq!(destinations.len(), 1);
+        let destination = destinations[0];
+        assert_eq!(destination.end_ms, 400_000);
+        assert!(destination.eligible);
+
+        let frontier = entry_containing(&rendition.plan, 150.0);
+        assert!(destination.target_entry > frontier);
+        rendition.attach_reader("prewarmed", frontier).await;
+        let ledger = rendition.readers.lock().await["prewarmed"]
+            .marker_prewarm
+            .clone();
+        let mut rendering = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        rendering.position_ms = 150_000;
+        rendering.buffered_from_ms = Some(145_000);
+        rendering.buffered_through_ms = 170_000;
+        assert!(apply_marker_prewarm_control(
+            &rendition,
+            "prewarmed",
+            7,
+            &rendering,
+            None,
+            &destinations,
+        )
+        .await
+        .is_none());
+        assert_eq!(
+            ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .records
+                .len(),
+            1,
+            "the approaching stored marker registers one bounded request"
+        );
+
+        let ledgers = vec![Arc::clone(&ledger)];
+        let mut manifest = rendition.manifest.lock().await;
+        let empty_position = Position {
+            produced_through: None,
+            positioned_at: None,
+            seconds_per_segment: rendition.seconds_per_segment,
+            working_set: WorkingSet::default(),
+        };
+        assert_eq!(
+            decide(&manifest, &[Demand::idle_at(frontier)], empty_position),
+            Action::Reposition { to: frontier },
+            "the foreground fixture itself starts at the playhead window"
+        );
+        assert_eq!(
+            decide_with_marker_prewarm(
+                &manifest,
+                &[Demand::idle_at(frontier)],
+                empty_position,
+                &ledgers,
+            ),
+            Action::Reposition { to: frontier },
+            "ordinary playhead fill wins before speculative work"
+        );
+        assert!(
+            !ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .records[0]
+                .active
+        );
+
+        let horizon = ((f64::from(AHEAD_HORIZON_SECONDS) / rendition.seconds_per_segment).ceil()
+            as u32)
+            .max(1);
+        let foreground_end = frontier.saturating_add(horizon);
+        assert!(foreground_end < destination.target_entry);
+        for entry in 0..=foreground_end {
+            assert!(manifest.materialize(entry, 1_000, i64::from(entry)));
+        }
+        let filled_position = Position {
+            produced_through: Some(foreground_end),
+            positioned_at: Some(0),
+            seconds_per_segment: rendition.seconds_per_segment,
+            working_set: WorkingSet {
+                used_bytes: 2,
+                budget_bytes: 1,
+                held: false,
+            },
+        };
+        assert!(matches!(
+            decide_with_marker_prewarm(
+                &manifest,
+                &[Demand::idle_at(frontier)],
+                filled_position,
+                &ledgers,
+            ),
+            Action::Suspend {
+                reason: crate::prodsched::Hold::Ahead { .. },
+                ..
+            }
+        ));
+        assert!(
+            !ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .records[0]
+                .active,
+            "prewarm never makes room under pressure"
+        );
+
+        let unpressured = Position {
+            working_set: WorkingSet::default(),
+            ..filled_position
+        };
+        assert_eq!(
+            decide_with_marker_prewarm(
+                &manifest,
+                &[Demand::idle_at(frontier)],
+                unpressured,
+                &ledgers,
+            ),
+            Action::Produce {
+                next: foreground_end + 1
+            },
+            "the same bounded scheduler advances toward the target only after foreground is full"
+        );
+        assert!(manifest.materialize(destination.target_entry, 1_000, 1));
+        ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .credit(destination.target_entry);
+        drop(manifest);
+
+        let mut seeking = rendering.clone();
+        seeking.position_ms = destination.end_ms;
+        seeking.buffered_from_ms = Some(destination.end_ms);
+        seeking.buffered_through_ms = destination.end_ms;
+        seeking.render_state = crate::playback_control::RenderState::Seeking;
+        seeking.seek_target_ms = Some(destination.end_ms);
+        let hit = apply_marker_prewarm_control(
+            &rendition,
+            "prewarmed",
+            8,
+            &seeking,
+            Some(&rendering),
+            &destinations,
+        )
+        .await
+        .expect("a marker seek emits an outcome");
+        assert!(hit.hit);
+        assert_eq!(hit.requested_sequence, Some(7));
+        assert!(hit
+            .produced_range
+            .is_some_and(|range| range.covers(destination.target_entry)));
+        assert!(
+            apply_marker_prewarm_control(
+                &rendition,
+                "prewarmed",
+                9,
+                &seeking,
+                Some(&seeking),
+                &destinations,
+            )
+            .await
+            .is_none(),
+            "continued seeking snapshots do not double-count one skip"
+        );
+
+        // The rendition now contains the landing segment, but it was produced
+        // for another playback. This is the rejected ordinary-buffer
+        // definition made adversarial: the second playback must still miss.
+        rendition.attach_reader("ordinary-buffer", frontier).await;
+        apply_marker_prewarm_control(
+            &rendition,
+            "ordinary-buffer",
+            1,
+            &rendering,
+            None,
+            &destinations,
+        )
+        .await;
+        let miss = apply_marker_prewarm_control(
+            &rendition,
+            "ordinary-buffer",
+            2,
+            &seeking,
+            Some(&rendering),
+            &destinations,
+        )
+        .await
+        .expect("an uncredited marker seek emits a miss");
+        assert!(!miss.hit);
+        assert_eq!(miss.produced_range, None);
     }
 
     async fn create(
@@ -6825,6 +7650,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -6904,6 +7731,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -6946,6 +7775,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(replacement_touch),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -7018,7 +7849,7 @@ mod tests {
                 .lock()
                 .await
                 .get("sess-a")
-                .copied()
+                .cloned()
                 .expect("replacement reader")
                 .last_served,
             None,
@@ -7524,6 +8355,8 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
                 terminal_cleanup: None,
@@ -7599,13 +8432,9 @@ mod tests {
         // The reader just fetched segment 5 — exactly the window the driver
         // would build for it.
         let seconds_per_segment = plan.duration_ticks() as f64 / 16_000.0 / plan.len() as f64;
-        let window = reader_window(
-            Reader {
-                frontier: 6,
-                last_served: Some(5),
-            },
-            seconds_per_segment,
-        );
+        let mut reader = Reader::new(6);
+        reader.last_served = Some(5);
+        let window = reader_window(&reader, seconds_per_segment);
         let freed = dir
             .make_room(&mut manifest, &[window], u64::MAX)
             .await
@@ -7630,13 +8459,9 @@ mod tests {
         // A forward seek's blocked GET moves the frontier past the playhead;
         // the window's high edge must follow it, or `make_room` evicts the
         // just-materialized seek target before the waiter opens it.
-        let seeked = reader_window(
-            Reader {
-                frontier: 30,
-                last_served: Some(5),
-            },
-            seconds_per_segment,
-        );
+        let mut seeked_reader = Reader::new(30);
+        seeked_reader.last_served = Some(5);
+        let seeked = reader_window(&seeked_reader, seconds_per_segment);
         assert!(
             seeked.covers(30),
             "the blocked seek target sits inside its own reader's window"

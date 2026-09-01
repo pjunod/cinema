@@ -814,9 +814,28 @@ pub async fn client_log(
             Some(session_id) => transcode.session_status(session_id).await,
             None => None,
         };
+        // VOD marker outcomes are emitted by the authoritative control path
+        // after it verifies the exact seek target against prewarm's own
+        // production ledger. The shipped clients still send their historical
+        // hard-coded `miss`; retaining it here would double-count every VOD
+        // skip and overwrite the fact the server just proved. Direct play has
+        // no VOD session and therefore keeps reporting `miss` unchanged.
+        if suppress_vod_marker_prewarm_placeholder(
+            &event,
+            info.as_ref().map(|info| info.presentation),
+        ) {
+            return;
+        }
         emit_client_playback_event(store, event, info.as_ref(), network);
     });
     StatusCode::NO_CONTENT
+}
+
+fn suppress_vod_marker_prewarm_placeholder(
+    event: &PlaybackEvent,
+    presentation: Option<&str>,
+) -> bool {
+    event.event == "marker_prewarm" && presentation == Some("vod")
 }
 
 fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::SessionInfo) {
@@ -3721,6 +3740,24 @@ mod tests {
             delivered_bytes: Some(4_096),
             delivered_bps: Some(8_000),
         }
+    }
+
+    #[test]
+    fn only_vod_suppresses_the_clients_placeholder_prewarm_miss() {
+        let event = PlaybackEvent {
+            event: "marker_prewarm".to_owned(),
+            detail: Some("miss".to_owned()),
+            ..PlaybackEvent::default()
+        };
+        assert!(suppress_vod_marker_prewarm_placeholder(&event, Some("vod")));
+        assert!(
+            !suppress_vod_marker_prewarm_placeholder(&event, Some("live-recovery")),
+            "a live session has no server-side destination prewarm"
+        );
+        assert!(
+            !suppress_vod_marker_prewarm_placeholder(&event, None),
+            "direct play has no server session and must keep emitting miss"
+        );
     }
 
     #[test]
