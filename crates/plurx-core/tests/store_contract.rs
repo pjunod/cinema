@@ -8158,6 +8158,10 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
         })
         .await
         .expect("v20 migration fixture library");
+    migrated
+        .set_library_dv_conversion_mode(library.id, DvConversionMode::Manual)
+        .await
+        .expect("enable manual conversion for v20 migration fixture");
     let item = migrated
         .insert_item(&NewItem {
             library_id: library.id,
@@ -9913,16 +9917,30 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
     // Model a committed v22 shape whose marker acknowledgement was lost. The
     // daemon must advance only the marker instead of replaying ALTER/rename
     // statements against the already-current tables.
-    assert_eq!(
-        client
-            .execute(
+    let results = client
+        .txn([
+            // Bootstrap installs the current v25 shape. Rewind every schema
+            // object added after v22 so the fixture represents a committed
+            // v22 analysis shape with only its v21 marker acknowledgement
+            // missing; otherwise later migrations collide with current DDL.
+            (
+                "DROP TRIGGER IF EXISTS dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
+            ("DROP TABLE dv_conversions", hiqlite::params!()),
+            ("DROP TABLE media_session_preparations", hiqlite::params!()),
+            (
                 "UPDATE cluster_meta SET schema_version = 21 WHERE singleton = 1",
                 hiqlite::params!(),
-            )
-            .await
-            .expect("stamp stale analysis schema marker"),
-        1
-    );
+            ),
+        ])
+        .await
+        .expect("construct stale analysis schema marker fixture");
+    results
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit stale analysis schema marker fixture");
     let migrated_telemetry = cluster._root.path().join("analysis-schema-migrated.db");
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &migrated_telemetry)
         .await
