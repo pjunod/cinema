@@ -28,9 +28,10 @@ The required path currently pays for the same work more than once:
   they exercise separable risks;
 - the Store integration binary contains a large dynamic inventory and runs
   with `--test-threads=1`, making one runner the critical path;
-- a native macOS ARM runner exists, but it cannot establish a Linux ARM
-  runtime contract without a Linux VM and must not become a required always-on
-  dependency.
+- the initial runner inventory had only a native macOS ARM runner, which could
+  not establish a Linux ARM runtime contract. Implementation added two
+  isolated native Linux ARM virtual machines so required arm64 packaging no
+  longer depends on x86 emulation.
 
 The repaired baseline produced a 6 minute 8 second warm fast-Rust gate. The
 first policy preflight exceeded its 3-minute job limit only after its tests had
@@ -447,7 +448,7 @@ merge.
 | M0 | Host/runner/label/disk audit | Two distinct non-voter x86 hosts selected; all voters excluded from heavy label |
 | M1 | Cargo cache + fail-safe mode | warm lane reuses local objects; unsafe prune roots rejected |
 | M2 | named BuildKit + registry contract | warm image reuses layers; size and floor visible in summary |
-| M3 | native ARM shadow | 10 consecutive eligible native package/probe passes; laptop absence never blocks |
+| M3 | native Linux ARM pool | two isolated runners online; an exact cold package/probe passes without QEMU |
 | M4 | same-job package smoke | both architectures compile/package/probe exact two-binary manifest |
 | M5 | Store/topology split | command/inventory union equals legacy; separate receipts retained |
 | M6 | two Store shards | exact union/disjointness validator passes; wall time improves without missing tests |
@@ -501,7 +502,8 @@ These are explicitly separate efforts:
 
 - shared three-voter fixtures across tests;
 - automatic runner provisioning or access-key distribution;
-- making a laptop-hosted ARM lane required;
+- replacing the laptop-hosted required ARM pool with dedicated always-on ARM
+  hardware;
 - changing release publication away from its current GitHub-hosted Bookworm
   contract;
 - changing production fleet deployment/build roles;

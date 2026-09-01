@@ -612,6 +612,7 @@ jobs:
     concurrency:
       group: ${{ vars.CI_RUNNER_MODE != 'github' && 'plurx-apple-silicon-heavy' || format('plurx-apple-{0}', github.run_id) }}
       cancel-in-progress: false
+      queue: max
     timeout-minutes: 30
     env:
       DEVELOPER_DIR: ${{ vars.CI_RUNNER_MODE == 'github' && '/Applications/Xcode_26.6.app/Contents/Developer' || '/Applications/Xcode.app/Contents/Developer' }}
@@ -877,6 +878,7 @@ jobs:
     concurrency:
       group: ${{ vars.CI_RUNNER_MODE != 'github' && matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy' || format('plurx-package-{0}-{1}', github.run_id, matrix.arch) }}
       cancel-in-progress: false
+      queue: max
     needs: [scope, preflight]
     if: needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true'
     timeout-minutes: 90

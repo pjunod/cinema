@@ -968,6 +968,9 @@ class OperationsContractCase(unittest.TestCase):
         package = jobs["package_smoke"]
         apple = jobs["apple"]
         pr_gate = jobs["pr_gate"]
+        matrix = package.split("    steps:\n", 1)[0].split("include:\n", 1)[1]
+        amd64 = matrix.split("- arch: amd64", 1)[1].split("- arch: arm64", 1)[0]
+        arm64 = matrix.split("- arch: arm64", 1)[1]
 
         self.assertIn(
             "runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && "
@@ -979,6 +982,24 @@ class OperationsContractCase(unittest.TestCase):
             "self_hosted_runs_on: "
             "'[\"self-hosted\",\"Linux\",\"ARM64\",\"lab\",\"ci-arm64\"]'",
             package,
+        )
+        self.assertIn("target: x86_64-unknown-linux-gnu", amd64)
+        self.assertIn("kernel_machine: x86_64", amd64)
+        self.assertIn("docker_machine: x86_64", amd64)
+        self.assertIn("github_runs_on: '[\"ubuntu-24.04\"]'", amd64)
+        self.assertIn(
+            "self_hosted_runs_on: "
+            "'[\"self-hosted\",\"Linux\",\"X64\",\"lab\",\"general\",\"high-cpu\"]'",
+            amd64,
+        )
+        self.assertIn("target: aarch64-unknown-linux-gnu", arm64)
+        self.assertIn("kernel_machine: aarch64", arm64)
+        self.assertIn("docker_machine: aarch64", arm64)
+        self.assertIn("github_runs_on: '[\"ubuntu-24.04-arm\"]'", arm64)
+        self.assertIn(
+            "self_hosted_runs_on: "
+            "'[\"self-hosted\",\"Linux\",\"ARM64\",\"lab\",\"ci-arm64\"]'",
+            arm64,
         )
         self.assertNotIn("docker/setup-qemu-action", package)
         proof = workflow_step_blocks(package)[
@@ -1000,6 +1021,8 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("plurx-apple-silicon-heavy", apple)
         self.assertIn("cancel-in-progress: false", package)
         self.assertIn("cancel-in-progress: false", apple)
+        self.assertIn("queue: max", package)
+        self.assertIn("queue: max", apple)
 
     def test_ci_caches_are_keyed_to_what_they_cache(self):
         workflow = read(".github/workflows/ci.yml")
