@@ -1549,6 +1549,95 @@ async fn hiqlite_media_session_rejoin_cannot_resurrect_an_aborted_preparation() 
     );
 }
 
+/// A successful Raft proposal is the rejoin linearization point. A commit may
+/// consume the new ledger before the rejoin reads its projection, but that
+/// later advancement cannot turn the successful rejoin into a database-like
+/// error.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn hiqlite_media_session_rejoin_survives_a_post_proposal_commit() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated post-proposal state");
+    let user = store
+        .create_user("staged-rejoin-post-proposal-user", "hash", false)
+        .await
+        .expect("create post-proposal user");
+    let playback = "staged-rejoin-post-proposal-playback";
+    let predecessor = "00000000-0000-4000-8000-00000000d461";
+    current_media_session(
+        &store,
+        user.id,
+        playback,
+        predecessor,
+        "00000000-0000-4000-8000-00000000d462",
+        "hiqlite",
+    )
+    .await;
+    let occupied = "00000000-0000-4000-8000-00000000d463";
+    store
+        .prepare_media_session(&staged_preparation(
+            user.id,
+            playback,
+            occupied,
+            "00000000-0000-4000-8000-00000000d464",
+            predecessor,
+        ))
+        .await
+        .expect("prepare post-proposal fixture")
+        .expect("post-proposal fixture occupies the slot");
+    let mut merged = staged_preparation(
+        user.id,
+        playback,
+        "00000000-0000-4000-8000-00000000d465",
+        "00000000-0000-4000-8000-00000000d466",
+        predecessor,
+    );
+    merged.now_ms = 2_500;
+    merged.recipe_json = r#"{"subtitle":"burn:8"}"#.to_owned();
+
+    let (proposal_complete, release_projection) =
+        HiqliteAuthStore::validation_pause_next_rejoin_after_proposal();
+    let rejoin_store = store.clone();
+    let rejoin_preparation = merged.clone();
+    let rejoin = tokio::spawn(async move {
+        rejoin_store
+            .rejoin_media_session_preparation(occupied, &rejoin_preparation)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), proposal_complete)
+        .await
+        .expect("rejoin reaches post-proposal seam")
+        .expect("rejoin publishes post-proposal seam");
+    let committed = store
+        .commit_media_session_preparation(user.id, playback, &merged.incarnation_id, 3_000, 900_000)
+        .await
+        .expect("commit merged replacement")
+        .expect("merged replacement commits while rejoin projection is paused");
+    release_projection
+        .send(())
+        .expect("release rejoin projection");
+    let route = rejoin
+        .await
+        .expect("join paused rejoin task")
+        .expect("post-proposal advancement is not an error")
+        .expect("successful rejoin still returns its exact route");
+    assert_eq!(route.incarnation_id, merged.incarnation_id);
+    assert_eq!(route, committed.route);
+    assert!(
+        store
+            .staged_media_session_for_playback(user.id, playback)
+            .await
+            .expect("inspect committed replacement ledger")
+            .is_none(),
+        "the concurrent commit consumed the replacement ledger"
+    );
+}
+
 /// Acceptance 5 — commit advances the exact expected pointer, once.
 #[tokio::test]
 async fn media_session_commit_advances_the_exact_expected_pointer_once() {

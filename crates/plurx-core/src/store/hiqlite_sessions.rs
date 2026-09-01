@@ -28,6 +28,12 @@ type RejoinLedgerReadPause = (
     tokio::sync::oneshot::Receiver<()>,
 );
 
+#[cfg(feature = "hiqlite-contract-tests")]
+type RejoinProposalPause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
 /// Contract-only seam which freezes one activation after its optimistic
 /// pointer read and before its replicated transaction is submitted. It lets
 /// the three-voter contract deterministically order activation+renewal inside
@@ -43,6 +49,12 @@ static ACTIVATION_POINTER_READ_PAUSE: std::sync::LazyLock<
 static REJOIN_LEDGER_READ_PAUSE: std::sync::LazyLock<
     std::sync::Mutex<Option<RejoinLedgerReadPause>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// Contract-only seam for advancing the replacement after rejoin's Raft
+/// proposal commits but before its durable projection is read back.
+#[cfg(feature = "hiqlite-contract-tests")]
+static REJOIN_PROPOSAL_PAUSE: std::sync::LazyLock<std::sync::Mutex<Option<RejoinProposalPause>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 #[cfg(feature = "hiqlite-contract-tests")]
 impl HiqliteAuthStore {
@@ -73,6 +85,20 @@ impl HiqliteAuthStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(pause.is_none(), "rejoin ledger-read pause already armed");
+        *pause = Some((reached_sender, release_receiver));
+        (reached_receiver, release_sender)
+    }
+
+    pub fn validation_pause_next_rejoin_after_proposal() -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached_sender, reached_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        let mut pause = REJOIN_PROPOSAL_PAUSE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(pause.is_none(), "rejoin proposal pause already armed");
         *pause = Some((reached_sender, release_receiver));
         (reached_receiver, release_sender)
     }
@@ -1627,6 +1653,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
+        let statement_count = statements.len();
         let results = match self.client().txn(statements).await {
             Ok(results) => results,
             Err(error) => {
@@ -1668,40 +1695,43 @@ impl MediaSessionStore for HiqliteAuthStore {
                 return Err(database_error(error));
             }
         };
+        if changed.len() != statement_count {
+            return Err(StoreError::Task(
+                "replicated media-session rejoin returned an incomplete result vector".to_owned(),
+            ));
+        }
 
-        // Classify the merged preparation first. An all-zero proposal can be
-        // either a lost race or a retry after a successful rejoin, and only
-        // the exact durable projection distinguishes them.
-        let staged = staged_row(self, preparation.user_id, &preparation.playback_id).await?;
-        let staged_is_ours = staged.is_some_and(|staged| {
-            staged.staged_incarnation_id == preparation.incarnation_id
-                && staged.expected_predecessor_incarnation_id
-                    == preparation.expected_predecessor_incarnation_id
-        });
-        let route = if staged_is_ours {
-            route_by(self, "incarnation_id", &preparation.incarnation_id)
+        #[cfg(feature = "hiqlite-contract-tests")]
+        {
+            let proposal_pause = {
+                let mut pause = REJOIN_PROPOSAL_PAUSE
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                pause.take()
+            };
+            if let Some((reached, release)) = proposal_pause {
+                let _ = reached.send(());
+                let _ = release.await;
+            }
+        }
+
+        // The chained statement outputs make any nonzero result vector proof
+        // that this proposal staged the exact replacement. Only that fresh
+        // proposal may project from the route after the ledger has already
+        // advanced: an all-zero loss must still prove an exact staged replay.
+        let fresh_rejoin = changed.iter().any(|affected| *affected != 0);
+        if fresh_rejoin {
+            let route = route_by(self, "incarnation_id", &preparation.incarnation_id)
                 .await?
-                .filter(|route| preparation_route_matches(route, preparation))
-        } else {
-            None
-        };
-        let named_was_replaced = route_by(self, "incarnation_id", staged_incarnation_id)
-            .await?
-            .is_some_and(|route| {
-                route.state == "ended"
-                    && route.terminal_reason.as_deref() == Some("replaced")
-                    && route.user_id == preparation.user_id
-                    && route.playback_id == preparation.playback_id
-            });
-        if let Some(route) = route.filter(|_| named_was_replaced) {
-            return Ok(Some(route));
+                .filter(|route| preparation_route_matches(route, preparation));
+            if let Some(route) = route {
+                return Ok(Some(route));
+            }
         }
-        if changed.iter().all(|affected| *affected == 0) {
-            return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation).await;
-        }
-        Err(StoreError::Task(
-            "replicated media-session rejoin committed without its exact projection".to_owned(),
-        ))
+        // An all-zero replay/loss and a successful proposal whose replacement
+        // was already consumed are both settled by the same durable rule:
+        // exact staged replay => Some, named retained => Err, neither => None.
+        classify_rejoin_after_attempt(self, staged_incarnation_id, preparation).await
     }
 
     async fn staged_media_session_for_playback(
