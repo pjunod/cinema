@@ -336,6 +336,7 @@ pub(super) async fn exercise_topology(
     )
     .await?;
     let applied_index_before = metric_index(cluster, leader).await?;
+    let payload_counts_before = applied_payload_counts(cluster, leader).await?;
     let resource_baseline = if let Some(identities) = evidence.resources {
         Some(
             collect_named_resources(cluster, &voters, identities, true)
@@ -372,6 +373,40 @@ pub(super) async fn exercise_topology(
         raw_acknowledged_write_round_trip_us.push(duration_us(started.elapsed()));
     }
     let applied_index_after = metric_index(cluster, leader).await?;
+    // Account for every entry the write window applied, by payload kind, so a
+    // per-write entry-cost violation names the contaminating entry (a blank
+    // leader-establishment commit, a membership change, or a genuinely
+    // unaccounted normal write) instead of only counting it at verify time.
+    let payload_counts_after = applied_payload_counts(cluster, leader).await?;
+    let window_entries = applied_index_after.saturating_sub(applied_index_before);
+    let (window_blank, window_membership, window_normal) = (
+        payload_counts_after
+            .blank
+            .saturating_sub(payload_counts_before.blank),
+        payload_counts_after
+            .membership
+            .saturating_sub(payload_counts_before.membership),
+        payload_counts_after
+            .normal
+            .saturating_sub(payload_counts_before.normal),
+    );
+    if window_entries != workload.operations {
+        bail!(
+            "topology write window did not cost exactly one Raft entry per acknowledged \
+             write: {} operations advanced the applied index by {window_entries} \
+             ({applied_index_before} -> {applied_index_after}); the window applied \
+             {window_blank} blank, {window_membership} membership, and {window_normal} \
+             normal entries; leader term {} before, {} after",
+            workload.operations,
+            payload_counts_before.current_term,
+            payload_counts_after.current_term
+        );
+    }
+    println!(
+        "cluster-check: topology write window accounted: operations={} blank={window_blank} \
+         membership={window_membership} normal={window_normal} term={}..{}",
+        workload.operations, payload_counts_before.current_term, payload_counts_after.current_term
+    );
     let applied_indexes = wait_for_applied(cluster, &voters, applied_index_after).await?;
     let (
         raw_local_catalogue_read_us,
@@ -693,6 +728,40 @@ async fn observe_corpus(
         });
     }
     Ok(observations)
+}
+
+/// One node's applied Raft entries broken down by payload kind, with the term
+/// its metrics reported at the sample. Read from local metrics only — no
+/// quorum operation — so sampling it cannot itself append an entry.
+struct PayloadCounts {
+    blank: u64,
+    membership: u64,
+    normal: u64,
+    current_term: u64,
+}
+
+async fn applied_payload_counts(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+) -> Result<PayloadCounts> {
+    match cluster
+        .request(node_id, Request::AppliedPayloadCounts)
+        .await?
+    {
+        Response::AppliedPayloadCounts {
+            blank,
+            membership,
+            normal,
+            current_term,
+            ..
+        } => Ok(PayloadCounts {
+            blank,
+            membership,
+            normal,
+            current_term,
+        }),
+        response => bail!("topology voter {node_id} omitted payload counts: {response:?}"),
+    }
 }
 
 async fn metric_index(cluster: &mut ClusterProcesses, node_id: u64) -> Result<u64> {

@@ -283,6 +283,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         Some("singleton-attempt") => run_singleton_takeover_attempt().await,
         Some("serving-partition") => run_serving_partition_case().await,
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
+        Some("watermark-experiment") => run_watermark_double_read_experiment(args.get(2)).await,
         Some("inspect-wal") => run_inspect_wal(&args[2..]),
         Some("topology") => {
             let output = args.get(2).map(PathBuf::from).unwrap_or_else(|| {
@@ -4958,6 +4959,74 @@ async fn offline_summary(
         .await
 }
 
+/// The two-call watermark experiment from the exact-count investigation:
+/// against an idle three-voter cluster, prove whether `db_quorum_watermark`
+/// itself ever advances the committed index. Two consecutive reads with no
+/// writes between them must observe the same index unless the term changed —
+/// an election commits a blank leader-establishment entry, which is a
+/// different mechanism and is reported separately. Fails only on a same-term
+/// move, because that would prove the watermark read appends per call and
+/// every exact-count drill that anchors on it mis-measures.
+async fn run_watermark_double_read_experiment(pairs: Option<&String>) -> Result<()> {
+    let pairs: u64 = match pairs {
+        Some(raw) => raw
+            .parse()
+            .context("watermark-experiment takes an optional pair count")?,
+        None => 50,
+    };
+    println!("cluster-check: watermark double-read experiment over {pairs} pairs");
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("watermark experiment data root")?;
+    let (mut cluster, _) = start_cluster_with_port_retry(&executable, root.path(), 3).await?;
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+    let leader = cluster.leader().await?;
+    // Let the cluster go quiet. No write is issued past this point, so any
+    // index movement below came from raft itself, not from the workload.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut moved_same_term = 0_u64;
+    let mut moved_new_term = 0_u64;
+    for pair in 0..pairs {
+        let first = quorum_watermark_observation(&mut cluster, leader).await?;
+        let second = quorum_watermark_observation(&mut cluster, leader).await?;
+        if second.committed_index != first.committed_index {
+            if second.term == first.term {
+                moved_same_term += 1;
+            } else {
+                moved_new_term += 1;
+            }
+            println!(
+                "cluster-check: watermark pair {pair} moved: index {} -> {}, \
+                 term {} -> {}, leader {} -> {}",
+                first.committed_index,
+                second.committed_index,
+                first.term,
+                second.term,
+                first.leader_id,
+                second.leader_id,
+            );
+        }
+    }
+    println!(
+        "cluster-check: watermark double-read tally: {pairs} pairs, {moved_same_term} moved \
+         within one term, {moved_new_term} moved across an election"
+    );
+    if moved_same_term != 0 {
+        bail!(
+            "db_quorum_watermark advanced the committed index {moved_same_term} times with no \
+             election and no writes in flight: the read itself appends, and every exact-count \
+             drill that anchors on it mis-measures"
+        );
+    }
+    Ok(())
+}
+
 /// The P6 learner contract, on real processes.
 ///
 /// Every clause here needs a second operating-system process and would be
@@ -4988,6 +5057,7 @@ async fn offline_summary(
 ///   same authority from its durable role;
 /// - the capacity projection never confuses a non-voting copy with voter
 ///   failure tolerance, and protocol rollback becomes safe after promotion.
+
 async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObservation> {
     /// The voter that starts on a binary predating the learner protocol.
     const OLD_BINARY_VOTER: u64 = 3;
@@ -5297,6 +5367,11 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
             leader,
             Request::ForceCompaction {
                 phase: "learner-snapshot".to_owned(),
+                // The leader holds FIRST_JOB, so its production heartbeat
+                // legitimately renews the lease while the 10,000-entry trigger
+                // load is being written; the drill accounts for each renewal
+                // by the row's revision advance instead of failing on it.
+                renewing_lease: Some(FIRST_JOB.to_owned()),
             },
         )
         .await?
@@ -5913,6 +5988,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         initial_snapshot,
         "baseline warm-up",
+        None,
     )
     .await?;
     // The first snapshot also lets SQLite settle its state-machine WAL. Take a
@@ -5923,6 +5999,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         Some(warm_snapshot),
         "baseline settle",
+        None,
     )
     .await?;
     settle_post_snapshot_tail(
@@ -5994,6 +6071,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         Some(baseline_snapshot),
         "coalesced load",
+        None,
     )
     .await?;
     // hiqlite's retained WAL segment alternates allocation across adjacent
@@ -6004,6 +6082,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         store.as_ref(),
         Some(measured_snapshot),
         "coalesced settle",
+        None,
     )
     .await?;
     settle_post_snapshot_tail(
@@ -6037,14 +6116,20 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
             .context("raw induced-regression retained-state write")?;
     }
     let raw_applied_after = applied_index(&metrics_client).await?;
-    let raw_measured_snapshot =
-        ensure_compaction_after(&metrics_client, store.as_ref(), raw_snapshot, "raw control")
-            .await?;
+    let raw_measured_snapshot = ensure_compaction_after(
+        &metrics_client,
+        store.as_ref(),
+        raw_snapshot,
+        "raw control",
+        None,
+    )
+    .await?;
     let raw_settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
         Some(raw_measured_snapshot),
         "raw settle",
+        None,
     )
     .await?;
     settle_post_snapshot_tail(&metrics_client, store.as_ref(), raw_settled_snapshot, "raw").await?;
@@ -6181,6 +6266,7 @@ async fn ensure_compaction_after(
     store: &HiqliteAuthStore,
     previous_snapshot: Option<u64>,
     phase: &str,
+    renewing_lease: Option<&str>,
 ) -> Result<u64> {
     let metrics = client.metrics_db().await?;
     if let Some(snapshot) = metrics
@@ -6196,31 +6282,83 @@ async fn ensure_compaction_after(
     // tail and contaminates the fixed-tail size comparison. Quorum-anchor the
     // starting point, submit exactly enough writes to reach the trigger, then
     // stop all writes while the snapshot builds and publishes.
-    let committed = client
+    let anchor = client
         .db_quorum_watermark()
         .await
-        .with_context(|| format!("{phase} obtain pre-compaction commit watermark"))?
-        .committed_index;
+        .with_context(|| format!("{phase} obtain pre-compaction commit watermark"))?;
+    let committed = anchor.committed_index;
+    let counts_before = applied_payload_counts_at(client, committed, phase).await?;
+    // A held cluster-job lease keeps its production heartbeat running on this
+    // node — `acquire_cluster_job` renews every `JOB_LEASE_HEARTBEAT` — and
+    // each renewal commits one Raft entry the plan below cannot see. Every
+    // renewal advances the durable row's `revision` by exactly one, so the
+    // revision delta across the window is an exact, named count of those
+    // entries. Local reads only: sampling must not append anything itself.
+    let lease_revision_before = match renewing_lease {
+        Some(resource) => Some(local_lease_revision(client, resource).await?),
+        None => None,
+    };
     let writes = snapshot_trigger_plan(previous_snapshot, committed)?;
     let marker = format!("cluster.growth.compaction.{phase}");
     for ordinal in 0..writes {
         store.put_setting(&marker, &ordinal.to_string()).await?;
     }
-    let final_committed = client
+    let confirm = client
         .db_quorum_watermark()
         .await
-        .with_context(|| format!("{phase} confirm exact compaction trigger"))?
-        .committed_index;
+        .with_context(|| format!("{phase} confirm exact compaction trigger"))?;
+    let final_committed = confirm.committed_index;
+    // Account for every entry the window applied, by payload kind, so a
+    // mismatch names the contaminating entry instead of only counting it.
+    // Blank entries are leader-establishment commits (an election happened
+    // inside the window); membership entries are configuration changes; only
+    // normal entries carry SQL, and of those, exactly the declared lease's
+    // renewals are legitimate beyond the drill's own writes.
+    let counts_after = applied_payload_counts_at(client, final_committed, phase).await?;
+    let (blank, membership, normal) = (
+        counts_after.0.saturating_sub(counts_before.0),
+        counts_after.1.saturating_sub(counts_before.1),
+        counts_after.2.saturating_sub(counts_before.2),
+    );
+    let renewals = match (renewing_lease, lease_revision_before) {
+        (Some(resource), Some(before)) => {
+            let after = local_lease_revision(client, resource).await?;
+            after.checked_sub(before).with_context(|| {
+                format!(
+                    "{phase} lease {resource} revision moved backward across the \
+                     compaction window ({before} -> {after})"
+                )
+            })?
+        }
+        _ => 0,
+    };
     let expected_final = committed
         .checked_add(writes)
+        .and_then(|total| total.checked_add(renewals))
         .context("compaction trigger commit index overflowed")?;
-    if final_committed != expected_final {
+    if final_committed != expected_final || blank != 0 || membership != 0 {
         bail!(
             "{phase} compaction trigger was contaminated by concurrent writes: \
-             committed {committed} + {writes} planned writes reached {final_committed}, \
-             expected exact {expected_final}"
+             committed {committed} + {writes} planned writes + {renewals} lease \
+             renewals reached {final_committed}, expected exact {expected_final}; \
+             the window applied {blank} blank, {membership} membership, and \
+             {normal} normal entries; watermark term {} leader {} at the anchor, \
+             term {} leader {} at confirmation",
+            anchor.term,
+            anchor.leader_id,
+            confirm.term,
+            confirm.leader_id
         );
     }
+    // stderr deliberately: in node mode this function runs inside a harness
+    // node process whose stdout is the request/response protocol channel, and
+    // one foreign stdout line breaks response decoding on the controller.
+    eprintln!(
+        "cluster-check: {phase} compaction window accounted: writes={writes} \
+         renewals={renewals} blank={blank} membership={membership} normal={normal} \
+         term={}..{}",
+        anchor.term, confirm.term
+    );
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let metrics = client.metrics_db().await?;
@@ -6234,6 +6372,36 @@ async fn ensure_compaction_after(
             bail!("{phase} did not create a snapshot after the bounded write load");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Sample this process's applied-payload counters once its state machine has
+/// applied at least `committed`. The counters advance at apply time while the
+/// quorum watermark proves commit, so sampling without this wait would blame
+/// the window for entries that were merely still in flight at the anchor.
+async fn applied_payload_counts_at(
+    client: &Client,
+    committed: u64,
+    phase: &str,
+) -> Result<(u64, u64, u64)> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let applied = client
+            .metrics_db()
+            .await?
+            .last_applied
+            .map(|log| log.index)
+            .unwrap_or(0);
+        if applied >= committed {
+            return Ok(hiqlite::validation_applied_payload_counts());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "{phase} node applied only {applied} of {committed} while sampling \
+                 payload counters"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -7024,6 +7192,13 @@ pub enum Request {
     },
     ForceCompaction {
         phase: String,
+        /// The cluster-job lease whose production heartbeat is legitimately
+        /// renewing on this node while the drill writes its exact trigger
+        /// load. Each renewal commits one Raft entry (`UPDATE job_leases ...
+        /// revision = revision + 1`), so the drill subtracts the observed
+        /// revision advance — a named, per-entry account, not slack. `None`
+        /// asserts no lease writer exists and keeps the window fully strict.
+        renewing_lease: Option<String>,
     },
     ReleaseArtworkRepair {
         fence: ArtworkRepairFence,
@@ -7119,6 +7294,11 @@ pub enum Request {
     RaftDebug,
     PassiveRaftMetrics,
     QuorumWatermark,
+    /// This process's applied Raft entries broken down by payload kind, with
+    /// its current term and applied index, read from local metrics without any
+    /// quorum operation. Exact-count drills sample it around their write
+    /// window so a contaminating entry is named, not merely counted.
+    AppliedPayloadCounts,
     PauseApply,
     ApplyPauseObserved,
     ResumeApply,
@@ -7245,6 +7425,13 @@ pub enum Response {
         term: u64,
         leader_id: u64,
         committed_index: u64,
+    },
+    AppliedPayloadCounts {
+        blank: u64,
+        membership: u64,
+        normal: u64,
+        current_term: u64,
+        applied_index: u64,
     },
     ApplyPauseObserved {
         observed: bool,
@@ -9746,9 +9933,19 @@ async fn handle_request(
         Request::ReadLocalSetting { ref key } => Ok(Response::Setting {
             value: read_local_setting(client, key).await?,
         }),
-        Request::ForceCompaction { ref phase } => {
+        Request::ForceCompaction {
+            ref phase,
+            ref renewing_lease,
+        } => {
             let previous = snapshot_index(client).await?;
-            ensure_compaction_after(client, store_ref(store)?, previous, phase).await?;
+            ensure_compaction_after(
+                client,
+                store_ref(store)?,
+                previous,
+                phase,
+                renewing_lease.as_deref(),
+            )
+            .await?;
             Ok(Response::Ok)
         }
         Request::ReleaseArtworkRepair { ref fence } => membership_ref(membership)?
@@ -10064,6 +10261,17 @@ async fn handle_request(
                 committed_index: watermark.committed_index,
             })
         }
+        Request::AppliedPayloadCounts => {
+            let metrics = client.metrics_db().await?;
+            let (blank, membership, normal) = hiqlite::validation_applied_payload_counts();
+            Ok(Response::AppliedPayloadCounts {
+                blank,
+                membership,
+                normal,
+                current_term: metrics.current_term,
+                applied_index: metrics.last_applied.map(|log| log.index).unwrap_or(0),
+            })
+        }
         Request::PauseApply => {
             hiqlite::validation_pause_apply();
             Ok(Response::Ok)
@@ -10353,6 +10561,28 @@ impl From<&mut Row<'_>> for HarnessArtworkRepairRow {
             generation: row.get("generation"),
         }
     }
+}
+
+/// The durable revision of one job lease, from this node's local applied
+/// state. Plain local read: the exact-count windows sample it, so it must not
+/// itself commit anything. An absent row reads as revision 0, which makes a
+/// vanished lease visible as a backward revision move rather than a silent
+/// zero delta.
+async fn local_lease_revision(client: &Client, resource: &str) -> Result<u64> {
+    let mut rows = client
+        .query_map::<SingletonLeaseRow, _>(
+            "SELECT resource, owner_node_id, fence, revision, expires_at_ms \
+             FROM job_leases WHERE resource = $1",
+            params!(resource),
+        )
+        .await?;
+    if rows.len() > 1 {
+        bail!("singleton lease primary key returned multiple rows");
+    }
+    rows.pop()
+        .map(|row| u64::try_from(row.revision).context("job lease revision was negative"))
+        .transpose()
+        .map(|revision| revision.unwrap_or(0))
 }
 
 async fn read_job_lease(client: &Client, resource: &str) -> Result<Option<Lease>> {
@@ -12402,6 +12632,7 @@ mod tests {
     fn compaction_request_outlives_snapshot_publication_and_purge_bounds() {
         let request = Request::ForceCompaction {
             phase: "response-timeout-contract".to_owned(),
+            renewing_lease: None,
         };
         assert!(request.response_timeout() > Duration::from_secs(60));
         assert_eq!(Request::Metrics.response_timeout(), REQUEST_TIMEOUT);
