@@ -11,8 +11,8 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -24,11 +24,14 @@ use plurx_core::cluster::membership::UNKNOWN_HOSTNAME;
 use plurx_core::store::SqliteStore;
 use serde_json::{json, Value};
 use tokio::net::TcpListener as TokioTcpListener;
+use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
 
 const FORWARD: u8 = 0;
-const UNREACHABLE: u8 = 1;
+const HTTP_ERROR: u8 = 1;
 const HUNG: u8 = 2;
+const AUTH_ADMISSION_BURST: u8 = 3;
+const KEY_LOOKUP_BURST: u8 = 4;
 const ACTIVITY_PATH: &str = "/_internal/v1/activity-snapshot";
 
 fn canonical_tempdir() -> tempfile::TempDir {
@@ -125,6 +128,8 @@ impl Drop for Daemon {
 #[derive(Clone)]
 struct ActivityProxyState {
     mode: Arc<AtomicU8>,
+    requests: Arc<AtomicU64>,
+    collection: Arc<Mutex<Option<Arc<Barrier>>>>,
     target: String,
     client: reqwest::Client,
 }
@@ -133,8 +138,21 @@ async fn activity_proxy(
     State(state): State<ActivityProxyState>,
     headers: HeaderMap,
 ) -> Response<Body> {
-    match state.mode.load(Ordering::Acquire) {
-        UNREACHABLE => return response(StatusCode::SERVICE_UNAVAILABLE, Vec::new()),
+    state.requests.fetch_add(1, Ordering::AcqRel);
+    let collection = state
+        .collection
+        .lock()
+        .expect("Activity proxy collection lock")
+        .clone();
+    if let Some(barrier) = collection {
+        // Collect the old eight-request burst onto one receiver admission
+        // window. Fixed code sends one physical request, which is released by
+        // this >=500 ms collection deadline instead.
+        let _ = tokio::time::timeout(Duration::from_millis(500), barrier.wait()).await;
+    }
+    let mode = state.mode.load(Ordering::Acquire);
+    match mode {
+        HTTP_ERROR => return response(StatusCode::SERVICE_UNAVAILABLE, Vec::new()),
         HUNG => {
             tokio::time::sleep(Duration::from_secs(10)).await;
             return response(StatusCode::SERVICE_UNAVAILABLE, Vec::new());
@@ -142,6 +160,51 @@ async fn activity_proxy(
         _ => {}
     }
 
+    if mode == AUTH_ADMISSION_BURST {
+        let responses = futures_util::future::join_all(
+            (0..3).map(|_| forward_activity(&state, &headers, None, None)),
+        )
+        .await;
+        let selected = responses
+            .iter()
+            .find(|(status, _)| *status == StatusCode::UNAUTHORIZED)
+            .or_else(|| responses.first())
+            .expect("three upstream Activity responses");
+        return response(selected.0, selected.1.clone());
+    }
+
+    if mode == KEY_LOOKUP_BURST {
+        let responses = futures_util::future::join_all((0..5).map(|index| {
+            let state = state.clone();
+            let headers = headers.clone();
+            let node_id = format!("missing-activity-key-{index}");
+            async move {
+                forward_activity(
+                    &state,
+                    &headers,
+                    Some(node_id.as_str()),
+                    Some("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"),
+                )
+                .await
+            }
+        }))
+        .await;
+        assert!(responses
+            .iter()
+            .all(|(status, _)| *status == StatusCode::UNAUTHORIZED));
+        return response(StatusCode::UNAUTHORIZED, Vec::new());
+    }
+
+    let (status, body) = forward_activity(&state, &headers, None, None).await;
+    response(status, body)
+}
+
+async fn forward_activity(
+    state: &ActivityProxyState,
+    headers: &HeaderMap,
+    node_override: Option<&str>,
+    signature_override: Option<&str>,
+) -> (StatusCode, Vec<u8>) {
     let mut request = state
         .client
         .get(format!("{}{}", state.target, ACTIVITY_PATH));
@@ -151,8 +214,15 @@ async fn activity_proxy(
         "x-plurx-cluster-time-ms",
         "x-plurx-cluster-signature",
     ] {
-        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
-            request = request.header(name, value);
+        let override_value = match name {
+            "x-plurx-cluster-node" => node_override,
+            "x-plurx-cluster-signature" => signature_override,
+            _ => None,
+        };
+        if let Some(value) =
+            override_value.or_else(|| headers.get(name).and_then(|value| value.to_str().ok()))
+        {
+            request = request.header(name, value.to_owned());
         }
     }
     match request.send().await {
@@ -162,9 +232,9 @@ async fn activity_proxy(
                 .bytes()
                 .await
                 .map_or_else(|_| Vec::new(), |body| body.to_vec());
-            response(status, bytes)
+            (status, bytes)
         }
-        Err(_) => response(StatusCode::SERVICE_UNAVAILABLE, Vec::new()),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Vec::new()),
     }
 }
 
@@ -177,6 +247,8 @@ fn response(status: StatusCode, body: Vec<u8>) -> Response<Body> {
 
 struct ActivityProxy {
     mode: Arc<AtomicU8>,
+    requests: Arc<AtomicU64>,
+    collection: Arc<Mutex<Option<Arc<Barrier>>>>,
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -184,9 +256,13 @@ struct ActivityProxy {
 impl ActivityProxy {
     async fn start(listener: TcpListener, target_port: u16) -> Self {
         let mode = Arc::new(AtomicU8::new(FORWARD));
+        let requests = Arc::new(AtomicU64::new(0));
+        let collection = Arc::new(Mutex::new(None));
         let shutdown = CancellationToken::new();
         let state = ActivityProxyState {
             mode: Arc::clone(&mode),
+            requests: Arc::clone(&requests),
+            collection: Arc::clone(&collection),
             target: format!("http://127.0.0.1:{target_port}"),
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -208,6 +284,8 @@ impl ActivityProxy {
         });
         Self {
             mode,
+            requests,
+            collection,
             shutdown,
             task,
         }
@@ -215,6 +293,24 @@ impl ActivityProxy {
 
     fn set(&self, mode: u8) {
         self.mode.store(mode, Ordering::Release);
+    }
+
+    fn request_count(&self) -> u64 {
+        self.requests.load(Ordering::Acquire)
+    }
+
+    fn begin_collection(&self, expected: usize) {
+        *self
+            .collection
+            .lock()
+            .expect("Activity proxy collection lock") = Some(Arc::new(Barrier::new(expected)));
+    }
+
+    fn end_collection(&self) {
+        *self
+            .collection
+            .lock()
+            .expect("Activity proxy collection lock") = None;
     }
 
     async fn stop(self) {
@@ -453,8 +549,25 @@ async fn activity_detail(client: &reqwest::Client, base: &str, token: &str) -> V
     response.json().await.expect("activity detail JSON")
 }
 
+async fn metric_value(client: &reqwest::Client, base: &str, name: &str) -> u64 {
+    let body = client
+        .get(format!("{base}/metrics"))
+        .send()
+        .await
+        .expect("metrics request")
+        .text()
+        .await
+        .expect("metrics text");
+    body.lines()
+        .find_map(|line| {
+            let (metric, value) = line.split_once(' ')?;
+            (metric == name).then(|| value.parse::<u64>().expect("integer counter"))
+        })
+        .unwrap_or_else(|| panic!("{name} was absent from metrics:\n{body}"))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
+async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() {
     let root = canonical_tempdir();
     let media = root.path().join("media");
     std::fs::create_dir_all(&media).expect("media directory");
@@ -776,7 +889,25 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         .as_str()
         .expect("household token")
         .to_owned();
-    let household_view = activity_detail(&client, &a_base, &household).await;
+    // Admin and household reads share one peer wave. The roster projection is
+    // still made per caller, so sharing peer data cannot leak machine names.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    proxy.begin_collection(8);
+    let before_privacy_wave = proxy.request_count();
+    let (admin_view, household_view) = tokio::join!(
+        activity_detail(&client, &a_base, &token),
+        activity_detail(&client, &a_base, &household),
+    );
+    proxy.end_collection();
+    assert_eq!(
+        proxy.request_count() - before_privacy_wave,
+        1,
+        "admin and household readers did not share one physical peer wave"
+    );
+    assert!(
+        admin_view.get("node_hostnames").is_some(),
+        "a clustered admin read always carries its per-request hostname projection"
+    );
     // The field is present for every clustered admin read even when the roster
     // named nobody, so its absence here is the gate and not an empty roster.
     assert!(
@@ -790,20 +921,200 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         .iter()
         .any(|delivery| delivery["node_id"] == remote_node));
 
-    proxy.set(UNREACHABLE);
-    let unavailable = activity_detail(&client, &a_base, &token).await;
-    assert!(unavailable["activity_nodes"]
+    // Collect the burst that used to exceed the receiver's two-per-second
+    // legacy authority guard. Fixed code performs one authenticated request;
+    // every public caller receives that same answered snapshot.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    proxy.begin_collection(8);
+    let before_burst = proxy.request_count();
+    let auth_refusals_before = metric_value(
+        &client,
+        &b_base,
+        "plurx_cluster_activity_auth_admission_refusals_total",
+    )
+    .await;
+    let key_refusals_before = metric_value(
+        &client,
+        &b_base,
+        "plurx_cluster_activity_key_lookup_refusals_total",
+    )
+    .await;
+    let burst =
+        futures_util::future::join_all((0..8).map(|_| activity_detail(&client, &a_base, &token)))
+            .await;
+    proxy.end_collection();
+    assert_eq!(
+        proxy.request_count() - before_burst,
+        1,
+        "eight public callers created more than one physical peer request"
+    );
+    for detail in &burst {
+        assert!(detail["activity_nodes"]
+            .as_array()
+            .expect("activity nodes")
+            .iter()
+            .all(|node| node["status"] == "answered"));
+        assert!(detail["deliveries"]
+            .as_array()
+            .expect("deliveries")
+            .iter()
+            .any(|delivery| delivery["node_id"] == remote_node));
+    }
+    assert_eq!(
+        metric_value(
+            &client,
+            &b_base,
+            "plurx_cluster_activity_auth_admission_refusals_total",
+        )
+        .await,
+        auth_refusals_before,
+        "the coalesced valid wave must not hit the receiver authority guard"
+    );
+    assert_eq!(
+        metric_value(
+            &client,
+            &b_base,
+            "plurx_cluster_activity_key_lookup_refusals_total",
+        )
+        .await,
+        key_refusals_before,
+        "the coalesced valid wave must not hit the receiver key-lookup guard"
+    );
+
+    // Summary and detail are two views of one process-wide peer wave. Expire
+    // the preceding burst deliberately: response shaping and the receiver
+    // metric reads above are outside the peer cache, so their wall-clock cost
+    // must not decide whether this assertion starts from a live snapshot.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    proxy.begin_collection(2);
+    let before_views = proxy.request_count();
+    let (summary, _) = tokio::join!(
+        async {
+            client
+                .get(format!("{a_base}/api/v1/activity"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("Activity summary request")
+        },
+        activity_detail(&client, &a_base, &token),
+    );
+    proxy.end_collection();
+    assert_eq!(summary.status(), StatusCode::OK);
+    assert_eq!(
+        proxy.request_count() - before_views,
+        1,
+        "summary and detail created more than one physical peer request"
+    );
+
+    // A later view beyond the completed-result TTL starts exactly one new
+    // fanout. The paused-time unit pins the exact boundary itself.
+    let after_views = proxy.request_count();
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let _ = activity_detail(&client, &a_base, &token).await;
+    assert_eq!(proxy.request_count(), after_views + 1);
+
+    // Reproduce the receiver's actual per-sender refusal independently of the
+    // fixed sender gate: the proxy duplicates one valid signed request three
+    // times inside one receiver window. The public status and the receiver
+    // counter must identify authentication, not transport.
+    proxy.set(AUTH_ADMISSION_BURST);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let auth_before = metric_value(
+        &client,
+        &b_base,
+        "plurx_cluster_activity_auth_admission_refusals_total",
+    )
+    .await;
+    let key_before = metric_value(
+        &client,
+        &b_base,
+        "plurx_cluster_activity_key_lookup_refusals_total",
+    )
+    .await;
+    let authority_refused = activity_detail(&client, &a_base, &token).await;
+    assert!(authority_refused["activity_nodes"]
         .as_array()
         .expect("activity nodes")
         .iter()
-        .any(|node| node["node_id"] == remote_node && node["status"] == "unreachable"));
-    assert!(unavailable["deliveries"]
+        .any(|node| node["node_id"] == remote_node && node["status"] == "refused"));
+    assert!(
+        metric_value(
+            &client,
+            &b_base,
+            "plurx_cluster_activity_auth_admission_refusals_total",
+        )
+        .await
+            > auth_before
+    );
+    assert_eq!(
+        metric_value(
+            &client,
+            &b_base,
+            "plurx_cluster_activity_key_lookup_refusals_total",
+        )
+        .await,
+        key_before
+    );
+
+    // Five forged cold-key envelopes consume the receiver's four admitted
+    // misses and drive the separate global guard. They cannot reach the
+    // verified-sender authority guard.
+    proxy.set(KEY_LOOKUP_BURST);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let auth_before = metric_value(
+        &client,
+        &b_base,
+        "plurx_cluster_activity_auth_admission_refusals_total",
+    )
+    .await;
+    let key_before = metric_value(
+        &client,
+        &b_base,
+        "plurx_cluster_activity_key_lookup_refusals_total",
+    )
+    .await;
+    let key_refused = activity_detail(&client, &a_base, &token).await;
+    assert!(key_refused["activity_nodes"]
+        .as_array()
+        .expect("activity nodes")
+        .iter()
+        .any(|node| node["node_id"] == remote_node && node["status"] == "refused"));
+    assert_eq!(
+        metric_value(
+            &client,
+            &b_base,
+            "plurx_cluster_activity_auth_admission_refusals_total",
+        )
+        .await,
+        auth_before
+    );
+    assert!(
+        metric_value(
+            &client,
+            &b_base,
+            "plurx_cluster_activity_key_lookup_refusals_total",
+        )
+        .await
+            > key_before
+    );
+
+    proxy.set(HTTP_ERROR);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let http_error = activity_detail(&client, &a_base, &token).await;
+    assert!(http_error["activity_nodes"]
+        .as_array()
+        .expect("activity nodes")
+        .iter()
+        .any(|node| node["node_id"] == remote_node && node["status"] == "http_error"));
+    assert!(http_error["deliveries"]
         .as_array()
         .expect("deliveries")
         .iter()
         .all(|delivery| delivery["node_id"] != remote_node));
 
     proxy.set(HUNG);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
     let started = Instant::now();
     let timed_out = activity_detail(&client, &a_base, &token).await;
     let elapsed = started.elapsed();
@@ -821,7 +1132,17 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         .iter()
         .any(|node| node["node_id"] == remote_node && node["status"] == "timed_out"));
 
+    // A stopped listener is the transport-only unreachable case. An HTTP 503
+    // above must never be collapsed into this outcome.
+    proxy.stop().await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let unreachable = activity_detail(&client, &a_base, &token).await;
+    assert!(unreachable["activity_nodes"]
+        .as_array()
+        .expect("activity nodes")
+        .iter()
+        .any(|node| node["node_id"] == remote_node && node["status"] == "unreachable"));
+
     drop(node_b);
     drop(node_a);
-    proxy.stop().await;
 }

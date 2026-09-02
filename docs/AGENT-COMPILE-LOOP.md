@@ -66,10 +66,13 @@ of the first one to fail.
 re-pointed at the base the branch will actually land on:
 
 1. Archive `main`, extract, build the change in the container.
-2. `diff -u` the changed files against a **pristine** extraction of the same
-   archive. That is the patch, and it contains only the edits — check this,
-   because `cargo fmt --all` reformats anything in the tree that was not
-   already clean, and those hunks are not yours.
+2. **Run `cargo fmt --all` before generating the patch.** The gate runs
+   `rustfmt --check` and the local suite does not, so a tree that passes 1500
+   tests and Clippy still fails on a formatting diff — which is a round trip
+   for a blank line. Then `diff -u` the changed files against a **pristine**
+   extraction of the same archive. That is the patch, and it should contain
+   only your edits: `fmt` reformats anything in the tree that was not already
+   clean, and those hunks are not yours.
 3. On the clone, branch off **current** `main` and `git apply` the patch.
 4. Commit, `git archive` *that*, and re-verify in the container. Extract over
    the same tree so the warm `target/` survives; the second pass is minutes.

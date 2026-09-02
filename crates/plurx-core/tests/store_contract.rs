@@ -7299,6 +7299,47 @@ async fn open_contract_hiqlite_store(cluster: &ContractCluster) -> HiqliteAuthSt
     )
 }
 
+/// Bootstrap a deterministic-clock contract store without turning the
+/// production operation timeout into a test-runner scheduling limit.
+///
+/// The complete bootstrap is idempotent, so an exact replicated deadline may
+/// be retried. Every other store error is the contract's answer and remains
+/// terminal.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn bootstrap_contract_hiqlite_store_at(
+    client: Client,
+    telemetry_path: &std::path::Path,
+    now: i64,
+) -> HiqliteAuthStore {
+    for attempt in 1..=REPLICATED_DEADLINE_ATTEMPTS {
+        match classify_replicated(
+            HiqliteAuthStore::validation_bootstrap_at(
+                client.clone(),
+                CONTRACT_INSTANCE_ID,
+                telemetry_path,
+                now,
+            )
+            .await,
+        ) {
+            ReplicatedOutcome::Ready(store) => return store,
+            ReplicatedOutcome::Fault(error) => {
+                panic!("bootstrap fixed-clock contract store: {error}")
+            }
+            ReplicatedOutcome::Deadline if attempt < REPLICATED_DEADLINE_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            ReplicatedOutcome::Deadline => break,
+        }
+    }
+    panic!(
+        "{}",
+        replicated_deadline_diagnosis(
+            "bootstrap fixed-clock contract store",
+            REPLICATED_DEADLINE_ATTEMPTS,
+        )
+    )
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn contract_applied_index(client: &Client) -> u64 {
     client
@@ -7971,16 +8012,8 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     .await
     .expect("connect fenced cache clock observer");
     let telemetry = cluster._root.path().join("fenced-cache-clock-telemetry.db");
-    let store = Arc::new(
-        HiqliteAuthStore::validation_bootstrap_at(
-            client.clone(),
-            CONTRACT_INSTANCE_ID,
-            &telemetry,
-            1_000,
-        )
-        .await
-        .expect("bootstrap fixed-clock fenced cache store"),
-    );
+    let store =
+        Arc::new(bootstrap_contract_hiqlite_store_at(client.clone(), &telemetry, 1_000).await);
     store
         .validation_reset_contract_state()
         .await
@@ -8167,14 +8200,7 @@ async fn token_activity_refresh_has_a_fixed_clock_concurrent_write_budget() {
         ._root
         .path()
         .join("auth-activity-budget-telemetry.db");
-    let store = HiqliteAuthStore::validation_bootstrap_at(
-        client.clone(),
-        CONTRACT_INSTANCE_ID,
-        &telemetry,
-        1_000,
-    )
-    .await
-    .expect("bootstrap fixed-clock activity-budget store");
+    let store = bootstrap_contract_hiqlite_store_at(client.clone(), &telemetry, 1_000).await;
     store
         .validation_reset_contract_state()
         .await
@@ -8274,16 +8300,7 @@ async fn token_activity_refresh_burst_is_bounded_by_independent_store_count() {
             ._root
             .path()
             .join(format!("auth-activity-budget-process-{ordinal}.db"));
-        stores.push(
-            HiqliteAuthStore::validation_bootstrap_at(
-                store_client,
-                CONTRACT_INSTANCE_ID,
-                &telemetry,
-                1_000,
-            )
-            .await
-            .expect("bootstrap independent activity-budget store"),
-        );
+        stores.push(bootstrap_contract_hiqlite_store_at(store_client, &telemetry, 1_000).await);
     }
     stores[0]
         .validation_reset_contract_state()
@@ -8388,16 +8405,7 @@ async fn api_key_activity_refresh_burst_is_bounded_by_independent_store_count() 
             ._root
             .path()
             .join(format!("api-key-activity-budget-process-{ordinal}.db"));
-        stores.push(
-            HiqliteAuthStore::validation_bootstrap_at(
-                store_client,
-                CONTRACT_INSTANCE_ID,
-                &telemetry,
-                1_000,
-            )
-            .await
-            .expect("bootstrap independent API-key activity-budget store"),
-        );
+        stores.push(bootstrap_contract_hiqlite_store_at(store_client, &telemetry, 1_000).await);
     }
     stores[0]
         .validation_reset_contract_state()
@@ -8469,6 +8477,62 @@ async fn api_key_activity_refresh_burst_is_bounded_by_independent_store_count() 
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_key_activity_authority_read_burst_survives_on_one_store() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect API-key authority-read burst client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("api-key-authority-read-burst-telemetry.db");
+    let store = bootstrap_contract_hiqlite_store_at(client, &telemetry, 1_000).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated API-key authority-read state");
+    let key = store
+        .create_api_key(
+            "authority-read-burst",
+            "api-key-authority-read-burst-hash",
+            &[scopes::SCAN_TRIGGER.to_owned()],
+        )
+        .await
+        .expect("create authority-read burst API key");
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(121));
+    let mut requests = tokio::task::JoinSet::new();
+    for _ in 0..120 {
+        let store = store.clone();
+        let barrier = Arc::clone(&barrier);
+        requests.spawn(async move {
+            barrier.wait().await;
+            store
+                .api_key_for_hash("api-key-authority-read-burst-hash")
+                .await
+                .expect("look up API key during one-store authority burst")
+                .expect("resolve API key during one-store authority burst")
+        });
+    }
+    barrier.wait().await;
+    while let Some(result) = requests.join_next().await {
+        let resolved = result.expect("join one-store authority-read request");
+        assert_eq!(resolved.id, key.id);
+        assert!(!resolved.disabled);
+        assert!(resolved.allows(scopes::SCAN_TRIGGER));
+    }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
@@ -8486,14 +8550,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
         ._root
         .path()
         .join("api-key-activity-budget-telemetry.db");
-    let store = HiqliteAuthStore::validation_bootstrap_at(
-        client.clone(),
-        CONTRACT_INSTANCE_ID,
-        &telemetry,
-        1_000,
-    )
-    .await
-    .expect("bootstrap fixed-clock API-key activity-budget store");
+    let store = bootstrap_contract_hiqlite_store_at(client.clone(), &telemetry, 1_000).await;
     store
         .validation_reset_contract_state()
         .await
@@ -8506,6 +8563,14 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
         )
         .await
         .expect("create activity-budget API key");
+    let resolved = store
+        .api_key_for_hash("api-key-activity-budget-hash")
+        .await
+        .expect("look up seeded API key")
+        .expect("resolve seeded API key");
+    assert!(!resolved.disabled);
+    assert!(resolved.allows(scopes::SCAN_TRIGGER));
+    let key_id = resolved.id;
 
     let before = contract_leader_point(&client).await;
     let barrier = Arc::new(tokio::sync::Barrier::new(121));
@@ -8515,14 +8580,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
         let barrier = Arc::clone(&barrier);
         requests.spawn(async move {
             barrier.wait().await;
-            let key = store
-                .api_key_for_hash("api-key-activity-budget-hash")
-                .await
-                .expect("look up API key")
-                .expect("resolve API key");
-            assert!(!key.disabled);
-            assert!(key.allows(scopes::SCAN_TRIGGER));
-            store.touch_api_key(key.id).await.expect("touch API key");
+            store.touch_api_key(key_id).await.expect("touch API key");
         });
     }
     barrier.wait().await;
@@ -12511,7 +12569,7 @@ enum ReplicatedOutcome<T> {
 fn classify_replicated<T>(result: Result<T, StoreError>) -> ReplicatedOutcome<T> {
     match result {
         Ok(value) => ReplicatedOutcome::Ready(value),
-        Err(StoreError::Database(message)) if message.contains("timed out") => {
+        Err(StoreError::Database(message)) if message == REPLICATED_DEADLINE_MESSAGE => {
             ReplicatedOutcome::Deadline
         }
         Err(error) => ReplicatedOutcome::Fault(error),
@@ -12605,6 +12663,15 @@ fn a_replicated_deadline_is_never_reported_as_a_wal_size_violation() {
     assert!(
         matches!(deadline, ReplicatedOutcome::Deadline),
         "the production deadline text must classify as a deadline, not as a store fault"
+    );
+    assert!(
+        matches!(
+            classify_replicated::<()>(Err(StoreError::Database(
+                "an unrelated operation timed out".to_owned(),
+            ))),
+            ReplicatedOutcome::Fault(_)
+        ),
+        "only the exact replicated-store deadline is safe to retry"
     );
     let diagnosis =
         replicated_deadline_diagnosis("large-probe import", REPLICATED_DEADLINE_ATTEMPTS);

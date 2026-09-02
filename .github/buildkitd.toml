@@ -1,0 +1,6 @@
+# The fleet registry is deliberately plain HTTP on the private LAN. A BuildKit
+# container does not inherit Docker daemon insecure-registry settings, so the
+# builder needs the same trust decision explicitly. This only affects requests
+# to this exact address; no public registry has its transport weakened.
+[registry."192.168.4.7:3000"]
+  http = true

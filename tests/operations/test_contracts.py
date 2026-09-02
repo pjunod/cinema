@@ -38,11 +38,50 @@ def workflow_step_blocks(job: str) -> dict[str, str]:
     }
 
 
+def workflow_job_needs(job: str) -> tuple[str, ...]:
+    inline = re.search(r"(?m)^    needs: (.+)$", job)
+    if inline is not None:
+        value = inline.group(1).strip()
+        if value.startswith("[") and value.endswith("]"):
+            return tuple(
+                item.strip() for item in value[1:-1].split(",") if item.strip()
+            )
+        return (value,)
+    block = re.search(r"(?m)^    needs:\n((?:      - [^\n]+\n)+)", job)
+    if block is None:
+        return ()
+    return tuple(
+        line.removeprefix("      - ")
+        for line in block.group(1).splitlines()
+    )
+
+
 def workflow_step_scalar(step: str, key: str) -> str:
     values = re.findall(rf"(?m)^        {re.escape(key)}: ([^\n]+)$", step)
     if len(values) != 1:
         raise AssertionError(f"expected one scalar {key!r}, found {len(values)}")
     return values[0]
+
+
+def workflow_step_literal(step: str, key: str) -> list[str]:
+    marker = f"        {key}: |"
+    lines = step.splitlines()
+    try:
+        start = lines.index(marker) + 1
+    except ValueError as exc:
+        raise AssertionError(f"expected one literal {key!r}") from exc
+
+    value: list[str] = []
+    for line in lines[start:]:
+        if line and len(line) - len(line.lstrip(" ")) <= 8:
+            break
+        if not line:
+            value.append("")
+            continue
+        if not line.startswith("          "):
+            raise AssertionError(f"malformed literal {key!r}: {line!r}")
+        value.append(line[10:])
+    return value
 
 
 class OperationsContractCase(unittest.TestCase):
@@ -214,6 +253,8 @@ class OperationsContractCase(unittest.TestCase):
         compose = read("deploy/docker-compose.yml")
         self.assertIn('ARG PLURX_BUILD_REF=""', dockerfile)
         self.assertIn("ENV PLURX_BUILD_REF=${PLURX_BUILD_REF}", dockerfile)
+        self.assertIn('ARG PLURX_BUILD_SHA=""', dockerfile)
+        self.assertIn("ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}", dockerfile)
         self.assertIn("PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}", compose)
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
@@ -258,14 +299,17 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("PLURX_MKVMERGE=/usr/bin/mkvmerge", dockerfile)
 
         workflow = read(".github/workflows/ci.yml")
-        self.assertIn("docker/setup-qemu-action@v3", workflow)
-        self.assertIn("Build arm64 runtime and verify pinned conversion tools", workflow)
-        arm_runtime = workflow.split(
-            "- name: Build arm64 runtime and verify pinned conversion tools", 1
-        )[1].split("\n  # Configure this as the single required check", 1)[0]
-        self.assertIn("platforms: linux/arm64", arm_runtime)
-        self.assertIn("target: runtime-assets", arm_runtime)
-        self.assertIn("outputs: type=cacheonly", arm_runtime)
+        self.assertNotIn("docker/setup-qemu-action@v3", workflow)
+        self.assertIn("name: package and smoke (${{ matrix.arch }})", workflow)
+        self.assertIn("- arch: arm64", workflow)
+        self.assertIn("github_runs_on: '[\"ubuntu-24.04-arm\"]'", workflow)
+        self.assertIn(
+            "self_hosted_runs_on: "
+            "'[\"self-hosted\",\"Linux\",\"ARM64\",\"lab\",\"ci-arm64\"]'",
+            workflow,
+        )
+        self.assertIn("platforms: linux/${{ matrix.arch }}", workflow)
+        self.assertIn("file: Dockerfile.release", workflow)
 
         runtime_assets_marker = "FROM debian:bookworm-slim AS runtime-assets"
         runtime_image_marker = "FROM runtime-assets AS runtime"
@@ -294,62 +338,57 @@ class OperationsContractCase(unittest.TestCase):
         dockerfile = read("Dockerfile")
         ci = read(".github/workflows/ci.yml")
         release = read(".github/workflows/publish-release.yml")
-        for source in (dockerfile, release):
-            self.assertNotIn(
-                "cargo build --release -p plurxd -p plurx-cluster-check",
-                source,
-            )
-            self.assertRegex(
-                source,
-                r"cargo build(?: --locked)? --release -p plurxd",
-            )
-            self.assertRegex(
-                source,
-                r"cargo build(?: --locked)? --release -p plurx-cluster-check",
-            )
-            self.assertIn("cargo tree --locked -p plurxd -e features", source)
-            self.assertIn("grep -q 'cluster-read-cost-validation'", source)
+        self.assertNotIn(
+            "cargo build --release -p plurxd -p plurx-cluster-check",
+            dockerfile,
+        )
+        self.assertRegex(
+            dockerfile,
+            r"cargo build(?: --locked)? --release -p plurxd",
+        )
+        self.assertRegex(
+            dockerfile,
+            r"cargo build(?: --locked)? --release -p plurx-cluster-check",
+        )
+        self.assertIn("cargo tree --locked -p plurxd -e features", dockerfile)
+        self.assertIn("grep -q 'cluster-read-cost-validation'", dockerfile)
         self.assertIn("CARGO_TARGET_DIR=/src/target-plurxd", dockerfile)
         self.assertIn("CARGO_TARGET_DIR=/src/target-cluster-check", dockerfile)
-        self.assertIn('CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-plurxd"', release)
+        self.assertIn("id=plurx-cargo-registry,sharing=locked", dockerfile)
+        self.assertIn("id=plurx-target-plurxd-${TARGETARCH},sharing=locked", dockerfile)
         self.assertIn(
-            'CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-cluster-check"',
-            release,
+            "id=plurx-target-cluster-check-${TARGETARCH},sharing=locked",
+            dockerfile,
         )
+        self.assertIn("--binary-export", release)
+        self.assertIn("target: release-binaries", release)
+        self.assertIn("trusted-packaging/scripts/release-package-candidate", release)
 
-        ci_build = workflow_job_blocks(".github/workflows/ci.yml")["build"]
-        self.assertIn(
-            "cargo build --release -p plurxd --target ${{ matrix.target }}",
-            ci_build,
-        )
-        self.assertIn(
-            "CARGO_TARGET_DIR=target-cluster-check \\\n            cargo build --release -p plurx-cluster-check --target ${{ matrix.target }}",
-            ci_build,
-        )
-        self.assertIn(". -> target-cluster-check", ci_build)
-        ci_build_steps = workflow_step_blocks(ci_build)
-        digest_step = ci_build_steps["Record the release binary digests"]
-        retention_step = ci_build_steps[
-            "Retain release binary for push, tag, and qualification runs"
+        ci_package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        ci_package_steps = workflow_step_blocks(ci_package)
+        compile_step = ci_package_steps[
+            "Compile and export the exact candidate binaries"
         ]
-        binary_paths = (
-            "target/${{ matrix.target }}/release/plurxd",
-            "target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check",
-        )
-        digest_pairs = re.findall(
-            r"(?m)^\s*sha256sum (.+) \\\n\s*> (.+)$",
-            digest_step,
-        )
-        self.assertEqual(
-            digest_pairs,
-            [(path, f"{path}.sha256") for path in binary_paths],
-        )
+        bind_step = ci_package_steps["Bind the binary set to this candidate tree"]
+        self.assertIn("file: Dockerfile.binaries", compile_step)
+        self.assertIn("target: release-binaries", compile_step)
+        self.assertIn("scripts/release-package-candidate", bind_step)
+        self.assertIn("binary-export release-bin", bind_step)
+        self.assertIn("for name in plurxd plurx-cluster-check", bind_step)
+        retention_step = ci_package_steps[
+            "Retain candidate binaries for push, tag, and qualification runs"
+        ]
         artifact_paths = retention_step.split("\n          path: |\n", 1)[1].split(
-            "\n          retention-days:", 1
+            "\n          if-no-files-found:", 1
         )[0]
         self.assertEqual(
             [line.strip() for line in artifact_paths.splitlines() if line.strip()],
-            [path for binary in binary_paths for path in (binary, f"{binary}.sha256")],
+            [
+                "release-bin/plurxd",
+                "release-bin/plurx-cluster-check",
+                "release-bin/build-manifest.json",
+                "release-bin/*.sha256",
+            ],
         )
 
     def test_ship_routes_real_mobile_targets_through_ansible(self):
@@ -515,7 +554,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
         fast_rust = workflow.split("  check:", 1)[1].split(
-            "\n  cluster_auth:", 1
+            "\n  cluster_store_legacy:", 1
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
         self.assertIn("run: make ci-rust-gate", fast_rust)
@@ -537,10 +576,15 @@ class OperationsContractCase(unittest.TestCase):
         )[0]
         self.assertIn("--case suspend-resume", vod_web)
         self.assertIn("docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
-        self.assertIn("if: needs.scope.outputs.release_build == 'true'", workflow)
+        self.assertIn(
+            "if: needs.scope.outputs.release_build == 'true' || "
+            "needs.scope.outputs.container == 'true'",
+            workflow,
+        )
         self.assertIn("needs.scope.outputs.hiqlite_spike == 'true'", workflow)
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", workflow)
-        self.assertIn("name: replicated store and topology contracts", workflow)
+        self.assertIn("name: replicated Store contracts", workflow)
+        self.assertIn("name: replicated topology contracts", workflow)
         self.assertIn("name: replicated WAL recovery contracts", workflow)
         self.assertIn("name: cluster daemon contracts", workflow)
         self.assertIn("if: needs.scope.outputs.rust == 'true'", workflow)
@@ -550,14 +594,21 @@ class OperationsContractCase(unittest.TestCase):
             "MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}",
             workflow,
         )
-        self.assertIn("CLUSTER_AUTH_RESULT: ${{ needs.cluster_auth.result }}", workflow)
+        self.assertIn(
+            "CLUSTER_STORE_RESULT: ${{ needs.cluster_store.result }}", workflow
+        )
+        self.assertIn(
+            "CLUSTER_TOPOLOGY_RESULT: ${{ needs.cluster_topology.result }}",
+            workflow,
+        )
         self.assertIn("CLUSTER_WAL_RESULT: ${{ needs.cluster_wal.result }}", workflow)
         self.assertIn(
             "CLUSTER_DAEMON_RESULT: ${{ needs.cluster_daemon.result }}", workflow
         )
         pr_gate = workflow.split("  pr_gate:", 1)[1]
         self.assertIn("      - mobile_version", pr_gate)
-        self.assertIn("      - cluster_auth", pr_gate)
+        self.assertIn("      - cluster_store", pr_gate)
+        self.assertIn("      - cluster_topology", pr_gate)
         self.assertIn("      - cluster_wal", pr_gate)
         self.assertIn("      - cluster_daemon", pr_gate)
         self.assertIn("      - web_layout", pr_gate)
@@ -616,9 +667,21 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("img.shields.io/endpoint", readme)
         self.assertNotIn("raw.githubusercontent.com/pjunod/plurx/badges", readme)
 
-        docker = workflow.split("  docker:", 1)[1].split("\n  pr_gate:", 1)[0]
-        self.assertNotIn("needs: check", docker)
-        self.assertIn("needs: [scope, preflight]", docker)
+        package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        self.assertNotIn("needs: check", package)
+        self.assertIn("needs: [scope, preflight]", package)
+
+        preflight = workflow_job_blocks(".github/workflows/ci.yml")["preflight"]
+        effort_preflight = workflow_job_blocks(".github/workflows/effort-ci.yml")[
+            "preflight"
+        ]
+        for contract_preflight in (preflight, effort_preflight):
+            self.assertIn("uses: actions/setup-node@v4", contract_preflight)
+            self.assertIn('node-version: "22"', contract_preflight)
+            self.assertLess(
+                contract_preflight.index("actions/setup-node@v4"),
+                contract_preflight.index("run: make operations-check"),
+            )
 
         lint = read(".github/workflows/lint.yml")
         self.assertNotIn("\n  pull_request:\n", lint)
@@ -626,10 +689,9 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("workflow_dispatch:", lint)
         self.assertIn("run: make fmt-check lint", lint)
 
-        self.assertIn(
-            "cargo build --release -p plurxd --target ${{ matrix.target }}",
-            workflow,
-        )
+        self.assertIn("target: release-binaries", package)
+        self.assertIn("scripts/release-package-candidate", package)
+        self.assertNotIn("actions/download-artifact", package)
         # Root container lanes still install ffmpeg through apt. Keep that one
         # package-manager boundary on the canonical archive with retries;
         # persistent runner jobs consume dependencies provisioned by Ansible.
@@ -706,8 +768,9 @@ class OperationsContractCase(unittest.TestCase):
         )
         self.assertIn("scripts/validate run --profile commit --staged", precommit)
 
-        # Exactly four Rust test lanes own the PR: the fast gate plus three
-        # independently selected replicated/daemon jobs.
+        # Five stable Rust verdicts own the PR: the fast gate plus Store,
+        # topology, WAL, and daemon. Store can internally select legacy or
+        # sharded execution without changing the required verdict name.
         gate = makefile.split(".PHONY: ci-rust-gate", 1)[1].split(".PHONY:", 1)[0]
         self.assertIn("--workspace --locked --exclude plurx-cluster-check", gate)
         # The lockfile check sits in front of Clippy on purpose. `spikes/
@@ -720,9 +783,297 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("spike-lock-check", makefile.split("\nunit:", 1)[1].split("\n\n", 1)[0])
         self.assertIn("run: make ci-rust-gate", workflow)
         self.assertIn("make fmt-check lint", lint)
-        self.assertIn("run: make cluster-store-check cluster-harness-check", workflow)
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        self.assertIn("make cluster-store-check", jobs["cluster_store_legacy"])
+        self.assertNotIn(
+            "make cluster-harness-check", jobs["cluster_store_legacy"]
+        )
+        self.assertIn("make cluster-harness-check", jobs["cluster_topology"])
+        self.assertNotIn("make cluster-store-check", jobs["cluster_topology"])
         self.assertIn("run: make cluster-wal-check", workflow)
         self.assertIn("run: make cluster-daemon-check", workflow)
+
+    def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):
+        workflow = read(".github/workflows/ci.yml")
+        makefile = read("Makefile")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        store = workflow_step_blocks(jobs["cluster_store_legacy"])
+        topology = workflow_step_blocks(jobs["cluster_topology"])
+
+        store_run = store["Run replicated Store contracts"]
+        self.assertEqual(workflow_step_scalar(store_run, "id"), "store_contracts")
+        self.assertEqual(workflow_step_scalar(store_run, "continue-on-error"), "true")
+        self.assertEqual(workflow_step_scalar(store_run, "run"), "|")
+        self.assertEqual(
+            workflow_step_literal(store_run, "run"),
+            [
+                "set -euo pipefail",
+                "mkdir -p target/validation",
+                "make cluster-store-check 2>&1 | tee "
+                "target/validation/cluster-store.log",
+            ],
+        )
+
+        store_receipt = store["Record the Store lane result"]
+        self.assertEqual(workflow_step_scalar(store_receipt, "if"), "always()")
+        self.assertIn(
+            "LANE_RESULT: ${{ steps.store_contracts.outcome }}", store_receipt
+        )
+        self.assertIn('--result "$LANE_RESULT"', store_receipt)
+        self.assertIn('--command "make cluster-store-check"', store_receipt)
+        store_upload = store["Retain the Store lane log and receipt"]
+        self.assertEqual(workflow_step_scalar(store_upload, "if"), "always()")
+        self.assertIn("target/validation/cluster-store.log", store_upload)
+        self.assertIn("target/validation/cluster-store-receipt.json", store_upload)
+        store_propagate = store["Propagate the Store contract result"]
+        self.assertEqual(
+            workflow_step_scalar(store_propagate, "if"),
+            "always() && steps.store_contracts.outcome != 'success'",
+        )
+        self.assertEqual(workflow_step_scalar(store_propagate, "run"), "exit 1")
+
+        topology_run = topology["Run replicated topology contracts"]
+        self.assertEqual(
+            workflow_step_scalar(topology_run, "id"), "topology_contracts"
+        )
+        self.assertEqual(
+            workflow_step_scalar(topology_run, "continue-on-error"), "true"
+        )
+        self.assertEqual(workflow_step_scalar(topology_run, "run"), "|")
+        self.assertEqual(
+            workflow_step_literal(topology_run, "run"),
+            [
+                "set -euo pipefail",
+                "mkdir -p target/validation",
+                "{",
+                '  if [ "$RUN_CLUSTER_AUTH" = true ]; then',
+                "    make cluster-harness-check",
+                "  fi",
+                '  if [ "$RUN_HIQLITE_SPIKE" = true ]; then',
+                "    cargo clippy --locked --manifest-path "
+                "spikes/hiqlite-m0/Cargo.toml \\",
+                "      --tests --no-deps -- -D warnings",
+                "    make hiqlite-spike",
+                "  fi",
+                "} 2>&1 | tee target/validation/cluster-topology.log",
+            ],
+        )
+
+        topology_receipt = topology["Record the topology lane result"]
+        self.assertEqual(workflow_step_scalar(topology_receipt, "if"), "always()")
+        self.assertIn(
+            "LANE_RESULT: ${{ steps.topology_contracts.outcome }}",
+            topology_receipt,
+        )
+        self.assertIn('--result "$LANE_RESULT"', topology_receipt)
+        for command in (
+            "make cluster-harness-check",
+            "cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml "
+            "--tests --no-deps -- -D warnings",
+            "make hiqlite-spike",
+        ):
+            self.assertIn(f'--command "{command}"', topology_receipt)
+        topology_upload = topology["Retain the topology lane log and receipt"]
+        self.assertEqual(workflow_step_scalar(topology_upload, "if"), "always()")
+        self.assertIn("target/validation/cluster-topology.log", topology_upload)
+        self.assertIn(
+            "target/validation/cluster-topology-receipt.json", topology_upload
+        )
+        topology_propagate = topology["Propagate the topology contract result"]
+        self.assertEqual(
+            workflow_step_scalar(topology_propagate, "if"),
+            "always() && steps.topology_contracts.outcome != 'success'",
+        )
+        self.assertEqual(
+            workflow_step_scalar(topology_propagate, "run"), "exit 1"
+        )
+
+        self.assertIn(
+            "cluster-check: cluster-wal-check cluster-store-check "
+            "cluster-harness-check cluster-daemon-check",
+            makefile,
+        )
+
+    def test_store_shards_are_dynamic_disjoint_and_roll_out_behind_one_verdict(self):
+        workflow = read(".github/workflows/ci.yml")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        shard_jobs = workflow_job_blocks(".github/workflows/store-shards.yml")
+        legacy = jobs["cluster_store_legacy"]
+        required = jobs["cluster_store_shards"]
+        shadow = jobs["cluster_store_shadow"]
+        shard = shard_jobs["shard"]
+        aggregate = shard_jobs["aggregate"]
+        verdict = jobs["cluster_store"]
+
+        self.assertIn("execution_mode != 'accelerated'", legacy)
+        self.assertIn("execution_mode == 'accelerated'", required)
+        self.assertIn("uses: ./.github/workflows/store-shards.yml", required)
+        self.assertIn("execution-mode: accelerated", required)
+        self.assertIn("execution_mode == 'shadow'", shadow)
+        self.assertIn("uses: ./.github/workflows/store-shards.yml", shadow)
+        self.assertIn("execution-mode: shadow", shadow)
+        self.assertIn(
+            "continue-on-error: ${{ inputs.execution-mode == 'shadow' }}",
+            shard,
+        )
+        self.assertIn("shard_index: 0", shard)
+        self.assertIn("shard_index: 1", shard)
+        self.assertEqual(shard.count('\"ci-store\"'), 1)
+        self.assertEqual(shard.count('\"ci-store-shard-1\"'), 1)
+        self.assertIn("fail-fast: false", shard)
+
+        build = workflow_step_blocks(shard)["Build the exact Store test binary"]
+        self.assertEqual(workflow_step_scalar(build, "continue-on-error"), "true")
+        self.assertIn("uses: docker/build-push-action@v6", build)
+        self.assertIn("file: Dockerfile.store-shard", build)
+        self.assertIn("target: store-contract-binary", build)
+        self.assertIn("platforms: linux/amd64", build)
+        self.assertIn("outputs: type=local,dest=store-contract-export", build)
+        self.assertIn("type=gha,scope=cluster-store-shard-{0}", build)
+        self.assertIn("type=gha,mode=max,scope=cluster-store-shard-{0}", build)
+
+        shard_steps = workflow_step_blocks(shard)
+        run = shard_steps["Run the assigned Store tests once"]
+        self.assertEqual(workflow_step_scalar(run, "continue-on-error"), "true")
+        self.assertIn("python3 -m validation.store_shard run", run)
+        self.assertIn("--shard-count 2", run)
+        self.assertIn("--shard-index ${{ matrix.shard_index }}", run)
+        self.assertNotIn("cargo test", run)
+        failure = shard_steps["Record a Store binary build failure"]
+        self.assertIn(
+            "if: always() && steps.build_store_binary.outcome != 'success'",
+            failure,
+        )
+        self.assertIn("python3 -m validation.store_shard record-failure", failure)
+        upload = shard_steps["Retain the Store shard log and receipt"]
+        self.assertEqual(workflow_step_scalar(upload, "if"), "always()")
+        propagate = shard_steps["Propagate the Store shard result"]
+        self.assertIn("steps.build_store_binary.outcome != 'success'", propagate)
+        self.assertIn("steps.store_shard.outcome != 'success'", propagate)
+
+        self.assertIn("needs: shard", aggregate)
+        self.assertIn("python3 -m validation.store_shard validate", aggregate)
+        self.assertIn("mkdir -p target/validation", aggregate)
+        self.assertIn("pattern: cluster-store-shard-*", aggregate)
+        self.assertIn("merge-multiple: true", aggregate)
+        self.assertIn("cluster-store-shard-aggregate.json", aggregate)
+        self.assertIn("needs.shard.result != 'success'", aggregate)
+        self.assertIn("steps.validate_store_shards.outcome != 'success'", aggregate)
+
+        self.assertIn("name: replicated Store contracts", verdict)
+        self.assertNotIn("make cluster-store-check", verdict)
+        select = workflow_step_blocks(verdict)["Select the required Store graph"]
+        for contract in (
+            'test "$LEGACY_RESULT" = success',
+            'test "$LEGACY_RESULT" = skipped',
+            'test "$SHARD_RESULT" = skipped',
+            'test "$SHARD_RESULT" = success',
+            'echo "Store shadow evidence is intentionally outside this gate"',
+        ):
+            self.assertIn(contract, select)
+        self.assertIn("needs.cluster_store_shards.result", verdict)
+        self.assertNotIn("cluster_store_shadow", verdict)
+        self.assertEqual(workflow.count("cluster_store_shadow"), 1)
+        pr_gate = jobs["pr_gate"]
+        self.assertIn("      - cluster_store\n", pr_gate)
+        self.assertNotIn("      - cluster_store_legacy\n", pr_gate)
+        self.assertNotIn("      - cluster_store_shards\n", pr_gate)
+        self.assertNotIn("      - cluster_store_shadow\n", pr_gate)
+
+        dockerfile = read("Dockerfile.store-shard")
+        self.assertIn("FROM rust:1.97.1-bookworm", dockerfile)
+        self.assertIn("WORKDIR /src", dockerfile)
+        self.assertIn("id=plurx-cargo-registry,sharing=locked", dockerfile)
+        self.assertIn(
+            "id=plurx-target-store-contract-${TARGETARCH},sharing=locked",
+            dockerfile,
+        )
+        self.assertIn("--test store_contract --no-run", dockerfile)
+        self.assertIn('test "$#" -eq 1', dockerfile)
+        self.assertIn("rustc -Vv > /rustc-vv.txt", dockerfile)
+        self.assertIn("FROM scratch AS store-contract-binary", dockerfile)
+
+    def test_store_sharding_keeps_a_weekly_complete_unsharded_backstop(self):
+        workflow = read(".github/workflows/cluster-store-backstop.yml")
+        job = workflow_job_blocks(".github/workflows/cluster-store-backstop.yml")[
+            "cluster-store-backstop"
+        ]
+
+        self.assertIn('cron: "23 6 * * 1"', workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn('\"ci-store\"', job)
+        self.assertIn("uses: dtolnay/rust-toolchain@1.97.1", job)
+        self.assertIn("lane: cluster-store-backstop", job)
+        self.assertIn('persistent-eligible: "true"', job)
+        self.assertEqual(job.count("make cluster-store-check"), 2)
+        self.assertNotIn("validation.store_shard run", job)
+        self.assertNotIn("--exact", job)
+        self.assertIn("cluster-store-backstop-receipt.json", job)
+        self.assertIn(
+            "if: always() && steps.store_backstop.outcome != 'success'", job
+        )
+
+    def test_required_arm_package_is_native_and_serialized_with_apple(self):
+        workflow = read(".github/workflows/ci.yml")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        package = jobs["package_smoke"]
+        apple = jobs["apple"]
+        pr_gate = jobs["pr_gate"]
+        matrix = package.split("    steps:\n", 1)[0].split("include:\n", 1)[1]
+        amd64 = matrix.split("- arch: amd64", 1)[1].split("- arch: arm64", 1)[0]
+        arm64 = matrix.split("- arch: arm64", 1)[1]
+
+        self.assertIn(
+            "runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && "
+            "matrix.github_runs_on || matrix.self_hosted_runs_on) }}",
+            package,
+        )
+        self.assertIn("github_runs_on: '[\"ubuntu-24.04-arm\"]'", package)
+        self.assertIn(
+            "self_hosted_runs_on: "
+            "'[\"self-hosted\",\"Linux\",\"ARM64\",\"lab\",\"ci-arm64\"]'",
+            package,
+        )
+        self.assertIn("target: x86_64-unknown-linux-gnu", amd64)
+        self.assertIn("kernel_machine: x86_64", amd64)
+        self.assertIn("docker_machine: x86_64", amd64)
+        self.assertIn("github_runs_on: '[\"ubuntu-24.04\"]'", amd64)
+        self.assertIn(
+            "self_hosted_runs_on: "
+            "'[\"self-hosted\",\"Linux\",\"X64\",\"lab\",\"general\",\"high-cpu\"]'",
+            amd64,
+        )
+        self.assertIn("target: aarch64-unknown-linux-gnu", arm64)
+        self.assertIn("kernel_machine: aarch64", arm64)
+        self.assertIn("docker_machine: aarch64", arm64)
+        self.assertIn("github_runs_on: '[\"ubuntu-24.04-arm\"]'", arm64)
+        self.assertIn(
+            "self_hosted_runs_on: "
+            "'[\"self-hosted\",\"Linux\",\"ARM64\",\"lab\",\"ci-arm64\"]'",
+            arm64,
+        )
+        self.assertNotIn("docker/setup-qemu-action", package)
+        proof = workflow_step_blocks(package)[
+            "Prove the package runner and Docker engine are native"
+        ]
+        self.assertIn('test "$(uname -s)/$(uname -m)"', proof)
+        self.assertIn("Linux/$KERNEL_ARCH", proof)
+        self.assertIn("docker info --format '{{.OSType}}/{{.Architecture}}'", proof)
+        self.assertIn("DOCKER_ARCH: ${{ matrix.docker_machine }}", package)
+        self.assertIn("docker_machine: aarch64", package)
+        self.assertIn("linux/$DOCKER_ARCH", proof)
+        self.assertIn(
+            "persistent-eligible: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}",
+            package,
+        )
+        self.assertIn("package_smoke", workflow_job_needs(pr_gate))
+        self.assertNotIn("native_arm_shadow", jobs)
+        self.assertIn("plurx-apple-silicon-heavy", package)
+        self.assertIn("plurx-apple-silicon-heavy", apple)
+        self.assertIn("cancel-in-progress: false", package)
+        self.assertIn("cancel-in-progress: false", apple)
+        self.assertIn("queue: max", package)
+        self.assertIn("queue: max", apple)
 
     def test_ci_caches_are_keyed_to_what_they_cache(self):
         workflow = read(".github/workflows/ci.yml")
@@ -851,42 +1202,69 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("target/validation/android-instrumentation.txt", makefile)
         self.assertIn("Android instrumentation did not report a passing suite", makefile)
 
-        # The semantic proof reuses the cluster job's root target instead of
-        # compiling the same Hiqlite/OpenRaft dependency graph a second time.
-        cluster = workflow.split("  cluster_auth:", 1)[1].split(
-            "\n  cluster_wal:", 1
-        )[0]
+        # Store semantics and topology have independent caches, routing,
+        # failure logs, and exact-tree receipts.
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        store = jobs["cluster_store_legacy"]
+        topology = jobs["cluster_topology"]
         wal = workflow.split("  cluster_wal:", 1)[1].split(
             "\n  cluster_daemon:", 1
         )[0]
         daemon = workflow.split("  cluster_daemon:", 1)[1].split(
             "\n  web_layout:", 1
         )[0]
-        self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", cluster)
+        self.assertIn("uses: ./.github/actions/cargo-cache", store)
+        self.assertIn("lane: cluster-store-legacy", store)
+        self.assertIn('persistent-eligible: "true"', store)
+        self.assertIn("uses: ./.github/actions/cargo-cache", topology)
+        self.assertIn("lane: cluster-topology", topology)
+        self.assertIn('persistent-eligible: "true"', topology)
         self.assertIn(
-            "Resolve pinned Rust executables for the long contract run", cluster
+            "Resolve pinned Rust executables for the long contract run", topology
         )
-        self.assertIn("rustup which --toolchain 1.97.1 cargo", cluster)
-        self.assertIn("rustup which --toolchain 1.97.1 rustc", cluster)
-        self.assertNotIn("CARGO: rustup run 1.97.1 cargo", cluster)
-        self.assertIn("run: make cluster-store-check cluster-harness-check", cluster)
-        self.assertIn("run: make hiqlite-spike", cluster)
+        self.assertIn("rustup which --toolchain 1.97.1 cargo", topology)
+        self.assertIn("rustup which --toolchain 1.97.1 rustc", topology)
+        self.assertNotIn("CARGO: rustup run 1.97.1 cargo", topology)
+        self.assertIn("make cluster-store-check", store)
+        self.assertNotIn("make cluster-harness-check", store)
+        self.assertIn("make cluster-harness-check", topology)
+        self.assertNotIn("make cluster-store-check", topology)
+        self.assertIn("make hiqlite-spike", topology)
+        self.assertIn("cluster-store-receipt.json", store)
+        self.assertIn("cluster-topology-receipt.json", topology)
+        self.assertIn("if: always()", store)
+        self.assertIn("if: always()", topology)
         self.assertIn("run: make cluster-wal-check", wal)
         self.assertIn("run: make cluster-daemon-check", daemon)
         self.assertIn("name: Verify the cluster fixture generator", daemon)
         self.assertIn("command -v ffmpeg", daemon)
         self.assertNotIn("spikes/hiqlite-m0/target", workflow)
-        self.assertIn("name: cluster-topology-semantic", cluster)
+        self.assertIn("name: cluster-topology-semantic", topology)
         self.assertIn(
-            "path: target/validation/cluster-topology-semantic.json", cluster
+            "path: target/validation/cluster-topology-semantic.json", topology
         )
-        self.assertIn("if-no-files-found: error", cluster)
+        self.assertIn("if-no-files-found: error", topology)
 
-        # The docker smoke build keeps the GHA layer cache wired so the
-        # ffmpeg runtime layers stop re-downloading on every run.
-        docker = workflow.split("  docker:", 1)[1].split("\n  pr_gate:", 1)[0]
-        self.assertIn("cache-from: type=gha", docker)
-        self.assertIn("cache-to: type=gha,mode=min", docker)
+        # Hosted smoke keeps scoped GHA state; an eligible self-hosted smoke
+        # uses the one named host builder and enforces its postcondition.
+        package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        self.assertIn("uses: ./.github/actions/buildx-cache", package)
+        self.assertIn("type=gha,scope=package-compile-{0}", package)
+        self.assertIn("type=gha,mode=max,scope=package-compile-{0}", package)
+        self.assertIn("type=gha,scope=package-runtime-{0}", package)
+        self.assertIn("type=gha,mode=min,scope=package-runtime-{0}", package)
+        self.assertIn("PLURX_BUILD_SHA=${{ github.sha }}", package)
+        self.assertIn("plurx-cluster-check", package)
+        self.assertIn("build-identity", package)
+        label_template = (
+            "docker image inspect --format "
+            "'{{ index .Config.Labels \"org.opencontainers.image.revision\" }}'"
+        )
+        self.assertEqual(workflow.count(label_template), 1)
+        self.assertNotIn(r'index .Config.Labels \"', workflow)
+        self.assertIn(
+            'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', package
+        )
 
     def test_hiqlite_shutdown_budget_covers_its_deliberate_cluster_waits(self):
         management = read("vendor/hiqlite/src/client/mgmt.rs")
@@ -911,21 +1289,23 @@ class OperationsContractCase(unittest.TestCase):
         )
         self.assertIn("retention-days: 14", workflow)
 
-        # Ordinary PRs prove both release targets compile but retain no large
-        # artifacts. Final effort qualifications retain the exact binaries and
-        # checksums so the tested candidate can be inspected or staged.
-        build = workflow.split("  build:", 1)[1].split("\n  publish:", 1)[0]
+        # Ordinary PRs retain only the small identity/digest receipt. Pushes
+        # and final qualifications retain exact binaries for one day.
+        build = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
         self.assertIn(
-            "name: Retain release binary for push, tag, and qualification runs",
+            "name: Retain candidate binaries for push, tag, and qualification runs",
             build,
         )
         self.assertIn("needs.scope.outputs.qualification == 'true'", build)
-        self.assertIn("plurxd.sha256", build)
+        self.assertIn("name: Retain the exact package receipt", build)
+        self.assertIn("release-bin/*.sha256", build)
         self.assertIn(
             "continue-on-error: ${{ needs.scope.outputs.qualification != 'true' }}",
             build,
         )
-        self.assertIn("name: plurxd-${{ matrix.target }}", build)
+        self.assertIn("name: package-smoke-binaries-${{ matrix.arch }}", build)
+        self.assertIn("retention-days: 1", build)
+        self.assertIn("retention-days: 14", build)
 
         gate = workflow.split("  pr_gate:", 1)[1]
         self.assertIn("python3 -m validation.qualification", gate)
@@ -954,6 +1334,7 @@ class OperationsContractCase(unittest.TestCase):
 
     def test_every_actions_job_has_an_explicit_timeout(self):
         for path in (
+            ".github/workflows/cluster-store-backstop.yml",
             ".github/workflows/ci.yml",
             ".github/workflows/effort-ci.yml",
             ".github/workflows/lint.yml",
@@ -1026,6 +1407,12 @@ class OperationsContractCase(unittest.TestCase):
             "macos-26",
             '\"macOS\",\"ARM64\",\"lab\",\"apple\",\"xcode-26\"',
         )
+        ci_store = choose(
+            "ubuntu-24.04", '\"Linux\",\"X64\",\"lab\",\"ci-store\"'
+        )
+        ci_topology = choose(
+            "ubuntu-24.04", '\"Linux\",\"X64\",\"lab\",\"ci-topology\"'
+        )
         hosted_linux_24 = "    runs-on: ubuntu-24.04"
         hosted_linux = "    runs-on: ubuntu-latest"
 
@@ -1036,6 +1423,7 @@ class OperationsContractCase(unittest.TestCase):
             ".github/workflows/lint.yml",
             ".github/workflows/release-readiness.yml",
             ".github/workflows/rust-audit.yml",
+            ".github/workflows/store-shards.yml",
             ".github/workflows/validation-nightly.yml",
         ):
             for name, block in workflow_job_blocks(path).items():
@@ -1058,11 +1446,36 @@ class OperationsContractCase(unittest.TestCase):
                     expected = high_cpu_ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "web_layout":
                     expected = ffmpeg6
+                elif path == ".github/workflows/ci.yml" and name == "package_smoke":
+                    expected = (
+                        "    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == "
+                        "'github' && matrix.github_runs_on || "
+                        "matrix.self_hosted_runs_on) }}"
+                    )
+                elif (
+                    path == ".github/workflows/ci.yml"
+                    and name == "cluster_store_legacy"
+                ):
+                    expected = ci_store
+                elif (
+                    path == ".github/workflows/store-shards.yml"
+                    and name == "shard"
+                ):
+                    expected = (
+                        "    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == "
+                        "'github' && '[\"ubuntu-24.04\"]' || "
+                        "matrix.self_hosted_runs_on) }}"
+                    )
+                elif (
+                    path == ".github/workflows/cluster-store-backstop.yml"
+                    and name == "cluster-store-backstop"
+                ):
+                    expected = ci_store
+                elif path == ".github/workflows/ci.yml" and name == "cluster_topology":
+                    expected = ci_topology
                 elif path == ".github/workflows/ci.yml" and name in {
                     "check",
-                    "cluster_auth",
                     "cluster_wal",
-                    "docker",
                 }:
                     expected = high_cpu
                 elif (

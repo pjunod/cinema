@@ -113,16 +113,17 @@ jobs:
             exit 1
           fi
 
-  binary:
-    name: Bookworm binary (${{ matrix.arch }})
+  image:
+    name: build, package, and smoke (${{ matrix.arch }})
     needs: resolve
-    if: needs.resolve.outputs.version_exists != 'true'
+    if: >-
+      always() && needs.resolve.result == 'success' &&
+      needs.resolve.outputs.version_exists != 'true'
     runs-on: ubuntu-latest
-    container: rust:1.97.1-bookworm
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -143,63 +144,43 @@ jobs:
           fetch-depth: 0
           ref: ${{ needs.resolve.outputs.commit_sha }}
           path: release-source
-      - name: Derive the tagged binary contract
+      - name: Derive the binary-only Bookworm build from the tagged source
         run: >-
           PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging"
-          python3 -m validation.release_dockerfile --list-binaries
-          release-source/Dockerfile > "$GITHUB_WORKSPACE/release-binaries.txt"
-      - name: Install the target and compatibility tools
-        env:
-          TARGET: ${{ matrix.target }}
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          rustup target add "$TARGET"
-          apt-get update
-          apt-get install -y --no-install-recommends binutils file
-          if [ "$ARCH" = arm64 ]; then
-            apt-get install -y --no-install-recommends \
-              gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
-          fi
-      - uses: Swatinem/rust-cache@v2
+          python3 -m validation.release_dockerfile --binary-export
+          release-source/Dockerfile release-source/Dockerfile.binaries
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
-          key: release-bookworm-${{ matrix.target }}
-          workspaces: release-source
-          cache-targets: false
-      - name: Build the exact tagged binaries
-        env:
-          TARGET: ${{ matrix.target }}
-          PLURX_BUILD_REF: ${{ needs.resolve.outputs.release_tag }}
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        working-directory: release-source
-        run: |
-          set -euo pipefail
-          ! cargo tree --locked -p plurxd -e features \
-            | grep -q 'cluster-read-cost-validation'
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-plurxd" \
-            cargo build --locked --release -p plurxd --target "$TARGET"
-          if grep -Fxq plurx-cluster-check "$GITHUB_WORKSPACE/release-binaries.txt"; then
-            CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-cluster-check" \
-              cargo build --locked --release -p plurx-cluster-check --target "$TARGET"
-          fi
-      - name: Verify version, ABI ceiling, and release artifact
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compile and export the exact tagged binaries
+        uses: docker/build-push-action@v6
+        with:
+          context: release-source
+          file: release-source/Dockerfile.binaries
+          target: release-binaries
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=local,dest=release-source/binary-export
+          build-args: |
+            PLURX_BUILD_REF=${{ needs.resolve.outputs.release_tag }}
+            PLURX_BUILD_SHA=${{ needs.resolve.outputs.commit_sha }}
+      - name: Bind the binary set to the tagged tree and verify its ABI
         env:
           TARGET: ${{ matrix.target }}
           ARCH: ${{ matrix.arch }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
-          RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
           SOURCE_SHA: ${{ needs.resolve.outputs.commit_sha }}
         run: |
           set -euo pipefail
-          mapfile -t binaries < "$GITHUB_WORKSPACE/release-binaries.txt"
-          artifact_args=()
-          artifact_paths=()
-          for name in "${binaries[@]}"; do
-            target_directory="target-$name"
-            if [ "$name" = plurx-cluster-check ]; then
-              target_directory=target-cluster-check
-            fi
-            binary="$GITHUB_WORKSPACE/$target_directory/$TARGET/release/$name"
+          trusted-packaging/scripts/release-package-candidate \
+            release-source trusted-packaging \
+            release-source/binary-export release-source/release-bin \
+            "$TARGET" "$RELEASE_TAG" "$SOURCE_SHA"
+          while IFS= read -r name; do
+            binary="release-source/release-bin/$name"
             test "$(file -b "$binary")" != ""
             max_glibc=$(readelf --version-info "$binary" \
               | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
@@ -209,100 +190,11 @@ jobs:
               echo "::error::$ARCH $name requires GLIBC_$max_glibc; Bookworm provides 2.36"
               exit 1
             }
-            artifact_args+=(--binary "$name")
-            artifact_paths+=("$binary")
-          done
-          binary="$GITHUB_WORKSPACE/target-plurxd/$TARGET/release/plurxd"
-          if [ "$ARCH" = arm64 ]; then
-            reported=$(qemu-aarch64 -L /usr/aarch64-linux-gnu "$binary" --version)
-          else
-            reported=$("$binary" --version)
-          fi
-          test "$reported" = "plurxd $RELEASE_VERSION ($RELEASE_TAG)" || {
-            echo "::error::unexpected version: $reported"
-            exit 1
-          }
-          mkdir -p release-binary
-          install -m 0755 "${artifact_paths[@]}" release-binary/
-          PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging" \
-            python3 -m validation.release_artifact create \
-            --directory release-binary \
-            --git-tree "$(git -C release-source rev-parse HEAD^{tree})" \
-            --git-commit "$SOURCE_SHA" \
-            --build-ref "$RELEASE_TAG" \
-            --rustc "$(rustc -Vv)" \
-            --target "$TARGET" \
-            "${artifact_args[@]}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-binary-${{ matrix.arch }}
-          path: release-binary
-          if-no-files-found: error
-          compression-level: 0
-
-  image:
-    name: package and smoke (${{ matrix.arch }})
-    needs: [resolve, binary]
-    if: >-
-      always() && needs.resolve.result == 'success' &&
-      needs.resolve.outputs.version_exists != 'true' &&
-      needs.binary.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    steps:
-      - name: Check out the trusted packaging tool
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.resolve.outputs.packaging_sha }}
-      - name: Check out the exact tagged source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ needs.resolve.outputs.commit_sha }}
-          path: release-source
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-binary-${{ matrix.arch }}
-          path: release-source/release-bin
-      - name: Derive a prebuilt-only Dockerfile from the tagged runtime
-        env:
-          TARGET: ${{ matrix.arch == 'amd64' && 'x86_64-unknown-linux-gnu' || 'aarch64-unknown-linux-gnu' }}
-          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
-          SOURCE_SHA: ${{ needs.resolve.outputs.commit_sha }}
-        run: |
-          set -euo pipefail
-          mapfile -t binaries < <(python3 -m validation.release_dockerfile \
-            --list-binaries release-source/Dockerfile)
-          artifact_args=()
-          artifact_paths=()
-          for name in "${binaries[@]}"; do
-            artifact_args+=(--binary "$name")
-            artifact_paths+=("release-source/release-bin/$name")
-          done
-          python3 -m validation.release_dockerfile \
-            release-source/Dockerfile release-source/Dockerfile.release
-          python3 -m validation.release_artifact verify \
-            --directory release-source/release-bin \
-            --git-tree "$(git -C release-source rev-parse HEAD^{tree})" \
-            --git-commit "$SOURCE_SHA" \
-            --build-ref "$RELEASE_TAG" \
-            --target "$TARGET" \
-            "${artifact_args[@]}"
-          chmod 0755 "${artifact_paths[@]}"
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          done < <(
+            PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging" \
+              python3 -m validation.release_dockerfile --list-binaries \
+              release-source/Dockerfile
+          )
       - name: Build and push the untagged platform manifest
         id: build
         uses: docker/build-push-action@v6
@@ -336,6 +228,12 @@ jobs:
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$image_ref")" = "$SOURCE_URL"
           reported=$(docker run --rm --platform "linux/$ARCH" "$image_ref" --version)
           test "$reported" = "plurxd $RELEASE_VERSION ($RELEASE_TAG)"
+          if [ -x release-source/release-bin/plurx-cluster-check ]; then
+            cluster_identity=$(docker run --rm --platform "linux/$ARCH" \
+              --entrypoint /usr/local/bin/plurx-cluster-check \
+              "$image_ref" build-identity)
+            test "$cluster_identity" = "$SOURCE_SHA"
+          fi
           release-source/scripts/container-smoke "$image_ref"
           mkdir -p digests
           printf '%s\n' "$DIGEST" > "digests/$ARCH"
@@ -344,6 +242,16 @@ jobs:
           name: release-image-digest-${{ matrix.arch }}
           path: digests
           if-no-files-found: error
+          retention-days: 1
+      - name: Retain the exact tagged binary receipt for one day
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binary-receipt-${{ matrix.arch }}
+          path: release-source/release-bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
   reuse:
     name: verify existing release (${{ matrix.arch }})

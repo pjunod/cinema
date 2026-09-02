@@ -68,9 +68,40 @@ def render(source: str) -> str:
     return generated
 
 
+def render_binary_export(source: str) -> str:
+    """Keep the tagged build stage and export only its runtime binaries."""
+
+    binaries = required_binaries(source)
+    build_stage = source.split(RUNTIME_STAGE, 1)[0].rstrip()
+    if " AS build" not in build_stage:
+        raise ValueError("tagged Dockerfile must name its Rust stage build")
+    if "ARG PLURX_BUILD_SHA" not in build_stage:
+        marker = "WORKDIR /src\n"
+        if build_stage.count(marker) != 1:
+            raise ValueError("tagged Dockerfile must contain one /src build workdir")
+        build_stage = build_stage.replace(
+            marker,
+            'ARG PLURX_BUILD_SHA=""\n'
+            "ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}\n"
+            + marker,
+        )
+    copies = "\n".join(
+        f"COPY --from=build /{name} /{name}" for name in binaries
+    )
+    return (
+        build_stage
+        + "\nRUN rustc -Vv > /rustc-version\n\n"
+        + "FROM scratch AS release-binaries\n"
+        + copies
+        + "\nCOPY --from=build /rustc-version /rustc-version\n"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--list-binaries", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--list-binaries", action="store_true")
+    mode.add_argument("--binary-export", action="store_true")
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path, nargs="?")
     args = parser.parse_args()
@@ -83,7 +114,8 @@ def main() -> int:
         return 0
     if args.output is None:
         parser.error("output is required unless --list-binaries is used")
-    args.output.write_text(render(source), encoding="utf-8")
+    generated = render_binary_export(source) if args.binary_export else render(source)
+    args.output.write_text(generated, encoding="utf-8")
     return 0
 
 

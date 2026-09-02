@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use super::auth::LoginResponse;
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
-use super::internal_activity::{ActivityDelivery, PeerActivityOutcome};
+use super::internal_activity::{ActivityDelivery, PeerActivityOutcome, SharedPeerActivity};
 use crate::state::{AppState, IntegrationMetrics, ScanStatus, StoreMetricsCache, StoreMetricsView};
 
 #[derive(Serialize)]
@@ -2471,7 +2471,7 @@ pub struct Activity {
 /// whole page into an error.
 enum PeerActivityRead {
     LocalOnly,
-    Peers(Vec<(String, PeerActivityOutcome)>),
+    Peers(SharedPeerActivity),
     DirectoryUnavailable,
 }
 
@@ -2578,8 +2578,11 @@ fn peer_status(outcome: &PeerActivityOutcome) -> &'static str {
     match outcome {
         PeerActivityOutcome::Answered(_) => "answered",
         PeerActivityOutcome::Unhealthy => "unhealthy",
+        PeerActivityOutcome::Unsupported => "unsupported",
         PeerActivityOutcome::Unreachable => "unreachable",
         PeerActivityOutcome::TimedOut => "timed_out",
+        PeerActivityOutcome::Refused => "refused",
+        PeerActivityOutcome::HttpError => "http_error",
         PeerActivityOutcome::InvalidResponse => "invalid_response",
     }
 }
@@ -2615,7 +2618,7 @@ fn clustered_deliveries(
         .map(|delivery| ClusterDelivery::local(delivery, local_node_id))
         .collect::<Vec<_>>();
     if let PeerActivityRead::Peers(outcomes) = peers {
-        for (node_id, outcome) in outcomes {
+        for (node_id, outcome) in outcomes.iter() {
             let PeerActivityOutcome::Answered(snapshot) = outcome else {
                 continue;
             };
@@ -2650,7 +2653,7 @@ fn clustered_analysis_progress(
         .map(|progress| (local_node_id.to_owned(), progress))
         .collect::<Vec<_>>();
     if let PeerActivityRead::Peers(outcomes) = peers {
-        for (node_id, outcome) in outcomes {
+        for (node_id, outcome) in outcomes.iter() {
             let PeerActivityOutcome::Answered(snapshot) = outcome else {
                 continue;
             };
@@ -3711,7 +3714,7 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}",
         state.offline.prometheus(),
         plurx_core::store::prometheus_store_operations(),
         // Stays at zero on a healthy node and on an unclustered one. It moves
@@ -3719,6 +3722,8 @@ pub(crate) async fn metrics(
         // it could not read committed membership — a state nothing else in
         // this exposition would show.
         plurx_core::cluster::membership::prometheus_cluster_job_authority(),
+        plurx_core::cluster::membership::prometheus_cluster_activity_authority(),
+        super::internal_activity::prometheus_cluster_activity(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
 
@@ -3855,29 +3860,35 @@ mod tests {
 
     #[test]
     fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
-        let peers = PeerActivityRead::Peers(vec![
-            (
-                "node-b".to_owned(),
-                PeerActivityOutcome::Answered(crate::http::internal_activity::ActivitySnapshot {
-                    node_id: "node-b".to_owned(),
-                    deliveries: vec![ActivityDelivery {
-                        method: "direct".to_owned(),
-                        presentation: None,
-                        user: "viewer".to_owned(),
-                        file_id: 2,
-                        item_id: 102,
-                        title: "Remote title".to_owned(),
-                        started_unix: 2,
-                        idle_seconds: 1,
-                        delivered_bytes: None,
-                        delivered_bps: None,
-                    }],
-                    analysis: Vec::new(),
-                }),
-            ),
-            ("node-c".to_owned(), PeerActivityOutcome::TimedOut),
-            ("node-d".to_owned(), PeerActivityOutcome::Unhealthy),
-        ]);
+        let peers = PeerActivityRead::Peers(
+            vec![
+                (
+                    "node-b".to_owned(),
+                    PeerActivityOutcome::Answered(
+                        crate::http::internal_activity::ActivitySnapshot {
+                            node_id: "node-b".to_owned(),
+                            deliveries: vec![ActivityDelivery {
+                                method: "direct".to_owned(),
+                                presentation: None,
+                                user: "viewer".to_owned(),
+                                file_id: 2,
+                                item_id: 102,
+                                title: "Remote title".to_owned(),
+                                started_unix: 2,
+                                idle_seconds: 1,
+                                delivered_bytes: None,
+                                delivered_bps: None,
+                            }],
+                            analysis: Vec::new(),
+                        },
+                    ),
+                ),
+                ("node-c".to_owned(), PeerActivityOutcome::TimedOut),
+                ("node-d".to_owned(), PeerActivityOutcome::Unhealthy),
+                ("node-e".to_owned(), PeerActivityOutcome::Unsupported),
+            ]
+            .into(),
+        );
 
         let rows = serde_json::to_value(clustered_deliveries(
             "node-a",
@@ -3900,10 +3911,12 @@ mod tests {
         assert_eq!(nodes[1]["status"], "answered");
         assert_eq!(nodes[2]["status"], "timed_out");
         assert_eq!(nodes[3]["status"], "unhealthy");
+        assert_eq!(nodes[4]["status"], "unsupported");
 
         let missing = missing_activity_summary(&peers).expect("missing-node summary");
         assert!(missing.contains("node-c (timed_out)"), "{missing}");
         assert!(missing.contains("node-d (unhealthy)"), "{missing}");
+        assert!(missing.contains("node-e (unsupported)"), "{missing}");
         assert!(missing.ends_with("did not answer"), "{missing}");
     }
 
@@ -4091,6 +4104,8 @@ mod tests {
         assert!(!compact.contains("Client"));
         assert!(!compact.contains("ReplicationMonitor"));
         assert!(!compact.contains("LocalDbRaft"));
+        assert!(compact.contains("prometheus_cluster_activity_authority()"));
+        assert!(compact.contains("prometheus_cluster_activity()"));
 
         let substate = source
             .split_once("pub(crate) struct MetricsState")

@@ -977,7 +977,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # requests prove that the production warmup registry coalesces them into one
 # window extraction. Both request tasks are joined by the fixture's bounded
 # wait; neither is a shipped producer or process owner.
-expected_occurrences = 373
+# +1 with the bounded subtitle window: the window warmer's detached extraction.
+# +4 for the Activity read-gate and response regressions: eight concurrent
+# callers share one joined task shape, the cancelled owner is explicitly
+# aborted and awaited, its successor is joined after the preserved start floor,
+# and the hostile error-body HTTP fixture is aborted before its test returns.
+# All four are test-only owners; none detaches a producer, timer, or process.
+expected_occurrences = 377
 
 [[module_structures]]
 id = "method-spawn"
@@ -1028,7 +1034,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # fixture deadlines bound producer-start observation, the concurrent first
 # touch, publication observation, and whole-producer teardown. Every fixture
 # wait is awaited before its temporary media is released.
-expected_occurrences = 527
+# +3 with the bounded subtitle window: the window read and the two warm starts in the subtitle segment arm.
+# +1 for the process-shared Activity gate's `sleep_until`: the mutex owner
+# awaits the durable one-second fanout-start reservation before issuing another
+# bounded peer wave. Cancellation drops the owner while the reservation stays
+# in shared state; no timer or producer is detached.
+# +1 for the delayed-directory cancellation fixture: its two-second paused-time
+# sleep moves the wire start beyond the initial reservation and is fully owned
+# by the test task that the fixture aborts and joins.
+expected_occurrences = 529
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1083,7 +1097,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # assertions on in-process subtitle responses. They launch no process and own
 # no producer; the actual window extractor remains behind the existing bounded
 # command helper inventoried above.
-expected_occurrences = 198
+# +1 with the bounded subtitle window: its output().
+# +1 for Activity response classification: `reqwest::Response::status()` reads
+# the received HTTP headers before deciding whether its unused error body needs
+# no buffering. It launches no process and owns no child.
+expected_occurrences = 199
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
