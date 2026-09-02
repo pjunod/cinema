@@ -147,6 +147,21 @@ they carry the properties that are testable without hardware:
    newer player generation**. #726's store half already implements this
    (`commit_media_session_preparation` returns `Ok(None)` when the pointer
    moved); M6 is its first caller.
+
+**The whole ledger is built and unused.** As of `main` after M7 M4 landed,
+`prepare_media_session`, `rejoin_media_session_preparation`,
+`commit_media_session_preparation`, `abort_media_session_preparation` and
+`staged_media_session_for_playback` all exist on both backends and are
+contract-tested on three real voters — and `plurxd` calls **none of them**.
+Grep confirms zero callers. So M6's first slice is not "design a preparation
+lifecycle"; it is "become the first caller of one already proven at the store
+layer", which is a smaller and better-defended start than the milestone's size
+suggests.
+
+The design question that slice must answer is **where the lifecycle lives** —
+the rolling actor, the HTTP handler, or a coordinator between them. The actor
+owns producer decisions today and reaches nothing durable itself, so that is a
+real choice rather than an obvious one, and it is worth settling before code.
 2. **Abort** — tears down only the successor; the current stream stays
    authoritative and playable.
 3. **Disconnect does not imply commit** — after the preparation lease expires

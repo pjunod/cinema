@@ -442,26 +442,27 @@ creations the server honours. The cost is server-side waste, not client
 confusion.
 
 
-### What M3 still owes
+### M3 is closed
 
-Two gaps, neither a regression — an absent `control_sequence` means "do the
-work", which is exactly today's behaviour — but the milestone is not closed
-until both are shut.
+Both gaps this section recorded are shut, in
+[#785](https://github.com/pjunod/plurx/pull/785).
 
-**No test covers the HTTP refusal.** `SettledTarget::supersedes` has four unit
-tests including the twenty-seek storm; the glue in `hls::create` that calls it
-and returns `playback_target_superseded` is exercised by nothing. It is
-compile-verified and behaviour-unverified. M3's own acceptance is *a scripted
-20-seek storm results in production started for exactly one target*, and that
-is a protocol-level assertion the latch tests do not make.
+**The refusal is tested.** `hls::create` cannot be reached from a test — it
+needs a store, a transcode manager and an authenticated user — so the decision
+lives in one function and the handler has no other way to express it. Seven
+tests pin it, and the ones worth knowing are the negatives: an absent sequence
+and an absent settled target both **proceed**, because absent means *do the
+work*; equal and later sequences **proceed**, because a create can reach the
+server before its own snapshot and refusing the honest seek is the failure this
+milestone exists to prevent; and a malformed start reads as the head, which can
+only make a restart look *less* superseded — a bad body must not be able to
+cancel work the viewer wants.
 
-**Only the web client sends `control_sequence`.** One sender in the tree,
-`crates/plurxd/src/web/index.html:6783`. A seek storm from an iPhone or an
-Apple TV is still unlatched, because those clients omit the field. Adding it
-to Apple and Android is a build-number bump and a coordinated client release,
-which is why it was deliberately not folded into the same pull request — the
-build-number rule is that a bump must clear current `main`, not the branch
-point, so client edits are batched to pay it once.
+**Every client orders its restarts.** Apple and Android now send
+`control_sequence` alongside web. Each sends the reporter's own counter rather
+than the accepted sequence: a create can outrun the snapshot that justifies it,
+and a client reporting a *higher* sequence can only look less superseded, which
+is the safe direction. Apple 108, Android 64.
 
 ## M5.5 ran, and two thirds of it settled
 
