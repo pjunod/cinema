@@ -98,6 +98,17 @@ impl Meter {
     pub fn idle_for_ms(&self) -> i64 {
         (self.started.elapsed().as_millis() as i64 - self.window_at_ms.load(Relaxed)).max(0)
     }
+
+    /// Backdate the open window so this meter reports `ms` of idleness.
+    ///
+    /// For tests about what a long-idle delivery means, which would otherwise
+    /// have to sleep for the threshold they are testing. Takes `&self` because
+    /// the sessions those tests build are already behind an `Arc`.
+    #[cfg(test)]
+    pub(crate) fn idle_for_test(&self, ms: i64) {
+        self.window_at_ms
+            .store(self.started.elapsed().as_millis() as i64 - ms, Relaxed);
+    }
 }
 
 #[cfg(test)]

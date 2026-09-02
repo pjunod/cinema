@@ -5926,6 +5926,70 @@ impl Session {
     }
 }
 
+/// A client that has completed no delivery for this long, while media it has
+/// not fetched is published, is wedged rather than slow. The Apple
+/// `DeliveryStarvationDetector`'s idle threshold, so both sides call the same
+/// session wedged.
+pub(crate) const WEDGE_IDLE_MS: i64 = 16_000;
+/// Published media the client has not fetched. The same detector's pending
+/// threshold.
+pub(crate) const WEDGE_GAP_MS: i64 = 10_000;
+
+/// The server-side signature of a fetch wedge: the client completed no
+/// delivery for `WEDGE_IDLE_MS` while `WEDGE_GAP_MS` of published media sat
+/// unfetched.
+///
+/// A slow link fails the first term — it is still completing deliveries,
+/// slowly — and so keeps the rung step it deserves. A wedge is not a link
+/// verdict at all, and lowering quality for one costs the viewer picture for a
+/// fault the link never had.
+fn delivery_wedge(
+    delivered_idle_ms: i64,
+    published_end_ms: Option<i64>,
+    fetched_end_ms: i64,
+) -> bool {
+    delivered_idle_ms >= WEDGE_IDLE_MS
+        && published_end_ms
+            .is_some_and(|published| published.saturating_sub(fetched_end_ms) >= WEDGE_GAP_MS)
+}
+
+/// The two frontiers one live session is judged by: how far this client has
+/// fetched, and how far media has been published for it.
+///
+/// One reader, because the rung a stall reopen gets and the numbers the
+/// activity page shows are the same facts, and a second copy of these
+/// expressions is how they would come to disagree. The lease is authority when
+/// there is one; the in-memory index is the answer for a session that has
+/// never exchanged control.
+///
+/// Takes the `segments` mutex. Never call it while holding `sessions`.
+async fn delivery_frontier(
+    session: &Session,
+    lease: Option<&crate::playback_control::RollingLeaseSnapshot>,
+) -> (i64, Option<i64>) {
+    let fetched_end_ms = lease.map_or_else(
+        || session.fetched_end_ms.load(Relaxed),
+        |lease| lease.delivery.fetched_end_ms,
+    );
+    let published_end_ms = match lease {
+        Some(lease) => lease.delivery.published_end_ms,
+        None => session.segments.lock().await.produced_playable_end_ms(),
+    };
+    (fetched_end_ms, published_end_ms)
+}
+
+/// Whether this session is wedged, read from the same two frontiers the
+/// activity page publishes.
+async fn delivery_wedge_signature(session: &Session) -> bool {
+    let lease = session.control.snapshot().await;
+    let (fetched_end_ms, published_end_ms) = delivery_frontier(session, lease.as_ref()).await;
+    delivery_wedge(
+        session.delivery.idle_for_ms(),
+        published_end_ms,
+        fetched_end_ms,
+    )
+}
+
 /// One live session as the activity page and the stats overlay see it.
 async fn session_info(
     id: &str,
@@ -5947,23 +6011,14 @@ async fn session_info(
             pause.wait().await;
         }
     }
-    let fetched_end_ms = lease.as_ref().map_or_else(
-        || s.fetched_end_ms.load(Relaxed),
-        |lease| lease.delivery.fetched_end_ms,
-    );
-    let (ahead, first_retained_segment, compatibility_published_end_ms) = {
+    let (fetched_end_ms, published_end_ms) = delivery_frontier(s, lease.as_ref()).await;
+    let (ahead, first_retained_segment) = {
         let index = s.segments.lock().await;
         (
             ahead_of(&index, fetched_end_ms.max(0)),
             index.first_retained_index(),
-            index.produced_playable_end_ms(),
         )
     };
-    let published_end_ms = lease
-        .as_ref()
-        .map_or(compatibility_published_end_ms, |lease| {
-            lease.delivery.published_end_ms
-        });
     let idle_seconds = lease
         .as_ref()
         .map_or(SESSION_IDLE_SECS, |lease| lease.idle_for.as_secs());
@@ -13981,12 +14036,21 @@ impl TranscodeManager {
             };
             return Ok((request.clone(), target_height));
         }
-        let (previous_user, previous_playback, previous_file, previous_height, automatic, kind) = {
+        let (
+            previous,
+            previous_user,
+            previous_playback,
+            previous_file,
+            previous_height,
+            automatic,
+            kind,
+        ) = {
             let sessions = self.sessions.lock().await;
             let previous = sessions
                 .get(previous_session_id)
                 .ok_or_else(|| invalid_reopen_error("the previous session is no longer running"))?;
             (
+                Arc::clone(previous),
                 previous.supersession_user.clone(),
                 previous.playback_id.clone(),
                 previous.file_id,
@@ -14004,9 +14068,16 @@ impl TranscodeManager {
             ));
         }
 
+        // The rung step exists for a link that could not keep up. A predecessor
+        // that stopped completing deliveries while media it had not fetched was
+        // published did not prove that: nothing was flowing to be too slow. The
+        // decision is made here, before the create is persisted, so a transport
+        // replay of the same request returns the same answer.
+        let wedged = delivery_wedge_signature(&previous).await;
+
         let mut normalized = request.clone();
         normalized.automatic = automatic;
-        normalized.kind = if automatic {
+        normalized.kind = if automatic && !wedged {
             // One rung is the server-owned upper bound, not a reason to ignore
             // stronger link evidence from the player that actually stalled.
             // A lower requested rung can only make the retry safer; a stale or
@@ -14019,12 +14090,18 @@ impl TranscodeManager {
                 height: one_rung_below(previous_height).min(client_height),
             }
         } else {
+            // A wedged predecessor's successor is the same delivery again: a
+            // copy stays a copy, at the rung the viewer was already watching.
             kind
         };
 
-        let target_height = match normalized.kind {
-            SessionKind::Transcode { height } => height,
-            SessionKind::Copy { .. } => previous_height,
+        let target_height = if wedged {
+            previous_height
+        } else {
+            match normalized.kind {
+                SessionKind::Transcode { height } => height,
+                SessionKind::Copy { .. } => previous_height,
+            }
         };
         Ok((normalized, Some(target_height)))
     }
@@ -25743,6 +25820,166 @@ pub(crate) mod tests {
         assert_eq!(ahead_of(&SegmentIndex::default(), 0), None);
     }
 
+    /// One control exchange as the player sends it, carrying the same position
+    /// and buffer the flow evaluation was given. The two sides of the loop must
+    /// be reading one client, not two fixtures that happen to agree.
+    fn control_request(
+        demand: &crate::playback_control::PlaybackDemandSnapshot,
+        render_state: crate::playback_control::RenderState,
+        starved: bool,
+    ) -> crate::playback_control::ControlRequestV1 {
+        crate::playback_control::ControlRequestV1 {
+            protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+            generation: uuid::Uuid::new_v4().to_string(),
+            control_epoch: 1,
+            client_instance_id: uuid::Uuid::new_v4().to_string(),
+            sequence: 1,
+            demand: demand.demand,
+            position_ms: demand.position_ms,
+            buffered_from_ms: demand.buffered_from_ms,
+            buffered_through_ms: demand.buffered_through_ms,
+            playback_rate: demand.playback_rate,
+            render_state,
+            seek_target_ms: demand.seek_target_ms,
+            observed_download_bps: demand.observed_download_bps,
+            selection: demand.selection.clone(),
+            capabilities: demand.capabilities.clone(),
+            observation: starved.then_some(crate::playback_control::ClientObservation {
+                dropped_frames: None,
+                decoder_state: Some(crate::playback_control::DecoderState::Starved),
+                error_code: None,
+                error_detail: None,
+            }),
+            acknowledgement: None,
+            // The wire names, exactly as a client that has rolled out declares
+            // them.
+            supported_actions: Some(vec![
+                "hold".to_owned(),
+                "terminal".to_owned(),
+                "retry_resource".to_owned(),
+            ]),
+        }
+    }
+
+    #[test]
+    fn a_stall_manufactures_its_own_hold_and_is_not_answered_with_it() {
+        // The whole loop, joined: the freeze produces the hold, and the
+        // resolver must not hand that hold back as the answer to the freeze.
+        //
+        // In explicit lease mode the production target is measured from the
+        // client's own buffer anchor, so a player frozen at 120 s with an empty
+        // buffer asks for 30 s of reserve, already has 60 s published, and is
+        // held on time. Testing the resolver alone would prove half of it —
+        // that a hold can be withheld — and none of the part that matters,
+        // which is that this is the hold a stalled client actually meets.
+        let limits = AheadLimits {
+            max_secs: 180,
+            max_bytes: 2_000,
+            global_max_bytes: 8_000,
+        };
+        let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Apple,
+        );
+        demand.position_ms = 120_000;
+        // An empty buffer at the frozen position: nothing behind it, nothing
+        // ahead of it. This is the reading that collapses the target.
+        demand.buffered_from_ms = Some(120_000);
+        demand.buffered_through_ms = 120_000;
+        demand.playback_rate = 1.0;
+        let flow = |currently_suspended| {
+            evaluate_flow(FlowInputs {
+                physical_ahead: Some(Ahead {
+                    seconds: 60,
+                    bytes: 1_000,
+                }),
+                published_end_ms: Some(80_000),
+                media_origin_ms: 100_000,
+                lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+                demand: Some(&demand),
+                global_live_bytes: 1_000,
+                global_ahead_bytes: 1_000,
+                limits,
+                currently_suspended,
+            })
+        };
+        let held = flow(false);
+        assert_eq!(held.production_ahead_seconds, Some(60));
+        assert_eq!(
+            held.production_target_seconds,
+            Some(30),
+            "a frozen position asks for nothing but the wall-clock reserve",
+        );
+        assert_eq!(
+            held.hold,
+            Some(AheadHold {
+                reason: AheadHoldReason::Time,
+                release_value: 30,
+            }),
+        );
+        assert_eq!(
+            flow(true).hold.map(|hold| hold.release_value),
+            Some(15),
+            "and the release value is the resume threshold, not a second policy",
+        );
+
+        // The same hold, as the control plane sees it, for a client that is
+        // stalled, starved, and 30 s behind a frontier it has been served.
+        let wedged = crate::playback_control::DeliveryView {
+            presentation: "live-recovery".to_owned(),
+            producer_state: "held".to_owned(),
+            produced_through_ms: Some(180_000),
+            fetched_through_ms: 150_000,
+            delivered_bps: Some(4_000_000),
+            delivered_idle_ms: Some(20_000),
+            recent_producer_speed: Some(1.0),
+            client_runway_ms: 0,
+            admitted: None,
+            producer_decision: None,
+            hold_reason: held.hold.map(|hold| {
+                match hold.reason {
+                    AheadHoldReason::Demand => "demand",
+                    AheadHoldReason::Time => "time",
+                    AheadHoldReason::Bytes => "bytes",
+                    AheadHoldReason::Global => "global",
+                }
+                .to_owned()
+            }),
+            subtitle_readiness: None,
+            owner_node_hash: "n-0123456789abcdef".to_owned(),
+            owner_epoch: 1,
+        };
+        let stalled = control_request(&demand, crate::playback_control::RenderState::Stalled, true);
+        assert_eq!(
+            crate::playback_control::resolve_action(
+                &crate::playback_control::ControlAction::None,
+                &wedged,
+                &stalled,
+            ),
+            crate::playback_control::ControlAction::None,
+            "the hold the stall manufactured must not be the answer to the stall",
+        );
+
+        // The same production hold, to a client that is playing with a full
+        // buffer, is still an instruction — that is what the hold is for.
+        let mut playing = wedged.clone();
+        playing.client_runway_ms = 60_000;
+        let rendering = control_request(
+            &demand,
+            crate::playback_control::RenderState::Rendering,
+            false,
+        );
+        assert_eq!(
+            crate::playback_control::resolve_action(
+                &crate::playback_control::ControlAction::None,
+                &playing,
+                &rendering,
+            ),
+            crate::playback_control::ControlAction::Hold {
+                reason: crate::playback_control::HoldReason::Time,
+            },
+        );
+    }
+
     #[test]
     fn explicit_flow_uses_reported_runway_and_preserves_capacity_bounds() {
         let limits = AheadLimits {
@@ -26379,7 +26616,10 @@ pub(crate) mod tests {
         kind: SessionKind,
     }
 
-    async fn insert_reopen_fixture(manager: &TranscodeManager, fixture: ReopenFixture<'_>) {
+    async fn insert_reopen_fixture(
+        manager: &TranscodeManager,
+        fixture: ReopenFixture<'_>,
+    ) -> Arc<Session> {
         let mut session = test_session(fixture.dir);
         session.user_name = fixture.user_name.into();
         session.playback_id = fixture.playback_id.into();
@@ -26391,11 +26631,13 @@ pub(crate) mod tests {
             SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
             SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
         };
+        let session = Arc::new(session);
         manager
             .sessions
             .lock()
             .await
-            .insert(fixture.session_id.into(), Arc::new(session));
+            .insert(fixture.session_id.into(), Arc::clone(&session));
+        session
     }
 
     /// Build a session directory with a real playlist and real files, so the
@@ -33638,6 +33880,227 @@ pub(crate) mod tests {
             "the client cannot avoid the server-owned one-rung descent",
         );
         drop(higher_claim);
+    }
+
+    /// A predecessor with the server-side wedge signature on it: no completed
+    /// delivery for `idle_ms`, and `published_end_ms` of media the client has
+    /// never fetched. The lease is the frontier authority, so the publication
+    /// goes through the control actor rather than the in-memory index.
+    async fn wedge_predecessor(previous: &Arc<Session>, idle_ms: i64, published_end_ms: i64) {
+        previous.delivery.idle_for_test(idle_ms);
+        assert!(
+            previous
+                .control
+                .observe_publication(crate::playback_control::RollingPublicationObservation {
+                    producer_attempt: 0,
+                    playlist_ready: true,
+                    published_segment: Some(0),
+                    published_end_ms: Some(published_end_ms),
+                    next_media_sequence: 1,
+                    resolved_fetched_segment: None,
+                    resolved_fetched_end_ms: None,
+                })
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wedged_predecessor_reopens_on_its_own_rung() {
+        use plurx_core::store::SqliteStore;
+
+        // The rung step is a verdict about a link that could not keep up. A
+        // session that stopped completing deliveries while media it had never
+        // fetched was published did not prove that — nothing was flowing to be
+        // too slow — and stepping it down costs a viewer the picture they were
+        // already being served, on a fault the link never had. A 2160p copy
+        // must come back a 2160p copy.
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let previous_dir = crate::test_tempdir().expect("previous session");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let previous = insert_reopen_fixture(
+            &mgr,
+            ReopenFixture {
+                session_id: "wedged-session",
+                dir: previous_dir.path().to_path_buf(),
+                user_name: "paul",
+                playback_id: "wedged-player",
+                file_id: 61,
+                target_height: 2160,
+                automatic: true,
+                kind: SessionKind::Copy {
+                    aac: false,
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                },
+            },
+        )
+        .await;
+        wedge_predecessor(&previous, WEDGE_IDLE_MS, WEDGE_GAP_MS).await;
+
+        let request = reopen_request(61, "wedged-player", "wedged-reopen", "wedged-session");
+        let Claimed::Mine(claim, normalized) = mgr
+            .claim_request("wedged-reopen", &request, r#"["username","paul"]"#)
+            .await
+            .expect("a wedged predecessor is still a valid predecessor")
+        else {
+            panic!("new request owns its claim")
+        };
+        assert_eq!(
+            normalized.kind,
+            SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+            "a copy that wedged comes back a copy",
+        );
+        assert_eq!(
+            mgr.requests
+                .lock()
+                .expect("requests")
+                .get("wedged-reopen")
+                .and_then(|entry| entry.target_height),
+            Some(2160),
+            "on the rung the viewer was already watching",
+        );
+        drop(claim);
+
+        // The same request id is the same answer: the decision is made before
+        // the create is persisted, so a transport replay cannot see a
+        // different rung than the one already handed out.
+        let Claimed::Mine(replay_claim, replayed) = mgr
+            .claim_request("wedged-reopen", &request, r#"["username","paul"]"#)
+            .await
+            .expect("replay is valid")
+        else {
+            panic!("an unfinished claim is replayable by its owner")
+        };
+        assert_eq!(replayed.kind, normalized.kind);
+        drop(replay_claim);
+    }
+
+    #[tokio::test]
+    async fn a_slow_link_still_steps_down_because_it_is_not_wedged() {
+        use plurx_core::store::SqliteStore;
+
+        // Both halves of the signature are load-bearing. A link that is merely
+        // slow is still completing deliveries, and a session with nothing
+        // published beyond what the client already has is not being starved by
+        // a wedge. Either way the one-rung descent is the right answer, and a
+        // backstop that swallowed those would leave real starvation at a rung
+        // the link has already failed.
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        for (name, idle_ms, published_end_ms, why) in [
+            (
+                "still-delivering",
+                WEDGE_IDLE_MS - 1,
+                WEDGE_GAP_MS,
+                "a delivery completed a moment ago is a slow link, not a wedge",
+            ),
+            (
+                "nothing-waiting",
+                WEDGE_IDLE_MS,
+                WEDGE_GAP_MS - 1,
+                "an idle client with nothing published to fetch proves nothing",
+            ),
+        ] {
+            let dir = crate::test_tempdir().expect("previous session");
+            let previous = insert_reopen_fixture(
+                &mgr,
+                ReopenFixture {
+                    session_id: name,
+                    dir: dir.path().to_path_buf(),
+                    user_name: "paul",
+                    playback_id: name,
+                    file_id: 62,
+                    target_height: 1080,
+                    automatic: true,
+                    kind: SessionKind::Transcode { height: 1080 },
+                },
+            )
+            .await;
+            wedge_predecessor(&previous, idle_ms, published_end_ms).await;
+
+            let request = reopen_request(62, name, name, name);
+            let Claimed::Mine(claim, normalized) = mgr
+                .claim_request(name, &request, r#"["username","paul"]"#)
+                .await
+                .expect("valid reopen")
+            else {
+                panic!("new request owns its claim")
+            };
+            assert_eq!(
+                normalized.kind,
+                SessionKind::Transcode { height: 720 },
+                "{why}",
+            );
+            drop(claim);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_manual_reopen_is_unchanged_by_the_wedge_backstop() {
+        use plurx_core::store::SqliteStore;
+
+        // A viewer who picked a rung owns it. The backstop only removes a
+        // server-owned descent, and there is none to remove here.
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        for (name, idle_ms, published_end_ms) in [
+            ("manual-wedged", WEDGE_IDLE_MS, WEDGE_GAP_MS),
+            ("manual-healthy", 0, 0),
+        ] {
+            let dir = crate::test_tempdir().expect("previous session");
+            let previous = insert_reopen_fixture(
+                &mgr,
+                ReopenFixture {
+                    session_id: name,
+                    dir: dir.path().to_path_buf(),
+                    user_name: "paul",
+                    playback_id: name,
+                    file_id: 63,
+                    target_height: 1080,
+                    automatic: false,
+                    kind: SessionKind::Transcode { height: 1080 },
+                },
+            )
+            .await;
+            wedge_predecessor(&previous, idle_ms, published_end_ms).await;
+
+            let request = reopen_request(63, name, name, name);
+            let Claimed::Mine(claim, normalized) = mgr
+                .claim_request(name, &request, r#"["username","paul"]"#)
+                .await
+                .expect("valid reopen")
+            else {
+                panic!("new request owns its claim")
+            };
+            assert_eq!(
+                normalized.kind,
+                SessionKind::Transcode { height: 1080 },
+                "a manual predecessor keeps its own rung either way",
+            );
+            drop(claim);
+        }
     }
 
     #[tokio::test]

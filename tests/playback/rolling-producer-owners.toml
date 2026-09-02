@@ -101,7 +101,10 @@ replacement = "the sole supervisor reap path; rejected candidates use the same c
 [[symbols]]
 id = "response-publication-observation"
 pattern = "\\.observe_publication\\("
-expected_occurrences = 3
+# +1 for the pacing-hold rung backstop: one test helper publishes a frontier on
+# a predecessor session so claim normalization can read the wedge signature it
+# is being tested against. It is a fixture, not a producer owner.
+expected_occurrences = 4
 kind = "response_admission"
 replacement = "background flow refresh plus exact fixtures; HTTP playlist observation uses the separately inventoried absolute-deadline admission"
 
@@ -1186,6 +1189,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # loop is that polling the *store* observed only the first of the three writes,
 # so the test could assert against a status its own task had not finished
 # producing. No child process, no producer, no timer.
+# +2 for the VOD fetched-side frontier test: two `VodServe::status()` reads of
+# one session's diagnostics, before and after the hole is filled. They take a
+# manifest lock and return a struct; nothing is launched and nothing is owned.
 # +7 with M7 R-M3's seek-coalescing acceptance: every one is a
 # `Response::status()` assertion on an in-process subtitle-segment response.
 # They launch nothing and own nothing. R-M3 adds no command construction at
@@ -1194,8 +1200,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # under `process-command-construction` above.
 # +1 with R-M3's terminal-retirement test: one more `Response::status()` read on
 # an in-process subtitle response, this time to prove that retiring a playback
-# releases the window it owned.
-expected_occurrences = 208
+# releases the window it owned. The two counts above are independent and add:
+# the pacing-hold work and R-M3 landed against the same base.
+expected_occurrences = 210
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

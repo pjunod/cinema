@@ -292,6 +292,16 @@ pub struct VodSessionInfo {
     pub producer_hold: Option<&'static str>,
     pub producer_failed: Option<String>,
     pub published_end_ms: Option<i64>,
+    /// The end of the contiguous materialized run measured from the segment
+    /// this client was last served, rather than from segment 0.
+    ///
+    /// A far seek materializes segments past a hole, so `published_end_ms` can
+    /// sit behind the playhead while there is real media ahead of the client.
+    /// This is the frontier a stalled client could actually fetch from, and it
+    /// is what the control plane reads. `published_end_ms` keeps its own
+    /// meaning — how much of the title exists — because the activity page asks
+    /// that question, and it is a different one.
+    pub ready_ahead_end_ms: Option<i64>,
     pub fetched_end_ms: i64,
     pub fetched_segment: Option<i64>,
     pub ahead_seconds: Option<i64>,
@@ -3146,6 +3156,7 @@ impl VodServe {
                 producer_hold,
                 producer_failed: failed,
                 published_end_ms,
+                ready_ahead_end_ms,
                 fetched_end_ms,
                 fetched_segment: last_served.map(i64::from),
                 ahead_seconds: ready_ahead_end_ms.map(|end| (end - fetched_end_ms).max(0) / 1000),
@@ -9376,6 +9387,95 @@ mod tests {
             "a tombstone is not live"
         );
         assert!(serve.status("unknown").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_far_seek_reports_the_frontier_the_client_can_actually_fetch() {
+        // The two frontiers answer different questions and a far seek pulls
+        // them apart. `published_end_ms` is how much of the title exists,
+        // counted from the start, and the activity page asks that. A client
+        // parked past a hole asks a different one: is there anything ahead of
+        // *me*. Reporting the first as the second leaves a wedged player being
+        // told, correctly and uselessly, that the film begins.
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("sess-a", 20).await;
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            assert!(manifest.len() > 23, "the fixture needs a hole to seek past");
+            for index in [0, 1, 2, 3, 4, 20, 21, 22] {
+                assert!(manifest.materialize(index, 1_024, 0));
+            }
+        }
+        rendition
+            .readers
+            .lock()
+            .await
+            .get_mut("sess-a")
+            .expect("reader")
+            .last_served = Some(20);
+        serve.shared.sessions.lock().await.insert(
+            "sess-a".into(),
+            Session {
+                rendition: Some(Arc::clone(&rendition)),
+                rendition_key: rendition.key.clone(),
+                file: Arc::new(rendition.recipe.file.clone()),
+                playback_id: "play-a".into(),
+                user_name: "paul".into(),
+                item_title: "Fixture".into(),
+                started_unix: 1,
+                target_height: 360,
+                kind: request("play-a", 0.0).kind,
+                supersession_user: "[\"user_id\",1]".into(),
+                block_budget: Duration::from_secs(8),
+                lifecycle: serve.shared.session_lifecycle("sess-a"),
+                incarnation: Arc::new(()),
+                last_touch: StdMutex::new(Instant::now()),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
+                control_end: None,
+                control_end_snapshot: None,
+                terminal_cleanup: None,
+                tombstone: None,
+            },
+        );
+        let end_of = |index: u32| {
+            rendition
+                .plan
+                .entry(index)
+                .map(|entry| ticks_to_ms(entry.end_ticks(), rendition.timescale))
+                .expect("planned segment")
+        };
+
+        let status = serve.status("sess-a").await.expect("live VOD status");
+        assert_eq!(
+            status.published_end_ms,
+            Some(end_of(4)),
+            "the run from the start stops at the hole",
+        );
+        assert_eq!(
+            status.ready_ahead_end_ms,
+            Some(end_of(22)),
+            "the run from this client's own segment does not",
+        );
+        assert_eq!(status.fetched_end_ms, end_of(20));
+        assert!(
+            status.published_end_ms < Some(status.fetched_end_ms),
+            "and the title's frontier is behind this client, which is the trap",
+        );
+
+        // Fill the hole: with nothing to seek past the two answers are the
+        // same, which is why this is a correction and not a second policy.
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            for index in 5..20 {
+                assert!(manifest.materialize(index, 1_024, 0));
+            }
+        }
+        let filled = serve.status("sess-a").await.expect("live VOD status");
+        assert_eq!(filled.published_end_ms, filled.ready_ahead_end_ms);
     }
 
     #[tokio::test]
