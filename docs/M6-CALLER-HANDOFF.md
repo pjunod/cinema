@@ -372,6 +372,42 @@ metric. A shadow mode fed a wrong candidate produces a *confident* wrong
 measurement, and the whole point of the slice is that the measurement is
 trustworthy enough to act on.
 
+**Done**, as [#816](https://github.com/pjunod/plurx/pull/816):
+`candidate_request` and `EffectiveSelection::from_request`, with the converting
+Profile 7 property pinned. What remains is the wiring — and it has a cost worth
+knowing before it is written.
+
+#### 3.3.1 Building a candidate costs two store reads
+
+`resolve_height` needs the source file and the network prior. Both are store
+reads, and the control exchange runs about once a second per client under an
+absolute deadline. Doing them unconditionally, on every exchange, to answer a
+question that is almost always "nothing changed", is the wrong shape.
+
+**Gate them behind a cheap comparison.** Everything a selection names —
+quality, audio track, audio offset, subtitle mode and track — is already on the
+snapshot, and the delivered values are already on the delivery view. Compare
+those first; resolve and build a candidate only when one of them moved. The
+expensive path then runs at the rate viewers change something, which is orders
+of magnitude below the exchange rate.
+
+This works because of what the comparison is actually looking at, and that is
+worth stating plainly:
+
+**M6 prepares for a change the *client* asked for.** A selection is the
+viewer's intent, and a transition exists when that intent stops matching what
+is being delivered. A server-driven Auto rung change — the adaptive ladder
+moving because the link moved — is *not* a selection change and this path never
+sees one. That is plan §6.1's territory, not M6's, and conflating them is how a
+prepared handoff would start firing on exactly the congestion the throughput
+gate exists to refuse.
+
+The throughput gate still earns its place: a viewer who pins 2160p on a bad
+link is a client-driven change that doubles demand at the worst moment. But the
+gate is protecting against a viewer's choice, not against the server's own
+adaptation — and if a future slice does bring adaptive rung changes into this
+path, that is a new decision and not an extension of this one.
+
 **Why this slice exists at all:** the axis restriction in `PREPARED_AXIS` is an
 argument. Shadow mode turns it into a measurement — how many transitions would
 prepare, how many fall back and on which axis, and how often
