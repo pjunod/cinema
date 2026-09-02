@@ -2373,11 +2373,44 @@ final class AppleClientTests: XCTestCase {
         XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n            .root"))
         XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n                            .surface"))
         XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n            .timeline"))
-        for token in [".onMoveCommand", ".onExitCommand", ".onPlayPauseCommand"] {
+        let handlerSuffixes = ["MoveCommand", "ExitCommand", "PlayPauseCommand"]
+        for token in handlerSuffixes.map({ ".on" + $0 }) {
             XCTAssertFalse(playerSource.contains(token), "PlayerView must not own \(token)")
             XCTAssertTrue(adapterSource.contains(token), "the adapter must own \(token)")
         }
         XCTAssertTrue(adapterSource.contains("PlayerInputRouting.route("))
+    }
+
+    func testPlayerOptionsFollowTheSharedContractOrderAndSettingsFold() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let playerSource = try String(
+            contentsOf: testsDirectory
+                .appendingPathComponent("../Sources/PlayerView.swift")
+                .standardizedFileURL,
+            encoding: .utf8
+        )
+        let groupStart = try XCTUnwrap(playerSource.range(of: "private var playbackOptionGroup"))
+        let groupEnd = try XCTUnwrap(
+            playerSource.range(of: "private var compactControlRow", range: groupStart.upperBound..<playerSource.endIndex)
+        )
+        let group = String(playerSource[groupStart.lowerBound..<groupEnd.lowerBound])
+        let controls = [
+            "audioMenu", "subtitleMenu", "qualityMenu", "settingsMenu",
+            "statsButton", "pictureInPictureButton",
+        ]
+        var previous = group.startIndex
+        for control in controls {
+            let range = try XCTUnwrap(group.range(of: control, range: previous..<group.endIndex))
+            previous = range.upperBound
+        }
+        XCTAssertFalse(playerSource.contains("private var autoplayButton"))
+        let settingsStart = try XCTUnwrap(playerSource.range(of: "private var settingsMenu"))
+        let settingsEnd = try XCTUnwrap(
+            playerSource.range(of: "private var autoplaySettingsButton", range: settingsStart.upperBound..<playerSource.endIndex)
+        )
+        let settings = String(playerSource[settingsStart.lowerBound..<settingsEnd.upperBound])
+        XCTAssertTrue(settings.contains("gearshape.fill"))
+        XCTAssertTrue(settings.contains("autoplaySettingsButton"))
     }
 
     private func playerInputContractFixture() throws -> PlayerInputContractFixture {

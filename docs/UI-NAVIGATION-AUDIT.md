@@ -38,6 +38,12 @@ Play/Pause: `PlayerView.swift:1178-1184`; `PlayerScreen.kt:953-957` then
 `clients/android/app/src/test/java/tv/plurx/app/player/PlayerPolicyTest.kt:19-29`),
 which is why they survived every patch.
 
+**Closed by:** web [#795](https://github.com/pjunod/plurx/pull/795), Android
+[#797](https://github.com/pjunod/plurx/pull/797), and Apple
+[#799](https://github.com/pjunod/plurx/pull/799) route hidden directions to
+`reveal`; [#810](https://github.com/pjunod/plurx/pull/810) fences that decision to
+the adapters and reducers.
+
 **M2 — the seek bar sits in the same row as the buttons, and horizontal
 input on it is a seek.** Android's transport row is
 `[⟲10][▶][⟳10] 0:00 [———slider———] 1:59:00` (`PlayerScreen.kt:1339-1362`).
@@ -59,6 +65,12 @@ Home/End (`:9061-9064`); arrows reach the global handler, which seeks and
 `preventDefault()`s whenever the target is not a `<button>` (`:10786`), so
 on any browser where arrows move focus the bar is a one-way door.
 
+**Closed by:** [#795](https://github.com/pjunod/plurx/pull/795),
+[#797](https://github.com/pjunod/plurx/pull/797), and
+[#799](https://github.com/pjunod/plurx/pull/799) give the timeline its own row
+and implement preview-then-commit; [#810](https://github.com/pjunod/plurx/pull/810)
+folds the remaining options into the shared row grammar.
+
 **M3 — three different chrome-state machines.** Auto-hide delay: tvOS 4 s,
 Android 3.8 s, web 2.6 s (`PlayerView.swift:682`; `PlayerScreen.kt:920`;
 `index.html:8869`). What holds the chrome: tvOS — scrubbing, stream change,
@@ -74,6 +86,11 @@ web nowhere — the player never takes focus (`index.html:7236-7266`), so the
 detail page's Play button behind the modal keeps it and the next Space
 re-launches playback through `PLAY_OPEN_GATE` (`:7237`, `:10782`).
 
+**Closed by:** [#795](https://github.com/pjunod/plurx/pull/795),
+[#797](https://github.com/pjunod/plurx/pull/797), and
+[#799](https://github.com/pjunod/plurx/pull/799) use the fixture's four-second
+idle rule, hold visible state, and restore remembered focus.
+
 **M4 — the back key has a different precedence on every client.** tvOS
 Menu: engaged bar → stats → hide chrome → exit (`PlayerView.swift:961-972`),
 so an engaged bar under a Mini stats strip takes four presses to leave.
@@ -81,6 +98,12 @@ Android BACK: panel → hide chrome → exit (`PlayerScreen.kt:322-326`,
 `:742-751`). Web Escape: always closes the whole player, menu or stats open
 or not (`index.html:10784`); nothing closes `#pmenu` except choosing
 (`:9575-9627`, no Escape, no click-outside).
+
+**Closed by:** [#795](https://github.com/pjunod/plurx/pull/795),
+[#797](https://github.com/pjunod/plurx/pull/797), and
+[#799](https://github.com/pjunod/plurx/pull/799) derive Back from the same
+state and table; [#810](https://github.com/pjunod/plurx/pull/810) prevents a second
+platform handler from bypassing that precedence.
 
 **M5 — the playback-info panel has no shared row list.** The three
 clients agree on the mode names Mini · Standard · Debug and on nothing
@@ -93,6 +116,11 @@ reveal surface 4 s after the panel opens (`PlayerView.swift:1160-1164`),
 Android TV swallows the first Select and re-shows the transport under the
 panel on every D-pad press (`PlayerScreen.kt:987-991`, `:1002-1009`), and
 the web closes the whole player on Escape (`index.html:10784`).
+
+**Closed by:** [#795](https://github.com/pjunod/plurx/pull/795),
+[#797](https://github.com/pjunod/plurx/pull/797), and
+[#799](https://github.com/pjunod/plurx/pull/799) render the fixture's ordered
+field list and give the panel the same close/focus semantics.
 
 Everything in §3 and §4 is one of these five wearing a different coat.
 
@@ -466,8 +494,8 @@ against the same rows. That is
    `tests/playback/playback-info-fields.json`, duplicate labels retired,
    platform-only rows marked, one unit spelling, one pill meaning.
 
-Still open, with the recommended default in the contract and the plan:
-the canonical options set (§2 "Options set" row) — recommended
-`audio · subtitles · quality · settings · info · [pip] · [close]` with
-autoplay, auto-skip and audio sync inside `settings`; and whether tvOS
-season episode cards keep play-on-select (§3.1 item 7).
+Paul ruled the fixture defaults on 2026-09-02: the canonical options set is
+`audio · subtitles · quality · settings · info · [pip] · [close]`, with
+autoplay, auto-skip and audio sync inside `settings`; tvOS season episode cards
+keep play-on-select; an idle timeline Select toggles play; and Debug keeps the
+union field list.

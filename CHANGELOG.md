@@ -33,6 +33,24 @@ bump may break compatibility and a **patch** bump never does.
   operations guides cover authentication, serial restart discipline, rollback,
   registry retention, and the local `--build` fallback when nuc3 is down.
 
+### Changed
+
+- **M1 / web (#795):** the browser player now routes every contract input
+  through the shared table, gives the timeline its own preview-then-commit row,
+  restores focus across the modal and menus, uses the four-second hide rule,
+  and renders playback information from the shared field list.
+- **M2 / Android (#797):** streaming and offline players now share a pure
+  reducer, one key adapter, the custom timeline row, remembered focus, trapped
+  panels, and the same playback-information fields on phone and ten-foot
+  surfaces.
+- **M3 / Apple (#799):** iOS and tvOS now route through the same reducer,
+  preview timeline movement before one committed seek, preserve focus and
+  playback through remote commands, and render one Standard/Debug field list.
+- **M4 / fence and fold (#810):** validation now rejects player key handling
+  outside the three adapters and verifies both native fixture resources remain
+  wired; web and Apple place playback preferences in Settings in the shared
+  transport order.
+
 ## [0.3.0] — 2026-08-31
 
 ### Added

@@ -3038,7 +3038,7 @@ if(window.matchMedia){ try{ window.matchMedia("(prefers-color-scheme: dark)").ad
 </head>
 <body>
 <div id="app"></div>
-<div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="Player"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="audiobtn" aria-haspopup="menu" aria-expanded="false" style="display:none" onclick="toggleMenu('audio')">🔊 Audio</button><button class="pbtn" id="subsbtn" aria-haspopup="menu" aria-expanded="false" style="display:none" onclick="toggleMenu('subs')">💬 Subtitles</button><button class="pbtn" id="qualbtn" aria-haspopup="menu" aria-expanded="false" title="Playback quality" onclick="toggleMenu('quality')">◆ Quality</button><button class="pbtn" id="syncbtn" aria-haspopup="menu" aria-expanded="false" title="Audio sync adjustment" onclick="toggleMenu('sync')">⇄ Sync</button><button class="pbtn" id="statsbtn" aria-haspopup="dialog" aria-expanded="false" title="Playback info (i)" onclick="toggleStats()">ⓘ Playback info</button><button class="pbtn" id="skipbtn" title="Auto-skip intro & credits" onclick="togglePlayerAutoskip()">⏭ Auto-skip</button><button class="pbtn" id="autonextbtn" title="Auto-play the next episode when one finishes" onclick="togglePlayerAutonext()">▶ Autoplay</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" id="pbclose" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptimeline" id="ptimeline"><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span></div><div class="ptransport" id="ptransport"><button class="picon" id="pbback" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon" id="pbforward" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptransport-spacer" aria-hidden="true"></span><button class="picon paud" id="pbaudio" aria-haspopup="menu" aria-expanded="false" aria-label="Audio track" title="Audio track" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-haspopup="menu" aria-expanded="false" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">≡</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="statsov" id="statsov" data-mode="standard"><div class="statshd"><span id="statstitle">Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback info size"><button type="button" data-stats-mode="mini" role="radio" onclick="setStatsMode('mini')">Mini</button><button type="button" data-stats-mode="standard" role="radio" onclick="setStatsMode('standard')">Standard</button><button type="button" data-stats-mode="debug" role="radio" onclick="setStatsMode('debug')">Debug</button></div><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu" role="menu"></div></div></div>
+<div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="Player"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="statsbtn" aria-haspopup="dialog" aria-expanded="false" title="Playback info (i)" onclick="toggleStats()">ⓘ Playback info</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" id="pbclose" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptimeline" id="ptimeline"><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span></div><div class="ptransport" id="ptransport"><button class="picon" id="pbback" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon" id="pbforward" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptransport-spacer" aria-hidden="true"></span><button class="picon paud" id="pbaudio" aria-haspopup="menu" aria-expanded="false" aria-label="Audio track" title="Audio track" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-haspopup="menu" aria-expanded="false" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbquality" aria-haspopup="menu" aria-expanded="false" aria-label="Playback quality" title="Playback quality" onclick="toggleMenu('quality',1)">◆</button><button class="picon" id="pbsettings" aria-haspopup="menu" aria-expanded="false" aria-label="Playback settings" title="Playback settings" onclick="toggleMenu('settings',1)">⚙</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">≡</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="statsov" id="statsov" data-mode="standard"><div class="statshd"><span id="statstitle">Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback info size"><button type="button" data-stats-mode="mini" role="radio" onclick="setStatsMode('mini')">Mini</button><button type="button" data-stats-mode="standard" role="radio" onclick="setStatsMode('standard')">Standard</button><button type="button" data-stats-mode="debug" role="radio" onclick="setStatsMode('debug')">Debug</button></div><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu" role="menu"></div></div></div>
 <div class="toast" id="toast"></div>
 
 <script src="/assets/cluster-panel.js"></script>
@@ -5896,14 +5896,14 @@ function paintTagChips(){
     +`<input id="ed-tag" placeholder="${EDIT_TAGS.length?"":"beach, kids"}" onkeydown="tagKey(event)">`;
 }
 function dropTag(i){ EDIT_TAGS.splice(i,1); paintTagChips(); document.getElementById("ed-tag").focus(); }
-function tagKey(e){
-  const el=e.target;
-  if(e.key==="Enter"||e.key===","){
-    e.preventDefault();
+function tagKey(event){
+  const el=event.target;
+  if(event.key==="Enter"||event.key===","){
+    event.preventDefault();
     const v=(el.value||"").trim();
     if(v && !EDIT_TAGS.some(t=>t.toLowerCase()===v.toLowerCase())) EDIT_TAGS.push(v);
     el.value=""; paintTagChips(); document.getElementById("ed-tag").focus();
-  } else if(e.key==="Backspace" && !el.value && EDIT_TAGS.length){
+  } else if(event.key==="Backspace" && !el.value && EDIT_TAGS.length){
     EDIT_TAGS.pop(); paintTagChips(); document.getElementById("ed-tag").focus();
   }
 }
@@ -9627,19 +9627,16 @@ function subLabelMenu(s){
     +(subNeedsBurn(s)?" · burned in":"");
 }
 function setupTrackMenus(){
-  const ab=document.getElementById("audiobtn"), sb=document.getElementById("subsbtn"), m=document.getElementById("pmenu");
+  const m=document.getElementById("pmenu");
   if(m){ closeMenu(false); m.innerHTML=""; }
-  // Audio track selection now sits in the transport next to CC — that is where
-  // people look for it, and the top bar fades out from under the cursor during
-  // playback. The top-bar button stays as a second door to the same menu.
+  // Track selection has one door per option in the transport row. Duplicating
+  // the same menus in the header made the focus order depend on the client.
   const multi=!!(PLAYER.audio&&PLAYER.audio.length>1);
-  if(ab) ab.style.display=multi?"":"none";
   const pa=document.getElementById("pbaudio"); if(pa) pa.style.display=multi?"":"none";
   // Subtitles are offered in every playback mode. A stream that starts at an
   // offset (transcode, copy-HLS, a resumed remux) shifts the cues to match —
   // see setSub() — so the track lines up wherever playback actually began.
   const has=!!(PLAYER.subs&&PLAYER.subs.length);
-  if(sb) sb.style.display=has?"":"none";
   const cc=document.getElementById("pbsubs"); if(cc) cc.style.display=has?"":"none";
   pbSyncSubIcon();
 }
@@ -9657,6 +9654,22 @@ function closeMenu(restoreFocus=true){
   if(restoreFocus&&opener&&opener.focus) opener.focus({preventScroll:true});
   if(PLAYER) PLAYER._menuOpener=null;
   playerActivity();
+}
+function settingsMenuHtml(){
+  return `<div class="amsec">Playback settings</div>
+    <button id="pmenu-autoskip" role="menuitemcheckbox" aria-checked="${autoskipOn()}" class="${autoskipOn()?'sel':''}" onclick="togglePlayerAutoskip(); refreshPlayerSettingsMenu('pmenu-autoskip')">Auto-skip intro and credits</button>
+    <button id="pmenu-autoplay" role="menuitemcheckbox" aria-checked="${autoNextOn()}" class="${autoNextOn()?'sel':''}" onclick="togglePlayerAutonext(); refreshPlayerSettingsMenu('pmenu-autoplay')">Autoplay next episode</button>
+    ${syncMenuHtml()}`;
+}
+function refreshPlayerSettingsMenu(focusId){
+  const m=document.getElementById("pmenu");
+  if(!m||!m.classList.contains("on")||m.dataset.kind!=="settings") return;
+  m.innerHTML=settingsMenuHtml();
+  m.querySelectorAll("button").forEach(button=>{
+    if(!button.hasAttribute("role")) button.setAttribute("role","menuitem");
+  });
+  const target=focusId&&document.getElementById(focusId);
+  if(target) target.focus({preventScroll:true});
 }
 function toggleMenu(kind,low){
   const m=document.getElementById("pmenu"); if(!m) return;
@@ -9678,8 +9691,8 @@ function toggleMenu(kind,low){
   m.dataset.kind=kind; m.classList.toggle("low",!!low);
   if(kind==="audio"){
     m.innerHTML=PLAYER.audio.map((a,i)=>`<button class="${PLAYER.curAudio===i?'sel':''}" onclick="switchAudio(${i})">${esc(audioLabelMenu(a,i))}</button>`).join("");
-  } else if(kind==="sync"){
-    m.innerHTML=syncMenuHtml();
+  } else if(kind==="settings"){
+    m.innerHTML=settingsMenuHtml();
   } else if(kind==="quality"){
     // If a remembered measurement is why Auto is not giving this viewer the
     // source, say so HERE — this menu is where somebody goes when they wonder
@@ -9714,7 +9727,9 @@ function toggleMenu(kind,low){
     m.innerHTML=`<button class="${PLAYER.curSub<0?'sel':''}" onclick="setSub(-1)">Off</button>`+
       PLAYER.subs.map(s=>`<button class="${PLAYER.curSub===s.index?'sel':''}" onclick="setSub(${s.index})">${esc(subLabelMenu(s))}</button>`).join("");
   }
-  m.querySelectorAll("button").forEach(button=>button.setAttribute("role","menuitem"));
+  m.querySelectorAll("button").forEach(button=>{
+    if(!button.hasAttribute("role")) button.setAttribute("role","menuitem");
+  });
   m.classList.add("on");
   positionMenu(kind,low);
   const initial=m.querySelector(".sel")||m.querySelector("button");
@@ -9724,8 +9739,8 @@ function toggleMenu(kind,low){
 
 // Which control owns each menu. The menu is one shared element, so the button
 // that opened it is the only thing that says where it belongs.
-const MENU_ANCHORS={audio:["audiobtn","pbaudio"],subs:["subsbtn","pbsubs"],
-                    quality:["qualbtn",null],sync:["syncbtn",null]};
+const MENU_ANCHORS={audio:[null,"pbaudio"],subs:[null,"pbsubs"],
+                    quality:[null,"pbquality"],settings:[null,"pbsettings"]};
 
 // Put the menu under (or above) the button that opened it.
 //
@@ -9833,7 +9848,7 @@ async function setSync(v){
   const me=PLAYER; if(!me||!me.fileId) return;
   PLAYER.aoffset=Math.max(-15000,Math.min(15000,Math.round(v)));
   const m=document.getElementById("pmenu");
-  if(m&&m.classList.contains("on")&&m.dataset.kind==="sync") m.innerHTML=syncMenuHtml();
+  if(m&&m.classList.contains("on")&&m.dataset.kind==="settings") refreshPlayerSettingsMenu();
   toast("Audio sync: "+offsetLabel(PLAYER.aoffset));
   const video=document.getElementById("video");
   const pos=(PLAYER.offset||0)+((video&&video.currentTime)||0);

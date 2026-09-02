@@ -1280,11 +1280,16 @@ perf report are the same events server-side.
 
 ## Reading the stats overlay
 
+Player navigation follows the shared
+[player input contract](PLAYER-INPUT-CONTRACT.md): hidden chrome reveals before
+it can seek, the timeline previews Left/Right and commits only on Select, and
+Back resolves by the same state precedence on web, Android, and Apple.
+
 Press `i` in the player. The fields, and what each is telling you:
 
 | Field | Meaning |
 |---|---|
-| **Method** | The verdict *as currently running* — `Direct play` / `Remux` / `Transcode`. If it disagrees with the reasons, see [the fallback](#the-error-fallback--and-the-stale-reason-trap). |
+| **Method** | The delivery verdict *as currently running* — `Direct play`, `Remux`, `Transcode`, or `Transcode · cached`. Encoder and rung follow as clauses when applicable, for example `Transcode · nvenc · 1080p`. If it disagrees with the reasons, see [the fallback](#the-error-fallback--and-the-stale-reason-trap). |
 | **Reason** | Why it isn't direct play, one clause per failed dimension. Empty ⇒ direct. |
 | **Source** | The file's real specs (video codec/bit-depth/HDR, resolution, bitrate, container, audio) — from the server-side ffprobe, numbers the browser can't see. |
 | **Now decoding** | What the `<video>` element is actually decoding *right now*. For remux/copy this equals Source resolution (video untouched); for transcode it's the target rung. Dropped frames + buffer health live here. |

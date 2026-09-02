@@ -9,7 +9,7 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-08-31): source is v0.3.0, Apple build 109. Native text
+> Status (2026-08-31): source is v0.3.0, Apple build 110. Native text
 > subtitles, the cinematic detail surface, stable seek/recovery, truthful
 > delivered-range badges, and app-managed offline viewing on iPhone/iPad have
 > landed.

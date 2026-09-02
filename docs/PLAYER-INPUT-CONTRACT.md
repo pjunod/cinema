@@ -1,6 +1,6 @@
 # Player input contract — one routing table, every client obeys it
 
-**Status:** ruled 2026-09-02, fixtures committed, clients not yet conformant ·
+**Status:** ruled and implemented 2026-09-02 ·
 **Source of truth:** [`tests/playback/player-input-contract.json`](../tests/playback/player-input-contract.json) (input) and [`tests/playback/playback-info-fields.json`](../tests/playback/playback-info-fields.json) (info panel) ·
 **Kept honest by:** `tests/playback/player-input-contract.test.js` (runs in
 `make web-check`) · **Built by:** [PLAYER-INPUT-CONTRACT-PLAN.md](PLAYER-INPUT-CONTRACT-PLAN.md)
@@ -183,9 +183,8 @@ within each line is unchanged. Nothing else moves between surfaces.
 controls; today they are scattered as top-level buttons on the web
 (`⏭ Auto-skip`, `▶ Autoplay`, `⇄ Sync`), a top-level `autoplay` button on
 Apple, and Android's "Playback settings" panel — Android's shape is the one
-kept. **This is the open ruling in audit §6**; until Paul rules, the plan
-builds the row with the existing per-client option buttons in the
-`settings` slot's position and folds them in M4.
+kept. Paul ruled the recommended default: web and Apple fold those preferences
+into `settings`, and no preference remains a transport-row peer.
 
 **Focus memory.** `initial_focus` is `play_pause`. `reveal` restores the
 last focused control; `focus_transport` restores the last *transport*
@@ -455,21 +454,9 @@ _Generated from [`tests/playback/playback-info-fields.json`](../tests/playback/p
 
 ---
 
-## 9. Open rulings
+## 9. Defaults ruled with the contract
 
-Recommended defaults are already in the fixture; ruling the other way
-changes rows, not architecture.
-
-1. **The options set** (§3): keep Android's `settings` panel shape and fold
-   the web's auto-skip/autoplay/sync buttons and Apple's autoplay button
-   into it — recommended — or keep top-level toggles and make all three
-   clients show the same ones.
-2. **tvOS season episode cards**: Select plays today
-   (`Components.swift:313-322`); every other surface opens detail. Keep,
-   or add a "details" region as iOS has.
-3. **`select` on an idle timeline** is `toggle_play` (the Apple TV system
-   player's behaviour). Alternative: `ignore`. Both are one cell.
-4. **The info panel's row list** (§7) is the union of what the three
-   clients show today, with the duplicate labels retired and the
-   platform-only rows marked. Prune it if Debug is too long; a pruned row
-   is one line removed from the fixture.
+Paul ruled the fixture defaults on 2026-09-02: the options set uses Android's
+`settings` shape; tvOS episode cards keep play-on-select; `select` on an idle
+timeline toggles play; and the Debug info list is the union in
+`playback-info-fields.json`. These are contract rows, not client exceptions.
