@@ -644,3 +644,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
 source_anchor = "fun inputState(): PlayerInputState = when {"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
 test_anchor = "revealRestoresTheControlThatWasFocusedRatherThanPlayPause"
+
+[[fixes]]
+id = "apple.player-input-surrounds"
+commits = ["a96ce15b"]
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "static func revealFocusTarget("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testRevealDoesNotRestoreFocusToAMarkerThatIsNoLongerOffered"

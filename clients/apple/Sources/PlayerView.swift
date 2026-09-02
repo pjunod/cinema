@@ -322,11 +322,6 @@ enum TVPlaybackInfoPresentation {
     static let debugPanelMaxHeight: CGFloat = 850
     static let debugEdgeInset: CGFloat = 48
 
-    static func healthLabel(stalls: Int?) -> String {
-        guard let stalls else { return "Measuring" }
-        if stalls == 0 { return "No stalls" }
-        return stalls == 1 ? "1 stall" : "\(stalls) stalls"
-    }
 }
 #endif
 
@@ -742,7 +737,12 @@ struct PlayerView: View {
 
             if !lifecycle.isTearingDown {
                 #if os(tvOS)
-                if !controlsVisible {
+                // Not while the stream has failed: the surface is full-screen,
+                // focusable and carries the remote adapter, so once the chrome
+                // had auto-hidden it sat in front of the retry buttons
+                // consuming every direction — `failed × up/down` is `ignore`,
+                // and only Menu got out.
+                if !controlsVisible && !controller.failed {
                     Color.clear
                         .contentShape(Rectangle())
                         .ignoresSafeArea()
@@ -902,7 +902,27 @@ struct PlayerView: View {
             #endif
         }
         .onDisappear {
+            #if os(iOS)
+            controller.remoteInput = nil
+            #endif
             lifecycle.teardown { teardownPlayback() }
+        }
+        .onAppear {
+            // The lock screen and the control centre reach the same player, so
+            // they route through the same table: a skip while a scrub is
+            // pending is `ignore`, and play/pause commits it first.
+            #if os(iOS)
+            controller.remoteInput = { input in
+                applyPlayerInputOutcome(
+                    PlayerInputRouting.route(
+                        surface: .touch,
+                        state: inputState(),
+                        input: input
+                    ),
+                    input: input
+                )
+            }
+            #endif
         }
         .task(id: autoHideGeneration) {
             guard Self.shouldAutoHideControls(
@@ -912,7 +932,7 @@ struct PlayerView: View {
                 changingStream: controller.isChangingStream,
                 optionMenuOpen: optionMenuOpen,
                 failed: controller.failed,
-                infoOpen: showStats,
+                infoOpen: Self.infoSuppressesAutoHide(showStats: showStats, statsMode: statsMode),
                 previewPending: pendingMs != nil,
                 tearingDown: lifecycle.isTearingDown
             ) else { return }
@@ -925,7 +945,7 @@ struct PlayerView: View {
                       changingStream: controller.isChangingStream,
                       optionMenuOpen: optionMenuOpen,
                       failed: controller.failed,
-                      infoOpen: showStats,
+                      infoOpen: Self.infoSuppressesAutoHide(showStats: showStats, statsMode: statsMode),
                       previewPending: pendingMs != nil,
                       tearingDown: lifecycle.isTearingDown
                   ) else { return }
@@ -1055,6 +1075,24 @@ struct PlayerView: View {
             controls: controlsVisible,
             playbackInfo: playbackInfoVisible
         )
+    }
+
+    /// Mini is a strip, not a modal: the transport stays live beside it, it
+    /// is not the `info` state, and so it does not suppress the idle hide.
+    /// Standard and Debug do.
+    static func infoSuppressesAutoHide(showStats: Bool, statsMode: PlaybackStatsMode) -> Bool {
+        showStats && statsMode != .mini
+    }
+
+    /// Where `reveal` puts focus. The marker button is drawn only while a
+    /// marker is offered, so remembering it across the marker's life means
+    /// restoring focus to a view nobody is rendering.
+    static func revealFocusTarget(
+        remembered: PlayerControl,
+        markerOffered: Bool
+    ) -> PlayerControl {
+        if remembered == .marker && !markerOffered { return .playPause }
+        return remembered
     }
 
     static func shouldAutoHideControls(
@@ -1197,15 +1235,20 @@ struct PlayerView: View {
 
     private func inputState() -> PlayerInputState {
         if controller.failed { return .failed }
-        if showStats && statsMode != .mini { return .info }
+        // Contract §2.2 orders the precedence scrub → menu → info. A pending
+        // position is the most local thing on screen: on the phone the slider
+        // stays live under the panel, so asking `info` first meant a drag with
+        // Debug open answered `close_info` where the contract says `cancel`.
         #if os(iOS)
-        if activeOptionMenu != nil { return .menu }
         if isScrubbing { return .scrub }
+        if activeOptionMenu != nil { return .menu }
         #else
+        if focusedControl == .progress && pendingMs != nil { return .scrub }
         if tvMenuOpen { return .menu }
-        if focusedControl == .progress {
-            return pendingMs == nil ? .timeline : .scrub
-        }
+        #endif
+        if showStats && statsMode != .mini { return .info }
+        #if os(tvOS)
+        if focusedControl == .progress { return .timeline }
         #endif
         if !controlsVisible { return .hidden }
         return .transport
@@ -1234,7 +1277,11 @@ struct PlayerView: View {
             return false
         case .focusMarkerOrIgnore:
             #if os(tvOS)
-            if controller.activeMarker != nil { focusedControl = .marker }
+            // `offeredMarker`, not `activeMarker`: the button is drawn only
+            // for a marker the viewer is offered. An auto-skip-eligible
+            // marker seeked back into is active with no button on screen, and
+            // focusing it dropped focus entirely.
+            if controller.offeredMarker != nil { focusedControl = .marker }
             #endif
             return true
         case .focusTransport:
@@ -1288,7 +1335,7 @@ struct PlayerView: View {
         case .cancelThenFocusMarkerOrIgnore:
             cancelPendingPosition()
             #if os(tvOS)
-            if controller.activeMarker != nil { focusedControl = .marker }
+            if controller.offeredMarker != nil { focusedControl = .marker }
             #endif
             revealControls()
             return true
@@ -1359,7 +1406,11 @@ struct PlayerView: View {
         revealControls()
         Task { @MainActor in
             await Task.yield()
-            if controlsVisible { focusedControl = lastFocusedControl }
+            guard controlsVisible else { return }
+            focusedControl = Self.revealFocusTarget(
+                remembered: lastFocusedControl,
+                markerOffered: controller.offeredMarker != nil
+            )
         }
     }
     #endif
@@ -2878,11 +2929,11 @@ struct PlaybackStatsView: View {
     }
 
     private var miniNetworkSummary: String {
+        // `Delivery rate` is the server-reported rate. The player's own
+        // estimate is `Observed rate`, a different row with a different
+        // label — printing it here put two numbers under one label.
         if let delivered = controller.sessionStatus?.deliveredBps, delivered > 0 {
             return bitRate(delivered)
-        }
-        if let observed = controller.observedBitrate, observed > 0 {
-            return bitRate(Int(observed))
         }
         return "Measuring"
     }
@@ -3040,7 +3091,14 @@ struct PlaybackStatsView: View {
     /// the call site instead, so it needs nothing.
     @ViewBuilder
     private var ledgerBackdrop: some View {
+        #if os(iOS)
+        // Hit-testable and invisible: without this the taps that miss the
+        // panel reach the transport controls behind it, and `info` is a state
+        // the contract says traps interaction.
+        Color.clear.contentShape(Rectangle()).ignoresSafeArea()
+        #else
         EmptyView()
+        #endif
     }
 
     /// The remote lands on Done in every mode. Debug used to wire no initial
@@ -3130,7 +3188,7 @@ struct PlaybackStatsView: View {
     private var ledgerHeaderHealth: some View {
         #if os(tvOS)
         if mode == .standard {
-            playbackHealth
+            playbackServerHealth
         }
         #else
         EmptyView()
@@ -3153,22 +3211,17 @@ struct PlaybackStatsView: View {
     }
 
     #if os(tvOS)
-    private var playbackHealth: some View {
-        let stalls = controller.stalls
-        let label = TVPlaybackInfoPresentation.healthLabel(stalls: stalls)
-        let color: Color
-        if let stalls, stalls > 0 {
-            color = .orange
-        } else if stalls == 0 {
-            color = .green
-        } else {
-            color = .white.opacity(0.6)
-        }
+    /// The pill means server state on every client and in every mode — the
+    /// stall count is the `Stalls` row and nothing else. The tvOS Standard
+    /// header used to print "No stalls" beside that row: two spellings of one
+    /// datum, and no server state in the header at all.
+    private var playbackServerHealth: some View {
+        let status = playbackServerStatus
         return HStack(spacing: 9) {
             Circle()
-                .fill(color)
+                .fill(status.tone.color)
                 .frame(width: 11, height: 11)
-            Text(label)
+            Text(status.value)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
                 .foregroundStyle(playbackTone.color)
         }
@@ -3176,7 +3229,7 @@ struct PlaybackStatsView: View {
         .padding(.vertical, 7)
         .background(.white.opacity(0.07), in: Capsule())
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Playback health, \(label)")
+        .accessibilityLabel("Playback health, \(status.value)")
     }
     #endif
 
@@ -3638,473 +3691,18 @@ struct PlaybackStatsView: View {
         contractSections(for: .debug)
     }
 
-    private var debugPlaybackRows: [PlaybackLedgerRow] {
-        // The method label picks up qualifiers as the user works — a burned-in
-        // subtitle, a PGS overlay, a cached transcode — so the mode is the
-        // datum and the qualifiers are the clause.
-        let method = ledgerSeam(controller.methodLabel)
-        var rows: [PlaybackLedgerRow] = [ledgerRow("Build", buildLabel)]
-        rows.append(contentsOf: ledgerSplitRows("Method", method.datum, clause: method.clause))
-        rows.append(contentsOf: [
-            ledgerRow(
-                "Transport",
-                controller.currentSessionId == nil
-                    ? "Continuous file · range requests · Apple AVPlayer"
-                    : "Segmented HLS · Apple AVPlayer"
-            ),
-            ledgerRow(
-                "Position",
-                "\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))"
-            ),
-            ledgerRow("File ID", controller.decision.map { "#\($0.fileId)" } ?? "—"),
-        ])
-        if let session = controller.currentSessionId {
-            rows.append(ledgerRow("Session", session))
-        }
-        if let reasons = controller.decision?.reasons, !reasons.isEmpty {
-            rows.append(ledgerRow("Reason", reasons.joined(separator: "; ")))
-        }
-        return rows
-    }
-
-    private var debugSourceRows: [PlaybackLedgerRow] {
-        var rows: [PlaybackLedgerRow] = []
-        if let source = controller.decision?.source {
-            let video = [
-                source.videoCodec?.uppercased(),
-                source.videoProfile,
-                source.bitDepth.map { "\($0)-bit" },
-                source.hdrFormat ?? source.hdr?.uppercased(),
-            ].compactMap { $0 }.joined(separator: " · ")
-            rows.append(ledgerRow("Video", video.isEmpty ? "—" : video))
-            rows.append(ledgerRow(
-                "Resolution",
-                source.width.flatMap { width in source.height.map { "\(width)×\($0)" } } ?? "—"
-            ))
-            rows.append(ledgerRow("Bitrate", source.bitrate.map(bitRate) ?? "—"))
-            rows.append(ledgerRow("Container", source.container?.uppercased() ?? "—"))
-        }
-        if let audio = selectedAudioDescription {
-            rows.append(ledgerRow("Audio", audio))
-        }
-        rows.append(ledgerRow("AV offset", "\(controller.decision?.audioOffsetMs ?? 0) ms"))
-        return rows
-    }
-
-    private var debugDecodingRows: [PlaybackLedgerRow] {
-        let snapshot = controller.currentDiagnosticSnapshot
-        let size = controller.presentationSize
-        var rows: [PlaybackLedgerRow] = [
-            ledgerRow(
-                "Resolution",
-                size.width > 0 && size.height > 0
-                    ? "\(Int(size.width))×\(Int(size.height))"
-                    : "—"
-            )
-        ]
-        if let range = PlayerView.dynamicRangeSummary(
-            source: controller.decision?.source,
-            delivered: controller.deliveredRange,
-            displayHDR: Caps.displayIsHDR,
-            reasons: controller.decision?.reasons
-        ) {
-            rows.append(ledgerRow("Dynamic range", range))
-        }
-        rows.append(ledgerRow(
-            "Buffer",
-            snapshot.runway.map { String(format: "%.1f s", $0) } ?? "—",
-            tone: runwayTone(snapshot.runway)
-        ))
-        rows.append(ledgerRow(
-            "Player state",
-            snapshot.timeControlStatus ?? "unknown",
-            tone: playerStateTone(snapshot.timeControlStatus)
-        ))
-        if let waiting = snapshot.waitingReason {
-            rows.append(ledgerRow("Waiting reason", waiting, tone: .warning))
-        }
-        rows.append(ledgerRow(
-            "Buffer empty",
-            yesNo(snapshot.playbackBufferEmpty),
-            tone: snapshot.playbackBufferEmpty == true ? .critical : .good
-        ))
-        rows.append(ledgerRow(
-            "Likely to keep up",
-            yesNo(snapshot.playbackLikelyToKeepUp),
-            tone: snapshot.playbackLikelyToKeepUp == false ? .critical : .good
-        ))
-        rows.append(ledgerRow("Buffer full", yesNo(snapshot.playbackBufferFull)))
-        rows.append(ledgerRow(
-            "Stalls",
-            snapshot.accessStalls.map(String.init) ?? "—",
-            tone: stallTone(snapshot.accessStalls)
-        ))
-        let subtitle = selectedSubtitleParts
-        rows.append(contentsOf: ledgerSplitRows(
-            "Subtitles",
-            subtitle.name,
-            clause: subtitle.delivery
-        ))
-        return rows
-    }
-
-    private var debugNetworkRows: [PlaybackLedgerRow] {
-        let snapshot = controller.currentDiagnosticSnapshot
-        return [
-            ledgerRow(
-                "Delivery rate",
-                controller.sessionStatus?.deliveredBps.map(bitRate) ?? "—",
-                tone: networkTone
-            ),
-            ledgerRow("Observed rate", snapshot.observedBitrateBps.map { bitRate(Int($0)) } ?? "—"),
-            ledgerRow("Stream rate", snapshot.indicatedBitrateBps.map { bitRate(Int($0)) } ?? "—"),
-            ledgerRow("Requests", snapshot.mediaRequests.map(String.init) ?? "—"),
-            ledgerRow(
-                "Downloaded media",
-                snapshot.downloadedDuration.map { String(format: "%.1f s", $0) } ?? "—"
-            ),
-            ledgerRow("Transferred", snapshot.bytesTransferred.map(byteCount) ?? "—"),
-            ledgerRow(
-                "Transfer time",
-                snapshot.transferDuration.map { String(format: "%.2f s", $0) } ?? "—"
-            ),
-        ]
-    }
-
-    private var debugServerRows: [PlaybackLedgerRow] {
-        if controller.isVOD {
-            return [
-                ledgerNote("Stream", "Already transcoded · served from cache", tone: .good)
-            ]
-        }
-        guard let status = controller.sessionStatus else {
-            return [ledgerRow("Status", "No server-side session", tone: .muted)]
-        }
-        let speed = status.recentSpeed ?? status.speed
-        var rows: [PlaybackLedgerRow] = [
-            ledgerRow("Encoder", status.encoder ?? controller.encoder ?? "—"),
-            ledgerRow(
-                "Encode speed",
-                speed.map { String(format: "%.2f×", $0) } ?? "—",
-                tone: speed.map { encodeTone(speed: $0, status: status) } ?? .muted
-            ),
-            ledgerRow(
-                "Server ahead",
-                status.aheadSeconds.map { "\(max(0, $0)) s" } ?? "—",
-                tone: runwayTone(
-                    status.aheadSeconds.map(Double.init),
-                    suspended: status.suspended ?? false
-                )
-            ),
-            ledgerRow("Ahead bytes", status.aheadBytes.map(byteCount) ?? "—"),
-            ledgerRow("Produced", status.outTimeMs.map { formatTime($0) } ?? "—"),
-            ledgerRow("Pacing", status.readrate.map { String(format: "%.2f×", $0) } ?? "—"),
-            ledgerRow(
-                "Held",
-                yesNo(status.suspended),
-                tone: status.suspended == true ? .good : .neutral
-            ),
-        ]
-        if let reason = status.holdReason {
-            rows.append(ledgerRow("Hold reason", reason, tone: .good))
-        }
-        rows.append(ledgerRow(
-            "Suspend count",
-            status.suspendCount.map(String.init) ?? "0",
-            tone: (status.suspendCount ?? 0) > 8 ? .warning : .neutral
-        ))
-        rows.append(ledgerRow("Delivered", status.deliveredBytes.map(byteCount) ?? "—"))
-        rows.append(ledgerRow(
-            "Delivery idle",
-            status.deliveredIdleMs.map { "\($0) ms" } ?? "—",
-            tone: idleTone(
-                status.deliveredIdleMs,
-                suspended: status.suspended ?? false
-            )
-        ))
-        if let request = status.lastRequest {
-            rows.append(ledgerRow("Last request", request))
-        }
-        rows.append(ledgerRow(
-            "Request idle",
-            status.idleSeconds.map { "\($0) s" } ?? "—",
-            tone: requestIdleTone(
-                status.idleSeconds,
-                suspended: status.suspended ?? false
-            )
-        ))
-        if let shape = status.playlistShape {
-            rows.append(ledgerRow("Playlist", shape))
-        }
-        rows.append(ledgerRow("Published end", status.publishedEndMs.map { "\($0) ms" } ?? "—"))
-        rows.append(ledgerRow("Fetched end", status.fetchedEndMs.map { "\($0) ms" } ?? "—"))
-        return rows
-    }
-
     // MARK: - Standard field set
 
     /// Standard and Debug are both rendered from the shared fixture's field
     /// order. Platform telemetry supplies values; it never chooses labels or
-    /// moves rows between sections.
+    /// moves rows between sections. The hand-written builders that used to
+    /// sit here — five Debug row lists and a second, television-only Standard
+    /// set — became unreachable when that landed, and they still carried
+    /// labels the contract abolished ("Buffer full", "Downloaded media",
+    /// "Transfer time").
     var standardSections: [PlaybackLedgerSection] {
         contractSections(for: .standard)
     }
-
-    #if os(tvOS)
-    private var televisionStandardSections: [PlaybackLedgerSection] {
-        [
-            PlaybackLedgerSection("Playback", column: .left, rows: televisionPlaybackRows),
-            PlaybackLedgerSection(
-                "Source",
-                column: .left,
-                placeholder: "Waiting for source details",
-                rows: televisionSourceRows
-            ),
-            PlaybackLedgerSection("Now decoding", column: .left, rows: televisionDecodingRows),
-            PlaybackLedgerSection(
-                "Server",
-                column: .right,
-                placeholder: "Waiting for server details",
-                rows: televisionServerRows
-            ),
-        ]
-    }
-
-    /// The header already carries method and position on the television, so
-    /// this section exists only to route the decision reason into the notes.
-    private var televisionPlaybackRows: [PlaybackLedgerRow] {
-        guard let reasons = controller.decision?.reasons, !reasons.isEmpty else { return [] }
-        return [ledgerRow("Reason", reasons.joined(separator: " · "))]
-    }
-
-    private var televisionSourceRows: [PlaybackLedgerRow] {
-        guard let source = controller.decision?.source else { return [] }
-        let resolution = source.width.flatMap { width in
-            source.height.map { "\(width) × \($0)" }
-        } ?? "Unknown"
-        let video = [
-            source.videoCodec?.uppercased(),
-            source.bitDepth.map { "\($0)-bit" },
-            source.hdrFormat ?? source.hdr?.uppercased(),
-        ]
-            .compactMap { $0 }
-            .joined(separator: " · ")
-        var rows: [PlaybackLedgerRow] = [
-            ledgerRow("Resolution", resolution),
-            ledgerRow("Video", video.isEmpty ? "Unknown" : video),
-            ledgerRow("Container", source.container?.uppercased() ?? "Unknown"),
-        ]
-        if let bitrate = source.bitrate {
-            rows.append(ledgerRow("Bitrate", bitRate(bitrate)))
-        }
-        return rows
-    }
-
-    private var televisionDecodingRows: [PlaybackLedgerRow] {
-        var rows: [PlaybackLedgerRow] = []
-        let size = controller.presentationSize
-        if size.width > 0 && size.height > 0 {
-            rows.append(ledgerRow("Output", "\(Int(size.width)) × \(Int(size.height))"))
-        }
-        if let range = PlayerView.dynamicRangeSummary(
-            source: controller.decision?.source,
-            delivered: controller.deliveredRange,
-            displayHDR: Caps.displayIsHDR,
-            reasons: controller.decision?.reasons
-        ) {
-            rows.append(ledgerRow("Dynamic range", range))
-        }
-        if let bitrate = controller.observedBitrate, bitrate > 0 {
-            rows.append(ledgerRow("Observed bitrate", bitRate(Int(bitrate))))
-        } else if let bitrate = controller.indicatedBitrate, bitrate > 0 {
-            rows.append(ledgerRow("Stream bitrate", bitRate(Int(bitrate))))
-        }
-        let subtitle = selectedSubtitleParts
-        rows.append(contentsOf: ledgerSplitRows(
-            "Subtitles",
-            subtitle.name,
-            clause: subtitle.delivery
-        ))
-        return rows
-    }
-
-    private var televisionServerRows: [PlaybackLedgerRow] {
-        if controller.isVOD && controller.methodLabel.contains("cached") {
-            return [ledgerRow("Status", "Served from cache", tone: .good)]
-        }
-        guard let status = controller.sessionStatus else { return [] }
-        var rows: [PlaybackLedgerRow] = [
-            ledgerRow(
-                "Status",
-                (status.suspended ?? false) ? "Holding buffer" : "Active",
-                tone: .good
-            )
-        ]
-        if let encoder = status.encoder ?? controller.encoder {
-            rows.append(ledgerRow("Encoder", encoder))
-        }
-        if let speed = status.recentSpeed ?? status.speed {
-            rows.append(ledgerRow(
-                "Encode speed",
-                String(format: "%.2f×", speed),
-                tone: encodeTone(speed: speed, status: status)
-            ))
-        }
-        if let ahead = status.aheadSeconds {
-            // The hold clause appears and disappears every couple of seconds as
-            // the client buffer fills and drains, so it is a note of its own
-            // rather than a tail on the seconds — the seconds never move.
-            let held = (status.suspended ?? false)
-                ? "held\(holdReleaseDescription(status))"
-                : nil
-            rows.append(contentsOf: ledgerSplitRows(
-                "Buffer ahead",
-                "\(max(0, ahead)) s",
-                clause: held,
-                tone: runwayTone(Double(ahead), suspended: status.suspended ?? false)
-            ))
-        }
-        if let delivered = status.deliveredBps {
-            rows.append(ledgerRow("Delivery", bitRate(delivered)))
-        }
-        if let bytes = status.deliveredBytes {
-            rows.append(ledgerRow("Transferred", byteCount(bytes)))
-        }
-        return rows
-    }
-    #else
-    private var compactStandardSections: [PlaybackLedgerSection] {
-        [
-            PlaybackLedgerSection("Playback", column: .left, rows: compactPlaybackRows),
-            PlaybackLedgerSection("Source", column: .left, rows: compactSourceRows),
-            PlaybackLedgerSection("Now decoding", column: .left, rows: compactDecodingRows),
-            PlaybackLedgerSection(
-                "Server",
-                column: .right,
-                keepsNotesInBox: true,
-                rows: compactServerRows
-            ),
-        ]
-    }
-
-    private var compactPlaybackRows: [PlaybackLedgerRow] {
-        // Same seam as Debug: the mode is the datum, the qualifiers the user's
-        // choices add to it are the clause.
-        let method = ledgerSeam(controller.methodLabel)
-        var rows: [PlaybackLedgerRow] = ledgerSplitRows(
-            "Method",
-            method.datum,
-            clause: method.clause
-        )
-        rows.append(
-            ledgerRow(
-                "Position",
-                "\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))"
-            )
-        )
-        if let reasons = controller.decision?.reasons, !reasons.isEmpty {
-            rows.append(ledgerRow("Reason", reasons.joined(separator: "; ")))
-        }
-        return rows
-    }
-
-    private var compactSourceRows: [PlaybackLedgerRow] {
-        guard let source = controller.decision?.source else { return [] }
-        let resolution = source.width.flatMap { width in
-            source.height.map { "\(width)×\($0)" }
-        } ?? "—"
-        let video = [
-            source.videoCodec?.uppercased(),
-            source.bitDepth.map { "\($0)-bit" },
-            source.hdrFormat ?? source.hdr?.uppercased(),
-        ]
-            .compactMap { $0 }
-            .joined(separator: " · ")
-        // Resolution is the datum; the codec facts hung off it run past what a
-        // grid row can show on an iPad, so they are a note rather than a tail
-        // the grid would have to truncate.
-        var rows: [PlaybackLedgerRow] = ledgerSplitRows(
-            "Source",
-            resolution,
-            clause: video.isEmpty ? "—" : video
-        )
-        rows.append(ledgerRow("Container", source.container?.uppercased() ?? "—"))
-        if let bitrate = source.bitrate {
-            rows.append(ledgerRow("Source rate", bitRate(bitrate)))
-        }
-        return rows
-    }
-
-    private var compactDecodingRows: [PlaybackLedgerRow] {
-        var rows: [PlaybackLedgerRow] = []
-        let size = controller.presentationSize
-        if size.width > 0 && size.height > 0 {
-            rows.append(ledgerRow("Output", "\(Int(size.width))×\(Int(size.height))"))
-        }
-        // The badge says it in three characters; this says it in words, with
-        // the server's own reason for the difference.
-        if let range = PlayerView.dynamicRangeSummary(
-            source: controller.decision?.source,
-            delivered: controller.deliveredRange,
-            displayHDR: Caps.displayIsHDR,
-            reasons: controller.decision?.reasons
-        ) {
-            rows.append(ledgerRow("Dynamic range", range))
-        }
-        if let bitrate = controller.observedBitrate, bitrate > 0 {
-            rows.append(ledgerRow("Observed rate", bitRate(Int(bitrate))))
-        } else if let bitrate = controller.indicatedBitrate, bitrate > 0 {
-            rows.append(ledgerRow("Stream rate", bitRate(Int(bitrate))))
-        }
-        if let stalls = controller.stalls {
-            rows.append(ledgerRow("Player stalls", String(stalls)))
-        }
-        return rows
-    }
-
-    private var compactServerRows: [PlaybackLedgerRow] {
-        var rows: [PlaybackLedgerRow] = []
-        if controller.isVOD && controller.methodLabel.contains("cached") {
-            rows.append(ledgerNote("Server", "Already transcoded · served from cache"))
-        } else if let status = controller.sessionStatus {
-            if let encoder = status.encoder ?? controller.encoder {
-                rows.append(ledgerRow("Encoder", encoder))
-            }
-            if let speed = status.recentSpeed ?? status.speed {
-                rows.append(ledgerRow("Encode speed", String(format: "%.2f×", speed)))
-            }
-            if let ahead = status.aheadSeconds {
-                // Same seam as the television: the seconds stay in the grid
-                // and the hold clause is a note that comes and goes with the
-                // hold, so neither half changes column as the server suspends.
-                let held = (status.suspended ?? false)
-                    ? "held\(holdReleaseDescription(status))"
-                    : nil
-                rows.append(contentsOf: ledgerSplitRows(
-                    "Server ahead",
-                    "\(max(0, ahead)) s",
-                    clause: held
-                ))
-            }
-            if let delivered = status.deliveredBps {
-                rows.append(ledgerRow("Delivery rate", bitRate(delivered)))
-            }
-            if let bytes = status.deliveredBytes {
-                rows.append(ledgerRow("Delivered", byteCount(bytes)))
-            }
-        }
-        if let subtitle = controller.selectedSubtitle,
-           let track = controller.subtitles.first(where: { $0.index == subtitle }) {
-            let parts = subtitleParts(track, index: subtitle)
-            rows.append(contentsOf: ledgerSplitRows(
-                "Subtitles",
-                parts.name,
-                clause: parts.delivery
-            ))
-        }
-        return rows
-    }
-    #endif
 
     private func ledgerRow(
         _ label: String,
