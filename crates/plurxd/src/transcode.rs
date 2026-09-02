@@ -5213,6 +5213,11 @@ impl Session {
                 u64,
                 crate::playback_control::ControlAction,
                 crate::playback_control::ClientPlatform,
+                // M6's selection gate. Deliberately here rather than beside
+                // `acknowledged_end` at the end: two adjacent `bool`s in a
+                // positional tuple is a transposition the compiler cannot
+                // catch, and between `ClientPlatform` and `i64` it can.
+                bool,
                 i64,
                 u32,
                 u64,
@@ -5244,6 +5249,7 @@ impl Session {
             outcome.accepted_sequence,
             outcome.action,
             outcome.platform,
+            outcome.selection_changed,
             outcome.lease.expires_at_unix_ms(),
             outcome.lease.timeout_ms(),
             outcome.flow_ticket,
@@ -9494,6 +9500,7 @@ impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmiss
                     outcome.accepted_sequence,
                     outcome.action,
                     outcome.platform,
+                    outcome.selection_changed,
                     outcome.lease.expires_at_unix_ms(),
                     outcome.lease.timeout_ms(),
                     outcome.flow_ticket,
@@ -16491,6 +16498,7 @@ impl TranscodeManager {
             accepted_sequence,
             action,
             platform,
+            selection_changed,
             lease_expires_at_unix_ms,
             lease_timeout_ms,
             flow_ticket,
@@ -16535,6 +16543,7 @@ impl TranscodeManager {
                     accepted_sequence,
                     action,
                     platform,
+                    selection_changed,
                     lease_expires_at_unix_ms,
                     lease_timeout_ms,
                     flow_ticket,
@@ -16558,6 +16567,10 @@ impl TranscodeManager {
         accepted_sequence: u64,
         action: crate::playback_control::ControlAction,
         platform: crate::playback_control::ClientPlatform,
+        // Between `ClientPlatform` and `i64` on purpose — see the tuple this
+        // comes from. Two adjacent `bool` parameters is a transposition that
+        // compiles; this one cannot be swapped with `acknowledged_end`.
+        selection_changed: bool,
         lease_expires_at_unix_ms: i64,
         lease_timeout_ms: u32,
         flow_ticket: u64,
@@ -16626,6 +16639,7 @@ impl TranscodeManager {
                 platform,
                 terminal_handoff,
                 terminal_commit: None,
+                selection_changed,
             };
             if acknowledged_end {
                 if let Some(committer) = terminal_committer {

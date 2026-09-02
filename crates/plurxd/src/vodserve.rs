@@ -3309,6 +3309,7 @@ impl VodServe {
                 accepted_sequence: u64,
                 action: crate::playback_control::ControlAction,
                 platform: crate::playback_control::ClientPlatform,
+                selection_changed: bool,
                 lease_expires_at_unix_ms: i64,
                 marker_prewarm: Option<MarkerPrewarmControl>,
             },
@@ -3322,13 +3323,28 @@ impl VodServe {
             if crate::media_sessions::unix_ms() >= deadline_unix_ms {
                 return Some(Err(crate::playback_control::ControlStateError::Unavailable));
             }
-            let accepted = session.control.lock().expect("control lock").accept(
-                control.generation,
-                control.owner_epoch,
-                control.client_instance_id,
-                control.sequence,
-                control.snapshot.platform(),
-            );
+            // Acceptance and M6's selection gate are one lock scope. They are
+            // two reads of the same fence, and taking the lock twice would let
+            // another exchange land between them and be measured against a
+            // selection this one had already replaced.
+            let (accepted, selection_changed) = {
+                let mut fence = session.control.lock().expect("control lock");
+                let accepted = fence.accept(
+                    control.generation,
+                    control.owner_epoch,
+                    control.client_instance_id,
+                    control.sequence,
+                    control.snapshot.platform(),
+                );
+                // Only for an accepted exchange: a replay is the same exchange
+                // arriving twice, and it changed the selection the first time
+                // or not at all.
+                let changed = matches!(
+                    &accepted,
+                    Ok((crate::playback_control::ControlDisposition::Accepted, ..))
+                ) && fence.observe_selection(&control.snapshot.selection);
+                (accepted, changed)
+            };
             let (disposition, accepted_sequence, action, platform) = match accepted {
                 Ok(outcome) => outcome,
                 Err(error) => return Some(Err(error)),
@@ -3350,6 +3366,7 @@ impl VodServe {
                     platform,
                     terminal_handoff: None,
                     terminal_commit: None,
+                    selection_changed,
                 };
                 let terminal_commit = terminal_committer
                     .as_ref()
@@ -3396,6 +3413,7 @@ impl VodServe {
                     accepted_sequence,
                     action,
                     platform,
+                    selection_changed,
                     lease_expires_at_unix_ms: crate::media_sessions::unix_ms()
                         .saturating_add(remaining_ms),
                     marker_prewarm,
@@ -3411,6 +3429,7 @@ impl VodServe {
             accepted_sequence,
             action,
             platform,
+            selection_changed,
             lease_expires_at_unix_ms,
             marker_prewarm,
         ) = match outcome {
@@ -3441,6 +3460,7 @@ impl VodServe {
                 accepted_sequence,
                 action,
                 platform,
+                selection_changed,
                 lease_expires_at_unix_ms,
                 marker_prewarm,
             } => (
@@ -3448,6 +3468,7 @@ impl VodServe {
                 accepted_sequence,
                 action,
                 platform,
+                selection_changed,
                 lease_expires_at_unix_ms,
                 marker_prewarm,
             ),
@@ -3483,6 +3504,7 @@ impl VodServe {
             platform,
             terminal_handoff: None,
             terminal_commit: None,
+            selection_changed,
         }))
     }
 

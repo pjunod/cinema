@@ -4786,6 +4786,9 @@ async fn control_local_inner(
     };
     crate::playback_control::record(outcome);
     crate::playback_control::record_platform(outcome, result.platform);
+    if result.selection_changed {
+        record_preparation_shadow(state, &recipe, &request, &response).await;
+    }
     tracing::debug!(
         session = %crate::transcode::session_log_id(&route.session_id),
         owner_epoch,
@@ -4800,6 +4803,81 @@ async fn control_local_inner(
         Json(response),
     )
         .into_response()
+}
+
+/// Record what M6 would have done about this exchange's selection change.
+///
+/// **Shadow: nothing is staged and nothing about the response depends on it.**
+/// `PREPARED_AXIS` and the throughput floor are arguments until this runs on
+/// real traffic — in particular nothing but production can say whether
+/// `throughput_unproven` refuses so often that the prepared path would never
+/// fire, which that rule's own doc names as its open residual.
+///
+/// Called only when the engine reports the selection moved, because building a
+/// candidate costs two store reads and the exchange runs about once a second
+/// per client.
+///
+/// Measured against **the response this exchange actually sent**, not against
+/// a delivery re-derived here: the client was told a height and a rate, and a
+/// shadow that measured different ones would be answering a question nobody
+/// asked. Everything here is best-effort — a store read that fails is a
+/// measurement not taken, never a control exchange that fails.
+async fn record_preparation_shadow(
+    state: &AppState,
+    recipe: &RemoteStartRequest,
+    request: &crate::playback_control::ControlRequestV1,
+    response: &crate::playback_control::ControlResponseV1,
+) {
+    // The retained capability document lives on the session, not on this
+    // exchange — reading this one instead is the defect #801 exists for. Until
+    // the retained value is threaded to the HTTP layer, an exchange that omits
+    // capabilities is skipped rather than counted as incapable: a wrong number
+    // is worse than a missing one, and this metric exists to be trusted.
+    let Some(capabilities) = request.capabilities.as_ref() else {
+        return;
+    };
+    let Ok(source) = state.store.get_file(recipe.request.file_id).await else {
+        return;
+    };
+    let asked = match request.selection.quality {
+        crate::playback_control::QualitySelection::Auto => None,
+        crate::playback_control::QualitySelection::Manual { height } => Some(height),
+    };
+    let height = resolve_height(state, source.as_ref(), None, recipe.request.hdr10, asked).await;
+    let candidate = crate::playback_control::candidate_request(
+        &recipe.request,
+        &request.selection,
+        height,
+        source.as_ref().and_then(|file| file.height),
+    );
+    let delivered = &response.effective_selection;
+    let proposed = crate::playback_control::EffectiveSelection::from_request(
+        &candidate,
+        match candidate.kind {
+            crate::transcode::SessionKind::Transcode { height } => height,
+            // A copy is not a rung, so it keeps the height it is already
+            // delivering rather than the one the ladder would have picked.
+            crate::transcode::SessionKind::Copy { .. } => delivered.height,
+        },
+        None,
+    );
+    crate::playback_control::record_preparation_decision(
+        crate::playback_control::decide_preparation(
+            crate::playback_control::RecipeView {
+                selection: delivered,
+                grade: crate::playback_control::GradeIntent::from_request(&recipe.request),
+            },
+            crate::playback_control::RecipeView {
+                selection: &proposed,
+                grade: crate::playback_control::GradeIntent::from_request(&candidate),
+            },
+            Some(capabilities),
+            crate::playback_control::PreparationConditions {
+                observed_download_bps: request.observed_download_bps,
+                delivered_bps: response.delivery.delivered_bps,
+            },
+        ),
+    );
 }
 
 async fn status_local_before(

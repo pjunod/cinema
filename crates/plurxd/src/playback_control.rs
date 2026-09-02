@@ -1727,6 +1727,13 @@ pub(crate) struct LocalControlResult {
     pub terminal_handoff: Option<TerminalResponseHandoff>,
     /// Shared result of the one session-owned durable terminal continuation.
     pub terminal_commit: Option<TerminalCommitReceipt>,
+    /// This accepted exchange's selection differs from the last one's.
+    ///
+    /// M6's gate, answered by whichever engine served the exchange —
+    /// `ControlState::observe_selection` is the one implementation, and it is
+    /// on `ControlState` precisely so both can answer it. `false` on a replay
+    /// and on the first accepted exchange.
+    pub selection_changed: bool,
 }
 
 #[derive(Clone)]
@@ -2201,6 +2208,21 @@ pub(crate) struct ControlState {
     last_sequence: u64,
     last_accepted_at: Option<Instant>,
     prior_action: ControlAction,
+    /// The selection the last accepted exchange carried.
+    ///
+    /// Here rather than on the rolling actor because **both delivery engines
+    /// hold a `ControlState` and only one of them has an actor**. A session is
+    /// served by the VOD engine whenever `try_vod_session` admits it, which it
+    /// does for every `Presentation::Vod` request — and `into_request` sets
+    /// that for every create, since the growing live presentation was removed.
+    /// So a gate that lived on the rolling actor alone would see the minority
+    /// of exchanges and report a confidently undercounted picture, which is
+    /// worse than reporting none.
+    ///
+    /// Cleared with the client identity on an owner-epoch advance: the
+    /// sequence space restarts, and a selection from before the advance is not
+    /// something this client has since departed from.
+    last_selection: Option<ClientSelection>,
 }
 
 impl Default for ControlState {
@@ -2213,6 +2235,7 @@ impl Default for ControlState {
             last_sequence: 0,
             last_accepted_at: None,
             prior_action: ControlAction::None,
+            last_selection: None,
         }
     }
 }
@@ -2267,6 +2290,7 @@ impl ControlState {
             self.last_sequence = 0;
             self.last_accepted_at = None;
             self.prior_action = ControlAction::None;
+            self.last_selection = None;
         }
         match self.client_instance_id {
             None => {
@@ -2317,6 +2341,33 @@ impl ControlState {
             self.prior_action.clone(),
             client_platform,
         ))
+    }
+
+    /// Take this exchange's selection and say whether it moved.
+    ///
+    /// M6's gate. Building a candidate recipe costs two store reads — the
+    /// source file and the network prior — the exchange runs about once a
+    /// second per client under an absolute deadline, and the answer is almost
+    /// always *nothing changed*.
+    ///
+    /// **Against the previous selection, never against what is delivered.** A
+    /// client's ask and the height it gets are not the same number: an
+    /// explicit rung snaps onto the ladder, so a client asking 1079 is served
+    /// 1080 and goes on asking 1079. A gate comparing the two would read
+    /// *changed* on every exchange for the rest of that session, spending the
+    /// reads it exists to save on a candidate identical to what is playing.
+    ///
+    /// Called by both delivery engines on acceptance, and only on acceptance:
+    /// a replay is the same exchange arriving twice and changed the selection
+    /// the first time or not at all. `false` on the first accepted exchange —
+    /// a session just created from an intent has not since departed from it.
+    pub(crate) fn observe_selection(&mut self, selection: &ClientSelection) -> bool {
+        let moved = self
+            .last_selection
+            .as_ref()
+            .is_some_and(|previous| previous != selection);
+        self.last_selection = Some(selection.clone());
+        moved
     }
 
     /// Recover the immutable result for the exact accepted identity/sequence
@@ -6297,14 +6348,13 @@ impl RollingControlActor {
         )?;
         let accepted_end = disposition == ControlDisposition::Accepted
             && request.snapshot.demand == PlaybackDemand::End;
-        // Taken before the snapshot is moved, and only for an accepted
-        // exchange: a replay is the same exchange arriving twice, and it
-        // changed the selection the first time or not at all.
+        // Delegated to `ControlState` rather than compared against
+        // `self.demand`, because both delivery engines hold a `ControlState`
+        // and only this one has an actor — see `ControlState::last_selection`.
+        // Only for an accepted exchange: a replay is the same exchange
+        // arriving twice.
         let selection_changed = disposition == ControlDisposition::Accepted
-            && self
-                .demand
-                .as_ref()
-                .is_some_and(|previous| previous.selection != request.snapshot.selection);
+            && self.control.observe_selection(&request.snapshot.selection);
         if disposition == ControlDisposition::Accepted {
             self.mode = RollingLeaseMode::Explicit;
             self.settled_target = Some(SettledTarget {
