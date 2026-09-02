@@ -49,11 +49,8 @@ it narrows one fixture's own selection rather than sequencing two fixtures.
       the gate it provisions. Seven self-hosted runners carry that capability
       alongside `high-cpu`, and two other required jobs already select the same
       class, so the label narrows the pool without stranding the gate.
-- [x] Integrate #820, #822 and #806 by rebasing cleanly onto current `main`
-      `b4a1f108`; refresh every SHA-bound mapping to its new ancestor. The
-      intervening changes are confined to M6 playback-selection telemetry, its
-      handoff, and the learner internal-peer authority repair, none of which
-      touch the confirmation or Activity paths.
+- [x] Integrate #820, #822 and #806 by rebasing onto `main` `b4a1f108`, and
+      refresh every SHA-bound mapping to its new ancestor.
 - [x] Two independent adversarial reviews of the rebased head both found that
       the ancestry-refresh commit had renamed the four mapping fragments to
       their new ancestors while leaving each fragment's `commits` field on the
@@ -78,16 +75,30 @@ it narrows one fixture's own selection rather than sequencing two fixtures.
       the paused Activity unit could not be failed by any mutation and is
       gone. The recovery-window mapping claimed a contract that did not yet
       exist and now states what is actually enforced.
-- [x] Every gate re-run on this exact head: catalog 23 points / 27 checks /
-      1296 audited files; history 1232 corrective commits / 736 explicit
-      mappings; operations 156/156; ownership and routing inventories 11/11;
-      `git diff --check` clean. Under the pinned `rustc 1.97.1`, `cargo fmt
-      --all --check`, `cargo check --workspace --all-targets` and
+- [x] **The branch moved underneath this work twice.** Another session pushed
+      a merge of current `main` onto the PR head while the review repairs were
+      being verified, and `main` itself advanced four times in two hours --
+      #806, then #821/#824/#789, then #823. Rather than force-push over that
+      session's integration, this series is restacked onto the pushed head and
+      current `main` is merged in. Nothing of the other session's work is
+      discarded; every corrective commit on the series took a new identity, so
+      all nine evidence fragments are renamed and rewritten in one commit --
+      filename and payload together, which is the pairing the first refresh got
+      wrong. The one merge conflict was the rolling-producer ownership
+      inventory: #823's production shadow task and this branch's Activity
+      in-flight fixture each described the step 381 -> 382, so the merged count
+      is 383 and both narratives are kept. The inventory audit settles that
+      number, not the prose.
+- [x] Every gate re-run on this exact merged head: catalog 23 points / 27
+      checks / 1297 audited files; history 1234 corrective commits / 737
+      explicit mappings; operations 156/156; ownership and routing inventories
+      11/11; `git diff --check` clean. Under the pinned `rustc 1.97.1`,
+      `cargo fmt --all -- --check`, `cargo check --workspace --all-targets` and
       `cargo clippy --workspace --all-targets -- -D warnings` are clean,
       including `plurx-core` with `cluster-read-cost-validation`, and the fast
-      unit lane passes 1567 with 0 failed and 3 ignored. The real-cluster
-      Store, daemon-harness and hosted lanes remain the qualification run's
-      work; they are not claimed here.
+      unit lane passes 1574 with 0 failed and 3 ignored. The
+      real-cluster Store, daemon-harness and hosted lanes remain the
+      qualification run's work; they are not claimed here.
 - [ ] Push the re-reviewed exact head to #794, require its full GitHub
       qualification and promotion receipt, merge it, close partial duplicate
       #782 with a cross-link, and verify `main` after the merge.
