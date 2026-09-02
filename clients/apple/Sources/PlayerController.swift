@@ -3395,7 +3395,15 @@ final class PlayerController: ObservableObject {
                 return
             }
             #endif
-            await reopen(at: event.positionMs, intent: stallReopenIntent())
+            await reopen(
+                at: event.positionMs,
+                intent: stallReopenIntent(wedge: Self.isDeliveryWedge(
+                    kind: event.kind,
+                    deliveredIdleMs: sessionStatus?.deliveredIdleMs,
+                    publishedEndMs: sessionStatus?.publishedEndMs,
+                    fetchedEndMs: sessionStatus?.fetchedEndMs
+                ))
+            )
         case .stop(let terminal):
             player.pause()
             isPlaying = terminal.isPlaying
@@ -3494,7 +3502,7 @@ final class PlayerController: ObservableObject {
     /// without spending its own attempt. `false` means today's path, unchanged
     /// — which is the branch every node in the fleet takes, because no client
     /// has ever completed a full-vocabulary exchange with one.
-    private func applyStallVerdict(
+    func applyStallVerdict(
         _ verdict: ControlAction,
         event: PlaybackStallEvent
     ) -> Bool {
@@ -3515,12 +3523,24 @@ final class PlayerController: ObservableObject {
             reportPlaybackStall(event, outcome: .serverTerminal)
             return true
         case "hold":
+            // A hold answers why the producer paused, and production state is
+            // never authority over serving: bytes already published stay
+            // fetchable, so a wedged client may reconnect and fetch them. In
+            // explicit lease mode the stall itself manufactures the hold, so a
+            // hold allowed to decide there has no exit but the viewer backing
+            // out. Spend nothing and say nothing — the reopen the caller runs
+            // next is the answer.
+            guard Self.holdMayDecideStall(
+                kind: event.kind,
+                publishedEndMs: sessionStatus?.publishedEndMs,
+                fetchedEndMs: sessionStatus?.fetchedEndMs,
+                runwaySeconds: bufferedRunwaySeconds()
+            ) else { return false }
             // Production is deliberately not advancing, so a reopen would
             // churn against a server that already knows better — and it must
             // not spend the one same-delivery attempt either.
             //
-            // The explanation is not optional. A hold is never lifted by
-            // anything this client does, and the recovery monitor re-enters
+            // The explanation is not optional. The recovery monitor re-enters
             // here on its own cadence, so a client that only returned would
             // leave a viewer in front of a frozen picture with no bound and
             // nothing said. The notice is transient and the monitor re-shows
@@ -3541,6 +3561,67 @@ final class PlayerController: ObservableObject {
         default:
             return false
         }
+    }
+
+    /// Whether a server `hold` may decide this stall.
+    ///
+    /// It may not when the stall is a fetch wedge. A `.delivery` stall is one
+    /// by construction, and a `.buffering` stall whose last status poll shows
+    /// published media this player has not fetched while its runway is gone is
+    /// the same freeze read from the decoder's side. Those bytes are already
+    /// published, so the question a hold answers — why the producer paused —
+    /// has no bearing on whether this client may reconnect and fetch them.
+    ///
+    /// A `.silent` freeze keeps the hold: that decoder has bytes in hand and is
+    /// starved of nothing, and the HDR ladder owns the case.
+    nonisolated static func holdMayDecideStall(
+        kind: PlaybackStallKind,
+        publishedEndMs: Int?,
+        fetchedEndMs: Int?,
+        runwaySeconds: Double?
+    ) -> Bool {
+        switch kind {
+        case .delivery:
+            return false
+        case .silent:
+            return true
+        case .buffering:
+            // Numbers the poll never carried are not evidence of a wedge, and
+            // an unevidenced reopen is worse than honouring the server.
+            guard let publishedEndMs, let fetchedEndMs else { return true }
+            // An unknown runway is not evidence of health, the same reading
+            // `DeliveryStarvationDetector` takes of the same measurement.
+            let runwayGone = (runwaySeconds ?? 0)
+                <= DeliveryStarvationDetector.runwayCeilingSeconds
+            let unfetchedMs = publishedEndMs - fetchedEndMs
+            return !(runwayGone
+                && unfetchedMs >= DeliveryStarvationDetector.pendingMediaThresholdMs)
+        }
+    }
+
+    /// The server-side wedge signature, read from the last status poll: no
+    /// completed delivery for sixteen seconds while ten or more seconds of
+    /// published media sit unfetched.
+    ///
+    /// A `.delivery` stall short-circuits the reading. That detector cannot
+    /// fire without this exact signature, so the one stall that is a wedge by
+    /// construction must not be demoted to an ordinary one by a status poll
+    /// that has not landed yet.
+    nonisolated static func isDeliveryWedge(
+        kind: PlaybackStallKind,
+        deliveredIdleMs: Int?,
+        publishedEndMs: Int?,
+        fetchedEndMs: Int?
+    ) -> Bool {
+        guard kind != .delivery else { return true }
+        guard let deliveredIdleMs,
+              deliveredIdleMs >= DeliveryStarvationDetector.deliveredIdleThresholdMs,
+              let publishedEndMs,
+              let fetchedEndMs,
+              publishedEndMs - fetchedEndMs
+                >= DeliveryStarvationDetector.pendingMediaThresholdMs
+        else { return false }
+        return true
     }
 
     /// A deferred delivery stall leaves the poll that found it dead.
@@ -3668,25 +3749,33 @@ final class PlayerController: ObservableObject {
     /// session at all, and a VOD session is a completed cache entry whose
     /// bytes are already on disk, so neither is something the ladder can
     /// answer. Those reopen unbound, exactly as before.
+    ///
+    /// A wedge reopens unbound for a different reason. The server reads a
+    /// ticketed automatic reopen as evidence that this rung is too heavy for
+    /// the link and rewrites it one rung down — right for a slow link, wrong
+    /// for a session whose published bytes were simply never fetched, which
+    /// must come back on the rung it was already serving.
     nonisolated static func stallReopenIntent(
         sessionId: String?,
         isVOD: Bool,
         // One identity for this one stall. A transport replay of the same
         // create returns the answer already persisted under it rather than
         // stepping the ladder a second time.
-        requestId: String
+        requestId: String,
+        wedge: Bool
     ) -> PlayerOpenIntent {
-        guard let sessionId, !isVOD else { return .normal }
+        guard let sessionId, !isVOD, !wedge else { return .normal }
         return .stallReopen(
             StallReopenTicket(previousSessionId: sessionId, requestId: requestId)
         )
     }
 
-    private func stallReopenIntent() -> PlayerOpenIntent {
+    private func stallReopenIntent(wedge: Bool) -> PlayerOpenIntent {
         Self.stallReopenIntent(
             sessionId: sessionId,
             isVOD: isVOD,
-            requestId: UUID().uuidString
+            requestId: UUID().uuidString,
+            wedge: wedge
         )
     }
 

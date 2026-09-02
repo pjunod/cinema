@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["c7dac996"]
+reason = "This commit adds the pacing-hold root-cause and repair contract to the repository and records what shipped in PLAYBACK.md and the control-plane status page; it changes no runtime behavior."
+ignore = true

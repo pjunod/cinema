@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a1c5f414"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "`a_wedged_predecessor_reopens_on_its_own_rung` drives claim normalization at its call site with a copy predecessor that has the wedge signature on it -- no completed delivery for sixteen seconds while ten seconds of published media sat unfetched -- and requires the successor to stay a copy at the predecessor's height, including on a request-id replay, so a transport retry cannot see a different rung than the one already handed out. `a_slow_link_still_steps_down_because_it_is_not_wedged` removes each term of the signature in turn and requires today's one-rung descent back, which is what keeps a genuinely slow link from being handed a rung it has already failed, and `a_manual_reopen_is_unchanged_by_the_wedge_backstop` pins that a viewer-chosen rung is untouched either way. `a_stall_manufactures_its_own_hold_and_is_not_answered_with_it` joins explicit-mode flow evaluation to action resolution across one client: the frozen buffer anchor produces `hold { time, release 30 }`, and the resolver must answer `none` to the same client while still holding a rendering one."

@@ -788,7 +788,13 @@ impl DeliveryView {
             HlsSessionInfo::Vod(info) => Self {
                 presentation: "vod".to_owned(),
                 producer_state: info.producer_state.to_owned(),
-                produced_through_ms: info.published_end_ms,
+                // The run from this client's own fetched segment, not from
+                // segment 0. After a far seek past a hole the title's
+                // published frontier sits behind the playhead while the media
+                // this client would fetch next is materialized, and a
+                // frontier behind the playhead would leave that wedge
+                // deadlocked.
+                produced_through_ms: info.ready_ahead_end_ms,
                 fetched_through_ms: info.fetched_end_ms,
                 delivered_bps: None,
                 delivered_idle_ms: None,
@@ -1435,6 +1441,14 @@ pub(crate) struct ActionMetrics {
     pub action: ActionKind,
     pub hold_reason: Option<HoldReason>,
     pub suppressed: bool,
+    /// Held, the client accepts `hold`, and the serving predicate withheld the
+    /// instruction. `hold_reason` carries which hold was withheld.
+    ///
+    /// Distinct from `suppressed` on purpose: that one counts a client too old
+    /// to be told, and an operator watches it fall to zero. This one counts a
+    /// client that was told nothing deliberately, and it should rise only when
+    /// a wedge is being recovered from.
+    pub recovery_withheld: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1456,46 +1470,91 @@ pub(crate) fn action_metrics(
             action: ActionKind::Hold,
             hold_reason: Some(*reason),
             suppressed: false,
+            recovery_withheld: false,
         },
         ControlAction::Terminal { .. } => ActionMetrics {
             action: ActionKind::Terminal,
             hold_reason: None,
             suppressed: false,
+            recovery_withheld: false,
         },
         ControlAction::RetryResource { .. } => ActionMetrics {
             action: ActionKind::RetryResource,
             hold_reason: None,
             suppressed: false,
+            recovery_withheld: false,
         },
-        ControlAction::None => ActionMetrics {
-            action: ActionKind::None,
-            hold_reason: None,
-            // Only a hold this server could actually have named counts as
-            // suppressed. A reason it does not recognise was never a candidate
-            // instruction, so counting it here would inflate the gap with
-            // responses no vocabulary rollout would change.
-            // A producer decision the server could have named outranks a
-            // hold, so it is the thing withheld when the client is passive.
-            suppressed: match delivery
+        ControlAction::None => {
+            let decision = delivery
                 .producer_decision
                 .as_deref()
-                .and_then(ProducerDecisionReason::from_status)
-            {
-                Some(decision) => !request.accepts(if decision.is_permanent() {
-                    TERMINAL_ACTION
-                } else {
-                    RETRY_RESOURCE_ACTION
-                }),
-                None => {
-                    !request.accepts_hold()
-                        && delivery
-                            .hold_reason
-                            .as_deref()
-                            .is_some_and(|reason| HoldReason::from_delivery(reason).is_some())
-                }
-            },
-        },
+                .and_then(ProducerDecisionReason::from_status);
+            // Only a hold this server could actually have named is a candidate
+            // instruction; a reason it does not recognise was never one.
+            let hold = delivery
+                .hold_reason
+                .as_deref()
+                .and_then(HoldReason::from_delivery);
+            // Held, the client could have been told, and the serving predicate
+            // is why it was not. Counted apart from the vocabulary gap so a
+            // withheld hold never reads as a client too old to hear it.
+            let recovery_withheld = decision.is_none()
+                && request.accepts_hold()
+                && hold.is_some()
+                && recovery_outranks_hold(delivery, request);
+            ActionMetrics {
+                action: ActionKind::None,
+                // Which hold was withheld, and only then: every other `none`
+                // carries no reason, because nothing was withheld.
+                hold_reason: if recovery_withheld { hold } else { None },
+                // Only a hold this server could actually have named counts as
+                // suppressed. A reason it does not recognise was never a
+                // candidate instruction, so counting it here would inflate the
+                // gap with responses no vocabulary rollout would change.
+                // A producer decision the server could have named outranks a
+                // hold, so it is the thing withheld when the client is passive.
+                suppressed: match decision {
+                    Some(decision) => !request.accepts(if decision.is_permanent() {
+                        TERMINAL_ACTION
+                    } else {
+                        RETRY_RESOURCE_ACTION
+                    }),
+                    None => !request.accepts_hold() && hold.is_some(),
+                },
+                recovery_withheld,
+            }
+        }
     }
+}
+
+/// Runway at or below which a stalled client is starved. The same 10 s the
+/// Apple `DeliveryStarvationDetector` uses (`runwayCeilingSeconds`), so the
+/// two sides call the same player starved.
+pub(crate) const STARVED_RUNWAY_MS: i64 = 10_000;
+
+/// Published-but-unfetched media that proves a reconnect has something to
+/// fetch. The Apple detector's `pendingMediaThresholdMs`.
+pub(crate) const FETCHABLE_GAP_MS: i64 = 10_000;
+
+/// The one fact that outranks every advisory hold: this client is stalled,
+/// starved, out of runway, and the server has already published media it has
+/// not fetched. Production state cannot veto fetching served bytes.
+///
+/// Conjunctive on purpose. `client_runway_ms` reads 0 for an unknown runway,
+/// so the client's own `stalled` and `starved` reports are the positive
+/// evidence; the gap is the proof there is something to fetch; an unknown
+/// produced frontier proves nothing and fails the predicate.
+pub(crate) fn recovery_outranks_hold(delivery: &DeliveryView, request: &ControlRequestV1) -> bool {
+    request.render_state == RenderState::Stalled
+        && request
+            .observation
+            .as_ref()
+            .and_then(|observation| observation.decoder_state)
+            == Some(DecoderState::Starved)
+        && delivery.client_runway_ms <= STARVED_RUNWAY_MS
+        && delivery.produced_through_ms.is_some_and(|produced| {
+            produced.saturating_sub(delivery.fetched_through_ms) >= FETCHABLE_GAP_MS
+        })
 }
 
 pub(crate) fn resolve_action(
@@ -1541,6 +1600,13 @@ pub(crate) fn resolve_action(
         return ControlAction::None;
     }
     if !request.accepts_hold() {
+        return ControlAction::None;
+    }
+    // Serving outranks production. The hold is still reported in
+    // `delivery.hold_reason` — only the instruction is withheld, because a
+    // stalled client with published bytes it has not fetched must be free to
+    // reconnect and fetch them.
+    if recovery_outranks_hold(delivery, request) {
         return ControlAction::None;
     }
     delivery
@@ -10119,6 +10185,11 @@ static PREPARATION_DECISIONS: [[AtomicU64; 5]; 5] = [const { [const { AtomicU64:
 /// Exchanges where production was held and the client had not declared the
 /// action, so it was told nothing. Watch this fall as clients roll out.
 static CONTROL_ACTIONS_SUPPRESSED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// Holds withheld by the serving predicate, by reason and platform. A hold the
+/// client would have understood, not sent because the client was stalled with
+/// published media it had not fetched.
+static CONTROL_RECOVERY_WITHHELD: [[AtomicU64; 3]; 7] =
+    [const { [const { AtomicU64::new(0) }; 3] }; 7];
 /// Clients by platform and whether they declared they accept a hold. This is
 /// the fleet's rollout progress, readable without touching a device.
 static CONTROL_VOCABULARY: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
@@ -10263,7 +10334,13 @@ pub(crate) fn record_action(
     let platform = platform_index(platform);
     CONTROL_ACTIONS[metrics.action as usize][platform].fetch_add(1, Ordering::Relaxed);
     if let Some(reason) = metrics.hold_reason {
-        CONTROL_HOLD_REASONS[reason as usize].fetch_add(1, Ordering::Relaxed);
+        // Holds *sent*. A withheld one was not sent, so it is counted only in
+        // its own slot below.
+        if metrics.recovery_withheld {
+            CONTROL_RECOVERY_WITHHELD[reason as usize][platform].fetch_add(1, Ordering::Relaxed);
+        } else {
+            CONTROL_HOLD_REASONS[reason as usize].fetch_add(1, Ordering::Relaxed);
+        }
     }
     if metrics.suppressed {
         CONTROL_ACTIONS_SUPPRESSED[platform].fetch_add(1, Ordering::Relaxed);
@@ -10397,6 +10474,29 @@ pub(crate) fn prometheus() -> String {
             "plurx_playback_control_actions_suppressed_total{{platform=\"{platform}\"}} {}\n",
             CONTROL_ACTIONS_SUPPRESSED[index].load(Ordering::Relaxed)
         ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_control_recovery_withheld_total Holds a client would have understood, withheld because it was stalled with published media it had not fetched.\n\
+         # TYPE plurx_playback_control_recovery_withheld_total counter\n",
+    );
+    for (reason_index, reason) in [
+        "demand",
+        "time",
+        "bytes",
+        "global",
+        "ahead",
+        "working_set",
+        "no_room",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
+            output.push_str(&format!(
+                "plurx_playback_control_recovery_withheld_total{{reason=\"{reason}\",platform=\"{platform}\"}} {}\n",
+                CONTROL_RECOVERY_WITHHELD[reason_index][platform_index].load(Ordering::Relaxed)
+            ));
+        }
     }
     output.push_str(
         "# HELP plurx_playback_control_vocabulary_total Accepted exchanges by client platform and whether the client declared every action this server can send.\n\
@@ -10852,6 +10952,7 @@ mod tests {
                 action: ActionKind::None,
                 hold_reason: None,
                 suppressed: true,
+                recovery_withheld: false,
             },
         );
 
@@ -10892,7 +10993,291 @@ mod tests {
                 action: ActionKind::Hold,
                 hold_reason: Some(HoldReason::WorkingSet),
                 suppressed: false,
+                recovery_withheld: false,
             },
+        );
+    }
+
+    /// A client the serving predicate is about to speak for: stalled, its
+    /// decoder starved, no runway left, and 35 s of published media it has not
+    /// fetched. `delivery_with_hold` is the healthy counterpart — 15 s of
+    /// runway and a 5 s gap — and every test below plays the two against each
+    /// other.
+    fn stalled_starved() -> (DeliveryView, ControlRequestV1) {
+        let mut delivery = delivery_with_hold(Some("time"));
+        delivery.client_runway_ms = 0;
+        delivery.produced_through_ms = Some(60_000);
+        delivery.fetched_through_ms = 25_000;
+        let mut request = accepts_everything();
+        request.render_state = RenderState::Stalled;
+        request.observation = Some(ClientObservation {
+            dropped_frames: None,
+            decoder_state: Some(DecoderState::Starved),
+            error_code: None,
+            error_detail: None,
+        });
+        (delivery, request)
+    }
+
+    /// A VOD status carrying the two frontiers a far seek pulls apart: the
+    /// title's own published run, and the run measured from the segment this
+    /// client was last served.
+    fn vod_status(
+        published_end_ms: Option<i64>,
+        ready_ahead_end_ms: Option<i64>,
+        fetched_end_ms: i64,
+    ) -> HlsSessionInfo {
+        HlsSessionInfo::Vod(Box::new(crate::vodserve::VodSessionInfo {
+            id: "vod-session".to_owned(),
+            file_id: 7,
+            target_height: 1080,
+            encoder: "vod",
+            playlist_shape: "vod",
+            producer_state: "held",
+            producer_hold: Some("working_set"),
+            producer_failed: None,
+            published_end_ms,
+            ready_ahead_end_ms,
+            fetched_end_ms,
+            fetched_segment: Some(20),
+            ahead_seconds: ready_ahead_end_ms.map(|end| (end - fetched_end_ms).max(0) / 1_000),
+            materialized_segments: 8,
+            planned_segments: 60,
+            materialized_bytes: 8_192,
+            planned_bytes: 61_440,
+            working_set_bytes: 8_192,
+            working_set_budget_bytes: 1 << 30,
+            completed_cache_bytes: 0,
+            admitted: true,
+            suspended: true,
+            final_: false,
+        }))
+    }
+
+    #[test]
+    fn a_vod_seek_past_a_hole_is_judged_by_the_media_ahead_of_the_client() {
+        // The trap this closes: after a far seek the title's published run
+        // ends behind the playhead, so `published − fetched` is negative and
+        // the predicate fails safe — leaving a client wedged in front of
+        // segments that are materialized and servable right now.
+        let (_, mut request) = stalled_starved();
+        // Unlike the resolver fixtures, this one goes through `from_status`,
+        // which computes the runway itself: a stalled player's buffer ends at
+        // its own position.
+        request.buffered_through_ms = request.position_ms;
+        let seeked = DeliveryView::from_status(
+            &vod_status(Some(20_000), Some(240_000), 200_000),
+            &request,
+            "node-a",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(
+            seeked.produced_through_ms,
+            Some(240_000),
+            "the frontier the control plane reads is the one this client can fetch from",
+        );
+        assert_eq!(
+            resolve_action(&ControlAction::None, &seeked, &request),
+            ControlAction::None,
+            "so a post-seek wedge recovers rather than deadlocking",
+        );
+
+        // No hole, no difference: this is a correction to one reading, not a
+        // second policy.
+        let contiguous = DeliveryView::from_status(
+            &vod_status(Some(240_000), Some(240_000), 200_000),
+            &request,
+            "node-a",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(contiguous.produced_through_ms, seeked.produced_through_ms);
+
+        // A rendition that has published nothing ahead of this client proves
+        // nothing, and an unknown frontier must never authorise a reopen.
+        let unknown = DeliveryView::from_status(
+            &vod_status(Some(20_000), None, 200_000),
+            &request,
+            "node-a",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(unknown.produced_through_ms, None);
+        assert_eq!(
+            resolve_action(&ControlAction::None, &unknown, &request),
+            ControlAction::Hold {
+                reason: HoldReason::WorkingSet,
+            },
+        );
+    }
+
+    #[test]
+    fn a_stalled_starved_client_with_fetchable_media_is_not_told_to_hold() {
+        // Whatever the producer paused for, it did not pause the bytes this
+        // client has already been served and has not fetched. Production state
+        // is not authority over serving.
+        let healthy = accepts_everything();
+        for reason in [
+            "demand",
+            "time",
+            "bytes",
+            "global",
+            "ahead",
+            "working_set",
+            "no_room",
+        ] {
+            let (mut wedged, request) = stalled_starved();
+            wedged.hold_reason = Some(reason.to_owned());
+            assert_eq!(
+                resolve_action(&ControlAction::None, &wedged, &request),
+                ControlAction::None,
+                "{reason} must not veto a wedged client's recovery",
+            );
+
+            // The same hold, to a client that is playing, is still an
+            // instruction. Withholding it there would cost a reopen the server
+            // asked for.
+            let held = delivery_with_hold(Some(reason));
+            assert_eq!(
+                resolve_action(&ControlAction::None, &held, &healthy),
+                ControlAction::Hold {
+                    reason: HoldReason::from_delivery(reason).expect("named reason"),
+                },
+                "{reason} must still be sent to a healthy client",
+            );
+        }
+    }
+
+    #[test]
+    fn the_serving_predicate_is_conjunctive() {
+        // Four facts, and no three of them are enough. `client_runway_ms`
+        // reads 0 for an unknown runway, so without the client's own stalled
+        // and starved reports a quiet client would look starved to us.
+        /// One conjunct, removed.
+        type BreakOne = fn(&mut DeliveryView, &mut ControlRequestV1);
+        let cases: [(&str, BreakOne); 6] = [
+            ("not stalled", |_, request| {
+                request.render_state = RenderState::Rendering;
+            }),
+            ("decoder ready", |_, request| {
+                request.observation = Some(ClientObservation {
+                    dropped_frames: None,
+                    decoder_state: Some(DecoderState::Ready),
+                    error_code: None,
+                    error_detail: None,
+                });
+            }),
+            ("no observation", |_, request| {
+                request.observation = None;
+            }),
+            ("runway above the ceiling", |delivery, _| {
+                delivery.client_runway_ms = STARVED_RUNWAY_MS + 1;
+            }),
+            ("gap below the threshold", |delivery, _| {
+                delivery.fetched_through_ms =
+                    delivery.produced_through_ms.expect("produced") - (FETCHABLE_GAP_MS - 1);
+            }),
+            ("unknown produced frontier", |delivery, _| {
+                delivery.produced_through_ms = None;
+            }),
+        ];
+        for (name, break_one) in cases {
+            let (mut delivery, mut request) = stalled_starved();
+            break_one(&mut delivery, &mut request);
+            assert_eq!(
+                resolve_action(&ControlAction::None, &delivery, &request),
+                ControlAction::Hold {
+                    reason: HoldReason::Time,
+                },
+                "{name} alone must leave the hold in force",
+            );
+            assert!(!recovery_outranks_hold(&delivery, &request), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_producer_decision_still_outranks_the_predicate() {
+        // The ranking is unchanged: a producer that has stopped is not
+        // holding, and a wedged client must still be told when trying again
+        // cannot help.
+        let (mut delivery, request) = stalled_starved();
+        delivery.producer_decision = Some("unsupported".to_owned());
+        let ControlAction::Terminal { code, .. } =
+            resolve_action(&ControlAction::None, &delivery, &request)
+        else {
+            panic!("a permanent decision must still end the session");
+        };
+        assert_eq!(code, ProducerDecisionReason::Unsupported);
+
+        delivery.producer_decision = Some("reader_failed".to_owned());
+        assert_eq!(
+            resolve_action(&ControlAction::None, &delivery, &request),
+            ControlAction::RetryResource {
+                after_ms: NEXT_EXCHANGE_MS,
+                reason: ProducerDecisionReason::ReaderFailed,
+            },
+        );
+    }
+
+    #[test]
+    fn a_passive_client_is_still_told_nothing_and_counted_suppressed() {
+        // The vocabulary fence comes first. A client that never declared
+        // `hold` was not withheld from — it was never a candidate.
+        let (delivery, mut request) = stalled_starved();
+        request.supported_actions = None;
+        let action = resolve_action(&ControlAction::None, &delivery, &request);
+        assert_eq!(action, ControlAction::None);
+        assert_eq!(
+            action_metrics(&action, &delivery, &request),
+            ActionMetrics {
+                action: ActionKind::None,
+                hold_reason: None,
+                suppressed: true,
+                recovery_withheld: false,
+            },
+        );
+    }
+
+    #[test]
+    fn a_withheld_hold_is_counted_by_reason_and_never_as_suppressed() {
+        // Two different facts about one exchange. `suppressed` is a client too
+        // old to be told; this is a client deliberately not told. An operator
+        // watching the first fall to zero must not see the second in it.
+        let (delivery, request) = stalled_starved();
+        let action = resolve_action(&ControlAction::None, &delivery, &request);
+        assert_eq!(action, ControlAction::None);
+        let metrics = action_metrics(&action, &delivery, &request);
+        assert_eq!(
+            metrics,
+            ActionMetrics {
+                action: ActionKind::None,
+                hold_reason: Some(HoldReason::Time),
+                suppressed: false,
+                recovery_withheld: true,
+            },
+        );
+
+        let before_withheld =
+            CONTROL_RECOVERY_WITHHELD[HoldReason::Time as usize][1].load(Ordering::Relaxed);
+        let before_sent = CONTROL_HOLD_REASONS[HoldReason::Time as usize].load(Ordering::Relaxed);
+        let before_suppressed = CONTROL_ACTIONS_SUPPRESSED[1].load(Ordering::Relaxed);
+        record_action(&action, &delivery, &request, ClientPlatform::Apple);
+        assert_eq!(
+            CONTROL_RECOVERY_WITHHELD[HoldReason::Time as usize][1].load(Ordering::Relaxed),
+            before_withheld + 1,
+        );
+        // A withheld hold was not sent, so the sent counter must not move.
+        assert_eq!(
+            CONTROL_HOLD_REASONS[HoldReason::Time as usize].load(Ordering::Relaxed),
+            before_sent,
+        );
+        assert_eq!(
+            CONTROL_ACTIONS_SUPPRESSED[1].load(Ordering::Relaxed),
+            before_suppressed,
         );
     }
 
@@ -10916,6 +11301,10 @@ mod tests {
             assert_eq!(reason as usize, expected, "{reason:?} moved slot");
         }
         assert_eq!(CONTROL_HOLD_REASONS.len(), 7);
+        // The withheld exposition indexes the same discriminant, so it moves
+        // with the same variants and is pinned by the same assertion.
+        assert_eq!(CONTROL_RECOVERY_WITHHELD.len(), 7);
+        assert_eq!(CONTROL_RECOVERY_WITHHELD[0].len(), 3);
     }
 
     #[test]
@@ -15585,6 +15974,26 @@ mod tests {
         assert!(metrics.contains(
             "plurx_playback_control_platform_exchanges_total{outcome=\"accepted\",platform=\"web\"}"
         ));
+        // A withheld hold is neither sent nor suppressed, so it needs its own
+        // series or it would read as holds simply having stopped happening.
+        for reason in [
+            "demand",
+            "time",
+            "bytes",
+            "global",
+            "ahead",
+            "working_set",
+            "no_room",
+        ] {
+            for platform in ["web", "apple", "android"] {
+                assert!(
+                    metrics.contains(&format!(
+                        "plurx_playback_control_recovery_withheld_total{{reason=\"{reason}\",platform=\"{platform}\"}}"
+                    )),
+                    "{reason}/{platform} has no withheld series",
+                );
+            }
+        }
         assert!(
             metrics.contains("plurx_playback_control_relays_total{outcome=\"invalid_response\"}")
         );
