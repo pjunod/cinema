@@ -91,6 +91,8 @@ class EvidenceWorkflowCase(unittest.TestCase):
         )
         apple = self.read("clients/apple/Sources/PlayerController.swift")
         apple_view = self.read("clients/apple/Sources/PlayerView.swift")
+        apple_adapter = self.read("clients/apple/Sources/PlayerRemoteAdapter.swift")
+        apple_policy = self.read("clients/apple/Sources/PlayerInputRouting.swift")
         hls = self.read("crates/plurxd/src/http/hls.rs")
 
         self.assertIn("return realMediaPositionMs(", android)
@@ -102,8 +104,11 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertNotIn("HiddenSeekAccumulator", android_screen)
         self.assertIn("nextBaseMs = Self.sessionMediaOriginMs(hls, requestedStartMs: startMs)", apple)
 
-        remote_seek = apple_view.split("private func seekFromRemote", 1)[1].split("#endif", 1)[0]
-        self.assertLess(remote_seek.index("controller.skip"), remote_seek.index("revealControlsFromRemote"))
+        self.assertIn(".playerRemoteAdapter(", apple_view)
+        self.assertIn("PlayerInputRouting.route(", apple_adapter)
+        hidden = apple_policy.split("case .hidden:", 1)[1].split("case .transport:", 1)[0]
+        self.assertIn("case .left, .right, .up, .down, .select, .tapSurface: .reveal", hidden)
+        self.assertNotIn("controller.skip", hidden)
         self.assertIn("skipped Apple HEVC tier normalization", hls)
 
 

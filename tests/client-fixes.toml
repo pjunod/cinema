@@ -200,10 +200,10 @@ test_anchor = "testTVSeriesAndSeasonShelvesAcceptDirectionalFocusFromTheirHeader
 [[fixes]]
 id = "apple.tvos-progress-engagement-seeks"
 commits = ["7cf9bec6", "3991d34b"]
-source = "clients/apple/Sources/PlayerView.swift"
-source_anchor = "enum TVPlayerRemoteRouting"
+source = "clients/apple/Sources/PlayerInputRouting.swift"
+source_anchor = "enum PlayerInputRouting"
 test = "clients/apple/Tests/AppleClientTests.swift"
-test_anchor = "testTVProgressOnlySeeksAfterTheViewerEngagesIt"
+test_anchor = "testPlayerInputRoutingMatchesTheSharedContract"
 
 [[fixes]]
 id = "apple.pgs-overlay-menu-diagnostic"
