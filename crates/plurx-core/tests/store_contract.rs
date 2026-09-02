@@ -720,6 +720,21 @@ fn activation_confirmation_retries_only_its_exact_state_update() {
         confirm.contains("route.publication_ready_at_ms == publication_ready_at_ms"),
         "a zero-row replay must prove the surviving row carries this call's own boundary"
     );
+    // The embedded twin serves the same method and had the same hole. A fix
+    // applied to one backend and not the other is the parity defect this
+    // repository has paid for before.
+    let sqlite = include_str!("../src/store/sqlite/sessions.rs");
+    let sqlite_confirm = sqlite
+        .split_once("MediaSessionActivationSettlement::Confirm")
+        .expect("embedded settlement keeps a confirm branch")
+        .1
+        .split_once("MediaSessionActivationSettlement::Abandon")
+        .expect("embedded settlement keeps distinct confirm and abandon branches")
+        .0;
+    assert!(
+        sqlite_confirm.contains("route.publication_ready_at_ms == publication_ready_at_ms"),
+        "the embedded twin's confirmation replay must prove the same boundary"
+    );
 }
 
 #[cfg(feature = "cluster-read-cost-validation")]
