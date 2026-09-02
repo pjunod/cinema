@@ -1,0 +1,26 @@
+version = 1
+
+[[coverage]]
+commits = ["68651cf5"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+Test-only, and both halves were executed against the defect. The sweep in \
+`a_twenty_seek_storm_starts_work_only_for_the_settled_target` \
+(`crates/plurxd/src/http/hls.rs`) sampled the cache directory once, immediately \
+after waiting for the surviving producer to publish — and `read_cached_window` \
+starts answering at `atomic_write_child`, one `unlink_child` before that \
+producer is finished, so the assertion was racing the publisher rather than \
+observing the abort. It took the post-merge `fast Rust gate` on main red with \
+`an abandoned window left .tmp-e9fe0939-… behind`. It is now a bounded wait, \
+which cannot pass on the defect it exists for because a temp file nothing will \
+ever unlink outlasts any timeout. The second half is why that flake was the only \
+thing the sweep could ever have caught: the fixture producer parked before \
+writing, so a superseded producer created no temp file at all and the claim was \
+about a file that never existed. The producer now writes its partial output \
+before parking, the way the real `extract_vtt_window` does. Executed: with \
+`unlink_child(tmp_name)` deleted from the cancel arm of \
+`publish_extraction_with_cancel` in `crates/plurxd/src/subtitles.rs`, the test \
+fails on the bounded wait; with it restored it passes five consecutive runs. \
+Both run under `rust-gate` and `rust-gate-ci`.
+"""
