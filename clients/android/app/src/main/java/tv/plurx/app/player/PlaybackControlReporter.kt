@@ -349,12 +349,34 @@ data class ControlAction(
 )
 
 @Serializable
+data class ControlDelivery(
+    @SerialName("subtitle_readiness") val subtitleReadiness: String? = null,
+)
+
+internal object SubtitleReadinessDecision {
+    fun meansReady(value: String?): Boolean = value == "ready"
+}
+
+internal class SubtitleReadinessRetryState {
+    private var lastReady: Boolean? = null
+
+    @Synchronized
+    fun record(value: String?): Boolean {
+        val ready = SubtitleReadinessDecision.meansReady(value)
+        val retry = lastReady == false && ready
+        lastReady = ready
+        return retry
+    }
+}
+
+@Serializable
 data class ControlResponse(
     val protocol: String,
     val generation: String,
     @SerialName("control_epoch") val controlEpoch: Long,
     @SerialName("accepted_sequence") val acceptedSequence: Long,
     val action: ControlAction,
+    val delivery: ControlDelivery? = null,
 )
 
 /**

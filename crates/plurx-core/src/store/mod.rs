@@ -173,17 +173,19 @@ pub use self::hiqlite::{
 pub use self::hiqlite_import::{SqliteImportReport, SqliteImportTableDigest};
 pub use fragment_index_cluster::{
     analysis_backoff_ms, bounded_analysis_backoff_base_secs, bounded_analysis_backoff_max_secs,
-    bounded_analysis_lease_secs, bounded_analysis_max_attempts, cluster_fragment_index_blob_sha256,
-    cluster_fragment_index_generation_key, cluster_fragment_index_key,
-    cluster_fragment_index_pipeline_digest, decode_cluster_fragment_index_blob,
-    encode_cluster_fragment_index_blob, AnalysisAttempt, AnalysisFileLabel, AnalysisHistoryCursor,
-    AnalysisHistoryFilter, AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow,
-    AnalysisRequest, AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
-    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+    bounded_analysis_lease_secs, bounded_analysis_max_attempts, bounded_subtitle_window_seconds,
+    cluster_fragment_index_blob_sha256, cluster_fragment_index_generation_key,
+    cluster_fragment_index_key, cluster_fragment_index_pipeline_digest,
+    decode_cluster_fragment_index_blob, encode_cluster_fragment_index_blob, AnalysisAttempt,
+    AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryPage,
+    AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest, AnalysisStatusSummary,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
+    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
     DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
-    MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS,
-    MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    DEFAULT_SUBTITLE_WINDOW_SECS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
+    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -634,6 +636,9 @@ pub mod keys {
     pub const ANALYSIS_LEASE_SECS: &str = "analysis.lease_secs";
     pub const ANALYSIS_BACKOFF_BASE_SECS: &str = "analysis.backoff_base_secs";
     pub const ANALYSIS_BACKOFF_MAX_SECS: &str = "analysis.backoff_max_secs";
+    /// Forward subtitle materialization span. The settings API constrains this
+    /// to 30–900 seconds and absent means the 200-second default.
+    pub const SUBTITLE_WINDOW_SECS: &str = "playback.subtitle_window_secs";
     /// VOD availability kill switch. Absent/on accepts immutable VOD session
     /// creation; `0` refuses it. It never selects the removed live HLS path.
     pub const VOD_PRESENTATION: &str = "playback.vod_presentation";

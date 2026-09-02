@@ -6804,6 +6804,38 @@ function clearPlaybackControlWaiters(p){
 function subtitleReadinessMeansReady(delivery){
   return !!delivery&&delivery.subtitle_readiness==="ready";
 }
+// One transition, one retry. The state belongs to the reporter generation and
+// is reset by `startPlaybackControl`; repeated control cadence at `ready`
+// cannot turn into a subtitle request storm.
+function subtitleReadinessRetryTransition(state,delivery){
+  const ready=subtitleReadinessMeansReady(delivery);
+  const retry=state.subtitleReadinessReady===false&&ready;
+  state.subtitleReadinessReady=ready;
+  return retry;
+}
+function nativeHlsSubtitleOrdinal(player,index){
+  const native=(player&&player.subs||[]).filter(s=>s.native===true);
+  return native.findIndex(s=>s.index===index);
+}
+// Re-selecting a subtitle rendition asks the HLS engine for the current
+// segment again. Video stays attached throughout; this is subtitle I/O only.
+function retryReadyNativeSubtitle(player){
+  if(!player||player.burnedSub!=null||player.curSub==null||player.curSub<0) return false;
+  const ordinal=nativeHlsSubtitleOrdinal(player,player.curSub);
+  if(ordinal<0) return false;
+  if(player.hls){
+    player.hls.subtitleTrack=-1;
+    player.hls.subtitleTrack=ordinal;
+    return true;
+  }
+  if(!player.sessionId) return false;
+  const video=document.getElementById("video");
+  const track=video&&video.textTracks&&video.textTracks[ordinal];
+  if(!track) return false;
+  track.mode="disabled";
+  track.mode="showing";
+  return true;
+}
 function startPlaybackControl(v,p,bootstrap){
   stopPlaybackControl(p);
   p.controlLastRequest=null;
@@ -6811,6 +6843,7 @@ function startPlaybackControl(v,p,bootstrap){
   p.controlLastExchangeAt=null;
   p.controlLastError=null;
   p.controlLastFailureLogAt=null;
+  p.subtitleReadinessReady=undefined;
   if(!bootstrap || !window.PlurxPlaybackControl) return null;
   try{
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
@@ -6821,6 +6854,10 @@ function startPlaybackControl(v,p,bootstrap){
         if(PLAYER!==p||p.controlReporter!==reporter) return;
         p.controlLastRequest=request;
         settlePlaybackControlWaiters(p,request,response);
+        if(response&&response.delivery
+          &&subtitleReadinessRetryTransition(p,response.delivery)){
+          retryReadyNativeSubtitle(p);
+        }
         // A terminal verdict can arrive on any exchange, and the reporter
         // stops on it — correctly, since it owns no recovery. But a stall an
         // hour later would then find no reporter to ask and fall through to
@@ -6860,13 +6897,23 @@ async function openSession(fileId, opts){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
     {playback_id:PLAYBACK_ID,request_id:newRequestId()},contract.session);
+  // HLS sessions carry native WebVTT renditions whenever this server says a
+  // track can become one. Publishing the group up front lets a later subtitle
+  // selection and a readiness-directed re-fetch stay inside the current video
+  // item rather than reopening it.
+  const player=typeof PLAYER!=="undefined"?PLAYER:null;
+  const natives=(player&&player.subs||[]).filter(s=>s.native===true);
+  if(natives.length){
+    body.native_subtitles=true;
+    if(natives.some(s=>s.index===player.curSub)) body.subtitle=player.curSub;
+  }
   // Where this start sits in the control ordering, so a server that has since
   // accepted a later seek can refuse to produce a destination the viewer has
   // already scrolled past. The client's own `_seekToken` discards the response
   // either way; this saves the server the work rather than the client the
   // confusion. Omitted when no exchange has been accepted yet — a first play
   // has no earlier ask to be stale against.
-  const acceptedSequence=PLAYER&&PLAYER.controlReporter&&Number(PLAYER.controlReporter.sequence);
+  const acceptedSequence=player&&player.controlReporter&&Number(player.controlReporter.sequence);
   if(Number.isFinite(acceptedSequence)&&acceptedSequence>0) body.control_sequence=acceptedSequence;
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
@@ -9645,15 +9692,11 @@ function audioLabelMenu(a,i){ return (langName(a.language)||("Track "+(i+1)))+(a
 // *rendition*, while `text` (= not a bitmap) is everything that can be
 // extracted as text at all — which also covers mov_text and styled ASS/SSA.
 //
-// This player has no rendition path. It never asks for `?native=1`, and every
-// text track it shows arrives from the sidecar `/api/v1/files/{id}/subs/{n}`,
-// whose only server-side gate is `is_bitmap_subtitle` and whose extraction is
-// a plain `ffmpeg -map 0:s:N -f webvtt` — mov_text and ASS both come back as
-// cues. Asking `native` here would route those to a burn instead: a session
-// restart, a re-encode, and a subtitle nobody can switch off, for tracks that
-// work today. So `native` is consulted where a rendition is requested, of
-// which there is no site in this player, and an absent `native` (older
-// server) changes nothing anywhere.
+// HLS sessions use `native` for their rendition path; direct and progressive
+// delivery still use `text` and the whole-track `/files/.../subs/...` route.
+// Keeping the predicates separate preserves mov_text and styled ASS/SSA on
+// those non-HLS routes without asking the HLS master for a rendition it cannot
+// publish.
 function subNeedsBurn(s){ return !!s && s.text===false; }
 // A bitmap track is labelled as one. Selecting it restarts the stream as a
 // transcode, and somebody choosing between two English tracks deserves to know
@@ -9941,6 +9984,15 @@ async function setSub(index){
   const off=me.offset||0;
   me._subOff=off;                       // set before awaiting: stops pbTick re-firing
   const s=(me.subs||[]).find(x=>x.index===index);
+  const nativeOrdinal=nativeHlsSubtitleOrdinal(me,index);
+  if(me.sessionId&&nativeOrdinal>=0){
+    if(me.hls){
+      me.hls.subtitleTrack=nativeOrdinal;
+    }else if(v.textTracks&&v.textTracks[nativeOrdinal]){
+      v.textTracks[nativeOrdinal].mode="showing";
+    }
+    return;
+  }
   if(!off){
     const tr=document.createElement("track");
     tr.kind="subtitles"; tr.dataset.idx=index; tr.label=subLabelFor(s,index); tr.srclang=(s&&s.language)||"und";
