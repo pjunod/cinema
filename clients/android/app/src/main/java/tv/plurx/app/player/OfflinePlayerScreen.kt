@@ -64,6 +64,7 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
     var lastInteraction by remember { mutableLongStateOf(0L) }
     var lastFocusedControl by rememberSaveable { mutableStateOf(PlayerControlId.PlayPause) }
     var focusAfterComposition by remember { mutableStateOf<PlayerControlId?>(null) }
+    var focusRequestTicket by remember { mutableIntStateOf(0) }
     // One surface for every producer on this screen. A television routes
     // through the ten-foot table; a phone or tablet through touch — the two
     // tables disagree about what a direction does, so reading one for the
@@ -88,6 +89,7 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
 
     fun requestFocus(control: PlayerControlId) {
         focusAfterComposition = control
+        focusRequestTicket += 1
     }
 
     fun applyOutcome(outcome: PlayerInputOutcome, input: PlayerContractInput): Boolean {
@@ -194,9 +196,10 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
             PlayerInputOutcome.CloseMenu,
             PlayerInputOutcome.MenuFocus,
             -> false
-            // `ignore` is consumed, or the media session acts on the key the
-            // contract just declined. See PlayerScreen.
-            PlayerInputOutcome.Ignore -> true
+            // Consumed for the media keys only — see PlayerScreen.
+            PlayerInputOutcome.Ignore -> input == PlayerContractInput.PlayPause ||
+                input == PlayerContractInput.SkipBack ||
+                input == PlayerContractInput.SkipForward
         }
     }
 
@@ -315,6 +318,7 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
                 isPlaying = isPlaying,
                 requestInitialFocus = true,
                 initialFocus = focusAfterComposition ?: PlayerControlId.PlayPause,
+                focusRequestTicket = focusRequestTicket,
                 focus = focus,
                 lastFocusedControl = lastFocusedControl,
                 onControlFocused = { lastFocusedControl = it; lastInteraction += 1 },

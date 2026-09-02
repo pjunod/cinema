@@ -779,10 +779,13 @@ struct DetailView: View {
                 // Search — and each of those re-grabbed focus onto Play,
                 // throwing away wherever the viewer had walked the remote to.
                 if !hasClaimedTVFocus, Self.hasTVPrimaryAction(loaded, seriesPlayback: seriesPlayback) {
-                    hasClaimedTVFocus = true
                     tvFocusedAction = nil
                     try? await Task.sleep(for: .milliseconds(120))
                     tvFocusedAction = .primaryAction
+                    // Latched after the claim, not before: a first arrival cut
+                    // short by a dismissal would otherwise spend the one
+                    // chance this view has to place focus.
+                    hasClaimedTVFocus = true
                 }
                 #endif
             } catch {

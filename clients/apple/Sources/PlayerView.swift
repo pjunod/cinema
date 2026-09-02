@@ -1200,6 +1200,11 @@ struct PlayerView: View {
 
     private func hideControls() {
         guard controlsVisible, !controller.failed else { return }
+        // Mini is a strip beside the transport, not a panel of its own: it no
+        // longer suppresses the idle hide, so it has to leave with the chrome.
+        // Left behind it would sit on screen with no transport and no producer
+        // to close it — and `hidden × back` is exit, not close.
+        if showStats && statsMode == .mini { showStats = false }
         #if os(iOS)
         activeOptionMenu = nil
         #else
@@ -1247,10 +1252,13 @@ struct PlayerView: View {
         if tvMenuOpen { return .menu }
         #endif
         if showStats && statsMode != .mini { return .info }
+        // Chrome-hidden outranks the focus flag, as it does on Android: the
+        // reveal surface takes focus when the chrome goes, but not before the
+        // next press can arrive.
+        if !controlsVisible { return .hidden }
         #if os(tvOS)
         if focusedControl == .progress { return .timeline }
         #endif
-        if !controlsVisible { return .hidden }
         return .transport
     }
 
@@ -3092,10 +3100,13 @@ struct PlaybackStatsView: View {
     @ViewBuilder
     private var ledgerBackdrop: some View {
         #if os(iOS)
-        // Hit-testable and invisible: without this the taps that miss the
-        // panel reach the transport controls behind it, and `info` is a state
-        // the contract says traps interaction.
-        Color.clear.contentShape(Rectangle()).ignoresSafeArea()
+        // Hit-testable and invisible. Without it the taps that miss the panel
+        // reach the transport controls behind it; with it they are the touch
+        // table's `info × tap_surface`, which is `close_info`.
+        Color.clear
+            .contentShape(Rectangle())
+            .ignoresSafeArea()
+            .onTapGesture { onDismiss() }
         #else
         EmptyView()
         #endif

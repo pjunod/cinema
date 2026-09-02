@@ -682,6 +682,10 @@ private fun PlayerContent(
     var lastFocusedControl by rememberSaveable { mutableStateOf(PlayerControlId.PlayPause) }
     var panelOpener by rememberSaveable { mutableStateOf(PlayerControlId.PlayPause) }
     var focusAfterComposition by remember { mutableStateOf<PlayerControlId?>(null) }
+    // Bumped by every focus() call. Two requests for the SAME control are two
+    // moves — `focus_transport` from the timeline asks for the control it is
+    // already remembering — so the request has to carry something that changes.
+    var focusRequestTicket by remember { mutableIntStateOf(0) }
     // One surface for every producer on this screen — see OfflinePlayerScreen.
     val playerSurface = playerInputSurfaceFor(currentFormFactor())
     var repeatCount by remember { mutableIntStateOf(0) }
@@ -765,7 +769,15 @@ private fun PlayerContent(
     }
 
     fun focus(control: PlayerControlId) {
-        focusAfterComposition = control
+        // The marker chip is composed only while a marker is offered; asking
+        // for it after the marker has passed is asking for a node that is not
+        // there.
+        focusAfterComposition = if (control == PlayerControlId.Marker && activeMarker == null) {
+            PlayerControlId.PlayPause
+        } else {
+            control
+        }
+        focusRequestTicket += 1
     }
 
     fun applyOutcome(outcome: PlayerInputOutcome, input: PlayerContractInput): Boolean {
@@ -804,10 +816,15 @@ private fun PlayerContent(
                 false
             }
             PlayerInputOutcome.MenuFocus -> false
-            // `ignore` is "nothing happens", not "somebody else may act": an
-            // unconsumed media key reaches the Media3 session, which would
-            // seek the player the contract just said to leave alone.
-            PlayerInputOutcome.Ignore -> true
+            // `ignore` is "nothing happens", not "somebody else may act" — for
+            // the media keys, which the Media3 session would otherwise act on,
+            // seeking the player the contract just said to leave alone. A
+            // directional or Select `ignore` stays unconsumed: on a touch
+            // surface with a keyboard attached every direction is `ignore`,
+            // and swallowing those would leave the focus engine with nothing.
+            PlayerInputOutcome.Ignore -> input == PlayerContractInput.PlayPause ||
+                input == PlayerContractInput.SkipBack ||
+                input == PlayerContractInput.SkipForward
             PlayerInputOutcome.FocusMarkerOrIgnore -> {
                 focusMarkerOrIgnore()
                 true
@@ -1205,6 +1222,7 @@ private fun PlayerContent(
                 isPlaying = isPlaying,
                 requestInitialFocus = panel == null,
                 initialFocus = focusAfterComposition ?: PlayerControlId.PlayPause,
+                focusRequestTicket = focusRequestTicket,
                 focus = controlFocus,
                 markerAvailable = activeMarker != null,
                 lastFocusedControl = lastFocusedControl,
@@ -1414,6 +1432,7 @@ internal fun Controls(
     isPlaying: Boolean,
     requestInitialFocus: Boolean,
     initialFocus: PlayerControlId = PlayerControlId.PlayPause,
+    focusRequestTicket: Int = 0,
     mediaFacts: List<MediaFact> = emptyList(),
     markerAvailable: Boolean = false,
     focus: PlayerControlFocus? = null,
@@ -1435,7 +1454,14 @@ internal fun Controls(
     val ownFocus = remember { PlayerControlFocus() }
     val resolvedFocus = focus ?: ownFocus
     val formFactor = currentFormFactor()
-    RequestInitialFocus(resolvedFocus.requester(initialFocus), enabled = requestInitialFocus)
+    RequestInitialFocus(
+        resolvedFocus.requester(initialFocus),
+        enabled = requestInitialFocus,
+        token = focusRequestTicket,
+        // Navigation, not arrival: a second request 80 ms later would undo a
+        // press the viewer made in between.
+        reinforce = false,
+    )
     // The timeline row is composed only when a duration is known, so pointing
     // `up` at its requester on an unknown-duration stream aimed focus at a
     // node that was never attached.

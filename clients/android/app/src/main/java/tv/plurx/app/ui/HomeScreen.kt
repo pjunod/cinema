@@ -29,6 +29,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -131,11 +135,18 @@ fun HomeScreen(
                 // Home arrived with focus nowhere: the first D-pad press was
                 // spent finding a starting point rather than moving from one.
                 // The first VISIBLE shelf, so this can never aim at a
-                // requester whose row was not composed.
+                // requester whose row was not composed — and once, because
+                // loadHome() runs on every return from the player and a hub
+                // gaining a row would otherwise yank focus back to the top.
+                val fallbackFocus = remember { FocusRequester() }
+                var claimedInitialFocus by rememberSaveable { mutableStateOf(false) }
                 RequestInitialFocus(
-                    shelfFocus[visibleShelfKeys.firstOrNull()] ?: FocusRequester(),
-                    enabled = visibleShelfKeys.isNotEmpty(),
+                    shelfFocus[visibleShelfKeys.firstOrNull()] ?: fallbackFocus,
+                    enabled = !claimedInitialFocus && visibleShelfKeys.isNotEmpty(),
                 )
+                LaunchedEffect(visibleShelfKeys) {
+                    if (visibleShelfKeys.isNotEmpty()) claimedInitialFocus = true
+                }
                 fun previousShelf(key: String): FocusRequester? {
                     val index = visibleShelfKeys.indexOf(key)
                     return visibleShelfKeys.getOrNull(index - 1)?.let { shelfFocus[it] }

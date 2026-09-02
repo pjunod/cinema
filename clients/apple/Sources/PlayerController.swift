@@ -5655,7 +5655,7 @@ final class PlayerController: ObservableObject {
     /// control centre are inputs like any other: without this they were a
     /// second answer to "what does skip do", and they answered it during a
     /// pending scrub, where the touch table says `ignore`.
-    var remoteInput: ((PlayerContractInput) -> Bool)?
+    var remoteInput: (@MainActor (PlayerContractInput) -> Bool)?
 
     private func routeRemote(_ input: PlayerContractInput, otherwise fallback: () -> Void) {
         if let remoteInput {

@@ -86,9 +86,14 @@ fun SearchScreen(
     }
 
     // Search arrives with nothing focused, so the first D-pad press on a
-    // television was spent finding something rather than doing something.
+    // television was spent finding something rather than doing something. Only
+    // on a television: on a phone the field opens the soft keyboard on focus,
+    // and taking over the screen on arrival is not this change's business.
     val searchFieldFocus = remember { FocusRequester() }
-    RequestInitialFocus(searchFieldFocus)
+    RequestInitialFocus(
+        searchFieldFocus,
+        enabled = formFactor == FormFactor.Television,
+    )
 
     Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
         SafeTopRow(
@@ -110,10 +115,15 @@ fun SearchScreen(
                 placeholder = "Search movies, shows, episodes, tags…",
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                trailingIcon = if (query.isNotEmpty()) {
-                    { TvIconButton(onClick = { query = "" }) { Icon(Icons.Filled.Close, contentDescription = "Clear") } }
-                } else null,
             )
+            // Clear sits beside the field rather than inside it: the field
+            // takes Select to begin editing, so a button nested under that
+            // preview handler needs two presses to answer one.
+            if (query.isNotEmpty()) {
+                TvIconButton(onClick = { query = "" }) {
+                    Icon(Icons.Filled.Close, contentDescription = "Clear")
+                }
+            }
         }
 
         when {
