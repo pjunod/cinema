@@ -63,6 +63,11 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
     var lastInteraction by remember { mutableLongStateOf(0L) }
     var lastFocusedControl by rememberSaveable { mutableStateOf(PlayerControlId.PlayPause) }
     var focusAfterComposition by remember { mutableStateOf<PlayerControlId?>(null) }
+    // One surface for every producer on this screen. A television routes
+    // through the ten-foot table; a phone or tablet through touch — the two
+    // tables disagree about what a direction does, so reading one for the
+    // adapter and the other for Back was a divergence waiting to be found.
+    val playerSurface = playerInputSurfaceFor(currentFormFactor())
 
     fun poke() {
         controlsVisible = true
@@ -72,9 +77,11 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
     fun inputState(): PlayerInputState = when {
         failure != null -> PlayerInputState.Failed
         infoOpen && infoMode != PlaybackStatsMode.Mini -> PlayerInputState.Info
+        // Chrome-hidden first: the timeline flag is cleared by a focus
+        // callback that may not have arrived yet. See PlayerScreen.
+        !controlsVisible -> PlayerInputState.Hidden
         timelineFocused && pendingMs != null -> PlayerInputState.Scrub
         timelineFocused -> PlayerInputState.Timeline
-        !controlsVisible -> PlayerInputState.Hidden
         else -> PlayerInputState.Transport
     }
 
@@ -112,14 +119,19 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
             }
             PlayerInputOutcome.Skip -> {
                 val delta = if (input == PlayerContractInput.SkipBack || input == PlayerContractInput.Left) -10_000L else 10_000L
-                player.seekTo((player.currentPosition + delta).coerceIn(0L, durationMs.coerceAtLeast(0L)))
+                // `durationMs` is 0 until the player reports one, and a record
+                // may never carry it. Clamping to it then sent every skip to
+                // the start of the film.
+                player.seekTo(clampToKnownDuration(player.currentPosition + delta, durationMs))
                 poke()
                 true
             }
             PlayerInputOutcome.Preview -> {
-                val sign = if (input == PlayerContractInput.Left) -1 else 1
-                pendingMs = ((pendingMs ?: player.currentPosition) + sign * PlayerInputPolicy.previewStepMs(repeatCount))
-                    .coerceIn(0L, durationMs.coerceAtLeast(0L))
+                if (durationMs > 0L) {
+                    val sign = if (input == PlayerContractInput.Left) -1 else 1
+                    pendingMs = ((pendingMs ?: player.currentPosition) + sign * PlayerInputPolicy.previewStepMs(repeatCount))
+                        .coerceIn(0L, durationMs)
+                }
                 poke()
                 true
             }
@@ -152,6 +164,7 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
             PlayerInputOutcome.Hide -> {
                 if (infoOpen && infoMode == PlaybackStatsMode.Mini) infoOpen = false
                 controlsVisible = false
+                focusAfterComposition = null
                 true
             }
             PlayerInputOutcome.Exit -> {
@@ -173,16 +186,22 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
             }
             PlayerInputOutcome.FocusRow,
             PlayerInputOutcome.Activate,
+            -> {
+                poke()
+                false
+            }
             PlayerInputOutcome.CloseMenu,
             PlayerInputOutcome.MenuFocus,
-            PlayerInputOutcome.Ignore,
             -> false
+            // `ignore` is consumed, or the media session acts on the key the
+            // contract just declined. See PlayerScreen.
+            PlayerInputOutcome.Ignore -> true
         }
     }
 
     BackHandler {
         val input = PlayerContractInput.Back
-        applyOutcome(PlayerInputPolicy.route(PlayerInputSurface.Touch, inputState(), input), input)
+        applyOutcome(PlayerInputPolicy.route(playerSurface, inputState(), input), input)
     }
 
     LaunchedEffect(downloadId) {
@@ -241,20 +260,18 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
         if (isPlaying && (!infoOpen || infoMode == PlaybackStatsMode.Mini) && pendingMs == null && failure == null) {
             delay(4_000)
             applyOutcome(
-                PlayerInputPolicy.route(PlayerInputSurface.TenFoot, inputState(), PlayerContractInput.Idle),
+                PlayerInputPolicy.route(playerSurface, inputState(), PlayerContractInput.Idle),
                 PlayerContractInput.Idle,
             )
         }
     }
 
-    LaunchedEffect(controlsVisible, infoOpen, focusAfterComposition) {
+    // Controls asks for its own initial focus a frame after it composes, so a
+    // request made here was overwritten; the target travels in as
+    // `initialFocus` instead. See PlayerScreen.
+    LaunchedEffect(controlsVisible, infoOpen) {
         if (!controlsVisible && !infoOpen) {
             surfaceFocus.requestFocus()
-        } else if (controlsVisible && !infoOpen) {
-            focusAfterComposition?.let {
-                runCatching { focus.requester(it).requestFocus() }
-                focusAfterComposition = null
-            }
         }
     }
 
@@ -264,7 +281,7 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
             .background(Color.Black)
             .focusRequester(surfaceFocus)
             .focusable()
-            .playerInputAdapter(state = ::inputState) { outcome, input, repeats ->
+            .playerInputAdapter(surface = playerSurface, state = ::inputState) { outcome, input, repeats ->
                 repeatCount = repeats
                 applyOutcome(outcome, input)
             },
@@ -283,7 +300,7 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
                         indication = null,
                     ) {
                         val input = PlayerContractInput.TapSurface
-                        applyOutcome(PlayerInputPolicy.route(PlayerInputSurface.Touch, inputState(), input), input)
+                        applyOutcome(PlayerInputPolicy.route(playerSurface, inputState(), input), input)
                     },
             )
         }
@@ -296,17 +313,18 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
                 pendingMs = pendingMs,
                 isPlaying = isPlaying,
                 requestInitialFocus = true,
+                initialFocus = focusAfterComposition ?: PlayerControlId.PlayPause,
                 focus = focus,
                 lastFocusedControl = lastFocusedControl,
                 onControlFocused = { lastFocusedControl = it; lastInteraction += 1 },
                 onTimelineFocused = { timelineFocused = it },
                 onBack = {
                     val input = PlayerContractInput.Back
-                    applyOutcome(PlayerInputPolicy.route(PlayerInputSurface.Touch, inputState(), input), input)
+                    applyOutcome(PlayerInputPolicy.route(playerSurface, inputState(), input), input)
                 },
                 onPlayPause = { if (player.isPlaying) player.pause() else player.play(); poke() },
                 onSeekBack = { player.seekTo((player.currentPosition - 10_000).coerceAtLeast(0)); poke() },
-                onSeekForward = { player.seekTo((player.currentPosition + 10_000).coerceAtMost(durationMs)); poke() },
+                onSeekForward = { player.seekTo(clampToKnownDuration(player.currentPosition + 10_000, durationMs)); poke() },
                 onScrub = { pendingMs = it },
                 onScrubEnd = { pendingMs?.let(player::seekTo); pendingMs = null; poke() },
                 onTracks = null,
@@ -345,3 +363,11 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
         }
     }
 }
+
+/**
+ * Clamp a seek to a duration only when one is known. An offline record may
+ * carry no duration and the player reports none until it has prepared, and
+ * `coerceIn(0, 0)` is not "no ceiling" — it is the start of the film.
+ */
+internal fun clampToKnownDuration(positionMs: Long, durationMs: Long): Long =
+    if (durationMs > 0L) positionMs.coerceIn(0L, durationMs) else positionMs.coerceAtLeast(0L)
