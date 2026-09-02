@@ -439,7 +439,7 @@ as a column: backoff `5s → 30s → 2m`, batch of 20. Restart plurx mid-retry a
 the retry still happens. A queue that lives in memory loses everything on the
 one event you most want it to survive — a restart.
 
-**Where you see it.** Settings → Metadata → monarr card, the queue line
+**Where you see it.** Settings → Integrations → monarr card, the queue line
 under **Test connection**: `Watch notifications — 41 sent, 2 waiting, 0
 failed`. And on the monarr side, System → **Connections** lists `plurx` as
 `calls Monarr` / `calling`.
@@ -488,7 +488,7 @@ PLXKEY=plx_…                   # §2
 MKEY=<monarr Settings → Security → Reveal>
 ```
 
-1. **plurx can reach monarr** — Settings → Metadata → monarr →
+1. **plurx can reach monarr** — Settings → Integrations → monarr →
    **Test connection** → `✓ connected · monarr <version>`.
 2. **The calendar half works too** (Test does not cover it) —
    `curl -sS -H "Authorization: Bearer $TOKEN" "$PLURX/api/v1/coming-soon"` returns entries, and the

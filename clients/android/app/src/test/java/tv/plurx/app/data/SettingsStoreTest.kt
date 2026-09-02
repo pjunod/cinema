@@ -36,4 +36,27 @@ class SettingsStoreTest {
             credentialsForNewOrigin(StoredCredentials("", "orphan", "paul"), "http://a:32400").token,
         )
     }
+
+    @Test
+    fun subtitleSwitchingDefaultsToAfterAShortPause() {
+        // A device that has never seen the preference, or holds a value a
+        // later build no longer knows, direct-plays until a subtitle is chosen
+        // — the same default the Apple client settled on (2026-08-02).
+        assertEquals(SubtitleReadiness.OnDemand, ViewerPreferences().subtitleReadiness)
+        assertEquals(SubtitleReadiness.OnDemand, SubtitleReadiness.fromStorage(null))
+        assertEquals(SubtitleReadiness.OnDemand, SubtitleReadiness.fromStorage("unknown"))
+    }
+
+    @Test
+    fun subtitleSwitchingRoundTripsThroughStorage() {
+        SubtitleReadiness.entries.forEach {
+            assertEquals(it, SubtitleReadiness.fromStorage(it.storageValue))
+        }
+        // The raw values are the Apple client's `SubtitleReadiness` cases, so
+        // the two settings screens describe one preference in one vocabulary.
+        assertEquals("instant", SubtitleReadiness.Instant.storageValue)
+        assertEquals("onDemand", SubtitleReadiness.OnDemand.storageValue)
+        assertEquals("Instant", SubtitleReadiness.Instant.label)
+        assertEquals("After a short pause", SubtitleReadiness.OnDemand.label)
+    }
 }

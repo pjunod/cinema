@@ -261,14 +261,24 @@ test("VOD diagnostics describe materialization instead of claiming a cache hit",
 
 test("analysis controls are first-class settings separate from playback mode controls", () => {
   const panel = shippedSource("playbackPanel");
-  const save = shippedSource("savePlayback");
+  // Playback saves per card: the player defaults and the streaming tuning are
+  // two writes with two buttons, and neither carries an analysis field.
+  const save = shippedSource("saveStreaming");
+  const saveDefaults = shippedSource("savePlaybackDefaults");
   const analysisPanel = shippedSource("analysisSettingsPanel");
+  assert.match(saveDefaults, /default_audio_lang:/);
+  assert.match(saveDefaults, /sub_mode:/);
+  assert.doesNotMatch(saveDefaults, /vod_presentation:|hls_readrate:|stream_readrate:/,
+    "the defaults card never writes a streaming field");
+  assert.doesNotMatch(save, /default_audio_lang:|default_sub_lang:|sub_mode:/,
+    "the streaming card never writes a player default");
+  assert.doesNotMatch(saveDefaults, /vod_index_mins:/);
   const saveAnalysis = shippedSource("saveAnalysisSettings");
-  assert.match(panel, /id="pvod"/);
-  assert.match(panel, /id="pvlr"/);
-  assert.doesNotMatch(panel, /id="pvi"/);
+  assert.match(panel, /togRow\("pvod"/);
+  assert.match(panel, /togRow\("pvlr"/);
+  assert.doesNotMatch(panel, /"pvi"/);
   assert.match(analysisPanel, /id="an-every"/);
-  assert.match(analysisPanel, /id="an-enabled"/);
+  assert.match(analysisPanel, /togRow\("an-enabled"/);
   assert.match(panel, /id="pvws"/);
   assert.match(panel, /id="pvmb"/);
   assert.match(save, /vod_presentation:/);
@@ -292,7 +302,10 @@ test("analysis settings render the numeric retry policy returned by the API", ()
     "analysisSummaryCard",
     "presetOpts",
     "esc",
-    `${shippedSource("analysisSettingsPanel")}\nreturn analysisSettingsPanel;`,
+    [
+      shippedSource("setHead"), shippedSource("setCard"), shippedSource("cardHead"),
+      shippedSource("togRow"), shippedSource("setCardFoot"), shippedSource("analysisSettingsPanel"),
+    ].join("\n") + "\nreturn analysisSettingsPanel;",
   )(() => "summary", presetOpts, esc);
 
   const html = render(
