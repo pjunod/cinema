@@ -10967,6 +10967,14 @@ mod tests {
                     let now = live.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     peak_live.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
                     let _live = LiveProducer(live);
+                    // The partial write happens BEFORE the park, so a producer
+                    // that is superseded has a temp file on disk when it dies.
+                    // A real ffmpeg is the same shape — it is writing while it
+                    // runs — and without it "an abort unlinks its own temp
+                    // file" would be a claim about a file that never existed.
+                    tokio::fs::write(&tmp, b"WEBVTT\n\n")
+                        .await
+                        .map_err(|error| error.to_string())?;
                     started.add_permits(1);
                     // A superseded producer is dropped exactly here, which is
                     // what makes `live` fall again without this body ever
@@ -11582,18 +11590,35 @@ mod tests {
             // Nothing was left half-written. An abort unlinks its own temp
             // file and only its own temp file, so inverting that unlink to the
             // cache name — the one way a cancellation could reach a published
-            // sidecar — shows up here as a stray `.tmp-` entry.
-            let mut entries = tokio::fs::read_dir(&fixture.state.subs_dir)
-                .await
-                .expect("subtitle cache directory");
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                assert!(
-                    !name.starts_with(".tmp-"),
-                    "an abandoned window left {name} behind"
-                );
-            }
+            // sidecar — shows up here as a `.tmp-` entry that never goes away.
+            //
+            // Waited for rather than sampled once: the survivor's publication is
+            // what proved the gate opened, and `read_cached_window` starts
+            // answering at the atomic write, one unlink before that producer is
+            // finished. Sampling on that edge measures how fast the runner is.
+            // The wait still fails on the defect, because a temp file nothing
+            // will ever unlink outlasts any timeout.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let mut stray = None;
+                    let mut entries = tokio::fs::read_dir(&fixture.state.subs_dir)
+                        .await
+                        .expect("subtitle cache directory");
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        if name.starts_with(".tmp-") {
+                            stray = Some(name);
+                            break;
+                        }
+                    }
+                    match stray {
+                        None => return,
+                        Some(_) => tokio::task::yield_now().await,
+                    }
+                }
+            })
+            .await
+            .expect("every abandoned window unlinked its own temp file");
 
             // Release the whole-track producer last: publishing it prunes the
             // matching windows, which would erase the evidence above.
