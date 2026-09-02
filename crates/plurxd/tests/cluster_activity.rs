@@ -12,7 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -24,7 +24,6 @@ use plurx_core::cluster::membership::UNKNOWN_HOSTNAME;
 use plurx_core::store::SqliteStore;
 use serde_json::{json, Value};
 use tokio::net::TcpListener as TokioTcpListener;
-use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
 
 const FORWARD: u8 = 0;
@@ -129,7 +128,6 @@ impl Drop for Daemon {
 struct ActivityProxyState {
     mode: Arc<AtomicU8>,
     requests: Arc<AtomicU64>,
-    collection: Arc<Mutex<Option<Arc<Barrier>>>>,
     target: String,
     client: reqwest::Client,
 }
@@ -139,17 +137,6 @@ async fn activity_proxy(
     headers: HeaderMap,
 ) -> Response<Body> {
     state.requests.fetch_add(1, Ordering::AcqRel);
-    let collection = state
-        .collection
-        .lock()
-        .expect("Activity proxy collection lock")
-        .clone();
-    if let Some(barrier) = collection {
-        // Collect the old eight-request burst onto one receiver admission
-        // window. Fixed code sends one physical request, which is released by
-        // this >=500 ms collection deadline instead.
-        let _ = tokio::time::timeout(Duration::from_millis(500), barrier.wait()).await;
-    }
     let mode = state.mode.load(Ordering::Acquire);
     match mode {
         HTTP_ERROR => return response(StatusCode::SERVICE_UNAVAILABLE, Vec::new()),
@@ -248,7 +235,6 @@ fn response(status: StatusCode, body: Vec<u8>) -> Response<Body> {
 struct ActivityProxy {
     mode: Arc<AtomicU8>,
     requests: Arc<AtomicU64>,
-    collection: Arc<Mutex<Option<Arc<Barrier>>>>,
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -257,12 +243,10 @@ impl ActivityProxy {
     async fn start(listener: TcpListener, target_port: u16) -> Self {
         let mode = Arc::new(AtomicU8::new(FORWARD));
         let requests = Arc::new(AtomicU64::new(0));
-        let collection = Arc::new(Mutex::new(None));
         let shutdown = CancellationToken::new();
         let state = ActivityProxyState {
             mode: Arc::clone(&mode),
             requests: Arc::clone(&requests),
-            collection: Arc::clone(&collection),
             target: format!("http://127.0.0.1:{target_port}"),
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -285,7 +269,6 @@ impl ActivityProxy {
         Self {
             mode,
             requests,
-            collection,
             shutdown,
             task,
         }
@@ -297,20 +280,6 @@ impl ActivityProxy {
 
     fn request_count(&self) -> u64 {
         self.requests.load(Ordering::Acquire)
-    }
-
-    fn begin_collection(&self, expected: usize) {
-        *self
-            .collection
-            .lock()
-            .expect("Activity proxy collection lock") = Some(Arc::new(Barrier::new(expected)));
-    }
-
-    fn end_collection(&self) {
-        *self
-            .collection
-            .lock()
-            .expect("Activity proxy collection lock") = None;
     }
 
     async fn stop(self) {
@@ -933,11 +902,13 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
         );
     }
 
-    // Collect the burst that used to exceed the receiver's two-per-second
-    // legacy authority guard. Fixed code performs one authenticated request;
-    // every public caller receives that same answered snapshot.
+    // The burst used to exceed the receiver's two-per-second legacy authority
+    // guard. Fixed code performs one authenticated request and every public
+    // caller receives that same answered snapshot. Do not delay the proxy to
+    // collect the obsolete physical requests: the exact request-count
+    // assertion catches that regression directly, while an artificial wait
+    // would consume the production two-second peer deadline on fixed code.
     tokio::time::sleep(Duration::from_millis(1_500)).await;
-    proxy.begin_collection(8);
     let before_burst = proxy.request_count();
     let auth_refusals_before = metric_value(
         &client,
@@ -954,23 +925,34 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
     let burst =
         futures_util::future::join_all((0..8).map(|_| activity_detail(&client, &a_base, &token)))
             .await;
-    proxy.end_collection();
     assert_eq!(
         proxy.request_count() - before_burst,
         1,
         "eight public callers created more than one physical peer request"
     );
     for detail in &burst {
-        assert!(detail["activity_nodes"]
-            .as_array()
-            .expect("activity nodes")
-            .iter()
-            .all(|node| node["status"] == "answered"));
-        assert!(detail["deliveries"]
-            .as_array()
-            .expect("deliveries")
-            .iter()
-            .any(|delivery| delivery["node_id"] == remote_node));
+        assert!(
+            detail["activity_nodes"]
+                .as_array()
+                .expect("activity nodes")
+                .iter()
+                .all(|node| node["status"] == "answered"),
+            "coalesced burst included a non-answered peer: {detail}\n\
+             node A log:\n{}\nnode B log:\n{}",
+            node_a.diagnostics(),
+            node_b.diagnostics(),
+        );
+        assert!(
+            detail["deliveries"]
+                .as_array()
+                .expect("deliveries")
+                .iter()
+                .any(|delivery| delivery["node_id"] == remote_node),
+            "coalesced burst lost node B's delivery: {detail}\n\
+             node A log:\n{}\nnode B log:\n{}",
+            node_a.diagnostics(),
+            node_b.diagnostics(),
+        );
     }
     assert_eq!(
         metric_value(
@@ -998,7 +980,6 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
     // metric reads above are outside the peer cache, so their wall-clock cost
     // must not decide whether this assertion starts from a live snapshot.
     tokio::time::sleep(Duration::from_millis(1_500)).await;
-    proxy.begin_collection(2);
     let before_views = proxy.request_count();
     let (summary, _) = tokio::join!(
         async {
@@ -1011,7 +992,6 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
         },
         activity_detail(&client, &a_base, &token),
     );
-    proxy.end_collection();
     assert_eq!(summary.status(), StatusCode::OK);
     assert_eq!(
         proxy.request_count() - before_views,
