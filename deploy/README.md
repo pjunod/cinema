@@ -95,7 +95,11 @@ When `PLURX_SERVER_NAME` is still the default `plurx`, the companion advertises
 the Docker host name plus its LAN address, so a picker says
 `m6 · 192.168.1.20` instead of showing another anonymous `plurx` row. Set a
 custom `PLURX_SERVER_NAME` when a room or role name is clearer; the custom name
-replaces the host name while the address remains visible.
+replaces the host name while the address remains visible. Cluster nodes are
+named the same way — every node of one logical server reports the same
+`PLURX_SERVER_NAME`, and it is the host name and the address that tell them
+apart. A node with neither falls back to the first twelve characters of its
+node id, which is the only case where a picker shows a UUID.
 
 Do not add `network_mode: host` to `plurxd`. Compose forbids one service from
 declaring both host networking and `networks`, so doing that recreates the

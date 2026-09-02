@@ -4,6 +4,32 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The picker says which machine again
+
+**[`agent/discovery-machine-name`](https://github.com/pjunod/plurx/pull/839),
+open into main, 2026-09-02.** Every node of one logical server reports the
+same `server.name`, so since `4a7ead78` (2026-08-20) a clustered node
+advertised that bare name plus twelve characters of its node id — three rows
+of `plurx · 5deeeebc8f39` in the Apple TV picker, on a fleet whose machines
+have perfectly good names. It regressed `474e2ee1`, and neither
+`deploy/README.md` nor the compose comments ever stopped promising
+`m6 · 192.168.1.20`; the discovery companion still runs `uts: host`
+specifically so it can read the machine hostname.
+
+The name a node computes for itself is what it advertises now, in both
+advertisement paths. The node-id suffix survives as the fallback for a node
+that has neither a hostname nor a LAN address — that is the DNS-SD uniqueness
+the suffix existed for, and it is the only case that ever needed it, since a
+hostname is unique on one LAN and an address is unique by construction. The
+full node id stays in the TXT record and in the per-node host record either
+way, so nothing that resolves a node loses information.
+
+Three tests, one of them on the call site: reverting the branch that handed a
+clustered node its bare `server.name` fails on any host that has a hostname or
+an address (mutation-checked — it comes back `plurx · 6b98c6cb8388` against an
+expected `vm · 192.0.2.2`). Server-only: no client rebuild, and the fleet needs
+a redeploy before a TV shows the difference.
+
 ## The player input contract, reviewed and finished
 
 **Lane [`effort/player-input-contract`](https://github.com/pjunod/plurx/pull/814),
