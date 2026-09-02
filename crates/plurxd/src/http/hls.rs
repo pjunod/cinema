@@ -1068,6 +1068,41 @@ fn session_delivery_shape(kind: &crate::transcode::SessionKind) -> (PlaybackMeth
 
 /// POST /api/v1/files/:id/hls/sessions — create a stream, or recover the one
 /// an identical request already created.
+/// Whether a restart has been superseded by the destination the client has
+/// since settled on.
+///
+/// One expression rather than a predicate spread through the handler, because
+/// the handler is not reachable from a test: it needs a store, a transcode
+/// manager and an authenticated user. Everything that decides the outcome
+/// lives here, so a test on this function pins the decision rather than
+/// leaving the call site free to compute the anchor differently.
+///
+/// `false` for every absence. No `control_sequence` means a client that does
+/// not send one, which is every client before the field existed and every
+/// first play since — absent means *do the work*. No settled target means no
+/// session, a retired actor, or a client that has not exchanged yet, and in
+/// all three there is nothing to order against.
+fn restart_is_superseded(
+    settled: Option<crate::playback_control::SettledTarget>,
+    control_sequence: Option<u64>,
+    start_seconds: f64,
+) -> bool {
+    let (Some(settled), Some(control_sequence)) = (settled, control_sequence) else {
+        return false;
+    };
+    // A non-finite start is not a destination. Treating it as the head is the
+    // conservative reading: it can only make this look *less* superseded, so a
+    // malformed body cannot cancel a session the viewer still wants. The float
+    // cast saturates rather than wrapping, so an absurd start clamps instead of
+    // becoming a small anchor that would compare equal to a real one.
+    let requested_anchor_ms = if start_seconds.is_finite() {
+        (start_seconds.max(0.0) * 1_000.0) as i64
+    } else {
+        0
+    };
+    settled.supersedes(control_sequence, requested_anchor_ms)
+}
+
 pub async fn create(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -1508,26 +1543,27 @@ pub async fn create(
     // would add latency to every honest seek, and the ordering is already
     // decided. Only a strictly later exchange naming a different destination
     // supersedes, so the honest seek arriving next is never the one skipped.
-    if let (Some(control_sequence), Some(predecessor)) =
-        (request.control_sequence, activation_predecessor.as_ref())
-    {
-        let requested_anchor_ms = if request.start_seconds.is_finite() {
-            (request.start_seconds.max(0.0) * 1_000.0) as i64
-        } else {
-            0
-        };
-        if state
-            .transcode
-            .settled_target_for_session(&predecessor.session_id)
-            .await
-            .is_some_and(|settled| settled.supersedes(control_sequence, requested_anchor_ms))
-        {
-            return Err(ApiError::typed(
-                StatusCode::CONFLICT,
-                "playback_target_superseded",
-                "a later seek replaced this destination, so no session was started for it",
-            ));
+    let settled_target = match activation_predecessor.as_ref() {
+        // No predecessor is a first play: there is no ordering for it to be
+        // stale against, and no session to ask.
+        Some(predecessor) => {
+            state
+                .transcode
+                .settled_target_for_session(&predecessor.session_id)
+                .await
         }
+        None => None,
+    };
+    if restart_is_superseded(
+        settled_target,
+        request.control_sequence,
+        request.start_seconds,
+    ) {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "playback_target_superseded",
+            "a later seek replaced this destination, so no session was started for it",
+        ));
     }
     let expected_predecessor_incarnation_id = activation_predecessor
         .as_ref()
@@ -8654,6 +8690,108 @@ fn segment_content_type(name: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    /// M3's acceptance is that a seek storm starts production for exactly one
+    /// target. The latch decides which; this decides whether a restart that
+    /// arrives for a superseded one is refused. The handler cannot be reached
+    /// from a test -- it needs a store, a transcode manager and an
+    /// authenticated user -- so the decision lives in one function and this
+    /// pins it.
+    mod restart_supersession {
+        use super::super::restart_is_superseded;
+        use crate::playback_control::SettledTarget;
+
+        fn settled(sequence: u64, anchor_ms: i64) -> Option<SettledTarget> {
+            Some(SettledTarget {
+                sequence,
+                anchor_ms,
+            })
+        }
+
+        #[test]
+        fn a_client_that_sends_no_sequence_is_never_refused() {
+            // Every client before the field existed, and Apple and Android
+            // until they send it. Absent means do the work.
+            assert!(!restart_is_superseded(settled(90, 1_800_000), None, 5.0));
+        }
+
+        #[test]
+        fn a_playback_with_no_settled_target_is_never_refused() {
+            // No session, a retired actor, or a client that has not exchanged
+            // yet. Nothing to order against, so do the work.
+            assert!(!restart_is_superseded(None, Some(3), 5.0));
+        }
+
+        #[test]
+        fn a_restart_for_a_destination_the_client_left_is_refused() {
+            // Sequence 3 asked for 5 s; the client has since settled on 1,800 s
+            // at sequence 90. That session is waste before it spawns.
+            assert!(restart_is_superseded(settled(90, 1_800_000), Some(3), 5.0));
+        }
+
+        #[test]
+        fn the_honest_seek_arriving_next_is_never_the_one_refused() {
+            // The create can reach the server before its own snapshot does, so
+            // only a strictly later exchange supersedes. Equal and later both
+            // proceed -- refusing either is the failure this milestone exists
+            // to prevent.
+            assert!(!restart_is_superseded(
+                settled(90, 1_800_000),
+                Some(90),
+                5.0
+            ));
+            assert!(!restart_is_superseded(
+                settled(90, 1_800_000),
+                Some(91),
+                5.0
+            ));
+        }
+
+        #[test]
+        fn a_seek_that_lands_beside_its_target_is_not_refused() {
+            // 1,799.64 s against a settled 1,800 s is the same destination;
+            // seeking is not exact, and refusing this would make every honest
+            // seek cancel its own session.
+            assert!(!restart_is_superseded(
+                settled(90, 1_800_000),
+                Some(3),
+                1_799.64
+            ));
+        }
+
+        #[test]
+        fn a_malformed_start_cannot_cancel_a_session_the_viewer_wants() {
+            // NaN and a negative both read as the head. That can only make a
+            // restart look *less* superseded, which is the safe direction: a
+            // malformed body must not be able to refuse work.
+            assert!(!restart_is_superseded(settled(90, 0), Some(3), f64::NAN));
+            assert!(!restart_is_superseded(settled(90, 0), Some(3), -12.0));
+            // ... and it is still refused when the settled target really is
+            // somewhere else, so the clamp does not become a bypass.
+            assert!(restart_is_superseded(
+                settled(90, 1_800_000),
+                Some(3),
+                f64::NAN
+            ));
+        }
+
+        #[test]
+        fn an_absurd_start_saturates_instead_of_wrapping_into_a_real_anchor() {
+            // The float-to-int cast saturates. Were it to wrap, a huge start
+            // could land on a small anchor and compare equal to a destination
+            // the viewer actually wants.
+            assert!(restart_is_superseded(
+                settled(90, 1_800_000),
+                Some(3),
+                f64::MAX
+            ));
+            assert!(restart_is_superseded(
+                settled(90, 1_800_000),
+                Some(3),
+                f64::INFINITY
+            ));
+        }
+    }
     use super::*;
 
     /// A fixed clock for the plan-review tests. `review_client_plan` reads it
