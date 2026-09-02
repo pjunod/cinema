@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["0915feb2", "08b844ec", "f40041f5"]
+commits = ["4c419a4d", "e8a0b320", "fea21b5c"]
 points = ["cluster.page-reads", "validation.framework"]
 checks = ["cluster-auth", "history-regressions"]
 reason = "The retained real-daemon Activity regression proves that concurrent admin and household reads share one physical peer snapshot without exposing the admin-only hostname projection. None of its fixed-sender coalescing waves artificially delay the sole physical peer request inside the production two-second deadline: exact proxy request counts reject a restored fanout, while later direct proxy duplication independently proves receiver authority and key-lookup admission behavior. The ledger commit is retained and bound to the history-regressions contract so this evidence remains auditable."
