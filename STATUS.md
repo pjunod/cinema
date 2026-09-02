@@ -20,8 +20,10 @@ peer deadline waiting for synthetic proxy receivers; exact physical-request
 counts remain, and a paused unit now proves seven followers share the held
 leading fetch. Both summary and detail must also retain node B's two
 remote-only streams, closing an adversarially found false-green. Activation
-fixtures hold one distinct reserved HTTP/Raft/Hiqlite port set until all three
-listeners have been selected, preventing OS port recycling between fixtures.
+fixtures hold all three reserved HTTP/Raft/Hiqlite listeners open together
+until the set is chosen, so no fixture can hand the same ephemeral port to two
+of its own listeners. The reservation is released before the daemon binds, so
+it narrows one fixture's own selection rather than sequencing two fixtures.
 
 - [x] Three adversarial reviews found the summary false-green and a rebased
       evidence commit that named a non-ancestor; both findings are fixed.
@@ -41,11 +43,26 @@ listeners have been selected, preventing OS port recycling between fixtures.
       the matching `ffmpeg-6` capability on self-hosted runners. Operations
       contracts and the complete local Rust gate (1560 passed, 0 failed, 3
       ignored) cover that prerequisite.
-- [x] Integrate #820 and #822 by rebasing cleanly onto current `main`
-      `c52a0f49`; refresh every SHA-bound mapping to its new ancestor. The
-      intervening changes are confined to M6 playback-selection telemetry and
-      its handoff; operations pass 156/156 and ownership inventories pass
-      11/11 on the combined tree.
+- [x] Integrate #820, #822 and #806 by rebasing cleanly onto current `main`
+      `b4a1f108`; refresh every SHA-bound mapping to its new ancestor. The
+      intervening changes are confined to M6 playback-selection telemetry, its
+      handoff, and the learner internal-peer authority repair, none of which
+      touch the confirmation or Activity paths. On the combined tree the
+      catalog reports 23 points / 27 checks / 1291 audited files, history
+      reports 1227 corrective commits and 731 explicit mappings, operations
+      pass 156/156, and ownership inventories pass 11/11.
+- [x] Two independent adversarial reviews of the rebased head both found that
+      the ancestry-refresh commit had renamed the four mapping fragments to
+      their new ancestors while leaving each fragment's `commits` field on the
+      previous generation, so `make history-check` failed on the committed tree
+      while passing in the working tree. Fixed, and six further findings
+      implemented: the retried confirmation now reserves a recovery window
+      inside the owner lease, the zero-row replay is bound to this call's own
+      publication boundary, that guard and the durable-pointer proof are pinned
+      at the call site, the after-commit fault injection is scoped to the
+      activation statement, the summary-led wave now asserts detail retains node
+      B's remote-only streams, and the operations contract pins the hosted
+      ffmpeg step ahead of the gate it provisions.
 - [ ] Push the re-reviewed exact head to #794, require its full GitHub
       qualification and promotion receipt, merge it, close partial duplicate
       #782 with a cross-link, and verify `main` after the merge.
