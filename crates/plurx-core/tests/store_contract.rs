@@ -5202,6 +5202,79 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
     .await;
 }
 
+#[cfg(all(
+    feature = "cluster-read-cost-validation",
+    feature = "hiqlite-contract-tests"
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn hiqlite_media_activation_confirmation_replays_after_committed_timeout() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset ambiguous confirmation target");
+    let user = store
+        .create_user("ambiguous-confirm-user", "hash", false)
+        .await
+        .expect("create ambiguous confirmation user");
+    let activation = MediaSessionActivation {
+        incarnation_id: uuid::Uuid::from_u128(0x5000).to_string(),
+        session_id: uuid::Uuid::from_u128(0x5001).to_string(),
+        user_id: user.id,
+        playback_id: "ambiguous-confirm-playback".to_owned(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: None,
+        request_fingerprint: "e".repeat(64),
+        owner_node_id: "ambiguous-confirm-node".to_owned(),
+        recipe_json: "{}".to_owned(),
+        response_json: "{}".to_owned(),
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: 1_000,
+        lease_expires_at_ms: 900_000,
+    };
+    store
+        .activate_media_session(&activation)
+        .await
+        .expect("activate ambiguous confirmation session")
+        .expect("ambiguous confirmation activation must win");
+
+    store.validation_reset_operation_counts();
+    let successful_before = store.validation_successful_metric_counts();
+    let failed_before = store.validation_failed_write_metric_count();
+    store.validation_timeout_next_idempotent_transaction_after_commit();
+    let route = store
+        .settle_media_session_activation(
+            &activation,
+            MediaSessionActivationSettlement::Confirm {
+                publication_ready_at_ms: 0,
+            },
+            activation.now_ms,
+        )
+        .await
+        .expect("retry committed confirmation after lost acknowledgement")
+        .expect("replayed confirmation must retain the committed route");
+    assert_eq!(route.incarnation_id, activation.incarnation_id);
+    assert_eq!(route.publication_ready_at_ms, 0);
+    let counts = store.validation_operation_counts();
+    let successful_after = store.validation_successful_metric_counts();
+    let failed_after = store.validation_failed_write_metric_count();
+    assert_eq!(counts.write_calls, 2, "one physical retry is required");
+    assert_eq!(
+        successful_after.write_calls,
+        successful_before.write_calls + 1,
+        "the replayed transaction must finish successfully"
+    );
+    assert_eq!(
+        failed_after,
+        failed_before + 1,
+        "the ambiguous first attempt remains visible as a failed write"
+    );
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn hiqlite_media_activation_requires_its_lease_mutation() {

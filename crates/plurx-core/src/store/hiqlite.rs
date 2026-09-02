@@ -215,6 +215,7 @@ struct OperationCounters {
     non_consistent_query_calls: AtomicU64,
     write_calls: AtomicU64,
     fail_next_non_consistent_query: std::sync::atomic::AtomicBool,
+    timeout_next_idempotent_transaction_after_commit: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "cluster-read-cost-validation")]
@@ -224,6 +225,8 @@ impl OperationCounters {
         self.non_consistent_query_calls.store(0, Ordering::Relaxed);
         self.write_calls.store(0, Ordering::Relaxed);
         self.fail_next_non_consistent_query
+            .store(false, Ordering::Relaxed);
+        self.timeout_next_idempotent_transaction_after_commit
             .store(false, Ordering::Relaxed);
     }
 
@@ -1148,6 +1151,45 @@ impl TimedClient {
         .await
     }
 
+    /// Execute a transaction whose exact statements are safe to replay after
+    /// an ambiguous client timeout.
+    ///
+    /// The first attempt may already have committed before its three-second
+    /// client deadline expires. Callers must therefore make both the durable
+    /// mutation and its returned row-count interpretation idempotent.
+    pub(super) async fn txn_idempotent<C, Q>(&self, statements: Q) -> Result<Vec<usize>, StoreError>
+    where
+        Q: IntoIterator<Item = (C, hiqlite::Params)>,
+        C: Into<Cow<'static, str>>,
+    {
+        let statements = statements
+            .into_iter()
+            .map(|(sql, params)| (sql.into(), params))
+            .collect::<Vec<_>>();
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        time_idempotent_write_with_retry(&STORE_OPERATION_METRICS, || async {
+            #[cfg(feature = "cluster-read-cost-validation")]
+            self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
+            let changed = timeout_store(self.inner().txn(statements.clone()))
+                .await?
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(database_error)?;
+            #[cfg(feature = "cluster-read-cost-validation")]
+            if self
+                .operations
+                .timeout_next_idempotent_transaction_after_commit
+                .swap(false, Ordering::Relaxed)
+            {
+                return Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()));
+            }
+            Ok(changed)
+        })
+        .await
+    }
+
     pub(super) async fn is_healthy_db(&self) -> Result<(), StoreError> {
         timeout_store(self.inner().is_healthy_db()).await
     }
@@ -1190,6 +1232,18 @@ impl HiqliteAuthStore {
         self.client
             .operations
             .fail_next_non_consistent_query
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// Commit the next replay-safe transaction, then report the same timeout
+    /// a client would observe after losing its acknowledgement. The retry must
+    /// recover by re-reading the already-committed exact state.
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[doc(hidden)]
+    pub fn validation_timeout_next_idempotent_transaction_after_commit(&self) {
+        self.client
+            .operations
+            .timeout_next_idempotent_transaction_after_commit
             .store(true, Ordering::Relaxed);
     }
 

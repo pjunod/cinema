@@ -2032,7 +2032,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 }
                 let changed = self
                     .client()
-                    .txn([(
+                    .txn_idempotent([(
                         "UPDATE media_sessions SET publication_ready_at_ms = $1,
                                     updated_at_ms = $2
                               WHERE incarnation_id = $3 AND session_id = $4 AND user_id = $5
@@ -2068,10 +2068,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             request_id
                         ),
                     )])
-                    .await?
-                    .into_iter()
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(database_error)?;
+                    .await?;
                 let route = route_by(self, "incarnation_id", &activation.incarnation_id)
                     .await?
                     .filter(|route| {
