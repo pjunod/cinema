@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "title": "Player input contract — one routing table every client's reducer must reproduce",
+  "documented_in": "docs/PLAYER-INPUT-CONTRACT.md",
+  "ruled": "2026-09-02",
+
+  "surfaces": {
+    "ten-foot": "Directional input moves focus: Siri Remote (tvOS), D-pad (Android TV / Google TV), keyboard arrows on a TV browser, and keyboard arrows on the web when the timeline has focus.",
+    "touch": "Direct manipulation: iPhone/iPad and Android phones/tablets. Focus states do not apply; the pointer rows below are the whole contract.",
+    "desktop": "Pointer plus keyboard on the web. Tab moves focus; arrows are global hotkeys except while the timeline has focus, where the ten-foot timeline rows apply verbatim."
+  },
+
+  "timings": {
+    "hide_after_ms": 4000,
+    "hidden_only_while_playing": true,
+    "preview_auto_commit_ms": null,
+    "desktop_hotkey_coalesce_ms": 350,
+    "notes": [
+      "hide_after_ms: chrome hides this long after the last input while playing. Never while paused, failed, scrubbing, or with a menu or the info panel open.",
+      "preview_auto_commit_ms is null: a pending preview commits only on `select` (ten-foot) or pointer release (touch); it never commits on a timer.",
+      "desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base and issue one seek after this much quiet — the shipped web `nudge()` behaviour, kept."
+    ]
+  },
+
+  "steps": {
+    "skip_seconds": 10,
+    "preview_step_seconds": 10,
+    "preview_acceleration": [
+      { "from_repeat": 0, "step_seconds": 10 },
+      { "from_repeat": 5, "step_seconds": 30 },
+      { "from_repeat": 10, "step_seconds": 60 }
+    ],
+    "vertical_seek_seconds": null,
+    "notes": [
+      "skip_seconds is the only immediate seek step: the two transport buttons and the FF/REW media keys.",
+      "preview_acceleration applies to a HELD direction while scrubbing: repeats 0–4 move 10 s, 5–9 move 30 s, 10+ move 60 s. A released key resets the ladder.",
+      "vertical_seek_seconds is null: Up/Down never seek. Vertical is navigation between rows on every surface."
+    ]
+  },
+
+  "controls": {
+    "rows": [
+      {
+        "id": "marker",
+        "items": ["skip_marker"],
+        "notes": "Present only while a skip-intro/credits marker is active. Sits above the timeline row, right-aligned. Reachable by `up` from the timeline; never a horizontal neighbour of anything."
+      },
+      {
+        "id": "timeline",
+        "items": ["time_elapsed", "timeline", "time_total"],
+        "focusable": ["timeline"],
+        "notes": "Its own full-width row. The timeline is never a horizontal neighbour of a button — Left/Right on it belong to scrubbing, so a button beside it would be unreachable without a seek."
+      },
+      {
+        "id": "transport",
+        "items": ["skip_back", "play_pause", "skip_forward", "spacer", "audio", "subtitles", "quality", "settings", "info", "pip", "close"],
+        "conditional": {
+          "audio": "more than one audio track",
+          "subtitles": "at least one subtitle track",
+          "quality": "server ladder has rungs",
+          "pip": "platform reports picture-in-picture possible (never tvOS)",
+          "close": "touch and desktop only — ten-foot exits with `back`"
+        },
+        "notes": "One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged."
+      }
+    ],
+    "initial_focus": "play_pause",
+    "reveal_restores_last_focus": true,
+    "settings_contains": ["autoplay_next", "auto_skip", "audio_sync", "playback_speed_reserved"],
+    "menus_return_focus_to_opener": true
+  },
+
+  "inputs": ["left", "right", "up", "down", "select", "back", "play_pause", "skip_back", "skip_forward", "tap_surface", "idle"],
+
+  "states": {
+    "hidden": "Chrome hidden; the bare video surface holds focus.",
+    "transport": "Chrome visible; focus on a transport-row or marker button.",
+    "timeline": "Chrome visible; focus on the timeline; no preview pending.",
+    "scrub": "Chrome visible; focus on the timeline; a preview position is pending and shown in `time_elapsed` and on the bar.",
+    "menu": "An audio/subtitles/quality/settings menu or panel is open; focus is inside it.",
+    "info": "The playback-info (stats) panel is open in Standard or Debug mode; focus is inside it. Mini mode does not enter this state — it is a strip and the transport stays live.",
+    "failed": "The failure view (retry/close) is showing."
+  },
+
+  "outcomes": {
+    "reveal": "Show chrome; focus the last focused control (initially `play_pause`). No seek.",
+    "focus_row": "Move focus within the current row or to the adjacent row per `controls.rows` order; the platform focus engine does this, the reducer only names the target row.",
+    "focus_marker_or_ignore": "Focus `skip_marker` if present, else nothing.",
+    "focus_transport": "Move focus to the transport row, restoring the last transport control (initially `play_pause`).",
+    "activate": "Press the focused control.",
+    "toggle_play": "Play/pause. Chrome reveals if hidden and the hide timer restarts.",
+    "skip": "Immediate relative seek of ±`steps.skip_seconds`. Chrome reveals if hidden.",
+    "preview": "Enter or continue `scrub`: move the pending position by the acceleration ladder; no seek, no network.",
+    "commit": "Seek to the pending position; return to `timeline` with chrome visible.",
+    "cancel": "Discard the pending position; return to `timeline`.",
+    "cancel_then_focus_transport": "`cancel`, then `focus_transport`.",
+    "cancel_then_focus_marker_or_ignore": "`cancel`, then `focus_marker_or_ignore`.",
+    "commit_then_toggle_play": "`commit`, then `toggle_play`.",
+    "close_menu": "Close the open menu; focus returns to the control that opened it.",
+    "close_info": "Close the info panel; focus returns to `info`.",
+    "menu_focus": "Focus stays inside the menu (trapped) — the platform moves it among the menu's own items.",
+    "hide": "Hide chrome; remember the focused control; focus the surface.",
+    "exit": "Leave the player.",
+    "toggle_chrome": "Touch: hide chrome if visible, else reveal.",
+    "ignore": "Nothing happens; focus does not move."
+  },
+
+  "routing": {
+    "ten-foot": {
+      "hidden":    { "left": "reveal", "right": "reveal", "up": "reveal", "down": "reveal", "select": "reveal", "back": "exit", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "reveal", "idle": "ignore" },
+      "transport": { "left": "focus_row", "right": "focus_row", "up": "focus_row", "down": "focus_row", "select": "activate", "back": "hide", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "ignore", "idle": "hide" },
+      "timeline":  { "left": "preview", "right": "preview", "up": "focus_marker_or_ignore", "down": "focus_transport", "select": "toggle_play", "back": "hide", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "ignore", "idle": "hide" },
+      "scrub":     { "left": "preview", "right": "preview", "up": "cancel_then_focus_marker_or_ignore", "down": "cancel_then_focus_transport", "select": "commit", "back": "cancel", "play_pause": "commit_then_toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" },
+      "menu":      { "left": "menu_focus", "right": "menu_focus", "up": "menu_focus", "down": "menu_focus", "select": "activate", "back": "close_menu", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_menu", "idle": "ignore" },
+      "info":      { "left": "menu_focus", "right": "menu_focus", "up": "menu_focus", "down": "menu_focus", "select": "activate", "back": "close_info", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_info", "idle": "ignore" },
+      "failed":    { "left": "focus_row", "right": "focus_row", "up": "ignore", "down": "ignore", "select": "activate", "back": "exit", "play_pause": "ignore", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" }
+    },
+    "desktop": {
+      "hidden":    { "left": "skip", "right": "skip", "up": "ignore", "down": "ignore", "select": "ignore", "back": "exit", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_play", "idle": "ignore" },
+      "transport": { "left": "skip", "right": "skip", "up": "ignore", "down": "ignore", "select": "activate", "back": "exit", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_play", "idle": "hide" },
+      "timeline":  { "left": "preview", "right": "preview", "up": "ignore", "down": "ignore", "select": "toggle_play", "back": "exit", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_play", "idle": "hide" },
+      "scrub":     { "left": "preview", "right": "preview", "up": "ignore", "down": "ignore", "select": "commit", "back": "cancel", "play_pause": "commit_then_toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" },
+      "menu":      { "left": "menu_focus", "right": "menu_focus", "up": "menu_focus", "down": "menu_focus", "select": "activate", "back": "close_menu", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_menu", "idle": "ignore" },
+      "info":      { "left": "menu_focus", "right": "menu_focus", "up": "menu_focus", "down": "menu_focus", "select": "activate", "back": "close_info", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_info", "idle": "ignore" },
+      "failed":    { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "activate", "back": "exit", "play_pause": "ignore", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" }
+    },
+    "touch": {
+      "hidden":    { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "ignore", "back": "exit", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_chrome", "idle": "ignore" },
+      "transport": { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "activate", "back": "hide", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_chrome", "idle": "hide" },
+      "timeline":  { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "ignore", "back": "hide", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_chrome", "idle": "hide" },
+      "scrub":     { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "commit", "back": "cancel", "play_pause": "commit_then_toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" },
+      "menu":      { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "activate", "back": "close_menu", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_menu", "idle": "ignore" },
+      "info":      { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "activate", "back": "close_info", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_info", "idle": "ignore" },
+      "failed":    { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "activate", "back": "exit", "play_pause": "ignore", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" }
+    }
+  },
+
+  "surface_notes": {
+    "desktop": [
+      "`left`/`right` outside the timeline are the coalesced ±10 s hotkeys (`timings.desktop_hotkey_coalesce_ms`); `up`/`down` are no longer seeks.",
+      "`back` is Escape. With chrome visible it exits rather than hides: a pointer user has no Menu-hide idiom and the chrome hides itself. Precedence is scrub → menu → info → exit, so Escape with a menu open closes the menu, not the player.",
+      "`select` on the timeline is Enter or Space with the timeline focused. `tap_surface` is a pointer click on the video.",
+      "Tab leaves the timeline; leaving while a preview is pending is a `cancel`.",
+      "Touch on the desktop page (a tablet browser) follows the `touch` table for `tap_surface` and pointer scrubbing."
+    ],
+    "touch": [
+      "Scrubbing is a drag on the timeline: pointer down = `preview` at the touch position (continuous while dragging), pointer up = `commit`. A plain tap on the bar is a `preview` + `commit` at the tap position.",
+      "`back` is the system back gesture or button (Android) and the close button (iOS has no back key; `close` exits regardless of state after closing whatever is open).",
+      "`play_pause`, `skip_back`, `skip_forward` are the headset/lock-screen/notification media commands, which work in every state."
+    ],
+    "ten-foot": [
+      "`select` on the timeline (no preview pending) is play/pause, the same as clicking the bar in the Apple TV system player. It does not \"engage\" anything — there is no engaged state any more; a preview exists only while a pending position exists.",
+      "`play_pause` is the hardware Play/Pause button and must work in every state that lists `toggle_play`, including `transport` (today tvOS drops it while chrome is visible).",
+      "`skip_back`/`skip_forward` are MEDIA_REWIND / MEDIA_FAST_FORWARD (Android TV) — the Siri Remote has none, so tvOS has no producer for them.",
+      "`idle` fires only while playing (`timings.hidden_only_while_playing`) and only in the states that list `hide`. A paused film keeps its chrome."
+    ]
+  }
+}

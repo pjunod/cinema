@@ -70,6 +70,12 @@ out, so the next attempt starts where the last one stopped. If you run plurx
 beside monarr,
 [docs/INTEGRATION.md](docs/INTEGRATION.md) documents every seam between them —
 what each does, where you watch it, and the command that proves it works.
+[docs/PLAYER-INPUT-CONTRACT.md](docs/PLAYER-INPUT-CONTRACT.md) is the one
+routing table every player obeys — what a press, click, or swipe does in each
+state on every client — with [docs/UI-NAVIGATION-AUDIT.md](docs/UI-NAVIGATION-AUDIT.md)
+recording why the three players diverged and
+[docs/PLAYER-INPUT-CONTRACT-PLAN.md](docs/PLAYER-INPUT-CONTRACT-PLAN.md) the
+milestones that make them conform.
 [docs/EBOOK-READER-PLAN.md](docs/EBOOK-READER-PLAN.md) finishes the Books loop:
 Curator's import handoff, Cinema-owned reading state, the EPUB renderer,
 phone/tablet clients, and offline originals, each behind an acceptance gate.
