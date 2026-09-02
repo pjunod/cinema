@@ -25,6 +25,8 @@ struct SettingsStore {
         static let subLang = "plurx.subLang"
         static let autoplay = "plurx.autoplay"
         static let subtitleReadiness = "plurx.subtitleReadiness"
+        static let playbackQuality = "plurx.playbackQuality"
+        static let autoSkip = "plurx.autoSkip"
         static let theme = "plurx.theme"
         static let appearance = "plurx.appearance"
         static let libraryGrouping = "plurx.libraryGrouping"
@@ -102,6 +104,22 @@ struct SettingsStore {
                 ?? .onDemand
         }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.subtitleReadiness) }
+    }
+    /// Auto until a person chooses otherwise, like the Android and web
+    /// viewers; an unreadable or future value reads as Auto rather than as a
+    /// rung this build does not know.
+    var playbackQuality: PlaybackQuality {
+        get {
+            PlaybackQuality(rawValue: defaults.string(forKey: Key.playbackQuality) ?? "")
+                ?? .auto
+        }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.playbackQuality) }
+    }
+    /// Off by default, matching the Android client: the seek nobody asked for
+    /// is opt-in on every surface that offers it.
+    var autoSkip: Bool {
+        get { defaults.object(forKey: Key.autoSkip) as? Bool ?? false }
+        nonmutating set { defaults.set(newValue, forKey: Key.autoSkip) }
     }
     /// Preserve the native client's established noirr-dark presentation until
     /// a person chooses otherwise. New choices are remembered per device, like

@@ -52,20 +52,40 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
+                Picker("Quality", selection: Binding(
+                    get: { model.playbackQuality },
+                    set: { model.setPlaybackQuality($0) }
+                )) {
+                    ForEach(PlaybackQuality.allCases) { quality in
+                        Text(quality.label).tag(quality)
+                    }
+                }
                 Picker("Audio language", selection: audioBinding) {
                     ForEach(languages) { Text($0.name).tag($0.id) }
                 }
                 Picker("Subtitle language", selection: subBinding) {
                     ForEach(subtitleLanguages) { Text($0.name).tag($0.id) }
                 }
+                Picker("Subtitle switching", selection: Binding(
+                    get: { model.subtitleReadiness },
+                    set: { model.setSubtitleReadiness($0) }
+                )) {
+                    ForEach(SubtitleReadiness.allCases) { readiness in
+                        Text(readiness.label).tag(readiness)
+                    }
+                }
                 Toggle("Autoplay next episode", isOn: Binding(
                     get: { model.autoplay },
                     set: { model.setAutoplay($0) }
                 ))
+                Toggle("Skip intros and credits", isOn: Binding(
+                    get: { model.autoSkip },
+                    set: { model.setAutoSkip($0) }
+                ))
             } header: {
-                Text("Playback defaults")
+                Text("Playback")
             } footer: {
-                Text("Track preferences apply when a title has more than one. Autoplay continues episodic series and can also be toggled in the player.")
+                Text("Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on.")
             }
 
             #if os(iOS)
@@ -94,21 +114,6 @@ struct SettingsView: View {
             #endif
 
             Section {
-                Picker("Subtitle switching", selection: Binding(
-                    get: { model.subtitleReadiness },
-                    set: { model.setSubtitleReadiness($0) }
-                )) {
-                    ForEach(SubtitleReadiness.allCases) { readiness in
-                        Text(readiness.label).tag(readiness)
-                    }
-                }
-            } header: {
-                Text("Subtitles")
-            } footer: {
-                Text("Instant keeps a title's subtitles ready from the moment it starts, so turning them on or changing language never interrupts the picture — the server prepares every play. After a short pause begins the film straight from the file and rebuilds it once, at the same moment, the first time you choose a subtitle. Applies to the next title you start.")
-            }
-
-            Section {
                 Picker("Theme", selection: Binding(
                     get: { model.theme },
                     set: { model.setTheme($0) }
@@ -125,7 +130,7 @@ struct SettingsView: View {
                         Text(appearance.label).tag(appearance)
                     }
                 }
-                Picker("Icon size", selection: Binding(
+                Picker("Poster size", selection: Binding(
                     get: { model.posterSize },
                     set: { model.setPosterSize($0) }
                 )) {
@@ -150,6 +155,7 @@ struct SettingsView: View {
             Section("Account") {
                 LabeledContent("Signed in as", value: model.username ?? "—")
                 LabeledContent("Server", value: model.serverName ?? model.origin)
+                Button("Change server") { model.changeServer() }
                 Button("Sign out", role: .destructive) {
                     #if os(iOS)
                     Task {
@@ -168,7 +174,6 @@ struct SettingsView: View {
                     model.logout()
                     #endif
                 }
-                Button("Change server") { model.changeServer() }
             }
 
             Section("About") {
