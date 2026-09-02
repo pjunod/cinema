@@ -3928,6 +3928,23 @@ pub(crate) struct RollingControlOutcome {
     pub platform: ClientPlatform,
     pub lease: RollingLeaseSnapshot,
     pub flow_ticket: u64,
+    /// This exchange's selection differs from the last accepted one.
+    ///
+    /// M6's gate, and the reason it lives here: building a candidate recipe
+    /// costs two store reads (the source file and the network prior), the
+    /// exchange runs about once a second per client under an absolute
+    /// deadline, and the answer is almost always *nothing changed*. The actor
+    /// holds both selections at the moment of acceptance, so the comparison is
+    /// free here and nowhere else.
+    ///
+    /// **Against the previous selection, never against what is delivered.**
+    /// A client's ask and the height it gets are not the same number — an ask
+    /// of 1079 snaps onto the ladder and is delivered as 1080 — so a gate that
+    /// compared the two would read *changed* on every exchange of a snapped
+    /// session and spend the reads it exists to save. `false` on a replay and
+    /// on the first accepted exchange: a session that has just been created
+    /// from an intent has not since departed from it.
+    pub selection_changed: bool,
 }
 
 /// A session-owned continuation installed synchronously by the rolling actor
@@ -6267,6 +6284,8 @@ impl RollingControlActor {
                 platform,
                 lease: self.snapshot_at(now),
                 flow_ticket: self.last_flow_ticket,
+                // A terminal replay is not a transition by construction.
+                selection_changed: false,
             });
         }
         let (disposition, accepted_sequence, action, platform) = self.control.accept_at(
@@ -6279,6 +6298,14 @@ impl RollingControlActor {
         )?;
         let accepted_end = disposition == ControlDisposition::Accepted
             && request.snapshot.demand == PlaybackDemand::End;
+        // Taken before the snapshot is moved, and only for an accepted
+        // exchange: a replay is the same exchange arriving twice, and it
+        // changed the selection the first time or not at all.
+        let selection_changed = disposition == ControlDisposition::Accepted
+            && self
+                .demand
+                .as_ref()
+                .is_some_and(|previous| previous.selection != request.snapshot.selection);
         if disposition == ControlDisposition::Accepted {
             self.mode = RollingLeaseMode::Explicit;
             self.settled_target = Some(SettledTarget {
@@ -6326,6 +6353,7 @@ impl RollingControlActor {
             platform,
             lease: self.snapshot_at(now),
             flow_ticket,
+            selection_changed,
         })
     }
 
@@ -11479,6 +11507,138 @@ mod tests {
             sequence: request.sequence,
             snapshot: PlaybackDemandSnapshot::from(request),
         }
+    }
+
+    /// M6's gate: the actor says when a selection moved, because it is the
+    /// only place both selections are in hand for free.
+    ///
+    /// The expensive half — two store reads to resolve a candidate — is what
+    /// this exists to skip, on an exchange that runs about once a second per
+    /// client under an absolute deadline.
+    #[test]
+    fn the_actor_reports_when_a_selection_moved() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let base = request();
+
+        let mut first = base.clone();
+        first.sequence = 1;
+        let outcome = actor
+            .control_at(started + Duration::from_secs(1), owned_control(&first))
+            .expect("sequence 1 accepted");
+        assert!(
+            !outcome.selection_changed,
+            "a session that has just been created from an intent has not since \
+             departed from it",
+        );
+
+        let mut same = base.clone();
+        same.sequence = 2;
+        // A different playhead, buffer and render state — everything an
+        // ordinary exchange carries — with the same selection.
+        same.position_ms = base.position_ms + 4_000;
+        same.buffered_through_ms = base.buffered_through_ms + 4_000;
+        let outcome = actor
+            .control_at(started + Duration::from_secs(2), owned_control(&same))
+            .expect("sequence 2 accepted");
+        assert!(
+            !outcome.selection_changed,
+            "an ordinary exchange must not spend the reads the gate exists to save",
+        );
+
+        let mut moved = base.clone();
+        moved.sequence = 3;
+        moved.selection.audio_track = Some(base.selection.audio_track.unwrap_or(0) + 1);
+        let outcome = actor
+            .control_at(started + Duration::from_secs(3), owned_control(&moved))
+            .expect("sequence 3 accepted");
+        assert!(outcome.selection_changed, "the viewer picked another track");
+
+        // And it is a comparison against the *previous* selection, not a
+        // latch: holding the new selection is not a fresh change.
+        let mut held = moved.clone();
+        held.sequence = 4;
+        let outcome = actor
+            .control_at(started + Duration::from_secs(4), owned_control(&held))
+            .expect("sequence 4 accepted");
+        assert!(
+            !outcome.selection_changed,
+            "the selection is now the previous one",
+        );
+    }
+
+    /// The comparison is against what the client last asked for, never against
+    /// what it is being served — and this is the case that decides it.
+    ///
+    /// An explicit rung snaps onto the ladder, so a client asking 1079 is
+    /// delivered 1080 and keeps asking 1079. A gate that compared the ask to
+    /// the delivered height would read *changed* on every exchange for the
+    /// rest of that session, spend two store reads each time, and produce a
+    /// candidate identical to what is already playing.
+    #[test]
+    fn a_snapped_ask_is_not_a_change_every_second() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let mut base = request();
+        base.selection.quality = QualitySelection::Manual {
+            height: crate::transcode::snap_height(1079) - 1,
+        };
+        assert_ne!(
+            crate::transcode::snap_height(1079),
+            1079,
+            "the fixture is only meaningful if 1079 actually snaps",
+        );
+
+        for (sequence, seconds) in [(1, 1), (2, 2), (3, 3)] {
+            let mut exchange = base.clone();
+            exchange.sequence = sequence;
+            let outcome = actor
+                .control_at(
+                    started + Duration::from_secs(seconds),
+                    owned_control(&exchange),
+                )
+                .expect("accepted");
+            assert!(
+                !outcome.selection_changed,
+                "sequence {sequence}: an unchanged ask is unchanged however it \
+                 was served",
+            );
+        }
+    }
+
+    /// A replay is the same exchange arriving twice. It changed the selection
+    /// the first time or not at all, and answering `true` again would spend
+    /// the reads twice for one viewer action.
+    #[test]
+    fn a_replay_is_not_a_second_change() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let base = request();
+        let mut first = base.clone();
+        first.sequence = 1;
+        actor
+            .control_at(started + Duration::from_secs(1), owned_control(&first))
+            .expect("sequence 1 accepted");
+
+        let mut moved = base.clone();
+        moved.sequence = 2;
+        moved.selection.audio_offset_ms = 250;
+        let accepted = actor
+            .control_at(started + Duration::from_secs(2), owned_control(&moved))
+            .expect("sequence 2 accepted");
+        assert!(accepted.selection_changed);
+
+        let replayed = actor
+            .control_at(started + Duration::from_secs(3), owned_control(&moved))
+            .expect("sequence 2 replayed");
+        assert_eq!(replayed.disposition, ControlDisposition::Replay);
+        assert!(
+            !replayed.selection_changed,
+            "one viewer action, one resolution",
+        );
     }
 
     /// The wire lets a client send capabilities once. Anything that reads

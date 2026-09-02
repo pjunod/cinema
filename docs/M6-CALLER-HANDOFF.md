@@ -384,12 +384,22 @@ reads, and the control exchange runs about once a second per client under an
 absolute deadline. Doing them unconditionally, on every exchange, to answer a
 question that is almost always "nothing changed", is the wrong shape.
 
-**Gate them behind a cheap comparison.** Everything a selection names —
-quality, audio track, audio offset, subtitle mode and track — is already on the
-snapshot, and the delivered values are already on the delivery view. Compare
-those first; resolve and build a candidate only when one of them moved. The
-expensive path then runs at the rate viewers change something, which is orders
-of magnitude below the exchange rate.
+**Gate them behind a cheap comparison** — of this exchange's selection against
+**the last accepted one**, not against what is being delivered. This section
+said "the delivered values are already on the delivery view" and that is a
+trap: a client's ask and the height it gets are different numbers. An explicit
+rung snaps onto the ladder, so a client asking 1079 is served 1080 and goes on
+asking 1079 — and a gate comparing the two reads *changed* on every exchange
+for the rest of that session, spending the two reads it exists to save and
+producing a candidate identical to what is already playing.
+
+The right comparison is free in exactly one place: the actor already retains
+the last accepted snapshot, so it holds both selections at the moment of
+acceptance. `RollingControlOutcome::selection_changed` is that answer, and it
+is `false` on a replay (one viewer action, one resolution) and on the first
+accepted exchange (a session just created from an intent has not since departed
+from it). The expensive path then runs at the rate viewers change something,
+which is orders of magnitude below the exchange rate.
 
 This works because of what the comparison is actually looking at, and that is
 worth stating plainly:
