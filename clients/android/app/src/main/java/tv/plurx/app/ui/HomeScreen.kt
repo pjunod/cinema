@@ -52,6 +52,7 @@ import tv.plurx.app.ui.components.MediaFactChip
 import tv.plurx.app.ui.components.MediaRow
 import tv.plurx.app.ui.components.NetworkImage
 import tv.plurx.app.ui.components.PosterResolutionPlacement
+import tv.plurx.app.ui.components.RequestInitialFocus
 import tv.plurx.app.ui.components.safeDisplayInsets
 import tv.plurx.app.ui.components.TvIconButton
 import tv.plurx.app.ui.components.imageUrl
@@ -127,6 +128,14 @@ fun HomeScreen(
                 val shelfFocus = remember(visibleShelfKeys) {
                     visibleShelfKeys.associateWith { FocusRequester() }
                 }
+                // Home arrived with focus nowhere: the first D-pad press was
+                // spent finding a starting point rather than moving from one.
+                // The first VISIBLE shelf, so this can never aim at a
+                // requester whose row was not composed.
+                RequestInitialFocus(
+                    shelfFocus[visibleShelfKeys.firstOrNull()] ?: FocusRequester(),
+                    enabled = visibleShelfKeys.isNotEmpty(),
+                )
                 fun previousShelf(key: String): FocusRequester? {
                     val index = visibleShelfKeys.indexOf(key)
                     return visibleShelfKeys.getOrNull(index - 1)?.let { shelfFocus[it] }

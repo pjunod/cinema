@@ -2534,13 +2534,13 @@ classic|category@1280x860|dom|div.azbar[aria-label=*] > span.off[text]|24
 classic|category@1280x860|dom|div.crumbs > a[text]|1
 classic|category@1280x860|dom|div.crumbs > span.cur[text]|1
 classic|category@1280x860|dom|div.crumbs > span.sep[text]|1
-classic|category@1280x860|dom|div.grid > div.k-movie.poster.unw|3
-classic|category@1280x860|dom|div.grid > div.k-movie.poster|1
-classic|category@1280x860|dom|div.k-movie.poster > div.artbox|1
-classic|category@1280x860|dom|div.k-movie.poster > div.meta|1
-classic|category@1280x860|dom|div.k-movie.poster > div.prog|1
-classic|category@1280x860|dom|div.k-movie.poster.unw > div.artbox|3
-classic|category@1280x860|dom|div.k-movie.poster.unw > div.meta|3
+classic|category@1280x860|dom|div.grid > div.k-movie.poster.unw[role=link tabindex=0]|3
+classic|category@1280x860|dom|div.grid > div.k-movie.poster[role=link tabindex=0]|1
+classic|category@1280x860|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.artbox|3
+classic|category@1280x860|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.meta|3
+classic|category@1280x860|dom|div.k-movie.poster[role=link tabindex=0] > div.artbox|1
+classic|category@1280x860|dom|div.k-movie.poster[role=link tabindex=0] > div.meta|1
+classic|category@1280x860|dom|div.k-movie.poster[role=link tabindex=0] > div.prog|1
 classic|category@1280x860|dom|div.libbar > div.row|1
 classic|category@1280x860|dom|div.libbar > span#libcount.muted[text]|1
 classic|category@1280x860|dom|div.meta > div.s|4
@@ -2581,10 +2581,14 @@ classic|category@1280x860|focus|008|a "Home"
 classic|category@1280x860|focus|009|select "Title (A–Z) Recently added Date recorded Year Resolu
 classic|category@1280x860|focus|010|select "Everything Unwatched In progress Watched"
 classic|category@1280x860|focus|011|select "20 50 100 200 All"
-classic|category@1280x860|focus|012|button.active "Jump to B"
-classic|category@1280x860|focus|013|button "Jump to H"
-classic|category@1280x860|focus|014|button "Jump to S"
-classic|category@1280x860|focus|015|<wrap>
+classic|category@1280x860|focus|012|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|category@1280x860|focus|013|div.poster.k-movie "H Heat 1995 180p"
+classic|category@1280x860|focus|014|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|category@1280x860|focus|015|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|category@1280x860|focus|016|button.active "Jump to B"
+classic|category@1280x860|focus|017|button "Jump to H"
+classic|category@1280x860|focus|018|button "Jump to S"
+classic|category@1280x860|focus|019|<wrap>
 classic|category@1280x860|req|GET /api/v1/activity|2
 classic|category@1280x860|req|GET /api/v1/libraries/<id>/items|2
 classic|category@1280x860|req|GET /api/v1/libraries|1
@@ -2611,13 +2615,13 @@ classic|category@390x780|dom|div.azbar[aria-label=*] > span.off[text]|24
 classic|category@390x780|dom|div.crumbs > a[text]|1
 classic|category@390x780|dom|div.crumbs > span.cur[text]|1
 classic|category@390x780|dom|div.crumbs > span.sep[text]|1
-classic|category@390x780|dom|div.grid > div.k-movie.poster.unw|3
-classic|category@390x780|dom|div.grid > div.k-movie.poster|1
-classic|category@390x780|dom|div.k-movie.poster > div.artbox|1
-classic|category@390x780|dom|div.k-movie.poster > div.meta|1
-classic|category@390x780|dom|div.k-movie.poster > div.prog|1
-classic|category@390x780|dom|div.k-movie.poster.unw > div.artbox|3
-classic|category@390x780|dom|div.k-movie.poster.unw > div.meta|3
+classic|category@390x780|dom|div.grid > div.k-movie.poster.unw[role=link tabindex=0]|3
+classic|category@390x780|dom|div.grid > div.k-movie.poster[role=link tabindex=0]|1
+classic|category@390x780|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.artbox|3
+classic|category@390x780|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.meta|3
+classic|category@390x780|dom|div.k-movie.poster[role=link tabindex=0] > div.artbox|1
+classic|category@390x780|dom|div.k-movie.poster[role=link tabindex=0] > div.meta|1
+classic|category@390x780|dom|div.k-movie.poster[role=link tabindex=0] > div.prog|1
 classic|category@390x780|dom|div.libbar > div.row|1
 classic|category@390x780|dom|div.libbar > span#libcount.muted[text]|1
 classic|category@390x780|dom|div.meta > div.s|4
@@ -2658,10 +2662,14 @@ classic|category@390x780|focus|008|a "Home"
 classic|category@390x780|focus|009|select "Title (A–Z) Recently added Date recorded Year Resolu
 classic|category@390x780|focus|010|select "Everything Unwatched In progress Watched"
 classic|category@390x780|focus|011|select "20 50 100 200 All"
-classic|category@390x780|focus|012|button.active "Jump to B"
-classic|category@390x780|focus|013|button "Jump to H"
-classic|category@390x780|focus|014|button "Jump to S"
-classic|category@390x780|focus|015|<wrap>
+classic|category@390x780|focus|012|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|category@390x780|focus|013|div.poster.k-movie "H Heat 1995 180p"
+classic|category@390x780|focus|014|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|category@390x780|focus|015|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|category@390x780|focus|016|button.active "Jump to B"
+classic|category@390x780|focus|017|button "Jump to H"
+classic|category@390x780|focus|018|button "Jump to S"
+classic|category@390x780|focus|019|<wrap>
 classic|category@390x780|req|GET /api/v1/activity|2
 classic|category@390x780|req|GET /api/v1/libraries/<id>/items|2
 classic|category@390x780|req|GET /api/v1/libraries|1
@@ -2685,21 +2693,21 @@ classic|home@1280x860|dom|div#app > header.top|1
 classic|home@1280x860|dom|div#app > main#main|1
 classic|home@1280x860|dom|div.artbox > div.art.ph[text]|12
 classic|home@1280x860|dom|div.artbox > span.badge[text]|1
-classic|home@1280x860|dom|div.grid > div.k-movie.poster.unw|3
-classic|home@1280x860|dom|div.grid > div.k-movie.poster|1
-classic|home@1280x860|dom|div.grid > div.k-show.poster.unw|1
-classic|home@1280x860|dom|div.k-episode.poster > div.artbox|1
-classic|home@1280x860|dom|div.k-episode.poster > div.meta|1
-classic|home@1280x860|dom|div.k-episode.poster > div.prog|1
-classic|home@1280x860|dom|div.k-episode.poster.unw > div.artbox|1
-classic|home@1280x860|dom|div.k-episode.poster.unw > div.meta|1
-classic|home@1280x860|dom|div.k-movie.poster > div.artbox|3
-classic|home@1280x860|dom|div.k-movie.poster > div.meta|3
-classic|home@1280x860|dom|div.k-movie.poster > div.prog|3
-classic|home@1280x860|dom|div.k-movie.poster.unw > div.artbox|6
-classic|home@1280x860|dom|div.k-movie.poster.unw > div.meta|6
-classic|home@1280x860|dom|div.k-show.poster.unw > div.artbox|1
-classic|home@1280x860|dom|div.k-show.poster.unw > div.meta|1
+classic|home@1280x860|dom|div.grid > div.k-movie.poster.unw[role=link tabindex=0]|3
+classic|home@1280x860|dom|div.grid > div.k-movie.poster[role=link tabindex=0]|1
+classic|home@1280x860|dom|div.grid > div.k-show.poster.unw[role=link tabindex=0]|1
+classic|home@1280x860|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.artbox|1
+classic|home@1280x860|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.meta|1
+classic|home@1280x860|dom|div.k-episode.poster[role=link tabindex=0] > div.artbox|1
+classic|home@1280x860|dom|div.k-episode.poster[role=link tabindex=0] > div.meta|1
+classic|home@1280x860|dom|div.k-episode.poster[role=link tabindex=0] > div.prog|1
+classic|home@1280x860|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.artbox|6
+classic|home@1280x860|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.meta|6
+classic|home@1280x860|dom|div.k-movie.poster[role=link tabindex=0] > div.artbox|3
+classic|home@1280x860|dom|div.k-movie.poster[role=link tabindex=0] > div.meta|3
+classic|home@1280x860|dom|div.k-movie.poster[role=link tabindex=0] > div.prog|3
+classic|home@1280x860|dom|div.k-show.poster.unw[role=link tabindex=0] > div.artbox|1
+classic|home@1280x860|dom|div.k-show.poster.unw[role=link tabindex=0] > div.meta|1
 classic|home@1280x860|dom|div.libbar > div.row|1
 classic|home@1280x860|dom|div.meta > div.cleft[text]|1
 classic|home@1280x860|dom|div.meta > div.s|12
@@ -2710,10 +2718,10 @@ classic|home@1280x860|dom|div.railbox > button.r.railarrow[aria-label=* text]|3
 classic|home@1280x860|dom|div.railbox > div.rowscroll|3
 classic|home@1280x860|dom|div.row > select|1
 classic|home@1280x860|dom|div.row > span.lbl[text]|1
-classic|home@1280x860|dom|div.rowscroll > div.k-episode.poster.unw|1
-classic|home@1280x860|dom|div.rowscroll > div.k-episode.poster|1
-classic|home@1280x860|dom|div.rowscroll > div.k-movie.poster.unw|3
-classic|home@1280x860|dom|div.rowscroll > div.k-movie.poster|2
+classic|home@1280x860|dom|div.rowscroll > div.k-episode.poster.unw[role=link tabindex=0]|1
+classic|home@1280x860|dom|div.rowscroll > div.k-episode.poster[role=link tabindex=0]|1
+classic|home@1280x860|dom|div.rowscroll > div.k-movie.poster.unw[role=link tabindex=0]|3
+classic|home@1280x860|dom|div.rowscroll > div.k-movie.poster[role=link tabindex=0]|2
 classic|home@1280x860|dom|div.s > span.resbadge.resgrad[text]|9
 classic|home@1280x860|dom|div.s > span.stxt[text]|12
 classic|home@1280x860|dom|div.topctl > div|2
@@ -2736,10 +2744,22 @@ classic|home@1280x860|focus|003|a "settings"
 classic|home@1280x860|focus|004|input#q.search "Search cinema"
 classic|home@1280x860|focus|005|button.ghost.sm.lookbtn "Appearance"
 classic|home@1280x860|focus|006|button.ghost.sm.profile "Account"
-classic|home@1280x860|focus|007|select "Category Share name"
-classic|home@1280x860|focus|008|a.muted "· view all (4)"
-classic|home@1280x860|focus|009|a.muted "· view all (1)"
-classic|home@1280x860|focus|010|<wrap>
+classic|home@1280x860|focus|007|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
+classic|home@1280x860|focus|008|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
+classic|home@1280x860|focus|009|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|home@1280x860|focus|010|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
+classic|home@1280x860|focus|011|div.poster.k-movie "H Heat 1995 180p"
+classic|home@1280x860|focus|012|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|home@1280x860|focus|013|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|home@1280x860|focus|014|select "Category Share name"
+classic|home@1280x860|focus|015|a.muted "· view all (4)"
+classic|home@1280x860|focus|016|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|home@1280x860|focus|017|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|home@1280x860|focus|018|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|home@1280x860|focus|019|div.poster.k-movie "H Heat 1995 180p"
+classic|home@1280x860|focus|020|a.muted "· view all (1)"
+classic|home@1280x860|focus|021|div.poster.k-show.unw "SH Signal Hill 2019"
+classic|home@1280x860|focus|022|<wrap>
 classic|home@1280x860|req|GET /api/v1/activity|2
 classic|home@1280x860|req|GET /api/v1/coming-soon|1
 classic|home@1280x860|req|GET /api/v1/home/previews|1
@@ -2768,21 +2788,21 @@ classic|home@390x780|dom|div.artbox > span.badge[text]|1
 classic|home@390x780|dom|div.can-r.railbox > button.l.railarrow[aria-label=* text]|1
 classic|home@390x780|dom|div.can-r.railbox > button.r.railarrow[aria-label=* text]|1
 classic|home@390x780|dom|div.can-r.railbox > div.rowscroll|1
-classic|home@390x780|dom|div.grid > div.k-movie.poster.unw|3
-classic|home@390x780|dom|div.grid > div.k-movie.poster|1
-classic|home@390x780|dom|div.grid > div.k-show.poster.unw|1
-classic|home@390x780|dom|div.k-episode.poster > div.artbox|1
-classic|home@390x780|dom|div.k-episode.poster > div.meta|1
-classic|home@390x780|dom|div.k-episode.poster > div.prog|1
-classic|home@390x780|dom|div.k-episode.poster.unw > div.artbox|1
-classic|home@390x780|dom|div.k-episode.poster.unw > div.meta|1
-classic|home@390x780|dom|div.k-movie.poster > div.artbox|3
-classic|home@390x780|dom|div.k-movie.poster > div.meta|3
-classic|home@390x780|dom|div.k-movie.poster > div.prog|3
-classic|home@390x780|dom|div.k-movie.poster.unw > div.artbox|6
-classic|home@390x780|dom|div.k-movie.poster.unw > div.meta|6
-classic|home@390x780|dom|div.k-show.poster.unw > div.artbox|1
-classic|home@390x780|dom|div.k-show.poster.unw > div.meta|1
+classic|home@390x780|dom|div.grid > div.k-movie.poster.unw[role=link tabindex=0]|3
+classic|home@390x780|dom|div.grid > div.k-movie.poster[role=link tabindex=0]|1
+classic|home@390x780|dom|div.grid > div.k-show.poster.unw[role=link tabindex=0]|1
+classic|home@390x780|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.artbox|1
+classic|home@390x780|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.meta|1
+classic|home@390x780|dom|div.k-episode.poster[role=link tabindex=0] > div.artbox|1
+classic|home@390x780|dom|div.k-episode.poster[role=link tabindex=0] > div.meta|1
+classic|home@390x780|dom|div.k-episode.poster[role=link tabindex=0] > div.prog|1
+classic|home@390x780|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.artbox|6
+classic|home@390x780|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.meta|6
+classic|home@390x780|dom|div.k-movie.poster[role=link tabindex=0] > div.artbox|3
+classic|home@390x780|dom|div.k-movie.poster[role=link tabindex=0] > div.meta|3
+classic|home@390x780|dom|div.k-movie.poster[role=link tabindex=0] > div.prog|3
+classic|home@390x780|dom|div.k-show.poster.unw[role=link tabindex=0] > div.artbox|1
+classic|home@390x780|dom|div.k-show.poster.unw[role=link tabindex=0] > div.meta|1
 classic|home@390x780|dom|div.libbar > div.row|1
 classic|home@390x780|dom|div.meta > div.cleft[text]|1
 classic|home@390x780|dom|div.meta > div.s|12
@@ -2793,10 +2813,10 @@ classic|home@390x780|dom|div.railbox > button.r.railarrow[aria-label=* text]|2
 classic|home@390x780|dom|div.railbox > div.rowscroll|2
 classic|home@390x780|dom|div.row > select|1
 classic|home@390x780|dom|div.row > span.lbl[text]|1
-classic|home@390x780|dom|div.rowscroll > div.k-episode.poster.unw|1
-classic|home@390x780|dom|div.rowscroll > div.k-episode.poster|1
-classic|home@390x780|dom|div.rowscroll > div.k-movie.poster.unw|3
-classic|home@390x780|dom|div.rowscroll > div.k-movie.poster|2
+classic|home@390x780|dom|div.rowscroll > div.k-episode.poster.unw[role=link tabindex=0]|1
+classic|home@390x780|dom|div.rowscroll > div.k-episode.poster[role=link tabindex=0]|1
+classic|home@390x780|dom|div.rowscroll > div.k-movie.poster.unw[role=link tabindex=0]|3
+classic|home@390x780|dom|div.rowscroll > div.k-movie.poster[role=link tabindex=0]|2
 classic|home@390x780|dom|div.s > span.resbadge.resgrad[text]|9
 classic|home@390x780|dom|div.s > span.stxt[text]|12
 classic|home@390x780|dom|div.topctl > div|2
@@ -2819,11 +2839,22 @@ classic|home@390x780|focus|003|a "settings"
 classic|home@390x780|focus|004|input#q.search "Search cinema"
 classic|home@390x780|focus|005|button.ghost.sm.lookbtn "Appearance"
 classic|home@390x780|focus|006|button.ghost.sm.profile "Account"
-classic|home@390x780|focus|007|div.rowscroll "BR Blade Runner 1982 180p CO ✓ Signal Hill S1
-classic|home@390x780|focus|008|select "Category Share name"
-classic|home@390x780|focus|009|a.muted "· view all (4)"
-classic|home@390x780|focus|010|a.muted "· view all (1)"
-classic|home@390x780|focus|011|<wrap>
+classic|home@390x780|focus|007|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
+classic|home@390x780|focus|008|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
+classic|home@390x780|focus|009|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|home@390x780|focus|010|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
+classic|home@390x780|focus|011|div.poster.k-movie "H Heat 1995 180p"
+classic|home@390x780|focus|012|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|home@390x780|focus|013|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|home@390x780|focus|014|select "Category Share name"
+classic|home@390x780|focus|015|a.muted "· view all (4)"
+classic|home@390x780|focus|016|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|home@390x780|focus|017|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|home@390x780|focus|018|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|home@390x780|focus|019|div.poster.k-movie "H Heat 1995 180p"
+classic|home@390x780|focus|020|a.muted "· view all (1)"
+classic|home@390x780|focus|021|div.poster.k-show.unw "SH Signal Hill 2019"
+classic|home@390x780|focus|022|<wrap>
 classic|home@390x780|req|GET /api/v1/activity|2
 classic|home@390x780|req|GET /api/v1/coming-soon|1
 classic|home@390x780|req|GET /api/v1/home/previews|1
@@ -3033,13 +3064,13 @@ classic|library@1280x860|dom|div.azbar[aria-label=*] > span.off[text]|25
 classic|library@1280x860|dom|div.crumbs > a[text]|1
 classic|library@1280x860|dom|div.crumbs > span.cur[text]|1
 classic|library@1280x860|dom|div.crumbs > span.sep[text]|1
-classic|library@1280x860|dom|div.grid > div.k-movie.poster.unw|1
-classic|library@1280x860|dom|div.grid > div.k-movie.poster|1
-classic|library@1280x860|dom|div.k-movie.poster > div.artbox|1
-classic|library@1280x860|dom|div.k-movie.poster > div.meta|1
-classic|library@1280x860|dom|div.k-movie.poster > div.prog|1
-classic|library@1280x860|dom|div.k-movie.poster.unw > div.artbox|1
-classic|library@1280x860|dom|div.k-movie.poster.unw > div.meta|1
+classic|library@1280x860|dom|div.grid > div.k-movie.poster.unw[role=link tabindex=0]|1
+classic|library@1280x860|dom|div.grid > div.k-movie.poster[role=link tabindex=0]|1
+classic|library@1280x860|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.artbox|1
+classic|library@1280x860|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.meta|1
+classic|library@1280x860|dom|div.k-movie.poster[role=link tabindex=0] > div.artbox|1
+classic|library@1280x860|dom|div.k-movie.poster[role=link tabindex=0] > div.meta|1
+classic|library@1280x860|dom|div.k-movie.poster[role=link tabindex=0] > div.prog|1
 classic|library@1280x860|dom|div.libbar > div.row|1
 classic|library@1280x860|dom|div.libbar > span#libcount.muted[text]|1
 classic|library@1280x860|dom|div.meta > div.s|2
@@ -3080,9 +3111,11 @@ classic|library@1280x860|focus|008|a "Home"
 classic|library@1280x860|focus|009|select "Title (A–Z) Recently added Date recorded Year Resolu
 classic|library@1280x860|focus|010|select "Everything Unwatched In progress Watched"
 classic|library@1280x860|focus|011|select "20 50 100 200 All"
-classic|library@1280x860|focus|012|button.active "Jump to B"
-classic|library@1280x860|focus|013|button "Jump to H"
-classic|library@1280x860|focus|014|<wrap>
+classic|library@1280x860|focus|012|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|library@1280x860|focus|013|div.poster.k-movie "H Heat 1995 180p"
+classic|library@1280x860|focus|014|button.active "Jump to B"
+classic|library@1280x860|focus|015|button "Jump to H"
+classic|library@1280x860|focus|016|<wrap>
 classic|library@1280x860|req|GET /api/v1/activity|2
 classic|library@1280x860|req|GET /api/v1/libraries/<id>/items|1
 classic|library@1280x860|req|GET /api/v1/libraries|1
@@ -3109,13 +3142,13 @@ classic|library@390x780|dom|div.azbar[aria-label=*] > span.off[text]|25
 classic|library@390x780|dom|div.crumbs > a[text]|1
 classic|library@390x780|dom|div.crumbs > span.cur[text]|1
 classic|library@390x780|dom|div.crumbs > span.sep[text]|1
-classic|library@390x780|dom|div.grid > div.k-movie.poster.unw|1
-classic|library@390x780|dom|div.grid > div.k-movie.poster|1
-classic|library@390x780|dom|div.k-movie.poster > div.artbox|1
-classic|library@390x780|dom|div.k-movie.poster > div.meta|1
-classic|library@390x780|dom|div.k-movie.poster > div.prog|1
-classic|library@390x780|dom|div.k-movie.poster.unw > div.artbox|1
-classic|library@390x780|dom|div.k-movie.poster.unw > div.meta|1
+classic|library@390x780|dom|div.grid > div.k-movie.poster.unw[role=link tabindex=0]|1
+classic|library@390x780|dom|div.grid > div.k-movie.poster[role=link tabindex=0]|1
+classic|library@390x780|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.artbox|1
+classic|library@390x780|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.meta|1
+classic|library@390x780|dom|div.k-movie.poster[role=link tabindex=0] > div.artbox|1
+classic|library@390x780|dom|div.k-movie.poster[role=link tabindex=0] > div.meta|1
+classic|library@390x780|dom|div.k-movie.poster[role=link tabindex=0] > div.prog|1
 classic|library@390x780|dom|div.libbar > div.row|1
 classic|library@390x780|dom|div.libbar > span#libcount.muted[text]|1
 classic|library@390x780|dom|div.meta > div.s|2
@@ -3156,9 +3189,11 @@ classic|library@390x780|focus|008|a "Home"
 classic|library@390x780|focus|009|select "Title (A–Z) Recently added Date recorded Year Resolu
 classic|library@390x780|focus|010|select "Everything Unwatched In progress Watched"
 classic|library@390x780|focus|011|select "20 50 100 200 All"
-classic|library@390x780|focus|012|button.active "Jump to B"
-classic|library@390x780|focus|013|button "Jump to H"
-classic|library@390x780|focus|014|<wrap>
+classic|library@390x780|focus|012|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|library@390x780|focus|013|div.poster.k-movie "H Heat 1995 180p"
+classic|library@390x780|focus|014|button.active "Jump to B"
+classic|library@390x780|focus|015|button "Jump to H"
+classic|library@390x780|focus|016|<wrap>
 classic|library@390x780|req|GET /api/v1/activity|2
 classic|library@390x780|req|GET /api/v1/libraries/<id>/items|1
 classic|library@390x780|req|GET /api/v1/libraries|1
@@ -3446,12 +3481,12 @@ classic|search@1280x860|dom|div.artbox > div.art.ph[text]|3
 classic|search@1280x860|dom|div.crumbs > a[text]|1
 classic|search@1280x860|dom|div.crumbs > span.cur[text]|1
 classic|search@1280x860|dom|div.crumbs > span.sep[text]|1
-classic|search@1280x860|dom|div.grid > div.k-movie.poster.unw|2
-classic|search@1280x860|dom|div.grid > div.k-show.poster.unw|1
-classic|search@1280x860|dom|div.k-movie.poster.unw > div.artbox|2
-classic|search@1280x860|dom|div.k-movie.poster.unw > div.meta|2
-classic|search@1280x860|dom|div.k-show.poster.unw > div.artbox|1
-classic|search@1280x860|dom|div.k-show.poster.unw > div.meta|1
+classic|search@1280x860|dom|div.grid > div.k-movie.poster.unw[role=link tabindex=0]|2
+classic|search@1280x860|dom|div.grid > div.k-show.poster.unw[role=link tabindex=0]|1
+classic|search@1280x860|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.artbox|2
+classic|search@1280x860|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.meta|2
+classic|search@1280x860|dom|div.k-show.poster.unw[role=link tabindex=0] > div.artbox|1
+classic|search@1280x860|dom|div.k-show.poster.unw[role=link tabindex=0] > div.meta|1
 classic|search@1280x860|dom|div.meta > div.s|3
 classic|search@1280x860|dom|div.meta > div.t[text]|3
 classic|search@1280x860|dom|div.pagehead > div.phnav|1
@@ -3479,7 +3514,10 @@ classic|search@1280x860|focus|005|button.ghost.sm.lookbtn "Appearance"
 classic|search@1280x860|focus|006|button.ghost.sm.profile "Account"
 classic|search@1280x860|focus|007|a.pgback "Back to Home"
 classic|search@1280x860|focus|008|a "Home"
-classic|search@1280x860|focus|009|<wrap>
+classic|search@1280x860|focus|009|div.poster.k-movie.unw "SF Signal Fire 2003"
+classic|search@1280x860|focus|010|div.poster.k-movie.unw "TS The Signal 2021"
+classic|search@1280x860|focus|011|div.poster.k-show.unw "SH Signal Hill 2019"
+classic|search@1280x860|focus|012|<wrap>
 classic|search@1280x860|req|GET /api/v1/activity|2
 classic|search@1280x860|req|GET /api/v1/me|1
 classic|search@1280x860|req|GET /api/v1/search|1
@@ -3500,12 +3538,12 @@ classic|search@390x780|dom|div.artbox > div.art.ph[text]|3
 classic|search@390x780|dom|div.crumbs > a[text]|1
 classic|search@390x780|dom|div.crumbs > span.cur[text]|1
 classic|search@390x780|dom|div.crumbs > span.sep[text]|1
-classic|search@390x780|dom|div.grid > div.k-movie.poster.unw|2
-classic|search@390x780|dom|div.grid > div.k-show.poster.unw|1
-classic|search@390x780|dom|div.k-movie.poster.unw > div.artbox|2
-classic|search@390x780|dom|div.k-movie.poster.unw > div.meta|2
-classic|search@390x780|dom|div.k-show.poster.unw > div.artbox|1
-classic|search@390x780|dom|div.k-show.poster.unw > div.meta|1
+classic|search@390x780|dom|div.grid > div.k-movie.poster.unw[role=link tabindex=0]|2
+classic|search@390x780|dom|div.grid > div.k-show.poster.unw[role=link tabindex=0]|1
+classic|search@390x780|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.artbox|2
+classic|search@390x780|dom|div.k-movie.poster.unw[role=link tabindex=0] > div.meta|2
+classic|search@390x780|dom|div.k-show.poster.unw[role=link tabindex=0] > div.artbox|1
+classic|search@390x780|dom|div.k-show.poster.unw[role=link tabindex=0] > div.meta|1
 classic|search@390x780|dom|div.meta > div.s|3
 classic|search@390x780|dom|div.meta > div.t[text]|3
 classic|search@390x780|dom|div.pagehead > div.phnav|1
@@ -3533,7 +3571,10 @@ classic|search@390x780|focus|005|button.ghost.sm.lookbtn "Appearance"
 classic|search@390x780|focus|006|button.ghost.sm.profile "Account"
 classic|search@390x780|focus|007|a.pgback "Back to Home"
 classic|search@390x780|focus|008|a "Home"
-classic|search@390x780|focus|009|<wrap>
+classic|search@390x780|focus|009|div.poster.k-movie.unw "SF Signal Fire 2003"
+classic|search@390x780|focus|010|div.poster.k-movie.unw "TS The Signal 2021"
+classic|search@390x780|focus|011|div.poster.k-show.unw "SH Signal Hill 2019"
+classic|search@390x780|focus|012|<wrap>
 classic|search@390x780|req|GET /api/v1/activity|2
 classic|search@390x780|req|GET /api/v1/me|1
 classic|search@390x780|req|GET /api/v1/search|1

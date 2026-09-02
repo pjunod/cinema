@@ -388,6 +388,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/playback/web-control.test.js
 	@node tests/playback/player-input-contract.test.js
 	@node tests/web/player-dom.test.js
+	@node tests/web/nav-keyboard.test.js
 	@node tests/web/reader.test.js
 	@node tests/web/page-read-budget.test.js
 	@node tests/web/theme-family.test.js
