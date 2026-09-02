@@ -257,6 +257,44 @@ pre-review request — the comment at `:1291-1293` is the specification.
 Call `decide_preparation` in the exchange and emit the outcome as a metric.
 Stage nothing.
 
+**Settle this first: there is no mapping from a client's selection to a create
+body.** `resolve_plan` (slice 3.2, merged) takes a `CreateSession`. The
+exchange has a `ClientSelection` — `QualitySelection::Auto | Manual { height }`,
+`CodecPolicy`, `DynamicRangePolicy`, an audio track, an offset, a subtitle mode
+— and the two are different vocabularies, not two spellings of one.
+
+The base is not in doubt: the exchange already holds the session's own
+`RemoteStartRequest` as `recipe`, so the candidate is *that body with the
+client's selection applied*, not a body built from nothing. What is in doubt is
+each field:
+
+- **`QualitySelection::Manual { height }` → `CreateSession::height`** is the
+  easy one, and `Auto` → `None` with `quality_auto: Some(true)`. Note that
+  `into_request`'s `automatic` falls back to *wire presence* when
+  `quality_auto` is absent, and a subtitle burn sends the source height as a
+  promise rather than as a quality answer — so the candidate must set
+  `quality_auto` explicitly rather than let presence infer it.
+- **`CodecPolicy` and `DynamicRangePolicy` are client *policies*, not the
+  server's `copy` / `hdr10` / `preserve_dolby_vision` answers.** `create`
+  derives those from the caps document through `review_client_plan`, which the
+  selection does not carry. The honest reading is that a selection change on
+  those axes means *re-review*, and until that is settled a candidate should
+  carry the session's existing answers rather than invent new ones — which also
+  means a codec or grade selection change is not yet expressible as a
+  candidate at all. `decide_preparation` refuses both axes anyway
+  (`AxisNotProven`), so nothing is lost today; it will matter the moment the
+  capability is narrowed.
+- **`SubtitleSelection` is not `subtitle_burn`.** `Off`/`Native`/`Overlay` are
+  not burns; only `Burn` is. Mapping `track` into `subtitle_burn`
+  unconditionally would turn every native-subtitle change into a burn — a whole
+  new encode recipe — and `decide_preparation` would correctly refuse it, for
+  the wrong reason.
+
+Write that mapping down as a function with its own tests before wiring the
+metric. A shadow mode fed a wrong candidate produces a *confident* wrong
+measurement, and the whole point of the slice is that the measurement is
+trustworthy enough to act on.
+
 **Why this slice exists at all:** the axis restriction in `PREPARED_AXIS` is an
 argument. Shadow mode turns it into a measurement — how many transitions would
 prepare, how many fall back and on which axis, and how often
