@@ -33,13 +33,44 @@ for (const button of menuButtons) {
   assert.match(button, /aria-expanded="false"/, `menu opener lacks aria-expanded: ${button}`);
 }
 
+// Derived from the fixture, not from the DOM it is checking. Two of the
+// contract's transport items are rendered in the top bar on the web
+// (`#statsbtn` and `#pbclose`) and two web-only controls have no fixture entry
+// at all (`#pbinfo`, the title-info toggle, and `#pbfs`, fullscreen). That is a
+// live question about the row — recorded in docs/PLAYER-INPUT-CONTRACT.md §6.4
+// — so it is written down here as an exception with a name, and the ORDER of
+// everything else comes from the fixture. A reorder there fails this test.
+const contract = require("../playback/player-input-contract.json");
+const transportRow = contract.controls.rows.find((row) => row.id === "transport");
+assert.ok(transportRow, "the contract has no transport row");
+const WEB_ELEMENT_FOR_ITEM = {
+  skip_back: "pbback",
+  play_pause: "pbplay",
+  skip_forward: "pbforward",
+  audio: "pbaudio",
+  subtitles: "pbsubs",
+  quality: "pbquality",
+  settings: "pbsettings",
+  pip: "pbpip",
+  // Rendered in `#pbar`, not `#ptransport`, on the web today.
+  info: null,
+  close: null,
+  spacer: null,
+};
 const transport = playerLine.slice(transportAt, playerLine.indexOf('id="pinfo"'));
-const optionOrder = ["pbaudio", "pbsubs", "pbquality", "pbsettings", "pbinfo", "pbpip"];
 let previous = -1;
-for (const id of optionOrder) {
+for (const item of transportRow.items) {
+  assert.ok(item in WEB_ELEMENT_FOR_ITEM, `the fixture's transport row gained ${item}`);
+  const id = WEB_ELEMENT_FOR_ITEM[item];
+  if (!id) continue;
   const current = transport.indexOf(`id="${id}"`);
-  assert.ok(current > previous, `${id} is outside the shared transport option order`);
+  assert.ok(current > previous, `${id} is outside the shared transport row order`);
   previous = current;
+}
+// The two the contract does not know about are still where this test expects
+// them, so moving one is a decision rather than an accident.
+for (const [id, where] of [["statsbtn", playerLine], ["pbclose", playerLine], ["pbinfo", transport], ["pbfs", transport]]) {
+  assert.ok(where.includes(`id="${id}"`), `${id} left the player without a fixture row to move to`);
 }
 for (const retired of ["skipbtn", "autonextbtn", "syncbtn", "qualbtn", "audiobtn", "subsbtn"]) {
   assert.doesNotMatch(playerLine, new RegExp(`id="${retired}"`), `${retired} must be folded into the transport menus`);

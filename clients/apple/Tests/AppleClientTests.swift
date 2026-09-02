@@ -2464,8 +2464,13 @@ final class AppleClientTests: XCTestCase {
     func testThePhonePanelSwallowsTheTapsThatMissIt() throws {
         let source = try playerViewSource()
         let backdropStart = try XCTUnwrap(source.range(of: "private var ledgerBackdrop: some View {"))
-        let backdrop = String(source[backdropStart.lowerBound...].prefix(400))
-        XCTAssertTrue(backdrop.contains("Color.clear.contentShape(Rectangle())"))
+        let backdrop = String(source[backdropStart.lowerBound...].prefix(600))
+        // Hit-testable, and it acts: `info × tap_surface` is `close_info` on
+        // the touch table, so a tap that misses the panel closes it instead of
+        // pressing whatever is behind it.
+        XCTAssertTrue(backdrop.contains("Color.clear"))
+        XCTAssertTrue(backdrop.contains(".contentShape(Rectangle())"))
+        XCTAssertTrue(backdrop.contains(".onTapGesture { onDismiss() }"))
     }
 
     func testTheLockScreenRoutesThroughTheContract() throws {
