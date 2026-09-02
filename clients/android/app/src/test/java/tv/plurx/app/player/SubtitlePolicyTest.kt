@@ -11,6 +11,7 @@ import tv.plurx.app.data.DisplayCaps
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.ReopenReason
 import tv.plurx.app.data.SubTrack
+import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.VideoEntry
 
 /**
@@ -165,6 +166,98 @@ class SubtitlePolicyTest {
             SubtitleRoute(SubtitleDelivery.Burn, reopen = true),
             subtitleRoute(pgs(5), "remux", SubtitleDelivery.Burn),
         )
+    }
+
+    // ---- Settings → Playback → "Subtitle switching" -------------------------
+
+    @Test
+    fun instantSubtitleSwitchingOnlyEverDecidesRemuxAndTranscodePlays() {
+        // Direct play already has the file's text tracks in the demuxer, so a
+        // session would buy nothing under either setting.
+        assertFalse(subtitlesReadyFromFirstFrame(SubtitleReadiness.Instant, "direct", hasNativeTrack = true))
+        assertTrue(subtitlesReadyFromFirstFrame(SubtitleReadiness.Instant, "remux", hasNativeTrack = true))
+        assertTrue(subtitlesReadyFromFirstFrame(SubtitleReadiness.Instant, "transcode", hasNativeTrack = true))
+        // Nothing a session could publish.
+        assertFalse(subtitlesReadyFromFirstFrame(SubtitleReadiness.Instant, "remux", hasNativeTrack = false))
+        // The default is today's behaviour on every plan.
+        for (mode in listOf("direct", "remux", "transcode")) {
+            assertFalse(subtitlesReadyFromFirstFrame(SubtitleReadiness.OnDemand, mode, hasNativeTrack = true))
+        }
+    }
+
+    @Test
+    fun instantSubtitleSwitchingOpensTheFirstSessionWithRenditions() {
+        // Cold start, nothing selected: the plan session is already the
+        // native-rendition session, so the first selection is in place.
+        val coldStart = subtitleRoute(
+            null, "remux", SubtitleDelivery.Plan,
+            readiness = SubtitleReadiness.Instant, hasNativeTrack = true,
+        )
+        assertEquals(SubtitleDelivery.NativeSession, coldStart.delivery)
+        assertFalse(
+            subtitleRoute(
+                srt(1), "remux", SubtitleDelivery.NativeSession,
+                readiness = SubtitleReadiness.Instant, hasNativeTrack = true,
+            ).reopen,
+        )
+        // Off again stays on the session — turning subtitles back on must not
+        // cost a second restart.
+        assertEquals(
+            SubtitleRoute(SubtitleDelivery.NativeSession, reopen = false),
+            subtitleRoute(
+                null, "transcode", SubtitleDelivery.NativeSession,
+                readiness = SubtitleReadiness.Instant, hasNativeTrack = true,
+            ),
+        )
+    }
+
+    @Test
+    fun instantSubtitleSwitchingChangesNothingWhereItCannotHelp() {
+        // Direct play: the plan, exactly as under the default.
+        assertEquals(
+            SubtitleRoute(SubtitleDelivery.Plan, reopen = false),
+            subtitleRoute(
+                null, "direct", SubtitleDelivery.Plan,
+                readiness = SubtitleReadiness.Instant, hasNativeTrack = true,
+            ),
+        )
+        // A file with only bitmap tracks: no rendition to keep ready.
+        assertEquals(
+            SubtitleRoute(SubtitleDelivery.Plan, reopen = false),
+            subtitleRoute(
+                null, "remux", SubtitleDelivery.Plan,
+                readiness = SubtitleReadiness.Instant, hasNativeTrack = false,
+            ),
+        )
+        // The default keeps the on-demand shape: plan first, one reopen on
+        // the first selection. Same answers as the untouched call above.
+        assertEquals(
+            subtitleRoute(null, "remux", SubtitleDelivery.Plan),
+            subtitleRoute(
+                null, "remux", SubtitleDelivery.Plan,
+                readiness = SubtitleReadiness.OnDemand, hasNativeTrack = true,
+            ),
+        )
+    }
+
+    @Test
+    fun anInstantSessionWithNothingSelectedAdvertisesRenditionsOnly() {
+        // What the cold-start create posts under "Instant": the master with
+        // every native track, no initial selection, no burn, the video copied.
+        // `native_subtitles` without `subtitle` is the shape hls.rs answers
+        // with a bare `master.m3u8`.
+        val body = subtitleSessionBody(
+            playbackId = "pb", requestId = "rq", startSeconds = 0.0,
+            delivery = SubtitleDelivery.NativeSession, subtitleIndex = null,
+            copyableVideo = true, aac = false, preserveDolbyVision = false,
+            audioIndex = 0, audioOffsetMs = 0,
+            quality = PlaybackQuality.Auto, sourceHeight = 1080,
+        )
+        assertEquals(true, body.native_subtitles)
+        assertNull(body.subtitle)
+        assertNull(body.subtitle_burn)
+        assertEquals(true, body.copy)
+        assertNull(body.height)
     }
 
     // ---- ordinal mapping ---------------------------------------------------

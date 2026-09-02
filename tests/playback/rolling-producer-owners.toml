@@ -608,7 +608,13 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-exact-playback-route-read"
 pattern = "media_session_route_for_playback"
-expected_occurrences = 1
+# 1 -> 7 with M6's preparation-executor tests. All six additions are
+# assertions inside `mod tests`: each one reads the pointer to prove what a
+# stage, a commit, a lost CAS, an abort or a refused stage did or did not do
+# to it. The single shipped read is unchanged and still the only one — the
+# executor itself never reads the pointer, which is the point: the store's
+# CAS decides, and a read-then-act here would be a second authority.
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -623,7 +629,11 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-exact-activation-handoff-arm"
 pattern = "arm_media_session_handoff"
-expected_occurrences = 1
+# 1 -> 2, and the addition is a doc comment rather than a call: M6's commit
+# test names this as the thing that would publish a committed successor,
+# because "the pointer advanced" and "the viewer has a stream" were being
+# conflated. No new caller; the arming path is untouched.
+expected_occurrences = 2
 
 [[module_symbols]]
 id = "m4-durable-projection-completion-proof"
@@ -653,17 +663,30 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-activation-publication-handoff-fence"
 pattern = "publication_ready_at_ms"
-expected_occurrences = 68
+# 68 -> 71 with M6's preparation-executor tests: one confirmation of the
+# activation that advances the pointer out from under a staged successor, and
+# two assertions that a *commit* leaves the fence at the sentinel. All three
+# are test-only. The fence is not moved by any new shipped path — a commit
+# updates the lease and nothing else, exactly as before.
+expected_occurrences = 71
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
 pattern = "MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS"
-expected_occurrences = 3
+# 3 -> 4: M6's lost-CAS test confirms a *replacement*, which carries a
+# predecessor, so its confirmation must name a publication instant a full
+# safety window out — zero is only valid for a first activation. Test-only,
+# and it uses the constant rather than restating it so the test moves with it.
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-durable-publication-blocked-sentinel"
 pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
-expected_occurrences = 20
+# 20 -> 22 with M6's preparation-executor tests: the activation that advances
+# the pointer sets it, and the commit test asserts a committed successor is
+# still at it. Both test-only; no shipped path writes or clears the sentinel
+# that did not before.
+expected_occurrences = 22
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -753,7 +776,13 @@ expected_occurrences = 10
 [[module_symbols]]
 id = "m4-durable-terminal-cause"
 pattern = "terminal_reason"
-expected_occurrences = 18
+# 18 -> 20 with M6's preparation-executor tests. Both additions assert
+# `replaced` — the cause `abort_staged_generation` writes — on the abandoned
+# successor of a lost CAS and on the row a refused stage rolled back. They are
+# there because an empty preparation ledger is satisfied by a row that was
+# never created as much as by one that was torn down, and only the cause tells
+# the two apart. No new writer of a terminal cause.
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -979,7 +1008,22 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # aborted and awaited, its successor is joined after the preserved start floor,
 # and the hostile error-body HTTP fixture is aborted before its test returns.
 # All four are test-only owners; none detaches a producer, timer, or process.
-expected_occurrences = 375
+# 375 -> 378 with M6's preparation executor. The three additions are the
+# `oneshot::channel()` pairs behind `stage_preparation`,
+# `may_commit_preparation` and `settle_preparation` — bounded actor round
+# trips of the same shape as `snapshot` and `poll_producer_decision`, awaited
+# by the caller that opened them. Each owns no producer, no timer and no
+# process: the actor answers on its own mailbox and the sender is dropped when
+# that arm returns, so a retired actor closes the channel rather than leaving a
+# waiter detached. Reviewed as part of the M6 preparation slot's executor.
+# 378 -> 379 with the executor's own tests: `preparation_fixture` spawns one
+# `RollingControlHandle` per test, which is the ordinary test-actor shape
+# already counted a dozen times over. It is owned by the handle the fixture
+# returns; dropping the last handle closes the sender and the run loop exits,
+# so nothing outlives the test. It owns no producer, no process and no timer
+# beyond the actor's own lease clock, and no test in the group advances that
+# clock.
+expected_occurrences = 379
 
 [[module_structures]]
 id = "method-spawn"

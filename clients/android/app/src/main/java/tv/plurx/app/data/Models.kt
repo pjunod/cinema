@@ -442,7 +442,7 @@ data class Marker(
 ) {
     /**
      * A `preview` is never automatic whatever its provenance. The preference
-     * this gates is spelled "Auto-skip intro and credits" on every surface
+     * this gates is spelled "Skip intros and credits" on every surface
      * that offers it, and a preview is the one kind that is new footage every
      * week: skipping it is a choice about this episode's ending, not a
      * standing preference about repeated material. The button still appears.

@@ -4182,6 +4182,155 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(SettingsStore(defaults: defaults).subtitleReadiness, .instant)
     }
 
+    /// The Settings → Playback → Quality preference: Auto on a fresh install
+    /// and for any value this build cannot read, and remembered across a
+    /// relaunch under the same storage values the Android client uses.
+    func testPlaybackQualityDefaultsToAutoAndPersistsARung() throws {
+        let suite = "tv.plurx.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let fresh = SettingsStore(defaults: defaults)
+        XCTAssertEqual(fresh.playbackQuality, .auto)
+
+        defaults.set("8k", forKey: "plurx.playbackQuality")
+        XCTAssertEqual(SettingsStore(defaults: defaults).playbackQuality, .auto)
+
+        fresh.playbackQuality = .p720
+        XCTAssertEqual(defaults.string(forKey: "plurx.playbackQuality"), "720")
+        XCTAssertEqual(SettingsStore(defaults: defaults).playbackQuality, .p720)
+
+        fresh.playbackQuality = .original
+        XCTAssertEqual(defaults.string(forKey: "plurx.playbackQuality"), "original")
+        XCTAssertEqual(SettingsStore(defaults: defaults).playbackQuality, .original)
+    }
+
+    /// Off until a person turns it on — the Android default — and remembered
+    /// once they do.
+    func testSkipIntrosAndCreditsDefaultsOffAndPersistsAChange() throws {
+        let suite = "tv.plurx.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let fresh = SettingsStore(defaults: defaults)
+        XCTAssertFalse(fresh.autoSkip)
+
+        fresh.autoSkip = true
+        XCTAssertTrue(SettingsStore(defaults: defaults).autoSkip)
+
+        fresh.autoSkip = false
+        XCTAssertFalse(SettingsStore(defaults: defaults).autoSkip)
+    }
+
+    /// The menu matches the Android client's, storage value for storage value,
+    /// and each choice spells the `/decision` override the server actually
+    /// parses: a bare height would read as Auto and silently do nothing for a
+    /// direct or remux verdict, so every rung asks to *transcode* and leaves
+    /// the height to the session create.
+    func testPlaybackQualityChoicesMatchTheAndroidClientAndSpellTheDecisionOverride() {
+        XCTAssertEqual(
+            PlaybackQuality.allCases.map(\.rawValue),
+            ["auto", "original", "2160", "1440", "1080", "720", "480", "360"]
+        )
+        XCTAssertEqual(
+            PlaybackQuality.allCases.map(\.label),
+            ["Auto", "Original", "4K · 2160p", "1440p", "1080p", "720p", "480p", "360p"]
+        )
+        XCTAssertEqual(
+            PlaybackQuality.allCases.map(\.rungHeight),
+            [nil, nil, 2_160, 1_440, 1_080, 720, 480, 360]
+        )
+
+        XCTAssertNil(PlaybackQuality.auto.decisionForce)
+        XCTAssertEqual(PlaybackQuality.original.decisionForce, "original")
+        for rung in PlaybackQuality.allCases where rung.rungHeight != nil {
+            XCTAssertEqual(rung.decisionForce, "transcode", rung.rawValue)
+        }
+
+        // Auto adds nothing, so an ordinary play's request stays what it was.
+        XCTAssertEqual(PlaybackQuality.auto.decisionQueryItems, [])
+        XCTAssertEqual(
+            PlaybackQuality.p1080.decisionQueryItems,
+            [URLQueryItem(name: "force", value: "transcode")]
+        )
+        XCTAssertEqual(
+            PlaybackQuality.original.decisionQueryItems,
+            [URLQueryItem(name: "force", value: "original")]
+        )
+    }
+
+    /// The rung a title starts on. Auto and Original name none — a rung under
+    /// Original would force the transcode it exists to refuse — and a rung is
+    /// snapped to the tallest advertised one at or below it, never an
+    /// upscale, with no ladder at all falling back to server Auto.
+    func testStartingHeightSnapsThePreferenceToTheAdvertisedLadder() {
+        let ladder = [
+            QualityRung(height: 1_080, totalKbps: 8_000, peakKbps: 12_000),
+            QualityRung(height: 720, totalKbps: 4_000, peakKbps: 6_000),
+            QualityRung(height: 480, totalKbps: 2_000, peakKbps: 3_000),
+        ]
+
+        XCTAssertNil(PlayerController.startingHeight(for: .auto, ladder: ladder))
+        XCTAssertNil(PlayerController.startingHeight(for: .original, ladder: ladder))
+        XCTAssertEqual(PlayerController.startingHeight(for: .p720, ladder: ladder), 720)
+        XCTAssertEqual(
+            PlayerController.startingHeight(for: .p2160, ladder: ladder),
+            1_080,
+            "a 1080p title under 4K plays at 1080p rather than being upscaled"
+        )
+        XCTAssertEqual(
+            PlayerController.startingHeight(for: .p1440, ladder: ladder),
+            1_080,
+            "a rung the ladder dropped snaps down to the next advertised one"
+        )
+        XCTAssertNil(
+            PlayerController.startingHeight(for: .p360, ladder: ladder),
+            "nothing at or below the choice leaves the server's Auto rung"
+        )
+        XCTAssertNil(PlayerController.startingHeight(for: .p1080, ladder: []))
+    }
+
+    /// The automatic seek fires once per marker per playback, only while the
+    /// preference is on and only for a marker the eligibility rule admits.
+    /// Turning the preference on later still skips a marker it never had a
+    /// chance at, and a preview keeps its button whatever the preference says.
+    func testMarkerAutoSkipLedgerFiresOncePerMarkerAndOnlyWhenEligible() {
+        let intro = Marker(
+            kind: "intro", label: "Skip Intro", startMs: 1_000, endMs: 9_000,
+            chapter: true, provenance: "authored"
+        )
+        let credits = Marker(
+            kind: "credits", label: "Skip Credits", startMs: 80_000, endMs: 90_000,
+            chapter: true, provenance: "authored"
+        )
+        let preview = Marker(
+            kind: "preview", label: "Skip Preview", startMs: 90_000, endMs: 95_000,
+            chapter: true, provenance: "authored"
+        )
+        let estimate = Marker(
+            kind: "intro", label: "Skip Intro", startMs: 1_000, endMs: 9_000,
+            chapter: false, provenance: "estimated"
+        )
+        var ledger = MarkerAutoSkipLedger()
+
+        XCTAssertFalse(ledger.shouldSkip(intro, autoSkip: false))
+        XCTAssertTrue(ledger.shouldSkip(intro, autoSkip: true), "off did not spend the intro")
+        XCTAssertFalse(ledger.shouldSkip(intro, autoSkip: true), "one seek per marker")
+        XCTAssertTrue(ledger.shouldSkip(credits, autoSkip: true))
+        XCTAssertFalse(ledger.shouldSkip(preview, autoSkip: true))
+        XCTAssertFalse(ledger.shouldSkip(estimate, autoSkip: true))
+
+        // What the button reads: withheld exactly when the seek would fire.
+        XCTAssertTrue(MarkerAutoSkipLedger.isAutomatic(intro, autoSkip: true))
+        XCTAssertFalse(MarkerAutoSkipLedger.isAutomatic(intro, autoSkip: false))
+        XCTAssertFalse(MarkerAutoSkipLedger.isAutomatic(preview, autoSkip: true))
+        XCTAssertFalse(MarkerAutoSkipLedger.isAutomatic(estimate, autoSkip: true))
+
+        // A new playback starts with a fresh ledger.
+        var next = MarkerAutoSkipLedger()
+        XCTAssertTrue(next.shouldSkip(intro, autoSkip: true))
+    }
+
     func testNativeAppearanceSettingsPreserveTheExistingLookAndPersistChoices() throws {
         let suite = "tv.plurx.tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

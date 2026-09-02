@@ -25,6 +25,7 @@ import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.OfflineNetwork
 import tv.plurx.app.data.OfflineQuality
 import tv.plurx.app.data.PosterSize
+import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.ThemeId
 import tv.plurx.app.data.User
 import tv.plurx.app.data.ViewerPreferences
@@ -415,6 +416,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setHomeGrouping(grouping: HomeGrouping) = updatePreferences { copy(homeGrouping = grouping) }
 
     fun setPlaybackQuality(quality: PlaybackQuality) = updatePreferences { copy(playbackQuality = quality) }
+
+    fun setSubtitleReadiness(readiness: SubtitleReadiness) =
+        updatePreferences { copy(subtitleReadiness = readiness) }
 
     fun setAutoSkip(enabled: Boolean) = updatePreferences { copy(autoSkip = enabled) }
 

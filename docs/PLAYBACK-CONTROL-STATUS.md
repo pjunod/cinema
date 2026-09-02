@@ -1,11 +1,14 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-09-01 · **Baseline:** `main` at `1888647` (`v0.3.0`) ·
-**Fleet:** all four nodes serve `v0.3.0-49-g03b4daa3`, verified off
-`/api/v1/server` · **Devices:** Apple 99 and Android 56 were **installed** on
-2026-08-31; the web arm of the acceptance has since passed on nuc3 and the
-device arms remain unrun — see §"The first fleet run" and §"M5c is struck" ·
-the tree is Android 60 · Apple 104
+**Updated:** 2026-09-02 · **Baseline:** `main` at `c8ce837` (`v0.3.0`) ·
+**Fleet:** level again — all four on `v0.3.0-260-g5b127370`, read off
+`/metrics` 2026-09-02. **nuc3 is a non-voting learner** answering `readyz` 503
+`quorum unavailable`; the other three hold quorum (required 2) with zero
+leader changes, so nothing is degraded, but nuc3 serves only bounded catalogue
+reads and node-local routes · **Devices:** Apple 99 and Android 56 were **installed** on
+2026-08-31; the web arm of the acceptance passed on nuc3, and M5.5 has since
+measured all three platforms on hardware — see §"M5.5 ran, and two thirds of
+it settled" · the tree is Android 60 · Apple 104
 
 Companion to
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) (what
@@ -30,7 +33,7 @@ one is deleted.
 | 5 | delete detached recovery loops | — | merged as #663 |
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [execution](M5.5-SPIKE-EXECUTION-HANDOFF.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike **ran 2026-09-01 on all three platforms** and is complete: web and Android `false`, **Apple `true`** after a corrective instrument pass — see §"M5.5 ran, and two thirds of it settled" |
-| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) | **ready to build** — M5.5 measured, three of the roadmap's open questions answered, and the interruption bound starts at 2,246 ms |
+| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) · [caller](M6-CALLER-HANDOFF.md) | **building — the server decides, but cannot yet notice.** Slot [#792](https://github.com/pjunod/plurx/pull/792) · executor [#793](https://github.com/pjunod/plurx/pull/793) · its outcomes pinned [#796](https://github.com/pjunod/plurx/pull/796) · the decision [#798](https://github.com/pjunod/plurx/pull/798) · where the caller goes [#800](https://github.com/pjunod/plurx/pull/800)/[#802](https://github.com/pjunod/plurx/pull/802). **Still no production caller** — see §"M6 is building, and what it does not yet reach" |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it". R-M1 closes the unknown-readiness contract and carries the dated [large-MKV observation](M7-M1-LARGE-MKV-OBSERVATION.md); R-M2 remains gated on R-M1 acceptance. **M4 (burn-join) is a separate active effort**, not part of this remediation; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
@@ -88,7 +91,29 @@ merge target: two client PRs in flight means the second always fails.
 | acceptance | read the commit and the builds, do not quote them | [#734](https://github.com/pjunod/plurx/pull/734) | merged |
 | status | what item 8 actually delivered, and the M5.5 store half | [#735](https://github.com/pjunod/plurx/pull/735) | merged |
 | release | v0.3.0: the API, the config and both schemas moved | [#736](https://github.com/pjunod/plurx/pull/736) | merged |
-| prewarm | withhold a rate that has no possible numerator | [#738](https://github.com/pjunod/plurx/pull/738) | this change |
+| prewarm | withhold a rate that has no possible numerator | [#738](https://github.com/pjunod/plurx/pull/738) | merged |
+| M7 readiness | tell the client whether its subtitles are ready | [#741](https://github.com/pjunod/plurx/pull/741) | merged |
+| M7 subtitles | serve a windowed sidecar while the whole track warms | [#742](https://github.com/pjunod/plurx/pull/742) | merged |
+| M7 M3 | a seek storm produces work for one destination | [#754](https://github.com/pjunod/plurx/pull/754) | merged |
+| M7 M3 close | the HTTP refusal is tested, and every client orders its seeks | [#785](https://github.com/pjunod/plurx/pull/785) | merged |
+| method | a compiler for a checkout that has none | [#757](https://github.com/pjunod/plurx/pull/757) · [#786](https://github.com/pjunod/plurx/pull/786) | merged |
+| M5.5 execution | the execution wrapper the spike was missing | [#776](https://github.com/pjunod/plurx/pull/776) | merged; **run 2026-09-01** |
+| M6 handoff | the numbers M6 was waiting for | [#787](https://github.com/pjunod/plurx/pull/787) · [#788](https://github.com/pjunod/plurx/pull/788) | merged |
+| M6 slot | the preparation slot, and that a disconnect is not a commit | [#792](https://github.com/pjunod/plurx/pull/792) | merged |
+| M6 executor | the executor, and three authorities in order | [#793](https://github.com/pjunod/plurx/pull/793) | merged |
+| M6 tests | the executor's three durable outcomes, pinned | [#796](https://github.com/pjunod/plurx/pull/796) | merged |
+| M6 decision | prepare or fall back, and why it is one axis | [#798](https://github.com/pjunod/plurx/pull/798) | merged |
+| M6 caller | where the decision is made, and the five slices after it | [#800](https://github.com/pjunod/plurx/pull/800) · [#802](https://github.com/pjunod/plurx/pull/802) | merged |
+| M6 retention | the session keeps the capability it was told once | [#801](https://github.com/pjunod/plurx/pull/801) | merged |
+| M6 grade axis | read the grade off the request, on both sides | [#805](https://github.com/pjunod/plurx/pull/805) · [#807](https://github.com/pjunod/plurx/pull/807) | merged |
+| status | what M6 landed, and what it cannot yet do | [#804](https://github.com/pjunod/plurx/pull/804) | merged |
+| status | M6's night, closed out | — | this change |
+
+Status-only PRs are not listed: #746, #747, #751, #755, #759, #777, #781,
+#783 and #784 each updated this page and changed nothing else. Nor are the
+concurrent lanes — CI acceleration, the replicated-Store and topology contract
+work, M7 M4 burn-join, the Settings reorganisation — which have their own
+owners.
 
 **What item 8 did not deliver.** §6 item 8 names five things: exact
 intro/credits annotations, subtitle windows, force-analysis controls,
@@ -463,6 +488,133 @@ cancel work the viewer wants.
 than the accepted sequence: a create can outrun the snapshot that justifies it,
 and a client reporting a *higher* sequence can only look less superseded, which
 is the safe direction. Apple 108, Android 64.
+
+## M6 is building, and what it does not yet reach
+
+Three PRs, in the order the design demands: the actor's slot
+([#792](https://github.com/pjunod/plurx/pull/792)), the executor that performs
+the durable half ([#793](https://github.com/pjunod/plurx/pull/793)), and this
+change, which pins what those two actually do.
+
+**The shape, and why it is this shape.** The actor decides, the executor
+performs, the store's own compare-and-swap settles it — three authorities in
+that order, and none may be skipped. The slot lives in the actor rather than
+in the HTTP handler because the actor is already the ordering authority: it
+accepts control sequences, fences producer attempts and owns the terminal
+transition. A preparation committable from outside that ordering would be a
+second authority over one playback, which is the mechanism M7's plan warns
+against building a third of.
+
+**What is now pinned by tests, against a real `SqliteStore`:**
+
+- a staged successor commits, advances the pointer, and leaves neither a
+  ledger row nor a slot the actor is still holding;
+- a commit whose pointer moved **loses, and never reaps the newer player
+  generation that won** — the whole reason the predecessor is recorded at
+  preparation time rather than read fresh at commit;
+- an abort tears down only the successor; the current stream stays
+  authoritative and playable, and a retried abort reads back the same outcome
+  rather than a spurious loss;
+- the durable row is created *before* the slot is taken, so a slot that
+  refuses undoes the row — otherwise a successor nobody owns counts against
+  the user's admission cap until the maintenance backstop runs.
+
+Those are the first three of the roadmap's §3.1 phases, and they are the ones
+testable without hardware, which is why they came first.
+
+**What it now decides.** `decide_preparation`
+([#798](https://github.com/pjunod/plurx/pull/798)) takes the delivered
+selection, a candidate one, the client's *retained* capability and what the
+link has shown, and answers prepare or fall back. Four things about it are
+worth knowing, because three of them were wrong in the first draft and the
+review caught them:
+
+- **The prepared axis promises *same delivery method, same delivered grade* —
+  not "same codec".** `EffectiveSelection.codec` takes exactly two values,
+  `source` and `server_selected`, so H.264 against HEVC is invisible in it.
+  Today a real codec change drags the grade with it, because the SDR rungs are
+  H.264 and the HDR10 rung is HEVC Main10 — but that invariant lives in
+  `plurx_core::playback` and an AV1 or HEVC-SDR rung breaks it. Had the axis
+  been called "codec", a real codec change would eventually have classified as
+  a resolution change and been prepared.
+- **Throughput is a gate.** M6 handoff §8 asked for it by name, and the axis M6
+  prepares is the worst place to omit it: an Auto rung change is the one
+  transition a client reaches without a viewer touching anything, and the
+  reason it fires is usually that the link just degraded. The rule is a floor
+  rather than a model — observed at least twice what this session already
+  delivers — and either value missing is a refusal.
+- **The capability read is the retained one.** Clients must send
+  `capabilities` only on sequence 1, so anything reading the live snapshot sees
+  `None` from exchange two onward for the rest of the session.
+  [#801](https://github.com/pjunod/plurx/pull/801) retains it.
+- **The grade axis is read off the request on both sides**
+  ([#807](https://github.com/pjunod/plurx/pull/807)), as a `GradeIntent`
+  carrying the HDR10 rung and the two Dolby Vision answers.
+  `EffectiveSelection.dynamic_range` is the grade the *encoder* settled on, and
+  a candidate recipe that will never be built has no encoder — so comparing the
+  two compares unlike things. Both alternatives are worse and both look
+  reasonable: giving the candidate no grade fails **unsafe**, letting a real
+  grade change classify as resolution-only and be prepared; giving it the grade
+  its body asked for fails safe but *constantly*, so a session whose HDR10 rung
+  the encoder refused never gets a prepared handoff again.
+
+**Where it stops.** There is **no production caller**. Nothing in the
+HTTP layer stages a successor, so on today's fleet the executor is exercised
+only by tests, and `#[cfg_attr(not(test), allow(dead_code))]` says so rather
+than an invented caller written to satisfy a lint. Two things gate the caller,
+and neither is a code problem:
+
+1. **The capability reads `false` on all three clients.** M5.5 measured Apple
+   `true` on hardware, but `Caps.swift:264`,
+   `PlaybackControlSnapshotMapper.kt:276` and `index.html:6142` still
+   hardcode `false`. M6 **reads** that field rather than re-deriving it
+   ([M6-IMPLEMENTATION-HANDOFF.md](M6-IMPLEMENTATION-HANDOFF.md) §1), so
+   until a coordinated client release flips Apple's literal, a correct server
+   prepares on nothing.
+2. **The capability is too coarse to carry the finding.** Every platform came
+   back recipe- and device-dependent, and a bare boolean cannot say *yes for
+   this recipe on this device*. Narrowing it is a v1 protocol change and
+   M6's to decide deliberately — handoff §3.
+
+**Where the caller goes is now settled**, in
+[M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md): the control exchange decides and
+the actor still fences. Three of `decide_preparation`'s four inputs already
+converge in `control_local_inner`; the fourth — a *candidate* recipe — does not
+exist anywhere, because the client sends intent (`ClientSelection`: Auto,
+`CodecPolicy::Auto`) and the decision needs delivered output. Resolving one
+into the other is work `hls::create` already does and nothing else can call.
+
+The decision does not live in the actor because the actor would have to acquire
+plan resolution — the store, the render caps, the ladder — and it is a bounded
+mailbox with a lease clock where every store read is a new way to miss an
+exchange deadline. What must not move does not move: `stage_preparation` still
+refuses an occupied slot and a terminal playback, `may_commit_preparation`
+still refuses a forgotten successor, and `terminate` still aborts what it
+holds. The exchange proposes; the actor disposes.
+
+**What is left, in order** ([M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3,
+with the extraction map in §3.2.1):
+
+1. candidate resolution becomes callable — one span of `create`, of which only
+   the height resolution is inline. Its map is
+   [M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.2.1, **including the
+   correction**: the delivered grade is not predictable for an unbuilt recipe,
+   which is why the axis moved to the request;
+2. shadow mode: decide, emit the metric, change nothing. This is what turns
+   `PREPARED_AXIS` from an argument into a measurement;
+3. stage on `Prepare` — the first behaviour change, which fires on nothing
+   until a client release flips Apple's literal;
+4. the commit trigger — blocked on the acknowledgements, and not on code.
+
+**The disconnect-does-not-imply-commit property is already covered**, in
+`plurx-core`'s own contract suite on three voters
+(`media_session_maintenance_reaps_an_abandoned_preparation`): after the
+preparation lease expires, maintenance frees the slot and the predecessor is
+still current and active. Both backends reap the ledger inside
+`maintain_media_sessions`, keyed on the successor's *state* rather than on the
+deadline, so it can never race a live preparation whose owner is still
+renewing. A duplicate of that test at the executor level was written and
+discarded as vacuous.
 
 ## M5.5 ran, and two thirds of it settled
 

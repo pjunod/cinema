@@ -1430,7 +1430,10 @@ struct PlayerView: View {
         VStack(alignment: .leading, spacing: 8) {
             playbackInfoHeader
 
-            if let marker = controller.activeMarker {
+            // `offeredMarker`, not `activeMarker`: a marker the Skip preference
+            // is about to take gets no button, so nothing flashes before the
+            // automatic seek and no offer is reported for a skip nobody chose.
+            if let marker = controller.offeredMarker {
                 PlayerTrailingControlRow {
                     markerButton(marker)
                 }

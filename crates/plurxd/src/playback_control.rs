@@ -843,6 +843,360 @@ impl EffectiveSelection {
     }
 }
 
+/// Which axis of the *delivered* selection a proposed transition crosses.
+///
+/// Named for what [`EffectiveSelection`] can actually see, which is less than
+/// the recipe — see [`PreparationDecision::Unchanged`]. In particular
+/// `DeliveryMethod` is **not** a codec: the field it reads takes exactly two
+/// values, `source` and `server_selected`, so it distinguishes direct
+/// play/remux from a transcode and nothing finer. H.264 against HEVC is
+/// invisible here and always has been; today a real codec change drags
+/// `dynamic_range` with it because the SDR rungs are H.264 and the HDR10 rung
+/// is HEVC Main10, but that invariant lives in `plurx_core::playback` and is
+/// not asserted by this module. An AV1 or HEVC-SDR rung would break it, which
+/// is why `ResolutionOrBitrate` promises *same delivery method and same
+/// delivered grade* rather than "same codec".
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PreparationAxis {
+    /// Same delivery method, same delivered grade, different height — or a
+    /// move between Auto and a pinned rung.
+    ResolutionOrBitrate,
+    AudioTrackOrOffset,
+    /// A burned subtitle change, and only that. A native text track is not a
+    /// video replacement at all (plan §5.2) and never reaches this type.
+    SubtitleBurn,
+    /// Direct play/remux against transcode.
+    DeliveryMethod,
+    DynamicRange,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl PreparationAxis {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ResolutionOrBitrate => "resolution_or_bitrate",
+            Self::AudioTrackOrOffset => "audio_track_or_offset",
+            Self::SubtitleBurn => "subtitle_burn",
+            Self::DeliveryMethod => "delivery_method",
+            Self::DynamicRange => "dynamic_range",
+        }
+    }
+}
+
+/// Why a transition that crosses an axis is not being prepared.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FallbackReason {
+    /// No retained `dual_player_preparation`. See [`decide_preparation`] on
+    /// why this must be the *retained* capability rather than this exchange's.
+    ClientCannotPrepare,
+    /// The client can prepare, but not across this axis.
+    AxisNotProven,
+    /// More than one axis moves at once. Each is separately measured; a
+    /// combination is measured by nothing.
+    MultipleAxes,
+    /// The client has not shown it can carry a second pipeline. M6 handoff §8:
+    /// dual preparation doubles network demand and the constrained link is
+    /// exactly the case M5.5 did not test.
+    ThroughputUnproven,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl FallbackReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientCannotPrepare => "client_cannot_prepare",
+            Self::AxisNotProven => "axis_not_proven",
+            Self::MultipleAxes => "multiple_axes",
+            Self::ThroughputUnproven => "throughput_unproven",
+        }
+    }
+}
+
+/// What M6 does about a delivered-selection change while a stream is playing.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreparationDecision {
+    /// The **delivered selection** is unchanged. Deliberately not "the recipe
+    /// is unchanged": [`EffectiveSelection`] describes the output, not the
+    /// request, and carries no `file_id`, `start_seconds`, `aac` or
+    /// `convert_dolby_vision`. A next episode at the same height, a seek, an
+    /// AAC re-encode toggle and a Profile 7 → 8.1 rewrite all compare equal
+    /// here. **The caller owns those**; this answers only the question it can
+    /// see.
+    Unchanged,
+    /// Stage a successor and commit it when the client says it is ready.
+    Prepare { axis: PreparationAxis },
+    /// Replace the stream the way the fleet does today, and **do not call it
+    /// seamless**. Plan §5.2 draws that line and M5.5 gave it numbers: the
+    /// worst observed fallback interruption is 2,246 ms, on Safari, and
+    /// Apple's is unmeasured because Apple never exercised the fallback.
+    ///
+    /// `axis` is the **hardest** axis crossed, by [`PreparationAxis`]'s own
+    /// ordering, so an operator grouping refusals by axis sees the constraint
+    /// that actually bound rather than whichever field happened to move too.
+    Fallback {
+        axis: PreparationAxis,
+        reason: FallbackReason,
+    },
+}
+
+/// What the client has shown about the link it is on.
+///
+/// Present because M6's handoff §8 asks for it by name: *"treat a prepared
+/// handoff on a contended link as unproven and gate it on the client's own
+/// observed throughput rather than on the capability alone."* The whole spike
+/// ran on a steady shaped 80 Mbit/s link, so the constrained case — the one
+/// where doubling demand hurts — is measured by nothing.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreparationConditions {
+    /// The client's own observed download rate, as it reported it.
+    pub observed_download_bps: Option<u64>,
+    /// What this session is currently delivering, as the server measured it.
+    pub delivered_bps: Option<i64>,
+}
+
+impl PreparationConditions {
+    /// Whether the link has shown room for a second pipeline.
+    ///
+    /// The rule is a floor, not a model: **observed throughput at least twice
+    /// what this session is already delivering.** A prime runs a second
+    /// pipeline beside the first, so twice the current rate is the least that
+    /// could carry it; the successor's own rate is not knowable from
+    /// [`EffectiveSelection`], which carries a height and no bitrate, so a
+    /// tighter rule would be a guess wearing a number.
+    ///
+    /// **Either value missing is a refusal, not a pass.** A client that has
+    /// not reported its throughput has not shown headroom, and M5.5 measured
+    /// nothing about contended links — so the honest default is the fallback
+    /// the fleet already takes. This is also the residual worth re-reading if
+    /// prepared handoffs turn out never to fire: on a healthy link the ratio
+    /// is comfortable, but a session whose `delivered_bps` is not yet measured
+    /// refuses on that alone.
+    fn have_headroom_for_a_second_pipeline(&self) -> bool {
+        let (Some(observed), Some(delivered)) = (self.observed_download_bps, self.delivered_bps)
+        else {
+            return false;
+        };
+        let Ok(delivered) = u64::try_from(delivered) else {
+            return false;
+        };
+        delivered > 0 && observed >= delivered.saturating_mul(2)
+    }
+}
+
+/// The grade a recipe *asks for*, which is the only grade two recipes can be
+/// compared on.
+///
+/// [`EffectiveSelection::dynamic_range`] carries the grade the encoder
+/// actually built, and that is the right thing for a badge — `create`'s own
+/// comment says so: *"the server refuses the HDR10 rung for a source or a rung
+/// that cannot prove it, and the badge has to follow the encoder."* It is the
+/// wrong thing for a *candidate*, because a recipe that will never be built
+/// has no encoder and therefore no such grade.
+///
+/// Comparing an encoder's answer against a request would fail in one of two
+/// ways, both bad: a candidate given no grade lets a real grade change
+/// classify as resolution-only and be **prepared**, which is exactly what
+/// `PREPARED_AXIS` exists to prevent; a candidate given the grade its body
+/// asked for reads as a crossing on *every* exchange of a session whose HDR10
+/// rung the encoder refused, so that viewer never gets a prepared handoff at
+/// all.
+///
+/// So the grade axis is read off the request on both sides. Both are available
+/// where the decision is made: the exchange holds the session's own
+/// `RemoteStartRequest` and resolves the candidate's.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GradeIntent {
+    /// The HDR10 rung was asked for. After the plan review, so this is the
+    /// server's answer to the client's ask rather than the ask itself.
+    pub hdr10: bool,
+    /// Dolby Vision RPUs survive the bitstream filter.
+    pub preserve_dolby_vision: bool,
+    /// Profile 7 RPUs are rewritten to Profile 8.1 on the way through. Beside
+    /// preserving rather than inside it because they answer different
+    /// questions, and a viewer can see the difference between them.
+    pub convert_dolby_vision: bool,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl GradeIntent {
+    pub(crate) fn from_request(request: &crate::transcode::SessionRequest) -> Self {
+        let (preserve_dolby_vision, convert_dolby_vision) = match &request.kind {
+            SessionKind::Copy {
+                preserve_dolby_vision,
+                convert_dolby_vision,
+                ..
+            } => (*preserve_dolby_vision, *convert_dolby_vision),
+            // A transcode never carries RPUs through: the two questions only
+            // arise for a copy, and answering them `false` for a transcode is
+            // a statement about the output rather than a default.
+            SessionKind::Transcode { .. } => (false, false),
+        };
+        Self {
+            hdr10: request.hdr10,
+            preserve_dolby_vision,
+            convert_dolby_vision,
+        }
+    }
+}
+
+/// One side of a proposed transition: what is delivered, and what was asked
+/// for.
+///
+/// Two halves because neither answers alone. The selection carries the height,
+/// the delivery method and the audio and subtitle facts; the intent carries
+/// the grade, which the selection can only report after an encoder has settled
+/// it.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecipeView<'a> {
+    pub selection: &'a EffectiveSelection,
+    pub grade: GradeIntent,
+}
+
+/// The only axis M6 prepares across, and the reason it is one rather than a
+/// set.
+///
+/// M5.5 measured every platform **recipe- and device-dependent**, and in both
+/// directions: Safari passes same-codec and fails codec/HDR, while the
+/// tunneled Google TV passes codec/HDR 20/20 and fails same-codec 0/3 — the
+/// *harder* case works and the easier one does not. So no single axis is safe
+/// on every device that reports `true`, and the capability cannot say which,
+/// because a bare boolean cannot express "yes for this recipe on this device".
+///
+/// The decision, made deliberately per M6's handoff §3 rather than
+/// discovered: **honour the boolean and additionally restrict the server to
+/// resolution/bitrate.**
+///
+/// * It is the only axis plan §5.2 expects to be transparent, so the only one
+///   where "prepared" and "seamless" can be the same claim.
+/// * It is the common case — a quality change on the same source.
+/// * Both required Apple devices passed it 20/20.
+///
+/// **The residual, which is not small.** Apple passed *both* cases 20/20, so
+/// on the only platform that will report `true` in the foreseeable future this
+/// restriction discriminates nothing and its whole effect is to refuse
+/// codec/grade transitions that were measured twice on two devices. And on the
+/// device with the only hard failure it points the wrong way: the Google TV's
+/// 0/3 was on *same-codec*, and M5.5's own leading explanation is two
+/// identical tunneled pipelines contending for one decoder or audio track. If
+/// that reading is right, restricting to same-method-same-grade selects that
+/// precondition rather than avoiding it — and an
+/// `ERROR_CODE_AUDIO_TRACK_WRITE_FAILED` is a fault in the shared audio path,
+/// which is worse than the 2,246 ms this is trading against.
+///
+/// Android's platform-wide `false` is what holds that device back today. The
+/// capability keyed by axis **and device class** is therefore not a nice-to-
+/// have for unlocking Android's two phones; it is what has to exist before
+/// this constant is safe for the television class. Recorded here rather than
+/// argued around, because this constant is the entire server-side expression
+/// of the restriction and whoever narrows the capability will read it.
+#[cfg_attr(not(test), allow(dead_code))]
+const PREPARED_AXIS: PreparationAxis = PreparationAxis::ResolutionOrBitrate;
+
+/// Decide, from the delivered selection and a candidate one, whether M6
+/// prepares.
+///
+/// **Reads the capability. Never re-derives it.** M5.5 exists because three
+/// capability literals had been written by assumption, and a server that
+/// inferred "Apple can prepare" from the platform enum would be the fourth.
+/// When Apple's literal flips to `true` this starts preparing on Apple with no
+/// server change, which is handoff §1's whole point.
+///
+/// `retained` is the capability document the session is **holding**, not this
+/// exchange's. `ControlRequestV1::validate` requires `capabilities` only on
+/// sequence 1 and permits every later exchange to omit them, so absent-on-this-
+/// exchange means "already told you" and reading it as `false` would refuse
+/// every transition a capable client ever makes. `None` here must therefore
+/// mean *this session has never been told*, and the caller owns the retention.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn decide_preparation(
+    delivered: RecipeView<'_>,
+    candidate: RecipeView<'_>,
+    retained: Option<&DynamicCapabilities>,
+    conditions: PreparationConditions,
+) -> PreparationDecision {
+    let (delivered_grade, candidate_grade) = (delivered.grade, candidate.grade);
+    let (delivered, candidate) = (delivered.selection, candidate.selection);
+    let mut crossed: Option<PreparationAxis> = None;
+    let mut multiple = false;
+    // The hardest axis wins, by the enum's own ordering rather than by the
+    // order these happen to be written. Both plan §5.2 and roadmap §3.3 rank
+    // resolution/bitrate most transparent, then audio and burned subtitles,
+    // then the delivery method and the grade — so `max` is the ranking, and
+    // regrouping these statements cannot silently change an operator metric.
+    let mut cross = |axis: PreparationAxis| {
+        multiple |= crossed.is_some();
+        crossed = Some(crossed.map_or(axis, |held: PreparationAxis| held.max(axis)));
+    };
+
+    if delivered.codec != candidate.codec {
+        cross(PreparationAxis::DeliveryMethod);
+    }
+    // Read off the request on both sides, never off `dynamic_range` — see
+    // `GradeIntent`. The delivered selection's grade is the encoder's answer,
+    // and a candidate that will never be built has no encoder to answer for
+    // it, so comparing the two would be comparing unlike things.
+    if delivered_grade != candidate_grade {
+        cross(PreparationAxis::DynamicRange);
+    }
+    if delivered.audio_track != candidate.audio_track
+        || delivered.audio_offset_ms != candidate.audio_offset_ms
+    {
+        cross(PreparationAxis::AudioTrackOrOffset);
+    }
+    if delivered.subtitle_burn != candidate.subtitle_burn {
+        cross(PreparationAxis::SubtitleBurn);
+    }
+    if delivered.height != candidate.height || delivered.quality_auto != candidate.quality_auto {
+        cross(PreparationAxis::ResolutionOrBitrate);
+    }
+
+    let Some(axis) = crossed else {
+        return PreparationDecision::Unchanged;
+    };
+    if multiple {
+        // Each axis is separately measured and a combination is measured by
+        // nothing. M5.5 ran two cases, not their product, and the Google TV's
+        // inversion is exactly the evidence that axes do not compose the way
+        // reasoning would predict.
+        //
+        // Ranked above the capability deliberately: this is the fact that
+        // would still be true after a coordinated client release flipped the
+        // literal, so the metric stays stable across that release. The cost is
+        // that a fleet whose clients all report `false` books its multi-axis
+        // transitions here rather than under `client_cannot_prepare`, which
+        // understates how much of the fallback volume is the literals'.
+        return PreparationDecision::Fallback {
+            axis,
+            reason: FallbackReason::MultipleAxes,
+        };
+    }
+    if !retained.is_some_and(|caps| caps.dual_player_preparation) {
+        return PreparationDecision::Fallback {
+            axis,
+            reason: FallbackReason::ClientCannotPrepare,
+        };
+    }
+    if axis != PREPARED_AXIS {
+        return PreparationDecision::Fallback {
+            axis,
+            reason: FallbackReason::AxisNotProven,
+        };
+    }
+    if !conditions.have_headroom_for_a_second_pipeline() {
+        return PreparationDecision::Fallback {
+            axis,
+            reason: FallbackReason::ThroughputUnproven,
+        };
+    }
+    PreparationDecision::Prepare { axis }
+}
+
 pub(crate) fn target_duration_ms(recipe: &crate::media_sessions::RemoteStartRequest) -> i64 {
     let seconds = match &recipe.request.kind {
         SessionKind::Copy { .. } => plurx_core::transcode::COPY_SEGMENT_MAX_SECS,
@@ -2379,6 +2733,263 @@ pub(crate) struct ActionProposal {
     pub reason: ProducerDecisionReason,
     pub source: &'static str,
     pub severity: &'static str,
+}
+
+/// Performs a preparation's durable half, gated by the actor that owns the
+/// slot.
+///
+/// The actor decides and this executes; the store's own CAS decides the
+/// outcome. Three separate authorities, in that order, and none of them may
+/// be skipped:
+///
+/// * the actor answers whether this successor is still wanted,
+/// * the store answers whether the pointer still names the recorded
+///   predecessor,
+/// * the actor is told which happened and frees the slot.
+///
+/// The gate and the store call cannot be one transaction, so the actor is
+/// asked as late as possible and told as soon as an answer exists. The window
+/// between them is exactly why `settle` re-checks identity rather than
+/// trusting the gate's earlier `true`.
+// Exercised by tests against a real `SqliteStore` — the three phases M6's
+// acceptance names are testable without hardware, and they are the ones worth
+// pinning before a caller exists. Still no production caller until the HTTP
+// layer stages a successor, hence the non-test allow rather than an invented
+// one: a caller written to satisfy a lint is how a mechanism ends up with a
+// shape nobody chose.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct PreparationExecutor {
+    store: std::sync::Arc<dyn plurx_core::store::Store>,
+    control: RollingControlHandle,
+    user_id: i64,
+    playback_id: String,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl PreparationExecutor {
+    pub(crate) fn new(
+        store: std::sync::Arc<dyn plurx_core::store::Store>,
+        control: RollingControlHandle,
+        user_id: i64,
+        playback_id: String,
+    ) -> Self {
+        Self {
+            store,
+            control,
+            user_id,
+            playback_id,
+        }
+    }
+
+    /// Stage a successor: durable row first, then the slot.
+    ///
+    /// That order is deliberate. If the row is created and the slot refuses,
+    /// this aborts the row it just made — a staged row nobody owns is reaped
+    /// only by the maintenance backstop, and until then it counts against the
+    /// user's admission cap for a successor that will never commit. The
+    /// reverse order would instead leave the actor believing in a successor
+    /// the store rejected, which is worse: a commit could then name it.
+    pub(crate) async fn stage(
+        &self,
+        preparation: &plurx_core::domain::MediaSessionPreparation,
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        if self
+            .store
+            .prepare_media_session(preparation)
+            .await?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        if self
+            .control
+            .stage_preparation(
+                preparation.incarnation_id.clone(),
+                preparation.expected_predecessor_incarnation_id.clone(),
+            )
+            .await
+        {
+            return Ok(true);
+        }
+        let _ = self
+            .store
+            .abort_media_session_preparation(
+                self.user_id,
+                &self.playback_id,
+                &preparation.incarnation_id,
+                preparation.now_ms,
+            )
+            .await;
+        Ok(false)
+    }
+
+    /// Commit a staged successor, or abort it if the pointer moved.
+    ///
+    /// `Ok(false)` covers both refusals and means the same thing to a caller:
+    /// this successor is not becoming current. The distinction that matters is
+    /// invisible from here and deliberate — a lost CAS aborts the staged
+    /// generation and **never reaps the newer player generation** that won,
+    /// which is why the predecessor is recorded at preparation time rather
+    /// than read fresh at commit.
+    pub(crate) async fn commit(
+        &self,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        if !self
+            .control
+            .may_commit_preparation(staged_incarnation_id)
+            .await
+        {
+            return Ok(false);
+        }
+        let committed = self
+            .store
+            .commit_media_session_preparation(
+                self.user_id,
+                &self.playback_id,
+                staged_incarnation_id,
+                now_ms,
+                lease_expires_at_ms,
+            )
+            .await?
+            .is_some();
+        if !committed {
+            // The pointer moved. On both backends the store's own lost-CAS
+            // branch has already run `abort_staged_generation` before
+            // returning `Ok(None)`, so this call is normally a guaranteed
+            // no-op — every write inside that helper is gated on the ledger
+            // row it has just deleted. It is kept, and kept idempotent, for
+            // the branch the store documents as unreachable (a committed
+            // projection that cannot be read back rolls its transaction
+            // *back*, restoring the ledger row) and so a backend that ever
+            // stopped tearing down on its own does not silently leave a row
+            // the actor has already forgotten. Do not read it as the
+            // teardown: the store's is.
+            let _ = self
+                .store
+                .abort_media_session_preparation(
+                    self.user_id,
+                    &self.playback_id,
+                    staged_incarnation_id,
+                    now_ms,
+                )
+                .await;
+        }
+        self.control
+            .settle_preparation(staged_incarnation_id, committed)
+            .await;
+        Ok(committed)
+    }
+
+    /// Discard a staged successor and leave the current stream authoritative.
+    ///
+    /// The slot is settled whatever the store says. A row that is already
+    /// ended, or that was never staged, leaves nothing for the actor to hold —
+    /// and an owner retrying an abort after a crash must read back the same
+    /// outcome rather than a spurious loss.
+    pub(crate) async fn abort(
+        &self,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<(), plurx_core::error::StoreError> {
+        self.store
+            .abort_media_session_preparation(
+                self.user_id,
+                &self.playback_id,
+                staged_incarnation_id,
+                now_ms,
+            )
+            .await?;
+        self.control
+            .settle_preparation(staged_incarnation_id, false)
+            .await;
+        Ok(())
+    }
+}
+
+/// The state of this playback's single preparation slot.
+///
+/// M6 stages a successor while the current stream still plays and commits only
+/// once the successor says it is ready. The store half of that already exists
+/// and is contract-tested on three voters — `prepare_media_session`,
+/// `rejoin_media_session_preparation`, `commit_media_session_preparation`,
+/// `abort_media_session_preparation` — and had no caller. This is the actor's
+/// half: the slot's lifecycle, and who is allowed to move it.
+///
+/// It lives in the actor rather than in the HTTP handler because the actor is
+/// already the ordering authority — it accepts control sequences, fences
+/// producer attempts and owns the terminal transition — and a preparation that
+/// could be committed from outside that ordering would be a second authority
+/// over the same playback. The actor decides; an executor performs the durable
+/// call; the outcome is reported back. That is the shape producer decisions
+/// already use, deliberately: M7's plan warns against building a third
+/// mechanism, and a preparation lifecycle invented beside the decision
+/// lifecycle would be exactly that.
+/// `abort_preparation` has a production caller in `terminate`; the rest are
+/// the actor's half of a lifecycle whose executor half is M6's next slice.
+/// Marked the way `ProducerDecision` is, and for the same reason: the
+/// alternative is inventing a caller to satisfy the lint, which is how a
+/// mechanism ends up with a shape nobody chose. Remove this the moment the
+/// executor lands.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PreparationSlot {
+    /// Nothing staged. The current generation is the only one.
+    Empty,
+    /// A successor is staged and the durable row exists. `predecessor` is the
+    /// incarnation the commit must find the pointer still naming — recorded at
+    /// preparation time rather than read at commit time, because a pointer that
+    /// moved means a newer player generation exists and the correct outcome is
+    /// to abort this successor rather than reap that one.
+    Staged {
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+    },
+    /// The successor is being torn down. Terminal for this slot: an abort that
+    /// is under way cannot become a commit, or a disconnect could publish a
+    /// successor nobody asked for.
+    Aborting { staged_incarnation_id: String },
+}
+
+impl PreparationSlot {
+    pub(crate) fn staged_incarnation_id(&self) -> Option<&str> {
+        match self {
+            Self::Empty => None,
+            Self::Staged {
+                staged_incarnation_id,
+                ..
+            }
+            | Self::Aborting {
+                staged_incarnation_id,
+            } => Some(staged_incarnation_id),
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Whether a commit may be attempted for this exact successor.
+    ///
+    /// Identity is checked rather than assumed: a commit naming a successor
+    /// this slot is not holding is a stale executor speaking for a preparation
+    /// that has already been replaced, and honouring it would advance the
+    /// pointer to an incarnation the actor has forgotten.
+    pub(crate) fn may_commit(&self, staged_incarnation_id: &str) -> bool {
+        matches!(
+            self,
+            Self::Staged {
+                staged_incarnation_id: staged,
+                ..
+            } if staged == staged_incarnation_id
+        )
+    }
+
+    /// Whether an abort may be attempted for this exact successor. An abort
+    /// already under way is idempotent — an owner retrying after a crash must
+    /// read back the same outcome rather than a spurious loss.
+    pub(crate) fn may_abort(&self, staged_incarnation_id: &str) -> bool {
+        self.staged_incarnation_id() == Some(staged_incarnation_id)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -3979,6 +4590,30 @@ enum RollingControlCommand {
         after_sequence: u64,
         reply: tokio::sync::oneshot::Sender<ProducerDecisionPoll>,
     },
+    /// Take the preparation slot for a successor. `false` when it is already
+    /// occupied or the playback is terminal.
+    StagePreparation {
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    /// Ask whether this exact successor may still be committed, immediately
+    /// before the durable CAS. The gate and the store call cannot be one
+    /// transaction, so the actor is asked as late as possible and its answer
+    /// is re-checked on the way back in `SettlePreparation`.
+    MayCommitPreparation {
+        staged_incarnation_id: String,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    /// Report a preparation's durable outcome. `committed` false covers both a
+    /// completed abort and a lost commit CAS — the store returning `Ok(None)`
+    /// because the pointer no longer names the recorded predecessor. Both free
+    /// the slot; neither reaps the newer generation.
+    SettlePreparation {
+        staged_incarnation_id: String,
+        committed: bool,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     #[cfg(test)]
     InstallProducerDecision {
         decision: ProducerDecision,
@@ -4097,6 +4732,9 @@ impl RollingControlCommand {
             Self::ClassifyCopyProducerExit { .. } => Some(18),
             Self::ApplyProducerFlow { .. } => Some(19),
             Self::SettleProducerFlowSignal { .. } => Some(20),
+            Self::StagePreparation { .. } => Some(21),
+            Self::MayCommitPreparation { .. } => Some(22),
+            Self::SettlePreparation { .. } => Some(23),
             Self::ObservePublication { .. } => Some(4),
             Self::CommitMedia { .. } => Some(5),
             Self::CommitGenerationMetadata { .. } => Some(14),
@@ -4755,7 +5393,33 @@ struct RollingControlActor {
     last_renewal_kind: &'static str,
     mode: RollingLeaseMode,
     demand: Option<PlaybackDemandSnapshot>,
+    /// The capability document this session is holding, not this exchange's.
+    ///
+    /// `ControlRequestV1::validate` requires `capabilities` only on sequence 1
+    /// and permits every later exchange to omit them, so a consumer reading
+    /// the live snapshot sees `None` for the whole session after the first
+    /// message. For a field meaning *this device can hold two live pipelines*
+    /// that would refuse every transition a capable client ever makes — which
+    /// is every transition that will actually happen.
+    ///
+    /// Last write wins over `Some`. A client that changes its answer
+    /// mid-session is telling the truth about a device that changed — a
+    /// television that woke a second decoder, a phone that lost one — so the
+    /// newer document is the right one and no reconciliation is owed.
+    ///
+    /// **Nothing clears this on an owner-epoch advance, and it cannot go
+    /// stale anyway.** An advance resets `client_instance_id`, after which the
+    /// next accepted exchange must be sequence 1, and a sequence-1 exchange
+    /// that carries no capabilities fails twice over: `validate` rejects the
+    /// body, and the fence's `platform.ok_or(StaleClient)` rejects the accept.
+    /// So the exchange that could read a stale document is the exchange that
+    /// has just overwritten it.
+    retained_capabilities: Option<DynamicCapabilities>,
     settled_target: Option<SettledTarget>,
+    /// This playback's single preparation slot. One per playback is already
+    /// the store's invariant; holding it here makes the actor the only thing
+    /// that can move it.
+    preparation: PreparationSlot,
     delivery: RollingDeliverySnapshot,
     producer_progress_at: Option<Instant>,
     producer_exit_at: Option<Instant>,
@@ -4856,7 +5520,9 @@ impl RollingControlActor {
             last_renewal_kind: initial_kind,
             mode: RollingLeaseMode::Legacy,
             demand: None,
+            retained_capabilities: None,
             settled_target: None,
+            preparation: PreparationSlot::Empty,
             delivery: RollingDeliverySnapshot::default(),
             producer_progress_at: None,
             producer_exit_at: None,
@@ -5459,6 +6125,17 @@ impl RollingControlActor {
         true
     }
 
+    /// The capability document this session is holding.
+    ///
+    /// Read this, never the live snapshot's — see the field's own doc. M6's
+    /// preparation decision takes exactly this value, because a capability
+    /// that reads `None` from sequence 2 onward is a capability that refuses
+    /// every transition a capable client ever makes.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn retained_capabilities(&self) -> Option<&DynamicCapabilities> {
+        self.retained_capabilities.as_ref()
+    }
+
     fn control_at(
         &mut self,
         now: Instant,
@@ -5507,6 +6184,12 @@ impl RollingControlActor {
                 sequence: accepted_sequence,
                 anchor_ms: request.snapshot.buffer_anchor_ms(),
             });
+            // Retained before the snapshot is moved, and only over `Some`:
+            // an exchange that omits capabilities is one that has already
+            // told us, not one that has changed its mind.
+            if let Some(capabilities) = &request.snapshot.capabilities {
+                self.retained_capabilities = Some(capabilities.clone());
+            }
             self.demand = Some(request.snapshot);
             if accepted_end {
                 self.last_renewal_kind = "control-end";
@@ -5812,6 +6495,66 @@ impl RollingControlActor {
         self.pending_decision = Some(decision);
         self.decision_committed_at = Some(committed_at);
         self.decision_wake.executor_observation.queue_decision();
+        true
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Record that a successor has been staged.
+    ///
+    /// Refused when the slot is occupied. One preparation per playback is the
+    /// store's invariant and the ledger's primary key enforces it; refusing
+    /// here as well means the actor never believes in a second successor the
+    /// store would reject, which is what would let a commit name the wrong one.
+    fn stage_preparation(
+        &mut self,
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+    ) -> bool {
+        if self.retired || self.terminal.is_some() {
+            return false;
+        }
+        if !matches!(self.preparation, PreparationSlot::Empty) {
+            return false;
+        }
+        self.preparation = PreparationSlot::Staged {
+            staged_incarnation_id,
+            predecessor_incarnation_id,
+        };
+        true
+    }
+
+    /// Move the slot to aborting, and say whether this call is the one that
+    /// moved it.
+    ///
+    /// `false` covers an empty slot, a different successor, and an abort
+    /// already under way. None of those is an error: an owner retrying after a
+    /// crash must read back the same outcome, and a stale executor must not be
+    /// able to tear down a successor that replaced the one it knew about.
+    fn abort_preparation(&mut self, staged_incarnation_id: &str) -> bool {
+        if !self.preparation.may_abort(staged_incarnation_id) {
+            return false;
+        }
+        let already = matches!(self.preparation, PreparationSlot::Aborting { .. });
+        self.preparation = PreparationSlot::Aborting {
+            staged_incarnation_id: staged_incarnation_id.to_owned(),
+        };
+        !already
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Clear the slot once its durable outcome is known.
+    ///
+    /// Called for a committed successor and for a completed abort alike: after
+    /// either, this playback has no staged generation. Commit's own CAS lives
+    /// in the store, and its `Ok(None)` — the pointer no longer names the
+    /// recorded predecessor — reaches the actor as an abort rather than a
+    /// commit, which is the rule that keeps a lost race from reaping a newer
+    /// player generation.
+    fn settle_preparation(&mut self, staged_incarnation_id: &str) -> bool {
+        if self.preparation.staged_incarnation_id() != Some(staged_incarnation_id) {
+            return false;
+        }
+        self.preparation = PreparationSlot::Empty;
         true
     }
 
@@ -7163,6 +7906,17 @@ impl RollingControlActor {
         }
         self.retired = true;
         self.terminal = Some(cause);
+        // A disconnect does not imply a commit. Whatever ended this playback --
+        // an explicit end, a fence, or the lease simply expiring -- a successor
+        // that was staged but never committed must be torn down, and the
+        // current generation left authoritative if it is healthy. Moving the
+        // slot to `Aborting` here is what makes that true by construction: a
+        // commit arriving afterwards finds `may_commit` false and cannot
+        // publish a successor the viewer never waited for.
+        if let Some(staged) = self.preparation.staged_incarnation_id() {
+            let staged = staged.to_owned();
+            self.abort_preparation(&staged);
+        }
         self.decision_wake
             .terminal_projection
             .store(cause.projection(), Ordering::Release);
@@ -7374,6 +8128,46 @@ impl RollingControlActor {
                     reply,
                 } => {
                     let _ = reply.send(self.poll_producer_decision_at(after_sequence));
+                }
+                RollingControlCommand::StagePreparation {
+                    staged_incarnation_id,
+                    predecessor_incarnation_id,
+                    reply,
+                } => {
+                    let staged =
+                        self.stage_preparation(staged_incarnation_id, predecessor_incarnation_id);
+                    let _ = reply.send(staged);
+                }
+                RollingControlCommand::MayCommitPreparation {
+                    staged_incarnation_id,
+                    reply,
+                } => {
+                    let _ = reply.send(self.preparation.may_commit(&staged_incarnation_id));
+                }
+                RollingControlCommand::SettlePreparation {
+                    staged_incarnation_id,
+                    committed,
+                    reply,
+                } => {
+                    // A commit that lost its CAS is reported here as
+                    // `committed: false`, and it must land as an abort rather
+                    // than as nothing: the successor still exists durably and
+                    // something has to own tearing it down.
+                    //
+                    // The `Aborting` state this writes is not observable from
+                    // outside — the actor is single-threaded, so `settle`
+                    // empties the slot in the same turn and no other command
+                    // can interleave. It is written anyway because the two
+                    // calls are the abort lifecycle's own steps, and a future
+                    // settle that must await anything durable would otherwise
+                    // open exactly the window this ordering closes. A retry
+                    // of the same commit is refused either way: `may_commit`
+                    // is false against `Empty` as much as against `Aborting`.
+                    if !committed {
+                        self.abort_preparation(&staged_incarnation_id);
+                    }
+                    let settled = self.settle_preparation(&staged_incarnation_id);
+                    let _ = reply.send(settled);
                 }
                 #[cfg(test)]
                 RollingControlCommand::InstallProducerDecision { decision, reply } => {
@@ -8673,6 +9467,73 @@ impl RollingControlHandle {
         response.await.map_err(|_| ControlStateError::Unavailable)?
     }
 
+    /// Take the preparation slot for a successor whose durable row already
+    /// exists. `false` when the slot is occupied or the playback is terminal —
+    /// in both cases the caller must abort the row it just created, because
+    /// nothing else knows about it.
+    pub(crate) async fn stage_preparation(
+        &self,
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+    ) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command(RollingControlCommand::StagePreparation {
+                staged_incarnation_id,
+                predecessor_incarnation_id,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
+    /// Whether this exact successor may still be committed. Asked immediately
+    /// before the durable CAS and re-checked after it, because the gate and
+    /// the call cannot be one transaction.
+    pub(crate) async fn may_commit_preparation(&self, staged_incarnation_id: &str) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command(RollingControlCommand::MayCommitPreparation {
+                staged_incarnation_id: staged_incarnation_id.to_owned(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
+    /// Report a preparation's durable outcome and free the slot.
+    ///
+    /// A retired actor cannot be told, and that is not a failure: its
+    /// `terminate` already moved the slot to aborting, which is the same
+    /// conclusion this call would reach.
+    pub(crate) async fn settle_preparation(
+        &self,
+        staged_incarnation_id: &str,
+        committed: bool,
+    ) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command(RollingControlCommand::SettlePreparation {
+                staged_incarnation_id: staged_incarnation_id.to_owned(),
+                committed,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
     pub(crate) async fn snapshot(&self) -> Option<RollingLeaseSnapshot> {
         let (reply, response) = tokio::sync::oneshot::channel();
         self.enqueue_command(RollingControlCommand::Snapshot { reply })
@@ -9050,7 +9911,7 @@ static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new
 static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-static ROLLING_CONTROL_COMMANDS: [AtomicU64; 21] = [const { AtomicU64::new(0) }; 21];
+static ROLLING_CONTROL_COMMANDS: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
 static ROLLING_PRODUCER_ACTION_DEADLINES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// End won/already-terminal, authority-fence won/already-terminal, then lease
 /// expiry won/already-terminal.
@@ -9443,6 +10304,9 @@ pub(crate) fn prometheus() -> String {
         "classify_copy_producer_exit",
         "apply_producer_flow",
         "settle_producer_flow_signal",
+        "stage_preparation",
+        "may_commit_preparation",
+        "settle_preparation",
     ]
     .iter()
     .enumerate()
@@ -10516,6 +11380,79 @@ mod tests {
         }
     }
 
+    /// The wire lets a client send capabilities once. Anything that reads
+    /// the live snapshot therefore sees `None` from sequence 2 onward — and
+    /// for `dual_player_preparation` that means refusing every transition a
+    /// capable client ever makes, which is every transition that will
+    /// actually happen.
+    #[test]
+    fn the_capability_document_is_retained_across_exchanges_that_omit_it() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert!(
+            actor.retained_capabilities().is_none(),
+            "a session that has not been told holds nothing"
+        );
+
+        let base = request();
+        let mut first = base.clone();
+        first.sequence = 1;
+        first.capabilities = first.capabilities.map(|mut caps| {
+            caps.dual_player_preparation = true;
+            caps
+        });
+        actor
+            .control_at(started + Duration::from_secs(1), owned_control(&first))
+            .expect("sequence 1 accepted");
+        assert!(
+            actor
+                .retained_capabilities()
+                .expect("retained after sequence 1")
+                .dual_player_preparation
+        );
+
+        // Two exchanges that say nothing about capabilities, which is what
+        // the wire contract permits and what real clients do.
+        for (sequence, seconds) in [(2, 2), (3, 3)] {
+            let mut later = base.clone();
+            later.sequence = sequence;
+            later.capabilities = None;
+            actor
+                .control_at(
+                    started + Duration::from_secs(seconds),
+                    owned_control(&later),
+                )
+                .expect("later exchange accepted");
+            assert!(
+                actor
+                    .retained_capabilities()
+                    .expect("still retained")
+                    .dual_player_preparation,
+                "sequence {sequence} omitted capabilities; it did not withdraw them",
+            );
+        }
+
+        // A client that sends a new document has changed its answer about a
+        // device that changed, so the newer one wins.
+        let mut revised = base.clone();
+        revised.sequence = 4;
+        revised.capabilities = revised.capabilities.map(|mut caps| {
+            caps.dual_player_preparation = false;
+            caps
+        });
+        actor
+            .control_at(started + Duration::from_secs(4), owned_control(&revised))
+            .expect("revision accepted");
+        assert!(
+            !actor
+                .retained_capabilities()
+                .expect("retained after revision")
+                .dual_player_preparation,
+            "last write wins over Some",
+        );
+    }
+
     #[test]
     fn a_seek_storm_settles_on_one_target_and_supersedes_every_earlier_one() {
         let started = Instant::now();
@@ -10615,6 +11552,185 @@ mod tests {
         let settled = actor.settled_target.expect("playback settles too");
         assert_eq!(settled.sequence, 2);
         assert_eq!(settled.anchor_ms, 1_512_000);
+    }
+
+    fn staged_actor() -> (RollingControlActor, Instant) {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert!(actor.stage_preparation("successor-1".to_owned(), "current-1".to_owned()));
+        (actor, started)
+    }
+
+    /// The slot is only useful if the executor can actually reach it, and the
+    /// executor reaches it through the actor's bounded mailbox rather than by
+    /// touching state. These drive a real spawned actor.
+    #[tokio::test]
+    async fn a_staged_successor_round_trips_through_the_actor_mailbox() {
+        let handle = RollingControlHandle::spawn("session-start");
+        assert!(
+            handle
+                .stage_preparation("successor-1".to_owned(), "current-1".to_owned())
+                .await
+        );
+        assert!(handle.may_commit_preparation("successor-1").await);
+        assert!(
+            !handle.may_commit_preparation("successor-2").await,
+            "a stale executor must not be told it may commit"
+        );
+        assert!(handle.settle_preparation("successor-1", true).await);
+        assert!(
+            handle
+                .stage_preparation("successor-2".to_owned(), "successor-1".to_owned())
+                .await,
+            "a committed successor frees the slot for the next preparation"
+        );
+        handle.abort_actor_for_test();
+    }
+
+    /// A commit that lost its CAS reports `committed: false`, and that must
+    /// free the slot exactly as a completed abort does. The successor still
+    /// exists durably, so leaving the slot occupied would strand the playback
+    /// with a preparation nothing can finish.
+    #[tokio::test]
+    async fn a_lost_commit_frees_the_slot_and_refuses_a_retry() {
+        let handle = RollingControlHandle::spawn("session-start");
+        assert!(
+            handle
+                .stage_preparation("successor-1".to_owned(), "current-1".to_owned())
+                .await
+        );
+        assert!(handle.settle_preparation("successor-1", false).await);
+        assert!(
+            !handle.may_commit_preparation("successor-1").await,
+            "a lost commit cannot be retried into a win"
+        );
+        assert!(
+            handle
+                .stage_preparation("successor-2".to_owned(), "current-1".to_owned())
+                .await
+        );
+        handle.abort_actor_for_test();
+    }
+
+    /// The end-to-end shape of "a disconnect does not imply a commit", driven
+    /// through the mailbox the executor actually uses.
+    #[tokio::test]
+    async fn an_ended_playback_refuses_the_commit_its_executor_was_about_to_make() {
+        let handle = RollingControlHandle::spawn("session-start");
+        assert!(
+            handle
+                .stage_preparation("successor-1".to_owned(), "current-1".to_owned())
+                .await
+        );
+        assert!(handle.may_commit_preparation("successor-1").await);
+
+        let ended = handle.terminate(RollingTerminalCause::End).await;
+        assert!(ended.is_ok());
+
+        assert!(
+            !handle.may_commit_preparation("successor-1").await,
+            "the executor's gate closes with the playback"
+        );
+        handle.abort_actor_for_test();
+    }
+
+    /// One preparation per playback is the store's invariant. The actor
+    /// refuses a second rather than believing in one the store would reject —
+    /// a slot holding a successor the ledger never accepted is how a commit
+    /// ends up naming the wrong incarnation.
+    #[test]
+    fn the_slot_holds_one_successor_and_refuses_a_competitor() {
+        let (mut actor, _) = staged_actor();
+        assert!(!actor.stage_preparation("successor-2".to_owned(), "current-1".to_owned()));
+        assert_eq!(
+            actor.preparation.staged_incarnation_id(),
+            Some("successor-1")
+        );
+    }
+
+    /// A commit names the exact successor it prepared. A stale executor
+    /// speaking for a preparation that has since been replaced must not be
+    /// able to advance the pointer to an incarnation the actor has forgotten.
+    #[test]
+    fn only_the_successor_the_slot_holds_may_commit() {
+        let (actor, _) = staged_actor();
+        assert!(actor.preparation.may_commit("successor-1"));
+        assert!(!actor.preparation.may_commit("successor-2"));
+    }
+
+    /// **Disconnect does not imply commit.** Whatever ends the playback, a
+    /// successor that was staged and never committed is torn down, and a
+    /// commit arriving afterwards is refused — otherwise a viewer who closed
+    /// the tab could publish a generation they never waited for.
+    #[test]
+    fn a_terminal_playback_aborts_a_staged_successor_and_refuses_a_late_commit() {
+        for cause in [
+            RollingTerminalCause::End,
+            RollingTerminalCause::LeaseExpired,
+        ] {
+            let (mut actor, _) = staged_actor();
+            assert!(actor.preparation.may_commit("successor-1"));
+
+            let outcome = actor.terminate(cause);
+            assert!(matches!(outcome, RollingTerminalOutcome::Won(_)));
+
+            assert!(
+                matches!(actor.preparation, PreparationSlot::Aborting { .. }),
+                "{cause:?} must leave the successor aborting"
+            );
+            assert!(
+                !actor.preparation.may_commit("successor-1"),
+                "{cause:?} must refuse a late commit"
+            );
+        }
+    }
+
+    /// An abort under way cannot become a commit. The transition is one-way
+    /// because the alternative is a race in which a slow abort and a slow
+    /// commit both believe they won.
+    #[test]
+    fn an_abort_in_flight_never_becomes_a_commit() {
+        let (mut actor, _) = staged_actor();
+        assert!(
+            actor.abort_preparation("successor-1"),
+            "first abort moves it"
+        );
+        assert!(
+            !actor.abort_preparation("successor-1"),
+            "a retried abort reports no movement rather than a spurious loss"
+        );
+        assert!(!actor.preparation.may_commit("successor-1"));
+        assert!(actor.preparation.may_abort("successor-1"));
+    }
+
+    /// A stale executor cannot tear down a successor that replaced the one it
+    /// knew about, and cannot clear a slot it does not hold.
+    #[test]
+    fn a_stale_executor_moves_nothing() {
+        let (mut actor, _) = staged_actor();
+        assert!(!actor.abort_preparation("successor-2"));
+        assert!(!actor.settle_preparation("successor-2"));
+        assert_eq!(
+            actor.preparation.staged_incarnation_id(),
+            Some("successor-1")
+        );
+    }
+
+    /// Settling clears the slot for a committed successor and a completed
+    /// abort alike: after either, this playback has no staged generation and
+    /// may prepare again.
+    #[test]
+    fn settling_frees_the_slot_for_the_next_preparation() {
+        for abort_first in [false, true] {
+            let (mut actor, _) = staged_actor();
+            if abort_first {
+                assert!(actor.abort_preparation("successor-1"));
+            }
+            assert!(actor.settle_preparation("successor-1"));
+            assert_eq!(actor.preparation, PreparationSlot::Empty);
+            assert!(actor.stage_preparation("successor-2".to_owned(), "current-1".to_owned()));
+        }
     }
 
     #[test]
@@ -14079,6 +15195,915 @@ mod tests {
             )
             .await,
             Err(ControlStateError::OwnerTransition)
+        );
+    }
+
+    fn playing(height: i64) -> EffectiveSelection {
+        EffectiveSelection {
+            quality_auto: false,
+            height,
+            audio_track: Some(0),
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            codec: "server_selected".to_owned(),
+            dynamic_range: Some("hdr10".to_owned()),
+        }
+    }
+
+    /// A recipe's grade intent. `sdr()` is the default both sides use, so a
+    /// test that does not mention the grade is testing a transition that does
+    /// not cross it.
+    fn sdr() -> GradeIntent {
+        GradeIntent {
+            hdr10: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        }
+    }
+
+    fn hdr10() -> GradeIntent {
+        GradeIntent {
+            hdr10: true,
+            ..sdr()
+        }
+    }
+
+    fn view(selection: &EffectiveSelection) -> RecipeView<'_> {
+        RecipeView {
+            selection,
+            grade: sdr(),
+        }
+    }
+
+    fn view_at(selection: &EffectiveSelection, grade: GradeIntent) -> RecipeView<'_> {
+        RecipeView { selection, grade }
+    }
+
+    fn can_prepare(dual_player_preparation: bool) -> DynamicCapabilities {
+        DynamicCapabilities {
+            platform: ClientPlatform::Apple,
+            max_height: 2160,
+            codecs: vec![CodecPolicy::H264, CodecPolicy::Hevc],
+            dynamic_ranges: vec![DynamicRangePolicy::Sdr, DynamicRangePolicy::Hdr10],
+            dual_player_preparation,
+        }
+    }
+
+    /// A link with room for a second pipeline: twice what this session is
+    /// delivering, with margin.
+    fn roomy() -> PreparationConditions {
+        PreparationConditions {
+            observed_download_bps: Some(80_000_000),
+            delivered_bps: Some(12_000_000),
+        }
+    }
+
+    /// The axis M6 prepares across, on a client that says it can, on a link
+    /// that has shown headroom — in **both** directions, because upshift is
+    /// the direction that raises demand and a rule that only ever tested
+    /// downshifts would not notice being restricted to them.
+    #[test]
+    fn a_resolution_change_on_a_capable_client_is_prepared() {
+        for (from, to) in [(2160, 1080), (1080, 2160)] {
+            assert_eq!(
+                decide_preparation(
+                    view(&playing(from)),
+                    view(&playing(to)),
+                    Some(&can_prepare(true)),
+                    roomy(),
+                ),
+                PreparationDecision::Prepare {
+                    axis: PreparationAxis::ResolutionOrBitrate,
+                },
+                "{from} -> {to}",
+            );
+        }
+        // Auto ↔ manual at the same delivered height is still a change: the
+        // ladder the successor climbs differs even when the first rung matches.
+        let mut auto = playing(1080);
+        auto.quality_auto = true;
+        assert_eq!(
+            decide_preparation(
+                view(&playing(1080)),
+                view(&auto),
+                Some(&can_prepare(true)),
+                roomy(),
+            ),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::ResolutionOrBitrate,
+            },
+        );
+    }
+
+    /// The capability is read, never re-derived. This is the test that fails
+    /// if someone infers "Apple can prepare" from the platform enum — the
+    /// mistake M5.5 exists because of.
+    #[test]
+    fn a_client_that_did_not_say_it_can_prepare_gets_the_fallback() {
+        assert_eq!(
+            decide_preparation(
+                view(&playing(2160)),
+                view(&playing(1080)),
+                Some(&can_prepare(false)),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::ResolutionOrBitrate,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+            "the platform is Apple and Apple measured true; the literal still says false",
+        );
+        assert_eq!(
+            decide_preparation(view(&playing(2160)), view(&playing(1080)), None, roomy()),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::ResolutionOrBitrate,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+            "a session that has never been told has not been told",
+        );
+        // And the capability outranks the axis: an incapable client crossing
+        // an unproven axis is reported as incapable, because that is the fact
+        // that would change if the literal flipped.
+        let playing = playing(2160);
+        assert_eq!(
+            decide_preparation(
+                view(&playing),
+                view_at(&playing, hdr10()),
+                Some(&can_prepare(false)),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DynamicRange,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+        );
+    }
+
+    /// Every other axis falls back even on a capable client, and names itself.
+    #[test]
+    fn the_unproven_axes_fall_back_and_name_themselves() {
+        let caps = can_prepare(true);
+        let mut method = playing(2160);
+        method.codec = "source".to_owned();
+        let mut audio = playing(2160);
+        audio.audio_track = Some(1);
+        let mut offset = playing(2160);
+        offset.audio_offset_ms = 250;
+        let mut burn = playing(2160);
+        burn.subtitle_burn = Some(3);
+        // Each Dolby Vision answer is its own crossing: preserving decides
+        // whether the RPUs survive the filter and converting decides whether
+        // they are rewritten, and a viewer can see the difference.
+        let preserve = GradeIntent {
+            preserve_dolby_vision: true,
+            ..sdr()
+        };
+        let convert = GradeIntent {
+            preserve_dolby_vision: true,
+            convert_dolby_vision: true,
+            ..sdr()
+        };
+
+        for (candidate, grade, axis) in [
+            (&method, sdr(), PreparationAxis::DeliveryMethod),
+            (&playing(2160), hdr10(), PreparationAxis::DynamicRange),
+            (&playing(2160), preserve, PreparationAxis::DynamicRange),
+            (&playing(2160), convert, PreparationAxis::DynamicRange),
+            (&audio, sdr(), PreparationAxis::AudioTrackOrOffset),
+            (&offset, sdr(), PreparationAxis::AudioTrackOrOffset),
+            (&burn, sdr(), PreparationAxis::SubtitleBurn),
+        ] {
+            assert_eq!(
+                decide_preparation(
+                    view(&playing(2160)),
+                    view_at(candidate, grade),
+                    Some(&caps),
+                    roomy(),
+                ),
+                PreparationDecision::Fallback {
+                    axis,
+                    reason: FallbackReason::AxisNotProven,
+                },
+                "{}",
+                axis.as_str(),
+            );
+        }
+    }
+
+    /// The grade intent is read off the request, and a transcode answers both
+    /// Dolby Vision questions `false` as a statement rather than a default:
+    /// a transcode never carries RPUs through.
+    #[test]
+    fn a_grade_intent_comes_off_the_request() {
+        use crate::transcode::SessionRequest;
+
+        fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
+            SessionRequest {
+                file_id: 1,
+                playback_id: "player-a".to_owned(),
+                request_id: None,
+                control_sequence: None,
+                automatic: false,
+                previous_session_id: None,
+                reopen_reason: None,
+                kind,
+                start_seconds: 0.0,
+                audio_index: None,
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                hdr10,
+                presentation: crate::transcode::Presentation::Vod,
+                block_budget_secs: None,
+            }
+        }
+
+        assert_eq!(
+            GradeIntent::from_request(&request(SessionKind::Transcode { height: 1080 }, true)),
+            GradeIntent {
+                hdr10: true,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+        );
+        assert_eq!(
+            GradeIntent::from_request(&request(
+                SessionKind::Copy {
+                    aac: true,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: true,
+                },
+                false,
+            )),
+            GradeIntent {
+                hdr10: false,
+                preserve_dolby_vision: true,
+                convert_dolby_vision: true,
+            },
+            "the AAC re-encode is an audio fact and is not a grade fact",
+        );
+        // Preserving without converting is a third answer, not a rounding of
+        // the other two: the RPUs survive but are not rewritten.
+        assert_ne!(
+            GradeIntent::from_request(&request(
+                SessionKind::Copy {
+                    aac: false,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: false,
+                },
+                false,
+            )),
+            GradeIntent::from_request(&request(
+                SessionKind::Copy {
+                    aac: false,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: true,
+                },
+                false,
+            )),
+        );
+    }
+
+    /// The wire vocabulary is the operator's, so it is pinned rather than
+    /// merely produced. Nothing else in the tree asserts these strings, and a
+    /// swapped pair would make every dashboard say the opposite of the truth
+    /// while every other test still passed.
+    #[test]
+    fn the_decision_vocabulary_is_fixed() {
+        assert_eq!(
+            PreparationAxis::ResolutionOrBitrate.as_str(),
+            "resolution_or_bitrate"
+        );
+        assert_eq!(
+            PreparationAxis::AudioTrackOrOffset.as_str(),
+            "audio_track_or_offset"
+        );
+        assert_eq!(PreparationAxis::SubtitleBurn.as_str(), "subtitle_burn");
+        assert_eq!(PreparationAxis::DeliveryMethod.as_str(), "delivery_method");
+        assert_eq!(PreparationAxis::DynamicRange.as_str(), "dynamic_range");
+        assert_eq!(
+            FallbackReason::ClientCannotPrepare.as_str(),
+            "client_cannot_prepare"
+        );
+        assert_eq!(FallbackReason::AxisNotProven.as_str(), "axis_not_proven");
+        assert_eq!(FallbackReason::MultipleAxes.as_str(), "multiple_axes");
+        assert_eq!(
+            FallbackReason::ThroughputUnproven.as_str(),
+            "throughput_unproven"
+        );
+    }
+
+    /// The hardest axis names the transition, by the enum's ordering rather
+    /// than by which comparison happens to be written first — so regrouping
+    /// those statements cannot silently change what an operator reads.
+    #[test]
+    fn two_axes_at_once_are_never_prepared_and_the_hardest_names_them() {
+        let caps = can_prepare(true);
+        let mut method_and_height = playing(1080);
+        method_and_height.codec = "source".to_owned();
+        let mut audio_and_burn = playing(2160);
+        audio_and_burn.audio_track = Some(1);
+        audio_and_burn.subtitle_burn = Some(3);
+        let mut burn = playing(2160);
+        burn.subtitle_burn = Some(3);
+        let mut everything = playing(720);
+        everything.codec = "source".to_owned();
+        everything.audio_track = Some(2);
+        everything.subtitle_burn = Some(1);
+
+        for (candidate, grade, axis) in [
+            (&method_and_height, sdr(), PreparationAxis::DeliveryMethod),
+            (&audio_and_burn, sdr(), PreparationAxis::SubtitleBurn),
+            (&burn, hdr10(), PreparationAxis::DynamicRange),
+            (&everything, hdr10(), PreparationAxis::DynamicRange),
+        ] {
+            assert_eq!(
+                decide_preparation(
+                    view(&playing(2160)),
+                    view_at(candidate, grade),
+                    Some(&caps),
+                    roomy(),
+                ),
+                PreparationDecision::Fallback {
+                    axis,
+                    reason: FallbackReason::MultipleAxes,
+                },
+                "{}",
+                axis.as_str(),
+            );
+        }
+    }
+
+    /// A link that has not shown room for a second pipeline does not get one.
+    ///
+    /// Handoff §8 asks for this by name: the spike ran on a steady shaped
+    /// link, so the constrained case is measured by nothing, and a prepared
+    /// handoff that causes the stall it exists to prevent is the worst
+    /// outcome available.
+    #[test]
+    fn a_link_that_has_not_shown_headroom_does_not_get_a_second_pipeline() {
+        let caps = can_prepare(true);
+        let refusals = [
+            (
+                "no margin at all",
+                PreparationConditions {
+                    observed_download_bps: Some(12_000_000),
+                    delivered_bps: Some(12_000_000),
+                },
+            ),
+            (
+                "a hair under twice",
+                PreparationConditions {
+                    observed_download_bps: Some(23_999_999),
+                    delivered_bps: Some(12_000_000),
+                },
+            ),
+            (
+                "the client never reported one",
+                PreparationConditions {
+                    observed_download_bps: None,
+                    delivered_bps: Some(12_000_000),
+                },
+            ),
+            (
+                "the server has not measured delivery yet",
+                PreparationConditions {
+                    observed_download_bps: Some(80_000_000),
+                    delivered_bps: None,
+                },
+            ),
+        ];
+        for (case, conditions) in refusals {
+            assert_eq!(
+                decide_preparation(
+                    view(&playing(2160)),
+                    view(&playing(1080)),
+                    Some(&caps),
+                    conditions,
+                ),
+                PreparationDecision::Fallback {
+                    axis: PreparationAxis::ResolutionOrBitrate,
+                    reason: FallbackReason::ThroughputUnproven,
+                },
+                "{case}",
+            );
+        }
+        // Exactly twice is the floor, and the floor passes.
+        assert_eq!(
+            decide_preparation(
+                view(&playing(2160)),
+                view(&playing(1080)),
+                Some(&caps),
+                PreparationConditions {
+                    observed_download_bps: Some(24_000_000),
+                    delivered_bps: Some(12_000_000),
+                },
+            ),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::ResolutionOrBitrate,
+            },
+        );
+    }
+
+    /// The delivered grade never votes. It is the encoder's answer, and a
+    /// candidate has no encoder — so a session whose HDR10 rung the encoder
+    /// refused must not read as a grade crossing on every exchange for the
+    /// rest of its life.
+    #[test]
+    fn the_encoders_answer_is_not_the_grade_the_decision_reads() {
+        let caps = can_prepare(true);
+        // The session asked for HDR10 and the encoder refused it: delivered
+        // says `sdr`, the request still says HDR10.
+        let mut refused = playing(2160);
+        refused.dynamic_range = Some("sdr".to_owned());
+        let mut lower = playing(1080);
+        lower.dynamic_range = Some("sdr".to_owned());
+        assert_eq!(
+            decide_preparation(
+                view_at(&refused, hdr10()),
+                view_at(&lower, hdr10()),
+                Some(&caps),
+                roomy(),
+            ),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::ResolutionOrBitrate,
+            },
+            "a plain quality change on a refused-HDR10 session is still a plain \
+             quality change",
+        );
+        // And the reverse: two sessions the encoder happened to deliver
+        // identically are still a grade change if their requests differ.
+        let mut delivered_alike = playing(2160);
+        delivered_alike.dynamic_range = Some("sdr".to_owned());
+        assert_eq!(
+            decide_preparation(
+                view_at(&delivered_alike, sdr()),
+                view_at(&delivered_alike, hdr10()),
+                Some(&caps),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DynamicRange,
+                reason: FallbackReason::AxisNotProven,
+            },
+            "the encoder agreeing does not make two different asks the same ask",
+        );
+    }
+
+    /// The same delivered selection is not a transition, whatever else is
+    /// true — and the early return is before every other gate, so a throttled
+    /// link and an incapable client both still read `Unchanged`.
+    #[test]
+    fn an_unchanged_selection_prepares_nothing() {
+        let starved = PreparationConditions {
+            observed_download_bps: Some(1),
+            delivered_bps: Some(12_000_000),
+        };
+        for caps in [Some(can_prepare(true)), Some(can_prepare(false)), None] {
+            for conditions in [roomy(), starved] {
+                assert_eq!(
+                    decide_preparation(
+                        view(&playing(2160)),
+                        view(&playing(2160)),
+                        caps.as_ref(),
+                        conditions,
+                    ),
+                    PreparationDecision::Unchanged,
+                );
+            }
+        }
+    }
+
+    fn staged_preparation(
+        incarnation_id: &str,
+        predecessor: &str,
+        now_ms: i64,
+    ) -> plurx_core::domain::MediaSessionPreparation {
+        plurx_core::domain::MediaSessionPreparation {
+            incarnation_id: incarnation_id.to_owned(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            user_id: 7,
+            playback_id: "player-a".to_owned(),
+            expected_predecessor_incarnation_id: predecessor.to_owned(),
+            request_fingerprint: "b".repeat(64),
+            owner_node_id: "node-a".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"staged"}"#.to_owned(),
+            media_origin_ms: 0,
+            now_ms,
+            // Derived, not literal: `validate_preparation` requires
+            // `deadline_ms > now_ms`, and the neighbouring tests in this
+            // module take `now_ms` from `unix_ms()`. A constant deadline
+            // silently becomes invalid the moment someone copies this helper
+            // into a test with a real clock, and it surfaces as a bare
+            // `.expect("stage")` panic with no hint of why.
+            deadline_ms: now_ms.saturating_add(798_000),
+        }
+    }
+
+    /// A live playback with one current generation, and the executor pointed
+    /// at it. Returns the predecessor's incarnation id alongside the pieces,
+    /// because every preparation names it and a preparation with the wrong
+    /// predecessor is refused before it reaches the slot.
+    async fn preparation_fixture(
+        now_ms: i64,
+    ) -> (
+        String,
+        Arc<dyn plurx_core::store::Store>,
+        RollingControlHandle,
+        PreparationExecutor,
+    ) {
+        use plurx_core::store::SqliteStore;
+
+        let concrete = SqliteStore::open_in_memory().expect("store");
+        let (predecessor, _) = activate_route(&concrete, now_ms, 900_000).await;
+        let store: Arc<dyn plurx_core::store::Store> = Arc::new(concrete);
+        let control = RollingControlHandle::spawn("session-start");
+        let executor = PreparationExecutor::new(
+            Arc::clone(&store),
+            control.clone(),
+            7,
+            "player-a".to_owned(),
+        );
+        (predecessor, store, control, executor)
+    }
+
+    /// M6 acceptance 1 — commit durability, on the happy path.
+    ///
+    /// The claim is not only that the pointer advances. It is that the
+    /// executor leaves nothing behind: no ledger row, and no slot the actor is
+    /// still holding for a successor it has already become.
+    #[tokio::test]
+    async fn preparation_executor_commits_a_staged_successor() {
+        let now_ms = 2_000;
+        let (predecessor, store, control, executor) = preparation_fixture(now_ms).await;
+
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(
+            executor
+                .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+                .await
+                .expect("stage"),
+            "a preparation naming the current pointer is admissible"
+        );
+        assert_eq!(
+            store
+                .staged_media_session_for_playback(7, "player-a")
+                .await
+                .expect("ledger")
+                .expect("a successor is staged")
+                .staged_incarnation_id,
+            successor,
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(7, "player-a")
+                .await
+                .expect("route while staged")
+                .expect("the playback still has a pointer")
+                .incarnation_id,
+            predecessor,
+            "staging must not advance the pointer",
+        );
+
+        assert!(
+            executor
+                .commit(&successor, now_ms + 200, 900_000)
+                .await
+                .expect("commit"),
+            "the pointer still names the recorded predecessor, so the CAS wins"
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(7, "player-a")
+                .await
+                .expect("route after commit")
+                .expect("the playback has a pointer")
+                .incarnation_id,
+            successor,
+        );
+        assert!(
+            store
+                .staged_media_session_for_playback(7, "player-a")
+                .await
+                .expect("ledger after commit")
+                .is_none(),
+            "a committed successor is no longer a preparation",
+        );
+        // The pointer advancing is not the same as the viewer having a
+        // stream, and this is the line that keeps the two apart. A commit
+        // moves the successor off its preparation deadline and nothing else:
+        // the publication fence is still at the sentinel, and arming it is
+        // `arm_media_session_handoff`'s job, exactly as it is for an
+        // activated replacement.
+        let committed = store
+            .media_session_route_by_incarnation(&successor)
+            .await
+            .expect("committed route")
+            .expect("the successor exists");
+        assert_eq!(committed.lease_expires_at_ms, 900_000);
+        assert_eq!(
+            committed.publication_ready_at_ms,
+            plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "commit advances the pointer; it does not publish",
+        );
+        assert!(
+            control
+                .stage_preparation(uuid::Uuid::new_v4().to_string(), successor.clone())
+                .await,
+            "the slot is free again, so the next preparation can take it",
+        );
+    }
+
+    /// M6 acceptance 1, the half that matters — a lost CAS aborts the staged
+    /// generation and never reaps the newer player generation that won.
+    ///
+    /// The pointer is advanced out from under the preparation by an ordinary
+    /// activation, which is what a client restart does. The staged successor
+    /// must lose, and the generation that replaced its predecessor must still
+    /// be current and playable afterwards.
+    #[tokio::test]
+    async fn preparation_executor_abandons_a_successor_whose_pointer_moved() {
+        let now_ms = 2_000;
+        let (predecessor, store, control, executor) = preparation_fixture(now_ms).await;
+
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(executor
+            .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+            .await
+            .expect("stage"));
+
+        let winner = uuid::Uuid::new_v4().to_string();
+        let advance = plurx_core::domain::MediaSessionActivation {
+            incarnation_id: winner.clone(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            user_id: 7,
+            playback_id: "player-a".to_owned(),
+            expected_predecessor_incarnation_id: Some(predecessor.clone()),
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: "c".repeat(64),
+            owner_node_id: "node-a".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"advanced"}"#.to_owned(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: now_ms + 150,
+            lease_expires_at_ms: 900_000,
+        };
+        store
+            .activate_media_session(&advance)
+            .await
+            .expect("advance the pointer")
+            .expect("the advance wins");
+        // A replacement carries a predecessor, so its confirmation must name a
+        // publication instant a full handoff safety window out. Zero is only
+        // valid for a first activation, which is what `activate_route` does.
+        store
+            .settle_media_session_activation(
+                &advance,
+                plurx_core::domain::MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: advance
+                        .now_ms
+                        .saturating_add(plurx_core::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS),
+                },
+                advance.now_ms,
+            )
+            .await
+            .expect("confirm the advance")
+            .expect("the advance is confirmed");
+
+        assert!(
+            !executor
+                .commit(&successor, now_ms + 200, 900_000)
+                .await
+                .expect("commit"),
+            "the pointer no longer names the recorded predecessor",
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(7, "player-a")
+                .await
+                .expect("route after the lost CAS")
+                .expect("the playback has a pointer")
+                .incarnation_id,
+            winner,
+            "a lost commit must never reap the newer player generation",
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(&winner)
+                .await
+                .expect("winner route")
+                .expect("the winner exists")
+                .state,
+            "active",
+        );
+        assert!(
+            store
+                .staged_media_session_for_playback(7, "player-a")
+                .await
+                .expect("ledger after the lost CAS")
+                .is_none(),
+            "the abandoned successor releases the one-per-playback slot",
+        );
+        // Delisting the ledger row is not tearing the successor down. A row
+        // left `active` on its preparation lease counts against the user's
+        // admission caps, and the maintenance reaper keys on the *session's*
+        // state — so a successor that stays active is never swept at all.
+        let abandoned = store
+            .media_session_route_by_incarnation(&successor)
+            .await
+            .expect("abandoned route")
+            .expect("the abandoned row is still readable");
+        assert_eq!(abandoned.state, "ended");
+        assert_eq!(abandoned.terminal_reason.as_deref(), Some("replaced"));
+        assert!(
+            control
+                .stage_preparation(uuid::Uuid::new_v4().to_string(), winner)
+                .await,
+            "and the actor's slot with it",
+        );
+    }
+
+    /// M6 acceptance 2 — abort tears down only the successor.
+    #[tokio::test]
+    async fn preparation_executor_aborts_only_the_successor() {
+        let now_ms = 2_000;
+        let (predecessor, store, control, executor) = preparation_fixture(now_ms).await;
+
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(executor
+            .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+            .await
+            .expect("stage"));
+        executor
+            .abort(&successor, now_ms + 200)
+            .await
+            .expect("abort");
+
+        let current = store
+            .media_session_route_for_playback(7, "player-a")
+            .await
+            .expect("route after abort")
+            .expect("the current stream survives an abort");
+        assert_eq!(current.incarnation_id, predecessor);
+        assert_eq!(
+            current.state, "active",
+            "the predecessor stays authoritative and playable",
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(&successor)
+                .await
+                .expect("successor route")
+                .expect("the successor row is still readable")
+                .state,
+            "ended",
+        );
+        assert!(store
+            .staged_media_session_for_playback(7, "player-a")
+            .await
+            .expect("ledger after abort")
+            .is_none());
+
+        // An owner retrying an abort after a crash reads back the same
+        // outcome rather than a spurious loss. Ordered before the slot is
+        // reused, because a replay against a *reused* slot is a different
+        // property — the one asserted below.
+        executor
+            .abort(&successor, now_ms + 300)
+            .await
+            .expect("abort replay");
+
+        let replacement = uuid::Uuid::new_v4().to_string();
+        assert!(
+            control
+                .stage_preparation(replacement.clone(), predecessor)
+                .await,
+            "the slot is free, so the next preparation can take it",
+        );
+        // And a stale executor cannot settle the successor it used to hold:
+        // identity is checked rather than assumed, or a crashed owner's late
+        // abort would free a slot holding something else entirely.
+        assert!(
+            !control.settle_preparation(&successor, false).await,
+            "a stale settle must not free a slot holding a replacement",
+        );
+        assert!(
+            control.may_commit_preparation(&replacement).await,
+            "and the replacement is still the successor the actor holds",
+        );
+    }
+
+    /// The actor's gate is the first of the three authorities, and it is the
+    /// only one that can refuse a commit the store would happily accept.
+    ///
+    /// That is the whole point of asking. Here the pointer still names the
+    /// recorded predecessor, so the CAS would win — the commit is stopped
+    /// solely because the actor no longer holds this successor, which is what
+    /// a viewer disconnecting mid-preparation looks like: `terminate` moves
+    /// the slot to aborting and the successor stops being wanted. Without the
+    /// gate the pointer would advance to a generation nobody waited for.
+    #[tokio::test]
+    async fn preparation_executor_refuses_a_commit_the_actor_no_longer_wants() {
+        let now_ms = 2_000;
+        let (predecessor, store, control, executor) = preparation_fixture(now_ms).await;
+
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(executor
+            .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+            .await
+            .expect("stage"));
+
+        // The actor forgets the successor without the store being told.
+        assert!(control.settle_preparation(&successor, false).await);
+        assert!(!control.may_commit_preparation(&successor).await);
+
+        assert!(
+            !executor
+                .commit(&successor, now_ms + 200, 900_000)
+                .await
+                .expect("commit"),
+            "the gate refuses before the store is asked",
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(7, "player-a")
+                .await
+                .expect("route after the refused commit")
+                .expect("the playback has a pointer")
+                .incarnation_id,
+            predecessor,
+            "a refused commit must not advance the pointer",
+        );
+        // And the store still holds the successor, untouched: the gate stops
+        // short of the durable call rather than tearing anything down. Who
+        // reaps it is the disconnect path's problem, and `terminate` aborts
+        // the slot it is holding for exactly this reason.
+        assert_eq!(
+            store
+                .staged_media_session_for_playback(7, "player-a")
+                .await
+                .expect("ledger after the refused commit")
+                .expect("the staged row survives a gate refusal")
+                .staged_incarnation_id,
+            successor,
+        );
+    }
+
+    /// The durable row is created before the slot is taken, so the slot
+    /// refusing must undo the row. Otherwise a successor nobody owns counts
+    /// against the user's admission cap until the maintenance backstop runs.
+    #[tokio::test]
+    async fn preparation_executor_rolls_back_a_row_the_slot_refused() {
+        use plurx_core::store::SqliteStore;
+
+        let now_ms = 2_000;
+        let concrete = SqliteStore::open_in_memory().expect("store");
+        let (predecessor, _) = activate_route(&concrete, now_ms, 900_000).await;
+        let store: Arc<dyn plurx_core::store::Store> = Arc::new(concrete);
+        let executor = PreparationExecutor::new(
+            Arc::clone(&store),
+            RollingControlHandle::unavailable_for_test(),
+            7,
+            "player-a".to_owned(),
+        );
+
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(
+            !executor
+                .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+                .await
+                .expect("stage"),
+            "an actor that cannot be reached cannot take the slot",
+        );
+        assert!(
+            store
+                .staged_media_session_for_playback(7, "player-a")
+                .await
+                .expect("ledger after the refused stage")
+                .is_none(),
+            "the durable row is undone rather than left for the backstop",
+        );
+        // An empty ledger alone would also be satisfied by never having made
+        // the row, which is the opposite ordering and a different design.
+        // The successor's own session row is what says the row existed and
+        // was aborted: `replaced` is the abort's signature.
+        let rolled_back = store
+            .media_session_route_by_incarnation(&successor)
+            .await
+            .expect("rolled-back route")
+            .expect("the durable row was created before the slot was asked");
+        assert_eq!(rolled_back.state, "ended");
+        assert_eq!(rolled_back.terminal_reason.as_deref(), Some("replaced"));
+        assert_eq!(
+            store
+                .media_session_route_for_playback(7, "player-a")
+                .await
+                .expect("route after the refused stage")
+                .expect("the current stream is untouched")
+                .incarnation_id,
+            predecessor,
         );
     }
 

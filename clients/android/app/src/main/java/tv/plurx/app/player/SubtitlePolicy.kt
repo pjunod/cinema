@@ -5,6 +5,7 @@ import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.ReopenReason
 import tv.plurx.app.data.SubTrack
+import tv.plurx.app.data.SubtitleReadiness
 import java.util.Locale
 
 /**
@@ -73,19 +74,57 @@ internal fun subtitleBurnWouldDiscardHdr(track: SubTrack?, deliveredRange: Strin
         deliveredRange?.lowercase(Locale.ROOT) in setOf("dolby_vision", "hdr10", "hlg")
 
 /**
+ * Whether "Off" still rides an HLS session that advertises the file's text
+ * renditions. The whole of the Settings → Playback → "Subtitle switching"
+ * preference is this function; nothing else branches on it. It is the
+ * counterpart of the Apple client's `needsNativeSubtitleSession`, with one
+ * difference that is Media3's, not ours: on direct play the text tracks are
+ * already in the file the player is reading, so switching is free under either
+ * setting and a session would only trade an untouched stream for a segmented
+ * one. The preference therefore only decides remux and transcode plays.
+ *
+ * [SubtitleReadiness.Instant] answers yes for any file carrying a native text
+ * track: the very first session is opened with `native_subtitles`, every
+ * track exists as a rendition before the menu is ever opened, and turning one
+ * on or off is a media selection rather than a restart.
+ * [SubtitleReadiness.OnDemand], the default, keeps today's behaviour — the
+ * plan's own delivery until a subtitle is actually chosen, and the first
+ * choice pays for exactly one reopen at the same film position.
+ *
+ * A file with no native text track answers no under either setting: there is
+ * nothing a session could publish. Bitmap and styled tracks are not native,
+ * so they cannot drag a plan into a session it gains nothing from.
+ */
+internal fun subtitlesReadyFromFirstFrame(
+    readiness: SubtitleReadiness,
+    planMode: String,
+    hasNativeTrack: Boolean,
+): Boolean =
+    readiness == SubtitleReadiness.Instant && hasNativeTrack && planMode != "direct"
+
+/**
  * Route one selection. [planMode] is the *effective* delivery the plan would
  * use with no subtitle at all — "direct", "remux" or "transcode" — and
- * [current] is what is on screen now.
+ * [current] is what is on screen now. [readiness] and [hasNativeTrack] feed
+ * [subtitlesReadyFromFirstFrame], which decides only where "Off" lands.
  */
 internal fun subtitleRoute(
     track: SubTrack?,
     planMode: String,
     current: SubtitleDelivery,
+    readiness: SubtitleReadiness = SubtitleReadiness.OnDemand,
+    hasNativeTrack: Boolean = false,
 ): SubtitleRoute {
     val delivery = when {
         // Off. Renditions and embedded text tracks both switch off in place;
         // only escaping a burn needs the stream rebuilt, which [reopen] says.
-        track == null -> SubtitleDelivery.Plan
+        // Under "Instant" the renditions stay published while nothing is
+        // selected, so the next selection is a media selection, not a reopen.
+        track == null -> if (subtitlesReadyFromFirstFrame(readiness, planMode, hasNativeTrack)) {
+            SubtitleDelivery.NativeSession
+        } else {
+            SubtitleDelivery.Plan
+        }
         // A recognized overlay is an application layer. It never enters a
         // video session and therefore never changes the current video bytes.
         track.isPgsOverlay -> SubtitleDelivery.BitmapOverlay

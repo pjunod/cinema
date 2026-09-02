@@ -1697,7 +1697,7 @@ private fun PlayerSettings(
                 onAudioOffset(0)
             }
         }
-        PanelSwitch("Auto-skip intro and credits", preferences.autoSkip, vm::setAutoSkip)
+        PanelSwitch("Skip intros and credits", preferences.autoSkip, vm::setAutoSkip)
         PanelSwitch("Autoplay next episode", preferences.autoplayNext, vm::setAutoplayNext)
     }
 }

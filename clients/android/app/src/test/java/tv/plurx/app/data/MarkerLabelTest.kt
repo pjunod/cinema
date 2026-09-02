@@ -72,7 +72,7 @@ class MarkerLabelTest {
      * A preview is offered and never automatic.
      *
      * The eligibility rule was kind-agnostic, and a chapter-derived preview is
-     * `authored` — so the preference spelled "Auto-skip intro and credits"
+     * `authored` — so the preference spelled "Skip intros and credits"
      * silently began skipping next week's footage, and on an episode ending in
      * its preview the tail rule marked it watched and advanced. The button
      * still appears; what is withheld is the seek nobody asked for.

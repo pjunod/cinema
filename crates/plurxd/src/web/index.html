@@ -82,7 +82,7 @@
     header.top .search{order:4;flex-basis:100%;max-width:none;width:100%}
     header.top .activity{order:5;flex-basis:100%}
     .getappbtn{display:none}          /* the install banner already covers this on phones */
-    .sizebtn span{display:none}       /* icon-only to save width */
+    .lookbtn .lookword{display:none}  /* icon-only to save width */
     main{padding:16px 14px 60px}
   }
 
@@ -282,6 +282,17 @@
   .amenu button.sel{color:var(--accent);font-weight:600}
   .amenu button.sel::before{content:"✓ "}
   .amsec{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:8px 10px 3px}
+  /* Two- and three-way choices in the Appearance menu are one segmented row;
+     only Theme, which grows, stays a list. */
+  .amseg{display:flex;gap:4px;padding:2px 8px 4px}
+  .amenu .amseg button{flex:1 1 0;width:auto;text-align:center;padding:5px 4px;border:1px solid var(--line);border-radius:6px;font-size:12px;white-space:nowrap}
+  .amenu .amseg button.sel{border-color:var(--accent);background:var(--panel2);color:var(--text)}
+  .amenu .amseg button.sel::before{content:none}
+  .lookmenu{min-width:250px}
+  .amthemes{display:grid;grid-template-columns:1fr 1fr;gap:0 4px}
+  .amthemes .amnote{display:block;margin:0;font-size:9px}
+  .lookbtn{display:inline-flex;align-items:center;gap:7px}
+  @media(max-width:640px){ .lookword{display:none} }
   /* A sentence of context inside a menu of choices — the measurement behind a
      decision, next to the button that undoes it. */
   .menunote{font-size:11.5px;line-height:1.45;color:var(--muted);padding:0 10px 6px}
@@ -698,12 +709,86 @@
     .adminwrap td.rowactions{padding-top:9px}
     .adminwrap td.rowactions>.row{justify-content:flex-start!important}
   }
-  /* Settings tab bar — one group visible at a time (persisted per browser). */
-  .settabs{display:flex;gap:2px;flex-wrap:wrap;margin:0 0 20px;border-bottom:1px solid var(--line)}
-  .settab{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--muted);
-    padding:9px 15px;font-size:14px;font-weight:600;cursor:pointer;margin-bottom:-1px;border-radius:8px 8px 0 0}
-  .settab:hover{color:var(--text);background:linear-gradient(180deg,transparent,color-mix(in srgb,var(--accent) 18%,transparent))}
-  .settab.active{color:var(--text);border-bottom-color:var(--accent)}
+  /* Settings navigation. Every section is a route (#/settings/<section>), so
+     a section can be linked to and the back button walks between them. Wide
+     screens get a grouped rail; under 900px the same entries become a chip
+     strip in the same order, the group labels dropped. */
+  .setlayout{display:grid;grid-template-columns:196px minmax(0,1fr);gap:26px;align-items:start}
+  .settabs{display:flex;flex-direction:column;gap:2px;margin:0;position:sticky;top:64px}
+  .setgroup{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin:16px 0 5px 10px}
+  .setgroup:first-child{margin-top:2px}
+  .settab{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;
+    background:transparent;border:0;border-left:3px solid transparent;color:var(--muted);
+    padding:7px 10px;font-size:13.5px;font-weight:600;cursor:pointer;border-radius:8px}
+  .settab:hover{color:var(--text);background:color-mix(in srgb,var(--accent) 10%,transparent)}
+  .settab.active{color:var(--text);background:var(--panel2);border-left-color:var(--accent);border-radius:0 8px 8px 0}
+  .settab .setn{font-size:11px;font-weight:500;color:var(--muted);font-family:var(--font-mono);white-space:nowrap}
+  .settab .setdot{width:7px;height:7px;border-radius:50%;background:var(--warn);flex:0 0 auto}
+  @media(max-width:899px){
+    .setlayout{grid-template-columns:minmax(0,1fr);gap:14px}
+    .settabs{flex-direction:row;flex-wrap:nowrap;overflow-x:auto;gap:6px;padding:0 0 8px;position:static;scrollbar-width:none}
+    .settabs::-webkit-scrollbar{display:none}
+    .setgroup{display:none}
+    .settab{width:auto;white-space:nowrap;border:1px solid var(--line);border-radius:999px;padding:6px 12px;background:var(--panel)}
+    .settab.active{border-color:var(--accent);background:var(--panel2);border-radius:999px}
+    .settab .setn,.settab .setdot{display:none}
+  }
+  /* Section header: the name, one line of summary, and the section's bulk
+     actions — the same silhouette on every section. */
+  .sethead{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin:0 0 16px}
+  .sethead h1{margin:0;font-size:22px;line-height:1.1}
+  .sethead p{margin:4px 0 0;color:var(--muted);font-size:13px;max-width:70ch}
+  .sethead .row{flex-wrap:wrap;justify-content:flex-end}
+  /* Card primitives shared by every section. One head (title, one-sentence
+     purpose, a status pill or tools on the right), one field row, one switch
+     row, one footer with the card's own Save. A card is the unit of saving:
+     its Save is disabled until something inside it changes and the footer
+     says so, which is what the old single page-wide Save could not. */
+  .cardhead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin:0 0 4px}
+  .cardhead h2.section{margin:0;padding:0;border:0}
+  .cardhead .sub,.setcard .sub,.card .sub{margin:4px 0 0;color:var(--muted);font-size:12.5px;max-width:70ch;line-height:1.5}
+  .cardhead .cardtools{display:flex;gap:6px;align-items:center;flex:0 0 auto;flex-wrap:wrap;justify-content:flex-end}
+  .setcard h2.section+h2.section{margin-top:22px}
+  .setfields{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:flex-end;margin-top:12px}
+  .setfields>div{min-width:0}
+  .setfields label{margin:0 0 4px;font-size:11.5px}
+  .setfields select,.setfields input{width:auto;min-width:150px}
+  select.every{width:auto;max-width:180px;font-size:13px;padding:6px 9px}
+  .setfields input[type=number]{min-width:0;width:110px}
+  .setfields .err{flex-basis:100%;margin-top:0}
+  .tog{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 0;border-top:1px solid var(--line);font-size:13.5px;color:var(--text);margin:0}
+  .tog:first-child,.cardhead+.tog,.sub+.tog{border-top:0}
+  .tog>span:first-child{min-width:0}
+  .tog small{display:block;color:var(--muted);font-size:12px;margin-top:2px;line-height:1.4}
+  .tog select{width:auto;min-width:120px;font-size:13px;padding:5px 9px;flex:0 0 auto}
+  .tog input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);flex:0 0 auto;cursor:pointer}
+  .setfoot{display:flex;align-items:center;gap:10px;margin-top:16px;padding-top:14px;border-top:1px solid var(--line);flex-wrap:wrap}
+  .setfoot .setstate{font-size:12px;color:var(--muted);margin-left:auto}
+  .setcard.dirty .setfoot .setstate{color:var(--warn)}
+  .setfoot button.primary[disabled]{opacity:.45;cursor:default}
+  .setcard.local{border-style:dashed;border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
+  .setgrid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;align-items:start}
+  #dv-recovery-guards h3.section{font-size:12px;margin:14px 0 4px;padding:0;border:0;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  #dv-recovery-guards>div{font-size:13px}
+  .chk{display:inline-flex;align-items:center;gap:8px;font-size:13.5px;color:var(--text);margin:0;padding:8px 0}
+  .chk input[type=checkbox]{width:18px;min-width:0;height:18px;margin:0;accent-color:var(--accent)}
+  @media(min-width:900px){ .adminwrap td.rowactions{white-space:nowrap} .adminwrap td.rowactions>.row{flex-wrap:nowrap!important} }
+  .setgrid2>.card{margin:0;min-width:0}
+  .pill.ok{color:var(--good);border-color:color-mix(in srgb,var(--good) 55%,var(--line))}
+  .pill.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
+  .pill.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
+  .pill.acc{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
+  /* Row drawers: a table row's configuration opens under the row instead of
+     living inside its Status cell. One drawer at a time; the drawer owns its
+     own Save. The same shape, empty, is the add form. */
+  .adminwrap tr.setopen>td{border-bottom:0}
+  .adminwrap tr.setdrawer>td{background:var(--panel2);padding:14px 18px 16px;border-bottom:1px solid var(--line)}
+  .setdrawer .setfields{margin-top:0}
+  .setdrawer .setfields+.setfields{margin-top:12px}
+  .setdrawer .setfoot{margin-top:12px;padding-top:12px}
+  .setdrawer .setfoot .danger{margin-left:auto}
+  button.danger{background:transparent;color:var(--bad);border:1px solid color-mix(in srgb,var(--bad) 45%,var(--line));font-weight:500}
+  @media(max-width:640px){ .adminwrap tr.setdrawer{margin-top:-10px;border-top-left-radius:0;border-top-right-radius:0} }
   /* Content analysis is an operator workspace, not a link dropped between
      unrelated sections. These primitives are shared by its compact Activity
      and Settings summaries and by the full queue/history page. */
@@ -3765,18 +3850,8 @@ function classicChrome(active, inner){
      <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
      <div class="topctl">
        <div style="position:relative">
-         <button class="ghost sm" onclick="toggleThemeMenu(event)" title="Theme"><span class="tsw"></span></button>
-         <div class="amenu" id="thememenu"></div>
-       </div>
-       <div style="position:relative">
-         <button class="ghost sm" onclick="toggleAppearanceMenu(event)" title="Light / dark">◐</button>
-         <div class="amenu" id="appmenu"></div>
-       </div>
-       <div style="position:relative">
-         <button class="ghost sm sizebtn" onclick="toggleSizeMenu(event)" title="Icon size" style="display:inline-flex;align-items:center;gap:6px">
-           <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="0" y="0" width="5" height="5" rx="1"/><rect x="7" y="0" width="5" height="5" rx="1"/><rect x="0" y="7" width="5" height="5" rx="1"/><rect x="7" y="7" width="5" height="5" rx="1"/></svg><span>Size</span>
-         </button>
-         <div class="amenu" id="sizemenu"></div>
+         <button class="ghost sm lookbtn" onclick="toggleLookMenu(event)" title="Appearance — layout, theme, light or dark, poster size" aria-label="Appearance" aria-haspopup="menu"><span class="tsw"></span><span class="lookword">Appearance</span></button>
+         <div class="amenu lookmenu" id="lookmenu"></div>
        </div>
        ${getapp}
        <div style="position:relative">
@@ -3805,7 +3880,7 @@ function themeMenuHtml(){
     const only=THEMES[id].darkOnly?`<span class="amnote">midnight only</span>`:"";
     return `<button class="${theme===id?'sel':''}" onclick="setTheme('${id}')">${esc(THEMES[id].name)}${only}</button>`;
   }).join("");
-  return `${layoutMenuHtml()}<div class="amsec">Theme</div>${themes}`;
+  return `${layoutMenuHtml()}<div class="amsec">Theme</div><div class="amthemes">${themes}</div>`;
 }
 // Layout sits above Theme in the same popover: structure first, then paint.
 // Only layouts this surface can actually run are offered — an entry the device
@@ -3817,7 +3892,7 @@ function layoutMenuHtml(){
     const s=LAYOUTS[id].surfaces;
     return !s||s.indexOf(here)>=0;
   }).map(id=>`<button class="${cur===id?'sel':''}" onclick="setLayout('${id}')">${esc(LAYOUTS[id].name)}</button>`).join("");
-  return `<div class="amsec">Layout</div>${btns}`;
+  return `<div class="amsec">Layout</div><div class="amseg">${btns}</div>`;
 }
 // A layout change repaints everything, chrome included — unlike a theme, which
 // only swaps CSS variables on an already-painted page. render() is the honest
@@ -3844,29 +3919,35 @@ function setLayout(id){
 }
 function appMenuHtml(){
   let app="auto"; try{ app=localStorage.getItem("plurx_appearance")||"auto"; }catch(e){}
-  const modes=[["auto","Auto (system)"],["light","Light"],["dark","Dark"]].map(([v,l])=>`<button class="${app===v?'sel':''}" onclick="setAppearance('${v}')">${l}</button>`).join("");
+  const modes=`<div class="amseg">${[["auto","Auto"],["light","Light"],["dark","Dark"]].map(([v,l])=>`<button class="${app===v?'sel':''}" onclick="setAppearance('${v}')" title="${v==="auto"?"Follow the system setting":l}">${l}</button>`).join("")}</div>`;
   // If the current theme pins itself to midnight, say so here too. Without
   // this the control silently does nothing and the only available conclusion
   // is that the app is broken.
   let cur="classic"; try{ cur=localStorage.getItem("plurx_theme")||"classic"; }catch(e){}
   const t=THEMES[cur];
   const note=(t&&t.darkOnly)?`<div class="amwarn">${esc(t.name)} is a midnight-only theme — it stays dark whichever you pick.</div>`:"";
-  return `<div class="amsec">Appearance</div>${modes}${note}`;
+  return `<div class="amsec">Light or dark</div>${modes}${note}`;
 }
-function closeMenus(except){ ["thememenu","appmenu","sizemenu","profilemenu"].forEach(idn=>{ if(idn!==except){ const m=document.getElementById(idn); if(m) m.classList.remove("on"); } }); }
-function toggleThemeMenu(e){ if(e) e.stopPropagation(); closeMenus("thememenu"); const m=document.getElementById("thememenu"); if(!m) return;
-  const open=!m.classList.contains("on"); m.classList.toggle("on",open); if(open) m.innerHTML=themeMenuHtml(); }
-function toggleAppearanceMenu(e){ if(e) e.stopPropagation(); closeMenus("appmenu"); const m=document.getElementById("appmenu"); if(!m) return;
-  const open=!m.classList.contains("on"); m.classList.toggle("on",open); if(open) m.innerHTML=appMenuHtml(); }
-function setTheme(id){ try{localStorage.setItem("plurx_theme",id)}catch(e){} applyTheme(); const m=document.getElementById("thememenu"); if(m) m.innerHTML=themeMenuHtml(); }
-function setAppearance(v){ try{localStorage.setItem("plurx_appearance",v)}catch(e){} applyTheme(); const m=document.getElementById("appmenu"); if(m) m.innerHTML=appMenuHtml(); }
+function closeMenus(except){ ["lookmenu","profilemenu"].forEach(idn=>{ if(idn!==except){ const m=document.getElementById(idn); if(m) m.classList.remove("on"); } }); }
+// One popover for everything about how this browser looks — layout, theme,
+// light/dark, poster size — under the name the mobile apps already use for
+// the same four choices. It used to be three unnamed buttons.
+function lookMenuHtml(){ return `${themeMenuHtml()}${appMenuHtml()}${sizeMenuHtml()}`; }
+function toggleLookMenu(e){ if(e) e.stopPropagation(); closeMenus("lookmenu"); const m=document.getElementById("lookmenu"); if(!m) return;
+  const open=!m.classList.contains("on"); m.classList.toggle("on",open); if(open) m.innerHTML=lookMenuHtml(); }
+function repaintLookMenu(){ const m=document.getElementById("lookmenu"); if(m&&m.classList.contains("on")) m.innerHTML=lookMenuHtml(); }
+// The three older entry points route to the one menu; a layout's chrome may
+// still name them.
+function toggleThemeMenu(e){ toggleLookMenu(e); }
+function toggleAppearanceMenu(e){ toggleLookMenu(e); }
+function setTheme(id){ try{localStorage.setItem("plurx_theme",id)}catch(e){} applyTheme(); repaintLookMenu(); }
+function setAppearance(v){ try{localStorage.setItem("plurx_appearance",v)}catch(e){} applyTheme(); repaintLookMenu(); }
 // POSTER_SIZES / posterSize / applyPosterSize live in the <head> script — the
 // size has to be on the root element before first paint, and a definition down
 // here would not exist yet when that script runs.
-function sizeMenuHtml(){ const v=posterSize(); return `<div class="amsec">Icon size</div>`+POSTER_SIZES.map(s=>`<button class="${v===s[0]?'sel':''}" onclick="setIconSize('${s[0]}')">${s[1]}</button>`).join(""); }
-function toggleSizeMenu(e){ if(e) e.stopPropagation(); closeMenus("sizemenu"); const m=document.getElementById("sizemenu"); if(!m) return;
-  const open=!m.classList.contains("on"); m.classList.toggle("on",open); if(open) m.innerHTML=sizeMenuHtml(); }
-function setIconSize(v){ try{localStorage.setItem("plurx_iconsize",v)}catch(e){} applyPosterSize(); const m=document.getElementById("sizemenu"); if(m) m.innerHTML=sizeMenuHtml(); }
+function sizeMenuHtml(){ const v=posterSize(); return `<div class="amsec">Poster size</div><div class="amseg">`+POSTER_SIZES.map(s=>`<button class="${v===s[0]?'sel':''}" onclick="setIconSize('${s[0]}')">${s[1]}</button>`).join("")+`</div>`; }
+function toggleSizeMenu(e){ toggleLookMenu(e); }
+function setIconSize(v){ try{localStorage.setItem("plurx_iconsize",v)}catch(e){} applyPosterSize(); repaintLookMenu(); }
 // Account menu, anchored far-right: shows who you're signed in as, plus the
 // per-account actions (admins also get a Settings shortcut) and Sign out.
 // The server QR belongs here too: it contains no credential, and requiring a
@@ -4400,7 +4481,7 @@ function classicHomeBody(p){
       previews+=`<h2 class="section">${esc(s.name)} <a class="muted" style="font-size:12px" href="${s.href}">· ${count}</a></h2>${unavailable}${grid(s.items)}`;
     }
   } else {
-    previews+=`<div class="empty">No libraries yet.${ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':''}</div>`;
+    previews+=`<div class="empty">No libraries yet.${ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':''}</div>`;
   }
   return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
     `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
@@ -10920,8 +11001,8 @@ async function refreshAnalysisNow(btn){
 }
 function openAnalysisSettings(){
   try{ localStorage.setItem("plurx_settings_tab","analysis"); }catch(error){}
-  if(location.hash==="#/settings"||location.hash==="#/admin") viewSettings(++PAGE_RENDER_GENERATION,false);
-  else location.hash="#/settings";
+  if(settingsTab()==="analysis"&&isSettingsRoute(location.hash)) viewSettings(++PAGE_RENDER_GENERATION,false);
+  else location.hash="#/settings/analysis";
 }
 function analysisDiagnosticText(row,names){
   const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator"):"Background";
@@ -11206,7 +11287,7 @@ function paintActivityBody(d){
   const t=d.trakt||{};
   const trakt = t.configured
     ? `<p style="margin:0">${t.linked?`Linked as <b>${esc((t.linked.trakt_username)||"?")}</b>${t.linked.last_sync_at?` <span class="muted">· last sync ${fmtAgo(t.linked.last_sync_at)}</span>`:""}`:"Keys saved — not linked yet."}${t.syncing?' <span class="muted">· syncing now…</span>':''}</p>${t.note?`<p class="hint" style="margin:6px 0 0">${esc(t.note)}</p>`:''}`
-    : `<p class="muted" style="margin:0">Not set up${ME&&ME.is_admin?' — add it in <a href="#/settings">Settings</a>':''}.</p>`;
+    : `<p class="muted" style="margin:0">Not set up${ME&&ME.is_admin?' — add it in <a href="#/settings/integrations">Settings</a>':''}.</p>`;
   // The pre-transcode pass, which holds an encoder for as long as anything on
   // this page and until now appeared on none of it. Shown whenever one is
   // running rather than tucked behind a disclosure: an admin who has just
@@ -11356,12 +11437,14 @@ const SETTINGS_ENDPOINTS={
 };
 const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status","dvConversions"],secondary:[]},
-  metadata:{required:["settings","trakt"],secondary:["libs"]},
+  metadata:{required:["settings"],secondary:["libs"]},
   playback:{required:["settings"],secondary:[]},
   analysis:{required:["settings","analysis"],secondary:[]},
+  maintenance:{required:["settings","dvConversions"],secondary:[]},
   users:{required:["users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
   cluster:{required:["cluster"],secondary:["clusterOps"]},
+  integrations:{required:["settings","trakt"],secondary:[]},
 };
 function cacheSettings(value){
   SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
@@ -11372,8 +11455,7 @@ function cacheTrakt(value){
   return value;
 }
 function settingsCurrent(generation,tab){
-  const h=location.hash;
-  return generation===PAGE_RENDER_GENERATION&&(h==="#/settings"||h==="#/admin")&&settingsTab()===tab;
+  return generation===PAGE_RENDER_GENERATION&&isSettingsRoute(location.hash)&&settingsTab()===tab;
 }
 function loadSettingsKey(key,generation){
   if(SETTINGS_LOADED.has(key)) return Promise.resolve(SETTINGS_DATA[key]);
@@ -11398,10 +11480,33 @@ function loadSettingsKey(key,generation){
   });
 }
 function settingsTabsHtml(tab){
-  return SET_TABS.map(([id,label])=>`<button class="settab${tab===id?' active':''}" onclick="setSettingsTab('${id}')">${label}</button>`).join("");
+  // The rail. Every entry routes to #/settings/<section>, so the back button
+  // walks between sections; render() keeps the cached aggregate across the
+  // switch because the previous route was also Settings.
+  const d=SETTINGS_DATA||{};
+  return SET_GROUPS.map(([group,tabs])=>`<div class="setgroup">${esc(group)}</div>`+tabs.map(([id,label])=>{
+    const aside=settingsTabAside(id,d);
+    return `<button class="settab${tab===id?' active':''}" role="link" aria-current="${tab===id?'page':'false'}" onclick="setSettingsTab('${id}')">${esc(label)}${aside}</button>`;
+  }).join("")).join("");
+}
+// What a rail entry knows before it is opened: a count, a one-word status, or
+// a dot for "something here needs you". Only from data already loaded — the
+// rail never spends a request of its own.
+function settingsTabAside(id,d){
+  if(id==="libraries"&&Array.isArray(d.libs)) return `<span class="setn">${d.libs.length}</span>`;
+  if(id==="users"&&Array.isArray(d.users)) return `<span class="setn">${d.users.length}</span>`;
+  if(id==="metadata"&&d.settings&&!d.settings.tmdb_configured&&Array.isArray(d.libs)
+     &&d.libs.some(l=>!l.anime&&l.kind!=="home"&&l.kind!=="books"))
+    return `<span class="setdot" title="No TMDB key — Movies and TV get no artwork"></span>`;
+  if(id==="cluster"&&d.cluster){
+    if(d.cluster.unavailable) return d.cluster.code==="membership_unavailable"?`<span class="setn">sqlite</span>`:"";
+    const state=PlurxClusterPanel.clusterStateView(d.cluster);
+    return `<span class="setn">${esc(state.tone==="good"?"in sync":state.tone==="warn"?"attention":"")}</span>`;
+  }
+  return "";
 }
 function settingsShell(tab){
-  return `<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div>`;
+  return `<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div></div>`;
 }
 function patchSettingsSecondary(tab,key){
   if(tab==="metadata"&&key==="libs"){
@@ -11472,21 +11577,49 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
     CLUSTER_LOADED=false; forgetJoinToken();
   }
   const tab=settingsTab();
+  // Leaving a section drops any minted join token: it is bearer material, and
+  // the operator who switched away is done with it whether or not they said so.
+  if(SETTINGS_SHOWN_TAB!==tab) forgetJoinToken();
+  SETTINGS_SHOWN_TAB=tab; LIB_DRAWER=null; USER_DRAWER=null;
+  try{ localStorage.setItem("plurx_settings_tab",tab); }catch(e){}
   layoutChrome("settings",settingsShell(tab));
   setPagePhase(route,generation,"shell");
   const loaded=await loadSettingsTab(generation,tab);
   if(loaded) setPageTimer(()=>settingsTick(generation,tab), 2000, generation);
 }
-// ---- settings tabs (grouped so the page isn't one long scroll) ------------
-const SET_TABS=[["libraries","Libraries"],["metadata","Metadata"],["playback","Playback"],["analysis","Analysis"],["users","Users"],["system","System"],["cluster","Cluster"]];
-function settingsTab(){ let t="libraries"; try{ t=localStorage.getItem("plurx_settings_tab")||"libraries"; }catch(e){} return SET_TABS.some(x=>x[0]===t)?t:"libraries"; }
-// Leaving the tab drops any minted join token: it is bearer material, and the
-// operator who switched away is done with it whether or not they said so.
+// ---- settings sections ----------------------------------------------------
+// Grouped by who acts on them and how often: content you manage, playback
+// you tune, the server you operate, and outside services. The order here is
+// the rail's order and the chip strip's order.
+const SET_GROUPS=[
+  ["Content",[["libraries","Libraries"],["metadata","Metadata"]]],
+  ["Playback",[["playback","Playback"],["analysis","Analysis"]]],
+  ["Server",[["maintenance","Maintenance"],["users","Users"],["system","System"],["cluster","Cluster"]]],
+  ["Outside",[["integrations","Integrations"]]],
+];
+const SET_TABS=SET_GROUPS.flatMap(([,tabs])=>tabs);
+// Every section is a route: #/settings/<section>. The bare #/settings (and
+// the older #/admin) land on the last section this browser visited, so the
+// address bar names the section and the back button walks between them.
+function isSettingsRoute(h){ return h==="#/settings"||h==="#/admin"||(typeof h==="string"&&h.startsWith("#/settings/")); }
+function settingsRouteTab(h){
+  const m=/^#\/settings\/([a-z]+)$/.exec(h||"");
+  return m&&SET_TABS.some(x=>x[0]===m[1])?m[1]:null;
+}
+function settingsTab(){
+  const routed=settingsRouteTab(location.hash);
+  if(routed) return routed;
+  let t="libraries"; try{ t=localStorage.getItem("plurx_settings_tab")||"libraries"; }catch(e){}
+  return SET_TABS.some(x=>x[0]===t)?t:"libraries";
+}
+// Which section the shell last painted. viewSettings compares against it to
+// drop the join token on a section change, and render() uses the route to
+// keep the cached aggregate across one (a tab switch is not a page load).
+let SETTINGS_SHOWN_TAB=null;
 function setSettingsTab(t){
   if(t===settingsTab()) return;
-  forgetJoinToken(); try{ localStorage.setItem("plurx_settings_tab",t); }catch(e){}
-  clearInterval(PAGE_TIMER); PAGE_TIMER=null;
-  viewSettings(++PAGE_RENDER_GENERATION,false);
+  if(!SET_TABS.some(x=>x[0]===t)) return;
+  location.hash=`#/settings/${t}`;
 }
 function retrySettingsTab(){
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
@@ -11496,42 +11629,77 @@ function renderSettings(){
   // Settings work resolves asynchronously. The selected tab survives in
   // localStorage after navigation, so it cannot prove this route is still on
   // screen; a late cluster read or mutation must not repaint another page.
-  const h=location.hash;
-  if(h!=="#/settings"&&h!=="#/admin") return;
+  if(!isSettingsRoute(location.hash)) return;
   const d=SETTINGS_DATA;
   const tab=settingsTab();
   const manifest=SETTINGS_MANIFEST[tab];
   if(!manifest.required.every(key=>SETTINGS_LOADED.has(key))) return;
-  document.getElementById("main").innerHTML=`<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody">${settingsPanel(tab,d)}</div>`;
+  document.getElementById("main").innerHTML=`<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody">${settingsPanel(tab,d)}</div></div>`;
   if(tab==="system") return refreshLogs(); // its initial loading row is part of settled
   if(tab==="cluster"){ applyClusterFolds(); return refreshClusterLogs(); }
 }
 function settingsPanel(tab,d){
-  if(tab==="metadata") return metadataPanel(d.settings,d.trakt);
-  if(tab==="playback") return playbackPanel(d.settings);
-  if(tab==="analysis") return analysisSettingsPanel(d.settings,d.analysis);
-  if(tab==="users")    return usersPanel(d.users);
-  if(tab==="system")   return systemPanel(d.sys,d.playbackEvents);
-  if(tab==="cluster")  return clusterPanel(d);
+  if(tab==="metadata")     return metadataPanel(d.settings);
+  if(tab==="playback")     return playbackPanel(d.settings);
+  if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis);
+  if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions);
+  if(tab==="users")        return usersPanel(d.users);
+  if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
+  if(tab==="cluster")      return clusterPanel(d);
+  if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
   return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
+}
+// The section header: name, one line of summary, the section's bulk actions.
+function setHead(title,summary,tools){
+  return `<div class="sethead"><div><h1>${esc(title)}</h1>${summary?`<p>${summary}</p>`:""}</div>${tools?`<div class="row">${tools}</div>`:""}</div>`;
+}
+// A card is the unit of saving. Its Save stays disabled until something inside
+// it changes; the footer names the state so a half-edited page cannot be
+// mistaken for a saved one. Cards marked `local` save on change and opt out.
+function markSetCard(el){
+  const card=el&&el.closest?el.closest(".setcard"):null;
+  if(!card||card.classList.contains("local")) return;
+  card.classList.add("dirty");
+  const save=card.querySelector(".setfoot button.primary"); if(save) save.disabled=false;
+  const state=card.querySelector(".setfoot .setstate"); if(state) state.textContent="Unsaved changes";
+}
+function setCardSaved(el,label){
+  const card=el&&el.closest?el.closest(".setcard"):null;
+  if(!card) return;
+  card.classList.remove("dirty");
+  const save=card.querySelector(".setfoot button.primary"); if(save) save.disabled=true;
+  const state=card.querySelector(".setfoot .setstate"); if(state) state.textContent=label||"Saved";
+}
+function setCardFoot(saveFn,extra){
+  return `<div class="setfoot"><button class="primary sm" disabled onclick="${saveFn}(this)">Save</button>${extra||""}<span class="setstate">Saved</span></div>`;
+}
+function setCard(body,opts){
+  const o=opts||{};
+  return `<div class="card setcard${o.local?" local":""}"${o.id?` id="${o.id}"`:""} oninput="markSetCard(this)" onchange="markSetCard(this)">${body}</div>`;
+}
+function cardHead(title,sub,tools){
+  return `<div class="cardhead"><div><h2 class="section">${title}</h2>${sub?`<p class="sub">${sub}</p>`:""}</div>${tools?`<div class="cardtools">${tools}</div>`:""}</div>`;
+}
+function togRow(id,label,note,checked,attrs){
+  return `<label class="tog" for="${id}"><span>${label}${note?`<small>${note}</small>`:""}</span><input type="checkbox" id="${id}"${checked?" checked":""}${attrs?" "+attrs:""}></label>`;
+}
+function togSelect(id,label,note,options,value,title){
+  return `<label class="tog" for="${id}"><span>${label}${note?`<small>${note}</small>`:""}</span>${everySelect(id,options,value,title||label)}</label>`;
 }
 // Intervals in minutes. Nothing under 15 — the server refuses it, because a
 // real library scanned every minute is a NAS denial-of-service on a timer.
 const SCAN_EVERY=[[0,"Never"],[15,"15 min"],[30,"30 min"],[60,"1 hour"],[180,"3 hours"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"]];
 const REFRESH_EVERY=[[0,"Never"],[1440,"Daily"],[10080,"Weekly"],[43200,"Monthly"]];
 function everySelect(id,options,value,title){
-  return `<select id="${id}" title="${esc(title)}" style="max-width:120px;font-size:12px;padding:3px 6px">${
+  return `<select id="${id}" class="every" title="${esc(title)}">${
     options.map(([v,label])=>`<option value="${v}"${Number(value)===v?' selected':''}>${esc(label)}</option>`).join("")}</select>`;
 }
-// The schedule sits under the status because that is where someone looks when
-// wondering whether a scan is going to happen on its own.
-function schedRow(l){
-  if(!ME||!ME.is_admin) return '';
-  const last=l.last_scan_at?` · last ${esc(agoLabel(l.last_scan_at))}`:'';
-  return `<div class="sched">
-    <span class="schedpair">Scan ${everySelect(`sched-scan-${l.id}`,SCAN_EVERY,l.scan_interval_mins,"How often to look for new & changed files")}</span>
-    <span class="schedpair">Refresh art ${everySelect(`sched-ref-${l.id}`,REFRESH_EVERY,l.refresh_interval_mins,"How often to re-fetch metadata for everything — heavy; days, not hours")}</span>
-    <span class="schedpair"><button class="ghost sm" onclick="saveSchedule(${l.id},this)">Save</button>${last}</span></div>`;
+// The per-library schedule lives in the row's drawer with everything else
+// that configures the library; the row itself only reports.
+function libScheduleFields(l){
+  const last=l.last_scan_at?`<div><label>&nbsp;</label><span class="muted" style="font-size:12px">last scan ${esc(agoLabel(l.last_scan_at))}</span></div>`:'';
+  return `<div><label for="sched-scan-${l.id}">Scan for changes</label>${everySelect(`sched-scan-${l.id}`,SCAN_EVERY,l.scan_interval_mins,"How often to look for new & changed files")}</div>
+    <div><label for="sched-ref-${l.id}">Refresh art</label>${everySelect(`sched-ref-${l.id}`,REFRESH_EVERY,l.refresh_interval_mins,"How often to re-fetch metadata for everything — heavy; days, not hours")}</div>${last}`;
 }
 function agoLabel(ts){
   const s=Math.max(0,Math.floor(Date.now()/1000)-ts);
@@ -11540,113 +11708,75 @@ function agoLabel(ts){
   if(s<172800) return `${Math.round(s/3600)}h ago`;
   return `${Math.round(s/86400)}d ago`;
 }
-async function saveSchedule(id,btn){
-  const scan=Number(document.getElementById(`sched-scan-${id}`).value);
-  const ref=Number(document.getElementById(`sched-ref-${id}`).value);
-  btn.disabled=true;
-  try{
-    await api(`/libraries/${id}/schedule`,{method:"PUT",body:{scan_interval_mins:scan,refresh_interval_mins:ref}});
-    toast(scan||ref?"Schedule saved":"Automatic runs turned off");
-    render();
-  }catch(e){ toast(e.message||"Couldn't save the schedule"); }
-  finally{ btn.disabled=false; }
-}
-// Server-wide scheduled maintenance. Per-library scanning lives in the table
-// above; these two are global because they aren't about any one library.
 const RETRY_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"],[10080,"Weekly"]];
 // Shorter buckets than the rest: this job is on by default, and a missing
 // poster is visible on every screen the item appears on.
 const ART_EVERY=[[0,"Never"],[30,"30 minutes"],[60,"Hourly"],[360,"6 hours"],[1440,"Daily"]];
 const CLEAN_EVERY=[[0,"Never"],[60,"Hourly"],[360,"6 hours"],[1440,"Daily"]];
-function maintenancePanel(settings){
+function maintenancePanel(settings,dv){
   if(!ME||!ME.is_admin||!settings) return '';
-  return `<h2 class="section">Scheduled maintenance</h2>
-    <div class="row setrow" style="gap:14px 18px">
-      <span class="schedpair">Retry unreadable files
-        ${everySelect("job-probe",RETRY_EVERY,settings.probe_retry_mins,"Re-run ffprobe on files whose media details were never read")}</span>
-      <span class="schedpair">Retry missing artwork
-        ${everySelect("job-art",ART_EVERY,settings.artwork_retry_mins,"Re-fetch posters for items a provider matched but that never got an image")}</span>
-      <span class="schedpair">Clean transcode cache
-        ${everySelect("job-clean",CLEAN_EVERY,settings.transcode_cleanup_mins,"Delete leftover transcode working directories no session owns")}</span>
-      <label class="schedpair" title="Scan every library once, about 30 seconds after the server starts">
-        <input type="checkbox" id="job-boot"${settings.scan_on_startup?' checked':''}> Scan at startup</label>
-      <button class="ghost sm" onclick="saveMaintenance(this)">Save</button></div>
-    <div class="hint">All off by default except <b>Retry missing artwork</b>. <b>Retry unreadable files</b> re-probes anything
-      scanned without codec or duration — the fix for those (permissions, a remounted share) leaves no
-      trace a normal scan would notice. <b>Retry missing artwork</b> is on because a poster download that failed
-      leaves no trace either, and a blank card would otherwise stay blank until somebody refreshed the whole
-      library by hand. <b>Clean transcode cache</b> removes working directories left
-      behind by a crash or a host reboot, which no live session will ever claim. <b>Scan at startup</b> covers
-      the gap an interval can't: a server that was switched off while files landed doesn't notice them until
-      its next scheduled run.</div>
-    ${precachePanel(settings)}`;
+  const jobs=setCard(`${cardHead("Scheduled jobs","All off by default except missing-artwork retries. Each one leaves no trace a normal scan would notice, which is why it needs a timer of its own.")}
+    ${togSelect("job-probe","Retry unreadable files","Re-probe anything scanned without codec or duration — the fix (permissions, a remounted share) is invisible to a scan.",RETRY_EVERY,settings.probe_retry_mins,"Re-run ffprobe on files whose media details were never read")}
+    ${togSelect("job-art","Retry missing artwork","Re-fetch posters a provider matched but never delivered, so a blank card does not stay blank until someone refreshes the library by hand.",ART_EVERY,settings.artwork_retry_mins,"Re-fetch posters for items a provider matched but that never got an image")}
+    ${togSelect("job-clean","Clean transcode cache","Delete working directories a crash or a host reboot left behind, which no live session will ever claim.",CLEAN_EVERY,settings.transcode_cleanup_mins,"Delete leftover transcode working directories no session owns")}
+    ${togRow("job-boot","Scan every library at startup","About 30 seconds after the server starts — a server switched off while files landed doesn't notice them until its next scheduled run.",settings.scan_on_startup)}
+    ${setCardFoot("saveMaintenance")}`);
+  return `${setHead("Maintenance","Background work this node does on its own: what is scheduled, what it costs, and where to turn it off.")}
+    <div class="setgrid2">${jobs}${precachePanel(settings)}${dvDiskPanel(settings,dv)}${telemetryPanel(settings)}</div>`;
 }
-// Pre-transcoding: encode ahead of time what somebody is likely to play, so
-// pressing play on a 4K film costs nothing. Off by default, and deliberately so
-// — it competes with live playback for the same encoder.
 const PRODUCE_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"]];
 const CACHE_SIZES=[0,10,25,50,100,250,500,1000];
 function precachePanel(settings){
   const used=settings.cache_used_bytes||0;
-  const bar = settings.cache_max_gb
-    ? `<span class="muted">· ${fmtBytes(used)} of ${settings.cache_max_gb} GB used</span>`
-    : `<span class="muted">· off${used?` — ${fmtBytes(used)} still stored, cleared on the next sweep`:""}</span>`;
-  return `<h2 class="section">Playback telemetry</h2>
-    <div class="row setrow" style="gap:14px 18px">
-      <span class="schedpair">Retain events
-        <select id="telemetry-retain" title="How long node-local playback measurements are kept">
-          ${[[0,"Off"],[7,"7 days"],[14,"14 days"],[30,"30 days"],[60,"60 days"],[90,"90 days"]].map(([n,label])=>`<option value="${n}"${Number(settings.telemetry_retain_days)===n?' selected':''}>${label}</option>`).join("")}
-        </select></span>
-      <button class="ghost sm" onclick="saveTelemetry(this)">Save</button></div>
-    <div class="hint">Stores bounded, node-local playback measurements for performance reports. Off keeps the existing client log lines but writes and prunes no telemetry rows.</div>
-    <h2 class="section">Pre-transcoding</h2>
-    <div class="row setrow" style="gap:14px 18px">
-      <span class="schedpair">Look for work
-        ${everySelect("cache-produce",PRODUCE_EVERY,settings.cache_produce_mins,"How often to check what's worth encoding ahead of time")}</span>
-      <span class="schedpair">Disk budget
-        <select id="cache-gb" title="How much disk finished pre-transcodes may occupy before the oldest are evicted">
+  const state = settings.cache_max_gb
+    ? `${fmtBytes(used)} of ${settings.cache_max_gb} GB used`
+    : `off${used?` — ${fmtBytes(used)} still stored, cleared on the next sweep`:""}`;
+  return setCard(`${cardHead("Pre-transcoding","Encodes ahead of time what you're most likely to play next — what you're part-way through, what's up next in a show, then anything 4K or HDR that arrived recently — so pressing play costs nothing.",`<span class="pill${settings.cache_max_gb?" ok":""}">${esc(state)}</span>`)}
+    <div class="setfields">
+      <div><label for="cache-produce">Look for work</label>${everySelect("cache-produce",PRODUCE_EVERY,settings.cache_produce_mins,"How often to check what's worth encoding ahead of time")}</div>
+      <div><label for="cache-gb">Disk budget</label><select id="cache-gb" class="every" title="How much disk finished pre-transcodes may occupy before the oldest are evicted">
           ${CACHE_SIZES.map(n=>`<option value="${n}"${Number(settings.cache_max_gb)===n?' selected':''}>${n?n+" GB":"Off"}</option>`).join("")}
-        </select>
-        ${bar}</span>
-      <button class="ghost sm" onclick="savePrecache(this)">Save</button></div>
-    <div class="hint">Encodes ahead of time what you're most likely to play next — what you're part-way
-      through, what's up next in a show, then anything 4K or HDR that arrived recently. When it hits, playback
-      starts instantly and seeking is as fast as direct play, because the whole stream already exists.
-      <b>It shares the encoder with live playback and always loses:</b> the moment anyone presses play it
-      stops what it's doing and hands the hardware over, picking up later from where it stopped.
-      Only sources nothing plays natively are worth it (4K, HDR, HEVC), so an ordinary 1080p file is skipped.
-      Setting the budget to <b>Off</b> stops production and clears what's stored.</div>`;
+        </select></div>
+    </div>
+    <div class="hint"><b>It shares the encoder with live playback and always loses:</b> the moment anyone presses play it stops and hands the hardware over, picking up later from where it stopped. Only sources nothing plays natively are worth it (4K, HDR, HEVC); an ordinary 1080p file is skipped. A budget of <b>Off</b> stops production and clears what's stored. What it is doing right now is on Activity.</div>
+    ${setCardFoot("savePrecache")}`);
+}
+function telemetryPanel(settings){
+  return setCard(`${cardHead("Playback telemetry","Bounded, node-local playback measurements behind the Playback (7 days) card on System.")}
+    <div class="setfields"><div><label for="telemetry-retain">Retain events</label>
+        <select id="telemetry-retain" class="every" title="How long node-local playback measurements are kept">
+          ${[[0,"Off"],[7,"7 days"],[14,"14 days"],[30,"30 days"],[60,"60 days"],[90,"90 days"]].map(([n,label])=>`<option value="${n}"${Number(settings.telemetry_retain_days)===n?' selected':''}>${label}</option>`).join("")}
+        </select></div></div>
+    <div class="hint">Off keeps the existing client log lines but writes and prunes no telemetry rows.</div>
+    ${setCardFoot("saveTelemetry")}`);
 }
 async function saveTelemetry(btn){
   btn.disabled=true;
   try{
-    await api("/settings",{method:"PUT",body:{
-      telemetry_retain_days:Number(document.getElementById("telemetry-retain").value)}});
-    toast("Playback telemetry saved"); render();
-  }catch(e){ toast(e.message||"Couldn't save"); }
-  finally{ btn.disabled=false; }
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      telemetry_retain_days:Number(document.getElementById("telemetry-retain").value)}}));
+    toast("Playback telemetry saved"); setCardSaved(btn);
+  }catch(e){ toast(e.message||"Couldn't save"); btn.disabled=false; }
 }
 async function saveMaintenance(btn){
   btn.disabled=true;
   try{
-    await api("/settings",{method:"PUT",body:{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
       probe_retry_mins:Number(document.getElementById("job-probe").value),
       artwork_retry_mins:Number(document.getElementById("job-art").value),
       transcode_cleanup_mins:Number(document.getElementById("job-clean").value),
-      scan_on_startup:document.getElementById("job-boot").checked}});
-    toast("Maintenance schedule saved"); render();
-  }catch(e){ toast(e.message||"Couldn't save"); }
-  finally{ btn.disabled=false; }
+      scan_on_startup:document.getElementById("job-boot").checked}}));
+    toast("Maintenance schedule saved"); setCardSaved(btn);
+  }catch(e){ toast(e.message||"Couldn't save"); btn.disabled=false; }
 }
 async function savePrecache(btn){
   btn.disabled=true;
   try{
-    await api("/settings",{method:"PUT",body:{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
       cache_produce_mins:Number(document.getElementById("cache-produce").value),
-      cache_max_gb:Number(document.getElementById("cache-gb").value)}});
-    toast("Pre-transcoding saved"); render();
-  }catch(e){ toast(e.message||"Couldn't save"); }
-  finally{ btn.disabled=false; }
+      cache_max_gb:Number(document.getElementById("cache-gb").value)}}));
+    toast("Pre-transcoding saved"); setCardSaved(btn);
+  }catch(e){ toast(e.message||"Couldn't save"); btn.disabled=false; }
 }
 function dvProgressText(progress){
   if(!progress) return "No eligible files found";
@@ -11662,21 +11792,18 @@ function dvModeSelect(l,dv){
   const mode=(dv&&dv.library_modes&&dv.library_modes[String(l.id)])||"off";
   const unavailable=!(dv&&dv.capabilities&&dv.capabilities.available);
   const reason=unavailable?(dv&&dv.capabilities&&dv.capabilities.reason)||"dovi_tool or mkvmerge is unavailable":"";
-  return `<div class="sched" title="${esc(reason)}"><span class="schedpair">Dolby Vision
-    <select id="dv-mode-${l.id}" aria-label="Dolby Vision conversion mode for ${esc(l.name)}" aria-describedby="dv-progress-${l.id}" data-dv-tools-available="${unavailable?'false':'true'}" onchange="updateDvModeControls(${l.id})" style="max-width:105px;font-size:12px;padding:3px 6px">
+  return `<div class="setfields" title="${esc(reason)}"><div><label for="dv-mode-${l.id}">Dolby Vision conversion</label>
+    <select id="dv-mode-${l.id}" aria-label="Dolby Vision conversion mode for ${esc(l.name)}" aria-describedby="dv-progress-${l.id}" data-dv-tools-available="${unavailable?'false':'true'}" onchange="updateDvModeControls(${l.id})">
       ${[["off","Off"],["manual","Manual"],["auto","Automatic"]].map(([v,label])=>`<option value="${v}"${mode===v?' selected':''}${unavailable&&v!=="off"?' disabled':''}>${label}</option>`).join("")}
-    </select></span>
-    <span class="schedpair"><button class="ghost sm" id="dv-mode-save-${l.id}" aria-label="Save Dolby Vision conversion mode for ${esc(l.name)}" aria-describedby="dv-progress-${l.id}" onclick="saveDvMode(${l.id},this)"${unavailable&&mode!=="off"?' disabled':''}>Save</button>
-    <button class="ghost sm" id="dv-convert-${l.id}" aria-label="Convert Dolby Vision files in ${esc(l.name)} now" aria-describedby="dv-progress-${l.id}" onclick="convertDvLibrary(${l.id},this)"${unavailable||mode==="off"?' disabled':''}>Convert now</button></span>
-    <span class="muted" id="dv-progress-${l.id}" aria-live="polite">${esc(unavailable?`Unavailable: ${reason}`:dvProgressText(dv.progress_by_library&&dv.progress_by_library[String(l.id)]))}</span></div>`;
+    </select></div>
+    <div><label>&nbsp;</label><button class="ghost sm" id="dv-convert-${l.id}" aria-label="Convert Dolby Vision files in ${esc(l.name)} now" aria-describedby="dv-progress-${l.id}" onclick="convertDvLibrary(${l.id},this)"${unavailable||mode==="off"?' disabled':''}>Convert now</button></div>
+    <div><label>&nbsp;</label><span class="muted" id="dv-progress-${l.id}" aria-live="polite" style="font-size:12px">${esc(unavailable?`Unavailable: ${reason}`:dvProgressText(dv.progress_by_library&&dv.progress_by_library[String(l.id)]))}</span></div></div>`;
 }
 function updateDvModeControls(id){
   const select=document.getElementById(`dv-mode-${id}`);
   if(!select) return;
   const unavailable=select.dataset.dvToolsAvailable!=="true";
-  const save=document.getElementById(`dv-mode-save-${id}`);
   const convert=document.getElementById(`dv-convert-${id}`);
-  if(save) save.disabled=unavailable&&select.value!=="off";
   if(convert) convert.disabled=unavailable||select.value==="off";
 }
 async function refreshDvConversions(){
@@ -11696,21 +11823,6 @@ function paintDvConversionProgress(snapshot){
   }
   const recovery=document.getElementById("dv-recovery-guards");
   if(recovery) recovery.innerHTML=dvRecoveryGuardsHtml(snapshot);
-}
-async function saveDvMode(id,btn){
-  const mode=document.getElementById(`dv-mode-${id}`).value;
-  btn.disabled=true;
-  try{
-    const saved=await api(`/libraries/${id}/dv-conversion`,{method:"PUT",body:{mode}});
-    const snapshot=SETTINGS_DATA.dvConversions;
-    if(snapshot){
-      snapshot.library_modes=snapshot.library_modes||{};
-      snapshot.library_modes[String(id)]=saved.mode;
-    }
-    toast(mode==="off"?"On-disk conversion disabled":mode==="auto"?"Automatic conversion enabled":"Manual conversion enabled");
-    renderSettings();
-  }catch(e){ toast(e.message||"Couldn't save Dolby Vision mode"); }
-  finally{ btn.disabled=false; }
 }
 function noteDvLibraryQueueResult(id,result){
   const queued=Math.max(0,Number(result&&result.queued||0));
@@ -11750,10 +11862,8 @@ async function saveDvDiskSettings(btn){
       snapshot.keep_original=saved.dv_disk_keep_original;
       snapshot.parallel=saved.dv_disk_convert_parallel;
     }
-    toast("Dolby Vision conversion settings saved");
-    renderSettings();
-  }catch(e){ toast(e.message||"Couldn't save Dolby Vision settings"); }
-  finally{ btn.disabled=false; }
+    toast("Dolby Vision conversion settings saved"); setCardSaved(btn);
+  }catch(e){ toast(e.message||"Couldn't save Dolby Vision settings"); btn.disabled=false; }
 }
 function dvRecoveryGuardsHtml(dv){
   const guards=dv&&dv.recovery_guards||{}, summary=guards.summary||{};
@@ -11778,32 +11888,38 @@ function dvRecoveryGuardsHtml(dv){
 function dvDiskPanel(settings,dv){
   const capabilities=dv&&dv.capabilities;
   const reason=capabilities&&!capabilities.available?capabilities.reason:"";
-  return `<div class="card"><h2 class="section" style="margin-top:0">Dolby Vision on disk</h2>
+  const pill=capabilities?(capabilities.available?`<span class="pill ok">tools available</span>`:`<span class="pill bad">conversion unavailable</span>`):"";
+  return setCard(`${cardHead("Dolby Vision on disk","Profile 7 files are copied to a verified Profile 8.1 replacement before their public path changes. Each library's mode is set from its row in Libraries.",pill)}
     ${reason?`<div class="setwarn">⚠ <b>Conversion unavailable.</b> ${esc(reason)}</div>`:""}
-    <div class="row setrow" style="gap:14px 18px">
-      <label class="schedpair"><input type="checkbox" id="dv-keep-original"${settings&&settings.dv_disk_keep_original?' checked':''}> Keep the Profile 7 original as <code>.p7.orig</code></label>
-      <label class="schedpair" for="dv-parallel">Parallel files <select id="dv-parallel">${[1,2,3,4,5,6,7,8].map(n=>`<option value="${n}"${Number(settings&&settings.dv_disk_convert_parallel||1)===n?' selected':''}>${n}</option>`).join("")}</select></label>
-      <button class="ghost sm" aria-label="Save Dolby Vision conversion settings" onclick="saveDvDiskSettings(this)">Save</button></div>
-    <div class="hint">Profile 7 files are copied to a verified Profile 8.1 replacement before their public path changes. Keeping the original is safest and is on by default. Each file is leased cluster-wide, while parallelism limits work on this node.</div>
-    <div id="dv-recovery-guards">${dvRecoveryGuardsHtml(dv)}</div></div>`;
+    ${togRow("dv-keep-original","Keep the Profile 7 original as <code>.p7.orig</code>","Safest, and on by default.",settings&&settings.dv_disk_keep_original)}
+    <div class="setfields">
+      <label class="schedpair" for="dv-parallel">Parallel files on this node <select id="dv-parallel" class="every">${[1,2,3,4,5,6,7,8].map(n=>`<option value="${n}"${Number(settings&&settings.dv_disk_convert_parallel||1)===n?' selected':''}>${n}</option>`).join("")}</select></label>
+    </div>
+    <div class="hint">Each file is leased cluster-wide, while parallelism limits work on this node.</div>
+    <div id="dv-recovery-guards">${dvRecoveryGuardsHtml(dv)}</div>
+    <div class="setfoot"><button class="primary sm" disabled aria-label="Save Dolby Vision conversion settings" onclick="saveDvDiskSettings(this)">Save</button><span class="setstate">Saved</span></div>`);
 }
 function libRow(l,status,dv){
   const paths=(l.paths||[]).map(p=>`<span class="pathchip">${esc(p)}</span>`).join(" ")||'<span class="muted">—</span>';
-  return `<tr id="librow-${l.id}"><td class="libname"><b>${esc(l.name)}</b></td><td data-label="Kind">${esc(l.anime?'anime':l.kind)}</td>
+  const open=LIB_DRAWER===l.id;
+  const provider=l.kind!=="home"&&l.kind!=="books";
+  return `<tr id="librow-${l.id}"${open?' class="setopen"':""}><td class="libname"><b>${esc(l.name)}</b></td><td data-label="Kind">${esc(l.anime?'anime':l.kind)}</td>
       <td data-label="Paths"><div class="paths">${paths}</div></td>
-      <td class="muted" data-label="Status"><div id="st-${l.id}">${statusText(status[l.id],l.last_scan_at)}</div>${schedRow(l)}${dvModeSelect(l,dv)}</td>
+      <td class="muted" data-label="Status"><div id="st-${l.id}">${statusText(status[l.id],l.last_scan_at)}</div></td>
       <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end;gap:5px">
         <button class="ghost sm" onclick="scanLib(${l.id})">Scan</button>
-        <button class="ghost sm" onclick="refreshLib(${l.id})" title="Re-fetch all metadata & artwork (incl. season posters)">Refresh art</button>
-        <button class="ghost sm" onclick="editLib(${l.id})">Edit</button>
-        <button class="ghost sm" onclick="delLib(${l.id})">Delete</button></div></td></tr>`;
+        <button class="ghost sm" onclick="refreshLib(${l.id})"${provider?"":' disabled title="This kind of library has no metadata provider"'} title="Re-fetch all metadata & artwork (incl. season posters)">Refresh art</button>
+        <button class="ghost sm" aria-expanded="${open?"true":"false"}"${open?` aria-controls="libdrawer-${l.id}"`:""} onclick="openLibDrawer(${l.id})">Configure ${open?"⌃":"⌄"}</button></div></td></tr>${open?libDrawerHtml(l,dv):""}`;
 }
 function librariesPanel(libs,status,settings,dv){
-  const rows=libs.map(l=>libRow(l,status,dv)).join("")||`<tr><td colspan="5" class="muted">No libraries yet.</td></tr>`;
-  const bulk=libs.length?`<div class="row" style="margin:0 0 14px;gap:8px;align-items:center">
-        <button class="ghost sm" onclick="scanAll()" title="Scan every library for new & changed files">Scan all</button>
-        <button class="ghost sm" onclick="refreshAll()" title="Re-fetch metadata & artwork for every library">Refresh all art</button>
-        <span class="muted" style="font-size:12px">${libs.length} librar${libs.length===1?'y':'ies'}</span></div>`:"";
+  const rows=libs.map(l=>libRow(l,status,dv)).join("")||(LIB_DRAWER==="new"?"":`<tr><td colspan="5" class="muted">No libraries yet.</td></tr>`);
+  const tools=`${libs.length?`<button class="ghost sm" onclick="scanAll()" title="Scan every library for new & changed files">Scan all</button>
+        <button class="ghost sm" onclick="refreshAll()" title="Re-fetch metadata & artwork for every library">Refresh all art</button>`:""}
+        <button class="sm" onclick="openLibDrawer('new')">+ Add library</button>`;
+  const lastScan=libs.map(l=>l.last_scan_at||0).reduce((a,b)=>Math.max(a,b),0);
+  const summary=libs.length
+    ? `${libs.length} librar${libs.length===1?'y':'ies'}${lastScan?` · last scan ${esc(agoLabel(lastScan))}`:""}`
+    : "What plurx scans, how often, and what it does with what it finds.";
   // Movies/TV need a TMDB key for artwork; without one the scan finds files but
   // downloads nothing. Surface that right here, where libraries are managed.
   // Home and Books libraries have no provider, so they don't want a key either.
@@ -11821,32 +11937,53 @@ function librariesPanel(libs,status,settings,dv){
   const noKey = settings && !settings.tmdb_configured;
   let warn = "";
   if(noKey && libs.some(wantsProvider)){
-    warn = `<div class="setwarn">⚠ <b>No TMDB API key set.</b> Your Movies/TV libraries scan fine, but posters, overviews, and episode data won't download without one. <a onclick="setSettingsTab('metadata')">Add a free key in Metadata</a>, then come back and use <b>Refresh all art</b> — adding the key does not backfill what the earlier scans missed. (Anime uses AniList; Books and home-video libraries use no provider.)</div>`;
+    warn = `<div class="setwarn">⚠ <b>No TMDB API key set.</b> Your Movies/TV libraries scan fine, but posters, overviews, and episode data won't download without one. <a href="#/settings/metadata">Add a free key in Metadata</a>, then come back and use <b>Refresh all art</b> — adding the key does not backfill what the earlier scans missed. (Anime uses AniList; Books and home-video libraries use no provider.)</div>`;
   } else if(noKey && !libs.some(wantsProvider)){
-    warn = `<div class="setwarn">⚠ <b>Set up a metadata key before you add a Movies or TV library.</b> Without one the scan finds every file and downloads no posters, overviews or episode data — and adding the key afterwards doesn't backfill it, so you'd have to re-run a full refresh over the whole library. <a onclick="setSettingsTab('metadata')">Add a free TMDB key in Metadata</a> first; it takes a minute. (Anime, Books, and home-video libraries need no TMDB key.)</div>`;
+    warn = `<div class="setwarn">⚠ <b>Set up a metadata key before you add a Movies or TV library.</b> Without one the scan finds every file and downloads no posters, overviews or episode data — and adding the key afterwards doesn't backfill it, so you'd have to re-run a full refresh over the whole library. <a href="#/settings/metadata">Add a free TMDB key in Metadata</a> first; it takes a minute. (Anime, Books, and home-video libraries need no TMDB key.)</div>`;
   }
-  return `<div class="card"><h2 class="section" style="margin-top:0">Libraries</h2>
-      ${warn}${bulk}
+  return `${setHead("Libraries",summary,tools)}${warn}${LIB_DRAWER==="new"?libDrawerHtml(null,dv):""}
+    <div class="card" style="padding:8px 10px 4px">
       <table><thead><tr><th>Name</th><th>Kind</th><th>Paths</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table>
-      <h2 class="section">Add library</h2>
-      <div class="row"><input id="ln" placeholder="Name" aria-label="Library name" style="max-width:180px">
-        <select id="lk" style="max-width:190px"><option value="movies">Movies</option><option value="shows">TV Shows</option><option value="anime">Anime</option><option value="books">Books &amp; audiobooks</option><option value="home">Home videos &amp; photos</option></select>
-        <input id="lp" placeholder="/path/to/media (comma-separated)" aria-label="Media paths"></div>
-      <div class="hint">Paths are as the <b>server process</b> sees them — running in Docker, that's the path inside the container (e.g. <code>/media/movies</code>), which must be mounted in your compose file.</div>
-      <div class="err" id="lerr"></div>
-      <button style="margin-top:12px" onclick="addLib()">Add & scan</button>
-    </div>
-    ${dvDiskPanel(settings,dv)}
-    ${maintenancePanel(settings)?`<div class="card">${maintenancePanel(settings)}</div>`:""}`;
+    </div>`;
 }
-// Set when a provider key is saved while libraries already exist.
-//
-// A key is not retroactive: everything scanned before it went in was matched
-// against nothing and stays blank until something re-fetches it. Saving the
-// key therefore *looks* like it worked and changes nothing on screen, which
-// reads as the key being wrong. Survives until they act on it or leave the
-// page — a toast would be gone before they finished reading it.
+// Which row has its drawer open: a library id, "new" for the add form, or
+// null. One at a time. Module state, so a status tick cannot shut it; reset
+// on every section paint so it never reopens on a later visit.
+let LIB_DRAWER=null;
+function openLibDrawer(id){
+  LIB_DRAWER=(LIB_DRAWER===id)?null:id;
+  renderSettings();
+  const first=document.querySelector(".setdrawer input"); if(first) first.focus();
+}
+function libKindSelect(id,sel){
+  return `<select id="${id}">${[["movies","Movies"],["shows","TV Shows"],["anime","Anime"],["books","Books &amp; audiobooks"],["home","Home videos &amp; photos"]]
+    .map(([v,label])=>`<option value="${v}"${sel===v?" selected":""}>${label}</option>`).join("")}</select>`;
+}
+// The drawer holds everything that configures one library: its identity, its
+// schedule, and its Dolby Vision mode. Empty, it is the add form. It is a
+// table row so the phone layout reflows it under its parent like any other.
+function libDrawerHtml(l,dv){
+  const id=l?l.id:"new", sel=l?(l.anime?"anime":l.kind):"movies";
+  const identity=`<div class="setfields">
+      <div><label for="eln-${id}">Name</label><input id="eln-${id}" value="${esc(l?l.name:"")}" placeholder="Name" style="min-width:180px"></div>
+      <div><label for="elk-${id}">Kind</label>${libKindSelect(`elk-${id}`,sel)}</div>
+      <div style="flex:1 1 320px"><label for="elp-${id}">Paths <span class="muted">(comma-separated, as the server process sees them)</span></label><input id="elp-${id}" value="${esc(l?(l.paths||[]).join(", "):"")}" placeholder="/media/movies, /media/more" style="min-width:100%"></div>
+    </div>`;
+  const body=l
+    ? `${identity}<div class="setfields">${libScheduleFields(l)}</div>${dvModeSelect(l,dv)}
+       <div class="err" id="ele-${id}"></div>
+       <div class="setfoot"><button class="sm" onclick="saveLibDrawer(${l.id},this)">Save library</button>
+         <button class="ghost sm" onclick="openLibDrawer(null)">Cancel</button>
+         <button class="danger sm" onclick="delLib(${l.id})">Delete library…</button></div>`
+    : `${identity}<div class="hint">Running in Docker, a path is the one inside the container (e.g. <code>/media/movies</code>), which must be mounted in your compose file. The first scan starts as soon as the library is added.</div>
+       <div class="err" id="lerr"></div>
+       <div class="setfoot"><button class="sm" onclick="addLib(this)">Add &amp; scan</button>
+         <button class="ghost sm" onclick="openLibDrawer(null)">Cancel</button></div>`;
+  return l
+    ? `<tr class="setdrawer" id="libdrawer-${id}"><td colspan="5">${body}</td></tr>`
+    : `<div class="card setdrawer" id="libdrawer-new" style="margin-bottom:14px"><h2 class="section" style="margin:0 0 6px;padding:0;border:0">Add library</h2>${body}</div>`;
+}
 let KEY_NEEDS_BACKFILL=null;
 function keyBackfillHtml(libs){
   if(!KEY_NEEDS_BACKFILL || !libs.length) return "";
@@ -11863,28 +12000,27 @@ async function backfillFromKey(){
   setSettingsTab("libraries");
   setTimeout(settingsTick,400);
 }
-function metadataPanel(settings,trakt){
+function metadataPanel(settings){
   const libs=(SETTINGS_DATA&&SETTINGS_DATA.libs)||[];
-  return `<div id="metadata-libraries">${keyBackfillHtml(libs)}</div><div class="card"><h2 class="section" style="margin-top:0">API keys</h2>
-      <label>TMDB — posters, overviews, episode data</label>
-      <p class="muted" style="margin:2px 0 6px">${settings.tmdb_configured?"Configured. Click the field to reveal it, or type a new key to replace it.":"Add a free key (<a href='https://www.themoviedb.org/settings/api' target='_blank' rel='noopener'>themoviedb.org</a>) to fetch posters, overviews, and episode data."}</p>
-      <input id="tk" placeholder="TMDB API key" type="password" autocomplete="off" value="${esc(settings.tmdb_api_key||'')}" onfocus="this.type='text'" onblur="this.type='password'">
-      <div class="err" id="terr"></div>
-      <button class="sm" style="margin:10px 0 22px" onclick="saveTmdb()">Save TMDB key</button>
-      <label>OMDb — Rotten Tomatoes / Metacritic / IMDb ratings</label>
-      <p class="muted" style="margin:2px 0 6px">${settings.omdb_configured?"Configured — Rotten Tomatoes, Metacritic, and IMDb ratings can be fetched.":`Add a free key (<a href="https://www.omdbapi.com/apikey.aspx" target="_blank" rel="noopener">omdbapi.com</a>) to show Rotten Tomatoes, Metacritic, and IMDb ratings on the item page — TMDB doesn't carry these.`}</p>
-      <input id="ok" placeholder="OMDb API key" type="password" autocomplete="off" value="${esc(settings.omdb_api_key||'')}" onfocus="this.type='text'" onblur="this.type='password'">
-      <div class="err" id="oerr"></div>
-      <button class="sm" style="margin-top:10px" onclick="saveOmdb()">Save OMDb key</button></div>
-    ${traktCardHtml(trakt)}
-    ${monarrCardHtml()}`;
+  const keyCard=(id,title,sub,configured,value,link,saveFn,errId)=>setCard(`${cardHead(title,sub,`<span class="pill ${configured?"ok":"bad"}">${configured?"configured":"not set"}</span>`)}
+      <div class="setfields">
+        <div style="flex:1 1 320px"><label for="${id}">API key${configured?` <span class="muted">— click to reveal, or type a new key to replace it</span>`:` <span class="muted">— free from ${link}</span>`}</label>
+          <input id="${id}" placeholder="${esc(title)} API key" type="password" autocomplete="off" value="${esc(value||'')}" onfocus="this.type='text'" onblur="this.type='password'" style="min-width:100%"></div>
+        <div class="err" id="${errId}"></div>
+      </div>
+      ${setCardFoot(saveFn)}`);
+  return `${setHead("Metadata","Where posters, overviews, episode data and ratings come from.")}
+    <div id="metadata-libraries">${keyBackfillHtml(libs)}</div>
+    ${keyCard("tk","TMDB","Posters, overviews and episode data for Movies and TV.",settings.tmdb_configured,settings.tmdb_api_key,`<a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">themoviedb.org</a>`,"saveTmdb","terr")}
+    ${keyCard("ok","OMDb","Rotten Tomatoes, Metacritic and IMDb ratings on the item page — TMDB doesn't carry these.",settings.omdb_configured,settings.omdb_api_key,`<a href="https://www.omdbapi.com/apikey.aspx" target="_blank" rel="noopener">omdbapi.com</a>`,"saveOmdb","oerr")}
+    <div class="card">${cardHead("Providers with no key","Anime uses AniList. Books and home-video libraries use no provider.")}</div>`;
 }
-// Options for a preset dropdown, plus the stored value when it isn't one of
-// the presets. Without that last part a select silently displays some *other*
-// preset — the browser falls back to the first option — and the next Save
-// writes that one back, quietly changing a setting nobody touched. Values can
-// come from the API or a config someone tuned by hand, so "not in my list" is
-// a real state and the honest thing is to show it.
+// The section for services plurx talks to. Trakt is a two-way sync, monarr a
+// calendar seam; both are the opposite direction of the Metadata providers,
+// which is why they no longer share a page with them.
+function integrationsPanel(settings,trakt){
+  return `${setHead("Integrations","Other services plurx talks to.")}${traktCardHtml(trakt)}${monarrCardHtml()}`;
+}
 function presetOpts(pairs, cur, label){
   cur=(cur==null?"":String(cur));
   const opts=pairs.slice();
@@ -11892,23 +12028,22 @@ function presetOpts(pairs, cur, label){
   return opts.map(([v,l])=>`<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`).join("");
 }
 function analysisSettingsPanel(settings,snapshot){
-  return `<div id="analysis-settings-summary">${analysisSummaryCard(snapshot||{enabled:false},"settings")}</div>
-    <div class="card"><h2 class="section" style="margin-top:0">Index analysis</h2>
-      <p class="muted" style="margin-top:0;max-width:72ch">Content analysis verifies each source and builds the fragment index used by <b>VOD HLS</b>. It runs only while the media worker is idle, so foreground playback always wins.</p>
-      <label class="row" style="margin:0 0 16px;font-size:14px;color:var(--text)"><input type="checkbox" id="an-enabled" ${settings.vod_index_cluster_cache?'checked':''} style="width:auto;margin-right:9px"> Enable the durable analysis queue and shared index cache</label>
-      <div class="row" style="align-items:end">
-        <div><label>Background analysis</label><select id="an-every" style="width:auto;min-width:220px">${presetOpts([["0","Paused"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
+  const card=setCard(`${cardHead("Index analysis","Foreground playback always wins: analysis only runs while the media worker is idle.")}
+      ${togRow("an-enabled","Durable analysis queue and shared index cache","Manual Analyze and Retry actions use the queue; background analysis discovers eligible files on the cadence below. Pausing either keeps completed indexes; titles without one use Live HLS when live recovery is on in Playback.",settings.vod_index_cluster_cache)}
+      <div class="setfields">
+        <div><label for="an-every">Background analysis</label><select id="an-every" style="min-width:220px">${presetOpts([["0","Paused"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
       </div>
-      <h3 class="section">Retry policy</h3>
-      <div class="row" style="align-items:end">
-        <div><label>Maximum attempts</label><input id="an-attempts" type="number" min="1" max="20" value="${esc(settings.analysis_max_attempts||5)}"></div>
-        <div><label>Claim lease (seconds)</label><input id="an-lease" type="number" min="15" max="600" value="${esc(settings.analysis_lease_secs||60)}"></div>
-        <div><label>Initial backoff (seconds)</label><input id="an-backoff-base" type="number" min="1" max="300" value="${esc(settings.analysis_backoff_base_secs||5)}"></div>
-        <div><label>Maximum backoff (seconds)</label><input id="an-backoff-max" type="number" min="1" max="3600" value="${esc(settings.analysis_backoff_max_secs||300)}"></div>
+      <h2 class="section">Retry policy</h2>
+      <div class="setfields">
+        <div><label for="an-attempts">Maximum attempts</label><input id="an-attempts" type="number" min="1" max="20" value="${esc(settings.analysis_max_attempts||5)}"></div>
+        <div><label for="an-lease">Claim lease (seconds)</label><input id="an-lease" type="number" min="15" max="600" value="${esc(settings.analysis_lease_secs||60)}"></div>
+        <div><label for="an-backoff-base">Initial backoff (seconds)</label><input id="an-backoff-base" type="number" min="1" max="300" value="${esc(settings.analysis_backoff_base_secs||5)}"></div>
+        <div><label for="an-backoff-max">Maximum backoff (seconds)</label><input id="an-backoff-max" type="number" min="1" max="3600" value="${esc(settings.analysis_backoff_max_secs||300)}"></div>
       </div>
-      <div class="hint">Manual Analyze and Retry actions use the durable queue. Background analysis discovers eligible files on this cadence. Pausing either does not remove completed indexes; titles without one use Live HLS when live recovery is enabled in Playback.</div>
-      <div class="err" id="an-error"></div><div class="analysis-actions" style="justify-content:flex-start;margin-top:10px"><button onclick="saveAnalysisSettings()">Save analysis settings</button><a class="ghost sm" href="#/analysis">Open analysis workspace</a></div>
-    </div>
+      <div class="err" id="an-error"></div>
+      ${setCardFoot("saveAnalysisSettings")}`);
+  return `${setHead("Analysis","Content analysis verifies each source and builds the fragment index VOD HLS plays from.",`<a class="ghost sm" href="#/analysis" style="text-decoration:none">Open analysis workspace</a>`)}<div id="analysis-settings-summary">${analysisSummaryCard(snapshot||{enabled:false},"settings")}</div>
+    ${card}
     <div class="card"><h2 class="section" style="margin-top:0">How a file becomes VOD HLS ready</h2>
       <div class="analysis-diag-grid"><b>1 · Verify</b><span>Read and hash the exact source without blocking playback.</span><b>2 · Index</b><span>Build a complete fragment timeline on an eligible media worker.</span><b>3 · Publish</b><span>Store the content-addressed artifact and mark the file VOD HLS ready.</span></div>
     </div>`;
@@ -11916,77 +12051,86 @@ function analysisSettingsPanel(settings,snapshot){
 function playbackPanel(settings){
   const vodWorking=Number(settings.vod_working_set_bytes)||(8*1024*1024*1024);
   const vodMaterialize=Number(settings.vod_materialize_budget_secs)||30;
-  return `<div class="card"><h2 class="section" style="margin-top:0">Playback defaults</h2>
-      <p class="muted" style="margin-top:0">Default audio and subtitle selection for every player. Anime dual-audio still prefers the original audio with subtitles.</p>
-      <div class="row" style="align-items:end">
-        <div><label>Audio language</label><select id="pal" style="width:auto;min-width:150px">${langOpts(settings.default_audio_lang)}</select></div>
-        <div><label>Subtitle language</label><select id="psl" style="width:auto;min-width:150px">${langOpts(settings.default_sub_lang)}</select></div>
-        <div><label>Subtitles</label><select id="psm" style="width:auto;min-width:230px">
+  const active=SERVER&&Number.isFinite(SERVER.active_transcodes)?`<span class="pill">${SERVER.active_transcodes} active stream${SERVER.active_transcodes===1?"":"s"}</span>`:"";
+  const defaults=setCard(`${cardHead("Defaults for every player","Applied on web, Apple and Android when a title has more than one track. Anime dual-audio still prefers the original audio with subtitles.")}
+      <div class="setfields">
+        <div><label for="pal">Audio language</label><select id="pal">${langOpts(settings.default_audio_lang)}</select></div>
+        <div><label for="psl">Subtitle language</label><select id="psl">${langOpts(settings.default_sub_lang)}</select></div>
+        <div><label for="psm">Show subtitles</label><select id="psm" style="min-width:230px">
           <option value="auto" ${settings.sub_mode==='auto'?'selected':''}>Auto — only for foreign audio</option>
           <option value="always" ${settings.sub_mode==='always'?'selected':''}>Always on</option>
           <option value="off" ${settings.sub_mode==='off'?'selected':''}>Off</option></select></div>
       </div>
-      <label class="row" style="margin:16px 0 0;font-size:14px;color:var(--text)"><input type="checkbox" id="autonext" ${autoNextOn()?'checked':''} onchange="setAutoNext(this.checked)" style="width:auto;margin-right:9px"> Auto-play the next episode when one finishes <span class="muted" style="font-size:12px;margin-left:6px">· saved on this browser</span></label>
-      <h2 class="section">Automatic quality</h2>
-      <label class="row" style="margin:0;font-size:14px;color:var(--text)"><input type="checkbox" id="pabr" ${settings.playback_auto_abr?'checked':''} style="width:auto;margin-right:9px"> Adjust Auto quality while playing</label>
-      <p class="muted" style="margin-top:8px">Off keeps the server's initial Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Off is the default until the Auto acceptance week is complete.</p>
-      <h2 class="section">HLS playback modes</h2>
-      <p class="muted" style="margin-top:0"><b>VOD HLS</b> is the preferred fixed, seekable timeline. <b>Live HLS</b> is the growing recovery stream used when a file’s VOD analysis is unavailable.</p>
-      <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvod" ${settings.vod_presentation?'checked':''} style="width:auto;margin-right:9px"> Accept VOD session creation</label>
-      <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvlr" ${settings.vod_live_recovery?'checked':''} style="width:auto;margin-right:9px"> Use live HLS when a VOD prerequisite is unavailable</label>
-      <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pcpv1" ${settings.playback_control_protocol_v1?'checked':''} style="width:auto;margin-right:9px"> Advertise playback control protocol v1 <span class="muted" style="font-size:12px;margin-left:6px">· passive preview; no automatic actions yet</span></label>
-      <div class="row" style="align-items:end">
-        <div><label>Working set</label><select id="pvws" style="width:auto;min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
-        <div><label>Producer deadline</label><select id="pvmb" style="width:auto;min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>
-      </div>
-      <div class="hint">The item page and Playback info name the active mode explicitly. Index schedules, queue health, failures, and retries now live in <button class="ghost sm" onclick="openAnalysisSettings()">Analysis settings</button>.</div>
-      <h2 class="section">Measured playback limits</h2>
-      <p class="muted" style="margin-top:0">When an original stream loses visible frames, this browser remembers that
-        exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets
-        <b>Auto</b> transcode it next time instead of stuttering first. A different HDR shape or bitrate gets its own
-        measurement. The measurement expires after 30 days, and <b>Quality → Original</b> always bypasses it; if Auto
-        sacrifices HDR, the Quality menu names the learned client-performance limit and the range change.
-        Saved on this browser only; nothing here affects anyone else.</p>
-      <div class="row" id="dlrow">${decodeLimitsSummary()}</div>
-      <h2 class="section">Delivery speed</h2>
-      <p class="muted" style="margin-top:0">How fast a stream is sent, relative to how fast it plays. The first 30 seconds always arrive at full speed so starting and seeking stay instant; the limit applies after that. Unlimited lets one stream take the entire link, which on Wi-Fi can crowd out everything else on the network.</p>
-      <div><label>Stream pace</label><select id="prr" style="width:auto;min-width:230px">
-        <option value="2" ${settings.stream_readrate==='2'?'selected':''}>2× — gentlest</option>
-        <option value="4" ${settings.stream_readrate==='4'?'selected':''}>4× — recommended</option>
-        <option value="8" ${settings.stream_readrate==='8'?'selected':''}>8×</option>
-        <option value="0" ${settings.stream_readrate==='0'?'selected':''}>Unlimited — wired networks only</option></select></div>
-      <h2 class="section">Transcode buffering</h2>
-      <p class="muted" style="margin-top:0">How much of a head start a transcoded or repackaged stream builds before it settles down. The head start <em>is</em> the buffer a player has to survive a network hiccup, so raise it if 4K stutters and lower it if streams eat too much disk. The transcoder pauses once it reaches the buffer limit and resumes when you catch up.</p>
-      <div class="row" style="align-items:end">
-        <div><label>Head start</label><select id="phb" style="width:auto;min-width:200px">${presetOpts([["30","30 seconds"],["90","90 seconds — recommended"],["180","3 minutes"],["0","None"]], settings.hls_burst_secs, v=>`${v} seconds`)}</select></div>
-        <div><label>Then pace at</label><select id="phr" style="width:auto;min-width:200px">${presetOpts([["1.5","1.5× — gentlest"],["2","2× — recommended"],["4","4×"],["0","Unlimited"]], settings.hls_readrate, v=>`${v}×`)}</select></div>
-        <div><label>Buffer limit</label><select id="pha" style="width:auto;min-width:200px">${presetOpts([["60","1 minute"],["180","3 minutes — recommended"],["600","10 minutes"],["0","No limit — needs disk"]], settings.hls_ahead_max_secs, v=>`${v} seconds`)}</select></div>
-      </div>
-      <label class="row" style="margin:16px 0 0;font-size:14px;color:var(--text)"><input type="checkbox" id="phs" ${settings.hls_typeless_sliding?'checked':''} style="width:auto;margin-right:9px"> Experimental typeless sliding HLS <span class="muted" style="font-size:12px;margin-left:6px">· applies to new sessions; use only for the iPad control comparison</span></label>
       <div class="err" id="perr"></div>
-      <button style="margin-top:12px" onclick="savePlayback()">Save defaults</button></div>`;
+      ${setCardFoot("savePlaybackDefaults")}`);
+  const streaming=setCard(`${cardHead("Streaming","Server-side delivery. Changes apply to the next session, not the ones playing now.",active)}
+      ${togRow("pvod","VOD HLS — a fixed, seekable timeline","Preferred. Needs the file's analysis index; schedules and queue health are in Analysis.",settings.vod_presentation)}
+      ${togRow("pvlr","Fall back to Live HLS when a VOD prerequisite is missing","The growing recovery stream. Off means a title without an index refuses to start.",settings.vod_live_recovery)}
+      ${togRow("pabr","Adjust Auto quality while playing","Off keeps the server's first Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Off is the default until the Auto acceptance week is complete.",settings.playback_auto_abr)}
+      <div class="setfields">
+        <div><label for="pvws">VOD working set</label><select id="pvws" style="min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
+        <div><label for="pvmb">Producer deadline</label><select id="pvmb" style="min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>
+        <div><label for="prr">Stream pace after the first 30 s</label><select id="prr" style="min-width:230px">
+          <option value="2" ${settings.stream_readrate==='2'?'selected':''}>2× — gentlest</option>
+          <option value="4" ${settings.stream_readrate==='4'?'selected':''}>4× — recommended</option>
+          <option value="8" ${settings.stream_readrate==='8'?'selected':''}>8×</option>
+          <option value="0" ${settings.stream_readrate==='0'?'selected':''}>Unlimited — wired networks only</option></select></div>
+      </div>
+      <div class="hint">The first 30 seconds always arrive at full speed so starting and seeking stay instant; the pace applies after that. Unlimited lets one stream take the entire link, which on Wi-Fi can crowd out everything else on the network.</div>
+      <h2 class="section">Transcode buffering</h2>
+      <p class="sub" style="margin:0">How much of a head start a transcoded or repackaged stream builds before it settles down. The head start <em>is</em> the buffer a player has to survive a network hiccup: raise it if 4K stutters, lower it if streams eat too much disk. The transcoder pauses at the buffer limit and resumes when you catch up.</p>
+      <div class="setfields">
+        <div><label for="phb">Head start</label><select id="phb" style="min-width:200px">${presetOpts([["30","30 seconds"],["90","90 seconds — recommended"],["180","3 minutes"],["0","None"]], settings.hls_burst_secs, v=>`${v} seconds`)}</select></div>
+        <div><label for="phr">Then pace at</label><select id="phr" style="min-width:200px">${presetOpts([["1.5","1.5× — gentlest"],["2","2× — recommended"],["4","4×"],["0","Unlimited"]], settings.hls_readrate, v=>`${v}×`)}</select></div>
+        <div><label for="pha">Buffer limit</label><select id="pha" style="min-width:200px">${presetOpts([["60","1 minute"],["180","3 minutes — recommended"],["600","10 minutes"],["0","No limit — needs disk"]], settings.hls_ahead_max_secs, v=>`${v} seconds`)}</select></div>
+      </div>
+      <h2 class="section">Previews</h2>
+      ${togRow("pcpv1",`Advertise playback control protocol v1 <span class="pill">preview</span>`,"Passive; no automatic actions yet.",settings.playback_control_protocol_v1)}
+      ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison. Applies to new sessions.",settings.hls_typeless_sliding)}
+      <div class="err" id="serr"></div>
+      ${setCardFoot("saveStreaming")}`);
+  const local=setCard(`${cardHead("This browser only","Saved in this browser. Nothing here reaches the server or another viewer.",`<span class="pill acc">local</span>`)}
+      ${togRow("autonext","Auto-play the next episode when one finishes","",autoNextOn(),'onchange="setAutoNext(this.checked)"')}
+      <div class="tog"><span>Measured playback limits<small>When an original stream loses visible frames, this browser remembers that exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets <b>Auto</b> transcode it next time instead of stuttering first. A measurement expires after 30 days; <b>Quality → Original</b> always bypasses it.</small></span></div>
+      <div class="row" id="dlrow">${decodeLimitsSummary()}</div>`,{local:true});
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${streaming}${local}`;
 }
 function usersPanel(users){
-  return `<div class="card"><h2 class="section" style="margin-top:0">Users</h2>
-      <table><thead><tr><th>User</th><th>Role</th><th>Created</th><th></th></tr></thead>
-      <tbody>${users.map(u=>userRow(u)).join("")}</tbody></table>
-      <h2 class="section">Add user</h2>
-      <div class="row"><input id="un" placeholder="Username" style="max-width:180px" autocomplete="off">
-        <input id="up" placeholder="Password (min 8)" type="password" style="max-width:200px" autocomplete="new-password">
-        <input id="up2" placeholder="Confirm password" type="password" style="max-width:200px" autocomplete="new-password">
-        <label class="row" style="margin:0;font-size:13px;color:var(--muted)"><input type="checkbox" id="ua" style="width:auto"> admin</label></div>
-      <div class="err" id="uerr"></div>
-      <button style="margin-top:12px" onclick="addUser()">Add user</button></div>`;
+  const admins=users.filter(u=>u.is_admin).length;
+  const summary=`${users.length} account${users.length===1?"":"s"} · ${admins} admin${admins===1?"":"s"}`;
+  return `${setHead("Users",summary,`<button class="sm" onclick="openUserDrawer('new')">+ Add user</button>`)}
+      ${USER_DRAWER==="new"?userDrawerHtml(null):""}
+      <div class="card" style="padding:8px 10px 4px"><table><thead><tr><th>User</th><th>Role</th><th>Created</th><th></th></tr></thead>
+      <tbody>${users.map(u=>userRow(u)).join("")}</tbody></table></div>`;
 }
-// The git build stamp, shown only when it adds something the version number
-// doesn't: on a tagged release `build` is just "v" + the version, and repeating
-// it is noise. Between releases it's the one string that says which commit is
-// actually running, which is what a bug report needs.
-//
-// "unknown" gets said out loud rather than hidden. Hiding it is how this
-// screen came to read `plurx 0.1.0` for weeks of daily deploys with no way to
-// tell one from the next — the version number alone cannot answer "did my
-// change land?", and staying quiet made a broken deploy look like a stale one.
+// Which user row has its drawer open ("new" for the add form, a user id for
+// a password reset, or null). Same rules as the library drawer.
+let USER_DRAWER=null;
+function openUserDrawer(id){
+  USER_DRAWER=(USER_DRAWER===id)?null:id;
+  renderSettings();
+  const first=document.querySelector(".setdrawer input"); if(first) first.focus();
+}
+// The add form and the password reset are the same drawer: a password typed
+// twice. Reset used to be two prompt() dialogs; a form with a confirm field
+// is what the other two password forms already were.
+function userDrawerHtml(u){
+  const id=u?u.id:"new";
+  const fields=`<div class="setfields">
+      ${u?"":`<div><label for="un">Username</label><input id="un" placeholder="Username" autocomplete="off" style="min-width:180px"></div>`}
+      <div><label for="up-${id}">${u?"New password":"Password"} <span class="muted">(min 8)</span></label><input id="up-${id}" type="password" autocomplete="new-password" style="min-width:200px"></div>
+      <div><label for="up2-${id}">Confirm password</label><input id="up2-${id}" type="password" autocomplete="new-password" style="min-width:200px"></div>
+      ${u?"":`<div><label>&nbsp;</label><label class="chk" for="ua"><input type="checkbox" id="ua"> Administrator</label></div>`}
+      <div class="err" id="uerr"></div>
+    </div>`;
+  const body=u
+    ? `${fields}<div class="hint">Their current sessions are signed out when the password changes.</div>
+       <div class="setfoot"><button class="sm" onclick="resetPw(${u.id},${esc(JSON.stringify(u.username))},this)">Set password</button><button class="ghost sm" onclick="openUserDrawer(null)">Cancel</button></div>`
+    : `${fields}<div class="setfoot"><button class="sm" onclick="addUser(this)">Add user</button><button class="ghost sm" onclick="openUserDrawer(null)">Cancel</button></div>`;
+  return u
+    ? `<tr class="setdrawer" id="userdrawer-${id}"><td colspan="4">${body}</td></tr>`
+    : `<div class="card setdrawer" id="userdrawer-new" style="margin-bottom:14px"><h2 class="section" style="margin:0 0 6px;padding:0;border:0">Add user</h2>${body}</div>`;
+}
 function buildTag(sys){
   const b=sys.build;
   if(!b || b==="unknown")
@@ -12124,12 +12268,10 @@ function systemPanel(sys,playbackEvents){
   const enc=sys.encoders||{};
   const pills=[["NVENC",enc.nvenc],["QuickSync",enc.qsv],["VA-API",enc.vaapi],["VideoToolbox",enc.videotoolbox]]
     .map(([n,ok])=>`<span class="pill" style="${ok?'color:var(--good);border-color:var(--good)':''}">${n} ${ok?'✓':'—'}</span>`).join(" ");
-  return `<div class="card"><h2 class="section" style="margin-top:0">Server</h2>
+  return `${setHead("System",`${esc(sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}`,pills)}<div class="card"><h2 class="section" style="margin-top:0">Server</h2>
       <dl class="kvgrid system-grid">
-        <dt>Server</dt><dd>${esc(sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}</dd>
         <dt>Data dir</dt><dd>${esc(sys.data_dir)}</dd>
         <dt>ffmpeg</dt><dd>${sys.ffmpeg_version?esc(sys.ffmpeg_version):`<span style="color:var(--bad)">not found at \`${esc(sys.ffmpeg)}\` — scanning and transcoding will fail</span>`}</dd>
-        <dt>Hardware</dt><dd>${pills}</dd>
         <dt>Transcoder</dt><dd>${esc(sys.encoder_selected)} <span class="muted">(preference: ${esc(sys.hwaccel_pref)})</span></dd>
         <dt>HDR tone-map</dt><dd>${toneMapHtml(sys.tone_map)}</dd>
         <dt>Storage</dt><dd>${storageHtml(sys.storage)}</dd>
@@ -13083,33 +13225,26 @@ async function leaveCluster(btn,nodeId){
   if(settingsCurrent(generation,"cluster")) renderSettings();
 }
 // Inline library editor: the row becomes an editable form (name · kind · paths).
-function editLib(id){
-  const l=SETTINGS_DATA&&SETTINGS_DATA.libs.find(x=>x.id===id); if(!l) return;
-  const row=document.getElementById("librow-"+id); if(!row) return;
-  const sel=l.anime?"anime":l.kind;
-  row.innerHTML=`<td colspan="5"><div class="libedit">
-      <input id="eln-${id}" value="${esc(l.name)}" placeholder="Name" style="max-width:200px">
-      <select id="elk-${id}" style="max-width:170px">
-        <option value="movies"${sel==="movies"?" selected":""}>Movies</option>
-        <option value="shows"${sel==="shows"?" selected":""}>TV Shows</option>
-        <option value="anime"${sel==="anime"?" selected":""}>Anime</option>
-        <option value="books"${sel==="books"?" selected":""}>Books &amp; audiobooks</option>
-        <option value="home"${sel==="home"?" selected":""}>Home videos &amp; photos</option></select>
-      <input id="elp-${id}" value="${esc((l.paths||[]).join(", "))}" placeholder="/path (comma-separated)" style="flex:1;min-width:240px">
-      <button class="sm" onclick="saveLib(${id})">Save</button>
-      <button class="ghost sm" onclick="renderSettings()">Cancel</button>
-      <span class="err" id="ele-${id}" style="flex-basis:100%"></span>
-    </div></td>`;
-  const n=document.getElementById("eln-"+id); if(n) n.focus();
-}
-async function saveLib(id){
+// The drawer's Save: identity first, then the schedule. Two endpoints, one
+// button — a failure stops before the second write and is shown in the drawer.
+async function saveLibDrawer(id,btn){
   const name=(document.getElementById("eln-"+id).value||"").trim();
   const s=document.getElementById("elk-"+id).value;
   const paths=(document.getElementById("elp-"+id).value||"").split(",").map(x=>x.trim()).filter(Boolean);
   const kind=s==="anime"?"shows":s, anime=s==="anime";
+  const scan=Number(document.getElementById(`sched-scan-${id}`).value);
+  const ref=Number(document.getElementById(`sched-ref-${id}`).value);
   const err=document.getElementById("ele-"+id); if(err) err.textContent="";
-  try{ await api(`/libraries/${id}`,{method:"PUT",body:{name,kind,paths,anime}}); invalidateLibs(); toast("Library updated"); viewSettings(); }
-  catch(e){ if(err) err.textContent=e.message; }
+  btn.disabled=true;
+  const dvSelect=document.getElementById(`dv-mode-${id}`);
+  try{
+    await api(`/libraries/${id}`,{method:"PUT",body:{name,kind,paths,anime}});
+    await api(`/libraries/${id}/schedule`,{method:"PUT",body:{scan_interval_mins:scan,refresh_interval_mins:ref}});
+    // The Dolby Vision mode is part of the same drawer, so one Save writes it
+    // too — the select is only present when the conversion tools are available.
+    if(dvSelect) await api(`/libraries/${id}/dv-conversion`,{method:"PUT",body:{mode:dvSelect.value}});
+    invalidateLibs(); LIB_DRAWER=null; toast("Library saved"); viewSettings();
+  }catch(e){ if(err) err.textContent=e.message; btn.disabled=false; }
 }
 async function scanAll(){
   const libs=(SETTINGS_DATA&&SETTINGS_DATA.libs)||[]; if(!libs.length) return;
@@ -13124,7 +13259,7 @@ async function refreshAll(){
 }
 async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab()){
   const h=location.hash;
-  if(generation!==PAGE_RENDER_GENERATION||(h!=="#/settings"&&h!=="#/admin")||settingsTab()!==tab||document.visibilityState==="hidden"||
+  if(generation!==PAGE_RENDER_GENERATION||!isSettingsRoute(h)||settingsTab()!==tab||document.visibilityState==="hidden"||
      (SETTINGS_TICKING&&SETTINGS_TICKING.generation===generation&&SETTINGS_TICKING.authGeneration===AUTH_GENERATION)) return;
   const owner={generation,authGeneration:AUTH_GENERATION};
   SETTINGS_TICKING=owner;
@@ -13138,14 +13273,27 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         const el=document.getElementById("st-"+id);
         if(el) el.innerHTML=statusText(st,lastScans.get(String(id)));
       }
-      // Conversion progress is deliberately colder than scan status. Refresh
-      // only while durable work is active, and stop spending the extra request
-      // as soon as the next snapshot is terminal.
-      if(dvSnapshotHasActive(SETTINGS_DATA.dvConversions)&&Date.now()>=DV_SETTINGS_POLL_AT){
+      // The per-library conversion line only exists while a row drawer is open;
+      // refresh it there, deliberately colder than scan status, and only while
+      // durable work is active.
+      if(LIB_DRAWER!==null&&dvSnapshotHasActive(SETTINGS_DATA.dvConversions)&&Date.now()>=DV_SETTINGS_POLL_AT){
         try{
           const snapshot=await refreshDvConversions();
           if(!settingsCurrent(generation,tab)) return;
           paintDvConversionProgress(snapshot);
+        }catch(error){ if(error&&error.status===401) throw error; }
+      }
+    }
+    if(tab==="maintenance"){
+      // Dolby Vision on disk — the guard lifecycle and parallel work — lives
+      // here now, so its live refresh does too. Same cold cadence and same
+      // stop-when-terminal rule as the old Libraries branch.
+      if(dvSnapshotHasActive(SETTINGS_DATA.dvConversions)&&Date.now()>=DV_SETTINGS_POLL_AT){
+        try{
+          const snapshot=await refreshDvConversions();
+          if(!settingsCurrent(generation,tab)) return;
+          const guards=document.getElementById("dv-recovery-guards");
+          if(guards) guards.innerHTML=dvRecoveryGuardsHtml(snapshot);
         }catch(error){ if(error&&error.status===401) throw error; }
       }
     }
@@ -13155,7 +13303,7 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
     const clusterAuto=document.getElementById("cllogauto");
     if(clusterAuto&&clusterAuto.checked) secondary.push(refreshClusterLogs());
     // Live Trakt card: the device-link poll and sync state resolve server-side.
-    if(tab==="metadata"&&!TRAKT_EDIT){
+    if(tab==="integrations"&&!TRAKT_EDIT){
       const t=await api("/trakt/status");
       if(!settingsCurrent(generation,tab)) return;
       if(JSON.stringify(t)!==JSON.stringify(TRAKT)){ cacheTrakt(t); paintTrakt(); }
@@ -13284,14 +13432,16 @@ function refreshLogStream(cluster){
 }
 function refreshLogs(){ return refreshLogStream(false); }
 function refreshClusterLogs(){ return refreshLogStream(true); }
-async function addLib(){
-  const name=ln.value.trim(), sel=lk.value, paths=lp.value.split(",").map(s=>s.trim()).filter(Boolean);
+async function addLib(btn){
+  const name=document.getElementById("eln-new").value.trim(), sel=document.getElementById("elk-new").value;
+  const paths=document.getElementById("elp-new").value.split(",").map(s=>s.trim()).filter(Boolean);
   // "Anime" is a shows library flagged anime (absolute numbering + AniList).
   const kind = sel==="anime" ? "shows" : sel;
   const anime = sel==="anime";
   const err=document.getElementById("lerr"); err.textContent="";
-  try{ await api("/libraries",{method:"POST",body:{name,kind,paths,anime}}); invalidateLibs(); toast("Library added — scanning"); viewSettings(); }
-  catch(e){ err.textContent=e.message; }
+  if(btn) btn.disabled=true;
+  try{ await api("/libraries",{method:"POST",body:{name,kind,paths,anime}}); invalidateLibs(); LIB_DRAWER=null; toast("Library added — scanning"); viewSettings(); }
+  catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 async function scanLib(id){ try{ await api(`/libraries/${id}/scan`,{method:"POST"}); toast("Scan started"); setTimeout(settingsTick,400);}catch(e){toast(e.message)} }
 async function refreshLib(id){ try{ await api(`/libraries/${id}/refresh`,{method:"POST"}); toast("Refreshing metadata & artwork…"); setTimeout(settingsTick,400);}catch(e){toast(e.message)} }
@@ -13304,21 +13454,22 @@ function noteKeySaved(label, value, wasConfigured){
   const libs=(SETTINGS_DATA&&SETTINGS_DATA.libs)||[];
   if(value && !wasConfigured && libs.length) KEY_NEEDS_BACKFILL=label;
 }
-async function saveTmdb(){
+async function saveTmdb(btn){
   const err=document.getElementById("terr"); err.textContent="";
   const was=!!(SETTINGS_DATA&&SETTINGS_DATA.settings&&SETTINGS_DATA.settings.tmdb_configured);
-  const v=tk.value.trim();
+  const v=document.getElementById("tk").value.trim();
+  if(btn) btn.disabled=true;
   try{ await api("/settings",{method:"PUT",body:{tmdb_api_key:v}}); noteKeySaved("TMDB",v,was); toast("Saved"); viewSettings(); }
-  catch(e){err.textContent=e.message}
+  catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
-async function saveOmdb(){
+async function saveOmdb(btn){
   const err=document.getElementById("oerr"); err.textContent="";
   const was=!!(SETTINGS_DATA&&SETTINGS_DATA.settings&&SETTINGS_DATA.settings.omdb_configured);
   const v=document.getElementById("ok").value.trim();
+  if(btn) btn.disabled=true;
   try{ await api("/settings",{method:"PUT",body:{omdb_api_key:v}}); noteKeySaved("OMDb",v,was); toast("Saved"); viewSettings(); }
-  catch(e){err.textContent=e.message}
+  catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
-
 // ---- playback defaults + Trakt (settings page) -----------------------------
 const LANG_CHOICES=[["eng","English"],["jpn","Japanese"],["spa","Spanish"],["fre","French"],
   ["ger","German"],["ita","Italian"],["por","Portuguese"],["rus","Russian"],["kor","Korean"],
@@ -13327,8 +13478,9 @@ const LANG_CHOICES=[["eng","English"],["jpn","Japanese"],["spa","Spanish"],["fre
   ["tha","Thai"],["vie","Vietnamese"],["ukr","Ukrainian"],["ces","Czech"],["ell","Greek"],
   ["heb","Hebrew"],["hun","Hungarian"],["ron","Romanian"]];
 function langOpts(cur){ return LANG_CHOICES.map(([v,l])=>`<option value="${v}" ${cur===v?'selected':''}>${l}</option>`).join(""); }
-async function saveAnalysisSettings(){
+async function saveAnalysisSettings(btn){
   const err=document.getElementById("an-error"); if(err) err.textContent="";
+  if(btn) btn.disabled=true;
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
       vod_index_mins:Number(document.getElementById("an-every").value),
@@ -13342,15 +13494,24 @@ async function saveAnalysisSettings(){
     SETTINGS_DATA.analysis=snapshot; SETTINGS_LOADED.add("analysis");
     if(settingsCurrent(PAGE_RENDER_GENERATION,"analysis")) renderSettings();
     toast("Analysis settings saved");
-  }catch(error){ if(err) err.textContent=error.message; }
+  }catch(error){ if(err) err.textContent=error.message; if(btn) btn.disabled=false; }
 }
-async function savePlayback(){
+async function savePlaybackDefaults(btn){
   const err=document.getElementById("perr"); err.textContent="";
+  if(btn) btn.disabled=true;
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
       default_audio_lang:document.getElementById("pal").value,
       default_sub_lang:document.getElementById("psl").value,
-      sub_mode:document.getElementById("psm").value,
+      sub_mode:document.getElementById("psm").value}}));
+    toast("Playback defaults saved"); if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function saveStreaming(btn){
+  const err=document.getElementById("serr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
       stream_readrate:document.getElementById("prr").value,
       playback_auto_abr:document.getElementById("pabr").checked,
       hls_readrate:document.getElementById("phr").value,
@@ -13364,44 +13525,26 @@ async function savePlayback(){
       vod_block_budget_secs:"8",
       vod_materialize_budget_secs:document.getElementById("pvmb").value}}));
     if(SERVER) SERVER.playback_auto_abr=SETTINGS.playback_auto_abr;
-    toast("Playback defaults saved");
-  }catch(e){ err.textContent=e.message; }
+    toast("Streaming settings saved"); if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
-// Pairing with monarr, for the Coming soon rail. The key is stored on the
-// server and used by the server: plurxd makes the call to monarr, so this
-// credential never travels to a browser. It can edit monarr's whole library,
-// which is why that matters.
 function monarrCardHtml(){
   const url=(SETTINGS&&SETTINGS.monarr_url)||"";
   const key=(SETTINGS&&SETTINGS.monarr_api_key)||"";
   const on=(SETTINGS&&SETTINGS.monarr_configured);
-  return `<div class="card" id="monarrcard"><h2 class="section" style="margin-top:0">monarr</h2>
-    <p class="muted" style="margin-top:0">Show a <b>Coming soon</b> rail on the home screen from monarr's calendar —
-      episodes airing and films due in the next four weeks.
-      ${on?'Paired.':'Optional; leave empty for no rail.'}</p>
-    <label>monarr URL</label><input id="mnurl" placeholder="http://monarr:7676" value="${esc(url)}">
-    <label>monarr API key</label><input id="mnkey" type="password" autocomplete="off" value="${esc(key)}" onfocus="this.type='text'" onblur="this.type='password'">
-    <p class="hint">Settings → Security in monarr. plurx keeps it server-side and calls monarr for you,
-      so it is never sent to a browser.</p>
-    <label style="display:flex;align-items:flex-start;gap:8px;margin-top:14px">
-      <input id="mnsync" type="checkbox" ${(SETTINGS&&SETTINGS.monarr_watched_sync)?"checked":""}>
-      <span>Send watch state to monarr
-        <span class="hint" style="display:block">Off by default. When on, plurx tells monarr what was watched
-        <b>and by which Cinema user</b>, so Curator can prefer upgrades for shows someone is following.
-        That is viewing history leaving plurx — turn it on only if you want monarr to have it.
-        Nothing is ever deleted as a result.</span></span>
-    </label>
-    <div class="err" id="mnerr"></div>
-    <div class="row" style="margin-top:12px">
-      <button onclick="saveMonarr()">Save</button>
-      <button class="ghost sm" onclick="testMonarr()">Test connection</button>
-      <span id="mnstat" class="muted"></span>
+  return setCard(`${cardHead("monarr","A <b>Coming soon</b> rail on the home screen from monarr's calendar — episodes airing and films due in the next four weeks. Optional; leave empty for no rail.",`<span class="pill${on?" ok":""}">${on?"paired":"not paired"}</span>`)}
+    <div class="setfields">
+      <div><label for="mnurl">monarr URL</label><input id="mnurl" placeholder="http://monarr:7676" value="${esc(url)}" style="min-width:220px"></div>
+      <div><label for="mnkey">API key <span class="muted">— Settings → Security in monarr</span></label><input id="mnkey" type="password" autocomplete="off" value="${esc(key)}" onfocus="this.type='text'" onblur="this.type='password'" style="min-width:220px"></div>
     </div>
-    <div id="mnqueue" class="hint"></div></div>`;
+    <div class="hint">plurx keeps the key server-side and calls monarr for you, so it is never sent to a browser.</div>
+    ${togRow("mnsync","Send watch state to monarr","Off by default. When on, plurx tells monarr what was watched <b>and by which Cinema user</b>, so Curator can prefer upgrades for shows someone is following. That is viewing history leaving plurx — turn it on only if you want monarr to have it. Nothing is ever deleted as a result.",SETTINGS&&SETTINGS.monarr_watched_sync)}
+    <div class="err" id="mnerr"></div>
+    <div class="setfoot"><button class="primary sm" disabled onclick="saveMonarr(this)">Save</button>
+      <button class="ghost sm" onclick="testMonarr()">Test connection</button>
+      <span id="mnstat" class="muted" style="font-size:12px"></span><span class="setstate">Saved</span></div>
+    <div id="mnqueue" class="hint"></div>`,{id:"monarrcard"});
 }
-
-// "I set it up and I see no status" is a fair complaint about a settings
-// page that only ever says what you typed. This says whether monarr answered.
 async function testMonarr(){
   const el=document.getElementById("mnstat"), q=document.getElementById("mnqueue");
   el.textContent="checking…"; if(q) q.textContent="";
@@ -13421,48 +13564,52 @@ async function testMonarr(){
     }
   }catch(e){ el.textContent="✗ "+(e.message||String(e)); }
 }
-async function saveMonarr(){
+async function saveMonarr(btn){
   const err=document.getElementById("mnerr"); err.textContent="";
+  if(btn) btn.disabled=true;
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
       monarr_url:document.getElementById("mnurl").value.trim(),
       monarr_api_key:document.getElementById("mnkey").value.trim(),
       monarr_watched_sync:document.getElementById("mnsync").checked}}));
-    toast("monarr settings saved");
+    toast("monarr settings saved"); if(btn) setCardSaved(btn);
     testMonarr(); // saving without checking is how a typo survives a week
-
-  }catch(e){ err.textContent=e.message||String(e); }
+  }catch(e){ err.textContent=e.message||String(e); if(btn) btn.disabled=false; }
 }
-
 function traktCardHtml(t){
   if(t===null||t===undefined) return "";
-  let body="";
+  let body="", pill=`<span class="pill">not set up</span>`;
   if(!t.configured||TRAKT_EDIT){
-    body=`<p class="muted" style="margin-top:0">Scrobble what you watch and sync watched history + resume points both ways.
-      Create an API app at <a href="https://trakt.tv/oauth/applications" target="_blank" rel="noopener">trakt.tv/oauth/applications</a>
+    body=`<p class="sub" style="margin:0 0 4px">Create an API app at <a href="https://trakt.tv/oauth/applications" target="_blank" rel="noopener">trakt.tv/oauth/applications</a>
       (redirect URI <code>urn:ietf:wg:oauth:2.0:oob</code>), then paste its keys.</p>
-      <label>Client ID</label><input id="tcid" type="password" autocomplete="off" value="${esc((SETTINGS&&SETTINGS.trakt_client_id)||'')}" onfocus="this.type='text'" onblur="this.type='password'">
-      <label>Client secret</label><input id="tcs" type="password" autocomplete="off" value="${esc((SETTINGS&&SETTINGS.trakt_client_secret)||'')}" onfocus="this.type='text'" onblur="this.type='password'">
-      <div class="err" id="tkerr"></div>
-      <button style="margin-top:12px" onclick="saveTraktKeys()">Save keys</button>`;
+      <div class="setfields">
+        <div><label for="tcid">Client ID</label><input id="tcid" type="password" autocomplete="off" value="${esc((SETTINGS&&SETTINGS.trakt_client_id)||'')}" onfocus="this.type='text'" onblur="this.type='password'" style="min-width:240px"></div>
+        <div><label for="tcs">Client secret</label><input id="tcs" type="password" autocomplete="off" value="${esc((SETTINGS&&SETTINGS.trakt_client_secret)||'')}" onfocus="this.type='text'" onblur="this.type='password'" style="min-width:240px"></div>
+        <div class="err" id="tkerr"></div>
+      </div>
+      <div class="setfoot"><button class="sm" onclick="saveTraktKeys()">Save keys</button>${t.configured?`<button class="ghost sm" onclick="TRAKT_EDIT=false;paintTrakt()">Cancel</button>`:""}</div>`;
   } else if(t.pending && !t.pending.error){
+    pill=`<span class="pill warn">waiting for approval</span>`;
     body=`<p class="muted" style="margin-top:0">Go to <a href="${esc(t.pending.verification_url)}" target="_blank" rel="noopener">${esc(t.pending.verification_url)}</a> and enter:</p>
       <div class="traktcode">${esc(t.pending.user_code)}</div>
       <p class="hint">Waiting for approval — this updates by itself.</p>
       <div class="row" style="margin-top:8px"><button class="ghost sm" onclick="traktUnlink()">Cancel</button></div>`;
   } else if(t.linked){
-    body=`<p style="margin-top:0">Connected as <b>${esc(t.trakt_username||"?")}</b>${t.last_sync_at?` <span class="muted">· last sync ${fmtAgo(t.last_sync_at)}</span>`:""}${t.syncing?' <span class="muted">· syncing now…</span>':''}</p>
+    pill=`<span class="pill ok">connected · ${esc(t.trakt_username||"?")}</span>`;
+    body=`<p style="margin:4px 0 0">${t.last_sync_at?`<span class="muted">Last sync ${fmtAgo(t.last_sync_at)}</span>`:`<span class="muted">Not synced yet</span>`}${t.syncing?' <span class="muted">· syncing now…</span>':''}</p>
       ${t.note?`<p class="hint">${esc(t.note)}</p>`:''}
-      <div class="row"><button class="ghost sm" onclick="traktSyncNow()">Sync now</button>
-        <button class="ghost sm" onclick="traktUnlink()">Disconnect</button></div>`;
+      <div class="setfoot"><button class="ghost sm" onclick="traktSyncNow()">Sync now</button>
+        <button class="ghost sm" onclick="traktUnlink()">Disconnect</button>
+        <button class="ghost sm" onclick="TRAKT_EDIT=true;paintTrakt()">Change keys</button></div>`;
   } else {
-    body=`<p class="muted" style="margin-top:0">Keys saved. Link your Trakt account with a one-time code.</p>
+    pill=`<span class="pill warn">keys saved · not linked</span>`;
+    body=`<p class="muted" style="margin-top:4px">Link your Trakt account with a one-time code.</p>
       ${t.pending&&t.pending.error?`<div class="err">${esc(t.pending.error)}</div>`:''}
       ${t.note?`<p class="hint">${esc(t.note)}</p>`:''}
-      <div class="row"><button onclick="traktLink()">Connect Trakt</button>
+      <div class="setfoot"><button class="sm" onclick="traktLink()">Connect Trakt</button>
         <button class="ghost sm" onclick="TRAKT_EDIT=true;paintTrakt()">Change keys</button></div>`;
   }
-  return `<div class="card" id="traktcard"><h2 class="section" style="margin-top:0">Trakt</h2>${body}</div>`;
+  return `<div class="card" id="traktcard">${cardHead("Trakt","Scrobble what you watch; sync watched history and resume points both ways.",pill)}${body}</div>`;
 }
 function paintTrakt(){ const el=document.getElementById("traktcard"); if(el) el.outerHTML=traktCardHtml(TRAKT); }
 async function saveTraktKeys(){
@@ -13483,39 +13630,41 @@ async function traktSyncNow(){ try{ cacheTrakt(await api("/trakt/sync",{method:"
 // ---- users (admin) --------------------------------------------------------
 function userRow(u){
   const me = ME&&ME.id===u.id;
+  const open = USER_DRAWER===u.id;
   const created = new Date(u.created_at*1000).toLocaleDateString();
-  const role = u.is_admin?`<span class="pill" style="color:var(--accent);border-color:var(--accent)">admin</span>`:`<span class="muted">user</span>`;
-  const btns=[`<button class="ghost sm" onclick='resetPw(${u.id},${esc(JSON.stringify(u.username))})'>Reset password</button>`];
+  const role = u.is_admin?`<span class="pill acc">admin</span>`:`<span class="muted">user</span>`;
+  const btns=[`<button class="ghost sm" aria-expanded="${open?"true":"false"}"${open?` aria-controls="userdrawer-${u.id}"`:""} onclick="openUserDrawer(${u.id})">Reset password</button>`];
   btns.push(`<button class="ghost sm" onclick="setAdmin(${u.id},${u.is_admin?0:1})">${u.is_admin?'Revoke admin':'Make admin'}</button>`);
   if(!me) btns.push(`<button class="ghost sm" onclick='delUser(${u.id},${esc(JSON.stringify(u.username))})'>Delete</button>`);
-  return `<tr><td class="libname"><b>${esc(u.username)}</b>${me?' <span class="muted">(you)</span>':''}</td><td data-label="Role">${role}</td><td class="muted" data-label="Created">${created}</td>
-    <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end">${btns.join("")}</div></td></tr>`;
+  return `<tr${open?' class="setopen"':""}><td class="libname"><b>${esc(u.username)}</b>${me?' <span class="muted">(you)</span>':''}</td><td data-label="Role">${role}</td><td class="muted" data-label="Created">${created}</td>
+    <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end">${btns.join("")}</div></td></tr>${open?userDrawerHtml(u):""}`;
 }
-async function addUser(){
-  const username=un.value.trim(), password=up.value, is_admin=ua.checked;
+async function addUser(btn){
+  const username=document.getElementById("un").value.trim(), password=document.getElementById("up-new").value, is_admin=document.getElementById("ua").checked;
+  const again=document.getElementById("up2-new");
   const err=document.getElementById("uerr"); err.textContent="";
   // Cheaper to catch here than to have someone discover it at their first
   // sign-in — a mistyped password creates an account nobody can get into,
   // and the person who has to fix it isn't the one who made the mistake.
   if(!username){ err.textContent="Pick a username."; return; }
   if(password.length<8){ err.textContent="Password must be at least 8 characters."; return; }
-  if(password!==up2.value){ up2.value=""; up2.focus(); err.textContent="Those two passwords don't match."; return; }
-  try{ await api("/users",{method:"POST",body:{username,password,is_admin}}); toast("User added"); viewSettings(); }
-  catch(e){ err.textContent=e.message; }
+  if(password!==again.value){ again.value=""; again.focus(); err.textContent="Those two passwords don't match."; return; }
+  if(btn) btn.disabled=true;
+  try{ await api("/users",{method:"POST",body:{username,password,is_admin}}); USER_DRAWER=null; toast("User added"); viewSettings(); }
+  catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
-async function resetPw(id, name){
-  const pw=prompt(`New password for ${name} (min 8 characters). Their current sessions will be signed out.`);
-  if(pw==null) return;
-  if(pw.length<8){ toast("Password must be at least 8 characters."); return; }
+async function resetPw(id, name, btn){
+  const pw=document.getElementById(`up-${id}`).value, again=document.getElementById(`up2-${id}`).value;
+  const err=document.getElementById("uerr"); if(err) err.textContent="";
+  if(pw.length<8){ if(err) err.textContent="Password must be at least 8 characters."; return; }
   // Asked twice for the same reason the other two forms have a confirm field,
   // and it matters more here: this signs every one of their sessions out, so a
   // typo doesn't just set a password nobody knows — it takes away the one they
   // were already using.
-  if(prompt(`Type it again to confirm the new password for ${name}.`)!==pw){
-    toast("Those two passwords don't match — nothing was changed.");
-    return;
-  }
-  try{ await api(`/users/${id}`,{method:"PUT",body:{password:pw}}); toast("Password reset"); }catch(e){ toast(e.message); }
+  if(again!==pw){ if(err) err.textContent="Those two passwords don't match — nothing was changed."; return; }
+  if(btn) btn.disabled=true;
+  try{ await api(`/users/${id}`,{method:"PUT",body:{password:pw}}); USER_DRAWER=null; toast(`Password reset for ${name}`); renderSettings(); }
+  catch(e){ if(err) err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 async function setAdmin(id, makeAdmin){
   try{ await api(`/users/${id}`,{method:"PUT",body:{is_admin:!!makeAdmin}}); toast(makeAdmin?"Now an admin":"Admin revoked"); viewSettings(); }catch(e){ toast(e.message); }
@@ -13804,18 +13953,8 @@ function catalogChrome(active, inner){
          <span class="activity" id="activity" onclick="location.hash='#/activity'"></span>
          <div class="px-ctl">
            <div class="px-pop">
-             <button class="ghost sm" onclick="toggleThemeMenu(event)" title="Theme &amp; layout" aria-label="Theme and layout"><span class="tsw"></span></button>
-             <div class="amenu" id="thememenu"></div>
-           </div>
-           <div class="px-pop">
-             <button class="ghost sm" onclick="toggleAppearanceMenu(event)" title="Light / dark" aria-label="Light or dark">◐</button>
-             <div class="amenu" id="appmenu"></div>
-           </div>
-           <div class="px-pop">
-             <button class="ghost sm sizebtn" onclick="toggleSizeMenu(event)" title="Icon size" style="display:inline-flex;align-items:center;gap:6px">
-               <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="0" y="0" width="5" height="5" rx="1"/><rect x="7" y="0" width="5" height="5" rx="1"/><rect x="0" y="7" width="5" height="5" rx="1"/><rect x="7" y="7" width="5" height="5" rx="1"/></svg><span>Size</span>
-             </button>
-             <div class="amenu" id="sizemenu"></div>
+             <button class="ghost sm lookbtn" onclick="toggleLookMenu(event)" title="Appearance — layout, theme, light or dark, poster size" aria-label="Appearance" aria-haspopup="menu"><span class="tsw"></span><span class="lookword">Appearance</span></button>
+             <div class="amenu lookmenu" id="lookmenu"></div>
            </div>
            ${getapp}
          </div>
@@ -13892,7 +14031,7 @@ function catalogHomeBody(p){
       if(s.unavailable) previews+=`<div class="hint">Some library previews are unavailable right now.</div>`;
     }
   }else{
-    previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
+    previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':""}</div>`;
   }
   return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
     `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
@@ -14318,18 +14457,8 @@ function theaterChrome(active, inner){
      <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
      <div class="th-ctl">
        <div class="th-pop">
-         <button class="ghost sm" onclick="toggleThemeMenu(event)" title="Theme &amp; layout" aria-label="Theme and layout"><span class="tsw"></span></button>
-         <div class="amenu" id="thememenu"></div>
-       </div>
-       <div class="th-pop">
-         <button class="ghost sm" onclick="toggleAppearanceMenu(event)" title="Light / dark" aria-label="Light or dark">◐</button>
-         <div class="amenu" id="appmenu"></div>
-       </div>
-       <div class="th-pop">
-         <button class="ghost sm sizebtn" onclick="toggleSizeMenu(event)" title="Icon size" style="display:inline-flex;align-items:center;gap:6px">
-           <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="0" y="0" width="5" height="5" rx="1"/><rect x="7" y="0" width="5" height="5" rx="1"/><rect x="0" y="7" width="5" height="5" rx="1"/><rect x="7" y="7" width="5" height="5" rx="1"/></svg><span>Size</span>
-         </button>
-         <div class="amenu" id="sizemenu"></div>
+         <button class="ghost sm lookbtn" onclick="toggleLookMenu(event)" title="Appearance — layout, theme, light or dark, poster size" aria-label="Appearance" aria-haspopup="menu"><span class="tsw"></span><span class="lookword">Appearance</span></button>
+         <div class="amenu lookmenu" id="lookmenu"></div>
        </div>
        ${getapp}
        <div class="th-pop">
@@ -14501,7 +14630,7 @@ function theaterHomeBody(p){
       if(s.unavailable) previews+=`<div class="hint">Some library previews are unavailable right now.</div>`;
     }
   } else {
-    previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
+    previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':""}</div>`;
   }
   return `<div data-home-region="hubs" data-home-slot="hero">${hero}</div>`+
     `<div class="th-rails"><div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
@@ -15140,7 +15269,7 @@ let PAGE_TIMER=null, PAGE_RENDER_GENERATION=0;
 function pagePhaseName(route){
   if(route==="#/activity") return "activity";
   if(route==="#/analysis") return "analysis";
-  if(route==="#/settings"||route==="#/admin") return "settings";
+  if(isSettingsRoute(route)) return "settings";
   return "home";
 }
 function setPagePhase(route,generation,phase){
@@ -15190,11 +15319,21 @@ async function render(){
   if(!TOKEN||!ME) return boot();
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
   if(!ACT_TIMER) ACT_TIMER=setInterval(pollActivity,4000);
-  const h=location.hash||"#/";
+  let h=location.hash||"#/";
   if(!h.startsWith("#/read/")&&READER) destroyReader(true);
   // A join token is bearer authority, so leaving Settings drops the only
   // in-memory copy even before a later Settings visit clears it again.
-  if(h!=="#/settings"&&h!=="#/admin") forgetJoinToken();
+  if(!isSettingsRoute(h)) forgetJoinToken();
+  // A Settings section switch is not a page load: the aggregate the previous
+  // section fetched stays cached. Anything else arriving at Settings starts
+  // from a clean read. The bare #/settings and the older #/admin are rewritten
+  // to the section they land on, so the address bar always names one.
+  const stayingInSettings=isSettingsRoute(h)&&isSettingsRoute(LAST_ROUTE);
+  LAST_ROUTE=h;
+  if(isSettingsRoute(h)&&!settingsRouteTab(h)&&ME.is_admin){
+    h=`#/settings/${settingsTab()}`;
+    try{ history.replaceState(null,"",h); }catch(e){}
+  }
   // Item pages inherit the list you arrived from; everything else replaces it
   // (the list views re-set it as they render) or drops it.
   if(!h.startsWith("#/item/")) NAV_ORIGIN=null;
@@ -15206,7 +15345,7 @@ async function render(){
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
     else if(h==="#/activity") await viewActivity(generation);
     else if(h==="#/analysis") await viewAnalysis(generation);
-    else if(h==="#/admin"||h==="#/settings") await viewSettings(generation);
+    else if(isSettingsRoute(h)) await viewSettings(generation,!stayingInSettings);
     else await viewHome(generation);
     // Converted routes restore at the moment their content lands; this catches
     // the ones that do not, and — because it is consume-once — guarantees a
@@ -15217,6 +15356,7 @@ async function render(){
     if(generation===PAGE_RENDER_GENERATION&&e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m){ m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; setPageFailure(h,generation,"render_error"); }else toast(e.message); }
   }
 }
+let LAST_ROUTE=null;
 window.addEventListener("hashchange",render);
 
 if(NATIVE_READER_BOOT){

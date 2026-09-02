@@ -257,6 +257,64 @@ enum SubtitleReadiness: String, CaseIterable, Identifiable {
     }
 }
 
+/// The viewer's standing quality choice, the same vocabulary and storage
+/// values as the Android client's `PlaybackQuality`. It is the starting value
+/// of the player's quality menu, not a replacement for it: a rung picked
+/// mid-film still wins for that playback.
+///
+/// - `.auto` — the server chooses the verdict and the rung. The `/decision`
+///   request is byte-for-byte what it was before this preference existed.
+/// - `.original` — never re-encode video (`force=original`): direct play when
+///   the device can take the file, otherwise a copy-video remux.
+/// - a rung — ask for a transcode (`force=transcode`) and open the session at
+///   the tallest advertised rung that does not exceed the choice, so a 1080p
+///   title under "4K" plays at 1080p rather than being upscaled.
+enum PlaybackQuality: String, CaseIterable, Identifiable {
+    case auto
+    case original
+    case p2160 = "2160"
+    case p1440 = "1440"
+    case p1080 = "1080"
+    case p720 = "720"
+    case p480 = "480"
+    case p360 = "360"
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .auto: return "Auto"
+        case .original: return "Original"
+        case .p2160: return "4K · 2160p"
+        case .p1440: return "1440p"
+        case .p1080: return "1080p"
+        case .p720: return "720p"
+        case .p480: return "480p"
+        case .p360: return "360p"
+        }
+    }
+
+    /// The transcode rung this preference names, or nil for Auto/Original.
+    var rungHeight: Int? { Int(rawValue) }
+
+    /// The `force` value for `/decision`, or nil when the request should stay
+    /// exactly as it was. The server parses anything outside
+    /// `auto|original|transcode` as Auto, so a bare height would silently do
+    /// nothing for a direct or remux verdict: a rung is a request to
+    /// *transcode*, and how tall is the session create's business.
+    var decisionForce: String? {
+        switch self {
+        case .auto: return nil
+        case .original: return "original"
+        default: return "transcode"
+        }
+    }
+
+    var decisionQueryItems: [URLQueryItem] {
+        guard let decisionForce else { return [] }
+        return [URLQueryItem(name: "force", value: decisionForce)]
+    }
+}
+
 enum PosterSize: String, CaseIterable, Identifiable {
     case small = "s"
     case medium = "m"

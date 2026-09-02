@@ -1319,10 +1319,16 @@ test("maintenance and election controls use their bounded admin APIs", () => {
 
 test("routing away from Settings drops the in-memory join token", () => {
   const render = shippedSource("render");
-  assert.match(
-    render,
-    /if\(h!=="#\/settings"&&h!=="#\/admin"\) forgetJoinToken\(\)/,
-  );
+  assert.match(render, /if\(!isSettingsRoute\(h\)\) forgetJoinToken\(\)/);
+  // A section switch stays inside Settings, so render() does not drop the
+  // token there; viewSettings does, on the section change itself.
+  const view = shippedSource("viewSettings");
+  assert.match(view, /if\(SETTINGS_SHOWN_TAB!==tab\) forgetJoinToken\(\)/);
+  const isSettingsRoute = new Function(`${shippedSource("isSettingsRoute")}; return isSettingsRoute;`)();
+  for (const route of ["#/settings", "#/admin", "#/settings/cluster", "#/settings/libraries"])
+    assert.equal(isSettingsRoute(route), true, route);
+  for (const route of ["#/", "#/activity", "#/settingsx", "#/item/settings", "", undefined])
+    assert.equal(isSettingsRoute(route), false, String(route));
 });
 
 // ---- wiring ---------------------------------------------------------------
@@ -1348,10 +1354,7 @@ test("late cluster work can repaint only a live Settings route", () => {
   // user has navigated elsewhere, even though the selected tab remains in
   // localStorage.
   const renderSettings = shippedSource("renderSettings");
-  assert.match(
-    renderSettings,
-    /const h=location\.hash;\s*if\(h!=="#\/settings"&&h!=="#\/admin"\) return/,
-  );
+  assert.match(renderSettings, /if\(!isSettingsRoute\(location\.hash\)\) return/);
   for (const handler of ["loadCluster", "mintJoinToken", "removeNode"]) {
     assert.match(
       shippedSource(handler),
@@ -2563,6 +2566,7 @@ function tickHarness({ cluster, ops, now }) {
        SETTINGS_DATA=${JSON.stringify({ cluster, clusterOps: ops })},SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
      const cacheTrakt=(value)=>value;
      const Date={now:clock};
+     ${shippedSource("isSettingsRoute")}
      ${shippedSource("clusterOpsInterval")}
      ${shippedSource("clusterOpsStamp")}
      ${shippedSource("clusterOpsDue")}

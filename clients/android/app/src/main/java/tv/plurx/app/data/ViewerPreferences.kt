@@ -73,6 +73,26 @@ enum class PlaybackQuality(val storageValue: String, val label: String) {
     }
 }
 
+/**
+ * Settings → Playback → "Subtitle switching": when a title's text subtitles
+ * are made selectable. Mirrors the Apple client's `SubtitleReadiness`, raw
+ * values included, and like there it never reaches the server as a field of
+ * its own — it decides whether a remux/transcode play opens its HLS session
+ * with `native_subtitles` from the first frame ([Instant]) or only once a
+ * subtitle is actually chosen ([OnDemand], the default). See
+ * `subtitleRoute` in `player/SubtitlePolicy.kt`.
+ */
+enum class SubtitleReadiness(val storageValue: String, val label: String) {
+    Instant("instant", "Instant"),
+    OnDemand("onDemand", "After a short pause");
+
+    companion object {
+        fun fromStorage(value: String?): SubtitleReadiness = entries.firstOrNull {
+            it.storageValue == value
+        } ?: OnDemand
+    }
+}
+
 enum class OfflineQuality(val storageValue: String, val label: String, val maximumHeight: Int) {
     Standard("standard", "Standard · up to 720p", 720),
     High("high", "High · up to 1080p", 1080);
@@ -101,6 +121,7 @@ data class ViewerPreferences(
     val posterSize: PosterSize = PosterSize.Medium,
     val homeGrouping: HomeGrouping = HomeGrouping.Category,
     val playbackQuality: PlaybackQuality = PlaybackQuality.Auto,
+    val subtitleReadiness: SubtitleReadiness = SubtitleReadiness.OnDemand,
     val autoSkip: Boolean = false,
     val autoplayNext: Boolean = true,
     val playbackInfoMode: String = "standard",
