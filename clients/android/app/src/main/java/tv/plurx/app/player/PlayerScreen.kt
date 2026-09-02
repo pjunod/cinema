@@ -682,6 +682,8 @@ private fun PlayerContent(
     var lastFocusedControl by rememberSaveable { mutableStateOf(PlayerControlId.PlayPause) }
     var panelOpener by rememberSaveable { mutableStateOf(PlayerControlId.PlayPause) }
     var focusAfterComposition by remember { mutableStateOf<PlayerControlId?>(null) }
+    // One surface for every producer on this screen — see OfflinePlayerScreen.
+    val playerSurface = playerInputSurfaceFor(currentFormFactor())
     var repeatCount by remember { mutableIntStateOf(0) }
     val controlFocus = remember { PlayerControlFocus() }
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
@@ -751,9 +753,14 @@ private fun PlayerContent(
         playFailure != null -> PlayerInputState.Failed
         panel == PlayerPanel.Info && statsMode != PlaybackStatsMode.Mini -> PlayerInputState.Info
         panel != null && panel != PlayerPanel.Info -> PlayerInputState.Menu
+        // Chrome-hidden outranks the timeline flag. `hide` removes Controls
+        // from composition, and the flag is cleared by a focus callback the
+        // runtime does not promise to deliver before the next key arrives —
+        // so asking it first let a direction scrub chrome nobody could see,
+        // which is the one thing ruling 1 forbids.
+        !controlsVisible -> PlayerInputState.Hidden
         timelineFocused && pendingMs != null -> PlayerInputState.Scrub
         timelineFocused -> PlayerInputState.Timeline
-        !controlsVisible -> PlayerInputState.Hidden
         else -> PlayerInputState.Transport
     }
 
@@ -788,11 +795,19 @@ private fun PlayerContent(
                 focus(lastFocusedControl)
                 true
             }
+            // These three want the focus engine or the button's own click, so
+            // the event is deliberately not consumed.
             PlayerInputOutcome.FocusRow,
             PlayerInputOutcome.Activate,
-            PlayerInputOutcome.MenuFocus,
-            PlayerInputOutcome.Ignore,
-            -> false
+            -> {
+                poke()
+                false
+            }
+            PlayerInputOutcome.MenuFocus -> false
+            // `ignore` is "nothing happens", not "somebody else may act": an
+            // unconsumed media key reaches the Media3 session, which would
+            // seek the player the contract just said to leave alone.
+            PlayerInputOutcome.Ignore -> true
             PlayerInputOutcome.FocusMarkerOrIgnore -> {
                 focusMarkerOrIgnore()
                 true
@@ -817,10 +832,15 @@ private fun PlayerContent(
                 true
             }
             PlayerInputOutcome.Preview -> {
-                val direction = if (input == PlayerContractInput.Left) -1 else 1
-                val ceiling = plan.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE
-                pendingMs = ((pendingMs ?: controller.realPosition()) +
-                    direction * PlayerInputPolicy.previewStepMs(repeatCount)).coerceIn(0L, ceiling)
+                // No trustworthy total means no position to preview against,
+                // and no timeline row on screen either — the press is spent
+                // waking the chrome, as it is on every other client.
+                val ceiling = plan.durationMs
+                if (ceiling > 0L) {
+                    val direction = if (input == PlayerContractInput.Left) -1 else 1
+                    pendingMs = ((pendingMs ?: controller.realPosition()) +
+                        direction * PlayerInputPolicy.previewStepMs(repeatCount)).coerceIn(0L, ceiling)
+                }
                 poke()
                 true
             }
@@ -863,6 +883,7 @@ private fun PlayerContent(
                     panel = null
                 }
                 controlsVisible = false
+                focusAfterComposition = null
                 true
             }
             PlayerInputOutcome.Exit -> {
@@ -882,7 +903,7 @@ private fun PlayerContent(
     BackHandler(enabled = !isInPip) {
         applyOutcome(
             PlayerInputPolicy.route(
-                PlayerInputSurface.Touch,
+                playerSurface,
                 inputState(),
                 PlayerContractInput.Back,
             ),
@@ -1048,7 +1069,7 @@ private fun PlayerContent(
             delay(4_000)
             applyOutcome(
                 PlayerInputPolicy.route(
-                    PlayerInputSurface.TenFoot,
+                    playerSurface,
                     inputState(),
                     PlayerContractInput.Idle,
                 ),
@@ -1085,14 +1106,14 @@ private fun PlayerContent(
         }
     }
 
-    LaunchedEffect(controlsVisible, panel, isInPip, focusAfterComposition) {
+    // `reveal` and `close_menu` re-enter Controls from scratch, and Controls
+    // asks for its own initial focus a frame later — so a request made here
+    // was overwritten every time. The target now travels into Controls as
+    // `initialFocus` and there is one requester; this effect only parks focus
+    // on the invisible surface when the chrome is gone.
+    LaunchedEffect(controlsVisible, panel, isInPip) {
         if (!isInPip && !controlsVisible && panel == null) {
             surfaceFocusRequester.requestFocus()
-        } else if (!isInPip && controlsVisible && panel == null) {
-            focusAfterComposition?.let { target ->
-                runCatching { controlFocus.requester(target).requestFocus() }
-                focusAfterComposition = null
-            }
         }
     }
 
@@ -1100,7 +1121,7 @@ private fun PlayerContent(
         Modifier.fillMaxSize()
             .focusRequester(surfaceFocusRequester)
             .focusable()
-            .playerInputAdapter(state = ::inputState) { outcome, input, repeats ->
+            .playerInputAdapter(surface = playerSurface, state = ::inputState) { outcome, input, repeats ->
                 repeatCount = repeats
                 applyOutcome(outcome, input)
             },
@@ -1135,7 +1156,7 @@ private fun PlayerContent(
                 ) {
                     val input = PlayerContractInput.TapSurface
                     applyOutcome(
-                        PlayerInputPolicy.route(PlayerInputSurface.Touch, inputState(), input),
+                        PlayerInputPolicy.route(playerSurface, inputState(), input),
                         input,
                     )
                 },
@@ -1183,6 +1204,7 @@ private fun PlayerContent(
                 pendingMs = pendingMs,
                 isPlaying = isPlaying,
                 requestInitialFocus = panel == null,
+                initialFocus = focusAfterComposition ?: PlayerControlId.PlayPause,
                 focus = controlFocus,
                 markerAvailable = activeMarker != null,
                 lastFocusedControl = lastFocusedControl,
@@ -1208,7 +1230,7 @@ private fun PlayerContent(
                 onBack = {
                     val input = PlayerContractInput.Back
                     applyOutcome(
-                        PlayerInputPolicy.route(PlayerInputSurface.Touch, inputState(), input),
+                        PlayerInputPolicy.route(playerSurface, inputState(), input),
                         input,
                     )
                 },
@@ -1391,6 +1413,7 @@ internal fun Controls(
     pendingMs: Long? = null,
     isPlaying: Boolean,
     requestInitialFocus: Boolean,
+    initialFocus: PlayerControlId = PlayerControlId.PlayPause,
     mediaFacts: List<MediaFact> = emptyList(),
     markerAvailable: Boolean = false,
     focus: PlayerControlFocus? = null,
@@ -1412,11 +1435,15 @@ internal fun Controls(
     val ownFocus = remember { PlayerControlFocus() }
     val resolvedFocus = focus ?: ownFocus
     val formFactor = currentFormFactor()
-    RequestInitialFocus(resolvedFocus.playPause, enabled = requestInitialFocus)
+    RequestInitialFocus(resolvedFocus.requester(initialFocus), enabled = requestInitialFocus)
+    // The timeline row is composed only when a duration is known, so pointing
+    // `up` at its requester on an unknown-duration stream aimed focus at a
+    // node that was never attached.
+    val upFromTransport = if (durationMs > 0L) resolvedFocus.timeline else FocusRequester.Cancel
 
     fun transportModifier(control: PlayerControlId): Modifier = Modifier
         .focusRequester(resolvedFocus.requester(control))
-        .focusProperties { up = resolvedFocus.timeline }
+        .focusProperties { up = upFromTransport }
         .onFocusChanged { if (it.isFocused) onControlFocused(control) }
 
     @Composable
@@ -1554,6 +1581,7 @@ internal fun Controls(
                     ) {
                         TransportButtons(
                             isPlaying = isPlaying,
+                            timelineAbove = durationMs > 0L,
                             focus = resolvedFocus,
                             onFocused = onControlFocused,
                             onPlayPause = onPlayPause,
@@ -1568,6 +1596,7 @@ internal fun Controls(
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                             TransportButtons(
                                 isPlaying = isPlaying,
+                                timelineAbove = durationMs > 0L,
                                 focus = resolvedFocus,
                                 onFocused = onControlFocused,
                                 onPlayPause = onPlayPause,
@@ -1598,6 +1627,7 @@ internal fun playerContextLine(releaseDate: String?, runtimeLabel: String?): Str
 @Composable
 private fun TransportButtons(
     isPlaying: Boolean,
+    timelineAbove: Boolean,
     focus: PlayerControlFocus,
     onFocused: (PlayerControlId) -> Unit,
     onPlayPause: () -> Unit,
@@ -1607,7 +1637,7 @@ private fun TransportButtons(
     fun modifier(control: PlayerControlId, size: Dp): Modifier = Modifier
         .size(size)
         .focusRequester(focus.requester(control))
-        .focusProperties { up = focus.timeline }
+        .focusProperties { up = if (timelineAbove) focus.timeline else FocusRequester.Cancel }
         .onFocusChanged { if (it.isFocused) onFocused(control) }
 
     Row(
@@ -1968,8 +1998,12 @@ private fun PlaybackInfoMini(
         PlaybackMiniDivider()
         PlaybackMiniValue(details.position)
         PlaybackMiniDivider()
+        // `decode_resolution` is Mini's third row in
+        // tests/playback/playback-info-fields.json. The old composite
+        // (codec · W×H · HDR · bitrate) is a datum no mode of the contract
+        // has, and it is blank for an offline file.
         PlaybackMiniValue(
-            details.playingVideo ?: "Waiting",
+            details.decodeResolution ?: "Waiting",
             playbackTone(details),
             Modifier.weight(1f, fill = false),
         )

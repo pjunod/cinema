@@ -99,6 +99,79 @@ class PlayerControlsFocusTest {
     }
 
     @Test
+    fun revealRestoresTheControlThatWasFocusedRatherThanPlayPause() {
+        // `reveal` and `close_menu` re-enter Controls, which asks for its own
+        // initial focus a frame later: a request made outside was overwritten
+        // 80 ms after it landed, so every reveal came back on Play/Pause.
+        compose.setContent {
+            PlurxTheme {
+                Controls(
+                    title = "Example episode",
+                    positionMs = 30_000,
+                    durationMs = 60_000,
+                    isPlaying = true,
+                    requestInitialFocus = true,
+                    initialFocus = PlayerControlId.Info,
+                    onBack = {},
+                    onPlayPause = {},
+                    onSeekBack = {},
+                    onSeekForward = {},
+                    onScrub = {},
+                    onScrubEnd = {},
+                    onTracks = {},
+                    onSettings = {},
+                    onInfo = {},
+                    onPip = null,
+                )
+            }
+        }
+
+        val info = compose.onNodeWithContentDescription("Playback info")
+        compose.waitUntil(timeoutMillis = 2_000) {
+            info.fetchSemanticsNode().config.getOrElse(SemanticsProperties.Focused) { false }
+        }
+        compose.waitForIdle()
+        info.assertIsFocused()
+        compose.onNodeWithContentDescription("Pause").assertIsNotFocused()
+    }
+
+    @Test
+    fun anUnknownDurationLeavesTheTransportRowWithNoTimelineAbove() {
+        // The timeline row is composed only when a duration is known, so
+        // pointing `up` at its requester aimed focus at a node that was never
+        // attached — an uninitialised-FocusRequester crash on the first Up.
+        compose.setContent {
+            PlurxTheme {
+                Controls(
+                    title = "Live channel",
+                    positionMs = 30_000,
+                    durationMs = 0,
+                    isPlaying = true,
+                    requestInitialFocus = true,
+                    onBack = {},
+                    onPlayPause = {},
+                    onSeekBack = {},
+                    onSeekForward = {},
+                    onScrub = {},
+                    onScrubEnd = {},
+                    onTracks = {},
+                    onSettings = {},
+                    onInfo = {},
+                    onPip = null,
+                )
+            }
+        }
+
+        val pause = compose.onNodeWithContentDescription("Pause")
+        compose.waitUntil(timeoutMillis = 2_000) {
+            pause.fetchSemanticsNode().config.getOrElse(SemanticsProperties.Focused) { false }
+        }
+        pause.performKeyInput { pressKey(Key.DirectionUp) }
+        compose.waitForIdle()
+        pause.assertIsFocused()
+    }
+
+    @Test
     fun shippedRootAdapterPreviewsWithoutSeekingAndCommitsOnce() {
         var state = PlayerInputState.Timeline
         var previews = 0
