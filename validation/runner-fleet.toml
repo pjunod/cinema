@@ -13,7 +13,7 @@
 # *is there a machine that can run this job at all?* Two failures say why that
 # question is worth an artifact. `replicated Store contracts (legacy)` required
 # `ci-store` while exactly one runner in the fleet carried it, and on
-# 2026-09-01 that lane took 45 attempts, started 15, and had 27 cancelled while
+# 2026-09-02 that lane took 45 attempts, started 15, and had 27 cancelled while
 # still queued, with waits reaching 234 minutes. Separately,
 # `.github/workflows/store-shards.yml` pinned a shard to `ci-store-shard-1`, a
 # label no runner has ever carried; flipping `CI_EXECUTION_MODE` to

@@ -1606,7 +1606,7 @@ class OperationsContractCase(unittest.TestCase):
         # A `runs-on` naming a label nothing carries is not an error GitHub
         # reports. The job queues, indefinitely, and is eventually cancelled
         # having never started — which is how the required Store lane spent
-        # 2026-09-01 at 45 attempts, 15 started, 27 cancelled while queued, and
+        # 2026-09-02 at 45 attempts, 15 started, 27 cancelled while queued, and
         # waits reaching 234 minutes, and how `store-shards.yml` came to pin a
         # shard to `ci-store-shard-1`, a label the fleet has never had. Nothing
         # in the repository knew what the fleet carries, so nothing could

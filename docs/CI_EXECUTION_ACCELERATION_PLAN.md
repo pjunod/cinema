@@ -162,7 +162,7 @@ a matrix row pinned to `ci-store-shard-1`, a label no runner in the fleet has
 ever carried, so flipping `CI_EXECUTION_MODE` to `accelerated` would have
 parked every pull request behind a job GitHub can never assign. The same shape
 had already cost a day of queue: with exactly one runner carrying `ci-store`,
-`replicated Store contracts (legacy)` took 45 attempts on 2026-09-01, started
+`replicated Store contracts (legacy)` took 45 attempts on 2026-09-02, started
 15, had 27 cancelled while still queued having never run, and reached waits of
 234 minutes.
 
