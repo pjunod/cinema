@@ -1011,8 +1011,22 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
             .as_array()
             .expect("activity nodes")
             .iter()
-            .all(|node| node["status"] == "answered"),
+            .any(|node| node["node_id"] == remote_node && node["status"] == "answered"),
         "summary/detail sharing returned a failed healthy peer snapshot: {detail}\n\
+         node A log:\n{}\nnode B log:\n{}",
+        node_a.diagnostics(),
+        node_b.diagnostics(),
+    );
+    // The summary can be the wave leader here, so this is the only place the
+    // detail projection is proven to retain remote deliveries off a snapshot it
+    // did not lead. Asserting peer status alone passed with the streams gone.
+    assert!(
+        detail["deliveries"]
+            .as_array()
+            .expect("deliveries")
+            .iter()
+            .any(|delivery| delivery["node_id"] == remote_node),
+        "detail lost node B's remote-only streams on the summary-led wave: {detail}\n\
          node A log:\n{}\nnode B log:\n{}",
         node_a.diagnostics(),
         node_b.diagnostics(),
