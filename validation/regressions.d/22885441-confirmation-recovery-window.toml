@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["03dbd7dd"]
+commits = ["22885441"]
 points = ["playback.pipeline"]
 checks = ["rust-gate"]
 reason = "The retained source contract requires the activation confirmation to be awaited on a deadline reserved out of the owner lease rather than on the lease itself, and requires the committed-write recovery read to keep the full lease, so the reservation cannot be reverted without a red fast Rust gate. A const assertion additionally bounds the reserved margin at half the lease so it cannot grow until it starves the write it protects."

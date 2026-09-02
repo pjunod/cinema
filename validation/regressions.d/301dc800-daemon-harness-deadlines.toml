@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["21337f25"]
+commits = ["301dc800"]
 points = ["persistence.upgrades", "cluster.page-reads", "validation.framework"]
 checks = ["rust-gate", "cluster-auth", "history-regressions"]
 reason = "The retained daemon contracts hold each activation fixture's HTTP, Raft, and Hiqlite listeners open together so one fixture cannot select the same ephemeral port twice; healthy Activity coalescing waves prove exact physical-request counts without spending the production peer deadline in a synthetic receiver barrier, require both summary and detail to retain the remote-only streams, and a paused unit holds the leading physical fetch until seven followers have entered, proving in-flight sharing before it verifies completed-result reuse and exact TTL refresh. Dedicated proxy modes continue to generate concurrent receiver authority and key-lookup bursts, while failed healthy-wave assertions retain response and daemon diagnostics."

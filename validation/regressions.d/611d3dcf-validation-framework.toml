@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["20b09c21"]
+commits = ["611d3dcf"]
 points = ["validation.framework"]
 checks = ["history-regressions"]
 reason = "The status-only correction records the exact failed hosted qualification and the retained ffmpeg prerequisite evidence without claiming runtime behavior. The history-regressions audit requires this non-runtime corrective commit to remain explicitly classified."

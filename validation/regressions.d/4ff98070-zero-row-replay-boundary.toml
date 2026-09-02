@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["b85605ab"]
+commits = ["4ff98070"]
 points = ["core.media", "cluster.auth"]
 checks = ["rust-gate", "cluster-auth"]
 reason = "The retained Store source contract requires the zero-row confirmation replay to prove both that the durable playback pointer still names this activation and that the surviving row carries the publication boundary this call wrote, so neither conjunct can be dropped without a red gate, while the three-voter fault seam continues to execute the committed-then-timed-out replay end to end."

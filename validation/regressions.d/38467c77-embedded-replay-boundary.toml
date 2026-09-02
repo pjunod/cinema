@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["8f7ad7a4"]
+commits = ["38467c77"]
 points = ["core.media"]
 checks = ["rust-gate"]
 reason = "The retained Store source contract now scans both the replicated and the embedded settlement branches for the proof that a surviving activation row carries the publication boundary this call wrote, so the two backends cannot drift apart on the confirmation replay again."
