@@ -668,7 +668,11 @@ pattern = "publication_ready_at_ms"
 # two assertions that a *commit* leaves the fence at the sentinel. All three
 # are test-only. The fence is not moved by any new shipped path — a commit
 # updates the lease and nothing else, exactly as before.
-expected_occurrences = 71
+# 71 -> 72 with R-M3's pointer test: one test-only activation built from what
+# admission returned, so the fence it asks for is proved against the durable
+# pointer rather than against the constant in the code. It sets the sentinel
+# like every other first commit and moves no shipped fence.
+expected_occurrences = 72
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -686,7 +690,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # the pointer sets it, and the commit test asserts a committed successor is
 # still at it. Both test-only; no shipped path writes or clears the sentinel
 # that did not before.
-expected_occurrences = 22
+# 22 -> 23 with R-M3's pointer test, for the same activation described in
+# `m4-activation-publication-handoff-fence` above.
+expected_occurrences = 23
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -1110,7 +1116,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # publication, and two are the above-250 ms spacing the protocol's exchange
 # floor requires for a storm to be measured rather than rate-limited. Every one
 # of them is awaited by the test before its temporary media is released.
-expected_occurrences = 538
+# +2 with R-M3's review findings: one fixture wait for the surviving producer to
+# publish once the storm releases its gate — the wait that stops "nothing was
+# published" from being true because nothing was ever let through — and one in
+# the latch tests that drive the owner registry directly. Both are awaited by
+# their test before its temporary media is released.
+expected_occurrences = 540
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1181,7 +1192,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # all — it changes who may *stop* the existing window extractor, not who may
 # start one, and that extractor is still the single bounded ffmpeg inventoried
 # under `process-command-construction` above.
-expected_occurrences = 207
+# +1 with R-M3's terminal-retirement test: one more `Response::status()` read on
+# an in-process subtitle response, this time to prove that retiring a playback
+# releases the window it owned.
+expected_occurrences = 208
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

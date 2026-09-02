@@ -105,11 +105,35 @@ with it except where the viewer went, so the next request for that span is a
 first attempt rather than a suppressed retry.
 
 Admission moved too. The subtitle segment arm reads the client's settled
-destination immediately before warming, and declines to start a window that
-does not reach it, using the same 1 s tolerance `SettledTarget::supersedes`
-already uses rather than a second copy of the number. `None` still warms: it
-covers a missing session, a retired actor and a client that has not exchanged
-yet, and none of those is evidence of staleness.
+destination immediately before warming, and declines to start a window that is
+no longer work that destination wants. `None` still warms: it covers a missing
+session, a retired actor and a client that has not exchanged yet, and none of
+those is evidence of staleness.
+
+The comparison is deliberately not containment. The handoff's wording — refuse
+a window that "does not cover its target" — was implemented literally first and
+adversarial review showed what that costs: a settled target is where the viewer
+*is*, while the segment driving the window request is what the player is
+*fetching*, and a player fetches ahead. Containment therefore refuses the window
+immediately in front of the playhead at every grid boundary, reopening the exact
+gap the bridge exists to close, once per span, for the whole file. So a window is
+refused when it lies behind the destination, which means the viewer has left it,
+or beyond the forward reach a client legitimately buffers into, which means the
+request belongs to a destination the client has since abandoned. The reach is the
+same 180 s the server already retains behind the download frontier for Apple's
+measured client lead, and the 1 s tolerance is still `SettledTarget`'s own rather
+than a second copy of the number. This is a deliberate deviation from the
+handoff's literal wording and it does not weaken §8.1: a storm's abandoned
+destinations are further from the settled target than any buffer head, and the
+acceptance still refuses every one of them.
+
+Two guardrails came out of the same review. Releasing a session's owner also
+fences that session briefly, because a segment request that read its authority a
+moment before teardown is otherwise still entitled to install an owner nothing
+will ever release. And the slot is held by a destructor rather than by tail
+statements, so a panicking task, a runtime shutting down, or a cancelled request
+that had already claimed a slot all still release it — the alternative is a
+terminal cleanup parked forever on a settlement that will not come.
 
 Acceptance is at the production boundary, not on the latch. A twenty-seek storm
 drives real control exchanges through the manager and real segment requests
@@ -117,9 +141,13 @@ through the handler, with the producer counted by a drop guard so a superseded
 extraction is observed dying rather than assumed to. It asserts the typed 409
 for a create presented after a later snapshot landed, the unchanged replay and
 stale-sequence rejections, at most one live window producer at every step,
-nothing published by any abandoned window, the one published window surviving
-every supersession that followed it, a first play with no authority still
-warming, and exactly one producer left at the end carrying the settled target.
+nothing published by any abandoned window once the fixture releases every
+producer it was holding, the one published window surviving every supersession
+that followed it, a first play with no authority still warming, and exactly one
+producer left at the end carrying the settled target. The ownership latch's own
+arms are unreachable through the handler — the destination gate answers first —
+so they are driven directly, and the fence that the durable pointer honours is
+proved against the Store rather than against the constant in the code.
 
 ## Slice ledger — every PR in the current push
 
@@ -167,8 +195,8 @@ merge target: two client PRs in flight means the second always fails.
 | M5.5 execution | the execution wrapper the spike was missing | [#776](https://github.com/pjunod/plurx/pull/776) | merged; **run 2026-09-01** |
 | M6 handoff | the numbers M6 was waiting for | [#787](https://github.com/pjunod/plurx/pull/787) · [#788](https://github.com/pjunod/plurx/pull/788) | merged |
 | M6 slot | the preparation slot, and that a disconnect is not a commit | [#792](https://github.com/pjunod/plurx/pull/792) | merged |
-| M7 R-M2 | bound native subtitle materialization | [#789](https://github.com/pjunod/plurx/pull/789) | qualifying |
-| M7 R-M3 | one playback, one live subtitle window | [#TBD](https://github.com/pjunod/plurx/pulls) | open |
+| M7 R-M2 | bound native subtitle materialization | [#789](https://github.com/pjunod/plurx/pull/789) | merged |
+| M7 R-M3 | one playback, one live subtitle window | [#830](https://github.com/pjunod/plurx/pull/830) | open |
 | M6 executor | the executor, and three authorities in order | [#793](https://github.com/pjunod/plurx/pull/793) | merged |
 | M6 tests | the executor's three durable outcomes, pinned | [#796](https://github.com/pjunod/plurx/pull/796) | merged |
 | M6 decision | prepare or fall back, and why it is one axis | [#798](https://github.com/pjunod/plurx/pull/798) | merged |

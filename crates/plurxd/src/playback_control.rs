@@ -2144,27 +2144,64 @@ pub(crate) struct SettledTarget {
 
 const SETTLED_TARGET_SLACK_MS: i64 = 1_000;
 
+/// How far ahead of a settled destination a subtitle window may still be work
+/// the viewer wants.
+///
+/// A player fetches ahead of its playhead, so the segment driving a window
+/// request is normally in front of the position the client reported. The
+/// measured Apple case is about 120 s of lead, and the server already retains
+/// 180 s behind the download frontier for exactly that reason
+/// (`apple.hls-buffer-window`). Reusing that number keeps one description of
+/// how far a client is allowed to be ahead of itself, rather than inventing a
+/// second one for subtitles. Past it a request is not a buffer head, it is a
+/// destination the viewer has left.
+const SUBTITLE_WINDOW_FORWARD_REACH_MS: i64 = 180_000;
+
 impl SettledTarget {
     pub(crate) fn supersedes(&self, sequence: u64, anchor_ms: i64) -> bool {
         self.sequence > sequence && (self.anchor_ms - anchor_ms).abs() > SETTLED_TARGET_SLACK_MS
     }
 
-    /// Does a subtitle window anchored here reach the destination the client
-    /// settled on?
+    /// Is a subtitle window anchored here still work this destination wants?
     ///
     /// Control positions and subtitle window anchors are both absolute film
-    /// time, so this is one span containment. It lives beside
+    /// time, so this is a span comparison. It lives beside
     /// [`SettledTarget::supersedes`] on purpose: the 1 s tolerance is a single
     /// fact about how precisely a client's reported destination can be
     /// trusted, and a second `1_000` written into the subtitle path would be a
     /// second fact free to drift away from this one.
+    ///
+    /// The comparison is deliberately **not** "does this window contain the
+    /// playhead". A settled target is where the viewer *is*; the segment whose
+    /// window this is, is what the player is *fetching*, and a player fetches
+    /// ahead — Apple measurably by about two minutes. Requiring containment
+    /// would refuse the window immediately ahead of the playhead at every grid
+    /// boundary, which is the exact gap the bridge exists to cover, recurring
+    /// once per span for the whole file.
+    ///
+    /// So a window is refused when it lies behind the destination, which means
+    /// the viewer has left it, or unreasonably far ahead of it, which means the
+    /// request belongs to a destination the client has since abandoned. In
+    /// between is the forward reach a client legitimately buffers into.
     pub(crate) fn covered_by_window(&self, anchor_seconds: i64, window_seconds: i64) -> bool {
+        let window_seconds = window_seconds.max(0);
         let start_ms = anchor_seconds.saturating_mul(1_000);
         let end_ms = anchor_seconds
-            .saturating_add(window_seconds.max(0))
+            .saturating_add(window_seconds)
             .saturating_mul(1_000);
-        self.anchor_ms >= start_ms.saturating_sub(SETTLED_TARGET_SLACK_MS)
-            && self.anchor_ms <= end_ms.saturating_add(SETTLED_TARGET_SLACK_MS)
+        // One span or the measured client lead, whichever reaches further: a
+        // short operator span must not make the reach shorter than what a
+        // player actually fetches ahead.
+        let reach_ms = window_seconds
+            .saturating_mul(1_000)
+            .max(SUBTITLE_WINDOW_FORWARD_REACH_MS);
+        let behind = end_ms.saturating_add(SETTLED_TARGET_SLACK_MS) < self.anchor_ms;
+        let too_far_ahead = start_ms
+            > self
+                .anchor_ms
+                .saturating_add(reach_ms)
+                .saturating_add(SETTLED_TARGET_SLACK_MS);
+        !behind && !too_far_ahead
     }
 }
 

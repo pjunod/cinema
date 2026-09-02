@@ -10749,6 +10749,14 @@ mod tests {
         /// gone. The guard runs whether the future finishes or is dropped, so
         /// this is the physical number of live extractions.
         live: Arc<std::sync::atomic::AtomicUsize>,
+        /// The highest `live` ever reached.
+        ///
+        /// Sampling `live` from the test task can only observe instants the
+        /// test task is awake for, and after an await that waited for
+        /// settlement those instants are the ones where an overlap is least
+        /// likely. This is recorded by the producers themselves, so an overlap
+        /// that existed for one poll is still visible afterwards.
+        peak_live: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     /// Decrements the live-producer count however its producer ends.
@@ -10770,6 +10778,7 @@ mod tests {
                 started: Arc::new(tokio::sync::Semaphore::new(0)),
                 release: Arc::new(tokio::sync::Semaphore::new(0)),
                 live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                peak_live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
 
@@ -10779,6 +10788,10 @@ mod tests {
 
         fn live_window_producers(&self) -> usize {
             self.live.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn peak_window_producers(&self) -> usize {
+            self.peak_live.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -10851,6 +10864,7 @@ mod tests {
             let started = Arc::clone(&self.started);
             let release = Arc::clone(&self.release);
             let live = Arc::clone(&self.live);
+            let peak_live = Arc::clone(&self.peak_live);
             Box::pin(crate::subtitles::warm_vtt_window_with(
                 session,
                 sequence,
@@ -10861,7 +10875,8 @@ mod tests {
                 window_seconds,
                 move |tmp, _, _, _, _| async move {
                     runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let now = live.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    peak_live.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
                     let _live = LiveProducer(live);
                     started.add_permits(1);
                     // A superseded producer is dropped exactly here, which is
@@ -11185,7 +11200,11 @@ mod tests {
                 crate::playback_control::ClientPlatform::Web,
             );
             let target_ms = target_seconds.saturating_mul(1_000);
-            snapshot.position_ms = target_ms;
+            // A storm is a scrub bar being dragged, so the snapshots that drive
+            // it are seeks: the client is not where it was, and `position_ms`
+            // still names the old place until the seek lands.
+            snapshot.render_state = crate::playback_control::RenderState::Seeking;
+            snapshot.position_ms = target_ms.saturating_sub(4_000).max(0);
             snapshot.seek_target_ms = Some(target_ms);
             snapshot.buffered_from_ms = Some(target_ms);
             snapshot.buffered_through_ms = target_ms.saturating_add(15_000);
@@ -11280,18 +11299,25 @@ mod tests {
                     crate::playback_control::ControlDisposition::Accepted
                 );
 
-                // Fact 1, with the ordering the acceptance names: snapshot
-                // `N+1` is accepted before create `N` reaches admission, so the
-                // refusal is a real race rather than a replayed decision.
+                // Fact 1, with the ordering the acceptance names: the snapshot
+                // for this destination has just been accepted, and only now
+                // does the create for the *previous* one reach admission. The
+                // settled target it is judged against is therefore read from
+                // the live actor after the later exchange landed, which is the
+                // race a create loses in production.
+                //
+                // `create` itself needs a store, a transcode manager and an
+                // authenticated user, so the acceptance reaches the decision
+                // where the handler reaches it — through `admit_restart`, which
+                // returns the same `ApiError` the client receives and sits
+                // above every producer and activation in `create`'s body.
                 if let Some((stale_sequence, stale_start)) = pending_create.take() {
                     let settled = fixture
                         .state
                         .transcode
                         .settled_target_for_session(session_id)
                         .await;
-                    let before = source.window_runs();
-                    let refused = admit_restart(settled, Some(stale_sequence), stale_start, None);
-                    match refused {
+                    match admit_restart(settled, Some(stale_sequence), stale_start, None) {
                         Err(ApiError::Typed { status, code, .. }) => {
                             assert_eq!(status, StatusCode::CONFLICT);
                             assert_eq!(code, "playback_target_superseded");
@@ -11299,11 +11325,6 @@ mod tests {
                         }
                         other => panic!("a create for a destination the storm left: {other:?}"),
                     }
-                    assert_eq!(
-                        source.window_runs(),
-                        before,
-                        "the refusal happens before anything is spawned"
-                    );
                 }
 
                 // Fact 2: the ordering rules the storm relies on are unchanged.
@@ -11363,9 +11384,10 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(260)).await;
             }
 
-            assert!(
-                refusals >= 15,
-                "the storm should have refused most of its own stale creates, refused {refusals}"
+            assert_eq!(
+                refusals,
+                STORM.len() - 1,
+                "every destination but the first is superseded before its own create lands"
             );
 
             // Fact 8: exactly one producer survives, and it carries the target
@@ -11379,7 +11401,6 @@ mod tests {
             let final_anchor =
                 crate::subtitles::window_anchor_seconds(settled.anchor_ms / 1_000, window_seconds);
             let owned = crate::subtitles::owned_window_for_test(session_id)
-                .await
                 .expect("the settled destination is still being extracted");
             assert_eq!(
                 owned.0, final_anchor,
@@ -11392,6 +11413,45 @@ mod tests {
                 1,
                 "the storm settles on exactly one live producer"
             );
+            assert_eq!(
+                source.peak_window_producers(),
+                1,
+                "and never had two extractors running at once during it"
+            );
+            assert_eq!(
+                crate::subtitles::peak_window_flights_for_test(session_id),
+                1,
+                "nor two flights, which is the wider span the settlement wait \
+                 exists to keep from overlapping — a displaced flight is still \
+                 alive while it kills its child and clears the registries"
+            );
+
+            // Release every held producer before judging what published.
+            //
+            // Without this the storm's abandoned anchors are absent for a
+            // reason that says nothing about supersession: the fixture never
+            // let any of them past its gate. Opening the gate now means a
+            // producer that was merely *parked* would wake and publish, while
+            // one that was actually aborted is gone and cannot. Waiting for the
+            // survivor's own window to appear proves the permits really flowed.
+            source.release.add_permits(STORM.len());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(
+                    crate::subtitles::read_cached_window(
+                        &fixture.state.subs_dir,
+                        &file,
+                        0,
+                        final_anchor,
+                        window_seconds,
+                    )
+                    .await,
+                    Ok(Some(_))
+                ) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the surviving producer publishes once it is released");
 
             // Fact 5: every destination the storm passed through published
             // nothing. Only the first, which was deliberately driven to
@@ -11430,9 +11490,24 @@ mod tests {
                 Ok(Some(_))
             ));
 
-            // Release the surviving producers so the fixture directory is not
-            // removed under a live extraction.
-            source.release.add_permits(4);
+            // Nothing was left half-written. An abort unlinks its own temp
+            // file and only its own temp file, so inverting that unlink to the
+            // cache name — the one way a cancellation could reach a published
+            // sidecar — shows up here as a stray `.tmp-` entry.
+            let mut entries = tokio::fs::read_dir(&fixture.state.subs_dir)
+                .await
+                .expect("subtitle cache directory");
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                assert!(
+                    !name.starts_with(".tmp-"),
+                    "an abandoned window left {name} behind"
+                );
+            }
+
+            // Release the whole-track producer last: publishing it prunes the
+            // matching windows, which would erase the evidence above.
             source.whole_release.add_permits(4);
             crate::subtitles::release_session_window(session_id).await;
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -11447,9 +11522,12 @@ mod tests {
             .expect("the whole-track producer settles before cleanup");
         }
 
-        /// Fact 3. Every admitted restart takes the playback pointer from the
-        /// exact incarnation it replaces, so the loser of a storm can never
-        /// take it back from the winner.
+        /// Fact 3, first half: what admission hands the activation.
+        ///
+        /// This half is cheap and shallow on purpose — it pins that admission
+        /// names the predecessor it saw and asks for a compare-and-swap rather
+        /// than a last-writer-wins overwrite. The half that matters, that the
+        /// durable pointer actually refuses the loser, is the test below it.
         #[test]
         fn an_admitted_successor_fences_the_predecessor_it_replaces() {
             let admitted = admit_restart(
@@ -11477,6 +11555,364 @@ mod tests {
             assert_eq!(first_play.expected_predecessor_incarnation_id, None);
         }
 
+        /// Fact 3, second half: the fence admission asks for is real.
+        ///
+        /// `fence_predecessor` is a constant in the code, so asserting on it
+        /// proves only that the constant is still there. What the storm
+        /// actually depends on is that the durable pointer honours it — that a
+        /// losing restart naming the predecessor cannot take the pointer back
+        /// once the winner has moved it. That is a Store contract, so it is
+        /// asserted against the Store.
+        #[tokio::test]
+        async fn the_pointer_refuses_a_loser_that_still_names_the_old_incarnation() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let session_id = &uuid::Uuid::new_v4().to_string();
+            let predecessor = uuid::Uuid::new_v4().to_string();
+            let fixture = HlsDeliveryFixture::publish(dir.path(), session_id).await;
+            crate::transcode::tests::activate_control_route(
+                fixture.store.as_ref(),
+                session_id,
+                &predecessor,
+                "test-node",
+            )
+            .await;
+
+            let winner = uuid::Uuid::new_v4().to_string();
+            let admitted = admit_restart(None, Some(9), 1_800.0, Some(predecessor.as_str()))
+                .expect("the newest sequence is admitted");
+            let fingerprint = "b".repeat(64);
+            let claim = |incarnation: String, fingerprint: String| {
+                let store = Arc::clone(&fixture.store);
+                async move {
+                    let now_ms = crate::media_sessions::unix_ms();
+                    store
+                        .claim_media_session_request(
+                            7,
+                            &incarnation,
+                            &fingerprint,
+                            "player-control",
+                            &incarnation,
+                            now_ms,
+                            now_ms + 60_000,
+                        )
+                        .await
+                        .expect("claim the restart's request");
+                    assert!(store
+                        .assign_media_session_request_owner(
+                            7,
+                            &incarnation,
+                            &incarnation,
+                            "test-node",
+                            now_ms,
+                        )
+                        .await
+                        .expect("assign the request owner"));
+                }
+            };
+            let activation = |incarnation: &str, admitted: &RestartAdmission| {
+                let now_ms = crate::media_sessions::unix_ms();
+                plurx_core::domain::MediaSessionActivation {
+                    incarnation_id: incarnation.to_owned(),
+                    // A restart is a new session taking over one playback, so
+                    // the session id moves and the playback id is what the
+                    // pointer is keyed by.
+                    session_id: uuid::Uuid::new_v4().to_string(),
+                    user_id: 7,
+                    playback_id: "player-control".to_owned(),
+                    expected_predecessor_incarnation_id: admitted
+                        .expected_predecessor_incarnation_id
+                        .clone(),
+                    fence_predecessor: admitted.fence_predecessor,
+                    request_id: Some(incarnation.to_owned()),
+                    request_fingerprint: fingerprint.clone(),
+                    owner_node_id: "test-node".to_owned(),
+                    recipe_json: "{}".to_owned(),
+                    response_json: "{}".to_owned(),
+                    publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    media_origin_ms: 0,
+                    now_ms,
+                    lease_expires_at_ms: now_ms + 60_000,
+                }
+            };
+
+            claim(winner.clone(), fingerprint.clone()).await;
+            assert!(
+                fixture
+                    .store
+                    .activate_media_session(&activation(&winner, &admitted))
+                    .await
+                    .expect("winner activation")
+                    .is_some(),
+                "the winner names the incarnation the pointer holds, so its CAS succeeds"
+            );
+
+            // The loser was admitted against the same predecessor — it lost the
+            // race, not the ordering check — and still asks to take the pointer
+            // from an incarnation that no longer holds it.
+            let loser = uuid::Uuid::new_v4().to_string();
+            claim(loser.clone(), fingerprint.clone()).await;
+            assert!(
+                fixture
+                    .store
+                    .activate_media_session(&activation(&loser, &admitted))
+                    .await
+                    .expect("loser activation")
+                    .is_none(),
+                "a storm's loser cannot take the pointer back from the successor"
+            );
+        }
+
+        /// The ownership latch's own arms, driven directly.
+        ///
+        /// Through the handler these are unreachable: the settled-destination
+        /// gate answers first, so a request for a different anchor is refused
+        /// before the latch ever sees it. The latch still has to be right —
+        /// the two guards mask each other, and a bug in either would hide
+        /// behind the other — so this drives `warm_vtt_window_with` itself.
+        #[tokio::test]
+        async fn the_owner_latch_joins_refuses_and_displaces_by_authority() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let session_id = &uuid::Uuid::new_v4().to_string();
+            let (fixture, file) = cold_windowed_fixture(dir.path(), session_id).await;
+            let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let started = Arc::new(tokio::sync::Semaphore::new(0));
+            let hold = Arc::new(tokio::sync::Semaphore::new(0));
+
+            let warm = |sequence: Option<u64>, anchor: i64| {
+                let runs = Arc::clone(&runs);
+                let started = Arc::clone(&started);
+                let hold = Arc::clone(&hold);
+                let subs_dir = fixture.state.subs_dir.clone();
+                let file = file.clone();
+                let session_id = session_id.clone();
+                async move {
+                    crate::subtitles::warm_vtt_window_with(
+                        &session_id,
+                        sequence,
+                        &subs_dir,
+                        &file,
+                        0,
+                        anchor,
+                        WINDOW_SECONDS,
+                        move |_tmp, _, _, _, _| async move {
+                            runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            started.add_permits(1);
+                            hold.acquire().await.expect("hold").forget();
+                            Ok(())
+                        },
+                    )
+                    .await
+                }
+            };
+            let count = || runs.load(std::sync::atomic::Ordering::SeqCst);
+            let running = || {
+                let started = Arc::clone(&started);
+                async move {
+                    tokio::time::timeout(Duration::from_secs(5), started.acquire())
+                        .await
+                        .expect("a producer starts")
+                        .expect("started semaphore remains open")
+                        .forget();
+                }
+            };
+
+            assert!(warm(Some(5), 600).await, "a first claim starts a flight");
+            running().await;
+            assert_eq!(count(), 1);
+
+            assert!(
+                warm(Some(5), 600).await,
+                "the same destination joins the flight already running"
+            );
+            assert_eq!(count(), 1, "and never spawns a second extractor for it");
+
+            assert!(
+                !warm(Some(5), 900).await,
+                "an equal sequence is not a newer ordering fact"
+            );
+            assert!(
+                !warm(Some(4), 900).await,
+                "and an older one is evidence in the wrong direction"
+            );
+            assert!(
+                !warm(None, 900).await,
+                "nor does the absence of one displace a flight that has it"
+            );
+            assert_eq!(count(), 1, "none of those started anything");
+            assert_eq!(
+                crate::subtitles::owned_window_for_test(session_id)
+                    .expect("the flight is kept")
+                    .0,
+                600
+            );
+
+            assert!(warm(Some(6), 900).await, "a newer sequence displaces");
+            running().await;
+            assert_eq!(count(), 2);
+            assert_eq!(
+                crate::subtitles::owned_window_for_test(session_id)
+                    .expect("the successor owns the slot")
+                    .0,
+                900
+            );
+            assert_eq!(
+                crate::subtitles::peak_window_flights_for_test(session_id),
+                1,
+                "the predecessor settled before the successor started"
+            );
+
+            // Session end fences the id: a request already on its way cannot
+            // leave an extraction behind a playback that is gone.
+            crate::subtitles::release_session_window(session_id).await;
+            assert!(crate::subtitles::owned_window_for_test(session_id).is_none());
+            assert!(
+                !warm(Some(9), 1_200).await,
+                "a released session starts nothing, however new its authority"
+            );
+            assert_eq!(count(), 2);
+
+            crate::subtitles::clear_release_fence_for_test(session_id);
+            assert!(
+                warm(Some(9), 1_200).await,
+                "and gets its bridge back once the fence lapses"
+            );
+            running().await;
+            assert_eq!(count(), 3);
+
+            hold.add_permits(8);
+            crate::subtitles::release_session_window(session_id).await;
+        }
+
+        /// A first play with no authority is displaced by the first request
+        /// that has one — a settled destination is a fact, and the anchor a
+        /// session happened to open on is not.
+        #[tokio::test]
+        async fn an_ordering_fact_displaces_a_flight_started_without_one() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let session_id = &uuid::Uuid::new_v4().to_string();
+            let (fixture, file) = cold_windowed_fixture(dir.path(), session_id).await;
+            let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let hold = Arc::new(tokio::sync::Semaphore::new(0));
+            let warm = |sequence: Option<u64>, anchor: i64| {
+                let runs = Arc::clone(&runs);
+                let hold = Arc::clone(&hold);
+                let subs_dir = fixture.state.subs_dir.clone();
+                let file = file.clone();
+                let session_id = session_id.clone();
+                async move {
+                    crate::subtitles::warm_vtt_window_with(
+                        &session_id,
+                        sequence,
+                        &subs_dir,
+                        &file,
+                        0,
+                        anchor,
+                        WINDOW_SECONDS,
+                        move |_tmp, _, _, _, _| async move {
+                            runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            hold.acquire().await.expect("hold").forget();
+                            Ok(())
+                        },
+                    )
+                    .await
+                }
+            };
+
+            assert!(warm(None, 300).await);
+            assert!(warm(Some(1), 600).await, "an authority outranks none");
+            assert_eq!(
+                crate::subtitles::owned_window_for_test(session_id)
+                    .expect("the successor owns the slot")
+                    .0,
+                600
+            );
+            assert_eq!(
+                crate::subtitles::peak_window_flights_for_test(session_id),
+                1
+            );
+
+            hold.add_permits(4);
+            crate::subtitles::release_session_window(session_id).await;
+        }
+
+        /// Terminal retirement releases the owner through the production path,
+        /// not through a test calling the release function by hand.
+        #[tokio::test]
+        async fn rolling_retirement_releases_the_window_a_playback_owned() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let session_id = &uuid::Uuid::new_v4().to_string();
+            let (fixture, _file) = cold_windowed_fixture(dir.path(), session_id).await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+
+            let response = subtitle_segment(&fixture.state, session_id, 3, source.as_ref()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            producer_started(source.as_ref()).await;
+            assert!(crate::subtitles::owned_window_for_test(session_id).is_some());
+
+            assert!(
+                fixture
+                    .state
+                    .transcode
+                    .stop_session(session_id, "admin")
+                    .await,
+                "the fixture session retires"
+            );
+            assert!(
+                crate::subtitles::owned_window_for_test(session_id).is_none(),
+                "terminal retirement released the window owner"
+            );
+            assert_eq!(
+                source.live_window_producers(),
+                0,
+                "and waited for its extraction to settle"
+            );
+
+            source.whole_release.add_permits(4);
+        }
+
+        /// The coverage rule, at its edges.
+        ///
+        /// A window is refused when the viewer has left it behind or when it is
+        /// too far ahead to be a buffer head. Between those, including the
+        /// window immediately ahead of the playhead, it is exactly the bridge
+        /// this feature exists to build.
+        #[test]
+        fn coverage_admits_the_look_ahead_and_refuses_both_ends() {
+            let settled = crate::playback_control::SettledTarget {
+                sequence: 4,
+                anchor_ms: 190_000,
+            };
+            assert!(
+                settled.covered_by_window(0, 200),
+                "the window holding the playhead"
+            );
+            assert!(
+                settled.covered_by_window(200, 200),
+                "and the one immediately ahead of it, which is what a player is fetching"
+            );
+            assert!(
+                !settled.covered_by_window(1_800, 200),
+                "a window half an hour ahead is a destination the viewer left, not a buffer"
+            );
+            assert!(
+                !settled.covered_by_window(0, 30),
+                "a short span behind the playhead has nothing left to give it"
+            );
+            assert!(
+                settled.covered_by_window(180, 30),
+                "while the short span holding it still does"
+            );
+            assert!(
+                settled.covered_by_window(300, 30),
+                "and a short span keeps the measured client lead, not its own length"
+            );
+            let head = crate::playback_control::SettledTarget {
+                sequence: 1,
+                anchor_ms: 0,
+            };
+            assert!(head.covered_by_window(0, 200), "a first play at the head");
+        }
+
         /// Fact 7. `None` is the absence of an ordering fact, not evidence of
         /// staleness, so a client that has never exchanged still gets its
         /// bridge.
@@ -11501,7 +11937,6 @@ mod tests {
             producer_started(source.as_ref()).await;
             assert_eq!(source.window_runs(), 1);
             let owned = crate::subtitles::owned_window_for_test(session_id)
-                .await
                 .expect("the first play owns its flight");
             assert_eq!(owned.2, None, "with no ordering fact behind it");
 
@@ -11558,7 +11993,6 @@ mod tests {
                 assert_eq!(response.status(), StatusCode::OK);
                 producer_started(source.as_ref()).await;
                 let owned = crate::subtitles::owned_window_for_test(session_id)
-                    .await
                     .expect("the current destination is owned");
                 assert_eq!(owned.0, segment * SEGMENT_SECONDS);
                 assert_eq!(source.live_window_producers(), 1);
@@ -11586,7 +12020,6 @@ mod tests {
             );
             assert_eq!(
                 crate::subtitles::owned_window_for_test(session_id)
-                    .await
                     .expect("the live flight is kept")
                     .0,
                 9 * SEGMENT_SECONDS
@@ -11595,9 +12028,7 @@ mod tests {
             // Session end releases the owner, and does it by waiting for the
             // real producer rather than by dropping a handle.
             crate::subtitles::release_session_window(session_id).await;
-            assert!(crate::subtitles::owned_window_for_test(session_id)
-                .await
-                .is_none());
+            assert!(crate::subtitles::owned_window_for_test(session_id).is_none());
             assert_eq!(
                 source.live_window_producers(),
                 0,
@@ -11677,9 +12108,7 @@ mod tests {
                 0,
                 "no window is started for a destination the client already left"
             );
-            assert!(crate::subtitles::owned_window_for_test(session_id)
-                .await
-                .is_none());
+            assert!(crate::subtitles::owned_window_for_test(session_id).is_none());
 
             source.whole_release.add_permits(2);
             tokio::time::timeout(Duration::from_secs(5), async {

@@ -362,16 +362,131 @@ struct SessionWindow {
     settled: Arc<tokio::sync::Semaphore>,
 }
 
-type SessionWindows = tokio::sync::Mutex<HashMap<String, SessionWindow>>;
+/// Live window owners, and the sessions whose owner was just released.
+#[derive(Default)]
+struct WindowOwners {
+    live: HashMap<String, SessionWindow>,
+    /// When each recently released session stops being fenced.
+    ///
+    /// Releasing is an instant, but a segment request that read its authority
+    /// just before teardown can still be on its way to claiming a slot. Without
+    /// a fence that request installs an owner nothing will ever release: an
+    /// ffmpeg with no viewer, and a slot that makes the next playback to reuse
+    /// this durable id look superseded by an ordering fact from a session that
+    /// no longer exists.
+    released: HashMap<String, std::time::Instant>,
+    /// Per session: window flights alive right now, and the most that were ever
+    /// alive at once.
+    ///
+    /// A flight is alive from the moment its task starts to the moment its
+    /// guard drops — which is *after* the child is dead, the temp file is gone
+    /// and the registries are clear. That is the span the settlement wait
+    /// exists to keep from overlapping, and it is wider than the span a
+    /// producer-side counter can see, so this is where the "one live flight per
+    /// playback" claim is observable at all. Test-only: the production path
+    /// pays nothing for it.
+    #[cfg(test)]
+    flights: HashMap<String, (usize, usize)>,
+}
+
+/// How long a released session refuses to start new window work.
+///
+/// Long enough to outlast a segment request that was already in flight when
+/// teardown ran, short enough that a genuine resurrection of the same durable
+/// id gets its bridge back within one viewer's patience.
+const WINDOW_RELEASE_FENCE: Duration = Duration::from_secs(30);
+
+/// Fenced sessions remembered at once. A fence is an id and a deadline, so the
+/// cap is about refusing unbounded growth rather than saving bytes.
+const MAX_FENCED_SESSIONS: usize = 256;
+
+/// The owner registry is a *synchronous* mutex on purpose.
+///
+/// Every critical section here is a map lookup and a map write with no I/O in
+/// it, and the one operation that must wait — settlement — deliberately waits
+/// outside the lock. Making it synchronous also makes the destructor below
+/// possible, and a `std::sync::MutexGuard` held across an `await` is a compile
+/// error rather than a deadlock discovered in production.
+type SessionWindows = std::sync::Mutex<WindowOwners>;
 
 fn session_windows() -> &'static SessionWindows {
     static SESSION_WINDOWS: OnceLock<SessionWindows> = OnceLock::new();
-    SESSION_WINDOWS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+    SESSION_WINDOWS.get_or_init(|| std::sync::Mutex::new(WindowOwners::default()))
+}
+
+fn window_owners() -> std::sync::MutexGuard<'static, WindowOwners> {
+    session_windows()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn next_window_flight_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+impl WindowOwners {
+    /// Whether this session is inside its post-release fence.
+    fn fenced(&self, session: &str, now: std::time::Instant) -> bool {
+        self.released
+            .get(session)
+            .is_some_and(|expires_at| *expires_at > now)
+    }
+
+    /// Fence a session, evicting expired entries first and then the fence
+    /// closest to expiry — the one whose loss costs the least.
+    fn fence(&mut self, session: &str, now: std::time::Instant) {
+        self.released.retain(|_, expires_at| *expires_at > now);
+        while self.released.len() >= MAX_FENCED_SESSIONS {
+            let Some(soonest) = self
+                .released
+                .iter()
+                .min_by_key(|(_, expires_at)| **expires_at)
+                .map(|(session, _)| session.clone())
+            else {
+                break;
+            };
+            self.released.remove(&soonest);
+        }
+        self.released
+            .insert(session.to_owned(), now + WINDOW_RELEASE_FENCE);
+    }
+}
+
+/// Owns one flight's claim on a session slot for as long as that flight exists.
+///
+/// Every way out has to reach the same two facts: this session no longer holds
+/// this flight, and whoever is waiting for it to settle is released. A tail
+/// statement reaches them on the paths its author thought of; a destructor
+/// reaches them when the task panics, when the runtime drops it at shutdown,
+/// and when a cancelled request abandons a slot it had already claimed. The
+/// cost of missing one of those is a `release_session_window` that waits
+/// forever, holding a session's terminal cleanup behind it.
+struct WindowFlightGuard {
+    session: String,
+    id: u64,
+    settled: Arc<tokio::sync::Semaphore>,
+}
+
+impl Drop for WindowFlightGuard {
+    fn drop(&mut self) {
+        {
+            let mut owners = window_owners();
+            if owners
+                .live
+                .get(&self.session)
+                .is_some_and(|live| live.id == self.id)
+            {
+                owners.live.remove(&self.session);
+            }
+            #[cfg(test)]
+            if let Some(counts) = owners.flights.get_mut(&self.session) {
+                counts.0 = counts.0.saturating_sub(1);
+            }
+        }
+        // Last, so anything woken by it finds the registry already clear.
+        self.settled.close();
+    }
 }
 
 /// The error a joiner sees when the flight it was waiting on was superseded.
@@ -405,14 +520,24 @@ async fn await_window_settlement(settled: &tokio::sync::Semaphore) {
     let _ = settled.acquire().await;
 }
 
-/// Release the window owner a playback holds, if it holds one.
+/// Release the window owner a playback holds, and fence the session against
+/// acquiring another.
 ///
-/// Cancellation-safe in the sense session teardown needs: the slot is removed
-/// and the cancel signalled before the first await, so a caller that is itself
-/// dropped mid-release still leaves the flight stopping rather than orphaned
-/// and still owning a session id a later playback may reuse.
+/// Cancellation-safe in the sense session teardown needs: the fence is set, the
+/// slot removed and the cancel signalled before the first await, so a caller
+/// that is itself dropped mid-release still leaves the flight stopping rather
+/// than orphaned and still owning a session id a later playback may reuse.
+///
+/// The fence is why this is not merely a sweep. A segment request that read its
+/// authority a moment before teardown is still entitled to claim a slot, and
+/// without the fence it would claim one after the only thing that would ever
+/// release it had already run.
 pub async fn release_session_window(session: &str) {
-    let live = session_windows().lock().await.remove(session);
+    let live = {
+        let mut owners = window_owners();
+        owners.fence(session, std::time::Instant::now());
+        owners.live.remove(session)
+    };
     let Some(mut live) = live else {
         return;
     };
@@ -882,6 +1007,26 @@ async fn join_flight(flight: &Extraction) -> Result<PathBuf, String> {
     }
 }
 
+/// Open the cache directory a window is about to publish into.
+///
+/// `Ok(None)` means the sidecar is already there and nothing needs starting.
+async fn prepare_window_cache(
+    cached: &Path,
+    dir: &Path,
+    limits: ExtractionLimits,
+) -> Result<Option<plurx_core::fs_secure::SecureDirectory>, String> {
+    if valid_sidecar(cached, limits.max_sidecar_bytes).await {
+        return Ok(None);
+    }
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|error| format!("creating subtitle cache: {error}"))?;
+    plurx_core::fs_secure::SecureDirectory::open(dir)
+        .await
+        .map(Some)
+        .map_err(|error| format!("opening subtitle cache: {error}"))
+}
+
 /// The window path's owned extraction.
 ///
 /// [`ensure_vtt_at`] deliberately detaches the real work: a whole-track sidecar
@@ -897,26 +1042,27 @@ async fn ensure_window_owned<F, Fut>(
     file: &MediaFile,
     index: i64,
     limits: ExtractionLimits,
-    cancel: tokio::sync::oneshot::Receiver<()>,
+    mut cancel: tokio::sync::oneshot::Receiver<()>,
     extract: F,
 ) -> WindowExtractionOutcome
 where
     F: FnOnce(PathBuf, MediaFile, i64) -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
-    if valid_sidecar(&cached, limits.max_sidecar_bytes).await {
-        return WindowExtractionOutcome::Complete(Ok(cached));
-    }
-    if let Err(error) = tokio::fs::create_dir_all(dir).await {
-        return WindowExtractionOutcome::Complete(Err(format!("creating subtitle cache: {error}")));
-    }
-    let directory = match plurx_core::fs_secure::SecureDirectory::open(dir).await {
-        Ok(directory) => directory,
-        Err(error) => {
-            return WindowExtractionOutcome::Complete(Err(format!(
-                "opening subtitle cache: {error}"
-            )));
-        }
+    // The cache directory is server-local state rather than the media mount, so
+    // these are cheap — but they are still I/O, and a supersession arriving
+    // during them should not have to wait for them. Cancelling here is also
+    // strictly before `enlist`, so an abort at this point leaves no flight
+    // registered for anyone to join.
+    let prepared = tokio::select! {
+        biased;
+        _ = &mut cancel => return WindowExtractionOutcome::Aborted,
+        prepared = prepare_window_cache(&cached, dir, limits) => prepared,
+    };
+    let directory = match prepared {
+        Ok(Some(directory)) => directory,
+        Ok(None) => return WindowExtractionOutcome::Complete(Ok(cached)),
+        Err(why) => return WindowExtractionOutcome::Complete(Err(why)),
     };
     let (flight, owner) = match enlist(&cached, limits.max_sidecar_bytes).await {
         Flight::Published => return WindowExtractionOutcome::Complete(Ok(cached)),
@@ -1163,13 +1309,18 @@ where
     // started this exact span" is a question about waste. Answering them in
     // this order is what stops a storm from leaving a trail of live children.
     let mut displaced: Option<SessionWindow> = None;
-    let (cancel_rx, settled, id) = loop {
+    let (cancel_rx, guard) = loop {
         if let Some(mut live) = displaced.take() {
             drop(live.cancel.take());
             await_window_settlement(&live.settled).await;
         }
-        let mut owners = session_windows().lock().await;
-        match owners.get(session) {
+        let mut owners = window_owners();
+        if owners.fenced(session, std::time::Instant::now()) {
+            // This playback has ended. A request that read its authority just
+            // before teardown is not entitled to leave an extraction behind it.
+            return false;
+        }
+        match owners.live.get(session) {
             Some(live)
                 if live.anchor_seconds == anchor_seconds
                     && live.window_seconds == window_seconds =>
@@ -1188,7 +1339,7 @@ where
                 // Newer ordering fact, different destination. Take the slot
                 // out of the registry now so nothing else adopts it, then wait
                 // for the real producer to settle outside this lock.
-                displaced = owners.remove(session);
+                displaced = owners.live.remove(session);
                 continue;
             }
             None => {}
@@ -1196,7 +1347,7 @@ where
         let id = next_window_flight_id();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
         let settled = Arc::new(tokio::sync::Semaphore::new(0));
-        owners.insert(
+        owners.live.insert(
             session.to_owned(),
             SessionWindow {
                 id,
@@ -1207,23 +1358,44 @@ where
                 settled: Arc::clone(&settled),
             },
         );
-        break (cancel_rx, settled, id);
+        // Constructed under the same lock that installed the slot, so from
+        // here on there is no path — return, panic or task drop — that leaves
+        // the slot claimed or a waiter parked.
+        break (
+            cancel_rx,
+            WindowFlightGuard {
+                session: session.to_owned(),
+                id,
+                settled,
+            },
+        );
     };
 
     // Cross-session dedup underneath the per-playback slot: a different
     // playback already extracting this exact span is work to join rather than
-    // repeat, and it is not a flight this one may cancel.
+    // repeat, and it is not a flight this one may cancel. Dropping the guard
+    // releases the slot this request claimed a moment ago.
     if !warmups().lock().await.insert(cached.clone()) {
-        release_window_slot(session, id).await;
-        settled.close();
+        drop(guard);
         return true;
     }
 
     let dir_owned = dir.to_owned();
     let file_owned = file.clone();
-    let session_owned = session.to_owned();
     let window = bounded_window_seconds(window_seconds);
+    let counted_session = session.to_owned();
     tokio::spawn(async move {
+        // Moved in so the slot outlives exactly this task and no longer.
+        let _guard = guard;
+        #[cfg(test)]
+        {
+            let mut owners = window_owners();
+            let counts = owners.flights.entry(counted_session).or_insert((0, 0));
+            counts.0 += 1;
+            counts.1 = counts.1.max(counts.0);
+        }
+        #[cfg(not(test))]
+        let _ = counted_session;
         let _ = ensure_window_owned(
             cached.clone(),
             &dir_owned,
@@ -1237,9 +1409,6 @@ where
         )
         .await;
         warmups().lock().await.remove(&cached);
-        release_window_slot(&session_owned, id).await;
-        // Last, so anything woken by it finds the registries already clear.
-        settled.close();
     });
     true
 }
@@ -1251,20 +1420,30 @@ where
 /// not merely that one survived, and that fact lives in this registry rather
 /// than in anything the HTTP boundary returns.
 #[cfg(test)]
-pub(crate) async fn owned_window_for_test(session: &str) -> Option<(i64, i64, Option<u64>)> {
-    session_windows()
-        .lock()
-        .await
+pub(crate) fn owned_window_for_test(session: &str) -> Option<(i64, i64, Option<u64>)> {
+    window_owners()
+        .live
         .get(session)
         .map(|live| (live.anchor_seconds, live.window_seconds, live.sequence))
 }
 
-/// Drop a session's slot only if it still holds the named flight.
-async fn release_window_slot(session: &str, id: u64) {
-    let mut owners = session_windows().lock().await;
-    if owners.get(session).is_some_and(|live| live.id == id) {
-        owners.remove(session);
-    }
+/// Lift the post-release fence so a test can reuse a session id it just ended.
+#[cfg(test)]
+pub(crate) fn clear_release_fence_for_test(session: &str) {
+    window_owners().released.remove(session);
+}
+
+/// The most window flights this playback ever had alive at one time.
+///
+/// The whole point of waiting for a displaced flight to settle rather than
+/// dropping its handle is that this can never exceed one.
+#[cfg(test)]
+pub(crate) fn peak_window_flights_for_test(session: &str) -> usize {
+    window_owners()
+        .flights
+        .get(session)
+        .map(|counts| counts.1)
+        .unwrap_or(0)
 }
 
 async fn extract_vtt(tmp: &Path, file: &MediaFile, index: i64) -> Result<(), String> {
@@ -1355,19 +1534,31 @@ where
     let extraction =
         tokio::time::timeout(limits.timeout, extract(tmp.to_owned(), file.clone(), index));
     let extracted = match cancel {
-        Some(cancel) => tokio::select! {
-            biased;
-            _ = cancel => {
-                // Dropping `extraction` kills the child through `kill_on_drop`,
-                // and this frame still owns the temp file, so an abandoned
-                // window leaves the cache directory exactly as clean as an
-                // ordinary failure leaves it — but with no memo, because
-                // nothing was wrong with the extraction except its destination.
-                let _ = directory.unlink_child(tmp_name).await;
-                return WindowExtractionOutcome::Aborted;
+        Some(cancel) => {
+            // The cleanup deliberately happens *after* the select expression
+            // rather than inside its arm: `select!` drops the losing future
+            // when the whole expression completes, so unlinking from inside the
+            // arm would remove the temp file while ffmpeg still held it open.
+            // Ending the select first drops `extraction`, which is what
+            // `kill_on_drop` turns into an actual kill.
+            let raced = tokio::select! {
+                biased;
+                _ = cancel => None,
+                extracted = extraction => Some(extracted),
+            };
+            match raced {
+                Some(extracted) => extracted,
+                None => {
+                    // The child is dead and this frame still owns the temp
+                    // file, so an abandoned window leaves the cache directory
+                    // exactly as clean as an ordinary failure leaves it — but
+                    // with no memo, because nothing was wrong with the
+                    // extraction except its destination.
+                    let _ = directory.unlink_child(tmp_name).await;
+                    return WindowExtractionOutcome::Aborted;
+                }
             }
-            extracted = extraction => extracted,
-        },
+        }
         None => extraction.await,
     };
     let extracted = match extracted {
