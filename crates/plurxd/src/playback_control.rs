@@ -1002,10 +1002,24 @@ pub(crate) enum FallbackReason {
     /// More than one axis moves at once. Each is separately measured; a
     /// combination is measured by nothing.
     MultipleAxes,
-    /// The client has not shown it can carry a second pipeline. M6 handoff §8:
-    /// dual preparation doubles network demand and the constrained link is
-    /// exactly the case M5.5 did not test.
-    ThroughputUnproven,
+    /// Nobody measured the link, so there is nothing to refuse on. Separate
+    /// from `ThroughputInsufficient` because the two are opposite findings
+    /// that a single `throughput_unproven` would report as one number.
+    ///
+    /// This is the common case and will be for some time: both native clients
+    /// hardcode `observed_download_bps` null
+    /// (`PlayerController.swift`, `Controller.kt` — only the web client fills
+    /// it, from `hls.bandwidthEstimate`), and `DeliveryView::from_status`
+    /// leaves `delivered_bps` `None` on every VOD session, which is most of
+    /// them. A counter that booked all of that as "the link was too tight"
+    /// would read as evidence for the throughput rule while measuring only its
+    /// own missing inputs.
+    ThroughputUnreported,
+    /// The link *was* measured and does not carry a second pipeline. M6
+    /// handoff §8: dual preparation doubles network demand and the constrained
+    /// link is exactly the case M5.5 did not test. **This** is the reading
+    /// that speaks to the throughput rule.
+    ThroughputInsufficient,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1015,7 +1029,8 @@ impl FallbackReason {
             Self::ClientCannotPrepare => "client_cannot_prepare",
             Self::AxisNotProven => "axis_not_proven",
             Self::MultipleAxes => "multiple_axes",
-            Self::ThroughputUnproven => "throughput_unproven",
+            Self::ThroughputUnreported => "throughput_unreported",
+            Self::ThroughputInsufficient => "throughput_insufficient",
         }
     }
 }
@@ -1081,15 +1096,23 @@ impl PreparationConditions {
     /// prepared handoffs turn out never to fire: on a healthy link the ratio
     /// is comfortable, but a session whose `delivered_bps` is not yet measured
     /// refuses on that alone.
-    fn have_headroom_for_a_second_pipeline(&self) -> bool {
+    ///
+    /// Both refusals are still refusals; they are separated because *why* is
+    /// the entire operator question. `None` returns a pass.
+    fn headroom_refusal(&self) -> Option<FallbackReason> {
         let (Some(observed), Some(delivered)) = (self.observed_download_bps, self.delivered_bps)
         else {
-            return false;
+            return Some(FallbackReason::ThroughputUnreported);
         };
         let Ok(delivered) = u64::try_from(delivered) else {
-            return false;
+            // A negative or absurd delivered rate is not a measurement.
+            return Some(FallbackReason::ThroughputUnreported);
         };
-        delivered > 0 && observed >= delivered.saturating_mul(2)
+        if delivered == 0 {
+            // Nothing has been delivered yet, so there is no rate to double.
+            return Some(FallbackReason::ThroughputUnreported);
+        }
+        (observed < delivered.saturating_mul(2)).then_some(FallbackReason::ThroughputInsufficient)
     }
 }
 
@@ -1226,6 +1249,46 @@ pub(crate) fn decide_preparation(
     retained: Option<&DynamicCapabilities>,
     conditions: PreparationConditions,
 ) -> PreparationDecision {
+    decide_preparation_given_client(
+        delivered,
+        candidate,
+        retained.is_some_and(|caps| caps.dual_player_preparation),
+        conditions,
+    )
+}
+
+/// The same decision with the client capability **assumed satisfied**.
+///
+/// Shadow-only, and it exists because of what the fleet actually measured:
+/// with both shipped clients' `dual_player_preparation` literal hardcoded
+/// `false`, `client_cannot_prepare` is checked before the axis and the
+/// throughput and therefore absorbs *every* single-axis transition. The first
+/// production datapoint (m6, 2026-09-02, one `resolution_or_bitrate` change)
+/// read `client_cannot_prepare`, and so would every datapoint after it — so
+/// the shadow as first shipped can report which axes viewers cross, but cannot
+/// report the thing it was built to report: whether `AxisNotProven` and
+/// the throughput floor would refuse so often that the prepared path would
+/// never fire even after a coordinated client release.
+///
+/// Recorded as its own counter rather than by reordering `decide_preparation`,
+/// because that ordering is deliberate — see the `MultipleAxes` comment — and
+/// will be the production decision once M6 stages. This answers a strictly
+/// counterfactual question; nothing reads it but the metric.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn decide_preparation_after_client_release(
+    delivered: RecipeView<'_>,
+    candidate: RecipeView<'_>,
+    conditions: PreparationConditions,
+) -> PreparationDecision {
+    decide_preparation_given_client(delivered, candidate, true, conditions)
+}
+
+fn decide_preparation_given_client(
+    delivered: RecipeView<'_>,
+    candidate: RecipeView<'_>,
+    client_can_prepare: bool,
+    conditions: PreparationConditions,
+) -> PreparationDecision {
     let (delivered_grade, candidate_grade) = (delivered.grade, candidate.grade);
     let (delivered, candidate) = (delivered.selection, candidate.selection);
     let mut crossed: Option<PreparationAxis> = None;
@@ -1282,7 +1345,7 @@ pub(crate) fn decide_preparation(
             reason: FallbackReason::MultipleAxes,
         };
     }
-    if !retained.is_some_and(|caps| caps.dual_player_preparation) {
+    if !client_can_prepare {
         return PreparationDecision::Fallback {
             axis,
             reason: FallbackReason::ClientCannotPrepare,
@@ -1294,11 +1357,8 @@ pub(crate) fn decide_preparation(
             reason: FallbackReason::AxisNotProven,
         };
     }
-    if !conditions.have_headroom_for_a_second_pipeline() {
-        return PreparationDecision::Fallback {
-            axis,
-            reason: FallbackReason::ThroughputUnproven,
-        };
+    if let Some(reason) = conditions.headroom_refusal() {
+        return PreparationDecision::Fallback { axis, reason };
     }
     PreparationDecision::Prepare { axis }
 }
@@ -10225,18 +10285,38 @@ static ROLLING_LEASE_RENEWALS: [AtomicU64; 3] =
 static CONTROL_ACTIONS: [[AtomicU64; 3]; 4] = [const { [const { AtomicU64::new(0) }; 3] }; 4];
 /// Holds actually sent, by reason.
 static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
-/// What M6 *would* do about a selection change, by axis and outcome.
+/// What M6 *would* do about a selection change, by platform, axis and outcome.
 ///
 /// Shadow: nothing is staged and no behaviour depends on this. The point is
 /// that `PREPARED_AXIS` and the throughput floor are currently arguments, and
 /// this is what turns them into measurements on real traffic before anything
-/// acts on them. In particular it is the only way to learn whether
-/// `throughput_unproven` refuses so often that the prepared path would never
-/// fire at all — a possibility the rule's own doc names and cannot settle.
+/// acts on them.
 ///
-/// Indexed `[axis][outcome]`. Axis order is `PreparationAxis`'s own; outcome
-/// is prepare, then the four `FallbackReason`s in declaration order.
-static PREPARATION_DECISIONS: [[AtomicU64; 5]; 5] = [const { [const { AtomicU64::new(0) }; 5] }; 5];
+/// **Labelled by platform because the three clients are not interchangeable
+/// here.** Only the web client fills `observed_download_bps` at all, so an
+/// unlabelled counter would mix the one platform that can reach a throughput
+/// verdict with the two the client release is actually about, and no reader
+/// could separate them again.
+///
+/// Indexed `[platform][axis][outcome]`. Platform order is `ClientPlatform`'s
+/// own; axis is `PreparationAxis`'s; outcome is prepare, then the five
+/// `FallbackReason`s in declaration order.
+static PREPARATION_DECISIONS: [[[AtomicU64; 6]; 5]; 3] =
+    [const { [const { [const { AtomicU64::new(0) }; 6] }; 5] }; 3];
+/// The same measurement with the client capability assumed satisfied.
+///
+/// Same shape and same indices as `PREPARATION_DECISIONS` so the two are
+/// directly comparable series by series, and deliberately including the
+/// `client_cannot_prepare` column, which stays zero forever by construction.
+/// That permanent zero is the point: it is what makes a reader check which
+/// counter they are holding.
+///
+/// Read it against the other: `preparation_decisions` is what M6 would do
+/// **today**, `preparation_counterfactual` is what M6 would do **after a
+/// client release flipped the literal**, and the difference between them is
+/// the value of shipping that release.
+static PREPARATION_COUNTERFACTUAL: [[[AtomicU64; 6]; 5]; 3] =
+    [const { [const { [const { AtomicU64::new(0) }; 6] }; 5] }; 3];
 /// Exchanges where production was held and the client had not declared the
 /// action, so it was told nothing. Watch this fall as clients roll out.
 static CONTROL_ACTIONS_SUPPRESSED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
@@ -10346,6 +10426,35 @@ fn platform_index(platform: ClientPlatform) -> usize {
     }
 }
 
+/// Which seam a measured selection change arrived on.
+///
+/// Two, because they are not equally common and folding them would hide that.
+/// A viewer's quality change on Apple arrives as `Replacement` — see
+/// `DELIVERED_SELECTIONS` in `hls.rs` — and `InSession` is what the shadow was
+/// originally built to watch, which on this fleet is nearly nothing.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreparationSeam {
+    InSession,
+    Replacement,
+}
+
+/// Selection changes seen, by the seam they arrived on.
+///
+/// The decision counters' denominator, split so an operator can tell a fleet
+/// that never changes quality from one whose changes the server never noticed.
+static PREPARATION_OBSERVATIONS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Count one measured selection change against the seam it came in on.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_preparation_observation(seam: PreparationSeam) {
+    let index = match seam {
+        PreparationSeam::InSession => 0,
+        PreparationSeam::Replacement => 1,
+    };
+    PREPARATION_OBSERVATIONS[index].fetch_add(1, Ordering::Relaxed);
+}
+
 /// Record what M6 would have done, without doing it.
 ///
 /// Called only when the actor says the selection moved, so the denominator is
@@ -10354,9 +10463,33 @@ fn platform_index(platform: ClientPlatform) -> usize {
 /// a seek, a different file — and counting it would put a bar labelled
 /// "nothing to do" beside four that mean something.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn record_preparation_decision(decision: PreparationDecision) {
+pub(crate) fn record_preparation_decision(platform: ClientPlatform, decision: PreparationDecision) {
+    if let Some((axis, outcome)) = preparation_indices(decision) {
+        PREPARATION_DECISIONS[platform_index(platform)][axis][outcome]
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Record the same selection change decided as if the client could prepare.
+///
+/// Separate call rather than a second recording inside the one above, because
+/// the two decisions are made from different inputs and a caller that recorded
+/// one without the other would be measuring half a question.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_preparation_counterfactual(
+    platform: ClientPlatform,
+    decision: PreparationDecision,
+) {
+    if let Some((axis, outcome)) = preparation_indices(decision) {
+        PREPARATION_COUNTERFACTUAL[platform_index(platform)][axis][outcome]
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `[axis][outcome]` for one decision, or `None` for `Unchanged`.
+fn preparation_indices(decision: PreparationDecision) -> Option<(usize, usize)> {
     let (axis, outcome) = match decision {
-        PreparationDecision::Unchanged => return,
+        PreparationDecision::Unchanged => return None,
         PreparationDecision::Prepare { axis } => (axis, 0),
         PreparationDecision::Fallback { axis, reason } => (
             axis,
@@ -10364,7 +10497,8 @@ pub(crate) fn record_preparation_decision(decision: PreparationDecision) {
                 FallbackReason::ClientCannotPrepare => 0,
                 FallbackReason::AxisNotProven => 1,
                 FallbackReason::MultipleAxes => 2,
-                FallbackReason::ThroughputUnproven => 3,
+                FallbackReason::ThroughputUnreported => 3,
+                FallbackReason::ThroughputInsufficient => 4,
             },
         ),
     };
@@ -10375,7 +10509,7 @@ pub(crate) fn record_preparation_decision(decision: PreparationDecision) {
         PreparationAxis::DeliveryMethod => 3,
         PreparationAxis::DynamicRange => 4,
     };
-    PREPARATION_DECISIONS[axis][outcome].fetch_add(1, Ordering::Relaxed);
+    Some((axis, outcome))
 }
 
 /// Record what one accepted exchange's action was, and what it could not be.
@@ -10468,36 +10602,66 @@ pub(crate) fn prometheus() -> String {
             ));
         }
     }
-    output.push_str(
-        "# HELP plurx_playback_preparation_decisions_total What M6 would do about a selection change, by axis and outcome. Shadow: nothing is staged.\n\
-         # TYPE plurx_playback_preparation_decisions_total counter\n",
-    );
-    for (axis_index, axis) in [
-        PreparationAxis::ResolutionOrBitrate,
-        PreparationAxis::AudioTrackOrOffset,
-        PreparationAxis::SubtitleBurn,
-        PreparationAxis::DeliveryMethod,
-        PreparationAxis::DynamicRange,
-    ]
-    .iter()
-    .enumerate()
-    {
-        for (outcome_index, outcome) in [
-            "prepare",
-            FallbackReason::ClientCannotPrepare.as_str(),
-            FallbackReason::AxisNotProven.as_str(),
-            FallbackReason::MultipleAxes.as_str(),
-            FallbackReason::ThroughputUnproven.as_str(),
-        ]
-        .iter()
-        .enumerate()
-        {
-            output.push_str(&format!(
-                "plurx_playback_preparation_decisions_total{{axis=\"{}\",outcome=\"{outcome}\"}} {}\n",
-                axis.as_str(),
-                PREPARATION_DECISIONS[axis_index][outcome_index].load(Ordering::Relaxed)
-            ));
+    // One family at a time, each with its own HELP/TYPE immediately ahead of
+    // its own contiguous samples. The exposition format asks for it, every
+    // other emitter in this file does it, and a strict or OpenMetrics consumer
+    // added later would reject interleaved families.
+    for (name, help, counter) in [
+        (
+            "plurx_playback_preparation_decisions_total",
+            "What M6 would do about a selection change, by platform, axis and outcome. Shadow: nothing is staged.",
+            &PREPARATION_DECISIONS,
+        ),
+        (
+            "plurx_playback_preparation_counterfactual_total",
+            "The same, decided as if the client could prepare. outcome=\"client_cannot_prepare\" is zero by construction.",
+            &PREPARATION_COUNTERFACTUAL,
+        ),
+    ] {
+        output.push_str(&format!(
+            "# HELP {name} {help}\n\
+             # TYPE {name} counter\n"
+        ));
+        for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
+            for (axis_index, axis) in [
+                PreparationAxis::ResolutionOrBitrate,
+                PreparationAxis::AudioTrackOrOffset,
+                PreparationAxis::SubtitleBurn,
+                PreparationAxis::DeliveryMethod,
+                PreparationAxis::DynamicRange,
+            ]
+            .iter()
+            .enumerate()
+            {
+                for (outcome_index, outcome) in [
+                    "prepare",
+                    FallbackReason::ClientCannotPrepare.as_str(),
+                    FallbackReason::AxisNotProven.as_str(),
+                    FallbackReason::MultipleAxes.as_str(),
+                    FallbackReason::ThroughputUnreported.as_str(),
+                    FallbackReason::ThroughputInsufficient.as_str(),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    output.push_str(&format!(
+                        "{name}{{platform=\"{platform}\",axis=\"{}\",outcome=\"{outcome}\"}} {}\n",
+                        axis.as_str(),
+                        counter[platform_index][axis_index][outcome_index].load(Ordering::Relaxed)
+                    ));
+                }
+            }
         }
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_observations_total Selection changes measured, by the seam they arrived on.\n\
+         # TYPE plurx_playback_preparation_observations_total counter\n",
+    );
+    for (index, seam) in ["in_session", "replacement"].iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_preparation_observations_total{{seam=\"{seam}\"}} {}\n",
+            PREPARATION_OBSERVATIONS[index].load(Ordering::Relaxed)
+        ));
     }
     output.push_str(
         "# HELP plurx_playback_control_holds_total Holds sent to a client, by the reason production is not advancing.\n\
@@ -15962,26 +16126,59 @@ mod tests {
     #[test]
     fn the_shadow_decision_metric_publishes_every_axis_and_outcome() {
         let metrics = prometheus();
-        for axis in [
-            PreparationAxis::ResolutionOrBitrate,
-            PreparationAxis::AudioTrackOrOffset,
-            PreparationAxis::SubtitleBurn,
-            PreparationAxis::DeliveryMethod,
-            PreparationAxis::DynamicRange,
+        for name in [
+            "plurx_playback_preparation_decisions_total",
+            "plurx_playback_preparation_counterfactual_total",
         ] {
-            for outcome in [
-                "prepare",
-                FallbackReason::ClientCannotPrepare.as_str(),
-                FallbackReason::AxisNotProven.as_str(),
-                FallbackReason::MultipleAxes.as_str(),
-                FallbackReason::ThroughputUnproven.as_str(),
-            ] {
-                let series = format!(
-                    "plurx_playback_preparation_decisions_total{{axis=\"{}\",outcome=\"{outcome}\"}}",
-                    axis.as_str()
-                );
-                assert!(metrics.contains(&series), "missing {series}");
+            for platform in ["web", "apple", "android"] {
+                for axis in [
+                    PreparationAxis::ResolutionOrBitrate,
+                    PreparationAxis::AudioTrackOrOffset,
+                    PreparationAxis::SubtitleBurn,
+                    PreparationAxis::DeliveryMethod,
+                    PreparationAxis::DynamicRange,
+                ] {
+                    for outcome in [
+                        "prepare",
+                        FallbackReason::ClientCannotPrepare.as_str(),
+                        FallbackReason::AxisNotProven.as_str(),
+                        FallbackReason::MultipleAxes.as_str(),
+                        FallbackReason::ThroughputUnreported.as_str(),
+                        FallbackReason::ThroughputInsufficient.as_str(),
+                    ] {
+                        let series = format!(
+                            "{name}{{platform=\"{platform}\",axis=\"{}\",outcome=\"{outcome}\"}}",
+                            axis.as_str()
+                        );
+                        assert!(metrics.contains(&series), "missing {series}");
+                    }
+                }
             }
+        }
+        // Each family's samples are contiguous behind its own HELP/TYPE, which
+        // the exposition format asks for and which an interleaved emission
+        // silently broke.
+        for name in [
+            "plurx_playback_preparation_decisions_total",
+            "plurx_playback_preparation_counterfactual_total",
+        ] {
+            let samples: Vec<usize> = metrics
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| line.starts_with(&format!("{name}{{")))
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(samples.len(), 90, "{name}");
+            assert_eq!(
+                samples.last().expect("samples") - samples[0],
+                samples.len() - 1,
+                "{name} samples are not contiguous",
+            );
+            let help = metrics
+                .lines()
+                .position(|line| line.starts_with(&format!("# HELP {name} ")))
+                .expect("help");
+            assert!(help < samples[0], "{name} HELP follows its samples");
         }
     }
 
@@ -15994,33 +16191,227 @@ mod tests {
     /// the right thing to do with that is nothing.
     #[test]
     fn an_unchanged_decision_is_not_recorded() {
-        let before = prometheus();
-        record_preparation_decision(PreparationDecision::Unchanged);
+        // One cell, owned by this test alone. The counters are process-global
+        // and `cargo test` runs tests in parallel, so a family sum is a race
+        // with every other test that records anything.
+        let cell = |metrics: &str| {
+            series_value(
+                metrics,
+                "plurx_playback_preparation_decisions_total",
+                "android",
+                PreparationAxis::DynamicRange,
+                FallbackReason::ThroughputInsufficient.as_str(),
+            )
+        };
+        let before = cell(&prometheus());
+        record_preparation_decision(ClientPlatform::Android, PreparationDecision::Unchanged);
+        assert_eq!(before, cell(&prometheus()));
+
+        record_preparation_decision(
+            ClientPlatform::Android,
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DynamicRange,
+                reason: FallbackReason::ThroughputInsufficient,
+            },
+        );
+        assert_eq!(cell(&prometheus()), before + 1, "and a real decision is");
+    }
+
+    /// Read one `[platform][axis][outcome]` series out of the exposition.
+    ///
+    /// Deliberately not a family sum: these counters are process-global and
+    /// the test binary is parallel, so any two tests sharing a total race.
+    /// Each test owns one cell instead.
+    fn series_value(
+        metrics: &str,
+        name: &str,
+        platform: &str,
+        axis: PreparationAxis,
+        outcome: &str,
+    ) -> u64 {
+        let series = format!(
+            "{name}{{platform=\"{platform}\",axis=\"{}\",outcome=\"{outcome}\"}} ",
+            axis.as_str()
+        );
+        metrics
+            .lines()
+            .find_map(|line| line.strip_prefix(&series))
+            .unwrap_or_else(|| panic!("missing {series}"))
+            .parse()
+            .expect("counter value")
+    }
+
+    /// The counterfactual reaches the two rules the client gate hides, and
+    /// that is the whole reason it exists.
+    ///
+    /// Both shipped clients hardcode `dual_player_preparation` false, so on
+    /// today's fleet every single-axis transition books
+    /// `client_cannot_prepare` — which is true, and says nothing about whether
+    /// `PREPARED_AXIS` and the throughput floor would then refuse anyway. The
+    /// first production datapoint (m6, 2026-09-02) read exactly that.
+    #[test]
+    fn the_counterfactual_reaches_the_rules_the_client_gate_hides() {
+        // A link with no room for a second pipeline: the floor wants twice
+        // what is being delivered.
+        let strained = PreparationConditions {
+            observed_download_bps: Some(12_000_000),
+            delivered_bps: Some(12_000_000),
+        };
         assert_eq!(
-            preparation_series_total(&before),
-            preparation_series_total(&prometheus()),
+            decide_preparation(view(&playing(2160)), view(&playing(1080)), None, strained),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::ResolutionOrBitrate,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+            "today: the gate answers first and the floor is never consulted",
+        );
+        assert_eq!(
+            decide_preparation_after_client_release(
+                view(&playing(2160)),
+                view(&playing(1080)),
+                strained,
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::ResolutionOrBitrate,
+                reason: FallbackReason::ThroughputInsufficient,
+            },
+            "after the release: the measured floor is what would refuse",
         );
 
-        record_preparation_decision(PreparationDecision::Fallback {
-            axis: PreparationAxis::DynamicRange,
-            reason: FallbackReason::ThroughputUnproven,
-        });
+        let mut audio = playing(2160);
+        audio.audio_track = Some(1);
         assert_eq!(
-            preparation_series_total(&prometheus()),
-            preparation_series_total(&before) + 1,
-            "and a real decision is",
+            decide_preparation(view(&playing(2160)), view(&audio), None, roomy()),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::AudioTrackOrOffset,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+        );
+        assert_eq!(
+            decide_preparation_after_client_release(view(&playing(2160)), view(&audio), roomy()),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::AudioTrackOrOffset,
+                reason: FallbackReason::AxisNotProven,
+            },
+            "after the release: the axis rule is what would refuse",
+        );
+
+        assert_eq!(
+            decide_preparation_after_client_release(
+                view(&playing(2160)),
+                view(&playing(1080)),
+                roomy(),
+            ),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::ResolutionOrBitrate,
+            },
+            "and this is the volume a client release would actually unlock",
         );
     }
 
-    /// Sum every `plurx_playback_preparation_decisions_total` series. The
-    /// counters are process-global, so a test that asserted an absolute value
-    /// would depend on which other tests had run.
-    fn preparation_series_total(metrics: &str) -> u64 {
-        metrics
-            .lines()
-            .filter(|line| line.starts_with("plurx_playback_preparation_decisions_total{"))
-            .filter_map(|line| line.rsplit(' ').next()?.parse::<u64>().ok())
-            .sum()
+    /// The two decisions differ at the client gate and nowhere else.
+    ///
+    /// `MultipleAxes` is ranked above the gate deliberately so the metric
+    /// stays stable across a client release — this is the test that fails if
+    /// that ranking is undone, because the two counters would then disagree
+    /// about a transition neither client literal has any bearing on.
+    #[test]
+    fn the_counterfactual_differs_only_at_the_client_gate() {
+        let mut two_axes = playing(1080);
+        two_axes.audio_track = Some(1);
+        for conditions in [
+            roomy(),
+            PreparationConditions {
+                observed_download_bps: Some(12_000_000),
+                delivered_bps: Some(12_000_000),
+            },
+        ] {
+            assert_eq!(
+                decide_preparation(view(&playing(2160)), view(&two_axes), None, conditions),
+                decide_preparation_after_client_release(
+                    view(&playing(2160)),
+                    view(&two_axes),
+                    conditions,
+                ),
+                "a multi-axis transition is not the client literal's fault",
+            );
+            assert_eq!(
+                decide_preparation_after_client_release(
+                    view(&playing(2160)),
+                    view(&playing(2160)),
+                    conditions,
+                ),
+                PreparationDecision::Unchanged,
+            );
+        }
+    }
+
+    /// Each counter is moved by its own recorder and by nothing else.
+    #[test]
+    fn the_two_preparation_counters_are_recorded_separately() {
+        // One cell of each family, owned by this test alone — see
+        // `series_value` on why a family sum would race.
+        let decision = PreparationDecision::Fallback {
+            axis: PreparationAxis::SubtitleBurn,
+            reason: FallbackReason::AxisNotProven,
+        };
+        let cell = |metrics: &str, name: &str| {
+            series_value(
+                metrics,
+                name,
+                "web",
+                PreparationAxis::SubtitleBurn,
+                FallbackReason::AxisNotProven.as_str(),
+            )
+        };
+        const DECISIONS: &str = "plurx_playback_preparation_decisions_total";
+        const COUNTERFACTUAL: &str = "plurx_playback_preparation_counterfactual_total";
+
+        let before = prometheus();
+        record_preparation_counterfactual(ClientPlatform::Web, decision);
+        let after = prometheus();
+        assert_eq!(
+            cell(&after, DECISIONS),
+            cell(&before, DECISIONS),
+            "the counterfactual does not move the decision counter",
+        );
+        assert_eq!(
+            cell(&after, COUNTERFACTUAL),
+            cell(&before, COUNTERFACTUAL) + 1,
+        );
+
+        record_preparation_decision(ClientPlatform::Web, decision);
+        assert_eq!(
+            cell(&prometheus(), COUNTERFACTUAL),
+            cell(&after, COUNTERFACTUAL),
+            "and the decision does not move the counterfactual",
+        );
+        record_preparation_counterfactual(ClientPlatform::Web, PreparationDecision::Unchanged);
+        assert_eq!(
+            cell(&prometheus(), COUNTERFACTUAL),
+            cell(&after, COUNTERFACTUAL),
+            "`Unchanged` is not an outcome in either counter",
+        );
+        // And the platform is a real dimension, not a constant: the same
+        // decision on another platform lands in another cell.
+        let apple_before = series_value(
+            &prometheus(),
+            COUNTERFACTUAL,
+            "apple",
+            PreparationAxis::SubtitleBurn,
+            FallbackReason::AxisNotProven.as_str(),
+        );
+        record_preparation_counterfactual(ClientPlatform::Apple, decision);
+        assert_eq!(
+            series_value(
+                &prometheus(),
+                COUNTERFACTUAL,
+                "apple",
+                PreparationAxis::SubtitleBurn,
+                FallbackReason::AxisNotProven.as_str(),
+            ),
+            apple_before + 1,
+        );
     }
 
     #[test]
@@ -16758,8 +17149,12 @@ mod tests {
         assert_eq!(FallbackReason::AxisNotProven.as_str(), "axis_not_proven");
         assert_eq!(FallbackReason::MultipleAxes.as_str(), "multiple_axes");
         assert_eq!(
-            FallbackReason::ThroughputUnproven.as_str(),
-            "throughput_unproven"
+            FallbackReason::ThroughputUnreported.as_str(),
+            "throughput_unreported"
+        );
+        assert_eq!(
+            FallbackReason::ThroughputInsufficient.as_str(),
+            "throughput_insufficient"
         );
     }
 
@@ -16813,6 +17208,13 @@ mod tests {
     #[test]
     fn a_link_that_has_not_shown_headroom_does_not_get_a_second_pipeline() {
         let caps = can_prepare(true);
+        // Both are refusals; they are separate outcomes because "the link was
+        // too tight" and "nobody measured the link" are opposite findings, and
+        // a counter that reported them as one number would read as evidence
+        // for the throughput rule while measuring only its own missing inputs.
+        // On today's fleet the unreported cases are effectively all of it: the
+        // native clients send no `observed_download_bps` and VOD sessions
+        // carry no `delivered_bps`.
         let refusals = [
             (
                 "no margin at all",
@@ -16820,6 +17222,7 @@ mod tests {
                     observed_download_bps: Some(12_000_000),
                     delivered_bps: Some(12_000_000),
                 },
+                FallbackReason::ThroughputInsufficient,
             ),
             (
                 "a hair under twice",
@@ -16827,6 +17230,7 @@ mod tests {
                     observed_download_bps: Some(23_999_999),
                     delivered_bps: Some(12_000_000),
                 },
+                FallbackReason::ThroughputInsufficient,
             ),
             (
                 "the client never reported one",
@@ -16834,6 +17238,7 @@ mod tests {
                     observed_download_bps: None,
                     delivered_bps: Some(12_000_000),
                 },
+                FallbackReason::ThroughputUnreported,
             ),
             (
                 "the server has not measured delivery yet",
@@ -16841,9 +17246,26 @@ mod tests {
                     observed_download_bps: Some(80_000_000),
                     delivered_bps: None,
                 },
+                FallbackReason::ThroughputUnreported,
+            ),
+            (
+                "nothing delivered yet, so there is no rate to double",
+                PreparationConditions {
+                    observed_download_bps: Some(80_000_000),
+                    delivered_bps: Some(0),
+                },
+                FallbackReason::ThroughputUnreported,
+            ),
+            (
+                "a delivered rate that is not a measurement",
+                PreparationConditions {
+                    observed_download_bps: Some(80_000_000),
+                    delivered_bps: Some(-1),
+                },
+                FallbackReason::ThroughputUnreported,
             ),
         ];
-        for (case, conditions) in refusals {
+        for (case, conditions, reason) in refusals {
             assert_eq!(
                 decide_preparation(
                     view(&playing(2160)),
@@ -16853,7 +17275,7 @@ mod tests {
                 ),
                 PreparationDecision::Fallback {
                     axis: PreparationAxis::ResolutionOrBitrate,
-                    reason: FallbackReason::ThroughputUnproven,
+                    reason,
                 },
                 "{case}",
             );

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["814a2c78"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The replacement seam is the measurement's new denominator, so the evidence pins the three ways a table of last-delivered selections gets it wrong: one unit walks a predecessor session, its own later exchanges, the replacement's first exchange and the replacement's later exchanges, asserting only the replacement's first answers and that it answers the predecessor's delivered height and grade, that a session is never measured against itself, that one quality change is counted once rather than for the life of the session, and that a predecessor this node never served is not a measurement; a second unit fills the table past its cap and asserts the map and the eviction queue stay the same bounded length and that the oldest entry rather than the newest is the one dropped, because an unbounded table on a long-lived node is a leak and evicting the newest would drop exactly the measurement being taken."

@@ -4865,17 +4865,81 @@ async fn control_local_inner(
     };
     crate::playback_control::record(outcome);
     crate::playback_control::record_platform(outcome, result.platform);
+    // The replacement seam. A viewer's quality change arrives as a new session
+    // that replaces the old one, so the transition to measure is
+    // predecessor-delivered against this session's delivered — both already
+    // resolved, which is why nothing here reads the store or spawns.
+    //
+    // `reopen_reason: Some(Stall)` is excluded deliberately: that is the
+    // client adapting to a failure, not a viewer asking for something, and
+    // §3.3's own rule is that M6 prepares for a change the *client asked for*.
+    let replaced = if recipe.request.reopen_reason.is_none() {
+        remember_delivered_selection(
+            &route.session_id,
+            &response.effective_selection,
+            crate::playback_control::GradeIntent::from_request(&recipe.request),
+            recipe.request.previous_session_id.as_deref(),
+        )
+    } else {
+        None
+    };
+    if let Some((previous, previous_grade)) = replaced {
+        crate::playback_control::record_preparation_observation(
+            crate::playback_control::PreparationSeam::Replacement,
+        );
+        let delivered_view = crate::playback_control::RecipeView {
+            selection: &previous,
+            grade: previous_grade,
+        };
+        let proposed_view = crate::playback_control::RecipeView {
+            selection: &response.effective_selection,
+            grade: crate::playback_control::GradeIntent::from_request(&recipe.request),
+        };
+        let conditions = crate::playback_control::PreparationConditions {
+            observed_download_bps: request.observed_download_bps,
+            delivered_bps: response.delivery.delivered_bps,
+        };
+        let capabilities = result.selection.capabilities.clone();
+        crate::playback_control::record_preparation_decision(
+            result.platform,
+            crate::playback_control::decide_preparation(
+                delivered_view,
+                proposed_view,
+                capabilities.as_ref(),
+                conditions,
+            ),
+        );
+        crate::playback_control::record_preparation_counterfactual(
+            result.platform,
+            crate::playback_control::decide_preparation_after_client_release(
+                delivered_view,
+                proposed_view,
+                conditions,
+            ),
+        );
+    }
     if result.selection.changed {
+        crate::playback_control::record_preparation_observation(
+            crate::playback_control::PreparationSeam::InSession,
+        );
         // Spawned, never awaited: see the function's own doc. The exchange has
         // spent its deadline by here and the response is already built.
         tokio::spawn(record_preparation_shadow(
             state.clone(),
-            recipe.clone(),
-            request.selection.clone(),
-            request.observed_download_bps,
-            response.effective_selection.clone(),
-            response.delivery.delivered_bps,
-            result.selection.capabilities.clone(),
+            PreparationShadowInputs {
+                recipe: recipe.clone(),
+                selection: request.selection.clone(),
+                observed_download_bps: request.observed_download_bps,
+                delivered: response.effective_selection.clone(),
+                delivered_bps: response.delivery.delivered_bps,
+                capabilities: result.selection.capabilities.clone(),
+                // The exchange's own accepted platform, the same value
+                // `record_platform` just used — not the retained capability
+                // document's, which can be absent on a session this build did
+                // not start and would then leave the measurement
+                // unattributable.
+                platform: result.platform,
+            },
         ));
     }
     tracing::debug!(
@@ -4909,6 +4973,99 @@ static PREPARATION_SHADOWS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
 /// and far below the point where the store notices.
 const MAX_PREPARATION_SHADOWS: usize = 32;
 
+/// Last delivered selection of each session, so a session that *replaces*
+/// another can be measured against the one it replaced.
+///
+/// This exists because of what m6 measured on 2026-09-02: 949 accepted
+/// exchanges and one recorded decision. `ControlState::last_selection` sees a
+/// selection change only *within* one session, and Apple does not change a
+/// selection within a session — `PlayerController.selectQuality` calls
+/// `reopen`, whose own comment says the replacement "intentionally removes the
+/// older session". So a viewer's quality change arrives as a brand-new session
+/// with no predecessor to differ from, and the gate is false by construction.
+///
+/// The seam M6 is actually about is therefore the replacement, not the
+/// exchange — which is the whole point of the milestone: today a quality
+/// change tears the session down, and M6 exists so that it does not.
+static DELIVERED_SELECTIONS: std::sync::Mutex<Option<DeliveredSelections>> =
+    std::sync::Mutex::new(None);
+
+/// Bounded FIFO of `session id -> what it was last delivering`.
+///
+/// Process-local and best-effort by construction: a replacement served by a
+/// different node measures nothing, which understates the count and never
+/// misreports one. Bounded because a long-lived node serves unboundedly many
+/// sessions; the oldest is dropped, and dropping one costs a measurement.
+#[derive(Default)]
+struct DeliveredSelections {
+    by_session: std::collections::HashMap<
+        String,
+        (
+            crate::playback_control::EffectiveSelection,
+            crate::playback_control::GradeIntent,
+        ),
+    >,
+    order: std::collections::VecDeque<String>,
+}
+
+/// Enough for every session a node serves in the window a viewer might change
+/// quality in, and small enough to be invisible.
+const MAX_REMEMBERED_SELECTIONS: usize = 512;
+
+/// Remember what this session is delivering; answer what its predecessor was.
+///
+/// One lock, one pass, on the first accepted exchange of a session only —
+/// later exchanges of the same session re-record and answer `None`, so a
+/// replacement is measured once rather than on every exchange after it.
+fn remember_delivered_selection(
+    session: &str,
+    delivered: &crate::playback_control::EffectiveSelection,
+    grade: crate::playback_control::GradeIntent,
+    predecessor: Option<&str>,
+) -> Option<(
+    crate::playback_control::EffectiveSelection,
+    crate::playback_control::GradeIntent,
+)> {
+    let Ok(mut guard) = DELIVERED_SELECTIONS.lock() else {
+        // A poisoned lock costs measurements, never an exchange.
+        return None;
+    };
+    let table = guard.get_or_insert_with(DeliveredSelections::default);
+    let first_sighting = !table.by_session.contains_key(session);
+    if first_sighting {
+        table.order.push_back(session.to_owned());
+        while table.order.len() > MAX_REMEMBERED_SELECTIONS {
+            if let Some(evicted) = table.order.pop_front() {
+                table.by_session.remove(&evicted);
+            }
+        }
+    }
+    table
+        .by_session
+        .insert(session.to_owned(), (delivered.clone(), grade));
+    // Only the first sighting can be a replacement: after that this session is
+    // its own predecessor and the transition has already been counted.
+    if !first_sighting {
+        return None;
+    }
+    table.by_session.get(predecessor?).cloned()
+}
+
+/// Everything one exchange said, gathered for the shadow measurement.
+///
+/// A struct rather than eight parameters: these are all *one exchange's*
+/// answer, they are always passed together, and the spawned task has no reason
+/// to be able to take them from different exchanges.
+struct PreparationShadowInputs {
+    recipe: RemoteStartRequest,
+    selection: crate::playback_control::ClientSelection,
+    observed_download_bps: Option<u64>,
+    delivered: crate::playback_control::EffectiveSelection,
+    delivered_bps: Option<i64>,
+    capabilities: Option<crate::playback_control::DynamicCapabilities>,
+    platform: crate::playback_control::ClientPlatform,
+}
+
 /// Record what M6 would have done about this exchange's selection change.
 ///
 /// **Shadow: nothing is staged and nothing about the response depends on it.**
@@ -4926,15 +5083,16 @@ const MAX_PREPARATION_SHADOWS: usize = 32;
 /// Measured against **the response this exchange actually sent**: the client
 /// was told a height and a rate, and a shadow measuring different ones would
 /// answer a question nobody asked.
-async fn record_preparation_shadow(
-    state: AppState,
-    recipe: RemoteStartRequest,
-    selection: crate::playback_control::ClientSelection,
-    observed_download_bps: Option<u64>,
-    delivered: crate::playback_control::EffectiveSelection,
-    delivered_bps: Option<i64>,
-    capabilities: Option<crate::playback_control::DynamicCapabilities>,
-) {
+async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowInputs) {
+    let PreparationShadowInputs {
+        recipe,
+        selection,
+        observed_download_bps,
+        delivered,
+        delivered_bps,
+        capabilities,
+        platform,
+    } = exchange;
     // Released on every exit below, including the early one.
     struct InFlight;
     impl Drop for InFlight {
@@ -4994,21 +5152,46 @@ async fn record_preparation_shadow(
         },
         None,
     );
+    // Built once and passed to both decisions, so the two counters can never
+    // disagree about what the transition was — only about the client gate.
+    let delivered_view = crate::playback_control::RecipeView {
+        selection: &delivered,
+        grade: crate::playback_control::GradeIntent::from_request(&recipe.request),
+    };
+    let proposed_view = crate::playback_control::RecipeView {
+        selection: &proposed,
+        grade: crate::playback_control::GradeIntent::from_request(&candidate),
+    };
+    let conditions = crate::playback_control::PreparationConditions {
+        observed_download_bps,
+        delivered_bps,
+    };
     crate::playback_control::record_preparation_decision(
+        platform,
         crate::playback_control::decide_preparation(
-            crate::playback_control::RecipeView {
-                selection: &delivered,
-                grade: crate::playback_control::GradeIntent::from_request(&recipe.request),
-            },
-            crate::playback_control::RecipeView {
-                selection: &proposed,
-                grade: crate::playback_control::GradeIntent::from_request(&candidate),
-            },
+            delivered_view,
+            proposed_view,
             capabilities.as_ref(),
-            crate::playback_control::PreparationConditions {
-                observed_download_bps,
-                delivered_bps,
-            },
+            conditions,
+        ),
+    );
+    // All three clients hardcode the capability `false`, so the counter above
+    // books every single-axis transition as `client_cannot_prepare` and can
+    // say nothing about the axis rule or the throughput floor. This is the
+    // same transition decided as if that literal had already flipped — the
+    // only way, short of shipping a client, to learn whether the prepared path
+    // would ever fire.
+    //
+    // Expect `throughput_unreported` to dominate it at first, and read that as
+    // a statement about the *inputs*: the native clients send no
+    // `observed_download_bps` and VOD sessions carry no `delivered_bps`. That
+    // is a finding about instrumentation, not about links.
+    crate::playback_control::record_preparation_counterfactual(
+        platform,
+        crate::playback_control::decide_preparation_after_client_release(
+            delivered_view,
+            proposed_view,
+            conditions,
         ),
     );
 }
@@ -9374,6 +9557,106 @@ mod tests {
         }
     }
     use super::*;
+
+    /// The replacement seam, which is where a viewer's quality change actually
+    /// arrives.
+    ///
+    /// m6 recorded one decision against 949 accepted exchanges because
+    /// `ControlState::last_selection` only sees a change *within* a session,
+    /// and Apple's `selectQuality` replaces the session instead. This is the
+    /// table that lets the replacement be measured, and these are the three
+    /// things it has to get right.
+    #[test]
+    fn a_replacement_is_measured_against_the_session_it_replaced() {
+        let selection = |height: i64| crate::playback_control::EffectiveSelection {
+            height,
+            ..sample_effective_selection()
+        };
+        let grade = crate::playback_control::GradeIntent {
+            hdr10: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        let old = format!("seam-old-{}", std::process::id());
+        let new = format!("seam-new-{}", std::process::id());
+
+        // The predecessor's first exchange has no predecessor of its own.
+        assert_eq!(
+            remember_delivered_selection(&old, &selection(2160), grade, None),
+            None,
+        );
+        // Its later exchanges answer nothing, so a session is never measured
+        // against itself.
+        assert_eq!(
+            remember_delivered_selection(&old, &selection(2160), grade, None),
+            None,
+        );
+        // The replacement's first exchange answers what the old one was
+        // delivering — the transition the viewer actually made.
+        let (previous, previous_grade) =
+            remember_delivered_selection(&new, &selection(1080), grade, Some(&old))
+                .expect("the predecessor is remembered");
+        assert_eq!(previous.height, 2160);
+        assert_eq!(previous_grade, grade);
+        // And exactly once: every exchange after the first answers nothing, or
+        // one quality change would be counted for the life of the session.
+        assert_eq!(
+            remember_delivered_selection(&new, &selection(1080), grade, Some(&old)),
+            None,
+        );
+        // A predecessor this node never served is not a measurement.
+        assert_eq!(
+            remember_delivered_selection(
+                &format!("seam-third-{}", std::process::id()),
+                &selection(720),
+                grade,
+                Some("a-session-served-elsewhere"),
+            ),
+            None,
+        );
+    }
+
+    /// The table is bounded, because a node serves unboundedly many sessions.
+    #[test]
+    fn the_remembered_selections_are_bounded() {
+        let grade = crate::playback_control::GradeIntent {
+            hdr10: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        let tag = format!("bound-{}", std::process::id());
+        let first = format!("{tag}-0");
+        remember_delivered_selection(&first, &sample_effective_selection(), grade, None);
+        for index in 1..=MAX_REMEMBERED_SELECTIONS {
+            remember_delivered_selection(
+                &format!("{tag}-{index}"),
+                &sample_effective_selection(),
+                grade,
+                None,
+            );
+        }
+        let guard = DELIVERED_SELECTIONS.lock().expect("lock");
+        let table = guard.as_ref().expect("table");
+        assert!(table.by_session.len() <= MAX_REMEMBERED_SELECTIONS);
+        assert_eq!(table.by_session.len(), table.order.len());
+        assert!(
+            !table.by_session.contains_key(&first),
+            "the oldest entry is evicted, not the newest",
+        );
+    }
+
+    /// A minimal delivered selection; only `height` matters to these tests.
+    fn sample_effective_selection() -> crate::playback_control::EffectiveSelection {
+        crate::playback_control::EffectiveSelection {
+            height: 1080,
+            quality_auto: false,
+            codec: "server_selected".to_owned(),
+            dynamic_range: Some("sdr".to_owned()),
+            audio_track: None,
+            audio_offset_ms: 0,
+            subtitle_burn: None,
+        }
+    }
 
     /// A fixed clock for the plan-review tests. `review_client_plan` reads it
     /// to decide which of the client's learned limits still apply, so a test
