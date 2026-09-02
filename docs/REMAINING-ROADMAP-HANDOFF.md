@@ -118,6 +118,13 @@ during every phase leaves one durable outcome.
 
 ## 3. M6 — prepared recipe handoff (item 7)
 
+M5.5 has since run on hardware and answered three of §8's open questions.
+[M6-IMPLEMENTATION-HANDOFF.md](M6-IMPLEMENTATION-HANDOFF.md) carries those
+answers, the measured interruption bound, and what the spike does *not* settle.
+Read it alongside this section; where they disagree on a measured fact, it is
+newer.
+
+
 ### 3.1 The transaction
 
 ```
