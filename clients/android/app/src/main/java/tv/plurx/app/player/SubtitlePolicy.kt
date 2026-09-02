@@ -290,12 +290,14 @@ internal fun subtitleSessionBody(
     deliveredDynamicRange: String? = null,
     previousSessionId: String? = null,
     reopenReason: ReopenReason? = null,
+    controlSequence: Long? = null,
 ): CreateSessionReq {
     val copy = copyableVideo && delivery != SubtitleDelivery.Burn
     val native = delivery == SubtitleDelivery.NativeSession
     return CreateSessionReq(
         playback_id = playbackId,
         request_id = requestId,
+        control_sequence = controlSequence,
         // `height` is ignored under `copy`; sending it anyway would suggest a
         // rung this session is not going to honour.
         height = if (copy) {

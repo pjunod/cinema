@@ -30,10 +30,26 @@ one is deleted.
 | 5 | delete detached recovery loops | — | merged as #663 |
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [execution](M5.5-SPIKE-EXECUTION-HANDOFF.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike **ran 2026-09-01 on all three platforms** and is complete: web and Android `false`, **Apple `true`** after a corrective instrument pass — see §"M5.5 ran, and two thirds of it settled" |
-| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | **design unblocked, acknowledgements not** — the fallback path is measured on two platforms; `first_frame_ready` cannot be frozen while Apple is unmeasured |
-| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it" — and **M4 (burn-join) is the next buildable milestone**; detection is separately deferred |
+| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) | **ready to build** — M5.5 measured, three of the roadmap's open questions answered, and the interruption bound starts at 2,246 ms |
+| 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it". R-M1 closes the unknown-readiness contract and carries the dated [large-MKV observation](M7-M1-LARGE-MKV-OBSERVATION.md); R-M2 remains gated on R-M1 acceptance. **M4 (burn-join) is a separate active effort**, not part of this remediation; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
+
+### M7 R-M1 acceptance needs code and an observed cache transition
+
+Readiness source landed before its acceptance evidence. R-M1 closes both
+remaining facts: an older relay preserves an unknown string unchanged, while
+the web consumer treats only exact `ready` as ready; separately, a dated
+local-hardware run records `warming` → `ready` and two first-half cold-cache
+subtitle windows inside the 5-second publication budget.
+
+The two facts stay separate because a serialization test cannot prove ffmpeg
+publication on a large file, and a successful local extraction cannot decide
+the forward-compatible wire contract. The retained measurements and their
+limits are in
+[M7-M1-LARGE-MKV-OBSERVATION.md](M7-M1-LARGE-MKV-OBSERVATION.md). A
+tracking-only PR is not acceptance and is not required; R-M2 stays closed
+until the implementation change carrying both facts is accepted.
 
 ## Slice ledger — every PR in the current push
 
@@ -426,26 +442,27 @@ creations the server honours. The cost is server-side waste, not client
 confusion.
 
 
-### What M3 still owes
+### M3 is closed
 
-Two gaps, neither a regression — an absent `control_sequence` means "do the
-work", which is exactly today's behaviour — but the milestone is not closed
-until both are shut.
+Both gaps this section recorded are shut, in
+[#785](https://github.com/pjunod/plurx/pull/785).
 
-**No test covers the HTTP refusal.** `SettledTarget::supersedes` has four unit
-tests including the twenty-seek storm; the glue in `hls::create` that calls it
-and returns `playback_target_superseded` is exercised by nothing. It is
-compile-verified and behaviour-unverified. M3's own acceptance is *a scripted
-20-seek storm results in production started for exactly one target*, and that
-is a protocol-level assertion the latch tests do not make.
+**The refusal is tested.** `hls::create` cannot be reached from a test — it
+needs a store, a transcode manager and an authenticated user — so the decision
+lives in one function and the handler has no other way to express it. Seven
+tests pin it, and the ones worth knowing are the negatives: an absent sequence
+and an absent settled target both **proceed**, because absent means *do the
+work*; equal and later sequences **proceed**, because a create can reach the
+server before its own snapshot and refusing the honest seek is the failure this
+milestone exists to prevent; and a malformed start reads as the head, which can
+only make a restart look *less* superseded — a bad body must not be able to
+cancel work the viewer wants.
 
-**Only the web client sends `control_sequence`.** One sender in the tree,
-`crates/plurxd/src/web/index.html:6783`. A seek storm from an iPhone or an
-Apple TV is still unlatched, because those clients omit the field. Adding it
-to Apple and Android is a build-number bump and a coordinated client release,
-which is why it was deliberately not folded into the same pull request — the
-build-number rule is that a bump must clear current `main`, not the branch
-point, so client edits are batched to pay it once.
+**Every client orders its restarts.** Apple and Android now send
+`control_sequence` alongside web. Each sends the reporter's own counter rather
+than the accepted sequence: a create can outrun the snapshot that justifies it,
+and a client reporting a *higher* sequence can only look less superseded, which
+is the safe direction. Apple 108, Android 64.
 
 ## M5.5 ran, and two thirds of it settled
 

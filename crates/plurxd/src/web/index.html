@@ -6798,6 +6798,12 @@ function clearPlaybackControlWaiters(p){
   if(!waiters) return;
   for(const waiter of waiters.slice()) waiter.settle(null);
 }
+// Readiness is an extensible relay value. Only the exact value this client
+// understands authorizes a retry; absent and future values are both silence,
+// never an inferred ready state.
+function subtitleReadinessMeansReady(delivery){
+  return !!delivery&&delivery.subtitle_readiness==="ready";
+}
 function startPlaybackControl(v,p,bootstrap){
   stopPlaybackControl(p);
   p.controlLastRequest=null;

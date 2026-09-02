@@ -1,0 +1,119 @@
+#!/usr/bin/env node
+"use strict";
+
+// Render the two player contracts as the markdown blocks
+// docs/PLAYER-INPUT-CONTRACT.md embeds:
+//
+//   tests/playback/player-input-contract.json  → contract:routing:begin/end
+//   tests/playback/playback-info-fields.json   → contract:info:begin/end
+//
+//   scripts/player-contract-table            # print both blocks
+//   scripts/player-contract-table --write    # rewrite both blocks in the doc
+//
+// tests/playback/player-input-contract.test.js fails when the doc and the
+// fixtures disagree, so the fixtures are the only thing anyone edits by hand.
+
+const fs = require("node:fs");
+const path = require("node:path");
+
+const ROOT = path.join(__dirname, "..");
+const FIXTURE = path.join(ROOT, "tests/playback/player-input-contract.json");
+const FIELDS = path.join(ROOT, "tests/playback/playback-info-fields.json");
+const DOC = path.join(ROOT, "docs/PLAYER-INPUT-CONTRACT.md");
+const BEGIN = "<!-- contract:routing:begin -->";
+const END = "<!-- contract:routing:end -->";
+const INFO_BEGIN = "<!-- contract:info:begin -->";
+const INFO_END = "<!-- contract:info:end -->";
+
+function renderBlock(contract) {
+  const out = [];
+  out.push(BEGIN);
+  out.push("");
+  out.push(
+    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+  );
+  for (const surface of Object.keys(contract.routing)) {
+    out.push("");
+    out.push(`**Surface \`${surface}\`** — ${contract.surfaces[surface]}`);
+    out.push("");
+    out.push(`| state \\ input | ${contract.inputs.map((i) => `\`${i}\``).join(" | ")} |`);
+    out.push(`|---|${contract.inputs.map(() => "---").join("|")}|`);
+    for (const state of Object.keys(contract.states)) {
+      const row = contract.routing[surface][state];
+      out.push(
+        `| \`${state}\` | ${contract.inputs.map((i) => `\`${row[i]}\``).join(" | ")} |`,
+      );
+    }
+  }
+  out.push("");
+  out.push(END);
+  return out.join("\n");
+}
+
+function renderInfoBlock(fields) {
+  const out = [];
+  out.push(INFO_BEGIN);
+  out.push("");
+  out.push(
+    `_Generated from [\`tests/playback/playback-info-fields.json\`](../tests/playback/playback-info-fields.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+  );
+  const modes = Object.keys(fields.modes);
+  for (const section of fields.sections) {
+    const rows = fields.fields.filter((f) => f.section === section);
+    if (rows.length === 0) continue;
+    out.push("");
+    out.push(`**${section}**`);
+    out.push("");
+    out.push(`| Row | ${modes.map((m) => m).join(" | ")} | Format | Placement | Available on | Note |`);
+    out.push(`|---|${modes.map(() => "---").join("|")}|---|---|---|---|`);
+    for (const f of rows) {
+      const cells = modes.map((m) => (f.modes.includes(m) ? "✓" : "–"));
+      const placement = f.placement === "notes" ? "notes" : "grid";
+      const avail = f.available_on ? f.available_on.join(" · ") : "all";
+      const note = [f.always ? "always shown" : "", f.note || ""].filter(Boolean).join(" ");
+      out.push(`| \`${f.label}\` | ${cells.join(" | ")} | ${f.format} | ${placement} | ${avail} | ${note} |`);
+    }
+  }
+  out.push("");
+  out.push(INFO_END);
+  return out.join("\n");
+}
+
+function replaceBlock(doc, begin, end, block, label) {
+  const start = doc.indexOf(begin);
+  const stop = doc.indexOf(end);
+  if (start < 0 || stop < 0 || stop < start) {
+    throw new Error(`${DOC} has no ${begin} … ${end} block to rewrite (${label})`);
+  }
+  return doc.slice(0, start) + block + doc.slice(stop + end.length);
+}
+
+function main() {
+  const contract = JSON.parse(fs.readFileSync(FIXTURE, "utf8"));
+  const fields = JSON.parse(fs.readFileSync(FIELDS, "utf8"));
+  const block = renderBlock(contract);
+  const info = renderInfoBlock(fields);
+  if (process.argv.includes("--write")) {
+    let doc = fs.readFileSync(DOC, "utf8");
+    doc = replaceBlock(doc, BEGIN, END, block, "routing");
+    doc = replaceBlock(doc, INFO_BEGIN, INFO_END, info, "info");
+    fs.writeFileSync(DOC, doc);
+    process.stdout.write(`rewrote the routing and info blocks in ${path.relative(ROOT, DOC)}\n`);
+    return;
+  }
+  process.stdout.write(block + "\n\n" + info + "\n");
+}
+
+module.exports = {
+  renderBlock,
+  renderInfoBlock,
+  BEGIN,
+  END,
+  INFO_BEGIN,
+  INFO_END,
+  FIXTURE,
+  FIELDS,
+  DOC,
+};
+
+if (require.main === module) main();

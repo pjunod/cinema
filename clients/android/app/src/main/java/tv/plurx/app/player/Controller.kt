@@ -814,7 +814,7 @@ class Controller(
         scope.launch {
             val hls = try {
                 sessionCreateCoordinator.create(
-                    body = sessionBody(ms),
+                    body = sessionBody(ms, playbackControl.controlSequence()),
                     isCurrent = { stallGuard.isCurrent(requestVersion) },
                 ) ?: return@launch
             } catch (cancelled: CancellationException) {
@@ -989,6 +989,7 @@ class Controller(
                 body = subtitleSessionBody(
                     playbackId = playbackId,
                     requestId = UUID.randomUUID().toString(),
+                    controlSequence = playbackControl.controlSequence(),
                     startSeconds = positionMs / 1000.0,
                     delivery = subtitleDelivery,
                     subtitleIndex = selectedSubtitle,
@@ -1072,10 +1073,11 @@ class Controller(
         }
     }
 
-    internal fun sessionBody(ms: Long): CreateSessionReq = bindDecisionPlan(
+    internal fun sessionBody(ms: Long, controlSequence: Long? = null): CreateSessionReq = bindDecisionPlan(
         body = subtitleSessionBody(
             playbackId = playbackId,
             requestId = UUID.randomUUID().toString(),
+            controlSequence = controlSequence,
             startSeconds = ms / 1000.0,
             delivery = subtitleDelivery,
             subtitleIndex = selectedSubtitle,

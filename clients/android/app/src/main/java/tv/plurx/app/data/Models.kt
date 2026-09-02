@@ -728,6 +728,15 @@ data class CreateSessionReq(
     val playback_id: String,
     /** Fresh per attempt: a replayed create recovers the same session. */
     val request_id: String? = null,
+    /**
+     * Where this start sits in the control ordering. A seek storm asks for a
+     * session per destination; this orders those asks against the destination
+     * the client has since settled on, so the server can refuse to produce one
+     * the viewer already scrolled past. Null before the first exchange —
+     * there is no earlier ask to be stale against, and absent means *do the
+     * work*.
+     */
+    val control_sequence: Long? = null,
     val height: Int? = null,
     val start: Double? = null,
     val audio: Int? = null,
