@@ -65,7 +65,7 @@ class PlaybackInfoOverlayTest {
         compose.onNodeWithText("Playback info").assertIsDisplayed()
         compose.onNodeWithText("Method").assertIsDisplayed()
         compose.onNodeWithText("Position").assertIsDisplayed()
-        compose.onAllNodesWithText("Resolution").assertCountEquals(2)
+        compose.onAllNodesWithText("Resolution", useUnmergedTree = true).assertCountEquals(2)
         compose.onNodeWithText("Buffer").assertExists()
         compose.onNodeWithText("Stalls").assertExists()
         compose.onNodeWithText("Delivery rate").assertExists()
