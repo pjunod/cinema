@@ -109,6 +109,51 @@ barrier removal with the complete three-wave repair and deterministic unit.
 Close #782 only after #794 is qualified and merged, so GitHub never loses the
 visible replacement before the duplicate closes.
 
+## Apple pacing-hold freeze — the hold that vetoed its own recovery
+
+**PR [#803](https://github.com/pjunod/plurx/pull/803) — OPEN, awaiting Paul's
+merge (`fd23da27` on `agent/apple-pacing-hold-freeze`, 2026-09-02).** A stalled
+Apple client with an empty buffer and fetchable media asked the server what to
+do, was told `hold { reason: "time" }`, showed *"The server is pacing this
+stream."*, and returned without reopening its player item. In explicit lease
+mode the stall itself manufactures that hold — the production target is the
+client's runway plus a 30-second reserve, measured from its own frozen buffer
+anchor — so the loop had no exit but the viewer backing out. Web had the same
+veto behind a manual *Try again*.
+
+The invariant, established server-side and defended on both clients:
+**production state is never authority over serving; a client that can fetch
+published bytes may reconnect to fetch them, and the only question a hold
+answers is why the producer paused.**
+
+- `resolve_action` answers `none` when the same request proves the client is
+  stalled, its decoder starved, its runway at or under 10 s, and at least 10 s
+  of published media unfetched — one predicate for all seven hold reasons. The
+  hold is still reported in `delivery.hold_reason`; only the instruction is
+  withheld, counted by its own
+  `plurx_playback_control_recovery_withheld_total{reason,platform}` so it can
+  never be read as the vocabulary gap `actions_suppressed_total` measures.
+- A wedged reopen keeps its rung on both sides: the client drops the stall
+  ticket, and `normalize_claimed_request` declines the one-rung descent for a
+  predecessor carrying the wedge signature (no completed delivery for 16 s with
+  ≥ 10 s published and unfetched). A slow link fails the idle term and keeps
+  today's descent. The server half covers Android's ticketed reopens too. The
+  reopen keys on evidence rather than on the stall kind because the two
+  detectors race for one freeze.
+- VOD's serving frontier is now the contiguous materialized run measured from
+  the client's own fetched segment; `published_end_ms` counts from segment 0
+  and sits behind the playhead after a far seek. The activity page keeps
+  reading the old one, which answers a different question.
+- Local gate on the rebased branch: 1552 Rust tests, clippy `-D warnings`,
+  `cargo fmt --check`, all four `tests/playback` suites, `history-audit`, and
+  every `validate --profile commit --staged` check that does not need cargo.
+  Three mutation checks — the predicate call, the server's wedge branch, and
+  web's supply `return` — each fail exactly the tests that own them. Apple
+  build 110 claimed; Swift and Kotlin compile on the self-hosted runners, and
+  device acceptance is opportunistic because the AVPlayer wedge cannot be
+  induced on demand. Not deployed.
+
+
 ## Everything a read-only cluster member could not do
 
 **PRs [#806](https://github.com/pjunod/plurx/pull/806) (`b4a1f108`) and

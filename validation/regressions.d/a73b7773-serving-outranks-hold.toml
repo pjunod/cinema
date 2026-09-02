@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a73b7773"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The serving predicate is pinned from both sides and at both frontiers. `a_stalled_starved_client_with_fetchable_media_is_not_told_to_hold` walks all seven hold reasons and requires each to resolve to `none` for a stalled, starved, runway-exhausted client with published media it has not fetched, and to a `hold` for the healthy client in the same exchange. `the_serving_predicate_is_conjunctive` removes one conjunct at a time -- render state, decoder state, a missing observation, runway above the ceiling, a gap below the threshold, an unknown produced frontier -- and requires the hold back each time, which is what stops an unknown runway (reported as zero) from authorising a reopen on its own. `a_producer_decision_still_outranks_the_predicate` keeps the terminal and retry_resource ranking above it, and `a_withheld_hold_is_counted_by_reason_and_never_as_suppressed` proves a withheld hold moves its own counter and neither the sent-hold nor the vocabulary-suppression one. `a_vod_seek_past_a_hole_is_judged_by_the_media_ahead_of_the_client` pins the VOD frontier to the run measured from the client's own fetched segment, so a wedge in front of materialized segments is not left deadlocked by a published frontier that sits behind the playhead."
