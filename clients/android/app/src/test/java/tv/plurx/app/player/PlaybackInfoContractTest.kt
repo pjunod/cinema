@@ -71,6 +71,9 @@ class PlaybackInfoContractTest {
     @Test
     fun rowsMatchTheSharedAndroidFieldListInEveryMode() {
         PlaybackStatsMode.entries.forEach { mode ->
+            // Label AND placement: the fixture's `notes` column decides
+            // whether a row joins the grid or the notes strip, and comparing
+            // labels alone left that column checked by nothing.
             val expected = fixture.getValue("fields").jsonArray.map { it.jsonObject }
                 .filter { field ->
                     mode.storageValue in field.getValue("modes").jsonArray.map {
@@ -79,14 +82,32 @@ class PlaybackInfoContractTest {
                         it.jsonPrimitive.content
                     }?.let { "android" in it } != false
                 }
-                .map { it.getValue("label").jsonPrimitive.content }
+                .map {
+                    it.getValue("label").jsonPrimitive.content to
+                        (it["placement"]?.jsonPrimitive?.content ?: "grid")
+                }
             val actual = playbackInfoRows(
                 details,
                 listOf("fixture reason"),
-            ).filter { mode in it.modes && it.value != null }.map(InfoRow::label)
+            ).filter { mode in it.modes && it.value != null }
+                .map { it.label to it.placement }
 
             assertEquals(mode.label, expected, actual)
         }
+    }
+
+    @Test
+    fun theMiniStripShowsTheFixtureRowsForMini() {
+        // The Mini strip used to render a composite (codec · W×H · HDR ·
+        // bitrate) that no mode of the contract has, and that is blank for an
+        // offline file. Mini ⊂ Standard ⊂ Debug is the whole point of §7.
+        val mini = playbackInfoRows(details, emptyList())
+            .filter { PlaybackStatsMode.Mini in it.modes }
+            .map(InfoRow::id)
+        assertEquals(
+            listOf("method", "position", "decode_resolution", "dynamic_range", "buffer", "delivery_rate"),
+            mini,
+        )
     }
 
     @Test
