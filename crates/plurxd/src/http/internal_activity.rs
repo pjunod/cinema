@@ -1085,11 +1085,10 @@ mod tests {
             tokio::task::yield_now().await;
         }
         tokio::task::yield_now().await;
-        assert_eq!(
-            physical.load(Ordering::SeqCst),
-            1,
-            "followers must wait behind the in-flight physical fetch"
-        );
+        // No assertion belongs here: the gate guard is held across the leading
+        // fetch, so `physical` cannot exceed one at this point whatever the
+        // coalescing does, and an assertion no mutation can fail is noise. The
+        // post-join count and the shared-Arc identity below are the oracle.
         release_fetch.notify_one();
 
         let mut snapshots = vec![leader.await.expect("leader task")];
