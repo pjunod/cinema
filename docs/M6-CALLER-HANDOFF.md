@@ -143,6 +143,76 @@ isolation. `create` must call the extracted function too.
 **Acceptance:** a test asserting the extracted resolver and `create` produce
 the same `EffectiveSelection` for the same body and source file.
 
+#### 3.2.1 The extraction map
+
+Verified against `hls.rs` at `main` after
+[#800](https://github.com/pjunod/plurx/pull/800). Re-verify at build time in
+case it moved — but the shape is unlikely to, because each piece is already a
+named function.
+
+The resolver is the span of `create` from `hdr10_requested` (`hls.rs:1222`) to
+`apply_plan_review` (`:1300`). It does four things, in order, and only the
+second is inline:
+
+| step | today | callable? |
+|---|---|---|
+| 1. review the client's plan against its caps and the file | `review_client_plan` | yes |
+| 2. resolve the height — Auto answered, explicit rungs snapped, the source-height promise honoured | inline, `:1245-1261` | **no** — this is the extraction |
+| 3. build the request | `CreateSession::into_request(file_id, height)` | yes, and already unit-tested |
+| 4. apply the review's DV/HDR10 decisions to it | `apply_plan_review` | yes |
+
+Step 2's three arms are policy, not arithmetic, and the comments say why:
+Auto's answer is *not* snapped because snapping would re-decide policy (a 900p
+source deliberately transcodes at 900, with no scaler in the chain); the
+source's own height is the Original/forced-burn promise and is never snapped or
+downgraded; anything else is an explicit rung from a menu and strays snap onto
+the ladder while above-ladder heights pass through. Extract it whole. Splitting
+it is how one of those three promises gets lost.
+
+Its inputs are `req.height`, `source_height`, the ladder ceiling
+(`capability_height_ceiling_for_request`), the stored network prior, and
+`hdr10_requested`. The network prior needs the request's identity, which the
+control exchange has: it is the same session.
+
+**The delivered grade is predictable without starting anything.**
+`session_delivered_dynamic_range(source, kind, grade)` (`hls.rs:1024`) is a
+pure function of the source file, the resolved `SessionKind` and the output
+grade — it reads nothing off a running session. So
+`EffectiveSelection::from_recipe(recipe, height, dynamic_range)`'s third
+argument is available to a candidate that will never be built, which is what
+makes this slice possible at all. If that stops being true, stop and say so:
+a candidate whose grade has to be guessed is a candidate that will be wrong on
+exactly the transitions the grade axis exists to refuse.
+
+**Suggested shape**, so `create` and the exchange cannot drift:
+
+```rust
+struct ResolvedPlan {
+    request: crate::transcode::SessionRequest,
+    height: i64,
+    delivered_dynamic_range: Option<String>,
+    plan_notes: Vec<PlanNote>,
+}
+
+async fn resolve_plan(
+    state: &AppState,
+    source: Option<&MediaFile>,
+    body: CreateSession,
+    network_prior: Option<&NetworkPrior>,
+) -> Result<ResolvedPlan, ApiError>
+```
+
+`create` calls it and keeps everything after `:1300` — the fingerprint, the
+validity checks, admission, activation. The exchange calls it and throws the
+request away, keeping only the `EffectiveSelection` it can build from it.
+
+**The one thing to get right:** the fingerprint at `:1294` is taken from the
+request *before* the review is applied, deliberately, so a transport retry that
+lands on a different binary fingerprints identically. `resolve_plan` returning
+a post-review request would move that line's meaning. Either return both, or
+leave the fingerprint where it is and have `create` take it from the
+pre-review request — the comment at `:1291-1293` is the specification.
+
 ### 3.3 Shadow mode — decide, record, change nothing
 
 Call `decide_preparation` in the exchange and emit the outcome as a metric.
