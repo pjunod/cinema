@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "title": "Playback-info panel field contract — one row list, every client shows the same rows with the same labels and units",
+  "documented_in": "docs/PLAYER-INPUT-CONTRACT.md",
+  "ruled": "2026-09-02",
+
+  "modes": {
+    "mini": "One line, no header: method · position · decoding · buffer · delivery · health pill, with the mode selector and close inline at the right end. The transport stays live.",
+    "standard": "The two-column ledger, top right: PLAYBACK and SOURCE and NOW DECODING on the left, NETWORK and SERVER on the right, sentence-shaped values in the NOTES strip.",
+    "debug": "The same ledger with every row below. Title reads \"Playback debug\"."
+  },
+
+  "sections": ["PLAYBACK", "SOURCE", "NOW DECODING", "NETWORK", "SERVER"],
+
+  "formats": {
+    "bitrate": "\"12.3 Mb/s\" — one decimal below 10 Mb/s, none at or above; \"800 kb/s\" below 1 Mb/s. Unit is always Mb/s or kb/s, never Mbps.",
+    "bytes": "decimal SI — \"1.2 GB\", \"860 MB\"; never 1024-based.",
+    "seconds": "\"12.3 s\" — one decimal.",
+    "millis": "\"250 ms\".",
+    "speed": "\"1.25×\" — two decimals, the multiplication sign.",
+    "clock": "\"1:02:03\" — hours only when non-zero.",
+    "position": "\"<clock> / <clock>\" — slash, never \"of\"; a playback rate other than 1 is appended as \" · 1.5×\".",
+    "resolution": "\"3840×2160\" — no spaces.",
+    "count": "integer.",
+    "fraction": "\"12 / 4 380 frames\".",
+    "yesno": "\"Yes\" / \"No\".",
+    "text": "free text as the server or player reports it.",
+    "list": "items joined with \" · \" — the same joiner in every mode."
+  },
+
+  "health_pill": {
+    "meaning": "server session state — Direct · Active · Held · VOD · Filling · Complete · Failed",
+    "notes": "Apple's pill counts player stalls today; that datum becomes the `stalls` row. One pill, one meaning."
+  },
+
+  "unavailable_rendering": "A row whose datum the platform cannot supply is omitted, never shown as \"—\", unless the row is marked `always` (then \"—\"). A row a platform CAN supply but does not yet is a parity defect, not an omission.",
+
+  "fields": [
+    { "id": "method",          "label": "Method",         "section": "PLAYBACK",     "modes": ["mini", "standard", "debug"], "format": "text",       "note": "The delivery verdict — the same vocabulary on every client: Direct play · Remux · Transcode · Transcode · cached; the encoder and rung follow as a clause (\"Transcode · nvenc · 1080p\")." },
+    { "id": "playback_mode",   "label": "Playback mode",  "section": "PLAYBACK",     "modes": ["debug"],                     "format": "text",       "available_on": ["web"], "note": "Live HLS / VOD HLS / progressive — the web presentation kind. Native players have one presentation." },
+    { "id": "position",        "label": "Position",       "section": "PLAYBACK",     "modes": ["mini", "standard", "debug"], "format": "position" },
+    { "id": "reason",          "label": "Reason",         "section": "PLAYBACK",     "modes": ["standard", "debug"],         "format": "list",       "placement": "notes", "note": "Why the server chose this method." },
+    { "id": "build",           "label": "Build",          "section": "PLAYBACK",     "modes": ["debug"],                     "format": "text",       "always": true },
+    { "id": "transport",       "label": "Transport",      "section": "PLAYBACK",     "modes": ["debug"],                     "format": "text",       "placement": "notes" },
+    { "id": "file_id",         "label": "File ID",        "section": "PLAYBACK",     "modes": ["debug"],                     "format": "text" },
+    { "id": "session",         "label": "Session",        "section": "PLAYBACK",     "modes": ["debug"],                     "format": "text",       "placement": "notes" },
+    { "id": "switched",        "label": "Switched",       "section": "PLAYBACK",     "modes": ["debug"],                     "format": "list",       "placement": "notes", "available_on": ["web"], "note": "Auto-quality moves this session." },
+
+    { "id": "source_video",    "label": "Video",          "section": "SOURCE",       "modes": ["standard", "debug"],         "format": "list",       "placement": "notes", "note": "codec · profile · bit depth · HDR format." },
+    { "id": "source_resolution","label": "Resolution",    "section": "SOURCE",       "modes": ["standard", "debug"],         "format": "resolution" },
+    { "id": "source_bitrate",  "label": "Bitrate",        "section": "SOURCE",       "modes": ["standard", "debug"],         "format": "bitrate" },
+    { "id": "container",       "label": "Container",      "section": "SOURCE",       "modes": ["standard", "debug"],         "format": "text" },
+    { "id": "source_audio",    "label": "Audio",          "section": "SOURCE",       "modes": ["standard", "debug"],         "format": "list",       "placement": "notes", "note": "codec · channels · language, \"+N tracks\" when more exist." },
+    { "id": "source_file",     "label": "File",           "section": "SOURCE",       "modes": ["debug"],                     "format": "text",       "placement": "notes" },
+    { "id": "av_offset",       "label": "AV offset",      "section": "SOURCE",       "modes": ["debug"],                     "format": "millis",     "always": true, "note": "Applied offset; the container-declared value follows in parentheses when it differs." },
+
+    { "id": "decode_resolution","label": "Resolution",    "section": "NOW DECODING", "modes": ["mini", "standard", "debug"], "format": "resolution" },
+    { "id": "dynamic_range",   "label": "Dynamic range",  "section": "NOW DECODING", "modes": ["mini", "standard", "debug"], "format": "text",       "placement": "notes", "note": "Mini shows the chip form (\"DV P7 → HDR10\"); the ledger shows the sentence." },
+    { "id": "decode_audio",    "label": "Audio",          "section": "NOW DECODING", "modes": ["debug"],                     "format": "list",       "placement": "notes", "note": "What the player's audio output actually is (route-aware where the platform says)." },
+    { "id": "buffer",          "label": "Buffer",         "section": "NOW DECODING", "modes": ["mini", "standard", "debug"], "format": "seconds",    "note": "Runway ahead of the playhead. Seconds only — no clock form, no percentage." },
+    { "id": "frames",          "label": "Frames",         "section": "NOW DECODING", "modes": ["standard", "debug"],         "format": "fraction",   "available_on": ["web", "android"], "note": "dropped / total. AVPlayer does not expose it." },
+    { "id": "frame_rate",      "label": "Frame rate",     "section": "NOW DECODING", "modes": ["debug"],                     "format": "text",       "available_on": ["web"] },
+    { "id": "player_state",    "label": "Player state",   "section": "NOW DECODING", "modes": ["debug"],                     "format": "text",       "note": "One vocabulary: Playing · Paused · Buffering · Ended · Failed." },
+    { "id": "waiting_reason",  "label": "Waiting reason", "section": "NOW DECODING", "modes": ["debug"],                     "format": "text",       "placement": "notes", "available_on": ["apple"] },
+    { "id": "decoder",         "label": "Decoder",        "section": "NOW DECODING", "modes": ["debug"],                     "format": "text",       "available_on": ["web", "android"], "note": "hardware / software, with the reason when software." },
+    { "id": "stalls",          "label": "Stalls",         "section": "NOW DECODING", "modes": ["standard", "debug"],         "format": "text",       "note": "\"2 (1 supply · 1 decode)\" — player-side stall count this session." },
+    { "id": "subtitles",       "label": "Subtitles",      "section": "NOW DECODING", "modes": ["standard", "debug"],         "format": "text",       "note": "Track name; the delivery clause (native · burned · overlay) is a note under the same label." },
+
+    { "id": "delivery_rate",   "label": "Delivery rate",  "section": "NETWORK",      "modes": ["mini", "standard", "debug"], "format": "bitrate",    "note": "Server-reported delivered rate; \"· idle\" appended when delivery has gone quiet. One label — not Delivery in one mode and Delivery rate in another." },
+    { "id": "observed_rate",   "label": "Observed rate",  "section": "NETWORK",      "modes": ["debug"],                     "format": "bitrate",    "note": "The player's own throughput estimate." },
+    { "id": "stream_rate",     "label": "Stream rate",    "section": "NETWORK",      "modes": ["debug"],                     "format": "bitrate",    "note": "The declared rate of the rendition being played." },
+    { "id": "delivered",       "label": "Delivered",      "section": "NETWORK",      "modes": ["standard", "debug"],         "format": "bytes",      "note": "Server-reported bytes for this session. Never labelled Transferred." },
+    { "id": "transferred",     "label": "Transferred",    "section": "NETWORK",      "modes": ["debug"],                     "format": "bytes",      "available_on": ["apple"], "note": "Client access-log bytes — a different number from Delivered, so a different label." },
+    { "id": "requests",        "label": "Requests",       "section": "NETWORK",      "modes": ["debug"],                     "format": "count",      "available_on": ["apple"] },
+    { "id": "delivery_idle",   "label": "Delivery idle",  "section": "NETWORK",      "modes": ["debug"],                     "format": "millis" },
+    { "id": "started_in",      "label": "Started in",     "section": "NETWORK",      "modes": ["debug"],                     "format": "seconds",    "note": "Time to first frame." },
+
+    { "id": "status",          "label": "Status",         "section": "SERVER",       "modes": ["standard", "debug"],         "format": "text",       "always": true, "note": "One vocabulary: No server-side session · Active · Holding buffer · Served from cache (+ the VOD states on the web). Debug shows it too." },
+    { "id": "encoder",         "label": "Encoder",        "section": "SERVER",       "modes": ["standard", "debug"],         "format": "text" },
+    { "id": "encode_speed",    "label": "Encode speed",   "section": "SERVER",       "modes": ["standard", "debug"],         "format": "speed",      "note": "\"(avg)\" appended when only the cumulative figure exists. Never abbreviated to Encode." },
+    { "id": "server_ahead",    "label": "Server ahead",   "section": "SERVER",       "modes": ["standard", "debug"],         "format": "seconds",    "note": "Produced beyond the playhead. Held state and time-release are a note under the same label, never inlined into the value. One label — not Ahead / Buffer ahead / Server ahead." },
+    { "id": "ahead_bytes",     "label": "Ahead bytes",    "section": "SERVER",       "modes": ["debug"],                     "format": "bytes" },
+    { "id": "produced",        "label": "Produced",       "section": "SERVER",       "modes": ["debug"],                     "format": "clock" },
+    { "id": "pacing",          "label": "Pacing",         "section": "SERVER",       "modes": ["debug"],                     "format": "speed" },
+    { "id": "held",            "label": "Held",           "section": "SERVER",       "modes": ["debug"],                     "format": "yesno" },
+    { "id": "hold_reason",     "label": "Hold reason",    "section": "SERVER",       "modes": ["debug"],                     "format": "text" },
+    { "id": "suspend_count",   "label": "Suspend count",  "section": "SERVER",       "modes": ["debug"],                     "format": "count" },
+    { "id": "demand_window",   "label": "Demand window",  "section": "SERVER",       "modes": ["debug"],                     "format": "text",       "available_on": ["web"] },
+    { "id": "request_idle",    "label": "Request idle",   "section": "SERVER",       "modes": ["debug"],                     "format": "seconds" },
+    { "id": "last_request",    "label": "Last request",   "section": "SERVER",       "modes": ["debug"],                     "format": "text",       "placement": "notes" },
+    { "id": "playlist",        "label": "Playlist",       "section": "SERVER",       "modes": ["debug"],                     "format": "text" },
+    { "id": "published_end",   "label": "Published end",  "section": "SERVER",       "modes": ["debug"],                     "format": "millis" },
+    { "id": "fetched_end",     "label": "Fetched end",    "section": "SERVER",       "modes": ["debug"],                     "format": "millis" },
+    { "id": "control",         "label": "Control",        "section": "SERVER",       "modes": ["standard", "debug"],         "format": "text",       "note": "Playback-control session owner and state; timing and failure are notes under the same label in Debug." }
+  ]
+}

@@ -2380,6 +2380,89 @@ pub(crate) struct ActionProposal {
     pub severity: &'static str,
 }
 
+/// The state of this playback's single preparation slot.
+///
+/// M6 stages a successor while the current stream still plays and commits only
+/// once the successor says it is ready. The store half of that already exists
+/// and is contract-tested on three voters — `prepare_media_session`,
+/// `rejoin_media_session_preparation`, `commit_media_session_preparation`,
+/// `abort_media_session_preparation` — and had no caller. This is the actor's
+/// half: the slot's lifecycle, and who is allowed to move it.
+///
+/// It lives in the actor rather than in the HTTP handler because the actor is
+/// already the ordering authority — it accepts control sequences, fences
+/// producer attempts and owns the terminal transition — and a preparation that
+/// could be committed from outside that ordering would be a second authority
+/// over the same playback. The actor decides; an executor performs the durable
+/// call; the outcome is reported back. That is the shape producer decisions
+/// already use, deliberately: M7's plan warns against building a third
+/// mechanism, and a preparation lifecycle invented beside the decision
+/// lifecycle would be exactly that.
+/// `abort_preparation` has a production caller in `terminate`; the rest are
+/// the actor's half of a lifecycle whose executor half is M6's next slice.
+/// Marked the way `ProducerDecision` is, and for the same reason: the
+/// alternative is inventing a caller to satisfy the lint, which is how a
+/// mechanism ends up with a shape nobody chose. Remove this the moment the
+/// executor lands.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PreparationSlot {
+    /// Nothing staged. The current generation is the only one.
+    Empty,
+    /// A successor is staged and the durable row exists. `predecessor` is the
+    /// incarnation the commit must find the pointer still naming — recorded at
+    /// preparation time rather than read at commit time, because a pointer that
+    /// moved means a newer player generation exists and the correct outcome is
+    /// to abort this successor rather than reap that one.
+    Staged {
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+    },
+    /// The successor is being torn down. Terminal for this slot: an abort that
+    /// is under way cannot become a commit, or a disconnect could publish a
+    /// successor nobody asked for.
+    Aborting { staged_incarnation_id: String },
+}
+
+impl PreparationSlot {
+    pub(crate) fn staged_incarnation_id(&self) -> Option<&str> {
+        match self {
+            Self::Empty => None,
+            Self::Staged {
+                staged_incarnation_id,
+                ..
+            }
+            | Self::Aborting {
+                staged_incarnation_id,
+            } => Some(staged_incarnation_id),
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Whether a commit may be attempted for this exact successor.
+    ///
+    /// Identity is checked rather than assumed: a commit naming a successor
+    /// this slot is not holding is a stale executor speaking for a preparation
+    /// that has already been replaced, and honouring it would advance the
+    /// pointer to an incarnation the actor has forgotten.
+    pub(crate) fn may_commit(&self, staged_incarnation_id: &str) -> bool {
+        matches!(
+            self,
+            Self::Staged {
+                staged_incarnation_id: staged,
+                ..
+            } if staged == staged_incarnation_id
+        )
+    }
+
+    /// Whether an abort may be attempted for this exact successor. An abort
+    /// already under way is idempotent — an owner retrying after a crash must
+    /// read back the same outcome rather than a spurious loss.
+    pub(crate) fn may_abort(&self, staged_incarnation_id: &str) -> bool {
+        self.staged_incarnation_id() == Some(staged_incarnation_id)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -4755,6 +4838,10 @@ struct RollingControlActor {
     mode: RollingLeaseMode,
     demand: Option<PlaybackDemandSnapshot>,
     settled_target: Option<SettledTarget>,
+    /// This playback's single preparation slot. One per playback is already
+    /// the store's invariant; holding it here makes the actor the only thing
+    /// that can move it.
+    preparation: PreparationSlot,
     delivery: RollingDeliverySnapshot,
     producer_progress_at: Option<Instant>,
     producer_exit_at: Option<Instant>,
@@ -4856,6 +4943,7 @@ impl RollingControlActor {
             mode: RollingLeaseMode::Legacy,
             demand: None,
             settled_target: None,
+            preparation: PreparationSlot::Empty,
             delivery: RollingDeliverySnapshot::default(),
             producer_progress_at: None,
             producer_exit_at: None,
@@ -5811,6 +5899,66 @@ impl RollingControlActor {
         self.pending_decision = Some(decision);
         self.decision_committed_at = Some(committed_at);
         self.decision_wake.executor_observation.queue_decision();
+        true
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Record that a successor has been staged.
+    ///
+    /// Refused when the slot is occupied. One preparation per playback is the
+    /// store's invariant and the ledger's primary key enforces it; refusing
+    /// here as well means the actor never believes in a second successor the
+    /// store would reject, which is what would let a commit name the wrong one.
+    fn stage_preparation(
+        &mut self,
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+    ) -> bool {
+        if self.retired || self.terminal.is_some() {
+            return false;
+        }
+        if !matches!(self.preparation, PreparationSlot::Empty) {
+            return false;
+        }
+        self.preparation = PreparationSlot::Staged {
+            staged_incarnation_id,
+            predecessor_incarnation_id,
+        };
+        true
+    }
+
+    /// Move the slot to aborting, and say whether this call is the one that
+    /// moved it.
+    ///
+    /// `false` covers an empty slot, a different successor, and an abort
+    /// already under way. None of those is an error: an owner retrying after a
+    /// crash must read back the same outcome, and a stale executor must not be
+    /// able to tear down a successor that replaced the one it knew about.
+    fn abort_preparation(&mut self, staged_incarnation_id: &str) -> bool {
+        if !self.preparation.may_abort(staged_incarnation_id) {
+            return false;
+        }
+        let already = matches!(self.preparation, PreparationSlot::Aborting { .. });
+        self.preparation = PreparationSlot::Aborting {
+            staged_incarnation_id: staged_incarnation_id.to_owned(),
+        };
+        !already
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Clear the slot once its durable outcome is known.
+    ///
+    /// Called for a committed successor and for a completed abort alike: after
+    /// either, this playback has no staged generation. Commit's own CAS lives
+    /// in the store, and its `Ok(None)` — the pointer no longer names the
+    /// recorded predecessor — reaches the actor as an abort rather than a
+    /// commit, which is the rule that keeps a lost race from reaping a newer
+    /// player generation.
+    fn settle_preparation(&mut self, staged_incarnation_id: &str) -> bool {
+        if self.preparation.staged_incarnation_id() != Some(staged_incarnation_id) {
+            return false;
+        }
+        self.preparation = PreparationSlot::Empty;
         true
     }
 
@@ -7162,6 +7310,17 @@ impl RollingControlActor {
         }
         self.retired = true;
         self.terminal = Some(cause);
+        // A disconnect does not imply a commit. Whatever ended this playback --
+        // an explicit end, a fence, or the lease simply expiring -- a successor
+        // that was staged but never committed must be torn down, and the
+        // current generation left authoritative if it is healthy. Moving the
+        // slot to `Aborting` here is what makes that true by construction: a
+        // commit arriving afterwards finds `may_commit` false and cannot
+        // publish a successor the viewer never waited for.
+        if let Some(staged) = self.preparation.staged_incarnation_id() {
+            let staged = staged.to_owned();
+            self.abort_preparation(&staged);
+        }
         self.decision_wake
             .terminal_projection
             .store(cause.projection(), Ordering::Release);
@@ -10614,6 +10773,112 @@ mod tests {
         let settled = actor.settled_target.expect("playback settles too");
         assert_eq!(settled.sequence, 2);
         assert_eq!(settled.anchor_ms, 1_512_000);
+    }
+
+    fn staged_actor() -> (RollingControlActor, Instant) {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert!(actor.stage_preparation("successor-1".to_owned(), "current-1".to_owned()));
+        (actor, started)
+    }
+
+    /// One preparation per playback is the store's invariant. The actor
+    /// refuses a second rather than believing in one the store would reject —
+    /// a slot holding a successor the ledger never accepted is how a commit
+    /// ends up naming the wrong incarnation.
+    #[test]
+    fn the_slot_holds_one_successor_and_refuses_a_competitor() {
+        let (mut actor, _) = staged_actor();
+        assert!(!actor.stage_preparation("successor-2".to_owned(), "current-1".to_owned()));
+        assert_eq!(
+            actor.preparation.staged_incarnation_id(),
+            Some("successor-1")
+        );
+    }
+
+    /// A commit names the exact successor it prepared. A stale executor
+    /// speaking for a preparation that has since been replaced must not be
+    /// able to advance the pointer to an incarnation the actor has forgotten.
+    #[test]
+    fn only_the_successor_the_slot_holds_may_commit() {
+        let (actor, _) = staged_actor();
+        assert!(actor.preparation.may_commit("successor-1"));
+        assert!(!actor.preparation.may_commit("successor-2"));
+    }
+
+    /// **Disconnect does not imply commit.** Whatever ends the playback, a
+    /// successor that was staged and never committed is torn down, and a
+    /// commit arriving afterwards is refused — otherwise a viewer who closed
+    /// the tab could publish a generation they never waited for.
+    #[test]
+    fn a_terminal_playback_aborts_a_staged_successor_and_refuses_a_late_commit() {
+        for cause in [
+            RollingTerminalCause::End,
+            RollingTerminalCause::LeaseExpired,
+        ] {
+            let (mut actor, _) = staged_actor();
+            assert!(actor.preparation.may_commit("successor-1"));
+
+            let outcome = actor.terminate(cause);
+            assert!(matches!(outcome, RollingTerminalOutcome::Won(_)));
+
+            assert!(
+                matches!(actor.preparation, PreparationSlot::Aborting { .. }),
+                "{cause:?} must leave the successor aborting"
+            );
+            assert!(
+                !actor.preparation.may_commit("successor-1"),
+                "{cause:?} must refuse a late commit"
+            );
+        }
+    }
+
+    /// An abort under way cannot become a commit. The transition is one-way
+    /// because the alternative is a race in which a slow abort and a slow
+    /// commit both believe they won.
+    #[test]
+    fn an_abort_in_flight_never_becomes_a_commit() {
+        let (mut actor, _) = staged_actor();
+        assert!(
+            actor.abort_preparation("successor-1"),
+            "first abort moves it"
+        );
+        assert!(
+            !actor.abort_preparation("successor-1"),
+            "a retried abort reports no movement rather than a spurious loss"
+        );
+        assert!(!actor.preparation.may_commit("successor-1"));
+        assert!(actor.preparation.may_abort("successor-1"));
+    }
+
+    /// A stale executor cannot tear down a successor that replaced the one it
+    /// knew about, and cannot clear a slot it does not hold.
+    #[test]
+    fn a_stale_executor_moves_nothing() {
+        let (mut actor, _) = staged_actor();
+        assert!(!actor.abort_preparation("successor-2"));
+        assert!(!actor.settle_preparation("successor-2"));
+        assert_eq!(
+            actor.preparation.staged_incarnation_id(),
+            Some("successor-1")
+        );
+    }
+
+    /// Settling clears the slot for a committed successor and a completed
+    /// abort alike: after either, this playback has no staged generation and
+    /// may prepare again.
+    #[test]
+    fn settling_frees_the_slot_for_the_next_preparation() {
+        for abort_first in [false, true] {
+            let (mut actor, _) = staged_actor();
+            if abort_first {
+                assert!(actor.abort_preparation("successor-1"));
+            }
+            assert!(actor.settle_preparation("successor-1"));
+            assert_eq!(actor.preparation, PreparationSlot::Empty);
+            assert!(actor.stage_preparation("successor-2".to_owned(), "current-1".to_owned()));
+        }
     }
 
     #[test]
