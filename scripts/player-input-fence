@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Keep platform key decoding inside the three player input adapters."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import re
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+# Spellings, not just the ones the milestone happened to remove. A fence that
+# only knows the old idiom is a fence with a gate in it: Compose's
+# `onKeyEvent { it.key == Key.DirectionLeft }` carries no `KEYCODE_`, an
+# `onkeydown=` attribute is not an `addEventListener`, and an
+# `MPRemoteCommandCenter` target is a key handler with a different name.
+TOKENS = (
+    ("KEYCODE_", re.compile(r"KEYCODE_")),
+    ("onMoveCommand", re.compile(r"onMoveCommand")),
+    ("onExitCommand", re.compile(r"onExitCommand")),
+    ("onPlayPauseCommand", re.compile(r"onPlayPauseCommand")),
+    ("onKeyEvent", re.compile(r"\bon(?:Preview)?KeyEvent\b")),
+    ("Compose Key.", re.compile(r"(?<![A-Za-z0-9_])Key\.[A-Z][A-Za-z0-9_]*")),
+    ("UIKit key press", re.compile(r"\b(?:pressesBegan|pressesEnded|UIKeyCommand|onKeyPress)\b")),
+    ("MPRemoteCommandCenter", re.compile(r"\bMPRemoteCommandCenter\b")),
+    ("keydown listener", re.compile(r"""addEventListener\(\s*['"]key(?:down|up)['"]""")),
+    ("onkeydown attribute", re.compile(r"\bonkey(?:down|up)\s*=")),
+    ("event.key", re.compile(r"(?<![A-Za-z0-9_])(?:ev|evt|event)\.(?:key|keyCode)\b")),
+)
+
+# Test trees drive real key events on purpose — that is how a view is proved
+# to consume its reducer. They ship no input handling, so they are scanned
+# for nothing.
+TEST_TREE_MARKERS = ("/androidTest/", "/src/test/", "clients/apple/Tests/")
+
+WHOLE_FILE_ALLOWLIST = {
+    Path("clients/android/app/src/main/java/tv/plurx/app/player/PlayerKeyAdapter.kt"):
+        "Android player key codes are decoded into contract inputs here.",
+    Path("clients/android/app/src/main/java/tv/plurx/app/ui/AuthScreens.kt"):
+        "The sign-in form uses Select/Enter to begin editing; it is not a player.",
+    Path("clients/apple/Sources/PlayerRemoteAdapter.swift"):
+        "Apple remote commands are decoded into contract inputs here.",
+    Path("crates/plurxd/src/web/reader.js"):
+        "The EPUB frame owns document navigation while the reader is open.",
+    Path("crates/plurxd/src/web/offline-reader.js"):
+        "The native offline EPUB shell owns its local document navigation.",
+}
+
+# Files a token names but that are not player input. Each entry is one token
+# and one file, so a NEW token in the same file still fails.
+TOKEN_FILE_ALLOWLIST = {
+    ("MPRemoteCommandCenter", Path("clients/apple/Sources/PlayerController.swift")):
+        "The media-remote commands are installed here and routed through PlayerInputRouting.",
+}
+
+# index.html contains several independent applications. These bounded regions
+# are non-player keyboard adapters with reasons beside their anchors. The
+# player itself gets one region only; adding a second handler makes the fence
+# fail even if it happens to agree with the reducer today.
+INDEX_REGIONS = (
+    (
+        "// Capture Escape before layout-specific sheet handlers",
+        "// ---- global activity indicator",
+        "The connection QR dialog owns Escape while it is modal.",
+    ),
+    (
+        "// Keyboard while the player is open: 'i' toggles stats",
+        "// player-input-adapter:begin",
+        "The photo lightbox owns Escape and previous/next while it is open.",
+    ),
+    (
+        "// player-input-adapter:begin",
+        "// player-input-adapter:end",
+        "The web player adapter maps browser keys to contract inputs.",
+    ),
+    (
+        "// nav-keyboard-adapter:begin",
+        "// nav-keyboard-adapter:end",
+        "Card and episode-row activation (Enter/Space) outside playback, shared by every layout.",
+    ),
+    (
+        "function catalogWireOnce(){",
+        "// ---- phone: the library sheet and the search tab",
+        "Catalog owns Escape for its phone library sheet.",
+    ),
+    (
+        "function theaterWireOnce(){",
+        "// ---- registration",
+        "Theater poster keys provide link/button activation outside playback.",
+    ),
+    (
+        "function showReaderSearch(){",
+        "function toggleReaderPanel(mode){",
+        "The EPUB search field submits on Enter outside playback.",
+    ),
+    (
+        "function paintTagChips(){",
+        "function closeEdit(){",
+        "The metadata tag field commits a chip on Enter or comma outside playback.",
+    ),
+)
+
+
+def client_files() -> list[Path]:
+    files: list[Path] = []
+    for suffix in ("*.kt", "*.java", "*.swift", "*.m"):
+        for path in (ROOT / "clients").rglob(suffix):
+            relative = path.relative_to(ROOT)
+            if any(part in {"build", ".build", "DerivedData", ".gradle"} for part in relative.parts):
+                continue
+            files.append(relative)
+    files.append(Path("crates/plurxd/src/web/index.html"))
+    # Every shipped web script, not the three that had key handling the day
+    # this was written. Vendored bundles are not ours to fence.
+    for path in sorted((ROOT / "crates/plurxd/src/web").glob("*.js")):
+        if path.name.endswith(".min.js"):
+            continue
+        files.append(path.relative_to(ROOT))
+    return sorted(
+        file for file in set(files)
+        if not any(marker in f"/{file.as_posix()}" for marker in TEST_TREE_MARKERS)
+    )
+
+
+def index_allowed_lines(lines: list[str]) -> set[int]:
+    allowed: set[int] = set()
+    for start_text, end_text, _reason in INDEX_REGIONS:
+        starts = [index for index, line in enumerate(lines) if start_text in line]
+        ends = [index for index, line in enumerate(lines) if end_text in line and index >= starts[0]] if starts else []
+        if len(starts) != 1 or not ends:
+            raise ValueError(f"index.html lost keyboard allowlist anchors: {start_text!r} … {end_text!r}")
+        allowed.update(range(starts[0] + 1, ends[0] + 2))
+    return allowed
+
+
+def scan() -> list[str]:
+    failures: list[str] = []
+    # Fail closed. A missing client tree or a renamed allowlisted file used to
+    # make the fence PASS, which is the one answer it must never give by
+    # accident.
+    if not (ROOT / "clients").is_dir():
+        failures.append("clients:1: the client tree is missing; the fence scanned nothing")
+    for expected in list(WHOLE_FILE_ALLOWLIST) + [file for _token, file in TOKEN_FILE_ALLOWLIST]:
+        if not (ROOT / expected).is_file():
+            failures.append(f"{expected}:1: allowlisted file no longer exists; re-check the allowlist")
+    files = client_files()
+    for relative in files:
+        path = ROOT / relative
+        if not path.exists():
+            failures.append(f"{relative}:1: expected client file is missing")
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        allowed = set(range(1, len(lines) + 1)) if relative in WHOLE_FILE_ALLOWLIST else set()
+        if relative == Path("crates/plurxd/src/web/index.html"):
+            try:
+                allowed = index_allowed_lines(lines)
+            except ValueError as error:
+                failures.append(f"{relative}:1: {error}")
+                continue
+        for number, line in enumerate(lines, start=1):
+            if number in allowed:
+                continue
+            for token, pattern in TOKENS:
+                if (token, relative) in TOKEN_FILE_ALLOWLIST:
+                    continue
+                if pattern.search(line):
+                    failures.append(f"{relative}:{number}: {token} is outside an allowed adapter")
+
+    resource_files = {
+        Path("clients/android/app/build.gradle.kts"):
+            ("player-input-contract.json", "playback-info-fields.json"),
+        Path("clients/apple/project.yml"):
+            ("player-input-contract.json", "playback-info-fields.json"),
+    }
+    for relative, names in resource_files.items():
+        source = (ROOT / relative).read_text(encoding="utf-8")
+        for name in names:
+            if name not in source:
+                failures.append(f"{relative}:1: test resources no longer reference {name}")
+
+    android_build = ROOT / "clients/android/app/build.gradle.kts"
+    android_source = android_build.read_text(encoding="utf-8")
+    resource_directories = re.findall(
+        r'getByName\("test"\)\.resources\.directories\.add\("([^"]+)"\)',
+        android_source,
+    )
+    for name in ("player-input-contract.json", "playback-info-fields.json"):
+        wired = any((android_build.parent / directory / name).resolve().is_file()
+                    for directory in resource_directories)
+        if not wired:
+            failures.append(
+                f"clients/android/app/build.gradle.kts:1: test resources do not wire {name}"
+            )
+    return failures
+
+
+def main() -> int:
+    failures = scan()
+    if failures:
+        print("player input fence failed:", file=sys.stderr)
+        for failure in failures:
+            print(f"  {failure}", file=sys.stderr)
+        return 1
+    print("PASS player key handling is fenced to the platform adapters")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

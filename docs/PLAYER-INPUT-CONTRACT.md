@@ -1,6 +1,6 @@
 # Player input contract — one routing table, every client obeys it
 
-**Status:** ruled 2026-09-02, fixtures committed, clients not yet conformant ·
+**Status:** ruled and implemented 2026-09-02 ·
 **Source of truth:** [`tests/playback/player-input-contract.json`](../tests/playback/player-input-contract.json) (input) and [`tests/playback/playback-info-fields.json`](../tests/playback/playback-info-fields.json) (info panel) ·
 **Kept honest by:** `tests/playback/player-input-contract.test.js` (runs in
 `make web-check`) · **Built by:** [PLAYER-INPUT-CONTRACT-PLAN.md](PLAYER-INPUT-CONTRACT-PLAN.md)
@@ -110,22 +110,34 @@ _Generated from [`tests/playback/player-input-contract.json`](../tests/playback/
 
 ### 2.1 What the outcomes mean
 
+<!-- contract:outcomes:begin -->
+
+_Generated from [`tests/playback/player-input-contract.json`](../tests/playback/player-input-contract.json) by `scripts/player-contract-table`; do not edit by hand._
+
 | Outcome | What the client does |
 |---|---|
-| `reveal` | Show chrome; focus the control that had focus when it hid (initially `play_pause`). Never seeks. |
-| `focus_row` | Let the platform focus engine move within the current row or to the adjacent row in §3 order. The reducer names the row, never a coordinate. |
-| `focus_transport` | Move focus to the transport row, restoring the last transport control. |
-| `focus_marker_or_ignore` | Focus `skip_marker` if a marker is showing, else nothing. |
-| `preview` | Enter or stay in `scrub`: move the pending position by §4's ladder. No seek, no network. Show it in `time_elapsed` and on the bar. |
-| `commit` | Seek to the pending position; back to `timeline` with chrome up. |
-| `cancel` | Drop the pending position; back to `timeline`. The `cancel_then_…` variants do that and then the named focus move. |
-| `toggle_play` / `skip` | Play-pause / immediate ±10 s. Both reveal chrome if hidden and restart the hide timer. |
+| `reveal` | Show chrome; focus the last focused control (initially `play_pause`). No seek. |
+| `focus_row` | Move focus within the current row or to the adjacent row per `controls.rows` order; the platform focus engine does this, the reducer only names the target row. |
+| `focus_marker_or_ignore` | Focus `skip_marker` if present, else nothing. |
+| `focus_transport` | Move focus to the transport row, restoring the last transport control (initially `play_pause`). |
 | `activate` | Press the focused control. |
-| `menu_focus` | Focus stays inside the open menu or panel — trapped — while the platform moves it among the menu's own items. |
-| `close_menu` / `close_info` | Close it; focus returns to the control that opened it. |
-| `hide` | Hide chrome, remember the focused control, focus the surface. |
-| `exit` | Leave the player. Single press: no state requires two. |
-| `toggle_chrome` | Touch only: hide if visible, else reveal. |
+| `toggle_play` | Play/pause. Chrome reveals if hidden and the hide timer restarts. |
+| `skip` | Immediate relative seek of ±`steps.skip_seconds`. Chrome reveals if hidden. |
+| `preview` | Enter or continue `scrub`: move the pending position by the acceleration ladder; no seek, no network. |
+| `commit` | Seek to the pending position; return to `timeline` with chrome visible. |
+| `cancel` | Discard the pending position; return to `timeline`. |
+| `cancel_then_focus_transport` | `cancel`, then `focus_transport`. |
+| `cancel_then_focus_marker_or_ignore` | `cancel`, then `focus_marker_or_ignore`. |
+| `commit_then_toggle_play` | `commit`, then `toggle_play`. |
+| `close_menu` | Close the open menu; focus returns to the control that opened it. |
+| `close_info` | Close the info panel; focus returns to `info`. |
+| `menu_focus` | Focus stays inside the menu (trapped) — the platform moves it among the menu's own items. |
+| `hide` | Hide chrome; remember the focused control; focus the surface. |
+| `exit` | Leave the player. |
+| `toggle_chrome` | Touch: hide chrome if visible, else reveal. |
+| `ignore` | Nothing happens; focus does not move. |
+
+<!-- contract:outcomes:end -->
 
 ### 2.2 Precedence of `back`
 
@@ -169,23 +181,29 @@ safe to mean "scrub": there is nothing beside it to be unreachable.
                                                  └──────────────────────┘
 ```
 
-| Row | Items in order | Focusable | Present when |
+<!-- contract:rows:begin -->
+
+_Generated from [`tests/playback/player-input-contract.json`](../tests/playback/player-input-contract.json) by `scripts/player-contract-table`; do not edit by hand._
+
+| Row | Items in order | Focusable | Notes |
 |---|---|---|---|
-| `marker` | `skip_marker` | yes | a skip-intro/credits marker is active. Right-aligned above the timeline; reachable by `up` from the timeline only. |
-| `timeline` | `time_elapsed` · `timeline` · `time_total` | only `timeline` | duration known. Unknown-duration streams show `--:--` and an indeterminate bar that ignores `preview`. |
-| `transport` | `skip_back` · `play_pause` · `skip_forward` · spacer · `audio` · `subtitles` · `quality` · `settings` · `info` · `pip` · `close` | all | `audio` when >1 audio track · `subtitles` when any · `quality` when the ladder has rungs · `pip` when the platform says PiP is possible (never tvOS) · `close` on touch and desktop only. |
+| `marker` | `skip_marker` | all | Present only while a skip-intro/credits marker is active. Sits above the timeline row, right-aligned. Reachable by `up` from the timeline; never a horizontal neighbour of anything. |
+| `timeline` | `time_elapsed` · `timeline` · `time_total` | `timeline` | Its own full-width row. The timeline is never a horizontal neighbour of a button — Left/Right on it belong to scrubbing, so a button beside it would be unreachable without a seek. |
+| `transport` | `skip_back` · `play_pause` · `skip_forward` · spacer · `audio` · `subtitles` · `quality` · `settings` · `info` · `pip` · `close` | all | One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `audio` when more than one audio track · `subtitles` when at least one subtitle track · `quality` when server ladder has rungs · `pip` when platform reports picture-in-picture possible (never tvOS) · `close` when touch and desktop only — ten-foot exits with `back` |
+
+**`settings` holds:** `autoplay_next` · `auto_skip` · `audio_sync` · `playback_speed_reserved`.
+
+<!-- contract:rows:end -->
 
 Narrow touch splits the transport row at the spacer into two lines; order
 within each line is unchanged. Nothing else moves between surfaces.
 
-**`settings` holds:** autoplay next · auto-skip markers · audio sync ·
-(reserved) playback speed. These are preferences, not moment-to-moment
-controls; today they are scattered as top-level buttons on the web
-(`⏭ Auto-skip`, `▶ Autoplay`, `⇄ Sync`), a top-level `autoplay` button on
-Apple, and Android's "Playback settings" panel — Android's shape is the one
-kept. **This is the open ruling in audit §6**; until Paul rules, the plan
-builds the row with the existing per-client option buttons in the
-`settings` slot's position and folds them in M4.
+These are preferences, not moment-to-moment controls; today they are
+scattered as top-level buttons on the web (`⏭ Auto-skip`, `▶ Autoplay`,
+`⇄ Sync`), a top-level `autoplay` button on Apple, and Android's "Playback
+settings" panel — Android's shape is the one kept. Paul ruled the
+recommended default: web and Apple fold those preferences into `settings`,
+and no preference remains a transport-row peer.
 
 **Focus memory.** `initial_focus` is `play_pause`. `reveal` restores the
 last focused control; `focus_transport` restores the last *transport*
@@ -198,15 +216,31 @@ until `back`.
 
 ## 4. Timings and steps
 
-| Name | Value | Why this value |
-|---|---|---|
-| `hide_after_ms` | 4000 | Apple already used 4 s; Android 3.8 s and web 2.6 s were independent guesses. One number, and long enough to read a row. |
-| hide only while playing | yes | A paused film with no chrome is a black frame with no affordance. Apple hid while paused; Android and web did not. |
-| hide suppressed in | `scrub`, `menu`, `info`, `failed` | Every one of these has focus inside something the hide would remove. tvOS today hides under the failure view and the stats panel and parks focus on an invisible surface (audit §3.1 item 3). |
-| `skip_seconds` | 10 | The only immediate step: the two buttons and FF/REW media keys. |
-| `preview_step_seconds` | 10, then 30 from the 5th repeat, 60 from the 10th | Holding a direction while scrubbing accelerates; releasing resets. Replaces the ±30 s vertical seek with something a held key discovers by itself. |
-| `vertical_seek_seconds` | none | Up/Down are rows. Dropped by ruling. |
-| `preview_auto_commit_ms` | none | A preview commits on Select or pointer release, never on a timer. The web's *body* hotkeys keep their existing 350 ms coalesce (`desktop_hotkey_coalesce_ms`) because they are an immediate-seek idiom, not a scrub. |
+<!-- contract:timings:begin -->
+
+_Generated from [`tests/playback/player-input-contract.json`](../tests/playback/player-input-contract.json) by `scripts/player-contract-table`; do not edit by hand._
+
+| Name | Value |
+|---|---|
+| `hide_after_ms` | 4000 |
+| `hidden_only_while_playing` | true |
+| `preview_auto_commit_ms` | none |
+| `desktop_hotkey_coalesce_ms` | 350 |
+| `steps.skip_seconds` | 10 |
+| `steps.preview_acceleration` | 10 s from repeat 0 · 30 s from repeat 5 · 60 s from repeat 10 |
+| `steps.vertical_seek_seconds` | none |
+
+- hide_after_ms: chrome hides this long after the last input while playing. Never while paused, failed, scrubbing, or with a menu or the info panel open.
+- preview_auto_commit_ms is null: a pending preview commits only on `select` (ten-foot) or pointer release (touch); it never commits on a timer.
+- desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base and issue one seek after this much quiet — the shipped web `nudge()` behaviour, kept.
+
+<!-- contract:timings:end -->
+
+Why these values: Apple already used 4 s for the hide, while Android's 3.8 s
+and the web's 2.6 s were independent guesses — one number, long enough to
+read a row. A paused film with no chrome is a black frame with no
+affordance, so the hide runs only while playing. The preview ladder replaces
+the ±30 s vertical seek with something a held key discovers by itself.
 
 ---
 
@@ -237,11 +271,18 @@ Three layers, and the middle one is the only one allowed to think.
   (that is the platform's engine) but not *whether* a press seeks.
 
 The rule that keeps the moles from coming back: **no key code outside the
-adapter.** `make validate-staged` fails a diff that adds `KEYCODE_`,
-`onMoveCommand`, `onExitCommand`, `onPlayPauseCommand`, `keydown`, or
-`e.key` to any client file other than the named adapter (plan §5 lists the
-allowed files). A new behaviour has to go through the table, where the
-test will ask what the other two clients do.
+adapter.** `scripts/player-input-fence` runs from the pre-commit hook and
+from `make validate-staged` on any diff that touches a client or the web —
+it hangs off `apple.client`, `android.client`, `playback.pipeline` and
+`web.experience` — and it fails on `KEYCODE_`, `onMoveCommand`,
+`onExitCommand`, `onPlayPauseCommand`, `onKeyEvent`/`onPreviewKeyEvent`, a
+Compose `Key.` constant, `pressesBegan`/`UIKeyCommand`/`onKeyPress`,
+`MPRemoteCommandCenter`, a `keydown`/`keyup` listener, an `onkeydown`
+attribute, or `event.key`/`event.keyCode` in any shipped client file other
+than the named adapter. Allowed regions are named with a reason beside
+their anchors; test trees are not scanned, because driving real key events
+is how a view is proved to consume its reducer. A new behaviour has to go
+through the table, where the test will ask what the other two clients do.
 
 Per-surface adapters map inputs as follows; anything not listed is
 `ignore`d by the adapter before it reaches the reducer.
@@ -265,16 +306,21 @@ Per-surface adapters map inputs as follows; anything not listed is
    state × input has one defined outcome, that the three rulings are
    encoded (hidden directions reveal; timeline is preview/commit/cancel;
    nothing vertical seeks; Play/Pause works with chrome up; no auto-hide
-   under scrub/menu/info/failed), and that §2 of this page is byte-identical
-   to `scripts/player-contract-table`'s rendering. Change the fixture, run
-   `scripts/player-contract-table --write`, commit both.
+   under scrub/menu/info/failed), and that §2, §2.1, §3's row table, §4 and
+   §7 of this page are byte-identical to `scripts/player-contract-table`'s
+   rendering. Change the fixture, run `scripts/player-contract-table --write
+   --embed`, commit all of it. The test runs in the `preflight` job of both
+   pull-request workflows, and a fixture-only diff also selects both native
+   client suites and the web layout lane.
 2. **Each reducer reproduces the fixture.** Web: `web-policy.test.js` loads
    the JSON and asserts `routeInput` over every row. Android: a JUnit test
-   over `src/test/resources/player-input-contract.json`. Apple: an XCTest
-   over the same file as a test resource. The two copies are checked
-   byte-identical against `tests/playback/` by a validation check (plan
-   §5), the same way the five-surface build-claims contract keeps
-   `project.yml` and the docs in step.
+   whose resource directory *is* `tests/playback/`
+   (`app/build.gradle.kts`). Apple: an XCTest over the same files, added to
+   both test targets as resources in `project.yml`. There are no copies to
+   keep in step — every client reads the one fixture. The numbers are read
+   too: the web takes `hide_after_ms`, `skip_seconds` and the coalesce
+   window from the generated embed, and Apple asserts
+   `controlAutoHideDelayNanoseconds` against `timings.hide_after_ms`.
 3. **Each view consumes its reducer.** A reducer nobody calls proves
    nothing — this repo has already had seven production lines revert green
    because a test pinned an extracted helper instead of the call site.
@@ -288,9 +334,13 @@ Per-surface adapters map inputs as follows; anything not listed is
 4. **The row grammar is a DOM/semantics fact, not a screenshot.** Web: a
    test reads the `#player` line of `index.html` and asserts the id order
    per row. Android: a Compose semantics test asserts the sibling order and
-   that only the timeline is focusable in its row. Apple: `PlayerControlPlan`
-   is a pure function from `(surface, capabilities)` to rows, tested
-   against the fixture, and the view is a `ForEach` over it.
+   that only the timeline is focusable in its row. Apple has no equivalent
+   yet — an earlier draft of this section named a `PlayerControlPlan` type
+   that was never built, and the shipped test only substring-orders the
+   options group. Open: the web's transport row also diverges from
+   `controls.rows` (playback `info` and `close` sit in the top bar, and
+   `fullscreen`/title info have no fixture entry at all), which is a
+   question about the row, not only about the client.
 5. **No key code outside the adapter** — the grep gate in §5.
 6. **The playback-info panel shows the fixture's rows.** Each client's
    panel is built from a row list the test compares, label for label and
@@ -455,21 +505,9 @@ _Generated from [`tests/playback/playback-info-fields.json`](../tests/playback/p
 
 ---
 
-## 9. Open rulings
+## 9. Defaults ruled with the contract
 
-Recommended defaults are already in the fixture; ruling the other way
-changes rows, not architecture.
-
-1. **The options set** (§3): keep Android's `settings` panel shape and fold
-   the web's auto-skip/autoplay/sync buttons and Apple's autoplay button
-   into it — recommended — or keep top-level toggles and make all three
-   clients show the same ones.
-2. **tvOS season episode cards**: Select plays today
-   (`Components.swift:313-322`); every other surface opens detail. Keep,
-   or add a "details" region as iOS has.
-3. **`select` on an idle timeline** is `toggle_play` (the Apple TV system
-   player's behaviour). Alternative: `ignore`. Both are one cell.
-4. **The info panel's row list** (§7) is the union of what the three
-   clients show today, with the duplicate labels retired and the
-   platform-only rows marked. Prune it if Debug is too long; a pruned row
-   is one line removed from the fixture.
+Paul ruled the fixture defaults on 2026-09-02: the options set uses Android's
+`settings` shape; tvOS episode cards keep play-on-select; `select` on an idle
+timeline toggles play; and the Debug info list is the union in
+`playback-info-fields.json`. These are contract rows, not client exceptions.

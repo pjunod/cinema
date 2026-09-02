@@ -26,6 +26,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -39,6 +41,7 @@ import tv.plurx.app.data.PosterSize
 import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.ThemeId
 import tv.plurx.app.ui.components.ChoicePicker
+import tv.plurx.app.ui.components.RequestInitialFocus
 import tv.plurx.app.ui.components.SafeTopRow
 import tv.plurx.app.ui.components.TvIconButton
 import tv.plurx.app.ui.components.tvFocusRing
@@ -91,11 +94,17 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
         )
     }
 
+    // This screen arrived with focus nowhere, so a television's first D-pad
+    // press was spent finding a stop instead of moving between them. Back is
+    // the one control that is always composed here.
+    val backFocus = remember { FocusRequester() }
+    RequestInitialFocus(backFocus)
+
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
         SafeTopRow(
             Modifier.fillMaxWidth().padding(start = side - 12.dp, end = side, top = 8.dp),
         ) {
-            TvIconButton(onClick = onBack) {
+            TvIconButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
             Text("Settings", style = MaterialTheme.typography.titleLarge)

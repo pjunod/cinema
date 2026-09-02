@@ -712,6 +712,8 @@ struct DetailView: View {
     #if os(tvOS)
     @State private var seriesPlayback: PlayContext?
     @FocusState private var tvFocusedAction: TVDetailFocus?
+    /// Set once, the first time this item's detail lands. See the `.task`.
+    @State private var hasClaimedTVFocus = false
     #endif
 
     var body: some View {
@@ -767,15 +769,23 @@ struct DetailView: View {
                 detail = loaded
                 loadError = nil
                 #if os(tvOS)
-                tvFocusedAction = nil
                 if loaded.item.kind == "show" || loaded.item.kind == "season" {
                     seriesPlayback = await model.seriesPlayback(loaded)
                 } else {
                     seriesPlayback = nil
                 }
-                if Self.hasTVPrimaryAction(loaded, seriesPlayback: seriesPlayback) {
+                // First arrival only. `.task(id:)` re-runs whenever this view
+                // reappears — coming back from the player, from a season, from
+                // Search — and each of those re-grabbed focus onto Play,
+                // throwing away wherever the viewer had walked the remote to.
+                if !hasClaimedTVFocus, Self.hasTVPrimaryAction(loaded, seriesPlayback: seriesPlayback) {
+                    tvFocusedAction = nil
                     try? await Task.sleep(for: .milliseconds(120))
                     tvFocusedAction = .primaryAction
+                    // Latched after the claim, not before: a first arrival cut
+                    // short by a dismissal would otherwise spend the one
+                    // chance this view has to place focus.
+                    hasClaimedTVFocus = true
                 }
                 #endif
             } catch {

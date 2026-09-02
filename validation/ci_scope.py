@@ -81,11 +81,15 @@ SHIPPED_SOURCE_PATHS = (
 APPLE_PATHS = (
     "clients/apple/**",
     "tests/contracts/native-api.json",
+    "tests/playback/player-input-contract.json",
+    "tests/playback/playback-info-fields.json",
 )
 
 ANDROID_JVM_PATHS = (
     "clients/android/**",
     "tests/contracts/native-api.json",
+    "tests/playback/player-input-contract.json",
+    "tests/playback/playback-info-fields.json",
 )
 
 # The layout golden is exercised by booting the real server, so its inputs are
@@ -100,6 +104,8 @@ WEB_LAYOUT_PATHS = (
     "scripts/js-check",
     "scripts/themes-proposed.json",
     "scripts/ui-baseline",
+    "tests/playback/player-input-contract.json",
+    "tests/playback/playback-info-fields.json",
     "tests/ui-structure.golden",
 )
 
