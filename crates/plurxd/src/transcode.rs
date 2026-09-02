@@ -356,6 +356,32 @@ pub(crate) const HLS_AHEAD_MAX_BYTES_DEFAULT: i64 = 2 * 1024 * 1024 * 1024;
 /// seconds of wall-clock protection at every supported rate; the configured
 /// ahead ceiling remains the absolute media-time bound.
 const EXPLICIT_PRODUCTION_RESERVE_WALL_SECS: f64 = 30.0;
+/// Media a still-starting session may always produce, whatever the client's
+/// demand says.
+///
+/// **A starting client cannot report `active`.** The demand vocabulary is
+/// derived from the player: the web client sends `hold` whenever
+/// `video.paused` is true, and a `<video>` that has never received a byte is
+/// paused. Apple and Android report the same shape from the same state. So
+/// the first control of every session says `hold` — before playback, not
+/// against it.
+///
+/// Honouring that hold before anything is published is a deadlock with no
+/// exit. Production stops at zero, so no playlist is ever written; the
+/// playlist request the client is blocked on spends the whole
+/// [`PLAYLIST_WAIT_BUDGET`] and 503s; the client reports `manifestLoadTimeOut`
+/// and shows "the server couldn't build the stream". The client cannot say
+/// `active` until it plays, and it cannot play until this produces. Every
+/// fallback to a fresh session — the transcode a refused remux escalates to,
+/// most of all — died here, which turned one recoverable delivery fault into
+/// a terminal one.
+///
+/// The floor is [`plurx_core::transcode::COPY_PUBLISH_GATE_SECS`] because
+/// opening the playlist at all is what it buys, and the copy path's gate is
+/// the largest amount any path needs to open one. Its whole cost is that a
+/// client which pauses inside the first few seconds keeps producing to the
+/// floor — bounded, and the same media that client would buffer anyway.
+const EXPLICIT_STARTUP_FLOOR_SECS: i64 = plurx_core::transcode::COPY_PUBLISH_GATE_SECS as i64;
 /// Ceiling on scratch across *all* live sessions. A per-session cap bounds one
 /// runaway; it does nothing about four healthy 4K sessions filling the disk
 /// between them.
@@ -1082,6 +1108,7 @@ fn flow_event_extra(
 fn explicit_production_target_seconds(
     demand: &crate::playback_control::PlaybackDemandSnapshot,
     configured_max_secs: i64,
+    starting: bool,
 ) -> i64 {
     if configured_max_secs <= 0 {
         return 0;
@@ -1089,8 +1116,14 @@ fn explicit_production_target_seconds(
     let runway_seconds = demand.runway_ms().saturating_add(999) / 1_000;
     let reserve_seconds =
         (demand.playback_rate * EXPLICIT_PRODUCTION_RESERVE_WALL_SECS).ceil() as i64;
+    // A demand-derived target is a statement about a playhead. A session with
+    // nothing published has no playhead, and its client's numbers are all
+    // zero, so the derivation floors at `EXPLICIT_STARTUP_FLOOR_SECS` until
+    // there is a playlist for a playhead to be in.
+    let floor = if starting { EXPLICIT_STARTUP_FLOOR_SECS } else { 0 };
     runway_seconds
         .saturating_add(reserve_seconds)
+        .max(floor)
         .clamp(1, configured_max_secs)
 }
 
@@ -1138,11 +1171,21 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
         };
     };
 
-    if matches!(
-        demand.demand,
-        crate::playback_control::PlaybackDemand::Hold
-            | crate::playback_control::PlaybackDemand::End
-    ) {
+    // Whether this session still owes the client the media that lets it open a
+    // playlist at all. See `EXPLICIT_STARTUP_FLOOR_SECS`: a client that has not
+    // started reports `hold`, and obeying that before there is anything to play
+    // is the deadlock that made every fallback terminal.
+    let starting = published_end_ms.unwrap_or(0) / 1_000 < EXPLICIT_STARTUP_FLOOR_SECS;
+
+    // `End` suspends from any state: that client is gone rather than waiting,
+    // so there is nothing further production could unblock. `Hold` is the one
+    // that cannot be honoured while starting.
+    let demand_suspends = match demand.demand {
+        crate::playback_control::PlaybackDemand::End => true,
+        crate::playback_control::PlaybackDemand::Hold => !starting,
+        crate::playback_control::PlaybackDemand::Active => false,
+    };
+    if demand_suspends {
         return FlowEvaluation {
             hold: Some(AheadHold {
                 reason: AheadHoldReason::Demand,
@@ -1159,7 +1202,8 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
         };
     }
 
-    let production_target_seconds = explicit_production_target_seconds(demand, limits.max_secs);
+    let production_target_seconds =
+        explicit_production_target_seconds(demand, limits.max_secs, starting);
     let production_ahead_seconds = published_end_ms.map(|published_end_ms| {
         media_origin_ms
             .saturating_add(published_end_ms)
@@ -26041,7 +26085,7 @@ pub(crate) mod tests {
 
         demand.buffered_through_ms = 1_000_000;
         assert_eq!(
-            explicit_production_target_seconds(&demand, limits.max_secs),
+            explicit_production_target_seconds(&demand, limits.max_secs, false),
             limits.max_secs,
             "untrusted client runway cannot raise the configured time ceiling"
         );
@@ -26092,8 +26136,18 @@ pub(crate) mod tests {
         );
     }
 
+    /// The deadlock this change exists to remove.
+    ///
+    /// This assertion used to read the other way — a `hold` before publication
+    /// held the producer at a target of zero — and that is what shipped. It
+    /// cost every fallback session: the client reports `hold` because its
+    /// `<video>` has never received a byte and is therefore paused, the
+    /// producer stops at zero, no playlist is ever written, and the playlist
+    /// request that same client is blocked on spends `PLAYLIST_WAIT_BUDGET`
+    /// and returns 503. The client cannot report `active` until it plays, and
+    /// it cannot play until this produces, so nothing ever broke the tie.
     #[test]
-    fn explicit_hold_stops_even_before_publication_and_seek_uses_its_target() {
+    fn a_starting_client_cannot_hold_a_session_that_has_published_nothing() {
         let limits = AheadLimits {
             max_secs: 180,
             max_bytes: 2_000,
@@ -26103,23 +26157,73 @@ pub(crate) mod tests {
             crate::playback_control::ClientPlatform::Apple,
         );
         demand.demand = crate::playback_control::PlaybackDemand::Hold;
-        let holding = evaluate_flow(FlowInputs {
-            physical_ahead: None,
-            published_end_ms: None,
-            media_origin_ms: 0,
-            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
-            demand: Some(&demand),
-            global_live_bytes: 0,
-            global_ahead_bytes: 0,
-            limits,
-            currently_suspended: false,
-        });
+        demand.playback_rate = 0.0;
+        let starting = |demand: &crate::playback_control::PlaybackDemandSnapshot,
+                        published_end_ms| {
+            evaluate_flow(FlowInputs {
+                physical_ahead: None,
+                published_end_ms,
+                media_origin_ms: 0,
+                lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+                demand: Some(demand),
+                global_live_bytes: 0,
+                global_ahead_bytes: 0,
+                limits,
+                currently_suspended: false,
+            })
+        };
+
+        let nothing_published = starting(&demand, None);
         assert_eq!(
-            holding.hold.map(|hold| hold.reason),
+            nothing_published.hold, None,
+            "a hold from a client that has never played must not stop production"
+        );
+        assert_eq!(
+            nothing_published.production_target_seconds,
+            Some(EXPLICIT_STARTUP_FLOOR_SECS),
+            "and the target is the floor that opens a playlist, not the one \
+             second a stopped playhead derives"
+        );
+
+        // The floor is an exit, not a state: it stops applying at exactly the
+        // point where there is a playlist for the hold to be about.
+        let below_floor = starting(&demand, Some(EXPLICIT_STARTUP_FLOOR_SECS * 1_000 - 1));
+        assert_eq!(below_floor.hold, None);
+        assert_eq!(
+            below_floor.production_target_seconds,
+            Some(EXPLICIT_STARTUP_FLOOR_SECS)
+        );
+
+        let at_floor = starting(&demand, Some(EXPLICIT_STARTUP_FLOOR_SECS * 1_000));
+        assert_eq!(
+            at_floor.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Demand),
+            "once the floor is published a pause is a pause again"
+        );
+        assert_eq!(at_floor.production_target_seconds, Some(0));
+
+        // `End` is not a client waiting to start; it is one that has gone. It
+        // suspends from any state, published or not, or a viewer who closes the
+        // tab during startup leaves an encoder running to the floor.
+        demand.demand = crate::playback_control::PlaybackDemand::End;
+        let ended = starting(&demand, None);
+        assert_eq!(
+            ended.hold.map(|hold| hold.reason),
             Some(AheadHoldReason::Demand)
         );
-        assert_eq!(holding.production_target_seconds, Some(0));
+        assert_eq!(ended.production_target_seconds, Some(0));
+    }
 
+    #[test]
+    fn a_seek_uses_its_target_rather_than_the_playhead_it_left() {
+        let limits = AheadLimits {
+            max_secs: 180,
+            max_bytes: 2_000,
+            global_max_bytes: 8_000,
+        };
+        let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Apple,
+        );
         demand.demand = crate::playback_control::PlaybackDemand::Active;
         demand.position_ms = 10_000;
         demand.seek_target_ms = Some(100_000);
