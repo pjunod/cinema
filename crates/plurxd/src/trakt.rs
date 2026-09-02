@@ -1182,14 +1182,19 @@ mod tests {
         let mgr = Arc::new(TraktManager::new(Arc::clone(&store), test_key(), base));
 
         mgr.link_start(user).await.expect("device link");
+        // Wait for the *last* thing the link writes, not the first.
+        //
+        // The linking task stores the auth and only then clears `pending` and
+        // sets `note`. Polling the store observes the earliest of those three,
+        // so on a loaded run this loop could break between the write and the
+        // note and assert against a status the task had not finished
+        // producing. It failed exactly that way twice in a full-suite run and
+        // passed alone every time, which is the shape of an observation-point
+        // race rather than a product defect.
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if store
-                    .get_trakt_auth(user)
-                    .await
-                    .expect("read auth")
-                    .is_some()
-                {
+                let status = mgr.status(user).await;
+                if status.auth.is_some() && status.pending.is_none() && status.note.is_some() {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -1197,6 +1202,14 @@ mod tests {
         })
         .await
         .expect("approved link persisted");
+        assert!(
+            store
+                .get_trakt_auth(user)
+                .await
+                .expect("read auth")
+                .is_some(),
+            "the status reports a link, so the store must hold one",
+        );
 
         let status = mgr.status(user).await;
         let auth = status.auth.expect("linked auth");
