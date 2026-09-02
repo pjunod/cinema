@@ -73,6 +73,15 @@ missing = "fail"
 timeout_seconds = 60
 
 [[checks]]
+id = "player-input-fence"
+title = "Key handling lives only in the player input adapters; fixture resources stay wired"
+command = "scripts/player-input-fence"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["python3"]
+missing = "fail"
+timeout_seconds = 30
+
+[[checks]]
 id = "rust-gate"
 title = "Rust format, lint, unit tests, and SQLite contracts"
 command = "make rust-check"
@@ -583,13 +592,14 @@ paths = [
   "scripts/dv-evidence",
   "scripts/verify-dv-timeline",
   "scripts/playback-lab",
+  "scripts/player-input-fence",
   "crates/plurx-core/examples/init-promotion-probe.rs",
   "scripts/vod-plan-probe",
   "scripts/vod-probe-fixtures.sh",
   "scripts/vod-probe-stub",
   "tests/playback/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "web-static", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
@@ -676,6 +686,7 @@ paths = [
   "docs/PLAYER-INPUT-CONTRACT*.md",
   "scripts/contrast-*",
   "scripts/player-contract-table",
+  "scripts/player-input-fence",
   "scripts/control-reporter-browser-check",
   "scripts/js-check",
   "scripts/reader-browser",
@@ -684,7 +695,7 @@ paths = [
   "tests/ui-structure.golden",
   "tests/web/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "web-static", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline"]
 
 [[points]]
@@ -715,7 +726,7 @@ id = "apple.client"
 title = "Native iOS and tvOS clients"
 contract = "The Apple clients preserve the shared API, navigation, preferences, and playback policies on both platforms."
 paths = ["clients/apple/**"]
-checks = ["apple-simulators"]
+checks = ["apple-simulators", "player-input-fence"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline", "offline.viewing"]
 
 [[points]]
@@ -723,7 +734,7 @@ id = "android.client"
 title = "Native Android and Google TV clients"
 contract = "The Android clients preserve API models, TV focus, preferences, and Media3 playback policy."
 paths = ["clients/android/**"]
-checks = ["android-jvm", "android-device"]
+checks = ["android-jvm", "android-device", "player-input-fence"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline", "offline.viewing"]
 
 [[points]]

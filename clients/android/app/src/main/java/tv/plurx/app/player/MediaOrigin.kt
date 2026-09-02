@@ -71,6 +71,11 @@ internal class ProgressiveMediaOrigin : TransferListener {
     @Volatile
     private var originMs: Long = 0L
 
+    @Volatile
+    private var observedBitsPerSecond: Long? = null
+    private var rateWindowStartedNanos: Long = 0L
+    private var rateWindowBytes: Long = 0L
+
     fun begin(uri: String, requestedOriginMs: Long) {
         synchronized(this) {
             expectedUri = uri
@@ -79,6 +84,8 @@ internal class ProgressiveMediaOrigin : TransferListener {
     }
 
     fun currentOriginMs(): Long = originMs
+
+    fun currentObservedBitsPerSecond(): Long? = observedBitsPerSecond
 
     internal fun acceptResponse(uri: String, headers: Map<String, List<String>>): Boolean {
         val resolved = mediaOriginMsFromHeaders(headers) ?: return false
@@ -101,6 +108,9 @@ internal class ProgressiveMediaOrigin : TransferListener {
         isNetwork: Boolean,
     ) {
         if (!isNetwork) return
+        synchronized(this) {
+            if (rateWindowStartedNanos == 0L) rateWindowStartedNanos = System.nanoTime()
+        }
         val http = source as? HttpDataSource ?: return
         acceptResponse(dataSpec.uri.toString(), http.responseHeaders)
     }
@@ -110,7 +120,21 @@ internal class ProgressiveMediaOrigin : TransferListener {
         dataSpec: DataSpec,
         isNetwork: Boolean,
         bytesTransferred: Int,
-    ) = Unit
+    ) {
+        if (!isNetwork || bytesTransferred <= 0) return
+        synchronized(this) {
+            val now = System.nanoTime()
+            if (rateWindowStartedNanos == 0L) rateWindowStartedNanos = now
+            rateWindowBytes += bytesTransferred
+            val elapsed = now - rateWindowStartedNanos
+            if (elapsed >= 500_000_000L) {
+                observedBitsPerSecond = (rateWindowBytes * 8.0 / (elapsed / 1_000_000_000.0))
+                    .toLong().coerceAtLeast(0L)
+                rateWindowStartedNanos = now
+                rateWindowBytes = 0L
+            }
+        }
+    }
 
     override fun onTransferEnd(
         source: DataSource,

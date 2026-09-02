@@ -1112,6 +1112,10 @@ impl MediaSessionStore for SqliteStore {
                         activation_route_matches(route, &activation)
                             && route.publication_ready_at_ms
                                 != MEDIA_SESSION_PUBLICATION_BLOCKED
+                            // Same reasoning as the replicated twin: identity
+                            // alone would return a boundary another
+                            // confirmation of this incarnation committed.
+                            && route.publication_ready_at_ms == publication_ready_at_ms
                     }) {
                         tx.commit()?;
                         return Ok(Some(existing.clone()));

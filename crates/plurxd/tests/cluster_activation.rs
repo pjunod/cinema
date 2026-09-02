@@ -18,12 +18,21 @@ fn process_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
     PROCESS_TEST_LOCK.blocking_lock()
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind test port")
-        .local_addr()
-        .expect("test port")
-        .port()
+fn free_ports() -> [u16; 3] {
+    // Asking the kernel for port zero and immediately closing the listener is
+    // only an availability probe. Repeating that probe may return the same
+    // ephemeral port, which would make the daemon's HTTP listener race its
+    // Hiqlite listeners and send an HTTP assertion to the wrong service.
+    // Hold all three probes open until their distinct ports are collected.
+    let listeners: [TcpListener; 3] = std::array::from_fn(|_| {
+        TcpListener::bind("127.0.0.1:0").expect("bind test port reservation")
+    });
+    std::array::from_fn(|index| {
+        listeners[index]
+            .local_addr()
+            .expect("reserved test port")
+            .port()
+    })
 }
 
 fn toml_string(value: &std::path::Path) -> String {
@@ -171,7 +180,7 @@ fn migration_quiescence_precedes_directory_cleanup_probes_and_http_bind() {
     drop(SqliteStore::open(&data.join("plurx.db")).expect("legacy SQLite source"));
 
     let config_path = root.path().join("plurx.toml");
-    let server_port = free_port();
+    let [server_port, raft_port, api_port] = free_ports();
     std::fs::write(
         &config_path,
         format!(
@@ -184,8 +193,8 @@ fn migration_quiescence_precedes_directory_cleanup_probes_and_http_bind() {
              api_bind = \"127.0.0.1:{}\"\n\
              advertise_host = \"127.0.0.1\"\n",
             toml_string(&data),
-            free_port(),
-            free_port(),
+            raft_port,
+            api_port,
         ),
     )
     .expect("activation config");
@@ -283,6 +292,7 @@ fn run_to_completion_with_failpoint(root: &std::path::Path, failpoint: &str) -> 
     drop(SqliteStore::open(&data.join("plurx.db")).expect("legacy SQLite source"));
 
     let config_path = root.join("plurx.toml");
+    let [server_port, raft_port, api_port] = free_ports();
     std::fs::write(
         &config_path,
         format!(
@@ -294,10 +304,10 @@ fn run_to_completion_with_failpoint(root: &std::path::Path, failpoint: &str) -> 
              raft_bind = \"127.0.0.1:{}\"\n\
              api_bind = \"127.0.0.1:{}\"\n\
              advertise_host = \"127.0.0.1\"\n",
-            free_port(),
+            server_port,
             toml_string(&data),
-            free_port(),
-            free_port(),
+            raft_port,
+            api_port,
         ),
     )
     .expect("shutdown failpoint config");
@@ -332,6 +342,7 @@ fn m2_ignores_explicit_non_loopback_cluster_listener_hosts() {
     drop(SqliteStore::open(&data.join("plurx.db")).expect("legacy SQLite source"));
 
     let config_path = root.path().join("plurx.toml");
+    let [server_port, raft_port, api_port] = free_ports();
     std::fs::write(
         &config_path,
         format!(
@@ -343,10 +354,10 @@ fn m2_ignores_explicit_non_loopback_cluster_listener_hosts() {
              raft_bind = \"192.0.2.40:{}\"\n\
              api_bind = \"198.51.100.40:{}\"\n\
              advertise_host = \"203.0.113.40\"\n",
-            free_port(),
+            server_port,
             toml_string(&data),
-            free_port(),
-            free_port(),
+            raft_port,
+            api_port,
         ),
     )
     .expect("listener host config");
@@ -388,7 +399,7 @@ fn maintenance_commands_reach_tls_on_an_activated_node() {
     drop(SqliteStore::open(&data.join("plurx.db")).expect("legacy SQLite source"));
 
     let config_path = root.path().join("plurx.toml");
-    let server_port = free_port();
+    let [server_port, raft_port, api_port] = free_ports();
     std::fs::write(
         &config_path,
         format!(
@@ -401,8 +412,8 @@ fn maintenance_commands_reach_tls_on_an_activated_node() {
              api_bind = \"127.0.0.1:{}\"\n\
              advertise_host = \"127.0.0.1\"\n",
             toml_string(&data),
-            free_port(),
-            free_port(),
+            raft_port,
+            api_port,
         ),
     )
     .expect("maintenance config");
@@ -462,7 +473,7 @@ fn subsequent_plurxd_run_reopens_the_completed_replicated_target() {
     let source_before = std::fs::read(data.join("plurx.db")).expect("source bytes");
 
     let config_path = root.path().join("plurx.toml");
-    let server_port = free_port();
+    let [server_port, raft_port, api_port] = free_ports();
     std::fs::write(
         &config_path,
         format!(
@@ -475,8 +486,8 @@ fn subsequent_plurxd_run_reopens_the_completed_replicated_target() {
              api_bind = \"127.0.0.1:{}\"\n\
              advertise_host = \"127.0.0.1\"\n",
             toml_string(&data),
-            free_port(),
-            free_port(),
+            raft_port,
+            api_port,
         ),
     )
     .expect("daemon config");
@@ -581,7 +592,7 @@ async fn sigkill_recovery_preserves_acknowledged_writes(advertise_host: &str) {
     drop(source);
 
     let config_path = root.path().join("plurx.toml");
-    let server_port = free_port();
+    let [server_port, raft_port, api_port] = free_ports();
     std::fs::write(
         &config_path,
         format!(
@@ -594,8 +605,8 @@ async fn sigkill_recovery_preserves_acknowledged_writes(advertise_host: &str) {
              api_bind = \"127.0.0.1:{}\"\n\
              advertise_host = \"{advertise_host}\"\n",
             toml_string(&data),
-            free_port(),
-            free_port(),
+            raft_port,
+            api_port,
         ),
     )
     .expect("SIGKILL recovery config");

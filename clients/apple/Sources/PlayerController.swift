@@ -1430,6 +1430,8 @@ final class PlayerController: ObservableObject {
     @Published private(set) var finished = false
     @Published private(set) var pgsOverlayWindow: PGSOverlayWindow?
     @Published private(set) var pgsOverlayStatus: PGSOverlayStatus = .off
+    @Published private(set) var lastTTFFMs: Int?
+    @Published private(set) var playbackControlSummary: String?
 
     private var baseMs = 0
     private var itemId = 0
@@ -1828,6 +1830,8 @@ final class PlayerController: ObservableObject {
         compatibilityFallbackAttempted = false
         forceCompatibilityTranscode = false
         ttffReason = currentMs > 0 ? "resume" : "cold-start"
+        lastTTFFMs = nil
+        playbackControlSummary = nil
         ttffMeasurement.opened(at: currentMs)
         attachmentRecovery.opened(at: startMs)
         blackFrameWatchdog.opened()
@@ -2345,6 +2349,7 @@ final class PlayerController: ObservableObject {
         clearPGSOverlaySelection()
         pgsOverlayItemGeneration &+= 1
         playbackControl.end()
+        playbackControlSummary = nil
         // A verdict survives a reopen because the failure it explains usually
         // arrives after one. It must not survive the title: a confident
         // sentence about the wrong film is worse than a generic one.
@@ -4404,6 +4409,7 @@ final class PlayerController: ObservableObject {
         guard let ms = ttffMeasurement.observe(positionMs: positionMs, playing: playing) else {
             return
         }
+        lastTTFFMs = ms
         let method = clientLogMethod
         let height = sessionStatus?.targetHeight
             ?? selectedHeight
@@ -5734,6 +5740,20 @@ final class PlayerController: ObservableObject {
     }
 
     #if os(iOS)
+    /// Set by the player view while it is on screen. The lock screen and the
+    /// control centre are inputs like any other: without this they were a
+    /// second answer to "what does skip do", and they answered it during a
+    /// pending scrub, where the touch table says `ignore`.
+    var remoteInput: (@MainActor (PlayerContractInput) -> Bool)?
+
+    private func routeRemote(_ input: PlayerContractInput, otherwise fallback: () -> Void) {
+        if let remoteInput {
+            _ = remoteInput(input)
+        } else {
+            fallback()
+        }
+    }
+
     private func installRemoteCommands() {
         let commands = MPRemoteCommandCenter.shared()
         commands.playCommand.isEnabled = true
@@ -5765,17 +5785,26 @@ final class PlayerController: ObservableObject {
         }))
         remoteTargets.append((commands.togglePlayPauseCommand,
                               commands.togglePlayPauseCommand.addTarget { [weak self] _ in
-            Task { @MainActor in self?.togglePlayPause() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.routeRemote(.playPause) { self.togglePlayPause() }
+            }
             return .success
         }))
         remoteTargets.append((commands.skipBackwardCommand,
                               commands.skipBackwardCommand.addTarget { [weak self] _ in
-            Task { @MainActor in self?.skip(seconds: -10) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.routeRemote(.skipBack) { self.skip(seconds: -10) }
+            }
             return .success
         }))
         remoteTargets.append((commands.skipForwardCommand,
                               commands.skipForwardCommand.addTarget { [weak self] _ in
-            Task { @MainActor in self?.skip(seconds: 10) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.routeRemote(.skipForward) { self.skip(seconds: 10) }
+            }
             return .success
         }))
         remoteTargets.append((commands.changePlaybackPositionCommand,
@@ -5822,6 +5851,7 @@ extension PlayerController {
     func beginPlaybackControl(_ hls: HlsStart, origin: String) {
         guard let bootstrap = hls.control, bootstrap.isValid else {
             playbackControl.end()
+            playbackControlSummary = nil
             return
         }
         // The override describes the session that just ended. Carrying it into
@@ -5841,6 +5871,7 @@ extension PlayerController {
                 self?.retryNativeSubtitleAfterReadiness()
             }
         )
+        playbackControlSummary = "Owner epoch \(bootstrap.controlEpoch) · reporting"
     }
 
     /// AVPlayer may keep the first empty `no-store` subtitle segment. Toggle

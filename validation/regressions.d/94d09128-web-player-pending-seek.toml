@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["94d09128"]
+points = ["web.experience"]
+checks = ["web-static", "player-input-fence"]
+reason = "The correction and its evidence landed together in `crates/plurxd/src/web/index.html` and `tests/playback/web-policy.test.js`. The shipped-adapter test builds the real `playerInputState`, `nudge`, `commitPendingSeek`, `cancelPendingSeek`, `applyPlayerOutcome` and `handlePlayerKeydown` with the timer as a parameter, so every defect has a case that fails without the change: a skip armed before a preview must not seek over the committed one (restoring the separate `_nudgeBase`/`_nudgeAcc` accumulator fails the second `seekTo` assertion), a pending scrub outranks an open info panel for Escape (restoring the info-before-scrub order in `playerInputState` fails it), a pointer drag reports `scrub`, a coarse pointer routes through the touch table, and `hide` blurs the control it was holding. `make web-check` runs that file, and `web-static` runs `make web-check`."
