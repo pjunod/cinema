@@ -424,10 +424,11 @@ prepare, how many fall back and on which axis, and how often
 `throughput_unproven` fires, which is the residual most likely to make the
 whole path never fire in practice.
 
-Suggested shape, one counter with two labels rather than a family:
+Shipped shape — one counter, three labels, `prepare` folded into the outcome
+rather than split across a second label:
 
 ```
-plurx_playback_preparation_decisions_total{decision="prepare|fallback",axis="…",reason="…"}
+plurx_playback_preparation_decisions_total{platform="…",axis="…",outcome="…"}
 ```
 
 The vocabulary is already fixed and tested: `PreparationAxis::as_str` and
@@ -444,12 +445,12 @@ counters and every deploy resets them (M6 handoff §4).
 datapoint arrived on m6 on 2026-09-02 — one `resolution_or_bitrate` change,
 outcome `client_cannot_prepare` — and every datapoint after it will read the
 same, for a reason visible in `decide_preparation` itself: the client gate is
-checked *above* the axis rule and the throughput floor, and both shipped
-clients hardcode the literal `false`. So the shadow counter reports which axes
-viewers cross, which is worth having, and is structurally incapable of
-reporting the two things §3.3 says it exists for — whether `PREPARED_AXIS`
-refuses most transitions anyway, and whether `throughput_unproven` refuses so
-often that the prepared path would never fire.
+checked *above* the axis rule and the throughput floor, and all three clients
+hardcode the literal `false`. So the shadow counter reports which axes viewers
+cross, which is worth having, and is structurally incapable of reporting the
+two things §3.3 says it exists for — whether `PREPARED_AXIS` refuses most
+transitions anyway, and whether the throughput floor refuses so often that the
+prepared path would never fire.
 
 The ordering is not the defect; it is deliberate (see the `MultipleAxes`
 comment) and it will be the production decision once §3.4 stages. The defect
@@ -457,29 +458,67 @@ was believing one counter could answer a question about a client release that
 has not shipped. So the same transition is decided twice and recorded twice:
 
 ```
-plurx_playback_preparation_decisions_total{axis="…",outcome="…"}       # today
-plurx_playback_preparation_counterfactual_total{axis="…",outcome="…"}  # after the release
+plurx_playback_preparation_decisions_total{platform="…",axis="…",outcome="…"}       # today
+plurx_playback_preparation_counterfactual_total{platform="…",axis="…",outcome="…"}  # after the release
 ```
 
 The second is `decide_preparation_after_client_release` — the identical
 decision with the client gate assumed satisfied, and nothing else changed. Both
-counters carry the same axis/outcome cross product so they can be subtracted
-series by series; the counterfactual's `client_cannot_prepare` column is zero
-forever by construction, and is published anyway so that a reader who has the
-wrong counter in hand notices.
+counters carry the same platform/axis/outcome cross product so they can be
+subtracted series by series; the counterfactual's `client_cannot_prepare`
+column is zero forever by construction, and is published anyway so that a
+reader who has the wrong counter in hand notices.
+
+##### The throughput inputs do not exist yet, and the outcome says so
+
+A second literal would have poisoned this the same way the capability did.
+`have_headroom_for_a_second_pipeline` refuses on a missing value as well as on
+a tight link, and on today's fleet **the values are missing almost everywhere**:
+
+| input | who fills it | who does not |
+|---|---|---|
+| `observed_download_bps` | the web client, from `hls.bandwidthEstimate` | Apple (`PlayerController.swift`) and Android (`Controller.kt`) both send null |
+| `delivered_bps` | Live sessions | every VOD session — `DeliveryView::from_status` leaves it `None`, and VOD serves most sessions |
+
+Folded into one `throughput_unproven`, that would have published a counter
+reading "the link was too tight" for traffic where nobody looked at the link —
+and §3.3 had already primed the reader to expect exactly that shape, so an
+artifact of a missing field would have been read as confirmation of the
+hypothesis it was supposed to test. So the refusal is two outcomes:
+
+- `throughput_unreported` — one of the inputs is absent. A statement about
+  **instrumentation**, and the thing to fix before the floor can be judged.
+- `throughput_insufficient` — the link *was* measured and does not carry a
+  second pipeline. The only reading that speaks to the throughput rule.
+
+`platform` is a label for the same reason: only the web client can currently
+reach either throughput verdict, so an unlabelled counter would mix the one
+platform that can produce a number with the two the client release is about.
 
 **How to read them.** `decisions` is what M6 would do on today's fleet.
 `counterfactual` is what M6 would do after a client release flipped Apple's
 literal, and its `prepare` column is therefore the volume that release would
-actually unlock. If that column stays near zero while `throughput_unproven`
-climbs, the client release is not the thing standing between M6 and working,
-and §3.4 should not ship on the strength of the capability alone. The two agree
-exactly on `multiple_axes` and on `unchanged`, by the ranking above — a
-divergence there is a bug in the ranking, and there is a test that says so.
+actually unlock. Read the refusals in this order:
 
-**Acceptance:** `plurx_playback_preparation_counterfactual_total` is nonzero on
-a node serving real traffic, and the `prepare` against `throughput_unproven`
-against `axis_not_proven` split is recorded in the status page with a date.
+1. `throughput_unreported` dominant → **nothing has been measured yet.** Fix
+   the inputs (client-side estimate, VOD delivered rate) before drawing any
+   conclusion about the floor. This is the expected reading today.
+2. `axis_not_proven` dominant → viewers mostly cross axes M6 does not prepare,
+   and `PREPARED_AXIS` — not the client release — is what limits the feature.
+3. `throughput_insufficient` dominant, on `platform="web"` where the inputs
+   exist → the floor itself is what would refuse, and §3.4 should not ship on
+   the strength of the capability alone.
+
+The two counters agree exactly on `multiple_axes` and on `unchanged`, by the
+ranking above — a divergence there is a bug in the ranking, and there is a test
+that says so.
+
+**Acceptance:** on a node serving real traffic, the counterfactual's
+`resolution_or_bitrate` row is nonzero and its outcome split — `prepare`
+against `throughput_unreported` against `throughput_insufficient` against
+`axis_not_proven` — is recorded in the status page with a date and a platform
+breakdown. A grand total is not an acceptance: both counters are fed from the
+same transitions and their totals are always equal.
 
 ### 3.4 Stage on `Prepare`
 

@@ -4870,12 +4870,20 @@ async fn control_local_inner(
         // spent its deadline by here and the response is already built.
         tokio::spawn(record_preparation_shadow(
             state.clone(),
-            recipe.clone(),
-            request.selection.clone(),
-            request.observed_download_bps,
-            response.effective_selection.clone(),
-            response.delivery.delivered_bps,
-            result.selection.capabilities.clone(),
+            PreparationShadowInputs {
+                recipe: recipe.clone(),
+                selection: request.selection.clone(),
+                observed_download_bps: request.observed_download_bps,
+                delivered: response.effective_selection.clone(),
+                delivered_bps: response.delivery.delivered_bps,
+                capabilities: result.selection.capabilities.clone(),
+                // The exchange's own accepted platform, the same value
+                // `record_platform` just used — not the retained capability
+                // document's, which can be absent on a session this build did
+                // not start and would then leave the measurement
+                // unattributable.
+                platform: result.platform,
+            },
         ));
     }
     tracing::debug!(
@@ -4909,6 +4917,21 @@ static PREPARATION_SHADOWS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
 /// and far below the point where the store notices.
 const MAX_PREPARATION_SHADOWS: usize = 32;
 
+/// Everything one exchange said, gathered for the shadow measurement.
+///
+/// A struct rather than eight parameters: these are all *one exchange's*
+/// answer, they are always passed together, and the spawned task has no reason
+/// to be able to take them from different exchanges.
+struct PreparationShadowInputs {
+    recipe: RemoteStartRequest,
+    selection: crate::playback_control::ClientSelection,
+    observed_download_bps: Option<u64>,
+    delivered: crate::playback_control::EffectiveSelection,
+    delivered_bps: Option<i64>,
+    capabilities: Option<crate::playback_control::DynamicCapabilities>,
+    platform: crate::playback_control::ClientPlatform,
+}
+
 /// Record what M6 would have done about this exchange's selection change.
 ///
 /// **Shadow: nothing is staged and nothing about the response depends on it.**
@@ -4926,15 +4949,16 @@ const MAX_PREPARATION_SHADOWS: usize = 32;
 /// Measured against **the response this exchange actually sent**: the client
 /// was told a height and a rate, and a shadow measuring different ones would
 /// answer a question nobody asked.
-async fn record_preparation_shadow(
-    state: AppState,
-    recipe: RemoteStartRequest,
-    selection: crate::playback_control::ClientSelection,
-    observed_download_bps: Option<u64>,
-    delivered: crate::playback_control::EffectiveSelection,
-    delivered_bps: Option<i64>,
-    capabilities: Option<crate::playback_control::DynamicCapabilities>,
-) {
+async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowInputs) {
+    let PreparationShadowInputs {
+        recipe,
+        selection,
+        observed_download_bps,
+        delivered,
+        delivered_bps,
+        capabilities,
+        platform,
+    } = exchange;
     // Released on every exit below, including the early one.
     struct InFlight;
     impl Drop for InFlight {
@@ -5009,6 +5033,7 @@ async fn record_preparation_shadow(
         delivered_bps,
     };
     crate::playback_control::record_preparation_decision(
+        platform,
         crate::playback_control::decide_preparation(
             delivered_view,
             proposed_view,
@@ -5016,13 +5041,19 @@ async fn record_preparation_shadow(
             conditions,
         ),
     );
-    // Both shipped clients hardcode the capability `false`, so the counter
-    // above books every single-axis transition as `client_cannot_prepare` and
-    // can say nothing about the axis rule or the throughput floor. This is the
+    // All three clients hardcode the capability `false`, so the counter above
+    // books every single-axis transition as `client_cannot_prepare` and can
+    // say nothing about the axis rule or the throughput floor. This is the
     // same transition decided as if that literal had already flipped — the
     // only way, short of shipping a client, to learn whether the prepared path
     // would ever fire.
+    //
+    // Expect `throughput_unreported` to dominate it at first, and read that as
+    // a statement about the *inputs*: the native clients send no
+    // `observed_download_bps` and VOD sessions carry no `delivered_bps`. That
+    // is a finding about instrumentation, not about links.
     crate::playback_control::record_preparation_counterfactual(
+        platform,
         crate::playback_control::decide_preparation_after_client_release(
             delivered_view,
             proposed_view,
