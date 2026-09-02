@@ -61,15 +61,16 @@ The release image contains checksum-pinned `dovi_tool` 2.3.3 and Debian's
 exact `mkvmerge` 74.0.0 build. A bare-metal install needs both commands on
 `PATH`, or explicit `PLURX_DOVI_TOOL` and `PLURX_MKVMERGE` paths. Startup probes
 both. If either is missing, too old, or does not return a version, Settings →
-Libraries names the dependency and disables only on-disk conversion; scanning
+Maintenance names the dependency and disables only on-disk conversion; scanning
 and playback still start normally.
 
 To convert:
 
-1. Open Settings → Libraries. Leave **Keep the Profile 7 original** enabled
+1. Open Settings → Maintenance → **Dolby Vision on disk**. Leave **Keep the Profile 7 original** enabled
    unless the storage cost is unacceptable; the retained file is
    `<source>.p7.orig`.
-2. Choose **Manual** for a library and save. **Convert now** queues its current
+2. In Settings → Libraries, open the library's **Configure** drawer, choose
+   **Manual** for Dolby Vision conversion and save the mode. **Convert now** queues its current
    eligible files, including failed rows when explicitly retried. **Automatic**
    also queues newly discovered eligible files during scheduler passes.
 3. Set **Parallel files** conservatively. The default is one and the allowed
@@ -117,7 +118,7 @@ the public Profile 8 path still exists, the second name references the same
 inode and consumes no additional media data blocks. This requires the library
 filesystem to support same-filesystem hard links.
 
-Settings → Libraries shows the guard lifecycle and a bounded list of orphaned
+Settings → Maintenance → Dolby Vision on disk shows the guard lifecycle and a bounded list of orphaned
 records. `intent` means the safety link is being recorded, `active` is the
 normal committed state, `guard_removed` means the link is gone and private
 scratch cleanup remains, and `scratch_removed` is ready for ledger retirement.
@@ -2738,7 +2739,7 @@ need its DHCP lease renewed mid-burst can lose the lease and then fail to get it
 back, because the broadcast `DISCOVER` goes out at the lowest basic rate and is
 the first thing a saturated AP drops.
 
-**Settings → Playback → Delivery speed** bounds it. The first 30 seconds of any
+**Settings → Playback → Streaming → Stream pace** bounds it. The first 30 seconds of any
 stream always arrive flat-out, so starting and seeking stay instant; the limit
 applies after that.
 
@@ -2763,7 +2764,7 @@ Delivery speed above governs the progressive remux, which the browser pulls at
 its own pace. An HLS session — a transcode, or the copy-video repackaging
 Safari and Apple TV get — is different: ffmpeg writes segments to disk and the
 player fetches them, so *the server decides how much buffer the viewer is
-allowed to have.* **Settings → Playback → Transcode buffering** is that
+allowed to have.* **Settings → Playback → Streaming → Transcode buffering** is that
 decision, in three parts.
 
 | Control | Setting key | Default | What it does |

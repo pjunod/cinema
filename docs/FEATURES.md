@@ -77,9 +77,11 @@ books, and home media.
   themselves retry a 429 or a 5xx (honouring `Retry-After`); a 404 stays a fast
   permanent no.
 - **Scheduled jobs**, off by default except the artwork retry. Per library: a
-  **scan** interval and a **refresh art** interval (Settings → Libraries).
-  Server-wide: **retry unreadable files**, **retry missing artwork** (every 30
-  minutes unless turned off), and **clean transcode cache**. Intervals are
+  **scan** interval and a **refresh art** interval (Settings → Libraries →
+  the library's **Configure** drawer).
+  Server-wide, under Settings → Maintenance: **retry unreadable files**,
+  **retry missing artwork** (every 30 minutes unless turned off), and
+  **clean transcode cache**. Intervals are
   minutes with a floor of 15 · a refresh beats a scan when both fall due · runs are stamped on
   completion, on the library row, so neither a slow scan nor a nightly reboot can
   put the schedule into a spin. **Scan at startup** covers what an interval
@@ -576,7 +578,7 @@ sync. Off until keys are entered; plurx works fully without it.
 
 - **Bring your own API app.** The admin creates an app at
   trakt.tv/oauth/applications (redirect URI `urn:ietf:wg:oauth:2.0:oob`) and
-  pastes its client id + secret into Settings → Trakt — same pattern as the
+  pastes its client id + secret into Settings → Integrations → Trakt — same pattern as the
   TMDB key, no shared/central credentials.
 - **Device-code linking:** Connect shows an 8-character code to enter at
   trakt.tv/activate; the server polls in the background and the card flips to

@@ -8,6 +8,35 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Changed
+
+- **Settings is reorganised: one route per section, a grouped rail, one Save
+  per card.** Every section is addressable (`#/settings/playback`; the bare
+  `#/settings` and the older `#/admin` land on the last section visited), so
+  the back button walks between sections and a link can name one. The rail
+  groups sections by who acts on them — Content (Libraries, Metadata),
+  Playback (Playback, Analysis), Server (Maintenance, Users, System, Cluster),
+  Outside (Integrations) — and collapses to a chip strip on narrow screens.
+  A new **Maintenance** section gathers the scheduled jobs, pre-transcoding,
+  telemetry retention and Dolby Vision on-disk conversion that used to sit
+  under Libraries; a new **Integrations** section holds Trakt and monarr, so
+  Metadata is only the TMDB and OMDb providers. Libraries keeps a table that
+  only reports — a library's schedule and Dolby Vision mode open in a drawer
+  under its row, and Add library is a drawer from the header. Playback is
+  three cards with three Saves (defaults for every player, streaming, this
+  browser only) instead of one page-wide Save; every card's Save wakes only
+  when something in that card changes. Users adds and resets passwords
+  through the same drawer, replacing the two `prompt()` dialogs. The three
+  unnamed viewer popovers (layout+theme, light/dark, poster size) are one
+  **Appearance** menu, named as the mobile apps name it.
+- **The mobile Settings screens agree with each other.** iOS/tvOS and
+  Android run the same section order — Playback, Downloads, Appearance,
+  Account, About — with the same labels (Poster size, Home layout, Skip
+  intros and credits). Apple gains the **Quality** and **Skip intros and
+  credits** preferences Android had; Android gains Apple's **Subtitle
+  switching** (Instant / After a short pause) and the two-row Account layout
+  with Sign out last.
+
 ### Added
 
 - **The noirr fleet can build plurxd once and pull the same stamped image on
