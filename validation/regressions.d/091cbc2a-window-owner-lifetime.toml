@@ -1,0 +1,36 @@
+version = 1
+
+[[coverage]]
+commits = ["091cbc2a"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+The corrections and their evidence landed together, and each one was executed \
+against the defect before it was fixed. The settlement semaphore was closed by a \
+tail statement rather than a destructor, so a panicking flight, a runtime \
+shutting down, or a request cancelled between claiming a slot and spawning left \
+`release_session_window` waiting with no timeout — from inside terminal \
+retirement and from inside a VOD reaper that holds a lifecycle gate. \
+`rolling_retirement_releases_the_window_a_playback_owned` in \
+`crates/plurxd/src/http/hls.rs` drives that release through `stop_session` \
+rather than by calling the release function directly, and it was run against a \
+tree with `release_session_window` removed from `own_rolling_retirement`, where \
+it fails on the slot still being owned. Releasing was a sweep rather than a \
+fence, so a segment request that read its authority just before teardown could \
+install an owner nothing would ever release; \
+`the_owner_latch_joins_refuses_and_displaces_by_authority` asserts a released \
+session starts nothing until its fence lapses, and was run against a tree with \
+the fence disabled, where it fails. That same test drives the ownership latch's \
+arms directly because the handler's destination gate answers first and hides \
+them. The coverage rule was containment, which refuses the window immediately \
+ahead of the playhead at every grid boundary — the exact gap the bridge exists \
+to close; `coverage_admits_the_look_ahead_and_refuses_both_ends` was run against \
+the restored containment predicate and fails on the look-ahead case. Two \
+acceptance facts were vacuous: no producer in the storm fixture could publish \
+anything, so `a_twenty_seek_storm_starts_work_only_for_the_settled_target` now \
+releases every held producer before judging what published, and asserts on a \
+per-session live-flight count taken under the owner registry rather than on a \
+producer-side counter that stops counting before a flight has finished dying — \
+run against a tree with the settlement wait removed, it fails with two flights \
+alive at once. All of these run under `rust-gate` and `rust-gate-ci`.
+"""
