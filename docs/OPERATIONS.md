@@ -1081,11 +1081,25 @@ learner_route_ineligible` before its handler runs.
 | Surface | Learner behavior |
 |---|---|
 | Liveness, readiness, metrics, app assets, and `GET /api/v1/cluster/nodes` | Allowed. `/readyz` still returns 503 whenever the serving fence has no fresh quorum proof. |
+| Cluster status and evidence | `GET /api/v1/cluster/status`, `GET /api/v1/cluster/support-bundle`, and the internal operations-status read a peer's fan-out addresses to this node. A learner both answers that read and, when an operator opens the Cluster panel on the learner itself, fans it out to the rest of the roster. |
 | Native catalogue | GET libraries, library items, item detail, hubs, and home previews only; each bounded read still enforces its quorum/apply watermark. |
 | Plex catalogue | GET sections, section contents, and metadata shapes only, under the same bounded-read policy. |
-| Node-local media | Exact method-and-route shapes only: GET media bytes/status/playlists/images/subtitles, POST the declared HLS/publication and authenticated internal session starts, and DELETE those node-local sessions. The serving fence and peer proof remain mandatory. PUT audio offsets and every offline-package create/delete/lease/complete mutation are refused. |
+| Node-local media | Exact method-and-route shapes only: GET media bytes/status/playlists/images/subtitles and the content-addressed fragment-index blob (one key segment), POST the declared HLS/publication and authenticated internal session starts, activations, relays, aborts and controls, the media-pool offer and the shared-cache canary, and DELETE those node-local sessions. The serving fence and peer proof remain mandatory: the proof must be signed by a live, non-removed committed **member**, which is a learner as well as a voter. PUT audio offsets and every offline-package create/delete/lease/complete mutation are refused. |
 | Self leave | `POST /api/v1/cluster/leave`, with the body bound to this backend's `local_node_id`. |
 | Authority and mutations | Refused: settings, searches outside the bounded inventory, library/user/API-key mutations, providers, scans, Trakt, scheduler and repair jobs, protocol changes, token issuance, promotion, and remote-node removal. |
+
+A learner is a placement target as well as a placement origin: the media-pool
+rollout precondition and the shared-cache canary count the committed voters
+this node can see rather than assuming this node is one of them, so a ready
+learner accepts delegated sessions and starts them on other nodes.
+
+Both ends of an internal peer proof are checked against committed membership,
+and the internal peer surface is member-scoped in both directions: a learner
+may answer a voter's signed request, and a voter may answer a learner's.
+Membership *mutation* keeps the committed-voter predicate — that is the one
+refusal in the credential design that is authorization rather than
+authentication. Activity aggregation stays voter-only on both ends, because its
+peer directory never names a learner.
 
 `GET /api/v1/cluster/nodes` exposes the proof instead of making an operator
 infer it from a green heartbeat:

@@ -846,7 +846,7 @@ class PlaybackControlWireTest {
     }
 
     @Test
-    fun `the response decodes the server's field names and ignores what M2 does not consume`() {
+    fun `the response decodes and consumes subtitle readiness`() {
         val decoded = json.decodeFromString(
             ControlResponse.serializer(),
             """
@@ -854,11 +854,33 @@ class PlaybackControlWireTest {
              "generation":"11111111-1111-4111-8111-111111111111",
              "control_epoch":7,"accepted_sequence":4,"server_time_unix_ms":1,
              "lease":{"state":"active","renew_after_ms":5000,"expires_at_unix_ms":2},
-             "delivery":{},"effective_selection":{},"action":{"type":"none"}}
+             "delivery":{"subtitle_readiness":"warming"},
+             "effective_selection":{},"action":{"type":"none"}}
             """.trimIndent(),
         )
         assertEquals(4, decoded.acceptedSequence)
+        assertEquals("warming", decoded.delivery?.subtitleReadiness)
         assertEquals("none", decoded.action.type)
+    }
+
+    @Test
+    fun `subtitle readiness is closed and a ready edge retries once`() {
+        mapOf(
+            "ready" to true,
+            "warming" to false,
+            "unavailable" to false,
+            "a_value_from_next_year" to false,
+            "" to false,
+        ).forEach { (value, expected) ->
+            assertEquals(expected, SubtitleReadinessDecision.meansReady(value), value)
+        }
+        assertFalse(SubtitleReadinessDecision.meansReady(null))
+
+        val transition = SubtitleReadinessRetryState()
+        assertFalse(transition.record(null))
+        assertFalse(transition.record("warming"))
+        assertTrue(transition.record("ready"))
+        assertFalse(transition.record("ready"), "control cadence cannot retry again")
     }
 }
 

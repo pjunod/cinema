@@ -1440,6 +1440,9 @@ pub struct SettingsDto {
     pub analysis_lease_secs: i64,
     pub analysis_backoff_base_secs: i64,
     pub analysis_backoff_max_secs: i64,
+    /// Forward subtitle materialization span. Absent storage resolves to the
+    /// bounded 200-second server default.
+    pub subtitle_window_secs: i64,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
@@ -1644,6 +1647,9 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         setting(keys::ANALYSIS_BACKOFF_MAX_SECS).as_deref(),
     )
     .max(analysis_backoff_base_secs);
+    let subtitle_window_secs = plurx_core::store::bounded_subtitle_window_seconds(
+        setting(keys::SUBTITLE_WINDOW_SECS).as_deref(),
+    );
     Ok(SettingsDto {
         server_name,
         tmdb_configured: !tmdb_api_key.is_empty(),
@@ -1684,6 +1690,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         analysis_lease_secs,
         analysis_backoff_base_secs,
         analysis_backoff_max_secs,
+        subtitle_window_secs,
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
@@ -1747,6 +1754,7 @@ pub struct UpdateSettings {
     pub analysis_lease_secs: Option<i64>,
     pub analysis_backoff_base_secs: Option<i64>,
     pub analysis_backoff_max_secs: Option<i64>,
+    pub subtitle_window_secs: Option<i64>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -1826,6 +1834,16 @@ pub async fn update_settings(
         return Err(ApiError::BadRequest(
             "dv_disk_convert_parallel must be between 1 and 8".into(),
         ));
+    }
+    if req.subtitle_window_secs.is_some_and(|seconds| {
+        !(plurx_core::store::MIN_SUBTITLE_WINDOW_SECS..=plurx_core::store::MAX_SUBTITLE_WINDOW_SECS)
+            .contains(&seconds)
+    }) {
+        return Err(ApiError::BadRequest(format!(
+            "subtitle_window_secs must be between {} and {}",
+            plurx_core::store::MIN_SUBTITLE_WINDOW_SECS,
+            plurx_core::store::MAX_SUBTITLE_WINDOW_SECS
+        )));
     }
     let analysis_settings = if req.analysis_max_attempts.is_some()
         || req.analysis_lease_secs.is_some()
@@ -2185,6 +2203,12 @@ pub async fn update_settings(
             .map(|(key, value)| (*key, value.as_str()))
             .collect::<Vec<_>>();
         state.store.put_settings(&borrowed).await?;
+    }
+    if let Some(seconds) = req.subtitle_window_secs {
+        state
+            .store
+            .put_setting(keys::SUBTITLE_WINDOW_SECS, &seconds.to_string())
+            .await?;
     }
     if let Some(name) = server_name {
         state.store.put_setting(keys::SERVER_NAME, name).await?;

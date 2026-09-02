@@ -929,16 +929,37 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(decoded.leaseTimeoutMs, 60_000)
     }
 
-    func testTheResponseDecodesTheServersFieldNamesAndIgnoresWhatM2DoesNotConsume() throws {
+    func testTheResponseDecodesTheServersFieldNamesAndConsumesSubtitleReadiness() throws {
         let json = """
         {"protocol":"plurx-playback-control-v1",
          "generation":"11111111-1111-4111-8111-111111111111",
          "control_epoch":7,"accepted_sequence":4,"server_time_unix_ms":1,
          "lease":{"state":"active","renew_after_ms":5000,"expires_at_unix_ms":2},
-         "delivery":{},"effective_selection":{},"action":{"type":"none"}}
+         "delivery":{"subtitle_readiness":"warming"},
+         "effective_selection":{},"action":{"type":"none"}}
         """
         let decoded = try PlaybackControl.decoder.decode(ControlResponse.self, from: Data(json.utf8))
         XCTAssertEqual(decoded.acceptedSequence, 4)
+        XCTAssertEqual(decoded.delivery?.subtitleReadiness, "warming")
         XCTAssertEqual(decoded.action.type, "none")
+    }
+
+    func testSubtitleReadinessDecisionAndTransitionAreClosedAndSingleShot() {
+        for (value, expected) in [
+            ("ready", true),
+            ("warming", false),
+            ("unavailable", false),
+            ("a_value_from_next_year", false),
+            ("", false),
+        ] {
+            XCTAssertEqual(SubtitleReadinessDecision.meansReady(value), expected, value)
+        }
+        XCTAssertFalse(SubtitleReadinessDecision.meansReady(nil))
+
+        let transition = SubtitleReadinessRetryState()
+        XCTAssertFalse(transition.record(nil))
+        XCTAssertFalse(transition.record("warming"))
+        XCTAssertTrue(transition.record("ready"), "warming → ready retries once")
+        XCTAssertFalse(transition.record("ready"), "control cadence cannot retry again")
     }
 }

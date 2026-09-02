@@ -592,7 +592,18 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         // membership mutation a learner may originate locally.
         return true;
     }
-    if (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
+    // The content-addressed fragment-index read. `fragment_index_cluster`
+    // hydrates from `media_peers()`, which deliberately includes learners, so
+    // leaving this out of the matrix meant every hydration aimed at a learner
+    // was refused 503 before its handler ran — a peer directory pointing at a
+    // door the route matrix had nailed shut. One key, no deeper path; the
+    // handler still validates the key itself.
+    let fragment_index_read = method == Method::GET
+        && path
+            .strip_prefix(crate::fragment_index_cluster::PEER_PATH_PREFIX)
+            .is_some_and(|cache_key| !cache_key.is_empty() && !cache_key.contains('/'));
+    if fragment_index_read
+        || (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
         || (method == Method::POST
             && matches!(
                 path,
@@ -965,9 +976,33 @@ mod tests {
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
+            // The relay was in the matrix and had never been asserted. It is
+            // the highest-traffic path a learner ingress originates: every
+            // segment of media owned by another node goes through it.
+            (Method::POST, crate::media_sessions::RELAY_PATH),
+            (Method::POST, crate::shared_cache::CANARY_PATH),
+            // Peer hydration of a fragment index. `media_peers()` names
+            // learners, so refusing this at the route matrix made the
+            // directory point at a closed door.
+            (
+                Method::GET,
+                "/internal/media/fragment-index/abc123def456abc123def456abc123de",
+            ),
         ] {
             assert!(learner_route_eligible(&method, path), "{method} {path}");
         }
+        // The prefix admits exactly one key and nothing deeper or emptier.
+        for path in [
+            crate::fragment_index_cluster::PEER_PATH_PREFIX,
+            "/internal/media/fragment-index/abc123/../../etc",
+            "/internal/media/fragment-index/abc123/extra",
+        ] {
+            assert!(!learner_route_eligible(&Method::GET, path), "{path}");
+        }
+        assert!(!learner_route_eligible(
+            &Method::POST,
+            "/internal/media/fragment-index/abc123def456abc123def456abc123de"
+        ));
     }
 
     #[test]
@@ -3427,6 +3462,63 @@ mod tests {
                 .expect("retry settings"),
             (Some("7".to_owned()), Some("77".to_owned())),
             "an invalid pair cannot partially replace the durable policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn subtitle_window_setting_round_trips_and_clamps_corrupt_storage() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let key = plurx_core::store::keys::SUBTITLE_WINDOW_SECS;
+
+        let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["subtitle_window_secs"], 200);
+
+        for (stored, expected) in [("0", 30), ("99999", 900)] {
+            state
+                .store
+                .put_setting(key, stored)
+                .await
+                .expect("corrupt stored subtitle window");
+            let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK, "{settings}");
+            assert_eq!(settings["subtitle_window_secs"], expected);
+        }
+
+        let (status, updated) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"subtitle_window_secs": 200}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        assert_eq!(updated["subtitle_window_secs"], 200);
+
+        for invalid in [29, 901] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"subtitle_window_secs": invalid}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("between 30 and 900")),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            state.store.get_setting(key).await.expect("stored setting"),
+            Some("200".to_owned())
         );
     }
 
