@@ -1103,6 +1103,53 @@ fn restart_is_superseded(
     settled.supersedes(control_sequence, requested_anchor_ms)
 }
 
+/// The height a request resolves to, which is not always the one asked for.
+///
+/// Three arms and three different promises, which is why this is one function
+/// rather than three lines at a call site. Splitting it is how one of them
+/// gets lost:
+///
+/// * **Auto is never snapped.** The server's own choice already lands where it
+///   means to, and snapping would re-decide policy — a 900p source
+///   deliberately transcodes at 900, with no scaler in the chain at all. This
+///   is also the only arm that reads the network prior or the HDR10 ask.
+/// * **The source's own height is a promise**, not a request: it is the
+///   Original/forced-burn path the player reads as `sessionHeight`, and it is
+///   never snapped and never downgraded.
+/// * **An explicit rung from a menu snaps onto the ladder**, so a stray number
+///   lands where the encoder has rungs — while an above-ladder height passes
+///   through as what it is.
+///
+/// The clamp bounds the result and nothing else. It never binds downward,
+/// because the snap has already put a below-ladder ask on the lowest rung; it
+/// is the only thing bounding an above-ladder one.
+///
+/// Shared by `resolve_plan` and by M6's candidate, because it is the one part
+/// of resolving a recipe that needs the store, the ladder ceiling and the
+/// network prior — see
+/// [M6-CALLER-HANDOFF.md](../../../../docs/M6-CALLER-HANDOFF.md) §3.3 on why
+/// the rest of `resolve_plan` is not what a candidate wants.
+pub(crate) async fn resolve_height(
+    state: &AppState,
+    source: Option<&MediaFile>,
+    network_prior: Option<&plurx_core::domain::NetworkPrior>,
+    hdr10_requested: bool,
+    asked: Option<i64>,
+) -> i64 {
+    let source_height = source.and_then(|f| f.height);
+    match asked {
+        None => {
+            state
+                .transcode
+                .auto_height_for_request(source, network_prior, hdr10_requested)
+                .await
+        }
+        Some(h) if Some(h) == source_height => h,
+        Some(h) => crate::transcode::snap_height(h),
+    }
+    .clamp(crate::transcode::MIN_HEIGHT, crate::transcode::MAX_HEIGHT)
+}
+
 /// One resolved plan: the recipe a create body would produce right now.
 ///
 /// M6's preparation decision has to ask *"if this client's selection were
@@ -1179,25 +1226,7 @@ pub(crate) async fn resolve_plan(
         .as_ref()
         .map(|review| review.hdr10)
         .unwrap_or(body.hdr10 == Some(true));
-    let source_height = source.and_then(|f| f.height);
-    let height = match body.height {
-        // Auto: the server's own choice already lands where it means to —
-        // snapping it would re-decide policy (a 900p source deliberately
-        // transcodes at 900: no scaler in the chain at all).
-        None => {
-            state
-                .transcode
-                .auto_height_for_request(source, network_prior, hdr10_requested)
-                .await
-        }
-        // The source's own height is the Original/forced-burn promise
-        // (see the player's sessionHeight): never snapped, never downgraded.
-        Some(h) if Some(h) == source_height => h,
-        // An explicit rung from a menu: snap strays onto the ladder;
-        // above-ladder heights pass through as what they are.
-        Some(h) => crate::transcode::snap_height(h),
-    }
-    .clamp(crate::transcode::MIN_HEIGHT, crate::transcode::MAX_HEIGHT);
+    let height = resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
     let native_subtitles = body.native_subtitles == Some(true);
     let native_subtitle = body.subtitle.filter(|s| *s >= 0);
     if native_subtitles {
