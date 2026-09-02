@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["55c208cf"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained `the_capability_document_is_retained_across_exchanges_that_omit_it` regression drives one actor through four exchanges: sequence 1 carries a capability document, sequences 2 and 3 carry none — which the wire contract permits, since `ControlRequestV1::validate` requires `capabilities` only on sequence 1 — and sequence 4 carries a revised one. It asserts the retained document survives both omissions unchanged and is then replaced by the revision, so a consumer of a sequence-1-only field cannot read `None` for the rest of the session. Reverting the retention fails the sequence-2 assertion; making an omission clear the document fails at the same point; dropping last-write-wins over `Some` fails the sequence-4 assertion."
