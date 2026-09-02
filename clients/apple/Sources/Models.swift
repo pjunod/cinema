@@ -843,6 +843,13 @@ struct CreateSessionRequest: Codable {
     /// Fresh per attempt: makes a replayed create return the same session
     /// instead of spawning a second encoder.
     var requestId: String? = UUID().uuidString
+    /// Where this start sits in the control ordering. A seek storm asks for a
+    /// session per destination; this is what orders those asks against the
+    /// destination the client has since settled on, so the server can refuse
+    /// to produce one the viewer has already scrolled past. Absent before the
+    /// first exchange — there is no earlier ask to be stale against, and
+    /// absent means *do the work*.
+    var controlSequence: UInt64?
     /// The exact session a typed recovery steps down from. Required together
     /// with `reopenReason`; ordinary seeks and track changes omit both.
     var previousSessionId: String?

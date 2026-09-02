@@ -1,6 +1,6 @@
 # Retry a native subtitle when its demanded window becomes ready
 
-Build: 108
+Build: 109
 Issue: #700
 
 The Apple control client now consumes native-subtitle readiness and reselects

@@ -2584,6 +2584,7 @@ final class PlayerController: ObservableObject {
             let body = Self.applyOpenIntent(
                 to: CreateSessionRequest(
                     playbackId: playbackId,
+                    controlSequence: await playbackControl.controlSequence,
                     height: Self.burnSessionHeight(
                         burnSubtitle: burnSubtitle,
                         mode: normalMode,

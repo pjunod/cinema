@@ -115,6 +115,18 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     val isReporting: Boolean get() = reporter != null
 
     /**
+     * Where this playback sits in the control ordering, for a create that
+     * wants to be ordered against the settled destination.
+     *
+     * The reporter's own counter rather than the accepted sequence: a create
+     * can reach the server before the snapshot that justifies it, and a client
+     * reporting a *higher* sequence can only look less superseded, which is
+     * the safe direction. Null before the first exchange.
+     */
+    suspend fun controlSequence(): Long? =
+        reporter?.status()?.sequence?.takeIf { it > 0L }
+
+    /**
      * Every exchange's action, tagged with the sequence of the request it
      * answered. The ask reads the reporter's counter, publishes its evidence,
      * and takes the first answer at or above that floor.
