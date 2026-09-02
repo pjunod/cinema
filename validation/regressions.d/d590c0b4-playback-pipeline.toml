@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d590c0b4"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The counterfactual is a second decision over the same transition, so the evidence has to show it reaches what the client gate hides and diverges nowhere else: one unit drives a resolution change on a link below the second-pipeline floor and an audio-track change on a roomy one, asserting the shipped decision answers client_cannot_prepare for both while the counterfactual answers throughput_unproven and axis_not_proven respectively, and that the prepared axis on a roomy link answers prepare; a second unit asserts the two decisions are equal for a multi-axis transition and for an unchanged one under both link conditions, which is what fails if the MultipleAxes ranking is ever moved below the client gate; a third asserts each recorder moves only its own counter and that Unchanged moves neither; and a fourth asserts the counterfactual publishes the full axis-by-outcome cross product from boot, including the client_cannot_prepare column it can never fill, so the two counters stay subtractable series by series."
