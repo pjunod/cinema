@@ -1,6 +1,6 @@
 # Player input contract — implementation plan
 
-**Status:** ready to build, M0 landed with this document · **Executes:**
+**Status:** M1–M4 implemented on the effort lane · **Executes:**
 [PLAYER-INPUT-CONTRACT.md](PLAYER-INPUT-CONTRACT.md) against the findings in
 [UI-NAVIGATION-AUDIT.md](UI-NAVIGATION-AUDIT.md) · **Written:** 2026-09-02 ·
 **Anchors:** `file:line` at commit `18886477` unless stated; re-verify with
@@ -361,10 +361,9 @@ the physical Apple TV run in §6.
    region of `index.html` (mark it with `// player-input-adapter:begin/end`
    and allow only inside). Existing non-player handlers (lightbox, reader,
    QR dialog, catalog/theater poster keys) are listed with a reason each.
-2. **Fixture identity.** The same check asserts
-   `clients/android/app/src/test/resources/player-input-contract.json` and
-   the Apple test resource are byte-identical to
-   `tests/playback/player-input-contract.json`.
+2. **Fixture wiring.** The same check asserts Android's JVM test resources and
+   both Apple test targets still reference `player-input-contract.json` and
+   `playback-info-fields.json` directly from `tests/playback/`.
 3. **Options fold** once §8.1 of the contract is ruled: web's
    `⏭ Auto-skip`, `▶ Autoplay`, `⇄ Sync` and Apple's `autoplay` button
    become entries in a `settings` menu; Android's panel is the model. Row
@@ -373,9 +372,9 @@ the physical Apple TV run in §6.
    the contract where they describe seeking and the player; the
    `STATUS.html` player tile cites it.
 
-**Acceptance:** `make validate-staged` red on a synthetic diff that adds
-`KEYCODE_DPAD_LEFT` to `PlayerScreen.kt`, green on `main`; the three
-fixture copies hash-equal.
+**Acceptance:** `make validate-staged` is red on a synthetic diff that adds
+`KEYCODE_DPAD_LEFT` to `PlayerScreen.kt` and green on the lane head; both
+native test targets consume the shared fixtures rather than copies.
 
 ### M5 — navigation outside the player
 

@@ -78,24 +78,37 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn("self.refreshPGSOverlayWindow(at: overlayPosition)", apple)
         self.assertEqual(server.count("prune(&root).await;"), 1)
 
-    def test_media_origin_and_remote_seek_consumption_remain_wired(self) -> None:
+    def test_media_origin_and_contract_routing_remain_wired(self) -> None:
         android = self.read("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt")
         android_screen = self.read(
             "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
         )
+        android_adapter = self.read(
+            "clients/android/app/src/main/java/tv/plurx/app/player/PlayerKeyAdapter.kt"
+        )
+        android_policy = self.read(
+            "clients/android/app/src/main/java/tv/plurx/app/player/PlayerInputPolicy.kt"
+        )
         apple = self.read("clients/apple/Sources/PlayerController.swift")
         apple_view = self.read("clients/apple/Sources/PlayerView.swift")
+        apple_adapter = self.read("clients/apple/Sources/PlayerRemoteAdapter.swift")
+        apple_policy = self.read("clients/apple/Sources/PlayerInputRouting.swift")
         hls = self.read("crates/plurxd/src/http/hls.rs")
 
         self.assertIn("return realMediaPositionMs(", android)
         self.assertIn("val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)", android)
         self.assertIn(".setTransferListener(progressiveMediaOrigin)", android)
-        self.assertIn("HiddenSeekAccumulator(plan.durationMs)", android_screen)
-        self.assertIn("hiddenSeekAccumulator.consume()?.let(controller::seekTo)", android_screen)
+        self.assertIn(".playerInputAdapter(", android_screen)
+        self.assertIn("PlayerInputPolicy.route(surface, state(), input)", android_adapter)
+        self.assertIn("PlayerInputState.Hidden ->", android_policy)
+        self.assertNotIn("HiddenSeekAccumulator", android_screen)
         self.assertIn("nextBaseMs = Self.sessionMediaOriginMs(hls, requestedStartMs: startMs)", apple)
 
-        remote_seek = apple_view.split("private func seekFromRemote", 1)[1].split("#endif", 1)[0]
-        self.assertLess(remote_seek.index("controller.skip"), remote_seek.index("revealControlsFromRemote"))
+        self.assertIn(".playerRemoteAdapter(", apple_view)
+        self.assertIn("PlayerInputRouting.route(", apple_adapter)
+        hidden = apple_policy.split("case .hidden:", 1)[1].split("case .transport:", 1)[0]
+        self.assertIn("case .left, .right, .up, .down, .select, .tapSurface: .reveal", hidden)
+        self.assertNotIn("controller.skip", hidden)
         self.assertIn("skipped Apple HEVC tier normalization", hls)
 
 

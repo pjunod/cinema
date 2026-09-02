@@ -284,18 +284,19 @@ mod tests {
     }
 
     #[test]
-    fn both_stats_ledgers_render_the_tested_control_lease_presentation() {
+    fn shared_stats_rows_render_the_tested_control_lease_presentation() {
         assert!(PLAYBACK_POLICY_JS.contains("function controlLeaseMode"));
         assert!(PLAYBACK_POLICY_JS.contains("function controlLeasePresentation"));
         assert_eq!(
             INDEX_HTML
                 .matches("PlaybackPolicy.controlLeaseMode(")
                 .count(),
-            2
+            1
         );
-        assert!(INDEX_HTML.contains("`${leasePresentation.ownership} · ${leaseState}"));
-        assert!(INDEX_HTML.contains("`${standardLeasePresentation.ownership} · accepted #"));
-        assert!(INDEX_HTML.contains("`${standardLeasePresentation.ownership} · connecting`"));
+        assert!(INDEX_HTML.contains("const STATS_ROWS=Object.freeze"));
+        assert!(INDEX_HTML.contains("control,control_note:controlNote"));
+        assert!(INDEX_HTML.contains("`${lease.ownership} · accepted #"));
+        assert!(INDEX_HTML.contains("`${lease.ownership} · connecting`"));
         assert!(!INDEX_HTML.contains("`Passive · accepted #"));
     }
 

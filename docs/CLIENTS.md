@@ -11,7 +11,11 @@ Hybrid approach: one shared TypeScript core wherever a platform runs web tech; n
 | 3 | **Kotlin / Media3** | Android TV & Google TV (= Sony TVs, Nvidia Shield, Fire TV *Android* devices), Android phones/tablets | ExoPlayer/Media3 — true MKV direct play, HEVC/AV1/DV per device |
 | 4 | **BrightScript / SceneGraph** | Roku | Roku Video node — strict envelope, leans hardest on server remux/transcode |
 
-Shared across all: the server's OpenAPI-generated types, the device-profile definitions, and a common design language.
+Shared across all: the server's OpenAPI-generated types, the device-profile
+definitions, a common design language, and the
+[player input contract](PLAYER-INPUT-CONTRACT.md). Each first-party player maps
+platform events through one adapter into the same state/input routing table;
+its playback-info panel follows the companion shared field list.
 
 **Ship order:** Web first (it's also the admin UI and the Tizen/webOS seed). Then Android TV (cheapest native win, trivial sideload, biggest device coverage), then tvOS, then Tizen/webOS ports, then Roku. Kodi-family Plex clients (§3) cover living rooms in the meantime.
 
