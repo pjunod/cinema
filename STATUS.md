@@ -1,8 +1,46 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-01 (evening) · Kept current by the working agent in the same
+**Updated:** 2026-09-02 (morning) · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## M7 M4 burn-join and current-main corrections
+
+**PR [#794](https://github.com/pjunod/plurx/pull/794) — READY FOR EXACT-HEAD
+GITHUB QUALIFICATION.** M7 M4 shipped through the effort train and its first
+post-merge repair, then current-`main` CI exposed an ambiguous-success timeout
+while confirming a replacement media session. The exact sentinel-guarded
+confirmation now uses the bounded idempotent-write path; a zero-row replay is
+accepted only after the durable route and current pointer prove the same
+activation. Abandonment and ordinary transactions remain non-retryable.
+
+The same qualification work reproduced two existing daemon-harness flakes.
+Healthy Activity waves no longer spend 500 ms of the production two-second
+peer deadline waiting for synthetic proxy receivers; exact physical-request
+counts remain, and a paused unit now proves seven followers share the held
+leading fetch. Both summary and detail must also retain node B's two
+remote-only streams, closing an adversarially found false-green. Activation
+fixtures hold one distinct reserved HTTP/Raft/Hiqlite port set until all three
+listeners have been selected, preventing OS port recycling between fixtures.
+
+- [x] Three adversarial reviews found the summary false-green and a rebased
+      evidence commit that named a non-ancestor; both findings are fixed.
+- [x] The corrective series is split into Store behavior/evidence and daemon
+      harness behavior/evidence, with every mapping naming an ancestor.
+- [x] The final affected-surface profile passed 12 checks with 0 failures;
+      full workspace Rust, 118 executed real-cluster Store contracts, topology
+      and failure drills, activation 7/7, and Activity 2/2 are green. Two
+      Playwright-only preflights were skipped because Playwright is not
+      installed on the device host and remain GitHub-runner work.
+- [ ] Push the reviewed exact head to #794, require its full GitHub
+      qualification and promotion receipt, merge it, close partial duplicate
+      #782 with a cross-link, and verify `main` after the merge.
+
+**Decisions made without Paul (flagged for review):** consolidate #782's useful
+activation port reservation into #794, but replace its privacy-only Activity
+barrier removal with the complete three-wave repair and deterministic unit.
+Close #782 only after #794 is qualified and merged, so GitHub never loses the
+visible replacement before the duplicate closes.
 
 ## Artwork repair-fence claim flake (same CI job)
 
