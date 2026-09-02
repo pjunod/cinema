@@ -711,10 +711,11 @@ async fn fetch_peer_status(
         // A non-success status is an answer, not silence. Collapsing it into
         // `Unreachable` printed "unreachable" on a node that had just replied,
         // which is how a refused proof read as a dead machine.
-        Ok(response) if matches!(
-            response.status,
-            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-        ) =>
+        Ok(response)
+            if matches!(
+                response.status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            ) =>
         {
             (ObservationState::Refused, None)
         }

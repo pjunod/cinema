@@ -5603,8 +5603,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
             .await?
             .require_ok()?;
     }
-    let peer_proof_now =
-        i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+    let peer_proof_now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
     let operations_status_path = "/api/v1/internal/cluster/operations-status";
     let inbound = match cluster
         .request(

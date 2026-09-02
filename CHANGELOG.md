@@ -35,7 +35,9 @@ bump may break compatibility and a **patch** bump never does.
   "unreachable". Each code now says what happened and what it implies about the
   machine — a refusal is proof the node is up — and a test reads the
   aggregator's error classes out of the Rust source so a new one cannot ship
-  without a sentence.
+  without a sentence. `tests/web/cluster-membership.test.js` joins the
+  `web-check` target as well as the validation runner's `web-membership`
+  check, so a web change reaches it without knowing its name.
 
 ### Changed
 

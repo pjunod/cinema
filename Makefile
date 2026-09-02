@@ -393,9 +393,9 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/activity-node-names.test.js
 	@node tests/web/analysis-node-names.test.js
 	@node tests/web/settings-sections.test.js
-	# 2,900 lines of assertions on the Cluster panel's words that CI had never
-	# run: the file was only named in docs, as something to run by hand. It
-	# takes about two seconds.
+	# The validation runner already has this as `web-membership`, but this is
+	# the target a web change reaches for, and the Cluster panel is a web
+	# surface like any other here. Two seconds.
 	@node tests/web/cluster-membership.test.js
 	@scripts/js-check
 	@scripts/contrast-check --from-index crates/plurxd/src/web/index.html \
