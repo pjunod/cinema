@@ -48,6 +48,55 @@ answers is why the producer paused.**
   device acceptance is opportunistic because the AVPlayer wedge cannot be
   induced on demand. Not deployed.
 
+## Everything a read-only cluster member could not do
+
+**PRs [#806](https://github.com/pjunod/plurx/pull/806) (`b4a1f108`) and
+[#821](https://github.com/pjunod/plurx/pull/821) (`27e751ef`) — both MERGED to
+main, 2026-09-02.** Started from one screenshot: `nuc3`, a committed learner,
+showing a fresh heartbeat, zero apply lag and a green *Read worker ready* pill
+while the same card said *Not observed · unreachable*. Two independent defects,
+both of the same shape — code that asked whether the local node is a voter by
+assuming it is.
+
+**#806, the authority check.** `verify_live_activity_authority` required a
+committed **voter at both ends** of every internal peer proof: the answering
+node and the signer. So a learner answered 401 to every signed peer request —
+its own operations-status reply to the Cluster panel, and every media-session
+relay, control and abort a learner ingress originated — and every voter refused
+a learner's. Meanwhile `learner_route_eligible` publishes exactly that surface
+to learners, `operations_peers`/`media_peers` name them as fan-out targets in
+both directions, and `docs/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 already
+specified the member-scoped predicate here, giving the voter predicate to
+membership mutation alone. The implementation was stricter than its own design.
+`PeerAuthorityRole` now names the role each surface asks for; activity
+aggregation stays voter-only because its directory never names a learner. The
+aggregator also stopped folding a non-success response into `unreachable`
+alongside a dead socket — 401/403 are `refused`, other statuses `http_error` —
+and every observation code reaches the operator as a sentence rather than its
+raw identifier. The cluster-check learner scenario now sends a proof in both
+directions and was executed fails-first against the old predicate and against a
+signer-only revert.
+
+**#821, the placement arithmetic.** `activity_peers` returns the *other* voters,
+so the voters a node can see are `peers.len()` plus itself only when it is one.
+`remote_rollout_ready` and the shared-cache canary both added that `1`
+unconditionally, which on a learner compares `n` against `n + 1` — false for
+every roster size. A learner therefore answered 503 to every delegated media
+session while still returning eligible offers a voter ingress would rank and
+select, could never place one itself, and never published a verified
+shared-cache root; a ready learner sitting at zero active streams was the
+visible symptom. Both now count the voters this node can actually see.
+Separately, `/internal/media/fragment-index/{key}` was missing from the learner
+route matrix while `fragment_index_cluster` hydrates from `media_peers()` — a
+peer directory pointing at a door the matrix had nailed shut.
+
+Thirteen mutations across the two branches, all caught. `package and smoke
+(amd64)` flaked once on a host-wide port collision with a concurrent job on the
+same runner (`127.0.0.1:32402 … Address already in use`); re-run, green. **Not
+yet verified on hardware** — when the fleet next takes a build, nuc3 should read
+*Direct status ready* rather than *Not observed*, and its active-stream count
+should stop being structurally zero.
+
 ## Artwork repair-fence claim flake (same CI job)
 
 **PR [#753](https://github.com/pjunod/plurx/pull/753) — MERGED to main

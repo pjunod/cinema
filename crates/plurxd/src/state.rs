@@ -502,6 +502,19 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Resolve the operator's bounded forward subtitle span at the request
+    /// boundary. A malformed hand-edited row falls back to the 200-second
+    /// default; the settings API itself only persists values inside 30–900.
+    pub(crate) async fn subtitle_window_seconds(&self) -> i64 {
+        let stored = self
+            .store
+            .get_setting(keys::SUBTITLE_WINDOW_SECS)
+            .await
+            .ok()
+            .flatten();
+        plurx_core::store::bounded_subtitle_window_seconds(stored.as_deref())
+    }
+
     /// `node_id` is this server's stable id — the `node_id` a cache location
     /// is recorded against, so a cluster can tell whose copy is whose.
     #[cfg(test)]

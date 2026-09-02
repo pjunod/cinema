@@ -427,7 +427,7 @@ test("an unreachable voter is written as a blocker, never a healthy row", () => 
   const nodeHtml = ui.clusterNodeOperationsHtml(membership.nodes[1], operations);
   assert.match(html, /Do not restart another voter/);
   assert.match(html, /voter not observed/);
-  assert.match(nodeHtml, /Not observed · unreachable/);
+  assert.match(nodeHtml, /Not observed · no route to it from this node/);
   assert.doesNotMatch(nodeHtml, />Ready</);
 });
 
@@ -518,7 +518,7 @@ test("stale samples and four-voter-one-down fixtures never imply safety", () => 
   }];
   const staleHtml = ui.clusterOperationsCard(stale);
   const staleNode = ui.clusterNodeOperationsHtml(membership.nodes[1], stale);
-  assert.match(staleNode, /Not observed · stale peer sample/);
+  assert.match(staleNode, /Not observed · its answer was older than one refresh window/);
   assert.match(staleHtml, /Do not restart another voter/);
 
   const oneDown = operationStatus(membership, { safe: false, unreachable: true });
@@ -643,6 +643,73 @@ test("two learners are named the same way the one-learner sentence is", () => {
 });
 
 // The roster pill repeats the promise in a `title` attribute, and that is the
+// A read-only member with a fresh heartbeat, zero apply lag and a green "Read
+// worker ready" pill was simultaneously reporting, one row down, "Not observed ·
+// unreachable". Both halves were true readings of different sources — the roster
+// and the direct fan-out — and the fan-out's single word was the wrong noun: the
+// node had answered and refused the proof. The words are the whole product here,
+// so each observation code says what happened and what it implies about the box.
+test("a refusal says the node answered; only silence says unreachable", () => {
+  const ui = sandbox();
+  const membership = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+    node("node-d", 7, "learner", { bounded_read_ready: true }),
+  ]);
+  const refused = operationStatus(membership, { safe: true });
+  refused.nodes[3].observation = "refused";
+  refused.nodes[3].error_class = "refused";
+  refused.nodes[3].status = null;
+
+  const html = ui.clusterNodeOperationsHtml(membership.nodes[3], refused);
+  assert.match(html, /Not observed · it answered and refused the signed request from this node/);
+  // The specific regression: a node that replied must never be described as
+  // one that could not be reached.
+  assert.doesNotMatch(html, /unreachable/);
+  // And the invariant the panel is built on is not softened by nicer wording.
+  assert.match(html, /Membership heartbeat state is not a substitute/);
+
+  const silent = operationStatus(membership, { safe: true });
+  silent.nodes[3].observation = "unreachable";
+  silent.nodes[3].error_class = "unreachable";
+  silent.nodes[3].status = null;
+  assert.match(
+    ui.clusterNodeOperationsHtml(membership.nodes[3], silent),
+    /Not observed · no route to it from this node/,
+  );
+});
+
+// The sentences are only worth having if the server cannot introduce a code
+// that has none. The aggregator's error classes are string literals in one
+// match arm, so read them and require a sentence for each: a new
+// ObservationState with no panel entry fails here rather than shipping the bare
+// identifier to an operator.
+test("every observation code the aggregator can emit has a sentence", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "../../crates/plurxd/src/http/cluster_operations.rs"),
+    "utf8",
+  );
+  const arm = source.split("fn observation_error_class(")[1];
+  assert.notEqual(arm, undefined, "observation_error_class was renamed or removed");
+  const codes = [...arm.split("\n}")[0].matchAll(/=>\s*"([a-z_]+)"/g)].map((m) => m[1]);
+  assert.ok(codes.includes("refused"), `refused missing from ${codes.join(", ")}`);
+  assert.ok(codes.includes("unreachable"));
+  assert.ok(codes.length >= 7, `only found ${codes.length} codes`);
+  // Plus the two classes the join stamps directly rather than through the map,
+  // and the panel's own "no row at all" case.
+  for (const code of [...codes, "raft_identity_mismatch", "stale_peer_sample", "not_observed"]) {
+    if (code === "none") continue;
+    const sentence = PANEL.clusterObservationReason(code);
+    assert.notEqual(
+      sentence,
+      code.replaceAll("_", " "),
+      `${code} still reaches the operator as its raw identifier`,
+    );
+    assert.ok(sentence.length > code.length, `${code} has no real sentence`);
+  }
+});
+
 // one an operator hovers rather than reads in a banner. Nothing asserted it,
 // so it could be reverted to "Admitted and catching up" by itself.
 test("the learner role pill says what the banner says", () => {

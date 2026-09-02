@@ -112,6 +112,69 @@ async function main() {
     assert.equal(subtitleReadinessMeansReady(delivery),expected,
       `${label} readiness has one closed consumer decision`);
   }
+  const subtitleReadinessRetryTransition=new Function([
+    shippedSource("subtitleReadinessMeansReady"),
+    shippedSource("subtitleReadinessRetryTransition"),
+    "return subtitleReadinessRetryTransition;",
+  ].join("\n"))();
+  const readinessState={};
+  assert.equal(subtitleReadinessRetryTransition(readinessState,{}),false);
+  assert.equal(subtitleReadinessRetryTransition(readinessState,
+    {subtitle_readiness:"warming"}),false);
+  assert.equal(subtitleReadinessRetryTransition(readinessState,
+    {subtitle_readiness:"ready"}),true,"warming to ready directs one retry");
+  assert.equal(subtitleReadinessRetryTransition(readinessState,
+    {subtitle_readiness:"ready"}),false,"repeated ready cannot retry on cadence");
+  for(const delivery of [
+    {subtitle_readiness:"warming"},
+    {subtitle_readiness:"unavailable"},
+    {subtitle_readiness:"a_value_from_next_year"},
+    {},
+  ]){
+    const isolated={};
+    assert.equal(subtitleReadinessRetryTransition(isolated,delivery),false,
+      "non-ready readiness never directs a retry");
+  }
+  const retryReadyNativeSubtitle=new Function([
+    shippedSource("nativeHlsSubtitleOrdinal"),
+    shippedSource("retryReadyNativeSubtitle"),
+    "return retryReadyNativeSubtitle;",
+  ].join("\n"))();
+  const subtitleTrackWrites=[];
+  const hls={};
+  Object.defineProperty(hls,"subtitleTrack",{
+    set(value){ subtitleTrackWrites.push(value); },
+  });
+  const nativePlayer={
+    hls,
+    sessionId:"same-video-session",
+    burnedSub:null,
+    curSub:7,
+    subs:[
+      {index:3,native:false},
+      {index:5,native:true},
+      {index:7,native:true},
+    ],
+  };
+  const directed={};
+  let retries=0;
+  for(const delivery of [
+    {subtitle_readiness:"warming"},
+    {subtitle_readiness:"ready"},
+    {subtitle_readiness:"ready"},
+  ]){
+    if(subtitleReadinessRetryTransition(directed,delivery)
+      &&retryReadyNativeSubtitle(nativePlayer)) retries++;
+  }
+  assert.equal(retries,1,"one readiness edge performs one directed retry");
+  assert.deepEqual(subtitleTrackWrites,[-1,1],
+    "the retry toggles only the selected native rendition on the same HLS object");
+  assert.equal(nativePlayer.sessionId,"same-video-session",
+    "subtitle retry does not replace the video session");
+  assert.equal(retryReadyNativeSubtitle(Object.assign({},nativePlayer,{curSub:3})),false,
+    "a non-native text track cannot be driven through the HLS rendition path");
+  assert.equal(retryReadyNativeSubtitle(Object.assign({},nativePlayer,{burnedSub:7})),false,
+    "a burned selection is never independently retried");
 
   const first = deferred();
   const calls = [];

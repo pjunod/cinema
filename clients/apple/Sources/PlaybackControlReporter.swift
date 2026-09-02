@@ -327,16 +327,42 @@ struct ControlAction: Codable, Equatable {
     var message: String? = nil
 }
 
+struct ControlDelivery: Codable, Equatable {
+    /// Extensible relay value: only the exact value `ready` has client meaning.
+    var subtitleReadiness: String?
+}
+
+enum SubtitleReadinessDecision {
+    static func meansReady(_ value: String?) -> Bool { value == "ready" }
+}
+
+/// Turns a non-ready → ready edge into one retry and suppresses repeated
+/// control cadence at `ready`. The reporter actor records into this locked
+/// bridge; the player consumes the edge on MainActor.
+final class SubtitleReadinessRetryState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastReady: Bool?
+
+    func record(_ value: String?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let ready = SubtitleReadinessDecision.meansReady(value)
+        defer { lastReady = ready }
+        return lastReady == false && ready
+    }
+}
+
 struct ControlResponse: Codable, Equatable {
     var proto: String
     var generation: String
     var controlEpoch: Int
     var acceptedSequence: Int
+    var delivery: ControlDelivery? = nil
     var action: ControlAction
 
     enum CodingKeys: String, CodingKey {
         case proto = "protocol"
-        case generation, controlEpoch, acceptedSequence, action
+        case generation, controlEpoch, acceptedSequence, delivery, action
     }
 }
 

@@ -1005,13 +1005,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # ffmpegs destroys the video timeline (see `plurxd::dvpipe`). The conversion now
 # rewrites NAL units inside the fragments the one producer already writes, so
 # the process and task counts are exactly what they were before it.
+# +2 with M7 R-M2's handler acceptance fixture: two concurrent subtitle segment
+# requests prove that the production warmup registry coalesces them into one
+# window extraction. Both request tasks are joined by the fixture's bounded
+# wait; neither is a shipped producer or process owner.
 # +1 with the bounded subtitle window: the window warmer's detached extraction.
 # +4 for the Activity read-gate and response regressions: eight concurrent
 # callers share one joined task shape, the cancelled owner is explicitly
 # aborted and awaited, its successor is joined after the preserved start floor,
 # and the hostile error-body HTTP fixture is aborted before its test returns.
 # All four are test-only owners; none detaches a producer, timer, or process.
-# 375 -> 378 with M6's preparation executor. The three additions are the
+# 377 -> 380 with M6's preparation executor. The three additions are the
 # `oneshot::channel()` pairs behind `stage_preparation`,
 # `may_commit_preparation` and `settle_preparation` — bounded actor round
 # trips of the same shape as `snapshot` and `poll_producer_decision`, awaited
@@ -1026,7 +1030,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # so nothing outlives the test. It owns no producer, no process and no timer
 # beyond the actor's own lease clock, and no test in the group advances that
 # clock.
-expected_occurrences = 379
+# 379 -> 381 with M7 R-M2's handler acceptance fixture: its two concurrent
+# subtitle-segment request tasks are both joined by the fixture's bounded wait.
+# Neither task is a shipped producer or process owner.
+expected_occurrences = 381
 
 [[module_structures]]
 id = "method-spawn"
@@ -1072,6 +1079,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +11 M5b: conversion deadlines and cancellation/race fixtures. Production
 # subprocess and hash deadlines are paired with kill-on-drop or a bounded
 # residual-I/O permit; every test-only timer is awaited by its fixture.
+# +6 with M7 R-M2's bounded subtitle materialization acceptance: two shipped
+# handler deadlines bound replicated-setting and sidecar reads, while four
+# fixture deadlines bound producer-start observation, the concurrent first
+# touch, publication observation, and whole-producer teardown. Every fixture
+# wait is awaited before its temporary media is released.
 # +3 with the bounded subtitle window: the window read and the two warm starts in the subtitle segment arm.
 # +1 for the process-shared Activity gate's `sleep_until`: the mutex owner
 # awaits the durable one-second fanout-start reservation before issuing another
@@ -1080,7 +1092,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +1 for the delayed-directory cancellation fixture: its two-second paused-time
 # sleep moves the wire start beyond the initial reservation and is fully owned
 # by the test task that the fixture aborts and joins.
-expected_occurrences = 523
+expected_occurrences = 529
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1131,6 +1143,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # M5b is a net +1 launch-shaped method on the merged current-main tree. The
 # apparent launch set includes JoinSet's in-process leased worker; the actual
 # child is retained by `run_tool` until exit or cancellation.
+# +2 with M7 R-M2's handler acceptance fixture: both are `Response::status()`
+# assertions on in-process subtitle responses. They launch no process and own
+# no producer; the actual window extractor remains behind the existing bounded
+# command helper inventoried above.
 # +1 with the bounded subtitle window: its output().
 # +1 for Activity response classification: `reqwest::Response::status()` reads
 # the received HTTP headers before deciding whether its unused error body needs
@@ -1144,7 +1160,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +2 for the VOD fetched-side frontier test: two `VodServe::status()` reads of
 # one session's diagnostics, before and after the hole is filled. They take a
 # manifest lock and return a struct; nothing is launched and nothing is owned.
-expected_occurrences = 200
+expected_occurrences = 202
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
