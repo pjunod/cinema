@@ -1132,7 +1132,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1 for Activity response classification: `reqwest::Response::status()` reads
 # the received HTTP headers before deciding whether its unused error body needs
 # no buffering. It launches no process and owns no child.
-expected_occurrences = 197
+# +1 in the Trakt device-link test: `TraktManager::status()` inside the loop
+# that waits for the link to finish. It is an in-process read of three
+# mutex-guarded fields — auth, pending, note — and the reason it moved into the
+# loop is that polling the *store* observed only the first of the three writes,
+# so the test could assert against a status its own task had not finished
+# producing. No child process, no producer, no timer.
+expected_occurrences = 198
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
