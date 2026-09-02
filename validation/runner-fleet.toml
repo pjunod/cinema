@@ -1,0 +1,252 @@
+# The self-hosted runner fleet, written down so CI can check its own premises.
+#
+# This roster mirrors `pjunod/ansible`'s `github-runners/inventory/` —
+# `group_vars/all.yml` for the Incus guests and the macOS runner, and
+# `host_vars/<host>.yml` for the standalone Linux hosts — plus the two
+# hand-registered ARM64 laptop VMs (`gha-mba-linux-arm-01`,
+# `gha-mbp-linux-arm-01`) that were provisioned outside that inventory. Only
+# the runners registered to `pjunod/plurx` are listed; the same hosts also run
+# runner services scoped to other repositories, and those can never answer a
+# job in this one.
+#
+# It exists to answer a question this repository could not previously ask:
+# *is there a machine that can run this job at all?* Two failures say why that
+# question is worth an artifact. `replicated Store contracts (legacy)` required
+# `ci-store` while exactly one runner in the fleet carried it, and on
+# 2026-09-02 that lane took 45 attempts, started 15, and had 27 cancelled while
+# still queued, with waits reaching 234 minutes. Separately,
+# `.github/workflows/store-shards.yml` pinned a shard to `ci-store-shard-1`, a
+# label no runner has ever carried; flipping `CI_EXECUTION_MODE` to
+# `accelerated` would have parked every pull request behind a job that can
+# never be scheduled. Neither is a syntax error, neither fails fast, and
+# neither was visible to any check.
+#
+# So: **adding a label to a workflow means adding it to a runner first.** Change
+# the ansible inventory, apply it, then add the runner here in the change that
+# teaches a workflow to ask for the label. A `runs-on` no rostered runner can
+# satisfy now fails `make operations-check` at preflight — in seconds, on the
+# pull request that introduced it — instead of at 3am in a queue nobody is
+# watching. When the fleet changes, this file changes with it; a roster that
+# has drifted from the fleet proves nothing, and `tests/operations/
+# test_contracts.py` is what turns it into a claim rather than a note.
+#
+# `labels` carries only the labels the fleet assigns. GitHub adds `self-hosted`
+# and each runner's own operating-system and architecture labels, which never
+# appear in the ansible inventory, so they are derived from `os` and `arch`
+# rather than repeated by hand.
+#
+# Runner names carry their host: `gha-<host>-<role>-<NN>`. The ansible
+# inventory files the `rogg16` runners under that machine's hardware name,
+# `asus`; every other host name matches.
+
+version = 1
+
+# Hosts that also run production plurx. hiqlite is a three-voter Raft store, so
+# a voter carrying a heavy CI lane is a quorum flake waiting for a busy
+# afternoon — the shape behind the artwork-fence failures. plurx is currently
+# retired on `m6` by ansible's `github-runners/playbooks/retire-plurx.yml`,
+# but `media/inventory.yml` still declares plurx there, so the host stays
+# reserved until those two agree.
+voter_hosts = ["m6", "nuc3", "nuc4", "nynuc"]
+
+# Labels that select a heavy replicated-cluster lane. At most one runner per
+# physical host may carry one, and no voter may carry one at all. Two
+# three-voter hiqlite tests sharing a host reintroduces exactly the
+# loaded-runner quorum flake that splitting Store from topology was meant to
+# remove, so "one slot per host" is what makes the Store shard count a
+# statement about machines rather than about runner services.
+#
+# That ceiling is also why the Store shard count is *bounded by* the number of
+# `ci-store` slots rather than chosen freely: a surplus shard cannot be given a
+# second runner on a host that already holds one, so it serialises behind a
+# busy runner and buys a more complicated failure instead of wall time. The
+# fleet carries three slots today, on `nuc1`, `rogg16` and `nuc2` — one per
+# physical non-voter host. That number is an eligibility fact rather than a
+# capacity decision: a runner counts as a slot only once the Store lane has
+# passed on it. See `gha-nuc2-android-01` below for what that cost to learn.
+host_exclusive_labels = ["ci-store", "ci-topology"]
+
+# --- nuc1: Incus guest host, non-voter -------------------------------------
+[[runners]]
+name = "gha-nuc1-general-01"
+host = "nuc1"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "incus", "ubuntu-24.04", "ci-store"]
+
+# --- nuc2: Incus guest host, non-voter --------------------------------------
+# A `ci-store` slot, and the entry to read before adding or removing one.
+#
+# It carried the label earlier on 2026-09-02 and failed `replicated Store
+# contracts (legacy)` three runs in a row — 2840, 2842 and 2845 — about twelve
+# seconds into each job, before compiling anything:
+#
+#   warning: failed to write cache, path: /home/runner/.cargo/registry/index/
+#   index.crates.io-1949cf8c6b5b557f/.cache/as/yn/async-trait,
+#   error: Permission denied (os error 13)
+#   Permission denied (os error 13)
+#   ##[error]Process completed with exit code 2.
+#
+# The label was revoked and the shard count dropped to two. The cause was on
+# the host and not in the lane: `/home/runner/.cargo` was owned `root:root` and
+# `/home/runner/.cargo/registry` did not exist at all, because the runner role
+# seeds only the `bin` subdirectory and leaves the root-owned parent alone. Both
+# are now `runner:runner`, matching the actions-runner service user (uid 1000,
+# gid 1001), and a write probe as that user succeeds.
+#
+# The label came back only after the lane itself was proved here: run 2840
+# attempt 3 was re-run while both other slots were busy, so it had to land on
+# this runner, and it passed in 27.9 minutes — in family with
+# `gha-nuc1-general-01` (25.7-29.1 min) and `gha-rogg16-general-02` (21.8-22.7
+# min) on the same lane.
+#
+# That sequence is the standing rule: **a runner is not a slot until the lane
+# passes on it.** An ownership fix, a successful write probe and a convincing
+# explanation are not together evidence that a 27-minute three-voter hiqlite
+# test will run here. One green run of that test is.
+[[runners]]
+name = "gha-nuc2-android-01"
+host = "nuc2"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "incus", "ubuntu-24.04", "android-kvm", "ci-store"]
+
+[[runners]]
+name = "gha-nuc2-android-02"
+host = "nuc2"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "incus", "ubuntu-24.04", "android-kvm"]
+
+# --- rogg16 (`asus` in the ansible inventory): baremetal, non-voter ----------
+[[runners]]
+name = "gha-rogg16-general-01"
+host = "rogg16"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "baremetal", "ubuntu-26.04", "ci-topology"]
+
+[[runners]]
+name = "gha-rogg16-general-02"
+host = "rogg16"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "baremetal", "ubuntu-26.04", "ci-store"]
+
+[[runners]]
+name = "gha-rogg16-general-03"
+host = "rogg16"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+
+[[runners]]
+name = "gha-rogg16-general-04"
+host = "rogg16"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+
+[[runners]]
+name = "gha-rogg16-android-01"
+host = "rogg16"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "android-kvm", "baremetal", "ubuntu-26.04"]
+
+# --- m6, nuc3, nuc4: Incus guest hosts, production plurx voters -------------
+[[runners]]
+name = "gha-m6-general-01"
+host = "m6"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
+
+[[runners]]
+name = "gha-m6-general-02"
+host = "m6"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
+
+[[runners]]
+name = "gha-nuc3-general-01"
+host = "nuc3"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
+
+[[runners]]
+name = "gha-nuc3-general-02"
+host = "nuc3"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
+
+[[runners]]
+name = "gha-nuc4-general-01"
+host = "nuc4"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
+
+[[runners]]
+name = "gha-nuc4-general-02"
+host = "nuc4"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
+
+# --- nynuc: baremetal, production plurx voter -------------------------------
+[[runners]]
+name = "gha-nynuc-general-01"
+host = "nynuc"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+
+[[runners]]
+name = "gha-nynuc-general-02"
+host = "nynuc"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+
+[[runners]]
+name = "gha-nynuc-general-03"
+host = "nynuc"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+
+[[runners]]
+name = "gha-nynuc-general-04"
+host = "nynuc"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+
+# --- mba / mbp: laptops, non-voters -----------------------------------------
+# The macOS runner is the only Apple CI capacity there is. The two Linux ARM64
+# guests are Lima VMs registered by hand rather than by ansible, and they are
+# the required `ci-arm64` packaging pool: `mbp` is primary, `mba` is backup.
+[[runners]]
+name = "gha-mba-apple-01"
+host = "mba"
+os = "macOS"
+arch = "ARM64"
+labels = ["lab", "apple", "xcode-26"]
+
+[[runners]]
+name = "gha-mba-linux-arm-01"
+host = "mba"
+os = "Linux"
+arch = "ARM64"
+labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "backup"]
+
+[[runners]]
+name = "gha-mbp-linux-arm-01"
+host = "mbp"
+os = "Linux"
+arch = "ARM64"
+labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "primary"]

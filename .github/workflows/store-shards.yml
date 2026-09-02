@@ -1,5 +1,10 @@
 name: replicated Store shards
 
+# Both triggers populate the `inputs` context and both declare
+# `execution-mode`, so every expression below reads that one resolved value.
+# `github.event.inputs` is deliberately never used: it is populated only for
+# `workflow_dispatch` and would be silently empty on every `workflow_call`,
+# which is how a rollout switch turns into a no-op nobody notices.
 on:
   workflow_call:
     inputs:
@@ -7,6 +12,21 @@ on:
         description: Validated rollout mode selected by the caller.
         required: true
         type: string
+  # Proving the sharded path must not cost pull-request traffic. A manual run
+  # exercises these exact jobs on the real fleet and defaults to `shadow`, so
+  # the rehearsal stays advisory until someone deliberately asks for the
+  # required shape. Run this before `scripts/ci-execution-mode accelerated`,
+  # not after.
+  workflow_dispatch:
+    inputs:
+      execution-mode:
+        description: Rollout mode to rehearse. `shadow` keeps the run advisory.
+        required: false
+        default: shadow
+        type: choice
+        options:
+          - shadow
+          - accelerated
 
 permissions:
   contents: read
@@ -14,19 +34,40 @@ permissions:
 jobs:
   shard:
     name: replicated Store shard ${{ matrix.shard_index }}
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || matrix.self_hosted_runs_on) }}
+    # Every shard selects the same label set, so a shard cannot be pinned to a
+    # runner class of its own — which is precisely how shard 1 came to ask for
+    # `ci-store-shard-1`, a label no runner has ever carried, and would have
+    # queued every pull request forever the moment this path became required.
+    # `validation/runner-fleet.toml` now says what the fleet carries and
+    # `make operations-check` rejects a label no rostered runner answers to.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-store"]') }}
     timeout-minutes: 40
     continue-on-error: ${{ inputs.execution-mode == 'shadow' }}
+    env:
+      # The shard count lives here once and both `validation.store_shard`
+      # invocations read it. The matrix below is the only other place the
+      # number appears, because a matrix cannot be built from `env` — and a
+      # mismatch between the two still fails closed rather than silently
+      # dropping tests: `validation/store_shard.py` rejects a receipt set whose
+      # size or index set disagrees with the count the receipts declare.
+      #
+      # Three, because the fleet carries three `ci-store` slots and one physical
+      # host may hold only one — so this number is bounded by eligible hosts
+      # rather than chosen, and `make operations-check` fails when it exceeds
+      # the slots `validation/runner-fleet.toml` records. The floor is two,
+      # enforced by `validation/store_shard.py` in `assigned_tests` and again
+      # in the aggregate validator, so the count can track the fleet up and
+      # down without ever collapsing into a single unsharded job wearing the
+      # sharded lane's name.
+      SHARD_COUNT: "3"
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - shard_index: 0
-            self_hosted_runs_on: '["self-hosted","Linux","X64","lab","ci-store"]'
-          - shard_index: 1
-            # Intentionally unassigned until nuc2's changed SSH host key is
-            # independently verified and its dedicated runner is online.
-            self_hosted_runs_on: '["self-hosted","Linux","X64","lab","ci-store-shard-1"]'
+        # One shard per `ci-store` slot: `nuc1`, `rogg16` and `nuc2`, one per
+        # physical non-voter host. Keep this list and SHARD_COUNT in step —
+        # `make operations-check` fails when they disagree, and when the count
+        # exceeds the number of slots the fleet actually carries.
+        shard_index: [0, 1, 2]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,7 +103,7 @@ jobs:
           --rustc-vv store-contract-export/rustc-vv.txt
           --receipt target/validation/cluster-store-shard-${{ matrix.shard_index }}-receipt.json
           --log target/validation/cluster-store-shard-${{ matrix.shard_index }}.log
-          --shard-count 2
+          --shard-count "$SHARD_COUNT"
           --shard-index ${{ matrix.shard_index }}
       - name: Record a Store binary build failure
         if: always() && steps.build_store_binary.outcome != 'success'
@@ -70,7 +111,7 @@ jobs:
           python3 -m validation.store_shard record-failure
           --receipt target/validation/cluster-store-shard-${{ matrix.shard_index }}-receipt.json
           --log target/validation/cluster-store-shard-${{ matrix.shard_index }}.log
-          --shard-count 2
+          --shard-count "$SHARD_COUNT"
           --shard-index ${{ matrix.shard_index }}
           --error "Store test binary build failed"
       - name: Retain the Store shard log and receipt

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5514dff7"]
+points = ["validation.framework", "operations.packaging"]
+checks = ["operations-contract"]
+reason = "Raising the Store shard count to three after gha-nuc2-android-01 was repaired changes two coupled facts — the workflow's SHARD_COUNT and the rostered ci-store slots — and the operations contract suite is what holds them together: tests/operations/test_contracts.py rejects a count exceeding the rostered slots, a matrix whose indexes are not exactly range(count), a count below the floor validation/store_shard.py enforces, and any runs-on label no rostered runner carries. That suite caught this commit's own predecessor state, three shards against two slots, at preflight rather than in a queue."

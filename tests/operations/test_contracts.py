@@ -7,6 +7,7 @@ import re
 import runpy
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 
@@ -61,6 +62,56 @@ def workflow_step_scalar(step: str, key: str) -> str:
     if len(values) != 1:
         raise AssertionError(f"expected one scalar {key!r}, found {len(values)}")
     return values[0]
+
+
+def runner_fleet() -> dict:
+    with (ROOT / "validation/runner-fleet.toml").open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def rostered_runners() -> tuple[tuple[str, frozenset[str]], ...]:
+    """Each rostered runner and every label GitHub would match it against.
+
+    `self-hosted` and the operating-system and architecture labels are added by
+    GitHub, never by the ansible inventory, so the roster derives them here
+    rather than repeating five read-only strings on every runner.
+    """
+    return tuple(
+        (
+            runner["name"],
+            frozenset(runner["labels"]) | {"self-hosted", runner["os"], runner["arch"]},
+        )
+        for runner in runner_fleet()["runners"]
+    )
+
+
+def store_shard_count() -> int:
+    """The single declared Store shard count, from the shard job's `env`."""
+    return int(
+        re.search(
+            r'(?m)^      SHARD_COUNT: "(\d+)"$',
+            read(".github/workflows/store-shards.yml"),
+        ).group(1)
+    )
+
+
+def self_hosted_label_sets(block: str) -> list[tuple[str, ...]]:
+    """Every self-hosted label set a job's `runs-on` can resolve to.
+
+    A job either names both pools inline in one `fromJSON` ternary over
+    `vars.CI_RUNNER_MODE`, or reads the self-hosted side from a matrix key. Both
+    spell that side as a single-quoted JSON array, so parse the arrays that are
+    actually there instead of matching label strings this test already knows.
+    """
+    sources = re.findall(r"(?m)^ +runs-on: .+$", block)
+    sources += re.findall(r"(?m)^ +self_hosted_runs_on: .+$", block)
+    return [
+        tuple(labels)
+        for source in sources
+        for literal in re.findall(r"'(\[[^']*\])'", source)
+        for labels in (json.loads(literal),)
+        if "self-hosted" in labels
+    ]
 
 
 def workflow_step_literal(step: str, key: str) -> list[str]:
@@ -911,6 +962,7 @@ class OperationsContractCase(unittest.TestCase):
 
     def test_store_shards_are_dynamic_disjoint_and_roll_out_behind_one_verdict(self):
         workflow = read(".github/workflows/ci.yml")
+        shards = read(".github/workflows/store-shards.yml")
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
         shard_jobs = workflow_job_blocks(".github/workflows/store-shards.yml")
         legacy = jobs["cluster_store_legacy"]
@@ -931,11 +983,68 @@ class OperationsContractCase(unittest.TestCase):
             "continue-on-error: ${{ inputs.execution-mode == 'shadow' }}",
             shard,
         )
-        self.assertIn("shard_index: 0", shard)
-        self.assertIn("shard_index: 1", shard)
-        self.assertEqual(shard.count('\"ci-store\"'), 1)
-        self.assertEqual(shard.count('\"ci-store-shard-1\"'), 1)
+
+        # The sharded path has to be provable before anyone flips the
+        # repository variable, and proving it must not cost pull-request
+        # traffic. `workflow_dispatch` runs the same jobs on demand and
+        # defaults to `shadow`, so a rehearsal is advisory unless it is asked
+        # to be otherwise. Both triggers declare `execution-mode`, so every
+        # expression reads the one resolved `inputs` value; `github.event.
+        # inputs` is dispatch-only and would be empty on every `workflow_call`.
+        call, dispatch = (
+            shards.split("  workflow_call:\n", 1)[1].split("  workflow_dispatch:\n", 1)
+        )
+        self.assertIn("      execution-mode:\n        description:", call)
+        self.assertIn("        required: true", call)
+        self.assertIn("        type: string", call)
+        self.assertIn("      execution-mode:\n        description:", dispatch)
+        self.assertIn("        default: shadow", dispatch)
+        self.assertIn("        type: choice", dispatch)
+        self.assertNotIn(
+            "github.event.inputs", shards.split("\njobs:\n", 1)[1]
+        )
+        # One shard per `ci-store` slot, every one selecting the same label set
+        # that already schedules the legacy lane and the weekly backstop. A
+        # shard with a runner class of its own is what produced
+        # `ci-store-shard-1`, a label the fleet has never carried and which
+        # would have queued every pull request forever the moment this path
+        # became required.
+        self.assertEqual(
+            [("self-hosted", "Linux", "X64", "lab", "ci-store")],
+            self_hosted_label_sets(shard),
+        )
         self.assertIn("fail-fast: false", shard)
+        # The count lives in one place and both invocations read it. The matrix
+        # is the only unavoidable second mention — a matrix cannot be built
+        # from `env` — so prove the two agree rather than pinning a literal
+        # that every fleet change has to chase. A disagreement that somehow got
+        # past this still fails closed, because `validation/store_shard.py`
+        # rejects a receipt set whose size or index set does not match the
+        # count the receipts declare.
+        shard_count = store_shard_count()
+        self.assertGreaterEqual(
+            shard_count,
+            2,
+            "validation/store_shard.py rejects a shard count below two",
+        )
+        self.assertEqual(
+            list(range(shard_count)),
+            [
+                int(index)
+                for index in re.search(
+                    r"(?m)^        shard_index: \[(.+)\]$", shard
+                )
+                .group(1)
+                .split(",")
+            ],
+        )
+        self.assertEqual(
+            shard.count('--shard-count "$SHARD_COUNT"'),
+            2,
+            "both store_shard invocations must read the one declared count",
+        )
+        # No step may carry a literal count beside the one `env` declaration.
+        self.assertNotRegex(shard, r"--shard-count \d")
 
         build = workflow_step_blocks(shard)["Build the exact Store test binary"]
         self.assertEqual(workflow_step_scalar(build, "continue-on-error"), "true")
@@ -951,7 +1060,7 @@ class OperationsContractCase(unittest.TestCase):
         run = shard_steps["Run the assigned Store tests once"]
         self.assertEqual(workflow_step_scalar(run, "continue-on-error"), "true")
         self.assertIn("python3 -m validation.store_shard run", run)
-        self.assertIn("--shard-count 2", run)
+        self.assertIn('--shard-count "$SHARD_COUNT"', run)
         self.assertIn("--shard-index ${{ matrix.shard_index }}", run)
         self.assertNotIn("cargo test", run)
         failure = shard_steps["Record a Store binary build failure"]
@@ -1433,6 +1542,7 @@ class OperationsContractCase(unittest.TestCase):
 
         for path in (
             ".github/workflows/ci.yml",
+            ".github/workflows/cluster-store-backstop.yml",
             ".github/workflows/effort-ci.yml",
             ".github/workflows/fix-evidence.yml",
             ".github/workflows/lint.yml",
@@ -1476,11 +1586,11 @@ class OperationsContractCase(unittest.TestCase):
                     path == ".github/workflows/store-shards.yml"
                     and name == "shard"
                 ):
-                    expected = (
-                        "    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == "
-                        "'github' && '[\"ubuntu-24.04\"]' || "
-                        "matrix.self_hosted_runs_on) }}"
-                    )
+                    # Every shard selects the one label set, inline, exactly as
+                    # the legacy lane and the weekly backstop do. Reading it
+                    # from a per-shard matrix key is what let one row drift to
+                    # a label the fleet does not carry.
+                    expected = ci_store
                 elif (
                     path == ".github/workflows/cluster-store-backstop.yml"
                     and name == "cluster-store-backstop"
@@ -1533,6 +1643,126 @@ class OperationsContractCase(unittest.TestCase):
                 block,
                 f"rust-audit:{name} does not provision the pinned Cargo toolchain",
             )
+
+    def test_every_self_hosted_runs_on_is_satisfiable_by_a_rostered_runner(self):
+        # A `runs-on` naming a label nothing carries is not an error GitHub
+        # reports. The job queues, indefinitely, and is eventually cancelled
+        # having never started — which is how the required Store lane spent
+        # 2026-09-02 at 45 attempts, 15 started, 27 cancelled while queued, and
+        # waits reaching 234 minutes, and how `store-shards.yml` came to pin a
+        # shard to `ci-store-shard-1`, a label the fleet has never had. Nothing
+        # in the repository knew what the fleet carries, so nothing could
+        # object. `validation/runner-fleet.toml` is that knowledge and this is
+        # the check that spends it, at preflight, in milliseconds.
+        #
+        # Discover the workflow files rather than listing them: a workflow
+        # added after this test must not be exempt from it merely by being
+        # newer than it.
+        runners = rostered_runners()
+        self.assertTrue(runners, "the runner roster is empty")
+
+        workflow_paths = sorted(
+            path.relative_to(ROOT).as_posix()
+            for pattern in ("*.yml", "*.yaml")
+            for path in (ROOT / ".github/workflows").glob(pattern)
+        )
+        self.assertIn(".github/workflows/store-shards.yml", workflow_paths)
+
+        selections = 0
+        for path in workflow_paths:
+            parsed: list[tuple[str, ...]] = []
+            for name, block in workflow_job_blocks(path).items():
+                for labels in self_hosted_label_sets(block):
+                    parsed.append(labels)
+                    selections += 1
+                    with self.subTest(path=path, job=name, labels=labels):
+                        self.assertTrue(
+                            [
+                                runner
+                                for runner, carried in runners
+                                if set(labels) <= carried
+                            ],
+                            f"{path}:{name} selects {list(labels)}, which no "
+                            "runner in validation/runner-fleet.toml carries. "
+                            "Give a runner the label before a workflow asks "
+                            "for it.",
+                        )
+            # The per-job parse above has to see every self-hosted selection in
+            # the file. A `runs-on` spelling it cannot read would otherwise be
+            # quietly exempt, which is the same "nothing was looking" failure
+            # wearing a different hat, so compare against the whole file.
+            self.assertEqual(
+                sorted(parsed),
+                sorted(
+                    tuple(json.loads(literal))
+                    for literal in re.findall(r"'(\[[^']*\])'", read(path))
+                    if '"self-hosted"' in literal
+                ),
+                f"{path} selects a self-hosted runner in a shape this test "
+                "cannot parse; teach self_hosted_label_sets to read it",
+            )
+        # Guard against the parser silently matching nothing at all and the
+        # loop above passing vacuously.
+        self.assertGreater(selections, 20)
+
+    def test_the_runner_roster_keeps_heavy_cluster_lanes_off_shared_hosts(self):
+        # The roster is only worth what its own shape guarantees. `ci-store`
+        # and `ci-topology` each select a three-voter hiqlite test; two of them
+        # on one physical host is the loaded-runner quorum flake that produced
+        # the artwork-fence failures, and one on a production voter is the same
+        # bet with plurx's own availability as the stake. Both invariants are
+        # deliberate, so both are written down here rather than remembered.
+        fleet = runner_fleet()
+        runners = fleet["runners"]
+        voters = set(fleet["voter_hosts"])
+        self.assertTrue(voters)
+
+        names = [runner["name"] for runner in runners]
+        self.assertEqual(len(names), len(set(names)), "duplicate runner name")
+        for runner in runners:
+            with self.subTest(runner=runner["name"]):
+                # `gha-<host>-<role>-<NN>`. The host is in the name, so a
+                # runner cannot be filed under the wrong machine and quietly
+                # buy a second slot for its host.
+                self.assertEqual(runner["name"].split("-")[1], runner["host"])
+                self.assertIn(runner["os"], {"Linux", "macOS"})
+                self.assertIn(runner["arch"], {"X64", "ARM64"})
+                for implicit in ("self-hosted", runner["os"], runner["arch"]):
+                    self.assertNotIn(
+                        implicit,
+                        runner["labels"],
+                        "labels lists what the fleet assigns; GitHub adds this "
+                        "one and ansible never writes it",
+                    )
+
+        for label in fleet["host_exclusive_labels"]:
+            hosts = [
+                runner["host"] for runner in runners if label in runner["labels"]
+            ]
+            with self.subTest(label=label):
+                self.assertTrue(hosts, f"no rostered runner carries {label}")
+                self.assertEqual(
+                    sorted(hosts),
+                    sorted(set(hosts)),
+                    f"two {label} runners share a physical host",
+                )
+                self.assertEqual(
+                    [],
+                    sorted(set(hosts) & voters),
+                    f"{label} is assigned to a production plurx voter",
+                )
+
+        # The Store fan-out is only as parallel as the fleet. One host holds at
+        # most one slot, so a surplus shard cannot be given a runner of its
+        # own: it serialises behind a busy one and buys a more complicated
+        # failure and no wall time. This is the check that caught a three-shard
+        # matrix on 2026-09-02 after `gha-nuc2-android-01` lost `ci-store` for
+        # failing the lane on an unwritable Cargo home.
+        self.assertGreaterEqual(
+            len([r for r in runners if "ci-store" in r["labels"]]),
+            store_shard_count(),
+            "the Store shard count exceeds the number of ci-store slots",
+        )
 
     def test_job_containers_never_use_persistent_self_hosted_workspaces(self):
         workflow_root = ROOT / ".github/workflows"
