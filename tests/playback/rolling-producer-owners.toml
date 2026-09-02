@@ -1020,6 +1020,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # process: the actor answers on its own mailbox and the sender is dropped when
 # that arm returns, so a retired actor closes the channel rather than leaving a
 # waiter detached. Reviewed as part of the M6 preparation slot's executor.
+# 381 -> 382 with M6's shadow measurement, and this one is a *production*
+# detached task rather than a test actor, so it is worth the words. It owns no
+# producer, no process and no timer; it does one store read and increments an
+# atomic. It is detached deliberately: the control exchange is under an
+# absolute deadline it has already spent by the time this runs, the response is
+# fully built, and awaiting a store read there could turn a completed exchange
+# into a 503 *after* its accepted metric had been recorded — so a measurement
+# would corrupt the metrics it sits beside. It holds no lock (the VOD
+# lifecycle guard is dropped before the response is built), and the fan-out is
+# bounded at 32 in flight by `PREPARATION_SHADOWS_IN_FLIGHT`, because the gate
+# fires per selection change and a client alternating between two selections
+# would otherwise spawn one per exchange.
 # 378 -> 379 with the executor's own tests: `preparation_fixture` spawns one
 # `RollingControlHandle` per test, which is the ordinary test-actor shape
 # already counted a dozen times over. It is owned by the handle the fixture
@@ -1030,11 +1042,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # 379 -> 381 with M7 R-M2's handler acceptance fixture: its two concurrent
 # subtitle-segment request tasks are both joined by the fixture's bounded wait.
 # Neither task is a shipped producer or process owner.
-# 381 -> 382: the deterministic Activity in-flight-sharing regression holds
+# 382 -> 383: the deterministic Activity in-flight-sharing regression holds
 # one leading fetch in a joined test task while seven followers queue behind
 # the same process-local gate. The fixture releases and awaits every task; it
 # owns no shipped producer, timer, or process.
-expected_occurrences = 382
+expected_occurrences = 383
 
 [[module_structures]]
 id = "method-spawn"
