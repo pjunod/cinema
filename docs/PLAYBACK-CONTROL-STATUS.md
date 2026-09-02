@@ -104,8 +104,10 @@ merge target: two client PRs in flight means the second always fails.
 | M6 tests | the executor's three durable outcomes, pinned | [#796](https://github.com/pjunod/plurx/pull/796) | merged |
 | M6 decision | prepare or fall back, and why it is one axis | [#798](https://github.com/pjunod/plurx/pull/798) | merged |
 | M6 caller | where the decision is made, and the five slices after it | [#800](https://github.com/pjunod/plurx/pull/800) · [#802](https://github.com/pjunod/plurx/pull/802) | merged |
-| M6 retention | the session keeps the capability it was told once | [#801](https://github.com/pjunod/plurx/pull/801) | open |
-| status | what M6 landed, and where it stops | — | this change |
+| M6 retention | the session keeps the capability it was told once | [#801](https://github.com/pjunod/plurx/pull/801) | merged |
+| M6 grade axis | read the grade off the request, on both sides | [#805](https://github.com/pjunod/plurx/pull/805) · [#807](https://github.com/pjunod/plurx/pull/807) | merged |
+| status | what M6 landed, and what it cannot yet do | [#804](https://github.com/pjunod/plurx/pull/804) | merged |
+| status | M6's night, closed out | — | this change |
 
 Status-only PRs are not listed: #746, #747, #751, #755, #759, #777, #781,
 #783 and #784 each updated this page and changed nothing else. Nor are the
@@ -545,8 +547,16 @@ review caught them:
   `capabilities` only on sequence 1, so anything reading the live snapshot sees
   `None` from exchange two onward for the rest of the session.
   [#801](https://github.com/pjunod/plurx/pull/801) retains it.
-- **An unknown grade abstains.** `None` means the source row could not be read,
-  not a grade; comparing it as a value turned a rescan into a grade change.
+- **The grade axis is read off the request on both sides**
+  ([#807](https://github.com/pjunod/plurx/pull/807)), as a `GradeIntent`
+  carrying the HDR10 rung and the two Dolby Vision answers.
+  `EffectiveSelection.dynamic_range` is the grade the *encoder* settled on, and
+  a candidate recipe that will never be built has no encoder — so comparing the
+  two compares unlike things. Both alternatives are worse and both look
+  reasonable: giving the candidate no grade fails **unsafe**, letting a real
+  grade change classify as resolution-only and be prepared; giving it the grade
+  its body asked for fails safe but *constantly*, so a session whose HDR10 rung
+  the encoder refused never gets a prepared handoff again.
 
 **Where it stops.** There is **no production caller**. Nothing in the
 HTTP layer stages a successor, so on today's fleet the executor is exercised
@@ -586,7 +596,10 @@ holds. The exchange proposes; the actor disposes.
 with the extraction map in §3.2.1):
 
 1. candidate resolution becomes callable — one span of `create`, of which only
-   the height resolution is inline;
+   the height resolution is inline. Its map is
+   [M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.2.1, **including the
+   correction**: the delivered grade is not predictable for an unbuilt recipe,
+   which is why the axis moved to the request;
 2. shadow mode: decide, emit the metric, change nothing. This is what turns
    `PREPARED_AXIS` from an argument into a measurement;
 3. stage on `Prepare` — the first behaviour change, which fires on nothing
