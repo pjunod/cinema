@@ -1,6 +1,8 @@
 # Player input contract — implementation plan
 
-**Status:** ready to build, M0 landed with this document · **Executes:**
+**Status:** ready to build, M0 landed with this document · **Executed by:**
+[PLAYER-INPUT-CONTRACT-HANDOFF.md](PLAYER-INPUT-CONTRACT-HANDOFF.md) (the
+file-by-file instructions) · **Executes:**
 [PLAYER-INPUT-CONTRACT.md](PLAYER-INPUT-CONTRACT.md) against the findings in
 [UI-NAVIGATION-AUDIT.md](UI-NAVIGATION-AUDIT.md) · **Written:** 2026-09-02 ·
 **Anchors:** `file:line` at commit `18886477` unless stated; re-verify with
@@ -22,7 +24,7 @@ about the row, not a licence to make the client special.
 
 After this plan, the question "what does Right do right now?" has one
 answer per state on every client, that answer is a row in
-[`tests/playback/player-input-contract.json`](../tests/playback/player-input-contract.json),
+[`tests/contracts/player-input-contract.json`](../tests/contracts/player-input-contract.json),
 each client's reducer is tested against every row, and no key code exists
 outside each client's one adapter file. The three reports that started
 this — the unusable seek bar, the seek that fires while navigating, the
@@ -81,9 +83,9 @@ one line), idle CSS (`:320`, `:335`, `:339`, `:364`, `:377`). Tests:
 `tests/playback/web-policy.test.js` (slices shipped functions out of
 `index.html` and executes them — copy that harness), `web-control.test.js`.
 
-**Fixtures.** `tests/playback/player-input-contract.json` — `surfaces`,
+**Fixtures.** `tests/contracts/player-input-contract.json` — `surfaces`,
 `timings`, `steps`, `controls`, `inputs`, `states`, `outcomes`,
-`routing[surface][state][input]`; and `tests/playback/playback-info-fields.json`
+`routing[surface][state][input]`; and `tests/contracts/playback-info-fields.json`
 — `modes`, `sections`, `formats`, `health_pill`, `fields[]` with `id`,
 `label`, `section`, `modes`, `format`, optional `placement: notes`,
 `available_on`, `always`. `scripts/player-contract-table` renders §2 and §7
@@ -364,7 +366,7 @@ the physical Apple TV run in §6.
 2. **Fixture identity.** The same check asserts
    `clients/android/app/src/test/resources/player-input-contract.json` and
    the Apple test resource are byte-identical to
-   `tests/playback/player-input-contract.json`.
+   `tests/contracts/player-input-contract.json`.
 3. **Options fold** once §8.1 of the contract is ruled: web's
    `⏭ Auto-skip`, `▶ Autoplay`, `⇄ Sync` and Apple's `autoplay` button
    become entries in a `settings` menu; Android's panel is the model. Row
@@ -374,8 +376,7 @@ the physical Apple TV run in §6.
    `STATUS.html` player tile cites it.
 
 **Acceptance:** `make validate-staged` red on a synthetic diff that adds
-`KEYCODE_DPAD_LEFT` to `PlayerScreen.kt`, green on `main`; the three
-fixture copies hash-equal.
+`KEYCODE_DPAD_LEFT` to `PlayerScreen.kt`, green on `main`.
 
 ### M5 — navigation outside the player
 
@@ -436,7 +437,8 @@ timeout_seconds = 30
 
 `scripts/player-input-fence` greps the client trees for the tokens in M4 §1,
 subtracts the allow-list (each entry with a one-line reason in the script),
-and compares SHA-256 of the three fixture copies. Exit 1 with the offending
+and checks the two fixture references in `build.gradle.kts` and
+`project.yml` are still present. Exit 1 with the offending
 `file:line` list. Add it to the `playback.pipeline` and `web.ui` points'
 `checks` arrays in `validation/points.toml` (`:590-591`, `:683-685`) so a
 touch to either client tree runs it under `make validate-staged`.

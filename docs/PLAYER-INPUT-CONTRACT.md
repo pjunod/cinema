@@ -1,7 +1,7 @@
 # Player input contract — one routing table, every client obeys it
 
 **Status:** ruled 2026-09-02, fixtures committed, clients not yet conformant ·
-**Source of truth:** [`tests/playback/player-input-contract.json`](../tests/playback/player-input-contract.json) (input) and [`tests/playback/playback-info-fields.json`](../tests/playback/playback-info-fields.json) (info panel) ·
+**Source of truth:** [`tests/contracts/player-input-contract.json`](../tests/contracts/player-input-contract.json) (input) and [`tests/contracts/playback-info-fields.json`](../tests/contracts/playback-info-fields.json) (info panel) ·
 **Kept honest by:** `tests/playback/player-input-contract.test.js` (runs in
 `make web-check`) · **Built by:** [PLAYER-INPUT-CONTRACT-PLAN.md](PLAYER-INPUT-CONTRACT-PLAN.md)
 
@@ -68,7 +68,7 @@ move.
 
 <!-- contract:routing:begin -->
 
-_Generated from [`tests/playback/player-input-contract.json`](../tests/playback/player-input-contract.json) by `scripts/player-contract-table`; do not edit by hand._
+_Generated from [`tests/contracts/player-input-contract.json`](../tests/contracts/player-input-contract.json) by `scripts/player-contract-table`; do not edit by hand._
 
 **Surface `ten-foot`** — Directional input moves focus: Siri Remote (tvOS), D-pad (Android TV / Google TV), keyboard arrows on a TV browser, and keyboard arrows on the web when the timeline has focus.
 
@@ -270,11 +270,11 @@ Per-surface adapters map inputs as follows; anything not listed is
    `scripts/player-contract-table --write`, commit both.
 2. **Each reducer reproduces the fixture.** Web: `web-policy.test.js` loads
    the JSON and asserts `routeInput` over every row. Android: a JUnit test
-   over `src/test/resources/player-input-contract.json`. Apple: an XCTest
-   over the same file as a test resource. The two copies are checked
-   byte-identical against `tests/playback/` by a validation check (plan
-   §5), the same way the five-surface build-claims contract keeps
-   `project.yml` and the docs in step.
+   reading the same file from the JVM test classpath — `tests/contracts/`
+   is already a test resource directory there. Apple: an XCTest reading the
+   same file bundled into the test target by `project.yml`. One file,
+   three readers, no copies — the pattern `tests/contracts/native-api.json`
+   already uses.
 3. **Each view consumes its reducer.** A reducer nobody calls proves
    nothing — this repo has already had seven production lines revert green
    because a test pinned an extracted helper instead of the call site.
@@ -295,7 +295,7 @@ Per-surface adapters map inputs as follows; anything not listed is
 6. **The playback-info panel shows the fixture's rows.** Each client's
    panel is built from a row list the test compares, label for label and
    mode for mode, against
-   [`tests/playback/playback-info-fields.json`](../tests/playback/playback-info-fields.json)
+   [`tests/contracts/playback-info-fields.json`](../tests/contracts/playback-info-fields.json)
    (§7). Android already has a section/row builder and an instrumented test
    of its Standard labels; Apple's ledger types become non-private so the
    same test can exist; the web's `updateStats` builders are sliced and
@@ -351,7 +351,7 @@ every player instance today.
 
 <!-- contract:info:begin -->
 
-_Generated from [`tests/playback/playback-info-fields.json`](../tests/playback/playback-info-fields.json) by `scripts/player-contract-table`; do not edit by hand._
+_Generated from [`tests/contracts/playback-info-fields.json`](../tests/contracts/playback-info-fields.json) by `scripts/player-contract-table`; do not edit by hand._
 
 **PLAYBACK**
 

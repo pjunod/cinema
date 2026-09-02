@@ -463,7 +463,7 @@ against the same rows. That is
    navigation between rows.
 
 4. **The info panel gets one row list.** The union in
-   `tests/playback/playback-info-fields.json`, duplicate labels retired,
+   `tests/contracts/playback-info-fields.json`, duplicate labels retired,
    platform-only rows marked, one unit spelling, one pill meaning.
 
 Still open, with the recommended default in the contract and the plan:

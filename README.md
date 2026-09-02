@@ -75,7 +75,9 @@ routing table every player obeys — what a press, click, or swipe does in each
 state on every client — with [docs/UI-NAVIGATION-AUDIT.md](docs/UI-NAVIGATION-AUDIT.md)
 recording why the three players diverged and
 [docs/PLAYER-INPUT-CONTRACT-PLAN.md](docs/PLAYER-INPUT-CONTRACT-PLAN.md) the
-milestones that make them conform.
+milestones that make them conform —
+[docs/PLAYER-INPUT-CONTRACT-HANDOFF.md](docs/PLAYER-INPUT-CONTRACT-HANDOFF.md)
+is the file-by-file version an executing agent works from.
 [docs/EBOOK-READER-PLAN.md](docs/EBOOK-READER-PLAN.md) finishes the Books loop:
 Curator's import handoff, Cinema-owned reading state, the EPUB renderer,
 phone/tablet clients, and offline originals, each behind an acceptance gate.

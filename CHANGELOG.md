@@ -18,14 +18,15 @@ bump may break compatibility and a **patch** bump never does.
   client — with every claim anchored to `18886477`.
   `docs/PLAYER-INPUT-CONTRACT.md` is the rule the three players will be tested against: state
   × input → outcome per surface, rendered from
-  `tests/playback/player-input-contract.json` by `scripts/player-contract-table`
+  `tests/contracts/player-input-contract.json` by `scripts/player-contract-table`
   and held identical by `tests/playback/player-input-contract.test.js` under
   `make web-check`. The rulings it encodes: hidden chrome reveals and never
   seeks; the 10-foot seek bar is its own row with preview-then-commit; the
   ±30 s vertical seek is gone. `docs/PLAYER-INPUT-CONTRACT-PLAN.md` sequences
   the client work (web, Android, Apple, then a validation fence that keeps key
-  handling in one adapter file per client). No player behaviour changes in
-  this entry.
+  handling in one adapter file per client) and
+  `docs/PLAYER-INPUT-CONTRACT-HANDOFF.md` spells it out file by file for the
+  executing agent. No player behaviour changes in this entry.
 - **The noirr fleet can build plurxd once and pull the same stamped image on
   every voter.** Compose accepts `PLURX_IMAGE` while retaining its source-build
   default, and `scripts/registry-push` publishes both `latest` and an immutable

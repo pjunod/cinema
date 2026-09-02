@@ -674,6 +674,8 @@ paths = [
   "crates/plurxd/src/web/**",
   "docs/UI-*.md",
   "docs/PLAYER-INPUT-CONTRACT*.md",
+  "tests/contracts/player-input-contract.json",
+  "tests/contracts/playback-info-fields.json",
   "scripts/contrast-*",
   "scripts/player-contract-table",
   "scripts/control-reporter-browser-check",
