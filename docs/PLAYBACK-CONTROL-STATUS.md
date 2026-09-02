@@ -109,7 +109,11 @@ merge target: two client PRs in flight means the second always fails.
 | status | what M6 landed, and what it cannot yet do | [#804](https://github.com/pjunod/plurx/pull/804) | merged |
 | status | M6's night, closed out | [#808](https://github.com/pjunod/plurx/pull/808) | merged |
 | M6 resolver | one resolver for "what would we deliver" | [#809](https://github.com/pjunod/plurx/pull/809) | merged |
-| M6 shadow prep | the mapping slice 3.3 needs first | — | this change |
+| M6 shadow prep | the mapping slice 3.3 needs first | [#811](https://github.com/pjunod/plurx/pull/811) · [#812](https://github.com/pjunod/plurx/pull/812) · [#813](https://github.com/pjunod/plurx/pull/813) | merged |
+| M6 height | the height resolution is one function, shared | [#815](https://github.com/pjunod/plurx/pull/815) | merged |
+| M6 candidate | the recipe a selection asks for | [#816](https://github.com/pjunod/plurx/pull/816) | merged |
+| trakt flake | wait for the last write, not the first | [#817](https://github.com/pjunod/plurx/pull/817) | merged |
+| M6 shadow cost | what the wiring costs, and what it is allowed to see | — | this change |
 
 Status-only PRs are not listed: #746, #747, #751, #755, #759, #777, #781,
 #783 and #784 each updated this page and changed nothing else. Nor are the
