@@ -2380,6 +2380,170 @@ pub(crate) struct ActionProposal {
     pub severity: &'static str,
 }
 
+/// Performs a preparation's durable half, gated by the actor that owns the
+/// slot.
+///
+/// The actor decides and this executes; the store's own CAS decides the
+/// outcome. Three separate authorities, in that order, and none of them may
+/// be skipped:
+///
+/// * the actor answers whether this successor is still wanted,
+/// * the store answers whether the pointer still names the recorded
+///   predecessor,
+/// * the actor is told which happened and frees the slot.
+///
+/// The gate and the store call cannot be one transaction, so the actor is
+/// asked as late as possible and told as soon as an answer exists. The window
+/// between them is exactly why `settle` re-checks identity rather than
+/// trusting the gate's earlier `true`.
+// Unused in this slice, and plainly rather than conditionally: the slot's own
+// items are exercised by tests, but this has no caller in either target until
+// the HTTP layer stages a successor. `allow` rather than a constructed-once
+// test, because a fake `dyn Store` is most of the trait and a test that exists
+// only to satisfy a lint proves nothing about the sequencing that matters.
+#[allow(dead_code)]
+pub(crate) struct PreparationExecutor {
+    store: std::sync::Arc<dyn plurx_core::store::Store>,
+    control: RollingControlHandle,
+    user_id: i64,
+    playback_id: String,
+}
+
+#[allow(dead_code)]
+impl PreparationExecutor {
+    pub(crate) fn new(
+        store: std::sync::Arc<dyn plurx_core::store::Store>,
+        control: RollingControlHandle,
+        user_id: i64,
+        playback_id: String,
+    ) -> Self {
+        Self {
+            store,
+            control,
+            user_id,
+            playback_id,
+        }
+    }
+
+    /// Stage a successor: durable row first, then the slot.
+    ///
+    /// That order is deliberate. If the row is created and the slot refuses,
+    /// this aborts the row it just made — a staged row nobody owns is reaped
+    /// only by the maintenance backstop, and until then it counts against the
+    /// user's admission cap for a successor that will never commit. The
+    /// reverse order would instead leave the actor believing in a successor
+    /// the store rejected, which is worse: a commit could then name it.
+    pub(crate) async fn stage(
+        &self,
+        preparation: &plurx_core::domain::MediaSessionPreparation,
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        if self
+            .store
+            .prepare_media_session(preparation)
+            .await?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        if self
+            .control
+            .stage_preparation(
+                preparation.incarnation_id.clone(),
+                preparation.expected_predecessor_incarnation_id.clone(),
+            )
+            .await
+        {
+            return Ok(true);
+        }
+        let _ = self
+            .store
+            .abort_media_session_preparation(
+                self.user_id,
+                &self.playback_id,
+                &preparation.incarnation_id,
+                preparation.now_ms,
+            )
+            .await;
+        Ok(false)
+    }
+
+    /// Commit a staged successor, or abort it if the pointer moved.
+    ///
+    /// `Ok(false)` covers both refusals and means the same thing to a caller:
+    /// this successor is not becoming current. The distinction that matters is
+    /// invisible from here and deliberate — a lost CAS aborts the staged
+    /// generation and **never reaps the newer player generation** that won,
+    /// which is why the predecessor is recorded at preparation time rather
+    /// than read fresh at commit.
+    pub(crate) async fn commit(
+        &self,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        if !self
+            .control
+            .may_commit_preparation(staged_incarnation_id)
+            .await
+        {
+            return Ok(false);
+        }
+        let committed = self
+            .store
+            .commit_media_session_preparation(
+                self.user_id,
+                &self.playback_id,
+                staged_incarnation_id,
+                now_ms,
+                lease_expires_at_ms,
+            )
+            .await?
+            .is_some();
+        if !committed {
+            // The pointer moved: tear this successor down rather than leave a
+            // row the actor has already forgotten.
+            let _ = self
+                .store
+                .abort_media_session_preparation(
+                    self.user_id,
+                    &self.playback_id,
+                    staged_incarnation_id,
+                    now_ms,
+                )
+                .await;
+        }
+        self.control
+            .settle_preparation(staged_incarnation_id, committed)
+            .await;
+        Ok(committed)
+    }
+
+    /// Discard a staged successor and leave the current stream authoritative.
+    ///
+    /// The slot is settled whatever the store says. A row that is already
+    /// ended, or that was never staged, leaves nothing for the actor to hold —
+    /// and an owner retrying an abort after a crash must read back the same
+    /// outcome rather than a spurious loss.
+    pub(crate) async fn abort(
+        &self,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<(), plurx_core::error::StoreError> {
+        self.store
+            .abort_media_session_preparation(
+                self.user_id,
+                &self.playback_id,
+                staged_incarnation_id,
+                now_ms,
+            )
+            .await?;
+        self.control
+            .settle_preparation(staged_incarnation_id, false)
+            .await;
+        Ok(())
+    }
+}
+
 /// The state of this playback's single preparation slot.
 ///
 /// M6 stages a successor while the current stream still plays and commits only
@@ -4061,6 +4225,30 @@ enum RollingControlCommand {
         after_sequence: u64,
         reply: tokio::sync::oneshot::Sender<ProducerDecisionPoll>,
     },
+    /// Take the preparation slot for a successor. `false` when it is already
+    /// occupied or the playback is terminal.
+    StagePreparation {
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    /// Ask whether this exact successor may still be committed, immediately
+    /// before the durable CAS. The gate and the store call cannot be one
+    /// transaction, so the actor is asked as late as possible and its answer
+    /// is re-checked on the way back in `SettlePreparation`.
+    MayCommitPreparation {
+        staged_incarnation_id: String,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    /// Report a preparation's durable outcome. `committed` false covers both a
+    /// completed abort and a lost commit CAS — the store returning `Ok(None)`
+    /// because the pointer no longer names the recorded predecessor. Both free
+    /// the slot; neither reaps the newer generation.
+    SettlePreparation {
+        staged_incarnation_id: String,
+        committed: bool,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     #[cfg(test)]
     InstallProducerDecision {
         decision: ProducerDecision,
@@ -4179,6 +4367,9 @@ impl RollingControlCommand {
             Self::ClassifyCopyProducerExit { .. } => Some(18),
             Self::ApplyProducerFlow { .. } => Some(19),
             Self::SettleProducerFlowSignal { .. } => Some(20),
+            Self::StagePreparation { .. } => Some(21),
+            Self::MayCommitPreparation { .. } => Some(22),
+            Self::SettlePreparation { .. } => Some(23),
             Self::ObservePublication { .. } => Some(4),
             Self::CommitMedia { .. } => Some(5),
             Self::CommitGenerationMetadata { .. } => Some(14),
@@ -7533,6 +7724,38 @@ impl RollingControlActor {
                 } => {
                     let _ = reply.send(self.poll_producer_decision_at(after_sequence));
                 }
+                RollingControlCommand::StagePreparation {
+                    staged_incarnation_id,
+                    predecessor_incarnation_id,
+                    reply,
+                } => {
+                    let staged =
+                        self.stage_preparation(staged_incarnation_id, predecessor_incarnation_id);
+                    let _ = reply.send(staged);
+                }
+                RollingControlCommand::MayCommitPreparation {
+                    staged_incarnation_id,
+                    reply,
+                } => {
+                    let _ = reply.send(self.preparation.may_commit(&staged_incarnation_id));
+                }
+                RollingControlCommand::SettlePreparation {
+                    staged_incarnation_id,
+                    committed,
+                    reply,
+                } => {
+                    // A commit that lost its CAS is reported here as
+                    // `committed: false`, and it must land as an abort rather
+                    // than as nothing: the successor still exists durably and
+                    // something has to own tearing it down. Marking the slot
+                    // aborting first means a retry of the same commit finds
+                    // `may_commit` false instead of racing the teardown.
+                    if !committed {
+                        self.abort_preparation(&staged_incarnation_id);
+                    }
+                    let settled = self.settle_preparation(&staged_incarnation_id);
+                    let _ = reply.send(settled);
+                }
                 #[cfg(test)]
                 RollingControlCommand::InstallProducerDecision { decision, reply } => {
                     let installed = self.install_producer_decision_for_test(published_at, decision);
@@ -8831,6 +9054,73 @@ impl RollingControlHandle {
         response.await.map_err(|_| ControlStateError::Unavailable)?
     }
 
+    /// Take the preparation slot for a successor whose durable row already
+    /// exists. `false` when the slot is occupied or the playback is terminal —
+    /// in both cases the caller must abort the row it just created, because
+    /// nothing else knows about it.
+    pub(crate) async fn stage_preparation(
+        &self,
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+    ) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command(RollingControlCommand::StagePreparation {
+                staged_incarnation_id,
+                predecessor_incarnation_id,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
+    /// Whether this exact successor may still be committed. Asked immediately
+    /// before the durable CAS and re-checked after it, because the gate and
+    /// the call cannot be one transaction.
+    pub(crate) async fn may_commit_preparation(&self, staged_incarnation_id: &str) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command(RollingControlCommand::MayCommitPreparation {
+                staged_incarnation_id: staged_incarnation_id.to_owned(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
+    /// Report a preparation's durable outcome and free the slot.
+    ///
+    /// A retired actor cannot be told, and that is not a failure: its
+    /// `terminate` already moved the slot to aborting, which is the same
+    /// conclusion this call would reach.
+    pub(crate) async fn settle_preparation(
+        &self,
+        staged_incarnation_id: &str,
+        committed: bool,
+    ) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command(RollingControlCommand::SettlePreparation {
+                staged_incarnation_id: staged_incarnation_id.to_owned(),
+                committed,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
     pub(crate) async fn snapshot(&self) -> Option<RollingLeaseSnapshot> {
         let (reply, response) = tokio::sync::oneshot::channel();
         self.enqueue_command(RollingControlCommand::Snapshot { reply })
@@ -9208,7 +9498,7 @@ static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new
 static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-static ROLLING_CONTROL_COMMANDS: [AtomicU64; 21] = [const { AtomicU64::new(0) }; 21];
+static ROLLING_CONTROL_COMMANDS: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
 static ROLLING_PRODUCER_ACTION_DEADLINES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// End won/already-terminal, authority-fence won/already-terminal, then lease
 /// expiry won/already-terminal.
@@ -9601,6 +9891,9 @@ pub(crate) fn prometheus() -> String {
         "classify_copy_producer_exit",
         "apply_producer_flow",
         "settle_producer_flow_signal",
+        "stage_preparation",
+        "may_commit_preparation",
+        "settle_preparation",
     ]
     .iter()
     .enumerate()
@@ -10781,6 +11074,79 @@ mod tests {
             RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
         assert!(actor.stage_preparation("successor-1".to_owned(), "current-1".to_owned()));
         (actor, started)
+    }
+
+    /// The slot is only useful if the executor can actually reach it, and the
+    /// executor reaches it through the actor's bounded mailbox rather than by
+    /// touching state. These drive a real spawned actor.
+    #[tokio::test]
+    async fn a_staged_successor_round_trips_through_the_actor_mailbox() {
+        let handle = RollingControlHandle::spawn("session-start");
+        assert!(
+            handle
+                .stage_preparation("successor-1".to_owned(), "current-1".to_owned())
+                .await
+        );
+        assert!(handle.may_commit_preparation("successor-1").await);
+        assert!(
+            !handle.may_commit_preparation("successor-2").await,
+            "a stale executor must not be told it may commit"
+        );
+        assert!(handle.settle_preparation("successor-1", true).await);
+        assert!(
+            handle
+                .stage_preparation("successor-2".to_owned(), "successor-1".to_owned())
+                .await,
+            "a committed successor frees the slot for the next preparation"
+        );
+        handle.abort_actor_for_test();
+    }
+
+    /// A commit that lost its CAS reports `committed: false`, and that must
+    /// free the slot exactly as a completed abort does. The successor still
+    /// exists durably, so leaving the slot occupied would strand the playback
+    /// with a preparation nothing can finish.
+    #[tokio::test]
+    async fn a_lost_commit_frees_the_slot_and_refuses_a_retry() {
+        let handle = RollingControlHandle::spawn("session-start");
+        assert!(
+            handle
+                .stage_preparation("successor-1".to_owned(), "current-1".to_owned())
+                .await
+        );
+        assert!(handle.settle_preparation("successor-1", false).await);
+        assert!(
+            !handle.may_commit_preparation("successor-1").await,
+            "a lost commit cannot be retried into a win"
+        );
+        assert!(
+            handle
+                .stage_preparation("successor-2".to_owned(), "current-1".to_owned())
+                .await
+        );
+        handle.abort_actor_for_test();
+    }
+
+    /// The end-to-end shape of "a disconnect does not imply a commit", driven
+    /// through the mailbox the executor actually uses.
+    #[tokio::test]
+    async fn an_ended_playback_refuses_the_commit_its_executor_was_about_to_make() {
+        let handle = RollingControlHandle::spawn("session-start");
+        assert!(
+            handle
+                .stage_preparation("successor-1".to_owned(), "current-1".to_owned())
+                .await
+        );
+        assert!(handle.may_commit_preparation("successor-1").await);
+
+        let ended = handle.terminate(RollingTerminalCause::End).await;
+        assert!(ended.is_ok());
+
+        assert!(
+            !handle.may_commit_preparation("successor-1").await,
+            "the executor's gate closes with the playback"
+        );
+        handle.abort_actor_for_test();
     }
 
     /// One preparation per playback is the store's invariant. The actor
