@@ -1103,6 +1103,178 @@ fn restart_is_superseded(
     settled.supersedes(control_sequence, requested_anchor_ms)
 }
 
+/// The height a request resolves to, which is not always the one asked for.
+///
+/// Three arms and three different promises, which is why this is one function
+/// rather than three lines at a call site. Splitting it is how one of them
+/// gets lost:
+///
+/// * **Auto is never snapped.** The server's own choice already lands where it
+///   means to, and snapping would re-decide policy — a 900p source
+///   deliberately transcodes at 900, with no scaler in the chain at all. This
+///   is also the only arm that reads the network prior or the HDR10 ask.
+/// * **The source's own height is a promise**, not a request: it is the
+///   Original/forced-burn path the player reads as `sessionHeight`, and it is
+///   never snapped and never downgraded.
+/// * **An explicit rung from a menu snaps onto the ladder**, so a stray number
+///   lands where the encoder has rungs — while an above-ladder height passes
+///   through as what it is.
+///
+/// The clamp bounds the result and nothing else. It never binds downward,
+/// because the snap has already put a below-ladder ask on the lowest rung; it
+/// is the only thing bounding an above-ladder one.
+///
+/// Shared by `resolve_plan` and by M6's candidate, because it is the one part
+/// of resolving a recipe that needs the store, the ladder ceiling and the
+/// network prior — see
+/// [M6-CALLER-HANDOFF.md](../../../../docs/M6-CALLER-HANDOFF.md) §3.3 on why
+/// the rest of `resolve_plan` is not what a candidate wants.
+pub(crate) async fn resolve_height(
+    state: &AppState,
+    source: Option<&MediaFile>,
+    network_prior: Option<&plurx_core::domain::NetworkPrior>,
+    hdr10_requested: bool,
+    asked: Option<i64>,
+) -> i64 {
+    let source_height = source.and_then(|f| f.height);
+    match asked {
+        None => {
+            state
+                .transcode
+                .auto_height_for_request(source, network_prior, hdr10_requested)
+                .await
+        }
+        Some(h) if Some(h) == source_height => h,
+        Some(h) => crate::transcode::snap_height(h),
+    }
+    .clamp(crate::transcode::MIN_HEIGHT, crate::transcode::MAX_HEIGHT)
+}
+
+/// One resolved plan: the recipe a create body would produce right now.
+///
+/// M6's preparation decision has to ask *"if this client's selection were
+/// honoured, what would we deliver?"* without creating anything, and that is
+/// the same question `create` answers on its way to admission. Answered once,
+/// here, rather than twice in two places that agree today —
+/// [M6-CALLER-HANDOFF.md](../../../../docs/M6-CALLER-HANDOFF.md) §3.2. **Do
+/// not grow a second resolver.** The drift would be invisible, because both
+/// sides would look correct in isolation.
+pub(crate) struct ResolvedPlan {
+    pub request: crate::transcode::SessionRequest,
+    /// The height this plan resolved to, which is not always the one asked
+    /// for.
+    pub height: i64,
+    /// The client's intent **as sent**, fingerprinted before the plan review
+    /// is applied.
+    ///
+    /// Taken inside this function rather than by the caller, because the order
+    /// is the contract: a transport retry that lands on a node running a
+    /// different binary — or after a rescan changed the file's HDR facts —
+    /// must fingerprint identically and get its own session back rather than a
+    /// 409. A caller taking it afterwards would take a different fingerprint
+    /// and have no way to notice.
+    pub intent_fingerprint: String,
+    pub plan_notes: Vec<String>,
+    /// The client asked for a native text track rather than a burn, and which
+    /// one. Resolved here because it is validated here — an index that names
+    /// no track, or one that needs burning in, is refused before a recipe
+    /// exists.
+    pub native_subtitles: bool,
+    pub native_subtitle: Option<i64>,
+}
+
+pub(crate) struct PlanInputs<'a> {
+    pub state: &'a AppState,
+    pub user_id: i64,
+    pub file_id: i64,
+    pub source: Option<&'a MediaFile>,
+    pub network_prior: Option<&'a plurx_core::domain::NetworkPrior>,
+}
+
+/// Resolve a create body into the recipe it would produce.
+///
+/// `review` is a parameter rather than derived here, on purpose: deriving it
+/// counts `plan_derivation` metrics, and those measure *what create did with
+/// the plan it was handed*. A second caller counting them would stop the
+/// number that says the caps-v2 migration is finished from meaning that.
+///
+/// Everything derivable *from* the review is derived here rather than passed
+/// alongside it. `hdr10_requested` was a parameter for one revision, and that
+/// was the drift seam this whole extraction exists to close: a second caller
+/// passing the body's own `hdr10` where the review had said `false` would
+/// resolve an Auto height against a ceiling `create` would never have used,
+/// and nothing — not the type system, not a test — would notice.
+///
+/// This deliberately does **not** answer the delivered dynamic range. That
+/// grade comes from the pipeline the session gets at start, so a recipe that
+/// will never be built has none — which is why M6 reads the grade axis off the
+/// request instead, as `GradeIntent`. See §3.2.1 of the caller handoff for the
+/// claim that was withdrawn here.
+pub(crate) async fn resolve_plan(
+    inputs: PlanInputs<'_>,
+    review: Option<PlanReview>,
+    body: CreateSession,
+) -> Result<ResolvedPlan, ApiError> {
+    let PlanInputs {
+        state,
+        user_id,
+        file_id,
+        source,
+        network_prior,
+    } = inputs;
+    let hdr10_requested = review
+        .as_ref()
+        .map(|review| review.hdr10)
+        .unwrap_or(body.hdr10 == Some(true));
+    let height = resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
+    let native_subtitles = body.native_subtitles == Some(true);
+    let native_subtitle = body.subtitle.filter(|s| *s >= 0);
+    if native_subtitles {
+        if let Some(index) = native_subtitle {
+            let track = source
+                .and_then(|f| f.subtitle_streams.get(index as usize))
+                .ok_or_else(|| ApiError::BadRequest("unknown native subtitle track".into()))?;
+            if !is_native_text_subtitle(&track.codec) {
+                return Err(ApiError::BadRequest(
+                    "the selected subtitle requires burn-in".into(),
+                ));
+            }
+        }
+    }
+    let mut request = body.into_request(file_id, height);
+    if request
+        .request_id
+        .as_ref()
+        .is_some_and(|value| value.is_empty() || value.len() > 128)
+    {
+        return Err(ApiError::BadRequest(
+            "request_id must contain 1 to 128 characters".to_owned(),
+        ));
+    }
+    if !worker_session_request_is_valid(&request) {
+        return Err(ApiError::BadRequest(
+            "media session request exceeds the supported cluster contract".to_owned(),
+        ));
+    }
+    // The fingerprint is the client's intent as sent, which is what makes a
+    // retry of the same body recover the same session no matter which binary
+    // answers it. Only after it is taken does the server's reconciliation
+    // apply to the request that will actually be built.
+    let fingerprint = request.durable_intent_fingerprint(user_id);
+    let plan_notes = match review {
+        Some(review) => apply_plan_review(&mut request, review),
+        None => Vec::new(),
+    };
+    Ok(ResolvedPlan {
+        request,
+        height,
+        intent_fingerprint: fingerprint,
+        plan_notes,
+        native_subtitles,
+        native_subtitle,
+    })
+}
+
 pub async fn create(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -1242,63 +1414,24 @@ pub async fn create(
         .map_err(|error| {
             ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
         })?;
-    let height = match req.height {
-        // Auto: the server's own choice already lands where it means to —
-        // snapping it would re-decide policy (a 900p source deliberately
-        // transcodes at 900: no scaler in the chain at all).
-        None => {
-            state
-                .transcode
-                .auto_height_for_request(source.as_ref(), network_prior.as_ref(), hdr10_requested)
-                .await
-        }
-        // The source's own height is the Original/forced-burn promise
-        // (see the player's sessionHeight): never snapped, never downgraded.
-        Some(h) if Some(h) == source_height => h,
-        // An explicit rung from a menu: snap strays onto the ladder;
-        // above-ladder heights pass through as what they are.
-        Some(h) => crate::transcode::snap_height(h),
-    }
-    .clamp(crate::transcode::MIN_HEIGHT, crate::transcode::MAX_HEIGHT);
-    let native_subtitles = req.native_subtitles == Some(true);
-    let native_subtitle = req.subtitle.filter(|s| *s >= 0);
-    if native_subtitles {
-        if let Some(index) = native_subtitle {
-            let track = source
-                .as_ref()
-                .and_then(|f| f.subtitle_streams.get(index as usize))
-                .ok_or_else(|| ApiError::BadRequest("unknown native subtitle track".into()))?;
-            if !is_native_text_subtitle(&track.codec) {
-                return Err(ApiError::BadRequest(
-                    "the selected subtitle requires burn-in".into(),
-                ));
-            }
-        }
-    }
-    let mut request = req.into_request(id, height);
-    if request
-        .request_id
-        .as_ref()
-        .is_some_and(|value| value.is_empty() || value.len() > 128)
-    {
-        return Err(ApiError::BadRequest(
-            "request_id must contain 1 to 128 characters".to_owned(),
-        ));
-    }
-    if !worker_session_request_is_valid(&request) {
-        return Err(ApiError::BadRequest(
-            "media session request exceeds the supported cluster contract".to_owned(),
-        ));
-    }
-    // The fingerprint is the client's intent as sent, which is what makes a
-    // retry of the same body recover the same session no matter which binary
-    // answers it. Only after it is taken does the server's reconciliation
-    // apply to the request that will actually be built.
-    let fingerprint = request.durable_intent_fingerprint(user.id);
-    let plan_notes = match review {
-        Some(review) => apply_plan_review(&mut request, review),
-        None => Vec::new(),
-    };
+    let resolved = resolve_plan(
+        PlanInputs {
+            state: &state,
+            user_id: user.id,
+            file_id: id,
+            source: source.as_ref(),
+            network_prior: network_prior.as_ref(),
+        },
+        review,
+        req,
+    )
+    .await?;
+    let request = resolved.request;
+    let height = resolved.height;
+    let fingerprint = resolved.intent_fingerprint;
+    let plan_notes = resolved.plan_notes;
+    let native_subtitles = resolved.native_subtitles;
+    let native_subtitle = resolved.native_subtitle;
     let now_ms = unix_ms();
     let mut incarnation_id = uuid::Uuid::new_v4().to_string();
     // Every create occupies a durable admission row. A caller-supplied key
@@ -12315,6 +12448,267 @@ mod tests {
             presentation: None,
             block_budget_secs: None,
         }
+    }
+
+    fn resolver_state() -> AppState {
+        let root = crate::test_temp_path(format!("plurx-resolve-plan-{}", uuid::Uuid::new_v4()));
+        AppState::new(
+            "test".to_owned(),
+            std::sync::Arc::new(
+                plurx_core::store::SqliteStore::open_in_memory().expect("resolver store"),
+            ),
+            crate::state::Dirs {
+                artwork: root.join("artwork"),
+                transcode: root.join("transcode"),
+                cache: root.join("cache"),
+                subs: root.join("subs"),
+                runtime_cache: root.join("runtime"),
+                renditions: root.join("renditions"),
+            },
+            "test-node".to_owned(),
+            Default::default(),
+            Default::default(),
+            std::sync::Arc::new(crate::logbuf::LogBuffer::new(64)),
+        )
+    }
+
+    async fn resolved_height(state: &AppState, source: &MediaFile, asked: Option<i64>) -> i64 {
+        let body = CreateSession {
+            playback_id: "player-a".into(),
+            height: asked,
+            ..bare_create()
+        };
+        resolve_plan(
+            PlanInputs {
+                state,
+                user_id: 7,
+                file_id: source.id,
+                source: Some(source),
+                network_prior: None,
+            },
+            None,
+            body,
+        )
+        .await
+        .expect("resolve")
+        .height
+    }
+
+    /// The three arms of the height resolution — the largest thing
+    /// `resolve_plan` extracted that was not already a named function. (The
+    /// native-subtitle validation and the `request_id` length check are also
+    /// inline; both are covered through the real handler by
+    /// `hls_create_rejects_native_subtitle_indices_it_cannot_serve`.)
+    ///
+    /// They are policy, not arithmetic, and each is a different promise:
+    ///
+    /// * **the source's own height is never snapped and never downgraded** —
+    ///   it is the Original/forced-burn promise the player reads as
+    ///   `sessionHeight`;
+    /// * **an explicit rung from a menu snaps onto the ladder**, so a stray
+    ///   number lands somewhere the encoder has rungs for;
+    /// * **an above-ladder height passes through as what it is**, rather than
+    ///   being pulled down to the nearest rung.
+    ///
+    /// Splitting the match is how one of the three gets lost, so this test
+    /// exists to make that loud.
+    #[tokio::test]
+    async fn the_height_resolution_keeps_its_three_promises() {
+        let state = resolver_state();
+        let mut odd_source = hls_file(Vec::new());
+        odd_source.height = Some(900);
+
+        assert_eq!(
+            resolved_height(&state, &odd_source, Some(900)).await,
+            900,
+            "the source's own height is a promise, and is neither snapped nor \
+             downgraded",
+        );
+        assert_eq!(
+            resolved_height(&state, &odd_source, Some(1079)).await,
+            crate::transcode::snap_height(1079),
+            "a stray rung from a menu snaps onto the ladder",
+        );
+        let above = crate::transcode::MAX_HEIGHT;
+        assert_eq!(
+            resolved_height(&state, &odd_source, Some(above)).await,
+            above,
+            "an above-ladder height passes through as what it is",
+        );
+        // A below-ladder ask lands on the ladder's lowest rung, not on
+        // `MIN_HEIGHT`: the snap runs first and the clamp only bounds what
+        // comes out of it, so for a menu rung the clamp never binds downward
+        // at all.
+        let floor = resolved_height(&state, &odd_source, Some(1)).await;
+        assert_eq!(floor, crate::transcode::snap_height(1));
+        assert!(
+            floor > crate::transcode::MIN_HEIGHT,
+            "the clamp is a bound, not the policy: {floor}",
+        );
+        // Upward it does bind, and it is the only thing that does: an
+        // above-ladder height passes the snap through untouched, so without
+        // the clamp a body asking for 100000 builds a transcode at 100000.
+        assert_eq!(
+            resolved_height(&state, &odd_source, Some(crate::transcode::MAX_HEIGHT + 1)).await,
+            crate::transcode::MAX_HEIGHT,
+        );
+    }
+
+    /// Auto is the arm every client that does not pin a quality takes, and the
+    /// only one that reads the stored network prior or the HDR10 ask. Both
+    /// reach `auto_height_for_request` or neither does — and a resolver that
+    /// dropped either would still return a plausible height, which is why this
+    /// compares against the same call rather than against a constant.
+    #[tokio::test]
+    async fn auto_asks_the_ladder_with_everything_it_was_given() {
+        let state = resolver_state();
+        let mut source = hls_file(Vec::new());
+        source.height = Some(2160);
+        let prior = plurx_core::domain::NetworkPrior {
+            credential_generation: Default::default(),
+            client_class: "web".to_owned(),
+            network_fingerprint: "fingerprint".to_owned(),
+            // A measured slow link, which is the whole reason Auto reads the
+            // prior at all.
+            sustained_kbps: Some(4_000),
+            worst_rung_height: Some(1080),
+            starved_at_ms: Some(1),
+            sample_count: 12,
+            updated_at_ms: 1,
+        };
+
+        for hdr10 in [false, true] {
+            let body = CreateSession {
+                playback_id: "player-a".into(),
+                height: None,
+                hdr10: Some(hdr10),
+                ..bare_create()
+            };
+            let resolved = resolve_plan(
+                PlanInputs {
+                    state: &state,
+                    user_id: 7,
+                    file_id: source.id,
+                    source: Some(&source),
+                    network_prior: Some(&prior),
+                },
+                None,
+                body,
+            )
+            .await
+            .expect("resolve auto")
+            .height;
+            let expected = state
+                .transcode
+                .auto_height_for_request(Some(&source), Some(&prior), hdr10)
+                .await
+                .clamp(crate::transcode::MIN_HEIGHT, crate::transcode::MAX_HEIGHT);
+            assert_eq!(
+                resolved, expected,
+                "auto must carry the source, the prior and hdr10={hdr10}",
+            );
+        }
+    }
+
+    /// The fingerprint is taken from the intent as sent, before the review is
+    /// applied — so a retry of the same body recovers the same session even on
+    /// a node whose review would decide differently.
+    #[tokio::test]
+    async fn the_intent_fingerprint_ignores_the_review() {
+        let state = resolver_state();
+        let source = dolby_vision_p8_file();
+        // Built twice rather than cloned: `CreateSession` is a wire type and
+        // deriving `Clone` on it for a test would be the test changing the
+        // contract to suit itself.
+        let body = || CreateSession {
+            playback_id: "player-a".into(),
+            copy: Some(true),
+            preserve_dolby_vision: Some(false),
+            hdr10: Some(false),
+            ..bare_create()
+        };
+        let inputs = || PlanInputs {
+            state: &state,
+            user_id: 7,
+            file_id: source.id,
+            source: Some(&source),
+            network_prior: None,
+        };
+        let plain = resolve_plan(inputs(), None, body())
+            .await
+            .expect("resolve without a review");
+        let review = review_client_plan(
+            &dolby_vision_client(),
+            None,
+            &source,
+            &capable_node(),
+            true,
+            true,
+            NOW_MS,
+        );
+        let reviewed = resolve_plan(inputs(), Some(review), body())
+            .await
+            .expect("resolve with a review");
+
+        assert_eq!(
+            plain.intent_fingerprint, reviewed.intent_fingerprint,
+            "the review must not move the fingerprint, or a transport retry \
+             on a differently-deciding binary gets a 409 instead of its own \
+             session",
+        );
+        assert_ne!(
+            plain.request.kind, reviewed.request.kind,
+            "and the review must still reach the request",
+        );
+        assert_eq!(
+            plain.plan_notes,
+            Vec::<String>::new(),
+            "no review, nothing to note",
+        );
+    }
+
+    /// A review's notes reach the resolved plan. They are what the create
+    /// response shows a client about a plan it did not get, so dropping them
+    /// on the floor between `apply_plan_review` and `ResolvedPlan` would be
+    /// silent.
+    #[tokio::test]
+    async fn a_reviews_notes_reach_the_resolved_plan() {
+        let state = resolver_state();
+        let source = dolby_vision_p8_file();
+        // A body that claims more than its own caps support: the review
+        // overrides it and says so. Same fixture as
+        // `a_create_that_claims_more_than_its_caps_gets_the_servers_plan_and_a_note`,
+        // because a note is what that case exists to produce.
+        let review = review_client_plan(
+            &no_dolby_vision_client(),
+            None,
+            &source,
+            &capable_node(),
+            true,
+            false,
+            NOW_MS,
+        );
+        assert!(!review.notes.is_empty(), "fixture must produce notes");
+        let expected = review.notes.clone();
+        let resolved = resolve_plan(
+            PlanInputs {
+                state: &state,
+                user_id: 7,
+                file_id: source.id,
+                source: Some(&source),
+                network_prior: None,
+            },
+            Some(review),
+            CreateSession {
+                playback_id: "player-a".into(),
+                copy: Some(true),
+                preserve_dolby_vision: Some(true),
+                ..bare_create()
+            },
+        )
+        .await
+        .expect("resolve with notes");
+        assert_eq!(resolved.plan_notes, expected);
     }
 
     /// The server's re-derivation reaches the session, and the body never

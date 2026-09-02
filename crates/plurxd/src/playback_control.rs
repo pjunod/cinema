@@ -833,20 +833,475 @@ impl EffectiveSelection {
         delivered_height: i64,
         dynamic_range: Option<String>,
     ) -> Self {
-        let codec = match &recipe.request.kind {
+        Self::from_request(&recipe.request, delivered_height, dynamic_range)
+    }
+
+    /// The same view, from the request alone.
+    ///
+    /// A *candidate* recipe has no `RemoteStartRequest` — that carries the
+    /// incarnation, the source stat and the playlist shape of a session that
+    /// exists. Everything this reads is on the request itself, so a recipe
+    /// that will never be built can have one too.
+    ///
+    /// `dynamic_range` is the delivered grade and belongs to a built session,
+    /// so a candidate passes `None`. That is safe now and was not before:
+    /// `decide_preparation` reads the grade axis off `GradeIntent` — the
+    /// request's own answers — precisely because the delivered grade is the
+    /// encoder's and a candidate has no encoder.
+    pub(crate) fn from_request(
+        request: &crate::transcode::SessionRequest,
+        delivered_height: i64,
+        dynamic_range: Option<String>,
+    ) -> Self {
+        let codec = match &request.kind {
             SessionKind::Copy { .. } => "source",
             SessionKind::Transcode { .. } => "server_selected",
         };
         Self {
-            quality_auto: recipe.request.automatic,
+            quality_auto: request.automatic,
             height: delivered_height,
-            audio_track: recipe.request.audio_index,
-            subtitle_burn: recipe.request.subtitle_burn,
-            audio_offset_ms: recipe.request.audio_offset_ms,
+            audio_track: request.audio_index,
+            subtitle_burn: request.subtitle_burn,
+            audio_offset_ms: request.audio_offset_ms,
             codec: codec.to_owned(),
             dynamic_range,
         }
     }
+}
+
+/// The recipe a client's selection asks for, from the one it is being served.
+///
+/// **An edit, not a construction.** Every field the selection does not name is
+/// carried through unchanged, and that is the whole reason the candidate is a
+/// `SessionRequest` rather than a `CreateSession`: a create body structurally
+/// cannot express `convert_dolby_vision` — `into_request` hardcodes it false,
+/// because a client cannot ask to be handed a Profile 7 → 8.1 conversion — so
+/// a candidate round-tripped through one would differ from a *converting*
+/// session on that field alone, and report a grade crossing on every exchange
+/// for a viewer who changed nothing.
+///
+/// `height` is resolved by the caller through
+/// [`crate::http::hls::resolve_height`], because it is the one part a
+/// selection cannot answer for itself: it needs the store, the ladder ceiling
+/// and the network prior. `source_height` is passed separately and is **not**
+/// interchangeable with it — see the third ruling.
+///
+/// Four rulings are baked in here, and each is a decision rather than a
+/// mapping:
+///
+/// * **The client's codec and dynamic-range *policies* are not the server's
+///   answers.** `hdr10`, `preserve_dolby_vision` and `convert_dolby_vision`
+///   come from the caps document through `review_client_plan`, which a
+///   selection does not carry, so they are carried through untouched. A
+///   selection change on those axes means *re-review*, which nothing does yet
+///   — and nothing is lost today, because `decide_preparation` refuses both
+///   axes anyway. It will matter the moment the capability is narrowed.
+/// * **Only `SubtitleMode::Burn` is a burn.** Off, Native and Overlay are not
+///   video replacements at all (plan §5.2). Mapping a track into
+///   `subtitle_burn` for any of them would turn every native-subtitle change
+///   into a whole new encode recipe.
+/// * **A manual rung on a copy becomes a transcode, except at the source's own
+///   height.** A copy has no rung — asking for one is asking for something a
+///   copy cannot be. The source height is the exception because that *is* what
+///   a copy delivers: asking for it is asking for what you already have. The
+///   resulting `DeliveryMethod` crossing is then refused by the decision,
+///   which is the point: the candidate says what was asked for, and the
+///   decision says no.
+///
+///   The comparison is against `source_height`, **never** against the resolved
+///   `height`. A 1080 ask on a 2160 source resolves to 1080 — it is already a
+///   ladder rung, so the snap is the identity — and comparing the ask to the
+///   result would find them equal and leave a copy copying a rung it cannot
+///   serve.
+/// * **Auto never changes the delivery method.** It is a request to let the
+///   server choose, not a request to stop copying, and turning a direct play
+///   into a transcode because the viewer selected Auto would be a downgrade
+///   nobody asked for.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn candidate_request(
+    current: &crate::transcode::SessionRequest,
+    selection: &ClientSelection,
+    height: i64,
+    source_height: Option<i64>,
+) -> crate::transcode::SessionRequest {
+    let mut candidate = current.clone();
+    candidate.automatic = matches!(selection.quality, QualitySelection::Auto);
+    candidate.audio_index = selection.audio_track;
+    candidate.audio_offset_ms = selection.audio_offset_ms;
+    candidate.subtitle_burn = match selection.subtitle.mode {
+        SubtitleMode::Burn => selection.subtitle.track,
+        SubtitleMode::Off | SubtitleMode::Native | SubtitleMode::Overlay => None,
+    };
+    match (&current.kind, selection.quality) {
+        // A transcode simply moves rung.
+        (SessionKind::Transcode { .. }, _) => {
+            candidate.kind = SessionKind::Transcode { height };
+        }
+        // Auto leaves a copy copying, and a source-height ask is a copy's own
+        // delivery asked for by name. Both leave `kind` exactly as it was,
+        // which is what carries `convert_dolby_vision` through.
+        (SessionKind::Copy { .. }, QualitySelection::Auto) => {}
+        (SessionKind::Copy { .. }, QualitySelection::Manual { height: asked })
+            if Some(asked) == source_height => {}
+        (SessionKind::Copy { .. }, QualitySelection::Manual { .. }) => {
+            candidate.kind = SessionKind::Transcode { height };
+        }
+    }
+    candidate
+}
+
+/// Which axis of the *delivered* selection a proposed transition crosses.
+///
+/// Named for what [`EffectiveSelection`] can actually see, which is less than
+/// the recipe — see [`PreparationDecision::Unchanged`]. In particular
+/// `DeliveryMethod` is **not** a codec: the field it reads takes exactly two
+/// values, `source` and `server_selected`, so it distinguishes direct
+/// play/remux from a transcode and nothing finer. H.264 against HEVC is
+/// invisible here and always has been; today a real codec change drags
+/// `dynamic_range` with it because the SDR rungs are H.264 and the HDR10 rung
+/// is HEVC Main10, but that invariant lives in `plurx_core::playback` and is
+/// not asserted by this module. An AV1 or HEVC-SDR rung would break it, which
+/// is why `ResolutionOrBitrate` promises *same delivery method and same
+/// delivered grade* rather than "same codec".
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PreparationAxis {
+    /// Same delivery method, same delivered grade, different height — or a
+    /// move between Auto and a pinned rung.
+    ResolutionOrBitrate,
+    AudioTrackOrOffset,
+    /// A burned subtitle change, and only that. A native text track is not a
+    /// video replacement at all (plan §5.2) and never reaches this type.
+    SubtitleBurn,
+    /// Direct play/remux against transcode.
+    DeliveryMethod,
+    DynamicRange,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl PreparationAxis {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ResolutionOrBitrate => "resolution_or_bitrate",
+            Self::AudioTrackOrOffset => "audio_track_or_offset",
+            Self::SubtitleBurn => "subtitle_burn",
+            Self::DeliveryMethod => "delivery_method",
+            Self::DynamicRange => "dynamic_range",
+        }
+    }
+}
+
+/// Why a transition that crosses an axis is not being prepared.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FallbackReason {
+    /// No retained `dual_player_preparation`. See [`decide_preparation`] on
+    /// why this must be the *retained* capability rather than this exchange's.
+    ClientCannotPrepare,
+    /// The client can prepare, but not across this axis.
+    AxisNotProven,
+    /// More than one axis moves at once. Each is separately measured; a
+    /// combination is measured by nothing.
+    MultipleAxes,
+    /// The client has not shown it can carry a second pipeline. M6 handoff §8:
+    /// dual preparation doubles network demand and the constrained link is
+    /// exactly the case M5.5 did not test.
+    ThroughputUnproven,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl FallbackReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientCannotPrepare => "client_cannot_prepare",
+            Self::AxisNotProven => "axis_not_proven",
+            Self::MultipleAxes => "multiple_axes",
+            Self::ThroughputUnproven => "throughput_unproven",
+        }
+    }
+}
+
+/// What M6 does about a delivered-selection change while a stream is playing.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreparationDecision {
+    /// The **delivered selection** is unchanged. Deliberately not "the recipe
+    /// is unchanged": [`EffectiveSelection`] describes the output, not the
+    /// request, and carries no `file_id`, `start_seconds`, `aac` or
+    /// `convert_dolby_vision`. A next episode at the same height, a seek, an
+    /// AAC re-encode toggle and a Profile 7 → 8.1 rewrite all compare equal
+    /// here. **The caller owns those**; this answers only the question it can
+    /// see.
+    Unchanged,
+    /// Stage a successor and commit it when the client says it is ready.
+    Prepare { axis: PreparationAxis },
+    /// Replace the stream the way the fleet does today, and **do not call it
+    /// seamless**. Plan §5.2 draws that line and M5.5 gave it numbers: the
+    /// worst observed fallback interruption is 2,246 ms, on Safari, and
+    /// Apple's is unmeasured because Apple never exercised the fallback.
+    ///
+    /// `axis` is the **hardest** axis crossed, by [`PreparationAxis`]'s own
+    /// ordering, so an operator grouping refusals by axis sees the constraint
+    /// that actually bound rather than whichever field happened to move too.
+    Fallback {
+        axis: PreparationAxis,
+        reason: FallbackReason,
+    },
+}
+
+/// What the client has shown about the link it is on.
+///
+/// Present because M6's handoff §8 asks for it by name: *"treat a prepared
+/// handoff on a contended link as unproven and gate it on the client's own
+/// observed throughput rather than on the capability alone."* The whole spike
+/// ran on a steady shaped 80 Mbit/s link, so the constrained case — the one
+/// where doubling demand hurts — is measured by nothing.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreparationConditions {
+    /// The client's own observed download rate, as it reported it.
+    pub observed_download_bps: Option<u64>,
+    /// What this session is currently delivering, as the server measured it.
+    pub delivered_bps: Option<i64>,
+}
+
+impl PreparationConditions {
+    /// Whether the link has shown room for a second pipeline.
+    ///
+    /// The rule is a floor, not a model: **observed throughput at least twice
+    /// what this session is already delivering.** A prime runs a second
+    /// pipeline beside the first, so twice the current rate is the least that
+    /// could carry it; the successor's own rate is not knowable from
+    /// [`EffectiveSelection`], which carries a height and no bitrate, so a
+    /// tighter rule would be a guess wearing a number.
+    ///
+    /// **Either value missing is a refusal, not a pass.** A client that has
+    /// not reported its throughput has not shown headroom, and M5.5 measured
+    /// nothing about contended links — so the honest default is the fallback
+    /// the fleet already takes. This is also the residual worth re-reading if
+    /// prepared handoffs turn out never to fire: on a healthy link the ratio
+    /// is comfortable, but a session whose `delivered_bps` is not yet measured
+    /// refuses on that alone.
+    fn have_headroom_for_a_second_pipeline(&self) -> bool {
+        let (Some(observed), Some(delivered)) = (self.observed_download_bps, self.delivered_bps)
+        else {
+            return false;
+        };
+        let Ok(delivered) = u64::try_from(delivered) else {
+            return false;
+        };
+        delivered > 0 && observed >= delivered.saturating_mul(2)
+    }
+}
+
+/// The grade a recipe *asks for*, which is the only grade two recipes can be
+/// compared on.
+///
+/// [`EffectiveSelection::dynamic_range`] carries the grade the encoder
+/// actually built, and that is the right thing for a badge — `create`'s own
+/// comment says so: *"the server refuses the HDR10 rung for a source or a rung
+/// that cannot prove it, and the badge has to follow the encoder."* It is the
+/// wrong thing for a *candidate*, because a recipe that will never be built
+/// has no encoder and therefore no such grade.
+///
+/// Comparing an encoder's answer against a request would fail in one of two
+/// ways, both bad: a candidate given no grade lets a real grade change
+/// classify as resolution-only and be **prepared**, which is exactly what
+/// `PREPARED_AXIS` exists to prevent; a candidate given the grade its body
+/// asked for reads as a crossing on *every* exchange of a session whose HDR10
+/// rung the encoder refused, so that viewer never gets a prepared handoff at
+/// all.
+///
+/// So the grade axis is read off the request on both sides. Both are available
+/// where the decision is made: the exchange holds the session's own
+/// `RemoteStartRequest` and resolves the candidate's.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GradeIntent {
+    /// The HDR10 rung was asked for. After the plan review, so this is the
+    /// server's answer to the client's ask rather than the ask itself.
+    pub hdr10: bool,
+    /// Dolby Vision RPUs survive the bitstream filter.
+    pub preserve_dolby_vision: bool,
+    /// Profile 7 RPUs are rewritten to Profile 8.1 on the way through. Beside
+    /// preserving rather than inside it because they answer different
+    /// questions, and a viewer can see the difference between them.
+    pub convert_dolby_vision: bool,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl GradeIntent {
+    pub(crate) fn from_request(request: &crate::transcode::SessionRequest) -> Self {
+        let (preserve_dolby_vision, convert_dolby_vision) = match &request.kind {
+            SessionKind::Copy {
+                preserve_dolby_vision,
+                convert_dolby_vision,
+                ..
+            } => (*preserve_dolby_vision, *convert_dolby_vision),
+            // A transcode never carries RPUs through: the two questions only
+            // arise for a copy, and answering them `false` for a transcode is
+            // a statement about the output rather than a default.
+            SessionKind::Transcode { .. } => (false, false),
+        };
+        Self {
+            hdr10: request.hdr10,
+            preserve_dolby_vision,
+            convert_dolby_vision,
+        }
+    }
+}
+
+/// One side of a proposed transition: what is delivered, and what was asked
+/// for.
+///
+/// Two halves because neither answers alone. The selection carries the height,
+/// the delivery method and the audio and subtitle facts; the intent carries
+/// the grade, which the selection can only report after an encoder has settled
+/// it.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecipeView<'a> {
+    pub selection: &'a EffectiveSelection,
+    pub grade: GradeIntent,
+}
+
+/// The only axis M6 prepares across, and the reason it is one rather than a
+/// set.
+///
+/// M5.5 measured every platform **recipe- and device-dependent**, and in both
+/// directions: Safari passes same-codec and fails codec/HDR, while the
+/// tunneled Google TV passes codec/HDR 20/20 and fails same-codec 0/3 — the
+/// *harder* case works and the easier one does not. So no single axis is safe
+/// on every device that reports `true`, and the capability cannot say which,
+/// because a bare boolean cannot express "yes for this recipe on this device".
+///
+/// The decision, made deliberately per M6's handoff §3 rather than
+/// discovered: **honour the boolean and additionally restrict the server to
+/// resolution/bitrate.**
+///
+/// * It is the only axis plan §5.2 expects to be transparent, so the only one
+///   where "prepared" and "seamless" can be the same claim.
+/// * It is the common case — a quality change on the same source.
+/// * Both required Apple devices passed it 20/20.
+///
+/// **The residual, which is not small.** Apple passed *both* cases 20/20, so
+/// on the only platform that will report `true` in the foreseeable future this
+/// restriction discriminates nothing and its whole effect is to refuse
+/// codec/grade transitions that were measured twice on two devices. And on the
+/// device with the only hard failure it points the wrong way: the Google TV's
+/// 0/3 was on *same-codec*, and M5.5's own leading explanation is two
+/// identical tunneled pipelines contending for one decoder or audio track. If
+/// that reading is right, restricting to same-method-same-grade selects that
+/// precondition rather than avoiding it — and an
+/// `ERROR_CODE_AUDIO_TRACK_WRITE_FAILED` is a fault in the shared audio path,
+/// which is worse than the 2,246 ms this is trading against.
+///
+/// Android's platform-wide `false` is what holds that device back today. The
+/// capability keyed by axis **and device class** is therefore not a nice-to-
+/// have for unlocking Android's two phones; it is what has to exist before
+/// this constant is safe for the television class. Recorded here rather than
+/// argued around, because this constant is the entire server-side expression
+/// of the restriction and whoever narrows the capability will read it.
+#[cfg_attr(not(test), allow(dead_code))]
+const PREPARED_AXIS: PreparationAxis = PreparationAxis::ResolutionOrBitrate;
+
+/// Decide, from the delivered selection and a candidate one, whether M6
+/// prepares.
+///
+/// **Reads the capability. Never re-derives it.** M5.5 exists because three
+/// capability literals had been written by assumption, and a server that
+/// inferred "Apple can prepare" from the platform enum would be the fourth.
+/// When Apple's literal flips to `true` this starts preparing on Apple with no
+/// server change, which is handoff §1's whole point.
+///
+/// `retained` is the capability document the session is **holding**, not this
+/// exchange's. `ControlRequestV1::validate` requires `capabilities` only on
+/// sequence 1 and permits every later exchange to omit them, so absent-on-this-
+/// exchange means "already told you" and reading it as `false` would refuse
+/// every transition a capable client ever makes. `None` here must therefore
+/// mean *this session has never been told*, and the caller owns the retention.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn decide_preparation(
+    delivered: RecipeView<'_>,
+    candidate: RecipeView<'_>,
+    retained: Option<&DynamicCapabilities>,
+    conditions: PreparationConditions,
+) -> PreparationDecision {
+    let (delivered_grade, candidate_grade) = (delivered.grade, candidate.grade);
+    let (delivered, candidate) = (delivered.selection, candidate.selection);
+    let mut crossed: Option<PreparationAxis> = None;
+    let mut multiple = false;
+    // The hardest axis wins, by the enum's own ordering rather than by the
+    // order these happen to be written. Both plan §5.2 and roadmap §3.3 rank
+    // resolution/bitrate most transparent, then audio and burned subtitles,
+    // then the delivery method and the grade — so `max` is the ranking, and
+    // regrouping these statements cannot silently change an operator metric.
+    let mut cross = |axis: PreparationAxis| {
+        multiple |= crossed.is_some();
+        crossed = Some(crossed.map_or(axis, |held: PreparationAxis| held.max(axis)));
+    };
+
+    if delivered.codec != candidate.codec {
+        cross(PreparationAxis::DeliveryMethod);
+    }
+    // Read off the request on both sides, never off `dynamic_range` — see
+    // `GradeIntent`. The delivered selection's grade is the encoder's answer,
+    // and a candidate that will never be built has no encoder to answer for
+    // it, so comparing the two would be comparing unlike things.
+    if delivered_grade != candidate_grade {
+        cross(PreparationAxis::DynamicRange);
+    }
+    if delivered.audio_track != candidate.audio_track
+        || delivered.audio_offset_ms != candidate.audio_offset_ms
+    {
+        cross(PreparationAxis::AudioTrackOrOffset);
+    }
+    if delivered.subtitle_burn != candidate.subtitle_burn {
+        cross(PreparationAxis::SubtitleBurn);
+    }
+    if delivered.height != candidate.height || delivered.quality_auto != candidate.quality_auto {
+        cross(PreparationAxis::ResolutionOrBitrate);
+    }
+
+    let Some(axis) = crossed else {
+        return PreparationDecision::Unchanged;
+    };
+    if multiple {
+        // Each axis is separately measured and a combination is measured by
+        // nothing. M5.5 ran two cases, not their product, and the Google TV's
+        // inversion is exactly the evidence that axes do not compose the way
+        // reasoning would predict.
+        //
+        // Ranked above the capability deliberately: this is the fact that
+        // would still be true after a coordinated client release flipped the
+        // literal, so the metric stays stable across that release. The cost is
+        // that a fleet whose clients all report `false` books its multi-axis
+        // transitions here rather than under `client_cannot_prepare`, which
+        // understates how much of the fallback volume is the literals'.
+        return PreparationDecision::Fallback {
+            axis,
+            reason: FallbackReason::MultipleAxes,
+        };
+    }
+    if !retained.is_some_and(|caps| caps.dual_player_preparation) {
+        return PreparationDecision::Fallback {
+            axis,
+            reason: FallbackReason::ClientCannotPrepare,
+        };
+    }
+    if axis != PREPARED_AXIS {
+        return PreparationDecision::Fallback {
+            axis,
+            reason: FallbackReason::AxisNotProven,
+        };
+    }
+    if !conditions.have_headroom_for_a_second_pipeline() {
+        return PreparationDecision::Fallback {
+            axis,
+            reason: FallbackReason::ThroughputUnproven,
+        };
+    }
+    PreparationDecision::Prepare { axis }
 }
 
 pub(crate) fn target_duration_ms(recipe: &crate::media_sessions::RemoteStartRequest) -> i64 {
@@ -5105,6 +5560,28 @@ struct RollingControlActor {
     last_renewal_kind: &'static str,
     mode: RollingLeaseMode,
     demand: Option<PlaybackDemandSnapshot>,
+    /// The capability document this session is holding, not this exchange's.
+    ///
+    /// `ControlRequestV1::validate` requires `capabilities` only on sequence 1
+    /// and permits every later exchange to omit them, so a consumer reading
+    /// the live snapshot sees `None` for the whole session after the first
+    /// message. For a field meaning *this device can hold two live pipelines*
+    /// that would refuse every transition a capable client ever makes — which
+    /// is every transition that will actually happen.
+    ///
+    /// Last write wins over `Some`. A client that changes its answer
+    /// mid-session is telling the truth about a device that changed — a
+    /// television that woke a second decoder, a phone that lost one — so the
+    /// newer document is the right one and no reconciliation is owed.
+    ///
+    /// **Nothing clears this on an owner-epoch advance, and it cannot go
+    /// stale anyway.** An advance resets `client_instance_id`, after which the
+    /// next accepted exchange must be sequence 1, and a sequence-1 exchange
+    /// that carries no capabilities fails twice over: `validate` rejects the
+    /// body, and the fence's `platform.ok_or(StaleClient)` rejects the accept.
+    /// So the exchange that could read a stale document is the exchange that
+    /// has just overwritten it.
+    retained_capabilities: Option<DynamicCapabilities>,
     settled_target: Option<SettledTarget>,
     /// This playback's single preparation slot. One per playback is already
     /// the store's invariant; holding it here makes the actor the only thing
@@ -5210,6 +5687,7 @@ impl RollingControlActor {
             last_renewal_kind: initial_kind,
             mode: RollingLeaseMode::Legacy,
             demand: None,
+            retained_capabilities: None,
             settled_target: None,
             preparation: PreparationSlot::Empty,
             delivery: RollingDeliverySnapshot::default(),
@@ -5814,6 +6292,17 @@ impl RollingControlActor {
         true
     }
 
+    /// The capability document this session is holding.
+    ///
+    /// Read this, never the live snapshot's — see the field's own doc. M6's
+    /// preparation decision takes exactly this value, because a capability
+    /// that reads `None` from sequence 2 onward is a capability that refuses
+    /// every transition a capable client ever makes.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn retained_capabilities(&self) -> Option<&DynamicCapabilities> {
+        self.retained_capabilities.as_ref()
+    }
+
     fn control_at(
         &mut self,
         now: Instant,
@@ -5862,6 +6351,12 @@ impl RollingControlActor {
                 sequence: accepted_sequence,
                 anchor_ms: request.snapshot.buffer_anchor_ms(),
             });
+            // Retained before the snapshot is moved, and only over `Some`:
+            // an exchange that omits capabilities is one that has already
+            // told us, not one that has changed its mind.
+            if let Some(capabilities) = &request.snapshot.capabilities {
+                self.retained_capabilities = Some(capabilities.clone());
+            }
             self.demand = Some(request.snapshot);
             if accepted_end {
                 self.last_renewal_kind = "control-end";
@@ -11375,6 +11870,79 @@ mod tests {
         }
     }
 
+    /// The wire lets a client send capabilities once. Anything that reads
+    /// the live snapshot therefore sees `None` from sequence 2 onward — and
+    /// for `dual_player_preparation` that means refusing every transition a
+    /// capable client ever makes, which is every transition that will
+    /// actually happen.
+    #[test]
+    fn the_capability_document_is_retained_across_exchanges_that_omit_it() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert!(
+            actor.retained_capabilities().is_none(),
+            "a session that has not been told holds nothing"
+        );
+
+        let base = request();
+        let mut first = base.clone();
+        first.sequence = 1;
+        first.capabilities = first.capabilities.map(|mut caps| {
+            caps.dual_player_preparation = true;
+            caps
+        });
+        actor
+            .control_at(started + Duration::from_secs(1), owned_control(&first))
+            .expect("sequence 1 accepted");
+        assert!(
+            actor
+                .retained_capabilities()
+                .expect("retained after sequence 1")
+                .dual_player_preparation
+        );
+
+        // Two exchanges that say nothing about capabilities, which is what
+        // the wire contract permits and what real clients do.
+        for (sequence, seconds) in [(2, 2), (3, 3)] {
+            let mut later = base.clone();
+            later.sequence = sequence;
+            later.capabilities = None;
+            actor
+                .control_at(
+                    started + Duration::from_secs(seconds),
+                    owned_control(&later),
+                )
+                .expect("later exchange accepted");
+            assert!(
+                actor
+                    .retained_capabilities()
+                    .expect("still retained")
+                    .dual_player_preparation,
+                "sequence {sequence} omitted capabilities; it did not withdraw them",
+            );
+        }
+
+        // A client that sends a new document has changed its answer about a
+        // device that changed, so the newer one wins.
+        let mut revised = base.clone();
+        revised.sequence = 4;
+        revised.capabilities = revised.capabilities.map(|mut caps| {
+            caps.dual_player_preparation = false;
+            caps
+        });
+        actor
+            .control_at(started + Duration::from_secs(4), owned_control(&revised))
+            .expect("revision accepted");
+        assert!(
+            !actor
+                .retained_capabilities()
+                .expect("retained after revision")
+                .dual_player_preparation,
+            "last write wins over Some",
+        );
+    }
+
     #[test]
     fn a_seek_storm_settles_on_one_target_and_supersedes_every_earlier_one() {
         let started = Instant::now();
@@ -15138,6 +15706,749 @@ mod tests {
             .await,
             Err(ControlStateError::OwnerTransition)
         );
+    }
+
+    fn playing(height: i64) -> EffectiveSelection {
+        EffectiveSelection {
+            quality_auto: false,
+            height,
+            audio_track: Some(0),
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            codec: "server_selected".to_owned(),
+            dynamic_range: Some("hdr10".to_owned()),
+        }
+    }
+
+    /// A recipe's grade intent. `sdr()` is the default both sides use, so a
+    /// test that does not mention the grade is testing a transition that does
+    /// not cross it.
+    fn sdr() -> GradeIntent {
+        GradeIntent {
+            hdr10: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        }
+    }
+
+    fn hdr10() -> GradeIntent {
+        GradeIntent {
+            hdr10: true,
+            ..sdr()
+        }
+    }
+
+    fn view(selection: &EffectiveSelection) -> RecipeView<'_> {
+        RecipeView {
+            selection,
+            grade: sdr(),
+        }
+    }
+
+    fn view_at(selection: &EffectiveSelection, grade: GradeIntent) -> RecipeView<'_> {
+        RecipeView { selection, grade }
+    }
+
+    fn can_prepare(dual_player_preparation: bool) -> DynamicCapabilities {
+        DynamicCapabilities {
+            platform: ClientPlatform::Apple,
+            max_height: 2160,
+            codecs: vec![CodecPolicy::H264, CodecPolicy::Hevc],
+            dynamic_ranges: vec![DynamicRangePolicy::Sdr, DynamicRangePolicy::Hdr10],
+            dual_player_preparation,
+        }
+    }
+
+    /// A link with room for a second pipeline: twice what this session is
+    /// delivering, with margin.
+    fn roomy() -> PreparationConditions {
+        PreparationConditions {
+            observed_download_bps: Some(80_000_000),
+            delivered_bps: Some(12_000_000),
+        }
+    }
+
+    /// The axis M6 prepares across, on a client that says it can, on a link
+    /// that has shown headroom — in **both** directions, because upshift is
+    /// the direction that raises demand and a rule that only ever tested
+    /// downshifts would not notice being restricted to them.
+    #[test]
+    fn a_resolution_change_on_a_capable_client_is_prepared() {
+        for (from, to) in [(2160, 1080), (1080, 2160)] {
+            assert_eq!(
+                decide_preparation(
+                    view(&playing(from)),
+                    view(&playing(to)),
+                    Some(&can_prepare(true)),
+                    roomy(),
+                ),
+                PreparationDecision::Prepare {
+                    axis: PreparationAxis::ResolutionOrBitrate,
+                },
+                "{from} -> {to}",
+            );
+        }
+        // Auto ↔ manual at the same delivered height is still a change: the
+        // ladder the successor climbs differs even when the first rung matches.
+        let mut auto = playing(1080);
+        auto.quality_auto = true;
+        assert_eq!(
+            decide_preparation(
+                view(&playing(1080)),
+                view(&auto),
+                Some(&can_prepare(true)),
+                roomy(),
+            ),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::ResolutionOrBitrate,
+            },
+        );
+    }
+
+    /// The capability is read, never re-derived. This is the test that fails
+    /// if someone infers "Apple can prepare" from the platform enum — the
+    /// mistake M5.5 exists because of.
+    #[test]
+    fn a_client_that_did_not_say_it_can_prepare_gets_the_fallback() {
+        assert_eq!(
+            decide_preparation(
+                view(&playing(2160)),
+                view(&playing(1080)),
+                Some(&can_prepare(false)),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::ResolutionOrBitrate,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+            "the platform is Apple and Apple measured true; the literal still says false",
+        );
+        assert_eq!(
+            decide_preparation(view(&playing(2160)), view(&playing(1080)), None, roomy()),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::ResolutionOrBitrate,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+            "a session that has never been told has not been told",
+        );
+        // And the capability outranks the axis: an incapable client crossing
+        // an unproven axis is reported as incapable, because that is the fact
+        // that would change if the literal flipped.
+        let playing = playing(2160);
+        assert_eq!(
+            decide_preparation(
+                view(&playing),
+                view_at(&playing, hdr10()),
+                Some(&can_prepare(false)),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DynamicRange,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+        );
+    }
+
+    /// Every other axis falls back even on a capable client, and names itself.
+    #[test]
+    fn the_unproven_axes_fall_back_and_name_themselves() {
+        let caps = can_prepare(true);
+        let mut method = playing(2160);
+        method.codec = "source".to_owned();
+        let mut audio = playing(2160);
+        audio.audio_track = Some(1);
+        let mut offset = playing(2160);
+        offset.audio_offset_ms = 250;
+        let mut burn = playing(2160);
+        burn.subtitle_burn = Some(3);
+        // Each Dolby Vision answer is its own crossing: preserving decides
+        // whether the RPUs survive the filter and converting decides whether
+        // they are rewritten, and a viewer can see the difference.
+        let preserve = GradeIntent {
+            preserve_dolby_vision: true,
+            ..sdr()
+        };
+        let convert = GradeIntent {
+            preserve_dolby_vision: true,
+            convert_dolby_vision: true,
+            ..sdr()
+        };
+
+        for (candidate, grade, axis) in [
+            (&method, sdr(), PreparationAxis::DeliveryMethod),
+            (&playing(2160), hdr10(), PreparationAxis::DynamicRange),
+            (&playing(2160), preserve, PreparationAxis::DynamicRange),
+            (&playing(2160), convert, PreparationAxis::DynamicRange),
+            (&audio, sdr(), PreparationAxis::AudioTrackOrOffset),
+            (&offset, sdr(), PreparationAxis::AudioTrackOrOffset),
+            (&burn, sdr(), PreparationAxis::SubtitleBurn),
+        ] {
+            assert_eq!(
+                decide_preparation(
+                    view(&playing(2160)),
+                    view_at(candidate, grade),
+                    Some(&caps),
+                    roomy(),
+                ),
+                PreparationDecision::Fallback {
+                    axis,
+                    reason: FallbackReason::AxisNotProven,
+                },
+                "{}",
+                axis.as_str(),
+            );
+        }
+    }
+
+    fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
+        crate::transcode::SessionRequest {
+            file_id: 5615,
+            playback_id: "player-a".to_owned(),
+            request_id: None,
+            control_sequence: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind,
+            start_seconds: 12.5,
+            audio_index: Some(0),
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: crate::transcode::Presentation::Vod,
+            block_budget_secs: None,
+        }
+    }
+
+    fn converting_copy() -> crate::transcode::SessionRequest {
+        session_request(SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: true,
+        })
+    }
+
+    fn selection_at(quality: QualitySelection) -> ClientSelection {
+        ClientSelection {
+            quality,
+            audio_track: Some(0),
+            subtitle: SubtitleSelection {
+                mode: SubtitleMode::Off,
+                track: None,
+            },
+            audio_offset_ms: 0,
+            codec: CodecPolicy::Auto,
+            dynamic_range: DynamicRangePolicy::Auto,
+        }
+    }
+
+    /// The property that ruled the candidate's shape: a converting Profile 7
+    /// session, with the client changing nothing, must read `Unchanged`.
+    ///
+    /// It fails on both obvious implementations. A candidate round-tripped
+    /// through a `CreateSession` loses `convert_dolby_vision` — `into_request`
+    /// hardcodes it false, because a client cannot ask to be handed a
+    /// conversion — so the candidate's `GradeIntent` differs from the
+    /// delivered one on that field alone, and every exchange reports a grade
+    /// crossing for a viewer who changed nothing. Dolby Vision titles would
+    /// simply never prepare, and the metric would look entirely plausible.
+    #[test]
+    fn a_converting_session_that_changed_nothing_is_unchanged() {
+        let current = converting_copy();
+        let candidate = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Manual { height: 2160 }),
+            2160,
+            Some(2160),
+        );
+        assert_eq!(
+            candidate.kind, current.kind,
+            "a source-height ask on a copy is that copy, asked for by name",
+        );
+        assert_eq!(
+            GradeIntent::from_request(&candidate),
+            GradeIntent::from_request(&current),
+            "the conversion must survive the round trip, or DV never prepares",
+        );
+
+        let delivered =
+            EffectiveSelection::from_request(&current, 2160, Some("dolby_vision".into()));
+        let proposed = EffectiveSelection::from_request(&candidate, 2160, None);
+        assert_eq!(
+            decide_preparation(
+                RecipeView {
+                    selection: &delivered,
+                    grade: GradeIntent::from_request(&current),
+                },
+                RecipeView {
+                    selection: &proposed,
+                    grade: GradeIntent::from_request(&candidate),
+                },
+                Some(&can_prepare(true)),
+                roomy(),
+            ),
+            PreparationDecision::Unchanged,
+        );
+    }
+
+    /// A copy has no rung, so a manual rung that is not the source's own is a
+    /// request to stop copying — and the candidate must say so rather than
+    /// silently keep copying. The decision then refuses it, which is the
+    /// point: the candidate reports what was asked for, and the decision is
+    /// what says no.
+    ///
+    /// It is refused as a **grade** change, not a delivery-method one, and
+    /// that is not an accident of this fixture: leaving a Dolby Vision copy
+    /// *always* crosses the grade axis, because a transcode carries no RPUs at
+    /// all — `GradeIntent::from_request` answers both DV questions `false` for
+    /// a transcode as a statement about its output. So the hardest axis names
+    /// it, and for a DV title that is `dynamic_range`.
+    #[test]
+    fn a_rung_a_copy_cannot_serve_becomes_a_transcode() {
+        let current = converting_copy();
+        let candidate = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Manual { height: 1080 }),
+            1080,
+            Some(2160),
+        );
+        assert_eq!(candidate.kind, SessionKind::Transcode { height: 1080 });
+
+        let delivered = EffectiveSelection::from_request(&current, 2160, None);
+        let proposed = EffectiveSelection::from_request(&candidate, 1080, None);
+        assert_eq!(
+            decide_preparation(
+                RecipeView {
+                    selection: &delivered,
+                    grade: GradeIntent::from_request(&current),
+                },
+                RecipeView {
+                    selection: &proposed,
+                    grade: GradeIntent::from_request(&candidate),
+                },
+                Some(&can_prepare(true)),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DynamicRange,
+                reason: FallbackReason::MultipleAxes,
+            },
+            "method, height and grade all move; the hardest names it",
+        );
+        // A copy with no Dolby Vision to lose crosses method and height only,
+        // and then the delivery method is the hardest axis moving.
+        let plain = session_request(SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        });
+        let plain_candidate = candidate_request(
+            &plain,
+            &selection_at(QualitySelection::Manual { height: 1080 }),
+            1080,
+            Some(2160),
+        );
+        let plain_delivered = EffectiveSelection::from_request(&plain, 2160, None);
+        let plain_proposed = EffectiveSelection::from_request(&plain_candidate, 1080, None);
+        assert_eq!(
+            decide_preparation(
+                RecipeView {
+                    selection: &plain_delivered,
+                    grade: GradeIntent::from_request(&plain),
+                },
+                RecipeView {
+                    selection: &plain_proposed,
+                    grade: GradeIntent::from_request(&plain_candidate),
+                },
+                Some(&can_prepare(true)),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DeliveryMethod,
+                reason: FallbackReason::MultipleAxes,
+            },
+        );
+    }
+
+    /// The comparison that decides it is against the **source** height, never
+    /// against the resolved one. A 1080 ask on a 2160 source resolves to 1080
+    /// — it is already a ladder rung, so the snap is the identity — and
+    /// comparing the ask to the result would find them equal and leave a copy
+    /// copying a rung it cannot serve.
+    #[test]
+    fn the_copy_escape_is_the_source_height_not_the_resolved_one() {
+        let current = converting_copy();
+        let resolved_equals_ask = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Manual { height: 1080 }),
+            1080,
+            Some(2160),
+        );
+        assert_eq!(
+            resolved_equals_ask.kind,
+            SessionKind::Transcode { height: 1080 },
+            "ask == resolved height is not the escape; ask == source height is",
+        );
+    }
+
+    /// Auto never changes the delivery method. It asks the server to choose a
+    /// rung, not to stop copying — turning a direct play into a transcode
+    /// because the viewer selected Auto would be a downgrade nobody asked for.
+    #[test]
+    fn auto_leaves_a_copy_copying() {
+        let current = converting_copy();
+        let candidate = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Auto),
+            1080,
+            Some(2160),
+        );
+        assert_eq!(candidate.kind, current.kind);
+        assert!(candidate.automatic, "and it is Auto now");
+    }
+
+    /// Only a burn is a burn. Off, Native and Overlay are not video
+    /// replacements at all, and mapping their track into `subtitle_burn` would
+    /// turn every native-subtitle change into a whole new encode recipe.
+    #[test]
+    fn only_a_burn_reaches_subtitle_burn() {
+        let mut current = session_request(SessionKind::Transcode { height: 1080 });
+        current.subtitle_burn = Some(2);
+
+        for mode in [
+            SubtitleMode::Off,
+            SubtitleMode::Native,
+            SubtitleMode::Overlay,
+        ] {
+            let mut selection = selection_at(QualitySelection::Manual { height: 1080 });
+            selection.subtitle = SubtitleSelection {
+                mode,
+                track: if matches!(mode, SubtitleMode::Off) {
+                    None
+                } else {
+                    Some(3)
+                },
+            };
+            let candidate = candidate_request(&current, &selection, 1080, Some(2160));
+            assert_eq!(candidate.subtitle_burn, None, "{mode:?} is not a burn");
+        }
+
+        let mut burning = selection_at(QualitySelection::Manual { height: 1080 });
+        burning.subtitle = SubtitleSelection {
+            mode: SubtitleMode::Burn,
+            track: Some(3),
+        };
+        assert_eq!(
+            candidate_request(&current, &burning, 1080, Some(2160)).subtitle_burn,
+            Some(3),
+        );
+    }
+
+    /// The client's codec and dynamic-range answers are *policies*, and the
+    /// server's are answers. A selection carries the first and cannot carry the
+    /// second, so the session's own are carried through untouched — a change on
+    /// those axes means re-review, which nothing does yet.
+    #[test]
+    fn a_selection_cannot_rewrite_the_servers_plan_answers() {
+        let mut current = converting_copy();
+        current.hdr10 = true;
+        let mut selection = selection_at(QualitySelection::Auto);
+        selection.codec = CodecPolicy::Av1;
+        selection.dynamic_range = DynamicRangePolicy::Sdr;
+
+        let candidate = candidate_request(&current, &selection, 1080, Some(2160));
+        assert_eq!(
+            GradeIntent::from_request(&candidate),
+            GradeIntent::from_request(&current),
+            "a policy is not an answer",
+        );
+        // And everything the selection does not name survives.
+        assert_eq!(candidate.file_id, current.file_id);
+        assert_eq!(candidate.start_seconds, current.start_seconds);
+        assert_eq!(candidate.playback_id, current.playback_id);
+    }
+
+    /// The grade intent is read off the request, and a transcode answers both
+    /// Dolby Vision questions `false` as a statement rather than a default:
+    /// a transcode never carries RPUs through.
+    #[test]
+    fn a_grade_intent_comes_off_the_request() {
+        use crate::transcode::SessionRequest;
+
+        fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
+            SessionRequest {
+                file_id: 1,
+                playback_id: "player-a".to_owned(),
+                request_id: None,
+                control_sequence: None,
+                automatic: false,
+                previous_session_id: None,
+                reopen_reason: None,
+                kind,
+                start_seconds: 0.0,
+                audio_index: None,
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                hdr10,
+                presentation: crate::transcode::Presentation::Vod,
+                block_budget_secs: None,
+            }
+        }
+
+        assert_eq!(
+            GradeIntent::from_request(&request(SessionKind::Transcode { height: 1080 }, true)),
+            GradeIntent {
+                hdr10: true,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+        );
+        assert_eq!(
+            GradeIntent::from_request(&request(
+                SessionKind::Copy {
+                    aac: true,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: true,
+                },
+                false,
+            )),
+            GradeIntent {
+                hdr10: false,
+                preserve_dolby_vision: true,
+                convert_dolby_vision: true,
+            },
+            "the AAC re-encode is an audio fact and is not a grade fact",
+        );
+        // Preserving without converting is a third answer, not a rounding of
+        // the other two: the RPUs survive but are not rewritten.
+        assert_ne!(
+            GradeIntent::from_request(&request(
+                SessionKind::Copy {
+                    aac: false,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: false,
+                },
+                false,
+            )),
+            GradeIntent::from_request(&request(
+                SessionKind::Copy {
+                    aac: false,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: true,
+                },
+                false,
+            )),
+        );
+    }
+
+    /// The wire vocabulary is the operator's, so it is pinned rather than
+    /// merely produced. Nothing else in the tree asserts these strings, and a
+    /// swapped pair would make every dashboard say the opposite of the truth
+    /// while every other test still passed.
+    #[test]
+    fn the_decision_vocabulary_is_fixed() {
+        assert_eq!(
+            PreparationAxis::ResolutionOrBitrate.as_str(),
+            "resolution_or_bitrate"
+        );
+        assert_eq!(
+            PreparationAxis::AudioTrackOrOffset.as_str(),
+            "audio_track_or_offset"
+        );
+        assert_eq!(PreparationAxis::SubtitleBurn.as_str(), "subtitle_burn");
+        assert_eq!(PreparationAxis::DeliveryMethod.as_str(), "delivery_method");
+        assert_eq!(PreparationAxis::DynamicRange.as_str(), "dynamic_range");
+        assert_eq!(
+            FallbackReason::ClientCannotPrepare.as_str(),
+            "client_cannot_prepare"
+        );
+        assert_eq!(FallbackReason::AxisNotProven.as_str(), "axis_not_proven");
+        assert_eq!(FallbackReason::MultipleAxes.as_str(), "multiple_axes");
+        assert_eq!(
+            FallbackReason::ThroughputUnproven.as_str(),
+            "throughput_unproven"
+        );
+    }
+
+    /// The hardest axis names the transition, by the enum's ordering rather
+    /// than by which comparison happens to be written first — so regrouping
+    /// those statements cannot silently change what an operator reads.
+    #[test]
+    fn two_axes_at_once_are_never_prepared_and_the_hardest_names_them() {
+        let caps = can_prepare(true);
+        let mut method_and_height = playing(1080);
+        method_and_height.codec = "source".to_owned();
+        let mut audio_and_burn = playing(2160);
+        audio_and_burn.audio_track = Some(1);
+        audio_and_burn.subtitle_burn = Some(3);
+        let mut burn = playing(2160);
+        burn.subtitle_burn = Some(3);
+        let mut everything = playing(720);
+        everything.codec = "source".to_owned();
+        everything.audio_track = Some(2);
+        everything.subtitle_burn = Some(1);
+
+        for (candidate, grade, axis) in [
+            (&method_and_height, sdr(), PreparationAxis::DeliveryMethod),
+            (&audio_and_burn, sdr(), PreparationAxis::SubtitleBurn),
+            (&burn, hdr10(), PreparationAxis::DynamicRange),
+            (&everything, hdr10(), PreparationAxis::DynamicRange),
+        ] {
+            assert_eq!(
+                decide_preparation(
+                    view(&playing(2160)),
+                    view_at(candidate, grade),
+                    Some(&caps),
+                    roomy(),
+                ),
+                PreparationDecision::Fallback {
+                    axis,
+                    reason: FallbackReason::MultipleAxes,
+                },
+                "{}",
+                axis.as_str(),
+            );
+        }
+    }
+
+    /// A link that has not shown room for a second pipeline does not get one.
+    ///
+    /// Handoff §8 asks for this by name: the spike ran on a steady shaped
+    /// link, so the constrained case is measured by nothing, and a prepared
+    /// handoff that causes the stall it exists to prevent is the worst
+    /// outcome available.
+    #[test]
+    fn a_link_that_has_not_shown_headroom_does_not_get_a_second_pipeline() {
+        let caps = can_prepare(true);
+        let refusals = [
+            (
+                "no margin at all",
+                PreparationConditions {
+                    observed_download_bps: Some(12_000_000),
+                    delivered_bps: Some(12_000_000),
+                },
+            ),
+            (
+                "a hair under twice",
+                PreparationConditions {
+                    observed_download_bps: Some(23_999_999),
+                    delivered_bps: Some(12_000_000),
+                },
+            ),
+            (
+                "the client never reported one",
+                PreparationConditions {
+                    observed_download_bps: None,
+                    delivered_bps: Some(12_000_000),
+                },
+            ),
+            (
+                "the server has not measured delivery yet",
+                PreparationConditions {
+                    observed_download_bps: Some(80_000_000),
+                    delivered_bps: None,
+                },
+            ),
+        ];
+        for (case, conditions) in refusals {
+            assert_eq!(
+                decide_preparation(
+                    view(&playing(2160)),
+                    view(&playing(1080)),
+                    Some(&caps),
+                    conditions,
+                ),
+                PreparationDecision::Fallback {
+                    axis: PreparationAxis::ResolutionOrBitrate,
+                    reason: FallbackReason::ThroughputUnproven,
+                },
+                "{case}",
+            );
+        }
+        // Exactly twice is the floor, and the floor passes.
+        assert_eq!(
+            decide_preparation(
+                view(&playing(2160)),
+                view(&playing(1080)),
+                Some(&caps),
+                PreparationConditions {
+                    observed_download_bps: Some(24_000_000),
+                    delivered_bps: Some(12_000_000),
+                },
+            ),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::ResolutionOrBitrate,
+            },
+        );
+    }
+
+    /// The delivered grade never votes. It is the encoder's answer, and a
+    /// candidate has no encoder — so a session whose HDR10 rung the encoder
+    /// refused must not read as a grade crossing on every exchange for the
+    /// rest of its life.
+    #[test]
+    fn the_encoders_answer_is_not_the_grade_the_decision_reads() {
+        let caps = can_prepare(true);
+        // The session asked for HDR10 and the encoder refused it: delivered
+        // says `sdr`, the request still says HDR10.
+        let mut refused = playing(2160);
+        refused.dynamic_range = Some("sdr".to_owned());
+        let mut lower = playing(1080);
+        lower.dynamic_range = Some("sdr".to_owned());
+        assert_eq!(
+            decide_preparation(
+                view_at(&refused, hdr10()),
+                view_at(&lower, hdr10()),
+                Some(&caps),
+                roomy(),
+            ),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::ResolutionOrBitrate,
+            },
+            "a plain quality change on a refused-HDR10 session is still a plain \
+             quality change",
+        );
+        // And the reverse: two sessions the encoder happened to deliver
+        // identically are still a grade change if their requests differ.
+        let mut delivered_alike = playing(2160);
+        delivered_alike.dynamic_range = Some("sdr".to_owned());
+        assert_eq!(
+            decide_preparation(
+                view_at(&delivered_alike, sdr()),
+                view_at(&delivered_alike, hdr10()),
+                Some(&caps),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DynamicRange,
+                reason: FallbackReason::AxisNotProven,
+            },
+            "the encoder agreeing does not make two different asks the same ask",
+        );
+    }
+
+    /// The same delivered selection is not a transition, whatever else is
+    /// true — and the early return is before every other gate, so a throttled
+    /// link and an incapable client both still read `Unchanged`.
+    #[test]
+    fn an_unchanged_selection_prepares_nothing() {
+        let starved = PreparationConditions {
+            observed_download_bps: Some(1),
+            delivered_bps: Some(12_000_000),
+        };
+        for caps in [Some(can_prepare(true)), Some(can_prepare(false)), None] {
+            for conditions in [roomy(), starved] {
+                assert_eq!(
+                    decide_preparation(
+                        view(&playing(2160)),
+                        view(&playing(2160)),
+                        caps.as_ref(),
+                        conditions,
+                    ),
+                    PreparationDecision::Unchanged,
+                );
+            }
+        }
     }
 
     fn staged_preparation(
