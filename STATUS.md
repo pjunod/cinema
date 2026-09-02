@@ -17,40 +17,43 @@ activation. Abandonment and ordinary transactions remain non-retryable.
 The same qualification work reproduced two existing daemon-harness flakes.
 Healthy Activity waves no longer spend 500 ms of the production two-second
 peer deadline waiting for synthetic proxy receivers; exact physical-request
-counts remain, and a paused unit now proves seven followers share the held
-leading fetch. Both summary and detail must also retain node B's two
-remote-only streams, closing an adversarially found false-green. Activation
-fixtures hold all three reserved HTTP/Raft/Hiqlite listeners open together
-until the set is chosen, so no fixture can hand the same ephemeral port to two
-of its own listeners. The reservation is released before the daemon binds, so
+counts remain, and a paused unit now proves seven followers serialize behind
+one leading physical fetch and are handed its completed snapshot. The summary
+must retain node B's two-stream count and the detail read must name node B
+among its deliveries even on a wave the summary led, closing an adversarially
+found false-green. Activation fixtures hold all three reserved
+HTTP/Raft/Hiqlite listeners open together until the set is chosen, so no
+fixture can hand the same ephemeral port to two of its own listeners. The reservation is released before the daemon binds, so
 it narrows one fixture's own selection rather than sequencing two fixtures.
 
 - [x] Three adversarial reviews found the summary false-green and a rebased
       evidence commit that named a non-ancestor; both findings are fixed.
 - [x] The corrective series is split into Store behavior/evidence and daemon
       harness behavior/evidence, with every mapping naming an ancestor.
-- [x] The final affected-surface profile passed 12 checks with 0 failures;
-      full workspace Rust, 118 executed real-cluster Store contracts, topology
-      and failure drills, activation 7/7, and Activity 2/2 are green. Two
-      Playwright-only preflights were skipped because Playwright is not
-      installed on the device host and remain GitHub-runner work.
-- [x] Exact-head hosted run
+- [x] **Superseded evidence, kept for the record.** Before the rebase and the
+      two review rounds below, the affected-surface profile passed 12 checks
+      with 0 failures over full workspace Rust, 118 executed real-cluster Store
+      contracts, topology and failure drills, activation 7/7 and Activity 2/2,
+      and hosted run
       [33622277315](https://github.com/pjunod/plurx/actions/runs/33622277315)
-      passed policy, WAL, daemon, Store, topology, and both package lanes. Its
-      only failure was all 107 ffmpeg-backed Rust cases missing `ffmpeg` on the
-      GitHub image; the same Rust binary reported 1454 other passes. The fast
-      Rust lane now provisions pinned major 6 on hosted runners and requires
-      the matching `ffmpeg-6` capability on self-hosted runners. Operations
-      contracts and the complete local Rust gate (1560 passed, 0 failed, 3
-      ignored) cover that prerequisite.
+      passed policy, WAL, daemon, Store, topology and both package lanes. That
+      run's only failure was all 107 ffmpeg-backed Rust cases missing `ffmpeg`
+      on the GitHub image, against 1454 other passes from the same binary --
+      the prerequisite this branch repairs. Eleven commits have landed since,
+      so none of those numbers describes the current head; they are diagnosis,
+      not merge evidence. Two Playwright-only preflights were skipped because
+      Playwright is not installed on the device host and remain runner work.
+- [x] The fast Rust lane now provisions pinned major 6 on hosted runners and
+      requires the matching `ffmpeg-6` capability on self-hosted runners, with
+      the operations contract binding both sides and pinning the step ahead of
+      the gate it provisions. Seven self-hosted runners carry that capability
+      alongside `high-cpu`, and two other required jobs already select the same
+      class, so the label narrows the pool without stranding the gate.
 - [x] Integrate #820, #822 and #806 by rebasing cleanly onto current `main`
       `b4a1f108`; refresh every SHA-bound mapping to its new ancestor. The
       intervening changes are confined to M6 playback-selection telemetry, its
       handoff, and the learner internal-peer authority repair, none of which
-      touch the confirmation or Activity paths. On the combined tree the
-      catalog reports 23 points / 27 checks / 1291 audited files, history
-      reports 1227 corrective commits and 731 explicit mappings, operations
-      pass 156/156, and ownership inventories pass 11/11.
+      touch the confirmation or Activity paths.
 - [x] Two independent adversarial reviews of the rebased head both found that
       the ancestry-refresh commit had renamed the four mapping fragments to
       their new ancestors while leaving each fragment's `commits` field on the
@@ -63,6 +66,28 @@ it narrows one fixture's own selection rather than sequencing two fixtures.
       activation statement, the summary-led wave now asserts detail retains node
       B's remote-only streams, and the operations contract pins the hosted
       ffmpeg step ahead of the gate it provisions.
+- [x] A second pair of independent adversarial reviews of the repaired head
+      agreed on two further defects and found three more. The recovery
+      reservation was taken only when the whole margin fitted, so it vanished
+      in exactly the case that needs it -- the split is now proportional to the
+      lease actually left and lives in one named function. Nothing executed
+      that reservation, so a source contract now pins it; four mutations were
+      checked against that contract and all four turn it red. The embedded
+      SQLite twin had not received the replay-boundary proof its replicated
+      counterpart got, and the contract now scans both twins. One assertion in
+      the paused Activity unit could not be failed by any mutation and is
+      gone. The recovery-window mapping claimed a contract that did not yet
+      exist and now states what is actually enforced.
+- [x] Every gate re-run on this exact head: catalog 23 points / 27 checks /
+      1296 audited files; history 1232 corrective commits / 736 explicit
+      mappings; operations 156/156; ownership and routing inventories 11/11;
+      `git diff --check` clean. Under the pinned `rustc 1.97.1`, `cargo fmt
+      --all --check`, `cargo check --workspace --all-targets` and
+      `cargo clippy --workspace --all-targets -- -D warnings` are clean,
+      including `plurx-core` with `cluster-read-cost-validation`, and the fast
+      unit lane passes 1567 with 0 failed and 3 ignored. The real-cluster
+      Store, daemon-harness and hosted lanes remain the qualification run's
+      work; they are not claimed here.
 - [ ] Push the re-reviewed exact head to #794, require its full GitHub
       qualification and promotion receipt, merge it, close partial duplicate
       #782 with a cross-link, and verify `main` after the merge.
