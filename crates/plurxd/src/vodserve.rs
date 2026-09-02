@@ -3245,6 +3245,10 @@ impl VodServe {
                 debug_assert_eq!(result.action, action);
                 debug_assert_eq!(result.platform, platform);
                 result.disposition = crate::playback_control::ControlDisposition::Replay;
+                // One viewer action is one measurement: a stored result
+                // carries the observation of the exchange that produced it,
+                // and replaying it must not replay that.
+                result.selection = crate::playback_control::SelectionObservation::default();
                 let Some(cleanup) = session.terminal_cleanup.as_ref().map(Arc::clone) else {
                     return Some(Err(crate::playback_control::ControlStateError::Unavailable));
                 };
@@ -3309,7 +3313,7 @@ impl VodServe {
                 accepted_sequence: u64,
                 action: crate::playback_control::ControlAction,
                 platform: crate::playback_control::ClientPlatform,
-                selection_changed: bool,
+                selection: crate::playback_control::SelectionObservation,
                 lease_expires_at_unix_ms: i64,
                 marker_prewarm: Option<MarkerPrewarmControl>,
             },
@@ -3327,7 +3331,7 @@ impl VodServe {
             // two reads of the same fence, and taking the lock twice would let
             // another exchange land between them and be measured against a
             // selection this one had already replaced.
-            let (accepted, selection_changed) = {
+            let (accepted, selection) = {
                 let mut fence = session.control.lock().expect("control lock");
                 let accepted = fence.accept(
                     control.generation,
@@ -3339,11 +3343,18 @@ impl VodServe {
                 // Only for an accepted exchange: a replay is the same exchange
                 // arriving twice, and it changed the selection the first time
                 // or not at all.
-                let changed = matches!(
+                let observation = if matches!(
                     &accepted,
                     Ok((crate::playback_control::ControlDisposition::Accepted, ..))
-                ) && fence.observe_selection(&control.snapshot.selection);
-                (accepted, changed)
+                ) {
+                    fence.observe(
+                        &control.snapshot.selection,
+                        control.snapshot.capabilities.as_ref(),
+                    )
+                } else {
+                    crate::playback_control::SelectionObservation::default()
+                };
+                (accepted, observation)
             };
             let (disposition, accepted_sequence, action, platform) = match accepted {
                 Ok(outcome) => outcome,
@@ -3366,7 +3377,7 @@ impl VodServe {
                     platform,
                     terminal_handoff: None,
                     terminal_commit: None,
-                    selection_changed,
+                    selection: selection.clone(),
                 };
                 let terminal_commit = terminal_committer
                     .as_ref()
@@ -3413,7 +3424,7 @@ impl VodServe {
                     accepted_sequence,
                     action,
                     platform,
-                    selection_changed,
+                    selection: selection.clone(),
                     lease_expires_at_unix_ms: crate::media_sessions::unix_ms()
                         .saturating_add(remaining_ms),
                     marker_prewarm,
@@ -3429,7 +3440,7 @@ impl VodServe {
             accepted_sequence,
             action,
             platform,
-            selection_changed,
+            selection,
             lease_expires_at_unix_ms,
             marker_prewarm,
         ) = match outcome {
@@ -3460,7 +3471,7 @@ impl VodServe {
                 accepted_sequence,
                 action,
                 platform,
-                selection_changed,
+                selection,
                 lease_expires_at_unix_ms,
                 marker_prewarm,
             } => (
@@ -3468,7 +3479,7 @@ impl VodServe {
                 accepted_sequence,
                 action,
                 platform,
-                selection_changed,
+                selection,
                 lease_expires_at_unix_ms,
                 marker_prewarm,
             ),
@@ -3504,7 +3515,7 @@ impl VodServe {
             platform,
             terminal_handoff: None,
             terminal_commit: None,
-            selection_changed,
+            selection,
         }))
     }
 
