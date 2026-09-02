@@ -690,6 +690,15 @@ impl MediaPool {
     /// Prove the committed voter set is uniformly publishing this protocol,
     /// independent of the operator opt-in bit. The settings API uses this
     /// precondition before it writes the replicated enable flag.
+    ///
+    /// The question is whether every committed VOTER is visible in the peer
+    /// directory, which is not the same as whether the local node is one.
+    /// `activity_peers` returns the other voters — it excludes this node and
+    /// filters to voters — so the voters this node can see number
+    /// `peers.len()` plus itself only when it is a voter. Comparing against
+    /// `peers.len() + 1` unconditionally made the predicate `n != n + 1` on a
+    /// learner, so it was structurally false there and no learner could ever
+    /// accept a delegated session or place one.
     pub(crate) async fn remote_rollout_ready(&self) -> bool {
         if !self.membership.is_replicated() {
             return false;
@@ -699,20 +708,22 @@ impl MediaPool {
         let directory = tokio::time::timeout_at(deadline, async {
             tokio::join!(
                 self.membership.activity_peers(),
-                self.membership.activity_voter_count()
+                self.membership.activity_voter_count(),
+                self.membership.local_node_is_committed_voter()
             )
         })
         .await;
-        let Ok((Ok(peers), Ok(voter_count))) = directory else {
+        let Ok((Ok(peers), Ok(voter_count), Ok(local_is_voter))) = directory else {
             return false;
         };
-        if voter_count <= 1 || voter_count != peers.len().saturating_add(1) {
+        if voter_count <= 1 {
             return false;
         }
         let snapshots = self.snapshots.read().await;
         remote_directory_ready(
             &peers,
             voter_count,
+            local_is_voter,
             std::ops::Deref::deref(&snapshots),
             tokio::time::Instant::now(),
         )
@@ -817,10 +828,11 @@ impl MediaPool {
 fn remote_directory_ready(
     peers: &[ActivityPeer],
     voter_count: usize,
+    local_is_voter: bool,
     snapshots: &BTreeMap<String, CachedSnapshot>,
     now: tokio::time::Instant,
 ) -> bool {
-    voter_count == peers.len().saturating_add(1)
+    voter_count == peers.len().saturating_add(usize::from(local_is_voter))
         && peers.iter().all(|peer| {
             peer.reachable
                 && peer.http_base.is_some()
@@ -1466,6 +1478,33 @@ mod tests {
         assert!(!snapshot_is_bounded(&incompatible, "peer-a"));
     }
 
+    // The arithmetic above is only right where it is used, and a helper test
+    // leaves the call site free: the defect was one `+ 1` inside
+    // `remote_rollout_ready`. Pin that it asks membership for the local role
+    // and hands it through, and that the old unconditional form is gone.
+    #[test]
+    fn the_rollout_gate_asks_membership_whether_this_node_is_a_voter() {
+        let body = include_str!("media_pool.rs")
+            .split_once("pub(crate) async fn remote_rollout_ready(")
+            .expect("remote_rollout_ready was renamed")
+            .1
+            .split_once("\n    }\n")
+            .expect("remote_rollout_ready never closes at fn indent")
+            .0;
+        assert!(
+            body.contains("local_node_is_committed_voter()"),
+            "the rollout gate must read the local committed role, not assume it",
+        );
+        assert!(
+            body.contains("local_is_voter,"),
+            "the local role must reach remote_directory_ready",
+        );
+        assert!(
+            !body.contains("peers.len().saturating_add(1)"),
+            "the unconditional +1 is what made this unsatisfiable on a learner",
+        );
+    }
+
     #[test]
     fn remote_placement_requires_every_voter_on_the_current_protocol() {
         let now = tokio::time::Instant::now();
@@ -1481,15 +1520,26 @@ mod tests {
                 expires_at: now + Duration::from_secs(1),
             },
         )]);
-        assert!(remote_directory_ready(&peers, 2, &snapshots, now));
-        assert!(!remote_directory_ready(&peers, 3, &snapshots, now));
+        assert!(remote_directory_ready(&peers, 2, true, &snapshots, now));
+        assert!(!remote_directory_ready(&peers, 3, true, &snapshots, now));
+
+        // The same directory read from a LEARNER. `activity_peers` never
+        // returns the local node and never returns a learner, so every voter a
+        // learner can see is already in `peers` and there is no self to add.
+        // Counting itself as a voter made the predicate `n != n + 1` there, so
+        // it was unsatisfiable for any roster size. A learner that can see the
+        // one voter passes the arithmetic (`remote_rollout_ready` separately
+        // refuses a single-voter cluster); one that is missing a voter fails.
+        assert!(remote_directory_ready(&peers, 1, false, &snapshots, now));
+        assert!(!remote_directory_ready(&peers, 2, false, &snapshots, now));
 
         snapshots
             .get_mut("peer-a")
             .expect("peer snapshot")
             .snapshot
             .protocol_version = PROTOCOL_VERSION - 1;
-        assert!(!remote_directory_ready(&peers, 2, &snapshots, now));
+        assert!(!remote_directory_ready(&peers, 2, true, &snapshots, now));
+        assert!(!remote_directory_ready(&peers, 1, false, &snapshots, now));
     }
 
     #[test]
