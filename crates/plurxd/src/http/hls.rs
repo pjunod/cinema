@@ -2320,17 +2320,36 @@ fn replay_route_identity_matches(
 /// The bounded idempotent-write retry can spend the entire remaining owner
 /// lease on consensus timeouts. Spending it here is what
 /// [`wait_for_confirmed_activation`] exists to survive, and that reader is
-/// entered with the same lease deadline: without this reservation it observes
+/// entered with the same lease deadline: without a reservation it observes
 /// `now >= deadline`, returns `None` on its first statement, and abandons an
-/// activation whose confirmation had in fact committed. One reservation of a
-/// full store deadline keeps at least one complete consistent read available
-/// after the write side gives up.
+/// activation whose confirmation had in fact committed.
+///
+/// This is one complete consistent-read *attempt*, not a whole read: an
+/// authority read that times out retries once more inside the Store, and
+/// reserving that full envelope would leave the write itself under two
+/// attempts. The reservation is therefore a target rather than a floor -- see
+/// [`activation_confirmation_deadline`], which never takes more than half of
+/// whatever lease is actually left, so a confirmation entered late keeps a
+/// proportional share for recovery instead of losing the reservation entirely.
 const ACTIVATION_CONFIRMATION_RECOVERY_MARGIN: Duration = ACTIVATION_STORE_DEADLINE;
 
 const _: () = assert!(
     ACTIVATION_CONFIRMATION_RECOVERY_MARGIN.as_millis() * 2 <= LEASE_TTL_MS as u128,
     "the confirmation recovery reservation must leave most of the owner lease for the write"
 );
+
+/// Split the remaining owner lease between the confirmation write and the
+/// recovery read that has to survive it.
+///
+/// Taking the margin only when the full margin fits is what an earlier cut of
+/// this did, and it removed the reservation in exactly the case that needs it:
+/// a preparation that ran long leaves under a margin of lease, the confirmation
+/// takes all of it, and the recovery read is entered already expired. Half of
+/// what is left is always available, so the reservation degrades instead.
+fn activation_confirmation_deadline(lease_deadline: tokio::time::Instant) -> tokio::time::Instant {
+    let remaining = lease_deadline.saturating_duration_since(tokio::time::Instant::now());
+    lease_deadline - ACTIVATION_CONFIRMATION_RECOVERY_MARGIN.min(remaining / 2)
+}
 
 fn activation_lease_deadline(activation: &MediaSessionActivation) -> tokio::time::Instant {
     let remaining_ms = activation
@@ -2503,14 +2522,7 @@ pub(super) async fn activate_session_under_authority(
     // The confirmation write may retry inside the Store; the recovery read
     // below is the only path that can still observe a write that committed
     // behind a lost response, so it keeps its own reserved share of the lease.
-    let confirmation_deadline = {
-        let reserved = tokio::time::Instant::now() + ACTIVATION_CONFIRMATION_RECOVERY_MARGIN;
-        if lease_deadline > reserved {
-            lease_deadline - ACTIVATION_CONFIRMATION_RECOVERY_MARGIN
-        } else {
-            lease_deadline
-        }
-    };
+    let confirmation_deadline = activation_confirmation_deadline(lease_deadline);
     let confirmation = tokio::time::timeout_at(
         confirmation_deadline,
         state.store.settle_media_session_activation(
@@ -8997,6 +9009,54 @@ fn segment_content_type(name: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    /// The reservation is a control-flow property of one `async fn` that needs
+    /// a store, a transcode manager and an authenticated owner to reach, so
+    /// nothing executes it. Pin it where it lives instead: reverting the
+    /// confirmation to the bare lease deadline, or handing the recovery read
+    /// the reserved deadline it must never be given, fails here.
+    #[test]
+    fn the_confirmation_reserves_recovery_budget_inside_the_owner_lease() {
+        let source = include_str!("hls.rs");
+        let reservation = source
+            .split_once("    let confirmation_deadline = activation_confirmation_deadline(")
+            .expect("the confirmation must be awaited on its own reserved deadline")
+            .1
+            .split_once("    let route = match confirmation {")
+            .expect("confirmation settlement boundary")
+            .0;
+        assert!(
+            reservation.contains("tokio::time::timeout_at(")
+                && reservation.contains("confirmation_deadline,")
+                && reservation.contains("settle_media_session_activation("),
+            "the reserved deadline must bound the confirmation write itself"
+        );
+        assert!(
+            !reservation.contains("timeout_at(lease_deadline"),
+            "the confirmation must not be awaited on the raw owner lease"
+        );
+        // The recovery read is the beneficiary; giving it the reserved
+        // deadline would hand back the very budget the reservation bought.
+        assert!(
+            source.contains("wait_for_confirmed_activation(&state, &activation, lease_deadline)"),
+            "the committed-write recovery read must keep the full owner lease"
+        );
+        // A reservation that is taken only when it fits whole is the cut that
+        // vanished in the case that needed it.
+        let split = source
+            .split_once("fn activation_confirmation_deadline(")
+            .expect("the lease split must be one named function")
+            .1;
+        // Measuring anything other than the lease actually left would make
+        // the split degrade against a constant, which is not a split at all.
+        const REMAINING: &str =
+            "lease_deadline.saturating_duration_since(tokio::time::Instant::now())";
+        assert!(
+            split.contains(REMAINING)
+                && split.contains("ACTIVATION_CONFIRMATION_RECOVERY_MARGIN.min(remaining / 2)"),
+            "the reservation must degrade with the remaining lease, never be skipped"
+        );
+    }
 
     /// M3's acceptance is that a seek storm starts production for exactly one
     /// target. The latch decides which; this decides whether a restart that
