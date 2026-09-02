@@ -62,13 +62,18 @@ directions on every non-television device, a request that could crash on an
 uncomposed node, Home re-grabbing focus on each reload, and Apple's Mini
 strip stranded on screen by its own auto-hide fix.
 
-**Open, and deliberately not decided here:** the web's transport row does not
-match `controls.rows` (playback `info` and `close` sit in the top bar, and
-fullscreen and title info have no fixture entry); Home/End and lock-screen
-scrubbing have no contract row; `touch` cannot reach `scrub` through the
-table at all; and Android's hide delay and skip step are still literals
-rather than fixture reads. Nothing here has run on hardware: Chrome remux,
-Google TV / Shield, an Android phone, Apple TV and iPhone are all unclaimed.
+**Since ruled (2026-09-02):** the row grammar now describes what each surface
+actually renders — a `bar` row for the corner strip every client puts Close in,
+`title_info`/`fullscreen`/`airplay` named as web-only, and desktop's relocated
+`info` declared in `surface_placement` — so `player-dom.test.js` derives both
+rows from the fixture instead of carrying an exception list. Android's hide
+delay and skip step read the fixture too.
+
+**Still open, deliberately not decided here:** Home/End and lock-screen
+scrubbing have no contract row, and `touch` cannot reach `scrub` through the
+table at all (the pointer drag is prose in `surface_notes`). Nothing here has
+run on hardware: Chrome remux, Google TV / Shield, an Android phone, Apple TV
+and iPhone are all unclaimed.
 
 ## M7 M4 burn-join and current-main corrections
 

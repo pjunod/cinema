@@ -185,11 +185,12 @@ safe to mean "scrub": there is nothing beside it to be unreachable.
 
 _Generated from [`tests/playback/player-input-contract.json`](../tests/playback/player-input-contract.json) by `scripts/player-contract-table`; do not edit by hand._
 
-| Row | Items in order | Focusable | Notes |
-|---|---|---|---|
-| `marker` | `skip_marker` | all | Present only while a skip-intro/credits marker is active. Sits above the timeline row, right-aligned. Reachable by `up` from the timeline; never a horizontal neighbour of anything. |
-| `timeline` | `time_elapsed` · `timeline` · `time_total` | `timeline` | Its own full-width row. The timeline is never a horizontal neighbour of a button — Left/Right on it belong to scrubbing, so a button beside it would be unreachable without a seek. |
-| `transport` | `skip_back` · `play_pause` · `skip_forward` · spacer · `audio` · `subtitles` · `quality` · `settings` · `info` · `pip` · `close` | all | One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `audio` when more than one audio track · `subtitles` when at least one subtitle track · `quality` when server ladder has rungs · `pip` when platform reports picture-in-picture possible (never tvOS) · `close` when touch and desktop only — ten-foot exits with `back` |
+| Row | Items in order | Surfaces | Focusable | Notes |
+|---|---|---|---|---|
+| `bar` | `airplay` · `close` | `desktop` · `touch` | all | A corner strip over the picture, not a row in the chrome: every client that has a Close puts it there — top-trailing on the web, top-leading on iOS and on Android, where a television cannot focus it at all. `close` is last here for the same reason it was last in the transport row: the control that ends the session is the one you should not land on by accident. Nothing here is a horizontal neighbour of a transport button. `close` when touch and desktop only — a ten-foot player exits with `back` · `airplay` when web, and only while the browser reports an AirPlay target |
+| `marker` | `skip_marker` | all | all | Present only while a skip-intro/credits marker is active. Sits above the timeline row, right-aligned. Reachable by `up` from the timeline; never a horizontal neighbour of anything. |
+| `timeline` | `time_elapsed` · `timeline` · `time_total` | all | `timeline` | Its own full-width row. The timeline is never a horizontal neighbour of a button — Left/Right on it belong to scrubbing, so a button beside it would be unreachable without a seek. |
+| `transport` | `skip_back` · `play_pause` · `skip_forward` · spacer · `audio` · `subtitles` · `quality` · `settings` · `info` · `title_info` · `pip` · `fullscreen` | all | all | One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its ✕ already lives, and the native clients keep it here. `audio` when more than one audio track · `subtitles` when at least one subtitle track · `quality` when server ladder has rungs · `pip` when platform reports picture-in-picture possible (never tvOS) · `title_info` when web only — the native clients put title and synopsis on the detail screen · `fullscreen` when web only — a native player is already full screen `desktop` renders `info` at position 0 of the `bar` row |
 
 **`settings` holds:** `autoplay_next` · `auto_skip` · `audio_sync` · `playback_speed_reserved`.
 
@@ -337,10 +338,19 @@ Per-surface adapters map inputs as follows; anything not listed is
    that only the timeline is focusable in its row. Apple has no equivalent
    yet — an earlier draft of this section named a `PlayerControlPlan` type
    that was never built, and the shipped test only substring-orders the
-   options group. Open: the web's transport row also diverges from
-   `controls.rows` (playback `info` and `close` sit in the top bar, and
-   `fullscreen`/title info have no fixture entry at all), which is a
-   question about the row, not only about the client.
+   options group.
+
+   The web used to diverge here and the divergence is now written down
+   rather than argued with: `close` is in no client's transport row (the web
+   puts it top-trailing, iOS and Android top-leading, a television has none
+   and exits with `back`), so it moved to a `bar` row; `title_info`,
+   `fullscreen` and `airplay` exist only on the web and are named as such;
+   and the one control a surface genuinely relocates — desktop's `info`,
+   which sits beside the ✕ rather than in the button row — is
+   `surface_placement` on the transport row, so `player-dom.test.js` derives
+   the expected order for BOTH rows from the fixture. Paul ruled it this way
+   on 2026-09-02: describe what each surface does, rather than move two
+   buttons on the web to satisfy a row grammar written for a remote.
 5. **No key code outside the adapter** — the grep gate in §5.
 6. **The playback-info panel shows the fixture's rows.** Each client's
    panel is built from a row list the test compares, label for label and

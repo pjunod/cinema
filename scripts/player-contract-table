@@ -85,16 +85,24 @@ function renderRowsBlock(contract) {
     `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
   );
   out.push("");
-  out.push("| Row | Items in order | Focusable | Notes |");
-  out.push("|---|---|---|---|");
+  out.push("| Row | Items in order | Surfaces | Focusable | Notes |");
+  out.push("|---|---|---|---|---|");
   for (const row of contract.controls.rows) {
     const focusable = row.focusable ? row.focusable.map((i) => `\`${i}\``).join(" · ") : "all";
+    const surfaces = row.surfaces ? row.surfaces.map((s) => `\`${s}\``).join(" · ") : "all";
     const conditions = row.conditional
       ? Object.entries(row.conditional).map(([item, when]) => `\`${item}\` when ${when}`).join(" · ")
       : "";
-    const notes = [row.notes, conditions].filter(Boolean).join(" ");
+    const placement = row.surface_placement
+      ? Object.entries(row.surface_placement)
+          .flatMap(([item, where]) =>
+            Object.entries(where).map(([surface, target]) =>
+              `\`${surface}\` renders \`${item}\` at position ${target.position} of the \`${target.row}\` row`))
+          .join(" · ")
+      : "";
+    const notes = [row.notes, conditions, placement].filter(Boolean).join(" ");
     out.push(
-      `| \`${row.id}\` | ${row.items.map((i) => (i === "spacer" ? "spacer" : `\`${i}\``)).join(" · ")} | ${focusable} | ${notes} |`,
+      `| \`${row.id}\` | ${row.items.map((i) => (i === "spacer" ? "spacer" : `\`${i}\``)).join(" · ")} | ${surfaces} | ${focusable} | ${notes} |`,
     );
   }
   out.push("");

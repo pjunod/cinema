@@ -3,13 +3,11 @@
   "title": "Player input contract — one routing table every client's reducer must reproduce",
   "documented_in": "docs/PLAYER-INPUT-CONTRACT.md",
   "ruled": "2026-09-02",
-
   "surfaces": {
     "ten-foot": "Directional input moves focus: Siri Remote (tvOS), D-pad (Android TV / Google TV), keyboard arrows on a TV browser, and keyboard arrows on the web when the timeline has focus.",
     "touch": "Direct manipulation: iPhone/iPad and Android phones/tablets. Focus states do not apply; the pointer rows below are the whole contract.",
     "desktop": "Pointer plus keyboard on the web. Tab moves focus; arrows are global hotkeys except while the timeline has focus, where the ten-foot timeline rows apply verbatim."
   },
-
   "timings": {
     "hide_after_ms": 4000,
     "hidden_only_while_playing": true,
@@ -21,14 +19,22 @@
       "desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base and issue one seek after this much quiet — the shipped web `nudge()` behaviour, kept."
     ]
   },
-
   "steps": {
     "skip_seconds": 10,
     "preview_step_seconds": 10,
     "preview_acceleration": [
-      { "from_repeat": 0, "step_seconds": 10 },
-      { "from_repeat": 5, "step_seconds": 30 },
-      { "from_repeat": 10, "step_seconds": 60 }
+      {
+        "from_repeat": 0,
+        "step_seconds": 10
+      },
+      {
+        "from_repeat": 5,
+        "step_seconds": 30
+      },
+      {
+        "from_repeat": 10,
+        "step_seconds": 60
+      }
     ],
     "vertical_seek_seconds": null,
     "notes": [
@@ -37,41 +43,101 @@
       "vertical_seek_seconds is null: Up/Down never seek. Vertical is navigation between rows on every surface."
     ]
   },
-
   "controls": {
     "rows": [
       {
+        "id": "bar",
+        "items": [
+          "airplay",
+          "close"
+        ],
+        "surfaces": [
+          "desktop",
+          "touch"
+        ],
+        "conditional": {
+          "close": "touch and desktop only — a ten-foot player exits with `back`",
+          "airplay": "web, and only while the browser reports an AirPlay target"
+        },
+        "notes": "A corner strip over the picture, not a row in the chrome: every client that has a Close puts it there — top-trailing on the web, top-leading on iOS and on Android, where a television cannot focus it at all. `close` is last here for the same reason it was last in the transport row: the control that ends the session is the one you should not land on by accident. Nothing here is a horizontal neighbour of a transport button."
+      },
+      {
         "id": "marker",
-        "items": ["skip_marker"],
+        "items": [
+          "skip_marker"
+        ],
         "notes": "Present only while a skip-intro/credits marker is active. Sits above the timeline row, right-aligned. Reachable by `up` from the timeline; never a horizontal neighbour of anything."
       },
       {
         "id": "timeline",
-        "items": ["time_elapsed", "timeline", "time_total"],
-        "focusable": ["timeline"],
+        "items": [
+          "time_elapsed",
+          "timeline",
+          "time_total"
+        ],
+        "focusable": [
+          "timeline"
+        ],
         "notes": "Its own full-width row. The timeline is never a horizontal neighbour of a button — Left/Right on it belong to scrubbing, so a button beside it would be unreachable without a seek."
       },
       {
         "id": "transport",
-        "items": ["skip_back", "play_pause", "skip_forward", "spacer", "audio", "subtitles", "quality", "settings", "info", "pip", "close"],
+        "items": [
+          "skip_back",
+          "play_pause",
+          "skip_forward",
+          "spacer",
+          "audio",
+          "subtitles",
+          "quality",
+          "settings",
+          "info",
+          "title_info",
+          "pip",
+          "fullscreen"
+        ],
         "conditional": {
           "audio": "more than one audio track",
           "subtitles": "at least one subtitle track",
           "quality": "server ladder has rungs",
           "pip": "platform reports picture-in-picture possible (never tvOS)",
-          "close": "touch and desktop only — ten-foot exits with `back`"
+          "title_info": "web only — the native clients put title and synopsis on the detail screen",
+          "fullscreen": "web only — a native player is already full screen"
         },
-        "notes": "One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged."
+        "notes": "One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its ✕ already lives, and the native clients keep it here.",
+        "surface_placement": {
+          "info": {
+            "desktop": {
+              "row": "bar",
+              "position": 0
+            }
+          }
+        }
       }
     ],
     "initial_focus": "play_pause",
     "reveal_restores_last_focus": true,
-    "settings_contains": ["autoplay_next", "auto_skip", "audio_sync", "playback_speed_reserved"],
+    "settings_contains": [
+      "autoplay_next",
+      "auto_skip",
+      "audio_sync",
+      "playback_speed_reserved"
+    ],
     "menus_return_focus_to_opener": true
   },
-
-  "inputs": ["left", "right", "up", "down", "select", "back", "play_pause", "skip_back", "skip_forward", "tap_surface", "idle"],
-
+  "inputs": [
+    "left",
+    "right",
+    "up",
+    "down",
+    "select",
+    "back",
+    "play_pause",
+    "skip_back",
+    "skip_forward",
+    "tap_surface",
+    "idle"
+  ],
   "states": {
     "hidden": "Chrome hidden; the bare video surface holds focus.",
     "transport": "Chrome visible; focus on a transport-row or marker button.",
@@ -81,7 +147,6 @@
     "info": "The playback-info (stats) panel is open in Standard or Debug mode; focus is inside it. Mini mode does not enter this state — it is a strip and the transport stays live.",
     "failed": "The failure view (retry/close) is showing."
   },
-
   "outcomes": {
     "reveal": "Show chrome; focus the last focused control (initially `play_pause`). No seek.",
     "focus_row": "Move focus within the current row or to the adjacent row per `controls.rows` order; the platform focus engine does this, the reducer only names the target row.",
@@ -104,37 +169,287 @@
     "toggle_chrome": "Touch: hide chrome if visible, else reveal.",
     "ignore": "Nothing happens; focus does not move."
   },
-
   "routing": {
     "ten-foot": {
-      "hidden":    { "left": "reveal", "right": "reveal", "up": "reveal", "down": "reveal", "select": "reveal", "back": "exit", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "reveal", "idle": "ignore" },
-      "transport": { "left": "focus_row", "right": "focus_row", "up": "focus_row", "down": "focus_row", "select": "activate", "back": "hide", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "ignore", "idle": "hide" },
-      "timeline":  { "left": "preview", "right": "preview", "up": "focus_marker_or_ignore", "down": "focus_transport", "select": "toggle_play", "back": "hide", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "ignore", "idle": "hide" },
-      "scrub":     { "left": "preview", "right": "preview", "up": "cancel_then_focus_marker_or_ignore", "down": "cancel_then_focus_transport", "select": "commit", "back": "cancel", "play_pause": "commit_then_toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" },
-      "menu":      { "left": "menu_focus", "right": "menu_focus", "up": "menu_focus", "down": "menu_focus", "select": "activate", "back": "close_menu", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_menu", "idle": "ignore" },
-      "info":      { "left": "menu_focus", "right": "menu_focus", "up": "menu_focus", "down": "menu_focus", "select": "activate", "back": "close_info", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_info", "idle": "ignore" },
-      "failed":    { "left": "focus_row", "right": "focus_row", "up": "ignore", "down": "ignore", "select": "activate", "back": "exit", "play_pause": "ignore", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" }
+      "hidden": {
+        "left": "reveal",
+        "right": "reveal",
+        "up": "reveal",
+        "down": "reveal",
+        "select": "reveal",
+        "back": "exit",
+        "play_pause": "toggle_play",
+        "skip_back": "skip",
+        "skip_forward": "skip",
+        "tap_surface": "reveal",
+        "idle": "ignore"
+      },
+      "transport": {
+        "left": "focus_row",
+        "right": "focus_row",
+        "up": "focus_row",
+        "down": "focus_row",
+        "select": "activate",
+        "back": "hide",
+        "play_pause": "toggle_play",
+        "skip_back": "skip",
+        "skip_forward": "skip",
+        "tap_surface": "ignore",
+        "idle": "hide"
+      },
+      "timeline": {
+        "left": "preview",
+        "right": "preview",
+        "up": "focus_marker_or_ignore",
+        "down": "focus_transport",
+        "select": "toggle_play",
+        "back": "hide",
+        "play_pause": "toggle_play",
+        "skip_back": "skip",
+        "skip_forward": "skip",
+        "tap_surface": "ignore",
+        "idle": "hide"
+      },
+      "scrub": {
+        "left": "preview",
+        "right": "preview",
+        "up": "cancel_then_focus_marker_or_ignore",
+        "down": "cancel_then_focus_transport",
+        "select": "commit",
+        "back": "cancel",
+        "play_pause": "commit_then_toggle_play",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "ignore",
+        "idle": "ignore"
+      },
+      "menu": {
+        "left": "menu_focus",
+        "right": "menu_focus",
+        "up": "menu_focus",
+        "down": "menu_focus",
+        "select": "activate",
+        "back": "close_menu",
+        "play_pause": "toggle_play",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "close_menu",
+        "idle": "ignore"
+      },
+      "info": {
+        "left": "menu_focus",
+        "right": "menu_focus",
+        "up": "menu_focus",
+        "down": "menu_focus",
+        "select": "activate",
+        "back": "close_info",
+        "play_pause": "toggle_play",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "close_info",
+        "idle": "ignore"
+      },
+      "failed": {
+        "left": "focus_row",
+        "right": "focus_row",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "activate",
+        "back": "exit",
+        "play_pause": "ignore",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "ignore",
+        "idle": "ignore"
+      }
     },
     "desktop": {
-      "hidden":    { "left": "skip", "right": "skip", "up": "ignore", "down": "ignore", "select": "ignore", "back": "exit", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_play", "idle": "ignore" },
-      "transport": { "left": "skip", "right": "skip", "up": "ignore", "down": "ignore", "select": "activate", "back": "exit", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_play", "idle": "hide" },
-      "timeline":  { "left": "preview", "right": "preview", "up": "ignore", "down": "ignore", "select": "toggle_play", "back": "exit", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_play", "idle": "hide" },
-      "scrub":     { "left": "preview", "right": "preview", "up": "ignore", "down": "ignore", "select": "commit", "back": "cancel", "play_pause": "commit_then_toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" },
-      "menu":      { "left": "menu_focus", "right": "menu_focus", "up": "menu_focus", "down": "menu_focus", "select": "activate", "back": "close_menu", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_menu", "idle": "ignore" },
-      "info":      { "left": "menu_focus", "right": "menu_focus", "up": "menu_focus", "down": "menu_focus", "select": "activate", "back": "close_info", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_info", "idle": "ignore" },
-      "failed":    { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "activate", "back": "exit", "play_pause": "ignore", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" }
+      "hidden": {
+        "left": "skip",
+        "right": "skip",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "ignore",
+        "back": "exit",
+        "play_pause": "toggle_play",
+        "skip_back": "skip",
+        "skip_forward": "skip",
+        "tap_surface": "toggle_play",
+        "idle": "ignore"
+      },
+      "transport": {
+        "left": "skip",
+        "right": "skip",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "activate",
+        "back": "exit",
+        "play_pause": "toggle_play",
+        "skip_back": "skip",
+        "skip_forward": "skip",
+        "tap_surface": "toggle_play",
+        "idle": "hide"
+      },
+      "timeline": {
+        "left": "preview",
+        "right": "preview",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "toggle_play",
+        "back": "exit",
+        "play_pause": "toggle_play",
+        "skip_back": "skip",
+        "skip_forward": "skip",
+        "tap_surface": "toggle_play",
+        "idle": "hide"
+      },
+      "scrub": {
+        "left": "preview",
+        "right": "preview",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "commit",
+        "back": "cancel",
+        "play_pause": "commit_then_toggle_play",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "ignore",
+        "idle": "ignore"
+      },
+      "menu": {
+        "left": "menu_focus",
+        "right": "menu_focus",
+        "up": "menu_focus",
+        "down": "menu_focus",
+        "select": "activate",
+        "back": "close_menu",
+        "play_pause": "toggle_play",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "close_menu",
+        "idle": "ignore"
+      },
+      "info": {
+        "left": "menu_focus",
+        "right": "menu_focus",
+        "up": "menu_focus",
+        "down": "menu_focus",
+        "select": "activate",
+        "back": "close_info",
+        "play_pause": "toggle_play",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "close_info",
+        "idle": "ignore"
+      },
+      "failed": {
+        "left": "ignore",
+        "right": "ignore",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "activate",
+        "back": "exit",
+        "play_pause": "ignore",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "ignore",
+        "idle": "ignore"
+      }
     },
     "touch": {
-      "hidden":    { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "ignore", "back": "exit", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_chrome", "idle": "ignore" },
-      "transport": { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "activate", "back": "hide", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_chrome", "idle": "hide" },
-      "timeline":  { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "ignore", "back": "hide", "play_pause": "toggle_play", "skip_back": "skip", "skip_forward": "skip", "tap_surface": "toggle_chrome", "idle": "hide" },
-      "scrub":     { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "commit", "back": "cancel", "play_pause": "commit_then_toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" },
-      "menu":      { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "activate", "back": "close_menu", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_menu", "idle": "ignore" },
-      "info":      { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "activate", "back": "close_info", "play_pause": "toggle_play", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "close_info", "idle": "ignore" },
-      "failed":    { "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore", "select": "activate", "back": "exit", "play_pause": "ignore", "skip_back": "ignore", "skip_forward": "ignore", "tap_surface": "ignore", "idle": "ignore" }
+      "hidden": {
+        "left": "ignore",
+        "right": "ignore",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "ignore",
+        "back": "exit",
+        "play_pause": "toggle_play",
+        "skip_back": "skip",
+        "skip_forward": "skip",
+        "tap_surface": "toggle_chrome",
+        "idle": "ignore"
+      },
+      "transport": {
+        "left": "ignore",
+        "right": "ignore",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "activate",
+        "back": "hide",
+        "play_pause": "toggle_play",
+        "skip_back": "skip",
+        "skip_forward": "skip",
+        "tap_surface": "toggle_chrome",
+        "idle": "hide"
+      },
+      "timeline": {
+        "left": "ignore",
+        "right": "ignore",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "ignore",
+        "back": "hide",
+        "play_pause": "toggle_play",
+        "skip_back": "skip",
+        "skip_forward": "skip",
+        "tap_surface": "toggle_chrome",
+        "idle": "hide"
+      },
+      "scrub": {
+        "left": "ignore",
+        "right": "ignore",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "commit",
+        "back": "cancel",
+        "play_pause": "commit_then_toggle_play",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "ignore",
+        "idle": "ignore"
+      },
+      "menu": {
+        "left": "ignore",
+        "right": "ignore",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "activate",
+        "back": "close_menu",
+        "play_pause": "toggle_play",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "close_menu",
+        "idle": "ignore"
+      },
+      "info": {
+        "left": "ignore",
+        "right": "ignore",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "activate",
+        "back": "close_info",
+        "play_pause": "toggle_play",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "close_info",
+        "idle": "ignore"
+      },
+      "failed": {
+        "left": "ignore",
+        "right": "ignore",
+        "up": "ignore",
+        "down": "ignore",
+        "select": "activate",
+        "back": "exit",
+        "play_pause": "ignore",
+        "skip_back": "ignore",
+        "skip_forward": "ignore",
+        "tap_surface": "ignore",
+        "idle": "ignore"
+      }
     }
   },
-
   "surface_notes": {
     "desktop": [
       "`left`/`right` outside the timeline are the coalesced ±10 s hotkeys (`timings.desktop_hotkey_coalesce_ms`); `up`/`down` are no longer seeks.",
