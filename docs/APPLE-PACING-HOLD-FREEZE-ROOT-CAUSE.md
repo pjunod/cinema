@@ -1,6 +1,6 @@
 # Apple pacing-hold freeze — root cause and repair contract
 
-**Status:** built — see §6.5 for what shipped · **Scope:** Apple and web HLS stall
+**Status:** built as PR #803 — see §6.5 for what shipped · **Scope:** Apple and web HLS stall
 recovery · **Written:** 2026-09-02 · **Baseline:** `main` at `26cb567b`
 
 Companion to [PLAYBACK.md](PLAYBACK.md) (how growing HLS and its production
@@ -387,7 +387,7 @@ longer claimed as evidence that the predecessor rung failed.
 
 ### 6.5 What shipped, and the two places it differs from §6.1–6.3
 
-Built as one PR against `main` at `26cb567b`, six milestones. R1 is
+Built as [PR #803](https://github.com/pjunod/plurx/pull/803), six milestones, rebased onto `main` at `7443b05b`. R1 is
 `recovery_outranks_hold` beside `resolve_action`, called between the
 vocabulary check and the hold, with the `recovery_withheld` metric slot and
 `plurx_playback_control_recovery_withheld_total{reason,platform}`; R2 is
