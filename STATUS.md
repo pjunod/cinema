@@ -6,8 +6,8 @@ first.
 
 ## M7 M4 burn-join and current-main corrections
 
-**PR [#794](https://github.com/pjunod/plurx/pull/794) — READY FOR EXACT-HEAD
-GITHUB QUALIFICATION.** M7 M4 shipped through the effort train and its first
+**PR [#794](https://github.com/pjunod/plurx/pull/794) — FINAL CI-PREREQUISITE
+FIX UNDER REVIEW.** M7 M4 shipped through the effort train and its first
 post-merge repair, then current-`main` CI exposed an ambiguous-success timeout
 while confirming a replacement media session. The exact sentinel-guarded
 confirmation now uses the bounded idempotent-write path; a zero-row replay is
@@ -32,7 +32,16 @@ listeners have been selected, preventing OS port recycling between fixtures.
       and failure drills, activation 7/7, and Activity 2/2 are green. Two
       Playwright-only preflights were skipped because Playwright is not
       installed on the device host and remain GitHub-runner work.
-- [ ] Push the reviewed exact head to #794, require its full GitHub
+- [x] Exact-head hosted run
+      [33622277315](https://github.com/pjunod/plurx/actions/runs/33622277315)
+      passed policy, WAL, daemon, Store, topology, and both package lanes. Its
+      only failure was all 107 ffmpeg-backed Rust cases missing `ffmpeg` on the
+      GitHub image; the same Rust binary reported 1454 other passes. The fast
+      Rust lane now provisions pinned major 6 on hosted runners and requires
+      the matching `ffmpeg-6` capability on self-hosted runners. Operations
+      contracts and the complete local Rust gate (1560 passed, 0 failed, 3
+      ignored) cover that prerequisite.
+- [ ] Push the re-reviewed exact head to #794, require its full GitHub
       qualification and promotion receipt, merge it, close partial duplicate
       #782 with a cross-link, and verify `main` after the merge.
 
