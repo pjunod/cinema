@@ -1073,6 +1073,12 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        // The arm is client-wide, but only the activation confirmation is
+        // under contract here. Scoping it to that statement keeps an unrelated
+        // idempotent write (settings upserts share this path) from stealing the
+        // injection and failing the contract for the wrong reason.
+        #[cfg(feature = "cluster-read-cost-validation")]
+        let injectable = sql.contains("UPDATE media_sessions");
         time_idempotent_write_with_retry(&STORE_OPERATION_METRICS, || {
             #[cfg(feature = "cluster-read-cost-validation")]
             self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
@@ -1081,6 +1087,7 @@ impl TimedClient {
                 let result = operation.await;
                 #[cfg(feature = "cluster-read-cost-validation")]
                 if result.is_ok()
+                    && injectable
                     && self
                         .operations
                         .fail_next_idempotent_write_after_commit
