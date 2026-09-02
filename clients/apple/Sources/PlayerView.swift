@@ -17,7 +17,7 @@ enum PlayerControl: Hashable {
     case audio
     case subtitles
     case quality
-    case autoplay
+    case settings
     case stats
 }
 
@@ -25,7 +25,7 @@ extension PlayerControl {
     var isTransportControl: Bool {
         switch self {
         case .skipBack, .playPause, .skipForward, .pictureInPicture,
-             .audio, .subtitles, .quality, .autoplay, .stats:
+             .audio, .subtitles, .quality, .settings, .stats:
             true
         default:
             false
@@ -42,7 +42,7 @@ private enum PlayerOptionMenu: Hashable {
     case audio
     case subtitles
     case quality
-    case more
+    case settings
 }
 
 enum PlayerOptionMenuPalette {
@@ -1908,24 +1908,20 @@ struct PlayerView: View {
 
     private var playbackOptionGroup: some View {
         HStack(spacing: 8) {
-            if pictureInPicture.isSupported { pictureInPictureButton }
             if controller.audioTracks.count > 1 { audioMenu }
             if !controller.subtitles.isEmpty { subtitleMenu }
             if !controller.qualityRungs.isEmpty { qualityMenu }
-            autoplayButton
+            settingsMenu
             statsButton
+            if pictureInPicture.isSupported { pictureInPictureButton }
         }
     }
 
     #if os(iOS)
     private var compactControlRow: some View {
-        HStack(spacing: 8) {
-            skipBackButton
-            playPauseButton
-            skipForwardButton
-            Spacer(minLength: 4)
-            if pictureInPicture.isSupported { pictureInPictureButton }
-            moreMenu
+        VStack(alignment: .leading, spacing: 8) {
+            transportControlGroup
+            playbackOptionGroup
         }
         .frame(maxWidth: .infinity)
     }
@@ -1998,22 +1994,6 @@ struct PlayerView: View {
         #endif
     }
 
-    private var autoplayButton: some View {
-        Button {
-            model.setAutoplay(!model.autoplay)
-            revealControls()
-        } label: {
-            Image(systemName: "play.square.stack.fill")
-                .foregroundStyle(model.autoplay ? Palette.accent : .white)
-        }
-        .accessibilityLabel(model.autoplay ? "Autoplay next on" : "Autoplay next off")
-        #if os(tvOS)
-        .buttonStyle(TVPlayerControlButtonStyle())
-        .focusEffectDisabled()
-        .focused($focusedControl, equals: .autoplay)
-        #endif
-    }
-
     private var statsButton: some View {
         Button {
             withAnimation { showStats.toggle() }
@@ -2030,46 +2010,40 @@ struct PlayerView: View {
         #endif
     }
 
-    #if os(iOS)
-    private var moreMenu: some View {
+    private var settingsMenu: some View {
+        #if os(iOS)
         Button {
-            presentOptionMenu(.more)
+            presentOptionMenu(.settings)
         } label: {
-            Image(systemName: "ellipsis.circle.fill")
+            Image(systemName: "gearshape.fill")
         }
-        .accessibilityLabel("More playback options")
-        .popover(isPresented: optionMenuBinding(.more), arrowEdge: .bottom) {
-            optionMenuPanel("Playback options") {
-                if controller.audioTracks.count > 1 {
-                    optionMenuSection("Audio") { audioChoices }
-                }
-                if !controller.subtitles.isEmpty {
-                    optionMenuSection("Subtitles") { subtitleChoices }
-                }
-                if !controller.qualityRungs.isEmpty {
-                    optionMenuSection("Quality") { qualityChoices }
-                }
-                Divider()
-                Button {
-                    model.setAutoplay(!model.autoplay)
-                    dismissOptionMenu()
-                    revealControls()
-                } label: {
-                    Label(model.autoplay ? "Turn off autoplay" : "Turn on autoplay",
-                          systemImage: "play.square.stack.fill")
-                }
-                Button {
-                    withAnimation { showStats.toggle() }
-                    dismissOptionMenu()
-                    revealControls()
-                } label: {
-                    Label(showStats ? "Hide playback info" : "Playback info",
-                          systemImage: "info.circle.fill")
-                }
-            }
+        .accessibilityLabel("Playback settings")
+        .popover(isPresented: optionMenuBinding(.settings), arrowEdge: .bottom) {
+            optionMenuPanel("Playback settings") { autoplaySettingsButton }
+        }
+        #else
+        Menu { autoplaySettingsButton } label: {
+            Image(systemName: "gearshape.fill")
+        }
+        .accessibilityLabel("Playback settings")
+        .buttonStyle(TVPlayerControlButtonStyle())
+        .focusEffectDisabled()
+        .focused($focusedControl, equals: .settings)
+        #endif
+    }
+
+    private var autoplaySettingsButton: some View {
+        Button {
+            model.setAutoplay(!model.autoplay)
+            #if os(iOS)
+            dismissOptionMenu()
+            #endif
+            revealControls()
+        } label: {
+            Label(model.autoplay ? "Turn off autoplay" : "Turn on autoplay",
+                  systemImage: "play.square.stack.fill")
         }
     }
-    #endif
 
     #if os(tvOS)
     /// SwiftUI's Slider is unavailable on tvOS. This focusable bar previews

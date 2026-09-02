@@ -187,4 +187,42 @@ class PlayerControlsFocusTest {
         forward.performKeyInput { pressKey(Key.DirectionRight) }
         timeline.assertIsNotFocused()
     }
+
+    @Test
+    fun transportOptionsFollowTheSharedContractOrder() {
+        compose.setContent {
+            PlurxTheme {
+                Controls(
+                    title = "Example episode",
+                    positionMs = 30_000,
+                    durationMs = 60_000,
+                    isPlaying = true,
+                    requestInitialFocus = false,
+                    onBack = {},
+                    onPlayPause = {},
+                    onSeekBack = {},
+                    onSeekForward = {},
+                    onScrub = {},
+                    onScrubEnd = {},
+                    onTracks = {},
+                    onSettings = {},
+                    onInfo = {},
+                    onPip = {},
+                )
+            }
+        }
+
+        val tracks = compose.onNodeWithContentDescription("Audio and subtitles")
+        val settings = compose.onNodeWithContentDescription("Playback settings")
+        val info = compose.onNodeWithContentDescription("Playback info")
+        val pip = compose.onNodeWithContentDescription("Picture in picture")
+
+        tracks.performSemanticsAction(SemanticsActions.RequestFocus)
+        tracks.performKeyInput { pressKey(Key.DirectionRight) }
+        settings.assertIsFocused()
+        settings.performKeyInput { pressKey(Key.DirectionRight) }
+        info.assertIsFocused()
+        info.performKeyInput { pressKey(Key.DirectionRight) }
+        pip.assertIsFocused()
+    }
 }
