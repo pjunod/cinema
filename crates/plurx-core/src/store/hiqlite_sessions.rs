@@ -2080,6 +2080,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                     .filter(|route| {
                         activation_route_matches(route, activation)
                             && route.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED
+                            // Identity alone would accept a boundary some other
+                            // confirmation of this incarnation committed. A
+                            // replay of *this* call wrote exactly $1.
+                            && route.publication_ready_at_ms == publication_ready_at_ms
                     });
                 let committed_pointer = self
                     .client()

@@ -706,6 +706,20 @@ fn activation_confirmation_retries_only_its_exact_state_update() {
         !confirm.contains(".txn(") && !abandon.contains(".execute_idempotent("),
         "ordinary transactions and abandon mutations must not inherit confirmation's retry authority"
     );
+    // The zero-row branch is what makes the retry safe, and its two proofs are
+    // the pair a mutation would drop silently: the durable pointer still names
+    // this incarnation, and the surviving row carries the boundary this call
+    // wrote rather than one some other confirmation of the same incarnation
+    // committed.
+    assert!(
+        confirm
+            .contains("committed_pointer.as_deref() == Some(activation.incarnation_id.as_str())"),
+        "a zero-row replay must prove the durable pointer still names this activation"
+    );
+    assert!(
+        confirm.contains("route.publication_ready_at_ms == publication_ready_at_ms"),
+        "a zero-row replay must prove the surviving row carries this call's own boundary"
+    );
 }
 
 #[cfg(feature = "cluster-read-cost-validation")]
