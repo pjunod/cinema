@@ -101,7 +101,10 @@ replacement = "the sole supervisor reap path; rejected candidates use the same c
 [[symbols]]
 id = "response-publication-observation"
 pattern = "\\.observe_publication\\("
-expected_occurrences = 3
+# +1 for the pacing-hold rung backstop: one test helper publishes a frontier on
+# a predecessor session so claim normalization can read the wedge signature it
+# is being tested against. It is a fixture, not a producer owner.
+expected_occurrences = 4
 kind = "response_admission"
 replacement = "background flow refresh plus exact fixtures; HTTP playlist observation uses the separately inventoried absolute-deadline admission"
 
@@ -1132,7 +1135,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1 for Activity response classification: `reqwest::Response::status()` reads
 # the received HTTP headers before deciding whether its unused error body needs
 # no buffering. It launches no process and owns no child.
-expected_occurrences = 197
+# +2 for the VOD fetched-side frontier test: two `VodServe::status()` reads of
+# one session's diagnostics, before and after the hole is filled. They take a
+# manifest lock and return a struct; nothing is launched and nothing is owned.
+expected_occurrences = 199
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
