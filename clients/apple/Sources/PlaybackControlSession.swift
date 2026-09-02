@@ -143,6 +143,21 @@ final class PlaybackControlSession {
 
     var isReporting: Bool { reporter != nil }
 
+    /// Where this playback sits in the control ordering, for a create that
+    /// wants to be ordered against the settled destination.
+    ///
+    /// The reporter's own counter rather than the accepted sequence: a create
+    /// can reach the server before the snapshot that justifies it, and a
+    /// client that reports a *higher* sequence can only look less superseded,
+    /// which is the safe direction. `nil` before the first exchange.
+    var controlSequence: UInt64? {
+        get async {
+            guard let reporter else { return nil }
+            let sequence = await reporter.sequence
+            return sequence > 0 ? UInt64(sequence) : nil
+        }
+    }
+
     /// Begin reporting for a session the server said is controllable. A
     /// bootstrap the client cannot address leaves this silent, which is the
     /// passive behaviour rather than a playback failure.
