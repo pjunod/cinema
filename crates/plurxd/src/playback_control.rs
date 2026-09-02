@@ -2397,12 +2397,13 @@ pub(crate) struct ActionProposal {
 /// asked as late as possible and told as soon as an answer exists. The window
 /// between them is exactly why `settle` re-checks identity rather than
 /// trusting the gate's earlier `true`.
-// Unused in this slice, and plainly rather than conditionally: the slot's own
-// items are exercised by tests, but this has no caller in either target until
-// the HTTP layer stages a successor. `allow` rather than a constructed-once
-// test, because a fake `dyn Store` is most of the trait and a test that exists
-// only to satisfy a lint proves nothing about the sequencing that matters.
-#[allow(dead_code)]
+// Exercised by tests against a real `SqliteStore` — the three phases M6's
+// acceptance names are testable without hardware, and they are the ones worth
+// pinning before a caller exists. Still no production caller until the HTTP
+// layer stages a successor, hence the non-test allow rather than an invented
+// one: a caller written to satisfy a lint is how a mechanism ends up with a
+// shape nobody chose.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct PreparationExecutor {
     store: std::sync::Arc<dyn plurx_core::store::Store>,
     control: RollingControlHandle,
@@ -2410,7 +2411,7 @@ pub(crate) struct PreparationExecutor {
     playback_id: String,
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))]
 impl PreparationExecutor {
     pub(crate) fn new(
         store: std::sync::Arc<dyn plurx_core::store::Store>,
@@ -2501,8 +2502,17 @@ impl PreparationExecutor {
             .await?
             .is_some();
         if !committed {
-            // The pointer moved: tear this successor down rather than leave a
-            // row the actor has already forgotten.
+            // The pointer moved. On both backends the store's own lost-CAS
+            // branch has already run `abort_staged_generation` before
+            // returning `Ok(None)`, so this call is normally a guaranteed
+            // no-op — every write inside that helper is gated on the ledger
+            // row it has just deleted. It is kept, and kept idempotent, for
+            // the branch the store documents as unreachable (a committed
+            // projection that cannot be read back rolls its transaction
+            // *back*, restoring the ledger row) and so a backend that ever
+            // stopped tearing down on its own does not silently leave a row
+            // the actor has already forgotten. Do not read it as the
+            // teardown: the store's is.
             let _ = self
                 .store
                 .abort_media_session_preparation(
@@ -7748,9 +7758,17 @@ impl RollingControlActor {
                     // A commit that lost its CAS is reported here as
                     // `committed: false`, and it must land as an abort rather
                     // than as nothing: the successor still exists durably and
-                    // something has to own tearing it down. Marking the slot
-                    // aborting first means a retry of the same commit finds
-                    // `may_commit` false instead of racing the teardown.
+                    // something has to own tearing it down.
+                    //
+                    // The `Aborting` state this writes is not observable from
+                    // outside — the actor is single-threaded, so `settle`
+                    // empties the slot in the same turn and no other command
+                    // can interleave. It is written anyway because the two
+                    // calls are the abort lifecycle's own steps, and a future
+                    // settle that must await anything durable would otherwise
+                    // open exactly the window this ordering closes. A retry
+                    // of the same commit is refused either way: `may_commit`
+                    // is false against `Empty` as much as against `Aborting`.
                     if !committed {
                         self.abort_preparation(&staged_incarnation_id);
                     }
@@ -14710,6 +14728,440 @@ mod tests {
             )
             .await,
             Err(ControlStateError::OwnerTransition)
+        );
+    }
+
+    fn staged_preparation(
+        incarnation_id: &str,
+        predecessor: &str,
+        now_ms: i64,
+    ) -> plurx_core::domain::MediaSessionPreparation {
+        plurx_core::domain::MediaSessionPreparation {
+            incarnation_id: incarnation_id.to_owned(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            user_id: 7,
+            playback_id: "player-a".to_owned(),
+            expected_predecessor_incarnation_id: predecessor.to_owned(),
+            request_fingerprint: "b".repeat(64),
+            owner_node_id: "node-a".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"staged"}"#.to_owned(),
+            media_origin_ms: 0,
+            now_ms,
+            // Derived, not literal: `validate_preparation` requires
+            // `deadline_ms > now_ms`, and the neighbouring tests in this
+            // module take `now_ms` from `unix_ms()`. A constant deadline
+            // silently becomes invalid the moment someone copies this helper
+            // into a test with a real clock, and it surfaces as a bare
+            // `.expect("stage")` panic with no hint of why.
+            deadline_ms: now_ms.saturating_add(798_000),
+        }
+    }
+
+    /// A live playback with one current generation, and the executor pointed
+    /// at it. Returns the predecessor's incarnation id alongside the pieces,
+    /// because every preparation names it and a preparation with the wrong
+    /// predecessor is refused before it reaches the slot.
+    async fn preparation_fixture(
+        now_ms: i64,
+    ) -> (
+        String,
+        Arc<dyn plurx_core::store::Store>,
+        RollingControlHandle,
+        PreparationExecutor,
+    ) {
+        use plurx_core::store::SqliteStore;
+
+        let concrete = SqliteStore::open_in_memory().expect("store");
+        let (predecessor, _) = activate_route(&concrete, now_ms, 900_000).await;
+        let store: Arc<dyn plurx_core::store::Store> = Arc::new(concrete);
+        let control = RollingControlHandle::spawn("session-start");
+        let executor = PreparationExecutor::new(
+            Arc::clone(&store),
+            control.clone(),
+            7,
+            "player-a".to_owned(),
+        );
+        (predecessor, store, control, executor)
+    }
+
+    /// M6 acceptance 1 — commit durability, on the happy path.
+    ///
+    /// The claim is not only that the pointer advances. It is that the
+    /// executor leaves nothing behind: no ledger row, and no slot the actor is
+    /// still holding for a successor it has already become.
+    #[tokio::test]
+    async fn preparation_executor_commits_a_staged_successor() {
+        let now_ms = 2_000;
+        let (predecessor, store, control, executor) = preparation_fixture(now_ms).await;
+
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(
+            executor
+                .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+                .await
+                .expect("stage"),
+            "a preparation naming the current pointer is admissible"
+        );
+        assert_eq!(
+            store
+                .staged_media_session_for_playback(7, "player-a")
+                .await
+                .expect("ledger")
+                .expect("a successor is staged")
+                .staged_incarnation_id,
+            successor,
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(7, "player-a")
+                .await
+                .expect("route while staged")
+                .expect("the playback still has a pointer")
+                .incarnation_id,
+            predecessor,
+            "staging must not advance the pointer",
+        );
+
+        assert!(
+            executor
+                .commit(&successor, now_ms + 200, 900_000)
+                .await
+                .expect("commit"),
+            "the pointer still names the recorded predecessor, so the CAS wins"
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(7, "player-a")
+                .await
+                .expect("route after commit")
+                .expect("the playback has a pointer")
+                .incarnation_id,
+            successor,
+        );
+        assert!(
+            store
+                .staged_media_session_for_playback(7, "player-a")
+                .await
+                .expect("ledger after commit")
+                .is_none(),
+            "a committed successor is no longer a preparation",
+        );
+        // The pointer advancing is not the same as the viewer having a
+        // stream, and this is the line that keeps the two apart. A commit
+        // moves the successor off its preparation deadline and nothing else:
+        // the publication fence is still at the sentinel, and arming it is
+        // `arm_media_session_handoff`'s job, exactly as it is for an
+        // activated replacement.
+        let committed = store
+            .media_session_route_by_incarnation(&successor)
+            .await
+            .expect("committed route")
+            .expect("the successor exists");
+        assert_eq!(committed.lease_expires_at_ms, 900_000);
+        assert_eq!(
+            committed.publication_ready_at_ms,
+            plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "commit advances the pointer; it does not publish",
+        );
+        assert!(
+            control
+                .stage_preparation(uuid::Uuid::new_v4().to_string(), successor.clone())
+                .await,
+            "the slot is free again, so the next preparation can take it",
+        );
+    }
+
+    /// M6 acceptance 1, the half that matters — a lost CAS aborts the staged
+    /// generation and never reaps the newer player generation that won.
+    ///
+    /// The pointer is advanced out from under the preparation by an ordinary
+    /// activation, which is what a client restart does. The staged successor
+    /// must lose, and the generation that replaced its predecessor must still
+    /// be current and playable afterwards.
+    #[tokio::test]
+    async fn preparation_executor_abandons_a_successor_whose_pointer_moved() {
+        let now_ms = 2_000;
+        let (predecessor, store, control, executor) = preparation_fixture(now_ms).await;
+
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(executor
+            .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+            .await
+            .expect("stage"));
+
+        let winner = uuid::Uuid::new_v4().to_string();
+        let advance = plurx_core::domain::MediaSessionActivation {
+            incarnation_id: winner.clone(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            user_id: 7,
+            playback_id: "player-a".to_owned(),
+            expected_predecessor_incarnation_id: Some(predecessor.clone()),
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: "c".repeat(64),
+            owner_node_id: "node-a".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"advanced"}"#.to_owned(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: now_ms + 150,
+            lease_expires_at_ms: 900_000,
+        };
+        store
+            .activate_media_session(&advance)
+            .await
+            .expect("advance the pointer")
+            .expect("the advance wins");
+        // A replacement carries a predecessor, so its confirmation must name a
+        // publication instant a full handoff safety window out. Zero is only
+        // valid for a first activation, which is what `activate_route` does.
+        store
+            .settle_media_session_activation(
+                &advance,
+                plurx_core::domain::MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: advance
+                        .now_ms
+                        .saturating_add(plurx_core::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS),
+                },
+                advance.now_ms,
+            )
+            .await
+            .expect("confirm the advance")
+            .expect("the advance is confirmed");
+
+        assert!(
+            !executor
+                .commit(&successor, now_ms + 200, 900_000)
+                .await
+                .expect("commit"),
+            "the pointer no longer names the recorded predecessor",
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(7, "player-a")
+                .await
+                .expect("route after the lost CAS")
+                .expect("the playback has a pointer")
+                .incarnation_id,
+            winner,
+            "a lost commit must never reap the newer player generation",
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(&winner)
+                .await
+                .expect("winner route")
+                .expect("the winner exists")
+                .state,
+            "active",
+        );
+        assert!(
+            store
+                .staged_media_session_for_playback(7, "player-a")
+                .await
+                .expect("ledger after the lost CAS")
+                .is_none(),
+            "the abandoned successor releases the one-per-playback slot",
+        );
+        // Delisting the ledger row is not tearing the successor down. A row
+        // left `active` on its preparation lease counts against the user's
+        // admission caps, and the maintenance reaper keys on the *session's*
+        // state — so a successor that stays active is never swept at all.
+        let abandoned = store
+            .media_session_route_by_incarnation(&successor)
+            .await
+            .expect("abandoned route")
+            .expect("the abandoned row is still readable");
+        assert_eq!(abandoned.state, "ended");
+        assert_eq!(abandoned.terminal_reason.as_deref(), Some("replaced"));
+        assert!(
+            control
+                .stage_preparation(uuid::Uuid::new_v4().to_string(), winner)
+                .await,
+            "and the actor's slot with it",
+        );
+    }
+
+    /// M6 acceptance 2 — abort tears down only the successor.
+    #[tokio::test]
+    async fn preparation_executor_aborts_only_the_successor() {
+        let now_ms = 2_000;
+        let (predecessor, store, control, executor) = preparation_fixture(now_ms).await;
+
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(executor
+            .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+            .await
+            .expect("stage"));
+        executor
+            .abort(&successor, now_ms + 200)
+            .await
+            .expect("abort");
+
+        let current = store
+            .media_session_route_for_playback(7, "player-a")
+            .await
+            .expect("route after abort")
+            .expect("the current stream survives an abort");
+        assert_eq!(current.incarnation_id, predecessor);
+        assert_eq!(
+            current.state, "active",
+            "the predecessor stays authoritative and playable",
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(&successor)
+                .await
+                .expect("successor route")
+                .expect("the successor row is still readable")
+                .state,
+            "ended",
+        );
+        assert!(store
+            .staged_media_session_for_playback(7, "player-a")
+            .await
+            .expect("ledger after abort")
+            .is_none());
+
+        // An owner retrying an abort after a crash reads back the same
+        // outcome rather than a spurious loss. Ordered before the slot is
+        // reused, because a replay against a *reused* slot is a different
+        // property — the one asserted below.
+        executor
+            .abort(&successor, now_ms + 300)
+            .await
+            .expect("abort replay");
+
+        let replacement = uuid::Uuid::new_v4().to_string();
+        assert!(
+            control
+                .stage_preparation(replacement.clone(), predecessor)
+                .await,
+            "the slot is free, so the next preparation can take it",
+        );
+        // And a stale executor cannot settle the successor it used to hold:
+        // identity is checked rather than assumed, or a crashed owner's late
+        // abort would free a slot holding something else entirely.
+        assert!(
+            !control.settle_preparation(&successor, false).await,
+            "a stale settle must not free a slot holding a replacement",
+        );
+        assert!(
+            control.may_commit_preparation(&replacement).await,
+            "and the replacement is still the successor the actor holds",
+        );
+    }
+
+    /// The actor's gate is the first of the three authorities, and it is the
+    /// only one that can refuse a commit the store would happily accept.
+    ///
+    /// That is the whole point of asking. Here the pointer still names the
+    /// recorded predecessor, so the CAS would win — the commit is stopped
+    /// solely because the actor no longer holds this successor, which is what
+    /// a viewer disconnecting mid-preparation looks like: `terminate` moves
+    /// the slot to aborting and the successor stops being wanted. Without the
+    /// gate the pointer would advance to a generation nobody waited for.
+    #[tokio::test]
+    async fn preparation_executor_refuses_a_commit_the_actor_no_longer_wants() {
+        let now_ms = 2_000;
+        let (predecessor, store, control, executor) = preparation_fixture(now_ms).await;
+
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(executor
+            .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+            .await
+            .expect("stage"));
+
+        // The actor forgets the successor without the store being told.
+        assert!(control.settle_preparation(&successor, false).await);
+        assert!(!control.may_commit_preparation(&successor).await);
+
+        assert!(
+            !executor
+                .commit(&successor, now_ms + 200, 900_000)
+                .await
+                .expect("commit"),
+            "the gate refuses before the store is asked",
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(7, "player-a")
+                .await
+                .expect("route after the refused commit")
+                .expect("the playback has a pointer")
+                .incarnation_id,
+            predecessor,
+            "a refused commit must not advance the pointer",
+        );
+        // And the store still holds the successor, untouched: the gate stops
+        // short of the durable call rather than tearing anything down. Who
+        // reaps it is the disconnect path's problem, and `terminate` aborts
+        // the slot it is holding for exactly this reason.
+        assert_eq!(
+            store
+                .staged_media_session_for_playback(7, "player-a")
+                .await
+                .expect("ledger after the refused commit")
+                .expect("the staged row survives a gate refusal")
+                .staged_incarnation_id,
+            successor,
+        );
+    }
+
+    /// The durable row is created before the slot is taken, so the slot
+    /// refusing must undo the row. Otherwise a successor nobody owns counts
+    /// against the user's admission cap until the maintenance backstop runs.
+    #[tokio::test]
+    async fn preparation_executor_rolls_back_a_row_the_slot_refused() {
+        use plurx_core::store::SqliteStore;
+
+        let now_ms = 2_000;
+        let concrete = SqliteStore::open_in_memory().expect("store");
+        let (predecessor, _) = activate_route(&concrete, now_ms, 900_000).await;
+        let store: Arc<dyn plurx_core::store::Store> = Arc::new(concrete);
+        let executor = PreparationExecutor::new(
+            Arc::clone(&store),
+            RollingControlHandle::unavailable_for_test(),
+            7,
+            "player-a".to_owned(),
+        );
+
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(
+            !executor
+                .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+                .await
+                .expect("stage"),
+            "an actor that cannot be reached cannot take the slot",
+        );
+        assert!(
+            store
+                .staged_media_session_for_playback(7, "player-a")
+                .await
+                .expect("ledger after the refused stage")
+                .is_none(),
+            "the durable row is undone rather than left for the backstop",
+        );
+        // An empty ledger alone would also be satisfied by never having made
+        // the row, which is the opposite ordering and a different design.
+        // The successor's own session row is what says the row existed and
+        // was aborted: `replaced` is the abort's signature.
+        let rolled_back = store
+            .media_session_route_by_incarnation(&successor)
+            .await
+            .expect("rolled-back route")
+            .expect("the durable row was created before the slot was asked");
+        assert_eq!(rolled_back.state, "ended");
+        assert_eq!(rolled_back.terminal_reason.as_deref(), Some("replaced"));
+        assert_eq!(
+            store
+                .media_session_route_for_playback(7, "player-a")
+                .await
+                .expect("route after the refused stage")
+                .expect("the current stream is untouched")
+                .incarnation_id,
+            predecessor,
         );
     }
 
