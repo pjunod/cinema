@@ -3551,25 +3551,37 @@ async function persistentWait(v,p,began,generation){
   }
   if(p.stallDeferralsAt!==began){ p.stallDeferralsAt=began; p.stallDeferrals=0; }
   if(verdict&&verdict.type==="hold"){
-    // Production is deliberately not advancing, so the client's reopen would
-    // churn against a server that already knows better. Defer the reopen —
-    // but not the viewer's information. A hold is never lifted by anything the
-    // client does, so a client that only waited would leave a viewer eight
-    // seconds into a frozen picture with no UI and no bound, forever. The
-    // reopen is what a hold suppresses; the explanation is what it earns.
-    p.stallDeferrals=(p.stallDeferrals||0)+1;
-    clientLog({level:"info",event:"stall_recovery",detail:"deferred:hold",
-      message:`server holds this stall (${verdict.reason}) — reopen deferred`,
-      control_trigger:controlTrigger});
-    if(!p.stallPrompt){
-      p.stallPrompt=true;
-      setLoading(true,"Waiting for the server.",holdReasonText(verdict.reason),
-        `<button onclick="retryPlayback()">Try again</button>`+
-        `<button onclick="closePlayer()">Close</button>`);
+    if(kind==="supply"){
+      // A hold says why the producer paused. It never says whether published
+      // bytes can be fetched, and production state is not authority over
+      // serving: this player's buffer is empty and its supply has stopped, so
+      // there is nothing left for waiting to arrive at. Fall through to the
+      // same bounded recovery an unanswered ask gets.
+      clientLog({level:"warn",event:"stall_recovery",detail:"fallthrough:hold",
+        message:`server holds this stall (${verdict.reason}) — nothing left to play, recovering anyway`,
+        control_trigger:controlTrigger});
+    }else{
+      // Production is deliberately not advancing, so the client's reopen would
+      // churn against a server that already knows better. This player holds
+      // media it cannot render rather than media it cannot get, so waiting
+      // costs it nothing it could have fetched. Defer the reopen — but not the
+      // viewer's information. A client that only waited would leave a viewer
+      // eight seconds into a frozen picture with no UI and no bound, forever.
+      // The reopen is what a hold suppresses; the explanation is what it earns.
+      p.stallDeferrals=(p.stallDeferrals||0)+1;
+      clientLog({level:"info",event:"stall_recovery",detail:"deferred:hold",
+        message:`server holds this stall (${verdict.reason}) — reopen deferred`,
+        control_trigger:controlTrigger});
+      if(!p.stallPrompt){
+        p.stallPrompt=true;
+        setLoading(true,"Waiting for the server.",holdReasonText(verdict.reason),
+          `<button onclick="retryPlayback()">Try again</button>`+
+          `<button onclick="closePlayer()">Close</button>`);
+      }
+      p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation).catch(()=>{}),
+        PERSISTENT_STALL_MS);
+      return;
     }
-    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation).catch(()=>{}),
-      PERSISTENT_STALL_MS);
-    return;
   }
   if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT){
     // Production stopped for something that may not recur, and named when to
