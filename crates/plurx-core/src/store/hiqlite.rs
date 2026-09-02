@@ -124,8 +124,13 @@ pub const AUTH_PROTOCOL_VERSION: i64 = AUTH_PROTOCOL_MIN;
 pub const AUTH_LEARNER_PROTOCOL: i64 = 5;
 
 const STORE_TIMEOUT: Duration = Duration::from_secs(3);
-const AUTHORITY_READ_RETRY_DELAY: Duration = Duration::from_millis(100);
-const AUTHORITY_READ_MAX_ATTEMPTS: usize = 2;
+const AUTHORITY_READ_TIMEOUT_RETRY_DELAY: Duration = Duration::from_millis(100);
+const AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS: usize = 2;
+const AUTHORITY_QUORUM_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(100);
+const AUTHORITY_QUORUM_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(800);
+const AUTHORITY_QUORUM_RETRY_JITTER_RANGE_MILLIS: u8 = 100;
+const AUTHORITY_QUORUM_RETRY_MAX_DELAY: Duration = Duration::from_millis(899);
+const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
 const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
@@ -785,15 +790,40 @@ async fn time_store_operation_controlled<T>(
     result
 }
 
-fn is_retryable_authority_read_error<T>(result: &Result<T, StoreError>) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthorityReadRetry {
+    Timeout,
+    QuorumUnavailable,
+}
+
+fn authority_read_retry<T>(result: &Result<T, StoreError>) -> Option<AuthorityReadRetry> {
     match result {
-        Err(StoreError::Database(message)) => {
-            message == REPLICATED_STORE_TIMEOUT
-                || (message.starts_with("CheckIsLeaderError:")
-                    && message.contains("not enough for a quorum"))
+        Err(StoreError::Database(message)) if message == REPLICATED_STORE_TIMEOUT => {
+            Some(AuthorityReadRetry::Timeout)
         }
-        _ => false,
+        Err(StoreError::Database(message))
+            if message.starts_with("CheckIsLeaderError:")
+                && message.contains("not enough for a quorum") =>
+        {
+            Some(AuthorityReadRetry::QuorumUnavailable)
+        }
+        _ => None,
     }
+}
+
+fn authority_quorum_retry_delay(failure: u32) -> Duration {
+    let exponent = failure.saturating_sub(1).min(3);
+    let backoff = (AUTHORITY_QUORUM_RETRY_INITIAL_DELAY * (1_u32 << exponent))
+        .min(AUTHORITY_QUORUM_RETRY_MAX_BACKOFF);
+    let mut random = [0_u8; 1];
+    let jitter = getrandom::getrandom(&mut random)
+        .map(|()| {
+            Duration::from_millis(u64::from(
+                random[0] % AUTHORITY_QUORUM_RETRY_JITTER_RANGE_MILLIS,
+            ))
+        })
+        .unwrap_or_default();
+    (backoff + jitter).min(AUTHORITY_QUORUM_RETRY_MAX_DELAY)
 }
 
 fn is_replicated_store_timeout<T>(result: &Result<T, StoreError>) -> bool {
@@ -811,25 +841,67 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, StoreError>>,
 {
-    for attempt in 1..=AUTHORITY_READ_MAX_ATTEMPTS {
-        let result = time_store_operation(
+    let mut timeout_failures = 0_usize;
+    let mut quorum_failures = 0_u32;
+    let mut quorum_recovery_deadline = None;
+    let mut last_quorum_message = None;
+    loop {
+        let attempt = time_store_operation(
             metrics,
             StoreOperationClass::AuthorityRead,
             operation(),
             |_| true,
-        )
-        .await;
-        if !is_retryable_authority_read_error(&result) || attempt == AUTHORITY_READ_MAX_ATTEMPTS {
+        );
+        let result = if let Some(deadline) = quorum_recovery_deadline {
+            match tokio::time::timeout_at(deadline, attempt).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return Err(StoreError::Database(
+                        last_quorum_message
+                            .expect("a quorum deadline always retains its triggering error"),
+                    ));
+                }
+            }
+        } else {
+            attempt.await
+        };
+        let Some(retry) = authority_read_retry(&result) else {
+            return result;
+        };
+        let delay = match retry {
+            AuthorityReadRetry::Timeout => {
+                timeout_failures += 1;
+                if timeout_failures == AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS {
+                    return result;
+                }
+                AUTHORITY_READ_TIMEOUT_RETRY_DELAY
+            }
+            AuthorityReadRetry::QuorumUnavailable => {
+                quorum_failures += 1;
+                let Err(StoreError::Database(message)) = &result else {
+                    unreachable!("quorum-unavailable classification requires a database error")
+                };
+                last_quorum_message = Some(message.clone());
+                quorum_recovery_deadline.get_or_insert_with(|| {
+                    tokio::time::Instant::now() + AUTHORITY_QUORUM_RECOVERY_BUDGET
+                });
+                authority_quorum_retry_delay(quorum_failures)
+            }
+        };
+        if quorum_recovery_deadline
+            .is_some_and(|deadline| tokio::time::Instant::now() + delay >= deadline)
+        {
             return result;
         }
         tracing::warn!(
-            attempt,
-            max_attempts = AUTHORITY_READ_MAX_ATTEMPTS,
+            ?retry,
+            timeout_failures,
+            quorum_failures,
+            delay_ms = delay.as_millis(),
             "transient replicated authority read failed; retrying"
         );
-        tokio::time::sleep(AUTHORITY_READ_RETRY_DELAY).await;
+        tokio::time::sleep(delay).await;
     }
-    unreachable!("the bounded authority-read retry loop always returns")
 }
 
 /// Retry one exact-state mutation only while the client reports its bounded
@@ -4125,10 +4197,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn authority_reads_retry_one_transient_failure_and_nothing_else() {
-        let metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
+    async fn authority_reads_retry_timeouts_once_and_quorum_failures_through_election() {
+        let timeout_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let retried = time_authority_read_with_retry(metrics, {
+        let retried = time_authority_read_with_retry(timeout_metrics, {
             let attempts = Arc::clone(&attempts);
             move || {
                 let attempt = attempts.fetch_add(1, Ordering::Relaxed);
@@ -4146,7 +4218,7 @@ mod tests {
         assert_eq!(retried, 42);
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
         assert_eq!(
-            metrics
+            timeout_metrics
                 .cell(
                     StoreOperationClass::AuthorityRead,
                     StoreOperationOutcome::Error,
@@ -4157,7 +4229,7 @@ mod tests {
             "the timed-out attempt remains visible in metrics"
         );
         assert_eq!(
-            metrics
+            timeout_metrics
                 .cell(
                     StoreOperationClass::AuthorityRead,
                     StoreOperationOutcome::Ok,
@@ -4167,13 +4239,14 @@ mod tests {
             1
         );
 
+        let quorum_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let quorum_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let recovered = time_authority_read_with_retry(metrics, {
+        let recovered = time_authority_read_with_retry(quorum_metrics, {
             let attempts = Arc::clone(&quorum_attempts);
             move || {
                 let attempt = attempts.fetch_add(1, Ordering::Relaxed);
                 async move {
-                    if attempt == 0 {
+                    if attempt < 4 {
                         Err(StoreError::Database(
                             "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
                         ))
@@ -4184,12 +4257,121 @@ mod tests {
             }
         })
         .await
-        .expect("a transient quorum check gets the same bounded retry");
+        .expect("the election-window retry recovers a late quorum");
         assert_eq!(recovered, 84);
-        assert_eq!(quorum_attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(quorum_attempts.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            quorum_metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Error,
+                )
+                .count
+                .load(Ordering::Relaxed),
+            4,
+            "every failed physical quorum attempt remains visible"
+        );
+        assert_eq!(
+            quorum_metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Ok,
+                )
+                .count
+                .load(Ordering::Relaxed),
+            1
+        );
 
+        let exhausted_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
+        let exhausted_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = tokio::time::Instant::now();
+        let error = time_authority_read_with_retry(exhausted_metrics, {
+            let attempts = Arc::clone(&exhausted_attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async {
+                    Err::<(), _>(StoreError::Database(
+                        "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+                    ))
+                }
+            }
+        })
+        .await
+        .expect_err("a persistent quorum loss exhausts the election window");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(4) && elapsed < AUTHORITY_QUORUM_RECOVERY_BUDGET,
+            "persistent quorum recovery stopped outside its bounded window: {elapsed:?}"
+        );
+        let exhausted_attempts = exhausted_attempts.load(Ordering::Relaxed);
+        assert!(exhausted_attempts > AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS);
+        assert_eq!(
+            exhausted_metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Error,
+                )
+                .count
+                .load(Ordering::Relaxed),
+            exhausted_attempts as u64,
+            "metrics must count every exhausted physical quorum attempt"
+        );
+        assert!(error
+            .to_string()
+            .contains("CheckIsLeaderError: not enough for a quorum"));
+
+        let slow_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
+        let slow_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slow_attempt = STORE_TIMEOUT - Duration::from_millis(100);
+        let started = tokio::time::Instant::now();
+        let error = time_authority_read_with_retry(slow_metrics, {
+            let attempts = Arc::clone(&slow_attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    tokio::time::sleep(slow_attempt).await;
+                    Err::<(), _>(StoreError::Database(
+                        "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+                    ))
+                }
+            }
+        })
+        .await
+        .expect_err("an in-flight quorum retry is cancelled at the absolute deadline");
+        assert_eq!(
+            started.elapsed(),
+            slow_attempt + AUTHORITY_QUORUM_RECOVERY_BUDGET,
+            "the first quorum observation plus the recovery window is a hard wall-clock bound"
+        );
+        assert_eq!(slow_attempts.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            slow_metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Error,
+                )
+                .count
+                .load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            slow_metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Cancelled,
+                )
+                .count
+                .load(Ordering::Relaxed),
+            1,
+            "the physical attempt cut off by the outer deadline remains visible"
+        );
+        assert!(error
+            .to_string()
+            .contains("CheckIsLeaderError: not enough for a quorum"));
+
+        let permanent_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let permanent_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let error = time_authority_read_with_retry(metrics, {
+        let error = time_authority_read_with_retry(permanent_metrics, {
             let attempts = Arc::clone(&permanent_attempts);
             move || {
                 attempts.fetch_add(1, Ordering::Relaxed);
@@ -4200,6 +4382,29 @@ mod tests {
         .expect_err("non-timeout database errors are terminal");
         assert_eq!(error.to_string(), "database error: bad row");
         assert_eq!(permanent_attempts.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn authority_reads_fit_the_end_to_end_leader_recovery_budget() {
+        assert_eq!(STORE_TIMEOUT, Duration::from_secs(3));
+        assert_eq!(AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS, 2);
+        assert!(
+            // Before the absolute quorum window starts, the longest reachable
+            // path is one timed-out read, its delay, and the first quorum
+            // observation. All later sleeps and operations are cut off by the
+            // five-second deadline itself.
+            STORE_TIMEOUT * AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS as u32
+                + AUTHORITY_READ_TIMEOUT_RETRY_DELAY
+                + AUTHORITY_QUORUM_RECOVERY_BUDGET
+                < crate::cluster::migration::REPLICATED_LEADER_RECOVERY_BUDGET,
+            "timeout and quorum recovery must retain the sixteen-second outer budget"
+        );
+        for failure in 1..=16 {
+            assert!(
+                authority_quorum_retry_delay(failure) <= AUTHORITY_QUORUM_RETRY_MAX_DELAY,
+                "backoff plus jitter exceeded the named total-delay cap"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

@@ -622,6 +622,13 @@ def generate_media(media_dir, ffmpeg):
 # ---- the throwaway server -------------------------------------------------
 
 
+def default_server_bin():
+    target_dir = Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
+    if not target_dir.is_absolute():
+        target_dir = ROOT / target_dir
+    return target_dir / "debug" / "plurxd"
+
+
 class SelfHost:
     """Boot, seed, freeze and serve a plurxd nobody else is using."""
 
@@ -648,7 +655,7 @@ class SelfHost:
             if not path.exists():
                 raise Fail(f"no such server binary: {path}")
             return path
-        path = ROOT / "target" / "debug" / "plurxd"
+        path = default_server_bin()
         # A binary merely existing says nothing about whether it contains this
         # tree's embedded HTML. Cargo's incremental no-op is cheap; serving a
         # stale binary can bless the exact pre-change UI as the new golden.
@@ -2010,7 +2017,11 @@ def parse_args(argv):
                         "— long enough for the rails' scroll handler to have run (default: 250)")
     p.add_argument("--timeout", type=int, default=45000, help="per-step timeout in ms")
     p.add_argument("--browser", help="path to a Chromium binary (default: find one, else Playwright's)")
-    p.add_argument("--server-bin", help="plurxd binary for --self-host (default: target/debug/plurxd)")
+    p.add_argument(
+        "--server-bin",
+        help="plurxd binary for --self-host (default: $CARGO_TARGET_DIR/debug/plurxd "
+             "when set, otherwise target/debug/plurxd)",
+    )
     p.add_argument("--ffmpeg", default=os.environ.get("PLURX_FFMPEG", "ffmpeg"),
                    help="ffmpeg used to build the fixture media")
     p.add_argument("--port", type=int, default=39247, help="--self-host port, if free")
@@ -2108,9 +2119,9 @@ def preflight(args):
         if args.server_bin and not Path(args.server_bin).exists():
             problems.append(f"--server-bin {args.server_bin} does not exist")
         elif not args.server_bin and shutil.which("cargo") is None \
-                and not (ROOT / "target" / "debug" / "plurxd").exists():
+                and not default_server_bin().exists():
             problems.append(
-                "no target/debug/plurxd and no cargo to build one\n"
+                f"no {default_server_bin()} and no cargo to build one\n"
                 "      cargo build -p plurxd   |   --server-bin /path/to/plurxd"
             )
     else:

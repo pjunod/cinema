@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+
+# Both Store shards independently build this target inside the same fixed
+# Bookworm path and then require byte-identical output. Keeping compilation in
+# a container makes the digest independent of each runner service's checkout
+# path and host distribution. The lane-local target mount stays warm without
+# moving the 100+ MB test binary through GitHub artifacts.
+FROM rust:1.97.1-bookworm AS store-contract-build
+ARG PLURX_BUILD_REF=""
+ENV PLURX_BUILD_REF=${PLURX_BUILD_REF}
+ARG PLURX_BUILD_SHA=""
+ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}
+ARG TARGETARCH
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=plurx-target-store-contract-${TARGETARCH},sharing=locked,target=/src/target-store-contract \
+    mkdir -p /src/target-store-contract/debug/deps \
+    && find /src/target-store-contract/debug/deps -maxdepth 1 \
+        -type f -name 'store_contract-*' -delete \
+    && CARGO_TARGET_DIR=/src/target-store-contract cargo test --locked \
+        -p plurx-core \
+        --features cluster-read-cost-validation,hiqlite-contract-tests \
+        --test store_contract --no-run \
+    && set -- $(find /src/target-store-contract/debug/deps -maxdepth 1 \
+        -type f -perm -0100 -name 'store_contract-*' -print) \
+    && test "$#" -eq 1 \
+    && cp "$1" /store_contract \
+    && rustc -Vv > /rustc-vv.txt
+
+FROM scratch AS store-contract-binary
+COPY --from=store-contract-build /store_contract /store_contract
+COPY --from=store-contract-build /rustc-vv.txt /rustc-vv.txt

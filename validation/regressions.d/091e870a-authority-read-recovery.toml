@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["091e870a"]
+points = ["cluster.auth", "identity.access"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "`authority_reads_retry_timeouts_once_and_quorum_failures_through_election` and `authority_reads_fit_the_end_to_end_leader_recovery_budget` (crates/plurx-core/src/store/hiqlite.rs) pin the exact retry classifications, preserve the single timeout retry, prove late quorum recovery plus absolute-deadline exhaustion with a cancelled slow physical attempt, count every attempt outcome, and hold the combined path below the 16-second recovery envelope. `api_key_activity_authority_read_burst_survives_on_one_store` (crates/plurx-core/tests/store_contract.rs) retains the exact 120-simultaneous-read load shape that exposed the post-merge failure through one Store; the independent-store burst retains the complete lookup-plus-touch path across three clients, the one-store write-budget case isolates coalescing, and all fixed-clock contract bootstraps retry only the exact idempotent replicated deadline."

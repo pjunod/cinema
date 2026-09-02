@@ -69,11 +69,11 @@ docker stop --time 10 "$name" >/dev/null
 docker start "$name" >/dev/null
 # An ephemeral published port is assigned when the container starts and Docker
 # Desktop may choose a new one after a stop/start cycle. Re-resolve it rather
-# than mistaking a changed host port for a failed application restart.
+# than mistaking a changed host port for a failed application stop/start.
 binding="$(docker port "$name" 32400/tcp | head -n 1)"
 if [ -z "$binding" ]; then
   docker logs "$name" >&2 || true
-  echo "container published no host port for 32400/tcp after restart" >&2
+  echo "container published no host port for 32400/tcp after stop/start" >&2
   exit 1
 fi
 port="${binding##*:}"
@@ -83,7 +83,7 @@ until curl -fsS "$base/readyz" >/dev/null 2>&1; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge 60 ]; then
     docker logs "$name" >&2 || true
-    echo "container did not become ready after restart" >&2
+    echo "container did not become ready after stop/start" >&2
     exit 1
   fi
   sleep 1

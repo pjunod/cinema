@@ -1,0 +1,72 @@
+name: replicated Store backstop
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cluster-store-backstop:
+    name: full unsharded replicated Store contracts
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-store"]') }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: cluster-store-backstop
+          # This lane is the independent safety net for accelerated execution,
+          # so an eligible physical runner should keep its cache warm even
+          # while the required graph remains in legacy or shadow mode.
+          execution-mode: accelerated
+          persistent-eligible: "true"
+      - name: Run the complete Store inventory without sharding
+        id: store_backstop
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/validation
+          make cluster-store-check 2>&1 \
+            | tee target/validation/cluster-store-backstop.log
+      - name: Record the complete Store result
+        if: always()
+        env:
+          LANE_RESULT: ${{ steps.store_backstop.outcome }}
+        run: >-
+          python3 -m validation.ci_lane_receipt
+          --output target/validation/cluster-store-backstop-receipt.json
+          --log target/validation/cluster-store-backstop.log
+          --lane cluster-store-backstop
+          --result "$LANE_RESULT"
+          --command "make cluster-store-check"
+      - name: Retain the complete Store evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-store-backstop
+          path: |
+            target/validation/cluster-store-backstop.log
+            target/validation/cluster-store-backstop-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Propagate the complete Store result
+        if: always() && steps.store_backstop.outcome != 'success'
+        run: exit 1

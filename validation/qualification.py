@@ -21,7 +21,8 @@ REQUIRED_JOBS = frozenset(
         "mobile_version",
         "preflight",
         "rust",
-        "cluster_auth",
+        "cluster_store",
+        "cluster_topology",
         "cluster_wal",
         "cluster_daemon",
         "web_layout",
@@ -29,8 +30,7 @@ REQUIRED_JOBS = frozenset(
         "android_jvm",
         "apple",
         "android_device",
-        "build",
-        "docker",
+        "package_smoke",
     }
 )
 

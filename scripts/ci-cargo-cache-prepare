@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() {
+  echo "ci-cargo-cache-prepare: $*" >&2
+  exit 1
+}
+
+[ "$#" -eq 4 ] \
+  || die "usage: ci-cargo-cache-prepare <runner-tool-cache> <runner-name> <toolchain> <lane>"
+requested_tool_cache=$1
+runner_name=$2
+toolchain=$3
+lane=$4
+
+[[ "$runner_name" =~ ^[A-Za-z0-9_.-]+$ ]] \
+  || die "runner name must be filesystem-safe"
+[[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || die "toolchain must be a pinned Rust release"
+[[ "$lane" =~ ^[a-z0-9][a-z0-9.-]*$ ]] \
+  || die "lane must be filesystem-safe"
+
+tool_cache=$(cd -P -- "$requested_tool_cache" 2>/dev/null && pwd -P) \
+  || die "cannot resolve runner tool cache: $requested_tool_cache"
+
+ensure_child_directory() {
+  local parent name candidate canonical
+  parent=$1
+  name=$2
+  candidate="$parent/$name"
+
+  [ ! -L "$candidate" ] \
+    || die "refusing symbolic-link cache component: $candidate"
+  if [ -e "$candidate" ]; then
+    [ -d "$candidate" ] \
+      || die "cache component is not a directory: $candidate"
+  else
+    mkdir -- "$candidate"
+  fi
+
+  canonical=$(cd -P -- "$candidate" 2>/dev/null && pwd -P) \
+    || die "cannot resolve cache component: $candidate"
+  [ "$(dirname -- "$canonical")" = "$parent" ] \
+    || die "cache component escaped its parent: $candidate"
+  [ "$(basename -- "$canonical")" = "$name" ] \
+    || die "cache component changed identity: $candidate"
+  printf '%s\n' "$canonical"
+}
+
+plurx_root=$(ensure_child_directory "$tool_cache" plurx-ci)
+cargo_root=$(ensure_child_directory "$plurx_root" cargo)
+runner_root=$(ensure_child_directory "$cargo_root" "$runner_name")
+cache_root=$(ensure_child_directory "$runner_root" "rust-$toolchain")
+cargo_home=$(ensure_child_directory "$cache_root" cargo-home)
+lane_root=$(ensure_child_directory "$cache_root" "$lane")
+target_dir=$(ensure_child_directory "$lane_root" target)
+last_used="$lane_root/.last-used"
+
+[ ! -L "$last_used" ] \
+  || die "refusing symbolic-link cache marker: $last_used"
+if [ -e "$last_used" ]; then
+  [ -f "$last_used" ] \
+    || die "cache marker is not a regular file: $last_used"
+else
+  : > "$last_used"
+fi
+touch -- "$last_used"
+[ ! -L "$last_used" ] && [ -f "$last_used" ] \
+  || die "cache marker changed identity: $last_used"
+[ "$(cd -P -- "$(dirname -- "$last_used")" && pwd -P)" = "$lane_root" ] \
+  || die "cache marker escaped its lane: $last_used"
+
+printf '%s\n' "$cache_root" "$target_dir" "$cargo_home" "$last_used"

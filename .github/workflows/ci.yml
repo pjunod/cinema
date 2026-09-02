@@ -44,6 +44,7 @@ jobs:
       cluster_auth: ${{ steps.scope.outputs.cluster_auth }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
       qualification: ${{ steps.scope.outputs.qualification }}
+      execution_mode: ${{ steps.execution_mode.outputs.mode }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,6 +79,13 @@ jobs:
             self-hosted|github) ;;
             *) echo "::error::CI_RUNNER_MODE must be self-hosted or github"; exit 1 ;;
           esac
+      - name: Resolve the fail-safe execution rollout mode
+        id: execution_mode
+        env:
+          REQUESTED_MODE: ${{ vars.CI_EXECUTION_MODE || 'legacy' }}
+        run: |
+          mode="$(scripts/ci-execution-mode resolve "$REQUESTED_MODE")"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
   # A stale counter must fail the aggregate gate without hiding the native test
   # result. Run release hygiene beside preflight and the affected platform jobs
@@ -140,6 +148,9 @@ jobs:
         run: |
           make validation-lint
           python3 -m unittest discover -s tests/validation -p 'test_*.py'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Check CI, deploy, and shipping contracts
         run: make operations-check
       - name: Record the documentation-only lane
@@ -160,27 +171,148 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: rust-gate
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - name: Run format, Clippy, unit, and SQLite contracts
         run: make ci-rust-gate
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
-  cluster_auth:
-    name: replicated store and topology contracts
+  cluster_store_legacy:
+    name: replicated Store contracts (legacy)
+    needs: [scope, preflight]
+    if: >-
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.execution_mode != 'accelerated'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-store"]') }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: cluster-store-legacy
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
+          persistent-eligible: "true"
+      - name: Run replicated Store contracts
+        id: store_contracts
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/validation
+          make cluster-store-check 2>&1 | tee target/validation/cluster-store.log
+      - name: Record the Store lane result
+        if: always()
+        env:
+          LANE_RESULT: ${{ steps.store_contracts.outcome }}
+        run: >-
+          python3 -m validation.ci_lane_receipt
+          --output target/validation/cluster-store-receipt.json
+          --log target/validation/cluster-store.log
+          --lane cluster-store-legacy
+          --result "$LANE_RESULT"
+          --command "make cluster-store-check"
+      - name: Retain the Store lane log and receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-store-legacy-contracts
+          path: |
+            target/validation/cluster-store.log
+            target/validation/cluster-store-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Propagate the Store contract result
+        if: always() && steps.store_contracts.outcome != 'success'
+        run: exit 1
+
+  cluster_store_shards:
+    name: required replicated Store shard graph
+    needs: [scope, preflight]
+    if: >-
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.execution_mode == 'accelerated'
+    uses: ./.github/workflows/store-shards.yml
+    with:
+      execution-mode: accelerated
+
+  # Shadow evidence is deliberately absent from every required job's `needs`
+  # graph. An offline experimental runner can leave this call queued without
+  # delaying the legacy Store verdict or Main promotion gate.
+  cluster_store_shadow:
+    name: non-blocking replicated Store shard shadow
+    needs: [scope, preflight]
+    if: >-
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.execution_mode == 'shadow'
+    uses: ./.github/workflows/store-shards.yml
+    with:
+      execution-mode: shadow
+
+  cluster_store:
+    name: replicated Store contracts
+    needs:
+      - scope
+      - preflight
+      - cluster_store_legacy
+      - cluster_store_shards
+    if: always() && needs.scope.outputs.cluster_auth == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    timeout-minutes: 2
+    steps:
+      - name: Select the required Store graph
+        env:
+          EXECUTION_MODE: ${{ needs.scope.outputs.execution_mode }}
+          LEGACY_RESULT: ${{ needs.cluster_store_legacy.result }}
+          SHARD_RESULT: ${{ needs.cluster_store_shards.result }}
+        run: |
+          case "$EXECUTION_MODE" in
+            legacy)
+              test "$LEGACY_RESULT" = success
+              test "$SHARD_RESULT" = skipped
+              ;;
+            shadow)
+              test "$LEGACY_RESULT" = success
+              test "$SHARD_RESULT" = skipped
+              echo "Store shadow evidence is intentionally outside this gate"
+              ;;
+            accelerated)
+              test "$LEGACY_RESULT" = skipped
+              test "$SHARD_RESULT" = success
+              ;;
+            *)
+              echo "::error::Unknown resolved execution mode: $EXECUTION_MODE"
+              exit 1
+              ;;
+          esac
+
+  cluster_topology:
+    name: replicated topology contracts
     needs: [scope, preflight]
     if: >-
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
-    # The first cold lab run reached the final three-voter proof but crossed
-    # the old 25-minute guard while building the command-profile dependency
-    # graph. Keep enough headroom for a cold NUC and artifact cleanup; warm
-    # persistent-runner caches make subsequent runs substantially faster.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-topology"]') }}
+    # A cold runner builds the command-profile dependency graph before the
+    # three-voter proof. Persistent non-voter caches shorten later runs.
     timeout-minutes: 40
-    env:
-      # The M0 proof has its own manifest, but not its own dependency build.
-      # Sharing the root target lets it reuse the Hiqlite/OpenRaft graph from
-      # the Store and topology contracts instead of compiling it twice.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -191,12 +323,68 @@ jobs:
           cargo_bin="$(rustup which --toolchain 1.97.1 cargo)"
           rustc_bin="$(rustup which --toolchain 1.97.1 rustc)"
           printf 'CARGO=%s\nRUSTC=%s\n' "$cargo_bin" "$rustc_bin" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
         with:
-          key: hiqlite-cluster-auth
-      - name: Run replicated Store and topology contracts
-        if: needs.scope.outputs.cluster_auth == 'true'
-        run: make cluster-store-check cluster-harness-check
+          lane: cluster-topology
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
+          persistent-eligible: "true"
+      - name: Run replicated topology contracts
+        id: topology_contracts
+        continue-on-error: true
+        shell: bash
+        env:
+          RUN_CLUSTER_AUTH: ${{ needs.scope.outputs.cluster_auth }}
+          RUN_HIQLITE_SPIKE: ${{ needs.scope.outputs.hiqlite_spike }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/validation
+          {
+            if [ "$RUN_CLUSTER_AUTH" = true ]; then
+              make cluster-harness-check
+            fi
+            if [ "$RUN_HIQLITE_SPIKE" = true ]; then
+              cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml \
+                --tests --no-deps -- -D warnings
+              make hiqlite-spike
+            fi
+          } 2>&1 | tee target/validation/cluster-topology.log
+      - name: Record the topology lane result
+        if: always()
+        shell: bash
+        env:
+          LANE_RESULT: ${{ steps.topology_contracts.outcome }}
+          RUN_CLUSTER_AUTH: ${{ needs.scope.outputs.cluster_auth }}
+          RUN_HIQLITE_SPIKE: ${{ needs.scope.outputs.hiqlite_spike }}
+        run: |
+          set -euo pipefail
+          receipt=(
+            python3 -m validation.ci_lane_receipt
+            --output target/validation/cluster-topology-receipt.json
+            --log target/validation/cluster-topology.log
+            --lane cluster-topology
+            --result "$LANE_RESULT"
+          )
+          if [ "$RUN_CLUSTER_AUTH" = true ]; then
+            receipt+=(--command "make cluster-harness-check")
+          fi
+          if [ "$RUN_HIQLITE_SPIKE" = true ]; then
+            receipt+=(
+              --command "cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings"
+              --command "make hiqlite-spike"
+            )
+          fi
+          "${receipt[@]}"
+      - name: Retain the topology lane log and receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-topology-contracts
+          path: |
+            target/validation/cluster-topology.log
+            target/validation/cluster-topology-receipt.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain deterministic topology evidence
         if: always() && needs.scope.outputs.cluster_auth == 'true'
         continue-on-error: true
@@ -215,12 +403,16 @@ jobs:
           path: target/validation/cluster-failure-drills.json
           if-no-files-found: error
           retention-days: 1
-      - name: Lint the isolated semantic harness
-        if: needs.scope.outputs.hiqlite_spike == 'true'
-        run: cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings
-      - name: Run the three-voter semantic proof
-        if: needs.scope.outputs.hiqlite_spike == 'true'
-        run: make hiqlite-spike
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Propagate the topology contract result
+        if: always() && steps.topology_contracts.outcome != 'success'
+        run: exit 1
 
   cluster_wal:
     name: replicated WAL recovery contracts
@@ -231,11 +423,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
         with:
-          key: hiqlite-wal
+          lane: cluster-wal
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - name: Run exact Hiqlite and WAL recovery regressions
         run: make cluster-wal-check
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
   cluster_daemon:
     name: cluster daemon contracts
@@ -246,9 +447,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
         with:
-          key: cluster-daemon
+          lane: cluster-daemon
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
@@ -258,6 +461,13 @@ jobs:
           ffmpeg -version
       - name: Run real-daemon activation and activity contracts
         run: make cluster-daemon-check
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
   web_layout:
     name: web layout and accessibility
@@ -270,9 +480,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
         with:
-          key: web-layout
+          lane: web-layout
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       # Pinned so the browser-bundle cache key below is meaningful; bump both
       # together. A cache hit skips the ~150 MB Chromium download every run.
       - name: Cache Playwright browsers
@@ -293,6 +505,13 @@ jobs:
       # runs in a browser.
       - name: Run the playback-control reporter in a real browser
         run: make control-browser-check
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
   vod_web:
     name: film-addressed VOD browser acceptance
@@ -303,9 +522,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
         with:
-          key: vod-web
+          lane: vod-web
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -332,6 +553,13 @@ jobs:
           # See docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md,
           # docs/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md, and
           # docs/VOD-STALL-ACCEPTANCE-HANDOFF.md for restoration prompts.
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
   android_jvm:
     name: Android JVM tests and lint
@@ -381,6 +609,10 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true'
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["macos-26"]' || '["self-hosted","macOS","ARM64","lab","apple","xcode-26"]') }}
+    concurrency:
+      group: ${{ vars.CI_RUNNER_MODE != 'github' && 'plurx-apple-silicon-heavy' || format('plurx-apple-{0}', github.run_id) }}
+      cancel-in-progress: false
+      queue: max
     timeout-minutes: 30
     env:
       DEVELOPER_DIR: ${{ vars.CI_RUNNER_MODE == 'github' && '/Applications/Xcode_26.6.app/Contents/Developer' || '/Applications/Xcode.app/Contents/Developer' }}
@@ -561,7 +793,7 @@ jobs:
     # Same fast unit and SQLite-contract suite as `check`, so the same pinned
     # ffmpeg. See .github/actions/ffmpeg.
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
-    needs: check
+    needs: [scope, check]
     timeout-minutes: 30
     # PR coverage was a second run of the Rust suite whose result was discarded;
     # the badge is published only from the merged main branch.
@@ -578,7 +810,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: coverage
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
       - uses: taiki-e/install-action@cargo-llvm-cov
       # Instrumented or not, this runs the same suite as the check job, so it
       # needs the same ffmpeg.
@@ -628,97 +864,155 @@ jobs:
           git add coverage.json coverage.svg
           git commit -q -m "coverage badge"
           git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
-  build:
-    name: release build (${{ matrix.target }})
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+  package_smoke:
+    name: package and smoke (${{ matrix.arch }})
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && matrix.github_runs_on || matrix.self_hosted_runs_on) }}
+    concurrency:
+      group: ${{ vars.CI_RUNNER_MODE != 'github' && matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy' || format('plurx-package-{0}-{1}', github.run_id, matrix.arch) }}
+      cancel-in-progress: false
+      queue: max
     needs: [scope, preflight]
-    if: needs.scope.outputs.release_build == 'true'
-    timeout-minutes: 30
+    if: needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true'
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            kernel_machine: x86_64
+            docker_machine: x86_64
+            github_runs_on: '["ubuntu-24.04"]'
+            self_hosted_runs_on: '["self-hosted","Linux","X64","lab","general","high-cpu"]'
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            kernel_machine: aarch64
+            docker_machine: aarch64
+            github_runs_on: '["ubuntu-24.04-arm"]'
+            self_hosted_runs_on: '["self-hosted","Linux","ARM64","lab","ci-arm64"]'
     steps:
       - uses: actions/checkout@v4
-        # Full history + tags so the build script can stamp the binary with a
-        # real `git describe`; the default shallow clone has no tags and every
-        # release binary would report a bare hash.
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-          workspaces: |
-            . -> target
-            . -> target-cluster-check
-      - name: Provision or verify the aarch64 cross toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        # Also provides the C cross-compiler for rusqlite's bundled SQLite.
-        run: |
-          if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-            if [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ]; then
-              echo "::error::The aarch64 cross compiler must be provisioned on this runner"
-              exit 1
-            fi
-            sudo sed -i \
-              's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
-              /etc/apt/sources.list.d/ubuntu.sources
-            sudo apt-get -o Acquire::Retries=3 update
-            sudo apt-get -o Acquire::Retries=3 install -y gcc-aarch64-linux-gnu
-          fi
-          command -v aarch64-linux-gnu-gcc
-          aarch64-linux-gnu-gcc --version
-      # Build the two shipped binaries independently. The cluster inspector
-      # enables validation-only dependencies that must never feature-unify
-      # into plurxd, so it gets its own target directory just as it does in the
-      # release-publication workflow and source Dockerfile.
-      - name: Build both release binaries without feature union
-        run: |
-          cargo build --release -p plurxd --target ${{ matrix.target }}
-          CARGO_TARGET_DIR=target-cluster-check \
-            cargo build --release -p plurx-cluster-check --target ${{ matrix.target }}
+      - name: Prove the package runner and Docker engine are native
         env:
-          # Linker for the arm64 target (harmlessly unused on x86_64).
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      - name: Record the release binary digests
-        if: github.event_name == 'push' || needs.scope.outputs.qualification == 'true'
+          ARCH: ${{ matrix.arch }}
+          DOCKER_ARCH: ${{ matrix.docker_machine }}
+          KERNEL_ARCH: ${{ matrix.kernel_machine }}
         run: |
-          sha256sum target/${{ matrix.target }}/release/plurxd \
-            > target/${{ matrix.target }}/release/plurxd.sha256
-          sha256sum target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check \
-            > target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check.sha256
-      # Ordinary PRs prove both release targets compile but retain no large
-      # artifacts. Push/tag runs and final effort qualifications keep the exact
-      # binary plus digest for one day, long enough to inspect or stage it.
-      - name: Retain release binary for push, tag, and qualification runs
+          set -euo pipefail
+          test "$(uname -s)/$(uname -m)" = "Linux/$KERNEL_ARCH"
+          test "$(docker info --format '{{.OSType}}/{{.Architecture}}')" = "linux/$DOCKER_ARCH"
+      - id: buildx-cache
+        uses: ./.github/actions/buildx-cache
+        with:
+          lane: package-smoke-${{ matrix.arch }}
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
+          persistent-eligible: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}
+      - name: Derive the binary-only Bookworm build
+        run: >-
+          python3 -m validation.release_dockerfile --binary-export
+          Dockerfile Dockerfile.binaries
+      - name: Compile and export the exact candidate binaries
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.binaries
+          target: release-binaries
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=local,dest=binary-export
+          build-args: |
+            PLURX_BUILD_REF=${{ github.sha }}
+            PLURX_BUILD_SHA=${{ github.sha }}
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-compile-{0}', matrix.arch) || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=max,scope=package-compile-{0}', matrix.arch) || '' }}
+      - name: Bind the binary set to this candidate tree
+        run: |
+          scripts/release-package-candidate \
+            . . binary-export release-bin \
+            "${{ matrix.target }}" "$GITHUB_SHA" "$GITHUB_SHA"
+          for name in plurxd plurx-cluster-check; do
+            max_glibc=$(readelf --version-info "release-bin/$name" \
+              | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
+              | sort -V | tail -1)
+            test -n "$max_glibc"
+            test "$(printf '%s\n' "$max_glibc" 2.36 | sort -V | tail -1)" = 2.36 || {
+              echo "::error::${{ matrix.arch }} $name requires GLIBC_$max_glibc; Bookworm provides 2.36"
+              exit 1
+            }
+          done
+      - name: Build the runtime from only the verified binaries
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.release
+          push: false
+          load: true
+          platforms: linux/${{ matrix.arch }}
+          tags: plurx/plurxd:ci-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            tv.plurx.build-ref=${{ github.sha }}
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-runtime-{0}', matrix.arch) || '' }}
+          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=min,scope=package-runtime-{0}', matrix.arch) || '' }}
+      - name: Verify architecture, identity, and stop/start runtime
+        env:
+          ARCH: ${{ matrix.arch }}
+          IMAGE: plurx/plurxd:ci-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = "linux/$ARCH"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$GITHUB_SHA"
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
+            | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          test "$(docker run --rm --platform "linux/$ARCH" "$IMAGE" --version)" = "plurxd $version ($GITHUB_SHA)"
+          test "$(docker run --rm --platform "linux/$ARCH" \
+            --entrypoint /usr/local/bin/plurx-cluster-check \
+            "$IMAGE" build-identity)" = "$GITHUB_SHA"
+          scripts/container-smoke "$IMAGE"
+      - name: Retain the exact package receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-smoke-receipt-${{ matrix.arch }}
+          path: |
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain candidate binaries for push, tag, and qualification runs
         if: github.event_name == 'push' || needs.scope.outputs.qualification == 'true'
-        # Qualification promises an inspectable exact-tree candidate, so an
-        # upload failure must fail that run. Push/tag retention remains
-        # best-effort because repository quota exhaustion must not block an
-        # otherwise valid post-merge or tag build.
         continue-on-error: ${{ needs.scope.outputs.qualification != 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: plurxd-${{ matrix.target }}
+          name: package-smoke-binaries-${{ matrix.arch }}
           path: |
-            target/${{ matrix.target }}/release/plurxd
-            target/${{ matrix.target }}/release/plurxd.sha256
-            target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check
-            target-cluster-check/${{ matrix.target }}/release/plurx-cluster-check.sha256
+            release-bin/plurxd
+            release-bin/plurx-cluster-check
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
           retention-days: 1
+      - name: Bound persistent BuildKit state
+        if: always() && steps.buildx-cache.outputs.local == 'true'
+        env:
+          BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
+        run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50
 
   # CD validates the tag in this workflow, then delegates artifact construction,
   # per-platform smoke, and alias publication to the manually recoverable release
   # workflow. A cancelled tag run can therefore be recovered without moving it.
   publish:
     name: publish image (ghcr)
-    needs: [check, build]
+    needs: [check, package_smoke]
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/publish-release.yml
     with:
@@ -726,47 +1020,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-
-  # PR / branch smoke test that the image both builds and runs, without publishing.
-  docker:
-    name: docker runtime smoke
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
-    needs: [scope, preflight]
-    if: needs.scope.outputs.container == 'true' && !startsWith(github.ref, 'refs/tags/v')
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          load: true
-          platforms: linux/amd64
-          tags: plurx/plurxd:ci
-          # The runtime stage's layers (two full ffmpeg stacks) depend only on
-          # the Dockerfile, so the GHA layer cache spares their ~150 MB of
-          # downloads on every run; the cargo builder layer still rebuilds on
-          # source changes, which is exactly the part that must.
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
-      - name: Start, probe, restart, and re-probe the image
-        run: scripts/container-smoke plurx/plurxd:ci
-      # Release publication ships amd64 and arm64. The native release-build
-      # matrix above compiles both arm64 Rust binaries. Target only the
-      # architecture-specific runtime assets here so QEMU exercises the other
-      # checksum branch plus dovi_tool/mkvmerge assertions without redundantly
-      # cold-compiling the complete Rust graph for nearly an hour.
-      - name: Build arm64 runtime and verify pinned conversion tools
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          platforms: linux/arm64
-          target: runtime-assets
-          outputs: type=cacheonly
-          cache-from: type=gha
 
   # Configure this as the single required check for main-bound PRs and the
   # merge queue when repository protections become available. Until then it is
@@ -782,7 +1035,8 @@ jobs:
       - mobile_version
       - preflight
       - check
-      - cluster_auth
+      - cluster_store
+      - cluster_topology
       - cluster_wal
       - cluster_daemon
       - web_layout
@@ -790,8 +1044,7 @@ jobs:
       - android_jvm
       - apple
       - android_device
-      - build
-      - docker
+      - package_smoke
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 2
     steps:
@@ -801,7 +1054,8 @@ jobs:
           MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           CHECK_RESULT: ${{ needs.check.result }}
-          CLUSTER_AUTH_RESULT: ${{ needs.cluster_auth.result }}
+          CLUSTER_STORE_RESULT: ${{ needs.cluster_store.result }}
+          CLUSTER_TOPOLOGY_RESULT: ${{ needs.cluster_topology.result }}
           CLUSTER_WAL_RESULT: ${{ needs.cluster_wal.result }}
           CLUSTER_DAEMON_RESULT: ${{ needs.cluster_daemon.result }}
           WEB_LAYOUT_RESULT: ${{ needs.web_layout.result }}
@@ -809,17 +1063,17 @@ jobs:
           ANDROID_JVM_RESULT: ${{ needs.android_jvm.result }}
           APPLE_RESULT: ${{ needs.apple.result }}
           ANDROID_DEVICE_RESULT: ${{ needs.android_device.result }}
-          BUILD_RESULT: ${{ needs.build.result }}
-          DOCKER_RESULT: ${{ needs.docker.result }}
+          PACKAGE_SMOKE_RESULT: ${{ needs.package_smoke.result }}
         run: |
           for result in \
             "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
             "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
-            "$CLUSTER_AUTH_RESULT" "$CLUSTER_WAL_RESULT" \
+            "$CLUSTER_STORE_RESULT" "$CLUSTER_TOPOLOGY_RESULT" \
+            "$CLUSTER_WAL_RESULT" \
             "$CLUSTER_DAEMON_RESULT" \
             "$WEB_LAYOUT_RESULT" "$VOD_WEB_RESULT" \
             "$ANDROID_JVM_RESULT" "$APPLE_RESULT" "$ANDROID_DEVICE_RESULT" \
-            "$BUILD_RESULT" "$DOCKER_RESULT"; do
+            "$PACKAGE_SMOKE_RESULT"; do
             case "$result" in
               success|skipped) ;;
               *) echo "A selected validation job ended with: $result"; exit 1 ;;
@@ -836,7 +1090,7 @@ jobs:
           PLURX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PLURX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PLURX_QUALIFICATION_RESULTS: >-
-            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","cluster_auth":"${{ needs.cluster_auth.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","build":"${{ needs.build.result }}","docker":"${{ needs.docker.result }}"}
+            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","cluster_store":"${{ needs.cluster_store.result }}","cluster_topology":"${{ needs.cluster_topology.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","package_smoke":"${{ needs.package_smoke.result }}"}
         run: >-
           python3 -m validation.qualification
           --output target/validation/qualification-receipt.json

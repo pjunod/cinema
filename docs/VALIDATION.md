@@ -90,10 +90,19 @@ packaging. Local profiles (`commit`, `full`, `nightly`) run `rust-gate` —
 `make rust-check`, the one-command fmt + clippy + full-workspace suite. The
 `ci` profile and the PR workflow run `rust-gate-ci` — `make ci-rust-gate` —
 which owns formatting, Clippy, unit tests, and SQLite contracts in one job.
-Three parallel jobs own replicated Store/topology, WAL recovery, and real
-daemons. Excluding `plurx-cluster-check` from the fast lane keeps Cargo's
-feature unification from compiling those replicated contracts into it. The
-subset re-runs (`api-wire`,
+Four stable verdicts separately own replicated Store semantics, the topology
+harness, WAL recovery, and real daemons. The Store verdict selects either the
+complete legacy run or two binary-level shards according to
+`CI_EXECUTION_MODE`; its required job name does not change during rollout.
+Each shard discovers the compiled binary's current inventory, executes one
+exact multi-filter invocation, and retains its assignment, outcomes, durations,
+candidate tree, compiler identity, and binary digest. The aggregate accepts
+only a disjoint exact union from byte-identical binaries. A weekly scheduled
+job runs the complete unsharded inventory as an independent backstop. Store and
+topology retain independent logs and exact-tree receipts, so a slow or failed
+lane is attributable without re-running the other one. Excluding
+`plurx-cluster-check` from the fast lane keeps Cargo's feature unification from
+compiling those replicated contracts into it. The subset re-runs (`api-wire`,
 `security-boundaries`, `user-journey`) stay out of the `ci` profile for the
 same reason: there they would re-execute binaries the workspace run already
 executed with identical feature resolution.
@@ -168,7 +177,7 @@ select the narrower environment checks: Android application and build files
 justify an emulator; root Cargo manifests and the pinned toolchain justify
 cross-target release builds; image, Compose, runtime configuration, and
 lifecycle files justify the container smoke test. Ordinary `crates/**`
-changes run the fast Rust lane, plus the three cluster lanes when they touch a
+changes run the fast Rust lane, plus the four cluster verdicts when they touch a
 cluster contract. CI routing changes deliberately run those same four Rust
 lanes and the static workflow contracts, not every unrelated platform. Final
 effort qualification, main pushes, tags, merge-group events when enabled, and
@@ -207,6 +216,46 @@ switch does not move in-progress work, and GitHub Actions does not retry a queue
 or failed hosted job on the other pool automatically. That is deliberate: an
 automatic fallback can run privileged repository code on a trust boundary you
 did not select.
+
+### Execution mode — fail-safe rollout without renaming the gate
+
+`CI_EXECUTION_MODE` controls how eligible heavyweight lanes execute. It accepts
+`legacy`, `shadow`, or `accelerated`; an unset or unknown value resolves to
+`legacy`. In legacy mode the complete Store command is required and shards are
+not scheduled. In shadow mode the complete command remains required while the
+shard graph records comparison evidence through a separate reusable-workflow
+call that no required job depends on; an offline shadow runner therefore cannot
+delay the Store verdict or promotion gate. In accelerated mode the
+verified shard union becomes required and the legacy job is skipped. The
+stable `replicated Store contracts` verdict translates those internal results,
+so branch rules and the promotion gate never depend on rollout-only job names.
+
+```bash
+scripts/ci-execution-mode status
+scripts/ci-execution-mode legacy
+scripts/ci-execution-mode shadow
+scripts/ci-execution-mode accelerated
+```
+
+Changing the mode affects only new runs. Do not enable shadow until both shard
+labels resolve to distinct non-production x86 hosts with verified identity and
+bounded persistent storage. The weekly `replicated Store backstop` workflow is
+unsharded in every mode and remains the assignment-independent safety net.
+
+Eligible packaging changes require both rows of the `package_smoke` matrix.
+The arm64 row selects the self-hosted Linux/ARM64 `ci-arm64` VM pool, or
+`ubuntu-24.04-arm` in GitHub-hosted mode. It proves both the kernel and Docker
+engine are native `aarch64`, then performs the same exact-candidate binary
+export, runtime-only image build, identity checks, health probe, and stop/start
+smoke as amd64 without QEMU. Its manifest and digests are retained as required
+qualification evidence, and `Main promotion gate` depends directly on the
+complete matrix.
+
+At least one `ci-arm64` VM must therefore remain online for self-hosted
+qualification. The ARM package row shares the `plurx-apple-silicon-heavy`
+concurrency group with Apple tests so laptop capacity is not oversubscribed;
+`queue: max` preserves every pending required job instead of replacing an
+older pending candidate.
 
 GitHub-hosted mode also requires an account with usable Actions billing and
 spending limits. If GitHub refuses the job before assigning a runner, repair

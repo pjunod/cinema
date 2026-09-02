@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() {
+  echo "ci-buildkit-prune: $*" >&2
+  exit 1
+}
+
+[ "$#" -eq 2 ] || die "usage: ci-buildkit-prune <builder-name> <budget-gb>"
+builder_name=$1
+budget_gb=$2
+[[ "$builder_name" =~ ^plurx-[a-z0-9][a-z0-9_.-]*$ ]] \
+  || die "refusing unsafe builder name: $builder_name"
+[[ "$budget_gb" =~ ^[1-9][0-9]*$ ]] || die "budget must be whole gigabytes"
+
+canonical_directory() {
+  [ -d "$1" ] || return 1
+  (cd -P -- "$1" 2>/dev/null && pwd -P)
+}
+
+docker_root_raw=$(docker info --format '{{.DockerRootDir}}') \
+  || die "cannot read the Docker root directory"
+docker_root=$(canonical_directory "$docker_root_raw") \
+  || die "cannot resolve Docker root directory: $docker_root_raw"
+
+read_disk() {
+  df -Pk "$docker_root" | awk 'NR == 2 { print $2, $4 }'
+}
+
+read_builder_bytes() {
+  local line size usage_json
+  local total=0
+  usage_json=$(docker buildx du --builder "$builder_name" --format=json) \
+    || die "cannot inspect BuildKit usage for $builder_name"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *'"Size":"'*) size=${line#*'"Size":"'}; size=${size%%\"*} ;;
+      *) die "BuildKit returned an unrecognized disk-usage record" ;;
+    esac
+    [[ "$size" =~ ^[0-9]+$ ]] \
+      || die "BuildKit returned an invalid disk-usage size"
+    total=$((total + size))
+  done <<< "$usage_json"
+  echo "$total"
+}
+
+read -r filesystem_kb before_available_kb < <(read_disk)
+[[ "$filesystem_kb" =~ ^[1-9][0-9]*$ ]] \
+  || die "cannot determine the Docker filesystem size"
+[[ "$before_available_kb" =~ ^[0-9]+$ ]] \
+  || die "cannot determine free space on the Docker filesystem"
+
+absolute_floor_kb=$((100 * 1024 * 1024))
+percent_floor_kb=$(((filesystem_kb + 4) / 5))
+floor_kb=$absolute_floor_kb
+if [ "$percent_floor_kb" -gt "$floor_kb" ]; then
+  floor_kb=$percent_floor_kb
+fi
+floor_bytes=$((floor_kb * 1024))
+budget_bytes=$((budget_gb * 1024 * 1024 * 1024))
+before_bytes=$(read_builder_bytes)
+
+docker buildx prune --builder "$builder_name" --force \
+  --max-used-space "$budget_bytes" --min-free-space "$floor_bytes"
+
+after_bytes=$(read_builder_bytes)
+read -r _ after_available_kb < <(read_disk)
+[[ "$after_available_kb" =~ ^[0-9]+$ ]] \
+  || die "cannot determine post-prune Docker filesystem free space"
+
+{
+  echo "### BuildKit cache"
+  echo
+  echo "- builder: \`$builder_name\`"
+  echo "- Docker root: \`$docker_root\`"
+  echo "- budget: ${budget_gb} GiB"
+  echo "- filesystem floor: ${floor_kb} KiB"
+  echo "- before: $((before_bytes / 1024 / 1024)) MiB cache, $((before_available_kb / 1024 / 1024)) GiB free"
+  echo "- after: $((after_bytes / 1024 / 1024)) MiB cache, $((after_available_kb / 1024 / 1024)) GiB free"
+} >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+[ "$after_bytes" -le "$budget_bytes" ] \
+  || die "BuildKit cache remains over its ${budget_gb} GiB budget"
+[ "$after_available_kb" -ge "$floor_kb" ] \
+  || die "Docker filesystem remains below its required reserve"
