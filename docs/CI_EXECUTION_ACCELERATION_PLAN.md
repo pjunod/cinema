@@ -46,7 +46,7 @@ Success means:
 - amd64 and arm64 each compile once, package the exact compiled pair of
   binaries, and probe that package in the same job;
 - Store and topology failures identify their own lane;
-- two Store shards jointly execute exactly the discovered inventory, once
+- the Store shards jointly execute exactly the discovered inventory, once
   each, with a retained receipt;
 - required arm64 packaging runs on native Linux ARM rather than emulating the
   Rust compiler on x86;
@@ -126,9 +126,9 @@ The 2026-09-01 read-only audit found:
 | `nuc3` | yes | generic `general` / `high-cpu` labels | ~183 GB | ~9.2 GB |
 | `nuc4` | yes | generic `general` / `high-cpu` labels | ~210 GB | ~12.2 GB |
 | `nynuc` | yes | generic `general` / `high-cpu` labels | ~281 GB | ~13.8 GB |
-| `nuc1` | no | one runner uniquely labeled `ci-store` | not yet measured | not yet measured |
-| `nuc2` | no | Android runners offline at audit time; shard label withheld | not yet measured | not yet measured |
-| `rogg16` | no | one runner uniquely labeled `ci-topology`; other generic runners online | not yet measured | not yet measured |
+| `nuc1` | no | one runner labeled `ci-store` (see §4.1) | not yet measured | not yet measured |
+| `nuc2` | no | Android runners; one labeled `ci-store` after the Cargo-home repair (see §4.2) | not yet measured | not yet measured |
+| `rogg16` | no | one runner labeled `ci-topology`, one labeled `ci-store`; other generic runners online (see §4.1) | not yet measured | not yet measured |
 | MacBook Pro | no | Linux ARM64 VM `ci-arm64` primary | ~371 GB host free | new native guest |
 | MacBook Air | no | macOS ARM64 `apple` / `xcode-26`; Linux ARM64 VM `ci-arm64` backup | ~70 GB host free | new native guest |
 
@@ -151,14 +151,102 @@ The supplied deployment key is not authorized for `nuc1` or `rogg16`.
 `nuc2` additionally presents a changed ED25519 host key (observed fingerprint
 `SHA256:LI8rEpqCBeVnsn54PLNJy2UqbmWYQaB+cuxP/A5QSoE`). The old known-hosts
 entry has not been replaced and the new key has not been trusted: independent
-verification is required before any host access or runner activation. The
-`ci-store-shard-1` label is therefore intentionally unassigned and repository
-mode remains `legacy`. This is a security boundary, not permission to bypass
-host verification. `nuc1` and `rogg16` already separate Store and topology by
-physical host through their unique GitHub runner labels, but their disk facts
-remain unverified. A third verified non-production x86 host is still required
-for Store shard 1 because topology may not share a host with either Store
-shard.
+verification is required before any host *access*. That remains a security
+boundary, and it is not permission to bypass host verification.
+
+### 4.1 The 2026-09-02 label rebalance
+
+Withholding a shard label until that key was verified did not withhold a
+shard: it created one that can never be scheduled. `store-shards.yml` shipped
+a matrix row pinned to `ci-store-shard-1`, a label no runner in the fleet has
+ever carried, so flipping `CI_EXECUTION_MODE` to `accelerated` would have
+parked every pull request behind a job GitHub can never assign. The same shape
+had already cost a day of queue: with exactly one runner carrying `ci-store`,
+`replicated Store contracts (legacy)` took 45 attempts on 2026-09-02, started
+15, had 27 cancelled while still queued having never run, and reached waits of
+234 minutes.
+
+Registered labels are a GitHub-side property of an already-registered runner,
+not host access, so the rebalance was applied through the Actions API without
+touching `nuc2`'s SSH host key. The fleet carries three `ci-store` slots:
+
+| runner | host | production voter | eligibility proved by |
+|---|---|---|---|
+| `gha-nuc1-general-01` | `nuc1` | no | run 2838, green, 26.8 min |
+| `gha-rogg16-general-02` | `rogg16` | no | run 2837, green, 22.1 min |
+| `gha-nuc2-android-01` | `nuc2` | no | run 2840 attempt 3, green, 27.9 min (see §4.2) |
+
+with `ci-topology` on `gha-rogg16-general-01`. One slot per physical host is a
+deliberate invariant, not an accident of counting: two three-voter hiqlite
+tests on one loaded host is the quorum flake behind the artwork-fence
+failures. No voter carries either label.
+
+[`validation/runner-fleet.toml`](../validation/runner-fleet.toml) is the
+committed roster of that fleet, and `make operations-check` now rejects any
+`runs-on` in `.github/workflows/` that no rostered runner can satisfy — new
+workflow files included, automatically. Adding a label to a workflow means
+adding it to a runner first. See
+[VALIDATION.md](VALIDATION.md#the-runner-roster--a-label-is-a-claim-about-a-machine).
+
+### 4.2 A runner is not a slot until the lane passes on it
+
+`gha-nuc2-android-01` was added as a third `ci-store` slot on 2026-09-02 and
+failed `replicated Store contracts (legacy)` three runs in a row — 2840, 2842
+and 2845 — about twelve seconds into each job, before compiling anything:
+
+```text
+warning: failed to write cache, path: /home/runner/.cargo/registry/index/
+index.crates.io-1949cf8c6b5b557f/.cache/as/yn/async-trait,
+error: Permission denied (os error 13)
+Permission denied (os error 13)
+##[error]Process completed with exit code 2.
+```
+
+`gha-nuc1-general-01` (run 2838) and `gha-rogg16-general-02` (run 2837) ran the
+same lane green in the same hour, so this was the host and not the lane. The
+label was revoked and the shard count dropped from three to two.
+
+That drop is the bound working in the direction nobody plans for. The count is
+*bounded by* the slots because one physical host may hold only one, so a
+surplus shard has no runner of its own to take and serialises behind a busy
+one. The roster edit alone — slot removed, workflow still asking for three —
+failed preflight with `2 not greater than or equal to 3: the Store shard count
+exceeds the number of ci-store slots`, in milliseconds, before the workflow
+could reach a queue. Two remained a real fan-out rather than a degenerate one:
+`validation/store_shard.py` enforces two as its floor in `assigned_tests` and
+again in the aggregate validator, so exact union and disjointness held.
+
+**The repair.** `/home/runner/.cargo` was owned `root:root` and
+`/home/runner/.cargo/registry` did not exist at all: the runner role seeds only
+the `bin` subdirectory and leaves the root-owned parent alone, so `cargo` could
+not create the registry index it writes on every build. Both are now
+`runner:runner`, matching the actions-runner service user (uid 1000, gid 1001),
+and a write probe as that user succeeds. The same gap applies to any host the
+role provisions, so it is a fleet-wide fix waiting to be needed rather than a
+one-machine patch.
+
+**The proof.** The label came back only after the lane was re-run on that exact
+runner: run 2840 attempt 3, dispatched while both other slots were busy so it
+had to land there, passed in **27.9 minutes** — in family with
+`gha-nuc1-general-01` (25.7–29.1 min) and `gha-rogg16-general-02` (21.8–22.7
+min) on the same lane, against roughly twelve seconds to failure before the
+fix. `SHARD_COUNT` was raised to three only then.
+
+That order is the rule this section exists to record. An ownership fix, a green
+write probe and a convincing explanation are not together evidence that a
+27-minute three-voter hiqlite test will run on a machine; one green run of that
+test is. **Label the runner, prove the lane on it, then raise the count** — and
+never the reverse, because the reverse is how a shard ends up waiting on a
+machine that cannot serve it.
+
+**Open follow-up.** The rebalance was applied to the live runners through the
+API. `pjunod/ansible`'s `github-runners/inventory/` does not carry the current
+label sets for `gha-nuc1-general-01`, `gha-nuc2-android-01`,
+`gha-rogg16-general-01` or `gha-rogg16-general-02` — it still describes them as
+generic `general` builders. Re-running the runner playbook before that
+inventory is corrected would revert the fleet to the one-slot state and
+reintroduce the queue. `pjunod/ansible` PR #20 is open to reconcile it. Disk
+facts for `nuc1`, `nuc2` and `rogg16` also remain unmeasured.
 
 ## 5. Persistent Cargo cache contract
 
@@ -394,8 +482,38 @@ weaken deliberate shutdown and election timeouts to improve its graph time.
 ## 11. Deterministic Store sharding
 
 Phase B discovers test names from the compiled Store test binary, assigns
-each exact name to one of two shards, and invokes the binary once per shard
-with all assigned exact filters. It does not launch Cargo once per test.
+each exact name to one shard, and invokes the binary once per shard with all
+assigned exact filters. It does not launch Cargo once per test.
+
+The shard count is three, because the fleet carries three eligible `ci-store`
+slots and one physical host may hold only one (§4.1, §4.2). It is written once, as
+the `SHARD_COUNT` job environment variable in
+`.github/workflows/store-shards.yml`, and both `validation.store_shard`
+invocations read it; the matrix is the only other mention, because a matrix
+cannot be built from `env`. A disagreement between the two fails closed rather
+than silently dropping tests — the aggregate validator rejects a receipt set
+whose size or index set does not match the count the receipts declare — and
+`make operations-check` rejects the mismatch at preflight, along with a shard
+count that exceeds the number of `ci-store` slots. Two is this module's enforced
+floor, so the count tracks the fleet up and down but can never collapse to a
+single unsharded job wearing the sharded lane's name.
+
+Sharding here buys latency, not throughput, and the distinction should survive
+into the rollout decision. One pull request's Store lane should finish in a
+fraction of its present 22–29 minutes, but it holds all three slots while it
+runs; with several pull requests in flight the shards interleave as slots free
+and aggregate throughput is roughly what it is now. No sharded run has happened
+yet, so the per-shard figure is unmeasured, and each shard builds its own test
+binary — a fixed cost sharding does not divide.
+
+Every shard selects the same label set. Giving a shard a runner class of its
+own is what produced `ci-store-shard-1`; one label set for the whole matrix
+means a shard cannot be pinned to a machine that does not exist.
+
+`replicated Store shards` also accepts `workflow_dispatch`, with an
+`execution-mode` input defaulting to `shadow`. That is how the sharded path is
+proved on the real fleet before `CI_EXECUTION_MODE` is touched, without
+spending pull-request traffic on the rehearsal.
 
 The version-one assignment is deterministic hash partitioning. Every shard
 writes a receipt containing:
@@ -451,7 +569,7 @@ merge.
 | M3 | native Linux ARM pool | two isolated runners online; an exact cold package/probe passes without QEMU |
 | M4 | same-job package smoke | both architectures compile/package/probe exact two-binary manifest |
 | M5 | Store/topology split | command/inventory union equals legacy; separate receipts retained |
-| M6 | two Store shards | exact union/disjointness validator passes; wall time improves without missing tests |
+| M6 | one Store shard per `ci-store` slot (three today) | exact union/disjointness validator passes; wall time improves without missing tests |
 | M7 | shadow campaign | 10 consecutive accelerated shadow runs agree with legacy |
 | M8 | accelerated candidate | 20 consecutive required-candidate runs pass |
 | M9 | final qualification | one frozen-tree full suite passes, receipt exists, effort merges |
@@ -522,7 +640,7 @@ These are explicitly separate efforts:
 | Budgets | Per host; reserve first; approximate 50/30/20 | The original global arithmetic did not fit every disk |
 | Package hand-off | Same job per architecture | Avoid GitHub artifact quota and wrong-workspace risk |
 | ARM | Two Linux VM runners, required for self-hosted packaging | Eliminate the failed x86/QEMU compile; retain a native GitHub-hosted fallback mode |
-| First shards | Two non-production x86 hosts | Homogeneous baseline and no production/laptop load |
+| First shards | One shard per `ci-store` slot; non-production x86 hosts that pass the lane | Homogeneous baseline, no production/laptop load, and no shard pinned to a label nothing carries |
 | Assignment v1 | Hash plus exact-union receipt | Simple, deterministic, auditable start |
 | Assignment v2 | Deterministic LPT from committed durations | Balance seconds after trustworthy measurements exist |
 | Scheduled backstop | Full unsharded x86, no salt | Proves inventory independent of assignment |
@@ -561,7 +679,20 @@ These are explicitly separate efforts:
   `gha-mbp-linux-arm-01` and `gha-mba-linux-arm-01` are online with the
   dedicated `ci-arm64` label; the Air is the backup. The guest Docker daemons
   are independent of Docker Desktop and production Docker.
-- M0's voter audit is complete for the active Store/topology labels. The changed
-  `nuc2` host key, a verified third non-voter x86 host, disk facts, and the
-  `ci-store-shard-1` runner remain activation gates for `shadow`.
+- M0's voter audit is complete for the active Store/topology labels.
+- The Store matrix fans out to one shard per `ci-store` slot after the
+  2026-09-02 label rebalance (§4.1) — three today, on `nuc1`, `rogg16` and
+  `nuc2`. The
+  unassignable `ci-store-shard-1` row is gone, and
+  `validation/runner-fleet.toml` plus `make operations-check` make an
+  unschedulable `runs-on` a preflight failure rather than a queue.
+  `workflow_dispatch` on `store-shards.yml` proves the path on demand.
+- A third slot on `gha-nuc2-android-01` was tried, revoked the same day for an
+  unwritable Cargo home, repaired, proved by a green 27.9-minute Store run on
+  that runner, and restored (§4.2). The slot bound caught the oversized shard
+  count at preflight in both directions. The rule the episode leaves behind:
+  label the runner, prove the lane on it, then raise the count.
+- Disk facts for `nuc1`, `nuc2` and `rogg16`, the changed `nuc2` host key, and
+  the ansible inventory reconciliation (`pjunod/ansible` PR #20) remain open;
+  none of them now blocks scheduling.
 - No Docker daemon was restarted or reconfigured for this implementation.
