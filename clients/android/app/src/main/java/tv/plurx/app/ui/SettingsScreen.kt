@@ -26,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tv.plurx.app.BuildConfig
@@ -35,11 +36,11 @@ import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.OfflineNetwork
 import tv.plurx.app.data.OfflineQuality
 import tv.plurx.app.data.PosterSize
+import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.ThemeId
 import tv.plurx.app.ui.components.ChoicePicker
 import tv.plurx.app.ui.components.SafeTopRow
 import tv.plurx.app.ui.components.TvIconButton
-import tv.plurx.app.ui.components.TvOutlinedButton
 import tv.plurx.app.ui.components.tvFocusRing
 import tv.plurx.app.ui.theme.Muted
 
@@ -101,16 +102,12 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
         }
 
         val sectionModifier = Modifier.weight(1f)
-        val content: @Composable () -> Unit = {
-            SettingsSection("Appearance", "Theme and room brightness are independent, matching the web viewer.") {
-                ChoicePicker("Theme", preferences.theme, ThemeId.entries, { it.label }, vm::setTheme)
-                ChoicePicker("Appearance", preferences.appearance, Appearance.entries, { it.label }, vm::setAppearance)
-                ChoicePicker("Poster size", preferences.posterSize, PosterSize.entries, { it.label }, vm::setPosterSize)
-                ChoicePicker("Home grouping", preferences.homeGrouping, HomeGrouping.entries, { it.label }, vm::setHomeGrouping)
-            }
-        }
         val playback: @Composable () -> Unit = {
-            SettingsSection("Playback defaults", "Applied to new playback sessions and remembered on this device.") {
+            SettingsSection(
+                "Playback",
+                "Track choices apply when a title has more than one. Instant subtitle switching prepares " +
+                    "subtitles from the first frame; After a short pause builds them the first time you turn them on.",
+            ) {
                 ChoicePicker("Quality", preferences.playbackQuality, PlaybackQuality.entries, { it.label }, vm::setPlaybackQuality)
                 ChoicePicker("Audio language", audio, LANGS, { it.second }, onSelect = {
                     audio = it
@@ -120,8 +117,23 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
                     sub = it
                     vm.setLanguages(audio.first, sub.first)
                 })
-                PreferenceSwitch("Auto-skip intro and credits", preferences.autoSkip, vm::setAutoSkip)
+                ChoicePicker(
+                    "Subtitle switching",
+                    preferences.subtitleReadiness,
+                    SubtitleReadiness.entries,
+                    { it.label },
+                    vm::setSubtitleReadiness,
+                )
                 PreferenceSwitch("Autoplay next episode", preferences.autoplayNext, vm::setAutoplayNext)
+                PreferenceSwitch("Skip intros and credits", preferences.autoSkip, vm::setAutoSkip)
+            }
+        }
+        val appearance: @Composable () -> Unit = {
+            SettingsSection("Appearance", "Theme and room brightness are independent, matching the web viewer.") {
+                ChoicePicker("Theme", preferences.theme, ThemeId.entries, { it.label }, vm::setTheme)
+                ChoicePicker("Appearance", preferences.appearance, Appearance.entries, { it.label }, vm::setAppearance)
+                ChoicePicker("Poster size", preferences.posterSize, PosterSize.entries, { it.label }, vm::setPosterSize)
+                ChoicePicker("Home layout", preferences.homeGrouping, HomeGrouping.entries, { it.label }, vm::setHomeGrouping)
             }
         }
         val downloads: @Composable () -> Unit = {
@@ -149,32 +161,36 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = side, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(28.dp),
         ) {
+            // Playback → Downloads → Appearance → Account → About on every
+            // form factor. Wide layouts keep two columns: Playback (with
+            // Downloads beneath it, where the form factor has downloads) on
+            // the left and Appearance on the right, so reading order matches
+            // the single column a phone shows.
             if (formFactor == FormFactor.Compact) {
-                content()
                 playback()
                 downloads()
+                appearance()
             } else {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
-                    Column(sectionModifier) { content() }
-                    Column(sectionModifier) { playback() }
+                    Column(sectionModifier, verticalArrangement = Arrangement.spacedBy(28.dp)) {
+                        playback()
+                        downloads()
+                    }
+                    Column(sectionModifier) { appearance() }
                 }
-                downloads()
             }
 
             SettingsSection("Account", null) {
-                Text(
-                    "Signed in as ${vm.username ?: "—"} on ${vm.serverName ?: vm.origin}",
-                    color = Muted,
-                    style = MaterialTheme.typography.bodyMedium,
+                LabeledValueRow("Signed in as", vm.username ?: "—")
+                LabeledValueRow("Server", vm.serverName ?: vm.origin)
+                PreferenceAction("Change server", onClick = vm::changeServer)
+                PreferenceAction(
+                    "Sign out",
+                    destructive = true,
+                    onClick = {
+                        if (currentProfileHasDownloads) confirmingSignOut = true else vm.logout()
+                    },
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    TvOutlinedButton(
-                        onClick = {
-                            if (currentProfileHasDownloads) confirmingSignOut = true else vm.logout()
-                        },
-                    ) { Text("Sign out") }
-                    TvOutlinedButton(onClick = vm::changeServer) { Text("Change server") }
-                }
             }
 
             SettingsSection("About", null) {
@@ -201,6 +217,44 @@ private fun SettingsSection(
         Text(title, style = MaterialTheme.typography.titleMedium)
         description?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodyMedium) }
         content()
+    }
+}
+
+/** A label on the left and its read-only value on the right, like the About row. */
+@Composable
+private fun LabeledValueRow(label: String, value: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyLarge)
+        Text(value, color = Muted, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+/**
+ * A full-width action row. The same focusable `tvFocusRing` + `clickable`
+ * shape as [PreferenceSwitch] and `ChoicePicker`, so the D-pad lands on it
+ * like any other setting; [destructive] paints the label in the theme's error
+ * colour, the one convention this app has for an irreversible action.
+ */
+@Composable
+private fun PreferenceAction(label: String, destructive: Boolean = false, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .tvFocusRing(MaterialTheme.shapes.small, focusedScale = 1.02f)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            color = if (destructive) MaterialTheme.colorScheme.error else Color.Unspecified,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 
