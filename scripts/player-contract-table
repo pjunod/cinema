@@ -9,6 +9,7 @@
 //
 //   scripts/player-contract-table            # print both blocks
 //   scripts/player-contract-table --write    # rewrite both blocks in the doc
+//   scripts/player-contract-table --embed    # rewrite the served web routing table
 //
 // tests/playback/player-input-contract.test.js fails when the doc and the
 // fixtures disagree, so the fixtures are the only thing anyone edits by hand.
@@ -20,10 +21,16 @@ const ROOT = path.join(__dirname, "..");
 const FIXTURE = path.join(ROOT, "tests/playback/player-input-contract.json");
 const FIELDS = path.join(ROOT, "tests/playback/playback-info-fields.json");
 const DOC = path.join(ROOT, "docs/PLAYER-INPUT-CONTRACT.md");
+const POLICY = path.join(ROOT, "crates/plurxd/src/web/playback-policy.js");
+const WEB = path.join(ROOT, "crates/plurxd/src/web/index.html");
 const BEGIN = "<!-- contract:routing:begin -->";
 const END = "<!-- contract:routing:end -->";
 const INFO_BEGIN = "<!-- contract:info:begin -->";
 const INFO_END = "<!-- contract:info:end -->";
+const EMBED_BEGIN = "  // ---- generated from tests/playback/player-input-contract.json by\n  // scripts/player-contract-table --embed; do not edit by hand ----";
+const EMBED_END = "  // ---- end generated ----";
+const FIELDS_EMBED_BEGIN = "// ---- generated from tests/playback/playback-info-fields.json by\n// scripts/player-contract-table --embed; do not edit by hand ----";
+const FIELDS_EMBED_END = "// ---- end playback info fields ----";
 
 function renderBlock(contract) {
   const out = [];
@@ -88,11 +95,29 @@ function replaceBlock(doc, begin, end, block, label) {
   return doc.slice(0, start) + block + doc.slice(stop + end.length);
 }
 
+function renderEmbedBlock(contract) {
+  return `${EMBED_BEGIN}\n  const INPUT_ROUTING = ${JSON.stringify(contract.routing)};\n${EMBED_END}`;
+}
+
+function renderFieldsEmbedBlock(fields) {
+  return `${FIELDS_EMBED_BEGIN}\nconst PLAYBACK_INFO_FIELDS=${JSON.stringify(fields.fields)};\n${FIELDS_EMBED_END}`;
+}
+
 function main() {
   const contract = JSON.parse(fs.readFileSync(FIXTURE, "utf8"));
   const fields = JSON.parse(fs.readFileSync(FIELDS, "utf8"));
   const block = renderBlock(contract);
   const info = renderInfoBlock(fields);
+  if (process.argv.includes("--embed")) {
+    let policy = fs.readFileSync(POLICY, "utf8");
+    policy = replaceBlock(policy, EMBED_BEGIN, EMBED_END, renderEmbedBlock(contract), "web routing embed");
+    fs.writeFileSync(POLICY, policy);
+    let web = fs.readFileSync(WEB, "utf8");
+    web = replaceBlock(web, FIELDS_EMBED_BEGIN, FIELDS_EMBED_END, renderFieldsEmbedBlock(fields), "web playback-info embed");
+    fs.writeFileSync(WEB, web);
+    process.stdout.write(`rewrote the routing table in ${path.relative(ROOT, POLICY)} and playback-info fields in ${path.relative(ROOT, WEB)}\n`);
+    return;
+  }
   if (process.argv.includes("--write")) {
     let doc = fs.readFileSync(DOC, "utf8");
     doc = replaceBlock(doc, BEGIN, END, block, "routing");
@@ -111,9 +136,17 @@ module.exports = {
   END,
   INFO_BEGIN,
   INFO_END,
+  EMBED_BEGIN,
+  EMBED_END,
+  FIELDS_EMBED_BEGIN,
+  FIELDS_EMBED_END,
   FIXTURE,
   FIELDS,
   DOC,
+  POLICY,
+  WEB,
+  renderEmbedBlock,
+  renderFieldsEmbedBlock,
 };
 
 if (require.main === module) main();

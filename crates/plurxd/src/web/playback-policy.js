@@ -44,6 +44,11 @@
     retestMs: 7 * 24 * 60 * 60 * 1_000,
   });
 
+  // ---- generated from tests/playback/player-input-contract.json by
+  // scripts/player-contract-table --embed; do not edit by hand ----
+  const INPUT_ROUTING = {"ten-foot":{"hidden":{"left":"reveal","right":"reveal","up":"reveal","down":"reveal","select":"reveal","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"reveal","idle":"ignore"},"transport":{"left":"focus_row","right":"focus_row","up":"focus_row","down":"focus_row","select":"activate","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"ignore","idle":"hide"},"timeline":{"left":"preview","right":"preview","up":"focus_marker_or_ignore","down":"focus_transport","select":"toggle_play","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"ignore","idle":"hide"},"scrub":{"left":"preview","right":"preview","up":"cancel_then_focus_marker_or_ignore","down":"cancel_then_focus_transport","select":"commit","back":"cancel","play_pause":"commit_then_toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_menu","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_menu","idle":"ignore"},"info":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_info","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_info","idle":"ignore"},"failed":{"left":"focus_row","right":"focus_row","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"ignore","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"}},"desktop":{"hidden":{"left":"skip","right":"skip","up":"ignore","down":"ignore","select":"ignore","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_play","idle":"ignore"},"transport":{"left":"skip","right":"skip","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_play","idle":"hide"},"timeline":{"left":"preview","right":"preview","up":"ignore","down":"ignore","select":"toggle_play","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_play","idle":"hide"},"scrub":{"left":"preview","right":"preview","up":"ignore","down":"ignore","select":"commit","back":"cancel","play_pause":"commit_then_toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_menu","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_menu","idle":"ignore"},"info":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_info","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_info","idle":"ignore"},"failed":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"ignore","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"}},"touch":{"hidden":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_chrome","idle":"ignore"},"transport":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_chrome","idle":"hide"},"timeline":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_chrome","idle":"hide"},"scrub":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"commit","back":"cancel","play_pause":"commit_then_toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"close_menu","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_menu","idle":"ignore"},"info":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"close_info","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_info","idle":"ignore"},"failed":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"ignore","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"}}};
+  // ---- end generated ----
+
   function qualityForce(quality) {
     if (quality === "auto") return "auto";
     return quality === "original" || quality === "nomse"
@@ -750,13 +755,23 @@
         return -10;
       case "ArrowRight":
         return 10;
-      case "ArrowDown":
-        return -30;
-      case "ArrowUp":
-        return 30;
       default:
         return null;
     }
+  }
+
+  function routeInput(surface, state, input) {
+    const row = INPUT_ROUTING[surface] && INPUT_ROUTING[surface][state];
+    if (!row || !(input in row)) {
+      throw new Error(`no route for ${surface}/${state}/${input}`);
+    }
+    return row[input];
+  }
+
+  function previewStepSeconds(repeatCount) {
+    if (repeatCount >= 10) return 60;
+    if (repeatCount >= 5) return 30;
+    return 10;
   }
 
   function lostFrameRate(hitches, playedSeconds) {
@@ -1022,7 +1037,10 @@
     streamFailureOverlay,
     waitingOverlayAction,
     subtitleBurnAction,
+    INPUT_ROUTING,
+    routeInput,
     seekDeltaSeconds,
+    previewStepSeconds,
     lostFrameRate,
     decodeMarginVerdict,
     bitrateBucket,

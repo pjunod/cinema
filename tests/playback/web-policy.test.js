@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const policy = require("../../crates/plurxd/src/web/playback-policy.js");
+const inputContract = require("./player-input-contract.json");
 
 // The pure policy module is only half of the Auto counter: index.html decides
 // which instant identifies a stall episode before it ever reaches
@@ -92,7 +93,7 @@ test("playback info exposes and remembers the shared three-mode contract", () =>
     );
   }
   assert.match(SHIPPED_UI, /localStorage\.setItem\("plurx_stats_mode",mode\)/);
-  assert.match(SHIPPED_UI, /STATS_MODE==="debug"\?debugHtml:standardHtml/);
+  assert.match(SHIPPED_UI, /patchPlaybackInfoRows\(body,STATS_MODE,contractRows/);
   for (const tone of ["good", "warn", "bad", "muted"]) {
     assert.match(
       SHIPPED_UI,
@@ -133,9 +134,9 @@ test("playback info explicitly separates playback mode from delivery method", ()
   assert.equal(modes.playbackModeName({}), "Progressive file");
   assert.match(modes.playbackModeDetail({ vod: true }), /fixed, seekable timeline/);
   assert.match(modes.playbackModeDetail({ sessionId: "live-1" }), /growing recovery timeline/);
-  const stats = shippedSource("updateStats");
-  assert.match(stats, /cardRow\("Playback mode"/);
-  assert.match(stats, /Delivery method/);
+  const stats = shippedSource("playbackStatsTelemetry");
+  assert.match(stats, /playback_mode:playbackModeDetail/);
+  assert.match(stats, /method,playback_mode/);
 });
 
 asyncTest("every web HLS session requests the bounded VOD presentation", async () => {
@@ -1766,12 +1767,143 @@ test("HDR subtitle burns keep the current delivery instead", () => {
   );
 });
 
-test("directional seeks use short horizontal and long vertical steps", () => {
+test("directional seeks use horizontal steps only", () => {
   assert.equal(policy.seekDeltaSeconds("ArrowLeft"), -10);
   assert.equal(policy.seekDeltaSeconds("ArrowRight"), 10);
-  assert.equal(policy.seekDeltaSeconds("ArrowDown"), -30);
-  assert.equal(policy.seekDeltaSeconds("ArrowUp"), 30);
+  assert.equal(policy.seekDeltaSeconds("ArrowDown"), null);
+  assert.equal(policy.seekDeltaSeconds("ArrowUp"), null);
   assert.equal(policy.seekDeltaSeconds("Enter"), null);
+});
+
+test("desktop input routing matches every shared contract row", () => {
+  for (const [state, row] of Object.entries(inputContract.routing.desktop)) {
+    for (const [input, expected] of Object.entries(row)) {
+      assert.equal(policy.routeInput("desktop", state, input), expected);
+    }
+  }
+  assert.throws(
+    () => policy.routeInput("desktop", "transport", "unknown"),
+    /no route for desktop\/transport\/unknown/,
+  );
+});
+
+test("preview acceleration matches the shared contract ladder", () => {
+  const ladder = inputContract.steps.preview_acceleration;
+  const nextThreshold = (index) => ladder[index + 1]?.from_repeat ?? 12;
+  ladder.forEach((step, index) => {
+    for (let repeat = step.from_repeat; repeat < nextThreshold(index); repeat += 1) {
+      assert.equal(policy.previewStepSeconds(repeat), step.step_seconds);
+    }
+  });
+});
+
+test("the shipped player adapter applies state precedence and preview-then-commit", () => {
+  const makeClasses = (...initial) => {
+    const values = new Set(initial);
+    return {
+      contains: (name) => values.has(name),
+      add: (...names) => names.forEach((name) => values.add(name)),
+      remove: (...names) => names.forEach((name) => values.delete(name)),
+      toggle: (name, on) => on ? values.add(name) : values.delete(name),
+    };
+  };
+  const body = { tagName: "DIV" };
+  const elements = {
+    modal: { classList: makeClasses("open") },
+    player: { classList: makeClasses() },
+    ploading: { classList: makeClasses() },
+    statsov: { classList: makeClasses(), dataset: { mode: "standard" } },
+    pmenu: { classList: makeClasses("on") },
+    pseek: { id: "pseek" },
+    pbplay: { focus() {} },
+  };
+  const document = {
+    body,
+    activeElement: body,
+    getElementById: (id) => elements[id] || null,
+    querySelector: () => null,
+  };
+  const player = { _seekPending: null, _lastFocusedControl: "pbplay" };
+  const calls = { nudge: [], seek: [], play: 0, menu: 0, close: 0, fullscreen: 0, ticks: 0 };
+  const build = new Function(
+    "document", "PLAYER", "PlaybackPolicy", "isFullscreenAnywhere", "toggleFullscreen",
+    "toggleStats", "cycleSub", "playerActivity", "nudge", "pbTotalSec", "pbPosSec",
+    "pbTick", "seekTo", "togglePlay", "closeMenu", "closePlayer",
+    [
+      "let PLAYER_REPEAT_KEY=null; let PLAYER_REPEAT_COUNT=0;",
+      shippedSource("playerInputState"),
+      shippedSource("playerContractInput"),
+      shippedSource("playerHotkey"),
+      shippedSource("applyPlayerOutcome"),
+      shippedSource("handlePlayerKeydown"),
+      "return {playerInputState,playerContractInput,applyPlayerOutcome,handlePlayerKeydown};",
+    ].join("\n"),
+  );
+  const adapter = build(
+    document, player, policy, () => false, () => { calls.fullscreen += 1; },
+    () => {}, () => {}, () => {}, (delta) => calls.nudge.push(delta), () => 100, () => 20,
+    () => { calls.ticks += 1; }, (target) => calls.seek.push(target),
+    () => { calls.play += 1; }, () => { calls.menu += 1; }, () => { calls.close += 1; },
+  );
+  const key = (value, extra = {}) => ({
+    key: value, target: body, repeat: false, ctrlKey: false, metaKey: false, altKey: false,
+    preventDefault() {}, ...extra,
+  });
+
+  adapter.handlePlayerKeydown(key("Escape"));
+  assert.equal(calls.menu, 1);
+  assert.equal(calls.close, 0);
+
+  elements.pmenu.classList.remove("on");
+  document.activeElement = elements.pseek;
+  adapter.handlePlayerKeydown(key("ArrowRight"));
+  adapter.handlePlayerKeydown(key("ArrowRight", { repeat: true }));
+  adapter.handlePlayerKeydown(key("ArrowRight", { repeat: true }));
+  assert.equal(player._seekPending, 50);
+  assert.deepEqual(calls.seek, []);
+  assert.deepEqual(calls.nudge, []);
+  adapter.handlePlayerKeydown(key("Enter"));
+  assert.deepEqual(calls.seek, [50]);
+
+  document.activeElement = body;
+  const before = { ...calls, nudge: [...calls.nudge], seek: [...calls.seek] };
+  adapter.handlePlayerKeydown(key("ArrowUp"));
+  assert.deepEqual(calls.nudge, before.nudge);
+  assert.deepEqual(calls.seek, before.seek);
+  assert.equal(calls.play, before.play);
+  adapter.handlePlayerKeydown(key("f", { ctrlKey: true }));
+  assert.equal(calls.fullscreen, 0);
+
+  elements.ploading.classList.add("failed");
+  assert.equal(adapter.playerInputState(), "failed");
+  elements.ploading.classList.remove("failed");
+  elements.statsov.classList.add("on");
+  assert.equal(adapter.playerInputState(), "info");
+  elements.statsov.classList.remove("on");
+  elements.player.classList.add("idle");
+  assert.equal(adapter.playerInputState(), "hidden");
+});
+
+test("playback-info row builders follow the shared web field list in fixture order", () => {
+  const rows = new Function(
+    [
+      shippedBinding("const", "PLAYBACK_INFO_FIELDS"),
+      shippedBinding("const", "STATS_ROWS"),
+      shippedSource("playbackInfoRows"),
+      "return playbackInfoRows;",
+    ].join("\n"),
+  )();
+  const telemetry = Object.fromEntries(inputContract.inputs.map((input) => [input, input]));
+  for (const field of require("./playback-info-fields.json").fields) {
+    telemetry[field.id] = `value:${field.id}`;
+  }
+  telemetry.dynamic_range_mini = "HDR10";
+  for (const mode of ["mini", "standard", "debug"]) {
+    const expected = require("./playback-info-fields.json").fields
+      .filter((field) => field.modes.includes(mode) && (!field.available_on || field.available_on.includes("web")))
+      .map((field) => field.label);
+    assert.deepEqual(rows(mode, telemetry).map((row) => row.label), expected);
+  }
 });
 
 test("decode rescue uses lost frames over a long window, not pipeline latency", () => {

@@ -1542,7 +1542,7 @@ catalog|library@390x780|req|GET /api/v1/libraries|1
 catalog|library@390x780|req|GET /api/v1/me|1
 catalog|library@390x780|req|GET /api/v1/server|1
 catalog|player@1280x860|dom|^ > div#app|1
-catalog|player@1280x860|dom|^ > div#modal.modal.open|1
+catalog|player@1280x860|dom|^ > div#modal.modal.open[role=dialog aria-modal=true aria-label=*]|1
 catalog|player@1280x860|dom|a > span.px-lbl[text]|6
 catalog|player@1280x860|dom|a > svg.px-ico[aria-hidden=true]|6
 catalog|player@1280x860|dom|a.px-tab > span[text]|2
@@ -1568,7 +1568,7 @@ catalog|player@1280x860|dom|dd > span.mode-detail[text]|1
 catalog|player@1280x860|dom|div > h2[text]|1
 catalog|player@1280x860|dom|div > p[text]|1
 catalog|player@1280x860|dom|div#app > div#pxshell.px-shell|1
-catalog|player@1280x860|dom|div#modal.modal.open > div#player.player|1
+catalog|player@1280x860|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 catalog|player@1280x860|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 catalog|player@1280x860|dom|div#pbar.pbar > div.row|1
 catalog|player@1280x860|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
@@ -1577,8 +1577,9 @@ catalog|player@1280x860|dom|div#pinfo.pinfo > h3[text]|1
 catalog|player@1280x860|dom|div#player.player > div#pbar.pbar|1
 catalog|player@1280x860|dom|div#player.player > div#pinfo.pinfo|1
 catalog|player@1280x860|dom|div#player.player > div#ploading.ploading|1
-catalog|player@1280x860|dom|div#player.player > div#pmenu.pmenu|1
+catalog|player@1280x860|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 catalog|player@1280x860|dom|div#player.player > div#pskip.pskip|1
+catalog|player@1280x860|dom|div#player.player > div#ptimeline.ptimeline|1
 catalog|player@1280x860|dom|div#player.player > div#ptransport.ptransport|1
 catalog|player@1280x860|dom|div#player.player > div#statsov.statsov|1
 catalog|player@1280x860|dom|div#player.player > video#video|1
@@ -1589,16 +1590,18 @@ catalog|player@1280x860|dom|div#ploading.ploading > div.pspin|1
 catalog|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 catalog|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 catalog|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
-catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-label=* text]|1
+catalog|player@1280x860|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
+catalog|player@1280x860|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
+catalog|player@1280x860|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
+catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
+catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
 catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbinfo.on.picon[aria-label=* text]|1
 catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
 catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbplay.picon[aria-label=* text]|1
-catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-label=* text]|1
-catalog|player@1280x860|dom|div#ptransport.ptransport > button.nudge.picon[aria-label=* text]|2
-catalog|player@1280x860|dom|div#ptransport.ptransport > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
-catalog|player@1280x860|dom|div#ptransport.ptransport > span#ptcur.ptime[aria-hidden=true text]|1
-catalog|player@1280x860|dom|div#ptransport.ptransport > span#ptdur.ptime[aria-hidden=true text]|1
+catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+catalog|player@1280x860|dom|div#ptransport.ptransport > span.ptransport-spacer[aria-hidden=true]|1
 catalog|player@1280x860|dom|div#pxlibs > div.px-sec[text]|1
 catalog|player@1280x860|dom|div#pxlibs > nav.px-nav|1
 catalog|player@1280x860|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
@@ -1655,17 +1658,17 @@ catalog|player@1280x860|dom|div.px-pop > div#sizemenu.amenu|1
 catalog|player@1280x860|dom|div.px-pop > div#thememenu.amenu|1
 catalog|player@1280x860|dom|div.px-user > div.px-pop|1
 catalog|player@1280x860|dom|div.row > button#apbtn.pbtn[text]|1
-catalog|player@1280x860|dom|div.row > button#audiobtn.pbtn[text]|1
+catalog|player@1280x860|dom|div.row > button#audiobtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 catalog|player@1280x860|dom|div.row > button#autonextbtn.on.pbtn[text]|1
-catalog|player@1280x860|dom|div.row > button#qualbtn.pbtn[text]|1
+catalog|player@1280x860|dom|div.row > button#pbclose.pbtn[text]|1
+catalog|player@1280x860|dom|div.row > button#qualbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 catalog|player@1280x860|dom|div.row > button#skipbtn.pbtn[text]|1
-catalog|player@1280x860|dom|div.row > button#statsbtn.pbtn[text]|1
-catalog|player@1280x860|dom|div.row > button#subsbtn.pbtn[text]|1
-catalog|player@1280x860|dom|div.row > button#syncbtn.pbtn[text]|1
-catalog|player@1280x860|dom|div.row > button.pbtn[text]|1
+catalog|player@1280x860|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
+catalog|player@1280x860|dom|div.row > button#subsbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
+catalog|player@1280x860|dom|div.row > button#syncbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 catalog|player@1280x860|dom|div.statshd > button.statsx[aria-label=* text]|1
 catalog|player@1280x860|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
-catalog|player@1280x860|dom|div.statshd > span[text]|1
+catalog|player@1280x860|dom|div.statshd > span#statstitle[text]|1
 catalog|player@1280x860|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 catalog|player@1280x860|dom|div.trks > span.on.trk[text]|1
 catalog|player@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
@@ -1694,22 +1697,11 @@ catalog|player@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|player@1280x860|dom|svg.px-ico[aria-hidden=true] > path|9
 catalog|player@1280x860|dom|svg.px-ico[aria-hidden=true] > rect|7
 catalog|player@1280x860|dom|svg[aria-hidden=true] > rect|4
-catalog|player@1280x860|focus|000|button.ghost.sm "Mark watched"
-catalog|player@1280x860|focus|001|a.ghost.sm "View queue"
-catalog|player@1280x860|focus|002|button#qualbtn.pbtn "Playback quality"
-catalog|player@1280x860|focus|003|button#syncbtn.pbtn "Audio sync adjustment"
-catalog|player@1280x860|focus|004|button#statsbtn.pbtn "Playback info (i)"
-catalog|player@1280x860|focus|005|button#skipbtn.pbtn "Auto-skip intro & credits"
-catalog|player@1280x860|focus|006|button#autonextbtn.pbtn.on "Auto-play the next episode when
-catalog|player@1280x860|focus|007|button.pbtn "Close (Esc)"
-catalog|player@1280x860|focus|008|button#pbplay.picon "Play"
-catalog|player@1280x860|focus|009|button.picon.nudge "Back 10 seconds"
-catalog|player@1280x860|focus|010|button.picon.nudge "Forward 10 seconds"
-catalog|player@1280x860|focus|011|div#pseek.pseek "Seek"
-catalog|player@1280x860|focus|012|button#pbinfo.picon.on "Title info"
-catalog|player@1280x860|focus|013|button#pbpip.picon "Picture in picture"
-catalog|player@1280x860|focus|014|button#pbfs.picon "Fullscreen"
-catalog|player@1280x860|focus|015|<wrap>
+catalog|player@1280x860|focus|000|button#pbforward.picon "Forward 10 seconds"
+catalog|player@1280x860|focus|001|button#pbinfo.picon.on "Title info"
+catalog|player@1280x860|focus|002|button#pbpip.picon "Picture in picture"
+catalog|player@1280x860|focus|003|button#pbfs.picon "Fullscreen"
+catalog|player@1280x860|focus|004|<wrap>
 catalog|player@1280x860|req|GET /api/v1/activity|2
 catalog|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 catalog|player@1280x860|req|GET /api/v1/items/<id>|1
@@ -1720,7 +1712,7 @@ catalog|player@1280x860|req|POST /api/v1/client-log|1
 catalog|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 catalog|player@1280x860|req|POST /api/v1/items/<id>/progress|1
 catalog|player@390x780|dom|^ > div#app|1
-catalog|player@390x780|dom|^ > div#modal.modal.open|1
+catalog|player@390x780|dom|^ > div#modal.modal.open[role=dialog aria-modal=true aria-label=*]|1
 catalog|player@390x780|dom|a > span.px-lbl[text]|6
 catalog|player@390x780|dom|a > svg.px-ico[aria-hidden=true]|6
 catalog|player@390x780|dom|a.px-tab > span[text]|2
@@ -1746,7 +1738,7 @@ catalog|player@390x780|dom|dd > span.mode-detail[text]|1
 catalog|player@390x780|dom|div > h2[text]|1
 catalog|player@390x780|dom|div > p[text]|1
 catalog|player@390x780|dom|div#app > div#pxshell.px-shell|1
-catalog|player@390x780|dom|div#modal.modal.open > div#player.player|1
+catalog|player@390x780|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 catalog|player@390x780|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 catalog|player@390x780|dom|div#pbar.pbar > div.row|1
 catalog|player@390x780|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
@@ -1755,8 +1747,9 @@ catalog|player@390x780|dom|div#pinfo.pinfo > h3[text]|1
 catalog|player@390x780|dom|div#player.player > div#pbar.pbar|1
 catalog|player@390x780|dom|div#player.player > div#pinfo.pinfo|1
 catalog|player@390x780|dom|div#player.player > div#ploading.ploading|1
-catalog|player@390x780|dom|div#player.player > div#pmenu.pmenu|1
+catalog|player@390x780|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 catalog|player@390x780|dom|div#player.player > div#pskip.pskip|1
+catalog|player@390x780|dom|div#player.player > div#ptimeline.ptimeline|1
 catalog|player@390x780|dom|div#player.player > div#ptransport.ptransport|1
 catalog|player@390x780|dom|div#player.player > div#statsov.statsov|1
 catalog|player@390x780|dom|div#player.player > video#video|1
@@ -1767,16 +1760,18 @@ catalog|player@390x780|dom|div#ploading.ploading > div.pspin|1
 catalog|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 catalog|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 catalog|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
-catalog|player@390x780|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-label=* text]|1
+catalog|player@390x780|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
+catalog|player@390x780|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
+catalog|player@390x780|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
+catalog|player@390x780|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+catalog|player@390x780|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
+catalog|player@390x780|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
 catalog|player@390x780|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 catalog|player@390x780|dom|div#ptransport.ptransport > button#pbinfo.on.picon[aria-label=* text]|1
 catalog|player@390x780|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
 catalog|player@390x780|dom|div#ptransport.ptransport > button#pbplay.picon[aria-label=* text]|1
-catalog|player@390x780|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-label=* text]|1
-catalog|player@390x780|dom|div#ptransport.ptransport > button.nudge.picon[aria-label=* text]|2
-catalog|player@390x780|dom|div#ptransport.ptransport > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
-catalog|player@390x780|dom|div#ptransport.ptransport > span#ptcur.ptime[aria-hidden=true text]|1
-catalog|player@390x780|dom|div#ptransport.ptransport > span#ptdur.ptime[aria-hidden=true text]|1
+catalog|player@390x780|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+catalog|player@390x780|dom|div#ptransport.ptransport > span.ptransport-spacer[aria-hidden=true]|1
 catalog|player@390x780|dom|div#pxlibs > div.px-sec[text]|1
 catalog|player@390x780|dom|div#pxlibs > nav.px-nav|1
 catalog|player@390x780|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
@@ -1833,17 +1828,17 @@ catalog|player@390x780|dom|div.px-pop > div#sizemenu.amenu|1
 catalog|player@390x780|dom|div.px-pop > div#thememenu.amenu|1
 catalog|player@390x780|dom|div.px-user > div.px-pop|1
 catalog|player@390x780|dom|div.row > button#apbtn.pbtn[text]|1
-catalog|player@390x780|dom|div.row > button#audiobtn.pbtn[text]|1
+catalog|player@390x780|dom|div.row > button#audiobtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 catalog|player@390x780|dom|div.row > button#autonextbtn.on.pbtn[text]|1
-catalog|player@390x780|dom|div.row > button#qualbtn.pbtn[text]|1
+catalog|player@390x780|dom|div.row > button#pbclose.pbtn[text]|1
+catalog|player@390x780|dom|div.row > button#qualbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 catalog|player@390x780|dom|div.row > button#skipbtn.pbtn[text]|1
-catalog|player@390x780|dom|div.row > button#statsbtn.pbtn[text]|1
-catalog|player@390x780|dom|div.row > button#subsbtn.pbtn[text]|1
-catalog|player@390x780|dom|div.row > button#syncbtn.pbtn[text]|1
-catalog|player@390x780|dom|div.row > button.pbtn[text]|1
+catalog|player@390x780|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
+catalog|player@390x780|dom|div.row > button#subsbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
+catalog|player@390x780|dom|div.row > button#syncbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 catalog|player@390x780|dom|div.statshd > button.statsx[aria-label=* text]|1
 catalog|player@390x780|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
-catalog|player@390x780|dom|div.statshd > span[text]|1
+catalog|player@390x780|dom|div.statshd > span#statstitle[text]|1
 catalog|player@390x780|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 catalog|player@390x780|dom|div.trks > span.on.trk[text]|1
 catalog|player@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
@@ -1872,24 +1867,11 @@ catalog|player@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|player@390x780|dom|svg.px-ico[aria-hidden=true] > path|9
 catalog|player@390x780|dom|svg.px-ico[aria-hidden=true] > rect|7
 catalog|player@390x780|dom|svg[aria-hidden=true] > rect|4
-catalog|player@390x780|focus|000|button.ghost.sm "Mark watched"
-catalog|player@390x780|focus|001|a.ghost.sm "View queue"
-catalog|player@390x780|focus|002|a.px-tab "Home"
-catalog|player@390x780|focus|003|button.px-tab "Libraries"
-catalog|player@390x780|focus|004|button.px-tab "Search"
-catalog|player@390x780|focus|005|a.px-tab "Activity"
-catalog|player@390x780|focus|006|button#qualbtn.pbtn "Playback quality"
-catalog|player@390x780|focus|007|button#syncbtn.pbtn "Audio sync adjustment"
-catalog|player@390x780|focus|008|button#statsbtn.pbtn "Playback info (i)"
-catalog|player@390x780|focus|009|button#skipbtn.pbtn "Auto-skip intro & credits"
-catalog|player@390x780|focus|010|button#autonextbtn.pbtn.on "Auto-play the next episode when
-catalog|player@390x780|focus|011|button.pbtn "Close (Esc)"
-catalog|player@390x780|focus|012|button#pbplay.picon "Play"
-catalog|player@390x780|focus|013|div#pseek.pseek "Seek"
-catalog|player@390x780|focus|014|button#pbinfo.picon.on "Title info"
-catalog|player@390x780|focus|015|button#pbpip.picon "Picture in picture"
-catalog|player@390x780|focus|016|button#pbfs.picon "Fullscreen"
-catalog|player@390x780|focus|017|<wrap>
+catalog|player@390x780|focus|000|button#pbforward.picon "Forward 10 seconds"
+catalog|player@390x780|focus|001|button#pbinfo.picon.on "Title info"
+catalog|player@390x780|focus|002|button#pbpip.picon "Picture in picture"
+catalog|player@390x780|focus|003|button#pbfs.picon "Fullscreen"
+catalog|player@390x780|focus|004|<wrap>
 catalog|player@390x780|req|GET /api/v1/activity|2
 catalog|player@390x780|req|GET /api/v1/files/<id>/direct|1
 catalog|player@390x780|req|GET /api/v1/items/<id>|1
@@ -3611,7 +3593,7 @@ classic|library@390x780|req|GET /api/v1/libraries|1
 classic|library@390x780|req|GET /api/v1/me|1
 classic|library@390x780|req|GET /api/v1/server|1
 classic|player@1280x860|dom|^ > div#app|1
-classic|player@1280x860|dom|^ > div#modal.modal.open|1
+classic|player@1280x860|dom|^ > div#modal.modal.open[role=dialog aria-modal=true aria-label=*]|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
@@ -3635,7 +3617,7 @@ classic|player@1280x860|dom|div > h2[text]|1
 classic|player@1280x860|dom|div > p[text]|1
 classic|player@1280x860|dom|div#app > header.top|1
 classic|player@1280x860|dom|div#app > main#main|1
-classic|player@1280x860|dom|div#modal.modal.open > div#player.player|1
+classic|player@1280x860|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 classic|player@1280x860|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 classic|player@1280x860|dom|div#pbar.pbar > div.row|1
 classic|player@1280x860|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
@@ -3644,8 +3626,9 @@ classic|player@1280x860|dom|div#pinfo.pinfo > h3[text]|1
 classic|player@1280x860|dom|div#player.player > div#pbar.pbar|1
 classic|player@1280x860|dom|div#player.player > div#pinfo.pinfo|1
 classic|player@1280x860|dom|div#player.player > div#ploading.ploading|1
-classic|player@1280x860|dom|div#player.player > div#pmenu.pmenu|1
+classic|player@1280x860|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 classic|player@1280x860|dom|div#player.player > div#pskip.pskip|1
+classic|player@1280x860|dom|div#player.player > div#ptimeline.ptimeline|1
 classic|player@1280x860|dom|div#player.player > div#ptransport.ptransport|1
 classic|player@1280x860|dom|div#player.player > div#statsov.statsov|1
 classic|player@1280x860|dom|div#player.player > video#video|1
@@ -3656,16 +3639,18 @@ classic|player@1280x860|dom|div#ploading.ploading > div.pspin|1
 classic|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 classic|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 classic|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
-classic|player@1280x860|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-label=* text]|1
+classic|player@1280x860|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
+classic|player@1280x860|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
+classic|player@1280x860|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
+classic|player@1280x860|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+classic|player@1280x860|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
+classic|player@1280x860|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
 classic|player@1280x860|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 classic|player@1280x860|dom|div#ptransport.ptransport > button#pbinfo.on.picon[aria-label=* text]|1
 classic|player@1280x860|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
 classic|player@1280x860|dom|div#ptransport.ptransport > button#pbplay.picon[aria-label=* text]|1
-classic|player@1280x860|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-label=* text]|1
-classic|player@1280x860|dom|div#ptransport.ptransport > button.nudge.picon[aria-label=* text]|2
-classic|player@1280x860|dom|div#ptransport.ptransport > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
-classic|player@1280x860|dom|div#ptransport.ptransport > span#ptcur.ptime[aria-hidden=true text]|1
-classic|player@1280x860|dom|div#ptransport.ptransport > span#ptdur.ptime[aria-hidden=true text]|1
+classic|player@1280x860|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+classic|player@1280x860|dom|div#ptransport.ptransport > span.ptransport-spacer[aria-hidden=true]|1
 classic|player@1280x860|dom|div#statsov.statsov > div#statsbody.statsbody|1
 classic|player@1280x860|dom|div#statsov.statsov > div.statshd|1
 classic|player@1280x860|dom|div.actions > button.btnplay[text]|1
@@ -3695,17 +3680,17 @@ classic|player@1280x860|dom|div.pifacts.vbadges > span.audio.vbadge[text]|1
 classic|player@1280x860|dom|div.pifacts.vbadges > span.res.vbadge[text]|1
 classic|player@1280x860|dom|div.poster > div.art.ph[text]|1
 classic|player@1280x860|dom|div.row > button#apbtn.pbtn[text]|1
-classic|player@1280x860|dom|div.row > button#audiobtn.pbtn[text]|1
+classic|player@1280x860|dom|div.row > button#audiobtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 classic|player@1280x860|dom|div.row > button#autonextbtn.on.pbtn[text]|1
-classic|player@1280x860|dom|div.row > button#qualbtn.pbtn[text]|1
+classic|player@1280x860|dom|div.row > button#pbclose.pbtn[text]|1
+classic|player@1280x860|dom|div.row > button#qualbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 classic|player@1280x860|dom|div.row > button#skipbtn.pbtn[text]|1
-classic|player@1280x860|dom|div.row > button#statsbtn.pbtn[text]|1
-classic|player@1280x860|dom|div.row > button#subsbtn.pbtn[text]|1
-classic|player@1280x860|dom|div.row > button#syncbtn.pbtn[text]|1
-classic|player@1280x860|dom|div.row > button.pbtn[text]|1
+classic|player@1280x860|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
+classic|player@1280x860|dom|div.row > button#subsbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
+classic|player@1280x860|dom|div.row > button#syncbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 classic|player@1280x860|dom|div.statshd > button.statsx[aria-label=* text]|1
 classic|player@1280x860|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
-classic|player@1280x860|dom|div.statshd > span[text]|1
+classic|player@1280x860|dom|div.statshd > span#statstitle[text]|1
 classic|player@1280x860|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 classic|player@1280x860|dom|div.topctl > div|4
 classic|player@1280x860|dom|div.trks > span.on.trk[text]|1
@@ -3734,22 +3719,11 @@ classic|player@1280x860|dom|span.on.trk[text] > span.tdef[text]|1
 classic|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
 classic|player@1280x860|dom|svg[aria-hidden=true] > rect|4
-classic|player@1280x860|focus|000|button.ghost.sm "Mark watched"
-classic|player@1280x860|focus|001|a.ghost.sm "View queue"
-classic|player@1280x860|focus|002|button#qualbtn.pbtn "Playback quality"
-classic|player@1280x860|focus|003|button#syncbtn.pbtn "Audio sync adjustment"
-classic|player@1280x860|focus|004|button#statsbtn.pbtn "Playback info (i)"
-classic|player@1280x860|focus|005|button#skipbtn.pbtn "Auto-skip intro & credits"
-classic|player@1280x860|focus|006|button#autonextbtn.pbtn.on "Auto-play the next episode when
-classic|player@1280x860|focus|007|button.pbtn "Close (Esc)"
-classic|player@1280x860|focus|008|button#pbplay.picon "Play"
-classic|player@1280x860|focus|009|button.picon.nudge "Back 10 seconds"
-classic|player@1280x860|focus|010|button.picon.nudge "Forward 10 seconds"
-classic|player@1280x860|focus|011|div#pseek.pseek "Seek"
-classic|player@1280x860|focus|012|button#pbinfo.picon.on "Title info"
-classic|player@1280x860|focus|013|button#pbpip.picon "Picture in picture"
-classic|player@1280x860|focus|014|button#pbfs.picon "Fullscreen"
-classic|player@1280x860|focus|015|<wrap>
+classic|player@1280x860|focus|000|button#pbforward.picon "Forward 10 seconds"
+classic|player@1280x860|focus|001|button#pbinfo.picon.on "Title info"
+classic|player@1280x860|focus|002|button#pbpip.picon "Picture in picture"
+classic|player@1280x860|focus|003|button#pbfs.picon "Fullscreen"
+classic|player@1280x860|focus|004|<wrap>
 classic|player@1280x860|req|GET /api/v1/activity|2
 classic|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 classic|player@1280x860|req|GET /api/v1/items/<id>|1
@@ -3760,7 +3734,7 @@ classic|player@1280x860|req|POST /api/v1/client-log|1
 classic|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 classic|player@1280x860|req|POST /api/v1/items/<id>/progress|1
 classic|player@390x780|dom|^ > div#app|1
-classic|player@390x780|dom|^ > div#modal.modal.open|1
+classic|player@390x780|dom|^ > div#modal.modal.open[role=dialog aria-modal=true aria-label=*]|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
@@ -3784,7 +3758,7 @@ classic|player@390x780|dom|div > h2[text]|1
 classic|player@390x780|dom|div > p[text]|1
 classic|player@390x780|dom|div#app > header.top|1
 classic|player@390x780|dom|div#app > main#main|1
-classic|player@390x780|dom|div#modal.modal.open > div#player.player|1
+classic|player@390x780|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 classic|player@390x780|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 classic|player@390x780|dom|div#pbar.pbar > div.row|1
 classic|player@390x780|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
@@ -3793,8 +3767,9 @@ classic|player@390x780|dom|div#pinfo.pinfo > h3[text]|1
 classic|player@390x780|dom|div#player.player > div#pbar.pbar|1
 classic|player@390x780|dom|div#player.player > div#pinfo.pinfo|1
 classic|player@390x780|dom|div#player.player > div#ploading.ploading|1
-classic|player@390x780|dom|div#player.player > div#pmenu.pmenu|1
+classic|player@390x780|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 classic|player@390x780|dom|div#player.player > div#pskip.pskip|1
+classic|player@390x780|dom|div#player.player > div#ptimeline.ptimeline|1
 classic|player@390x780|dom|div#player.player > div#ptransport.ptransport|1
 classic|player@390x780|dom|div#player.player > div#statsov.statsov|1
 classic|player@390x780|dom|div#player.player > video#video|1
@@ -3805,16 +3780,18 @@ classic|player@390x780|dom|div#ploading.ploading > div.pspin|1
 classic|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 classic|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 classic|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
-classic|player@390x780|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-label=* text]|1
+classic|player@390x780|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
+classic|player@390x780|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
+classic|player@390x780|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
+classic|player@390x780|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+classic|player@390x780|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
+classic|player@390x780|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
 classic|player@390x780|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 classic|player@390x780|dom|div#ptransport.ptransport > button#pbinfo.on.picon[aria-label=* text]|1
 classic|player@390x780|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
 classic|player@390x780|dom|div#ptransport.ptransport > button#pbplay.picon[aria-label=* text]|1
-classic|player@390x780|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-label=* text]|1
-classic|player@390x780|dom|div#ptransport.ptransport > button.nudge.picon[aria-label=* text]|2
-classic|player@390x780|dom|div#ptransport.ptransport > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
-classic|player@390x780|dom|div#ptransport.ptransport > span#ptcur.ptime[aria-hidden=true text]|1
-classic|player@390x780|dom|div#ptransport.ptransport > span#ptdur.ptime[aria-hidden=true text]|1
+classic|player@390x780|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+classic|player@390x780|dom|div#ptransport.ptransport > span.ptransport-spacer[aria-hidden=true]|1
 classic|player@390x780|dom|div#statsov.statsov > div#statsbody.statsbody|1
 classic|player@390x780|dom|div#statsov.statsov > div.statshd|1
 classic|player@390x780|dom|div.actions > button.btnplay[text]|1
@@ -3844,17 +3821,17 @@ classic|player@390x780|dom|div.pifacts.vbadges > span.audio.vbadge[text]|1
 classic|player@390x780|dom|div.pifacts.vbadges > span.res.vbadge[text]|1
 classic|player@390x780|dom|div.poster > div.art.ph[text]|1
 classic|player@390x780|dom|div.row > button#apbtn.pbtn[text]|1
-classic|player@390x780|dom|div.row > button#audiobtn.pbtn[text]|1
+classic|player@390x780|dom|div.row > button#audiobtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 classic|player@390x780|dom|div.row > button#autonextbtn.on.pbtn[text]|1
-classic|player@390x780|dom|div.row > button#qualbtn.pbtn[text]|1
+classic|player@390x780|dom|div.row > button#pbclose.pbtn[text]|1
+classic|player@390x780|dom|div.row > button#qualbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 classic|player@390x780|dom|div.row > button#skipbtn.pbtn[text]|1
-classic|player@390x780|dom|div.row > button#statsbtn.pbtn[text]|1
-classic|player@390x780|dom|div.row > button#subsbtn.pbtn[text]|1
-classic|player@390x780|dom|div.row > button#syncbtn.pbtn[text]|1
-classic|player@390x780|dom|div.row > button.pbtn[text]|1
+classic|player@390x780|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
+classic|player@390x780|dom|div.row > button#subsbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
+classic|player@390x780|dom|div.row > button#syncbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 classic|player@390x780|dom|div.statshd > button.statsx[aria-label=* text]|1
 classic|player@390x780|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
-classic|player@390x780|dom|div.statshd > span[text]|1
+classic|player@390x780|dom|div.statshd > span#statstitle[text]|1
 classic|player@390x780|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 classic|player@390x780|dom|div.topctl > div|4
 classic|player@390x780|dom|div.trks > span.on.trk[text]|1
@@ -3883,20 +3860,11 @@ classic|player@390x780|dom|span.on.trk[text] > span.tdef[text]|1
 classic|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
 classic|player@390x780|dom|svg[aria-hidden=true] > rect|4
-classic|player@390x780|focus|000|button.ghost.sm "Mark watched"
-classic|player@390x780|focus|001|a.ghost.sm "View queue"
-classic|player@390x780|focus|002|button#qualbtn.pbtn "Playback quality"
-classic|player@390x780|focus|003|button#syncbtn.pbtn "Audio sync adjustment"
-classic|player@390x780|focus|004|button#statsbtn.pbtn "Playback info (i)"
-classic|player@390x780|focus|005|button#skipbtn.pbtn "Auto-skip intro & credits"
-classic|player@390x780|focus|006|button#autonextbtn.pbtn.on "Auto-play the next episode when
-classic|player@390x780|focus|007|button.pbtn "Close (Esc)"
-classic|player@390x780|focus|008|button#pbplay.picon "Play"
-classic|player@390x780|focus|009|div#pseek.pseek "Seek"
-classic|player@390x780|focus|010|button#pbinfo.picon.on "Title info"
-classic|player@390x780|focus|011|button#pbpip.picon "Picture in picture"
-classic|player@390x780|focus|012|button#pbfs.picon "Fullscreen"
-classic|player@390x780|focus|013|<wrap>
+classic|player@390x780|focus|000|button#pbforward.picon "Forward 10 seconds"
+classic|player@390x780|focus|001|button#pbinfo.picon.on "Title info"
+classic|player@390x780|focus|002|button#pbpip.picon "Picture in picture"
+classic|player@390x780|focus|003|button#pbfs.picon "Fullscreen"
+classic|player@390x780|focus|004|<wrap>
 classic|player@390x780|req|GET /api/v1/activity|2
 classic|player@390x780|req|GET /api/v1/files/<id>/direct|1
 classic|player@390x780|req|GET /api/v1/items/<id>|1
@@ -5607,7 +5575,7 @@ theater|library@390x780|req|GET /api/v1/libraries|1
 theater|library@390x780|req|GET /api/v1/me|1
 theater|library@390x780|req|GET /api/v1/server|1
 theater|player@1280x860|dom|^ > div#app|1
-theater|player@1280x860|dom|^ > div#modal.modal.open|1
+theater|player@1280x860|dom|^ > div#modal.modal.open[role=dialog aria-modal=true aria-label=*]|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
@@ -5624,7 +5592,7 @@ theater|player@1280x860|dom|div > p[text]|1
 theater|player@1280x860|dom|div#app > header.th-top|1
 theater|player@1280x860|dom|div#app > main#main|1
 theater|player@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
-theater|player@1280x860|dom|div#modal.modal.open > div#player.player|1
+theater|player@1280x860|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 theater|player@1280x860|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 theater|player@1280x860|dom|div#pbar.pbar > div.row|1
 theater|player@1280x860|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
@@ -5633,8 +5601,9 @@ theater|player@1280x860|dom|div#pinfo.pinfo > h3[text]|1
 theater|player@1280x860|dom|div#player.player > div#pbar.pbar|1
 theater|player@1280x860|dom|div#player.player > div#pinfo.pinfo|1
 theater|player@1280x860|dom|div#player.player > div#ploading.ploading|1
-theater|player@1280x860|dom|div#player.player > div#pmenu.pmenu|1
+theater|player@1280x860|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 theater|player@1280x860|dom|div#player.player > div#pskip.pskip|1
+theater|player@1280x860|dom|div#player.player > div#ptimeline.ptimeline|1
 theater|player@1280x860|dom|div#player.player > div#ptransport.ptransport|1
 theater|player@1280x860|dom|div#player.player > div#statsov.statsov|1
 theater|player@1280x860|dom|div#player.player > video#video|1
@@ -5645,16 +5614,18 @@ theater|player@1280x860|dom|div#ploading.ploading > div.pspin|1
 theater|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 theater|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 theater|player@1280x860|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
-theater|player@1280x860|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-label=* text]|1
+theater|player@1280x860|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
+theater|player@1280x860|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
+theater|player@1280x860|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
+theater|player@1280x860|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+theater|player@1280x860|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
+theater|player@1280x860|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
 theater|player@1280x860|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 theater|player@1280x860|dom|div#ptransport.ptransport > button#pbinfo.on.picon[aria-label=* text]|1
 theater|player@1280x860|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
 theater|player@1280x860|dom|div#ptransport.ptransport > button#pbplay.picon[aria-label=* text]|1
-theater|player@1280x860|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-label=* text]|1
-theater|player@1280x860|dom|div#ptransport.ptransport > button.nudge.picon[aria-label=* text]|2
-theater|player@1280x860|dom|div#ptransport.ptransport > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
-theater|player@1280x860|dom|div#ptransport.ptransport > span#ptcur.ptime[aria-hidden=true text]|1
-theater|player@1280x860|dom|div#ptransport.ptransport > span#ptdur.ptime[aria-hidden=true text]|1
+theater|player@1280x860|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+theater|player@1280x860|dom|div#ptransport.ptransport > span.ptransport-spacer[aria-hidden=true]|1
 theater|player@1280x860|dom|div#statsov.statsov > div#statsbody.statsbody|1
 theater|player@1280x860|dom|div#statsov.statsov > div.statshd|1
 theater|player@1280x860|dom|div.actions > button.btnplay[text]|1
@@ -5673,17 +5644,17 @@ theater|player@1280x860|dom|div.phnav > div.crumbs|1
 theater|player@1280x860|dom|div.pifacts.vbadges > span.audio.vbadge[text]|1
 theater|player@1280x860|dom|div.pifacts.vbadges > span.res.vbadge[text]|1
 theater|player@1280x860|dom|div.row > button#apbtn.pbtn[text]|1
-theater|player@1280x860|dom|div.row > button#audiobtn.pbtn[text]|1
+theater|player@1280x860|dom|div.row > button#audiobtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 theater|player@1280x860|dom|div.row > button#autonextbtn.on.pbtn[text]|1
-theater|player@1280x860|dom|div.row > button#qualbtn.pbtn[text]|1
+theater|player@1280x860|dom|div.row > button#pbclose.pbtn[text]|1
+theater|player@1280x860|dom|div.row > button#qualbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 theater|player@1280x860|dom|div.row > button#skipbtn.pbtn[text]|1
-theater|player@1280x860|dom|div.row > button#statsbtn.pbtn[text]|1
-theater|player@1280x860|dom|div.row > button#subsbtn.pbtn[text]|1
-theater|player@1280x860|dom|div.row > button#syncbtn.pbtn[text]|1
-theater|player@1280x860|dom|div.row > button.pbtn[text]|1
+theater|player@1280x860|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
+theater|player@1280x860|dom|div.row > button#subsbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
+theater|player@1280x860|dom|div.row > button#syncbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 theater|player@1280x860|dom|div.statshd > button.statsx[aria-label=* text]|1
 theater|player@1280x860|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
-theater|player@1280x860|dom|div.statshd > span[text]|1
+theater|player@1280x860|dom|div.statshd > span#statstitle[text]|1
 theater|player@1280x860|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 theater|player@1280x860|dom|div.th-ctl > div.th-pop|4
 theater|player@1280x860|dom|div.th-detail.th-hero.th-noart > div.th-dwrap|1
@@ -5734,22 +5705,11 @@ theater|player@1280x860|dom|span.on.trk[text] > span.tdef[text]|1
 theater|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
 theater|player@1280x860|dom|svg[aria-hidden=true] > rect|4
-theater|player@1280x860|focus|000|button.ghost.sm "Mark watched"
-theater|player@1280x860|focus|001|a.ghost.sm "View queue"
-theater|player@1280x860|focus|002|button#qualbtn.pbtn "Playback quality"
-theater|player@1280x860|focus|003|button#syncbtn.pbtn "Audio sync adjustment"
-theater|player@1280x860|focus|004|button#statsbtn.pbtn "Playback info (i)"
-theater|player@1280x860|focus|005|button#skipbtn.pbtn "Auto-skip intro & credits"
-theater|player@1280x860|focus|006|button#autonextbtn.pbtn.on "Auto-play the next episode when
-theater|player@1280x860|focus|007|button.pbtn "Close (Esc)"
-theater|player@1280x860|focus|008|button#pbplay.picon "Play"
-theater|player@1280x860|focus|009|button.picon.nudge "Back 10 seconds"
-theater|player@1280x860|focus|010|button.picon.nudge "Forward 10 seconds"
-theater|player@1280x860|focus|011|div#pseek.pseek "Seek"
-theater|player@1280x860|focus|012|button#pbinfo.picon.on "Title info"
-theater|player@1280x860|focus|013|button#pbpip.picon "Picture in picture"
-theater|player@1280x860|focus|014|button#pbfs.picon "Fullscreen"
-theater|player@1280x860|focus|015|<wrap>
+theater|player@1280x860|focus|000|button#pbforward.picon "Forward 10 seconds"
+theater|player@1280x860|focus|001|button#pbinfo.picon.on "Title info"
+theater|player@1280x860|focus|002|button#pbpip.picon "Picture in picture"
+theater|player@1280x860|focus|003|button#pbfs.picon "Fullscreen"
+theater|player@1280x860|focus|004|<wrap>
 theater|player@1280x860|req|GET /api/v1/activity|2
 theater|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 theater|player@1280x860|req|GET /api/v1/items/<id>|1
@@ -5760,7 +5720,7 @@ theater|player@1280x860|req|POST /api/v1/client-log|1
 theater|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 theater|player@1280x860|req|POST /api/v1/items/<id>/progress|1
 theater|player@390x780|dom|^ > div#app|1
-theater|player@390x780|dom|^ > div#modal.modal.open|1
+theater|player@390x780|dom|^ > div#modal.modal.open[role=dialog aria-modal=true aria-label=*]|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
@@ -5777,7 +5737,7 @@ theater|player@390x780|dom|div > p[text]|1
 theater|player@390x780|dom|div#app > header.th-top|1
 theater|player@390x780|dom|div#app > main#main|1
 theater|player@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
-theater|player@390x780|dom|div#modal.modal.open > div#player.player|1
+theater|player@390x780|dom|div#modal.modal.open[role=dialog aria-modal=true aria-label=*] > div#player.player|1
 theater|player@390x780|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
 theater|player@390x780|dom|div#pbar.pbar > div.row|1
 theater|player@390x780|dom|div#pinfo.pinfo > div.pifacts.vbadges|1
@@ -5786,8 +5746,9 @@ theater|player@390x780|dom|div#pinfo.pinfo > h3[text]|1
 theater|player@390x780|dom|div#player.player > div#pbar.pbar|1
 theater|player@390x780|dom|div#player.player > div#pinfo.pinfo|1
 theater|player@390x780|dom|div#player.player > div#ploading.ploading|1
-theater|player@390x780|dom|div#player.player > div#pmenu.pmenu|1
+theater|player@390x780|dom|div#player.player > div#pmenu.pmenu[role=menu]|1
 theater|player@390x780|dom|div#player.player > div#pskip.pskip|1
+theater|player@390x780|dom|div#player.player > div#ptimeline.ptimeline|1
 theater|player@390x780|dom|div#player.player > div#ptransport.ptransport|1
 theater|player@390x780|dom|div#player.player > div#statsov.statsov|1
 theater|player@390x780|dom|div#player.player > video#video|1
@@ -5798,16 +5759,18 @@ theater|player@390x780|dom|div#ploading.ploading > div.pspin|1
 theater|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekbuf.pseek-buf[aria-hidden=true]|1
 theater|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekfill.pseek-fill[aria-hidden=true]|1
 theater|player@390x780|dom|div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*] > div#pseekthumb.pseek-thumb[aria-hidden=true]|1
-theater|player@390x780|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-label=* text]|1
+theater|player@390x780|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
+theater|player@390x780|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
+theater|player@390x780|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
+theater|player@390x780|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+theater|player@390x780|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
+theater|player@390x780|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
 theater|player@390x780|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 theater|player@390x780|dom|div#ptransport.ptransport > button#pbinfo.on.picon[aria-label=* text]|1
 theater|player@390x780|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
 theater|player@390x780|dom|div#ptransport.ptransport > button#pbplay.picon[aria-label=* text]|1
-theater|player@390x780|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-label=* text]|1
-theater|player@390x780|dom|div#ptransport.ptransport > button.nudge.picon[aria-label=* text]|2
-theater|player@390x780|dom|div#ptransport.ptransport > div#pseek.pseek[role=slider tabindex=0 aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=* aria-valuetext=*]|1
-theater|player@390x780|dom|div#ptransport.ptransport > span#ptcur.ptime[aria-hidden=true text]|1
-theater|player@390x780|dom|div#ptransport.ptransport > span#ptdur.ptime[aria-hidden=true text]|1
+theater|player@390x780|dom|div#ptransport.ptransport > button#pbsubs.pcc.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
+theater|player@390x780|dom|div#ptransport.ptransport > span.ptransport-spacer[aria-hidden=true]|1
 theater|player@390x780|dom|div#statsov.statsov > div#statsbody.statsbody|1
 theater|player@390x780|dom|div#statsov.statsov > div.statshd|1
 theater|player@390x780|dom|div.actions > button.btnplay[text]|1
@@ -5826,17 +5789,17 @@ theater|player@390x780|dom|div.phnav > div.crumbs|1
 theater|player@390x780|dom|div.pifacts.vbadges > span.audio.vbadge[text]|1
 theater|player@390x780|dom|div.pifacts.vbadges > span.res.vbadge[text]|1
 theater|player@390x780|dom|div.row > button#apbtn.pbtn[text]|1
-theater|player@390x780|dom|div.row > button#audiobtn.pbtn[text]|1
+theater|player@390x780|dom|div.row > button#audiobtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 theater|player@390x780|dom|div.row > button#autonextbtn.on.pbtn[text]|1
-theater|player@390x780|dom|div.row > button#qualbtn.pbtn[text]|1
+theater|player@390x780|dom|div.row > button#pbclose.pbtn[text]|1
+theater|player@390x780|dom|div.row > button#qualbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 theater|player@390x780|dom|div.row > button#skipbtn.pbtn[text]|1
-theater|player@390x780|dom|div.row > button#statsbtn.pbtn[text]|1
-theater|player@390x780|dom|div.row > button#subsbtn.pbtn[text]|1
-theater|player@390x780|dom|div.row > button#syncbtn.pbtn[text]|1
-theater|player@390x780|dom|div.row > button.pbtn[text]|1
+theater|player@390x780|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
+theater|player@390x780|dom|div.row > button#subsbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
+theater|player@390x780|dom|div.row > button#syncbtn.pbtn[aria-expanded=false aria-haspopup=menu text]|1
 theater|player@390x780|dom|div.statshd > button.statsx[aria-label=* text]|1
 theater|player@390x780|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
-theater|player@390x780|dom|div.statshd > span[text]|1
+theater|player@390x780|dom|div.statshd > span#statstitle[text]|1
 theater|player@390x780|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 theater|player@390x780|dom|div.th-ctl > div.th-pop|4
 theater|player@390x780|dom|div.th-detail.th-hero.th-noart > div.th-dwrap|1
@@ -5887,23 +5850,11 @@ theater|player@390x780|dom|span.on.trk[text] > span.tdef[text]|1
 theater|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
 theater|player@390x780|dom|svg[aria-hidden=true] > rect|4
-theater|player@390x780|focus|000|button.ghost.sm "Mark watched"
-theater|player@390x780|focus|001|a.ghost.sm "View queue"
-theater|player@390x780|focus|002|a "Home"
-theater|player@390x780|focus|003|a "Activity"
-theater|player@390x780|focus|004|a "Settings"
-theater|player@390x780|focus|005|button#qualbtn.pbtn "Playback quality"
-theater|player@390x780|focus|006|button#syncbtn.pbtn "Audio sync adjustment"
-theater|player@390x780|focus|007|button#statsbtn.pbtn "Playback info (i)"
-theater|player@390x780|focus|008|button#skipbtn.pbtn "Auto-skip intro & credits"
-theater|player@390x780|focus|009|button#autonextbtn.pbtn.on "Auto-play the next episode when
-theater|player@390x780|focus|010|button.pbtn "Close (Esc)"
-theater|player@390x780|focus|011|button#pbplay.picon "Play"
-theater|player@390x780|focus|012|div#pseek.pseek "Seek"
-theater|player@390x780|focus|013|button#pbinfo.picon.on "Title info"
-theater|player@390x780|focus|014|button#pbpip.picon "Picture in picture"
-theater|player@390x780|focus|015|button#pbfs.picon "Fullscreen"
-theater|player@390x780|focus|016|<wrap>
+theater|player@390x780|focus|000|button#pbforward.picon "Forward 10 seconds"
+theater|player@390x780|focus|001|button#pbinfo.picon.on "Title info"
+theater|player@390x780|focus|002|button#pbpip.picon "Picture in picture"
+theater|player@390x780|focus|003|button#pbfs.picon "Fullscreen"
+theater|player@390x780|focus|004|<wrap>
 theater|player@390x780|req|GET /api/v1/activity|2
 theater|player@390x780|req|GET /api/v1/files/<id>/direct|1
 theater|player@390x780|req|GET /api/v1/items/<id>|1
