@@ -101,7 +101,10 @@ replacement = "the sole supervisor reap path; rejected candidates use the same c
 [[symbols]]
 id = "response-publication-observation"
 pattern = "\\.observe_publication\\("
-expected_occurrences = 3
+# +1 for the pacing-hold rung backstop: one test helper publishes a frontier on
+# a predecessor session so claim normalization can read the wedge signature it
+# is being tested against. It is a fixture, not a producer owner.
+expected_occurrences = 4
 kind = "response_admission"
 replacement = "background flow refresh plus exact fixtures; HTTP playlist observation uses the separately inventoried absolute-deadline admission"
 
@@ -1020,6 +1023,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # process: the actor answers on its own mailbox and the sender is dropped when
 # that arm returns, so a retired actor closes the channel rather than leaving a
 # waiter detached. Reviewed as part of the M6 preparation slot's executor.
+# 381 -> 382 with M6's shadow measurement, and this one is a *production*
+# detached task rather than a test actor, so it is worth the words. It owns no
+# producer, no process and no timer; it does one store read and increments an
+# atomic. It is detached deliberately: the control exchange is under an
+# absolute deadline it has already spent by the time this runs, the response is
+# fully built, and awaiting a store read there could turn a completed exchange
+# into a 503 *after* its accepted metric had been recorded — so a measurement
+# would corrupt the metrics it sits beside. It holds no lock (the VOD
+# lifecycle guard is dropped before the response is built), and the fan-out is
+# bounded at 32 in flight by `PREPARATION_SHADOWS_IN_FLIGHT`, because the gate
+# fires per selection change and a client alternating between two selections
+# would otherwise spawn one per exchange.
 # 378 -> 379 with the executor's own tests: `preparation_fixture` spawns one
 # `RollingControlHandle` per test, which is the ordinary test-actor shape
 # already counted a dozen times over. It is owned by the handle the fixture
@@ -1030,7 +1045,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # 379 -> 381 with M7 R-M2's handler acceptance fixture: its two concurrent
 # subtitle-segment request tasks are both joined by the fixture's bounded wait.
 # Neither task is a shipped producer or process owner.
-expected_occurrences = 381
+expected_occurrences = 382
 
 [[module_structures]]
 id = "method-spawn"
@@ -1154,7 +1169,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # loop is that polling the *store* observed only the first of the three writes,
 # so the test could assert against a status its own task had not finished
 # producing. No child process, no producer, no timer.
-expected_occurrences = 200
+# +2 for the VOD fetched-side frontier test: two `VodServe::status()` reads of
+# one session's diagnostics, before and after the hole is filled. They take a
+# manifest lock and return a struct; nothing is launched and nothing is owned.
+expected_occurrences = 202
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

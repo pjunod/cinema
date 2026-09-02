@@ -2098,9 +2098,10 @@ final class AppleClientTests: XCTestCase {
     /// A reach expansion the merge created and neither side had on its own:
     /// `main`'s server-truth delivery watchdog funnels into
     /// `retrySameDeliveryAfterStall`, the exact arm this branch bound to the
-    /// ladder. So a wedge that AVPlayer never reported now also names its
-    /// predecessor and stops at the floor — which is the intent, since a tvOS
-    /// 2160p copy-HLS freeze is precisely a rung the link cannot hold.
+    /// ladder. So a wedge that AVPlayer never reported is bounded by the same
+    /// floor and stops with its own message. It reopens unticketed, though: a
+    /// session whose published bytes were simply never fetched has nothing
+    /// wrong with the rung it was already serving.
     func testTheDeliveryWatchdogAlsoStepsTheLadderDownAndStopsAtItsFloor() {
         var storm = RecoveryReopenBudget()
 
@@ -2121,10 +2122,11 @@ final class AppleClientTests: XCTestCase {
             PlayerController.stallReopenIntent(
                 sessionId: "session-a",
                 isVOD: false,
-                requestId: "request-1"
+                requestId: "request-1",
+                wedge: true
             ),
-            stallIntent(),
-            "the watchdog arm mints the same predecessor binding"
+            .normal,
+            "the watchdog arm comes back on the rung it was already serving"
         )
 
         // At the floor it stops with the delivery-specific message rather than
@@ -2165,7 +2167,8 @@ final class AppleClientTests: XCTestCase {
             PlayerController.stallReopenIntent(
                 sessionId: "session-a",
                 isVOD: false,
-                requestId: "request-1"
+                requestId: "request-1",
+                wedge: false
             ),
             stallIntent()
         )
@@ -2173,7 +2176,8 @@ final class AppleClientTests: XCTestCase {
             PlayerController.stallReopenIntent(
                 sessionId: "session-a",
                 isVOD: true,
-                requestId: "request-1"
+                requestId: "request-1",
+                wedge: false
             ),
             .normal,
             "a completed cache entry has no ladder answer to give"
@@ -2182,11 +2186,202 @@ final class AppleClientTests: XCTestCase {
             PlayerController.stallReopenIntent(
                 sessionId: nil,
                 isVOD: false,
-                requestId: "request-1"
+                requestId: "request-1",
+                wedge: false
             ),
             .normal,
             "direct play holds no session at all"
         )
+    }
+
+    /// A hold answers why the producer paused, which is a different question
+    /// from whether this client may fetch bytes the server has already
+    /// published. The stalls that ask the second question — a delivery wedge,
+    /// and the buffering stall that is the same wedge read from the decoder's
+    /// side — are not the server's to decide.
+    func testAHoldDoesNotGetToDecideAStallThatOnlyAReopenCanFix() {
+        // A delivery wedge is one by construction: the detector that names it
+        // cannot fire on anything else, so no status reading rescues the hold.
+        XCTAssertFalse(PlayerController.holdMayDecideStall(
+            kind: .delivery, publishedEndMs: 200_000, fetchedEndMs: 150_000, runwaySeconds: 0
+        ))
+        XCTAssertFalse(PlayerController.holdMayDecideStall(
+            kind: .delivery, publishedEndMs: 200_000, fetchedEndMs: 199_000, runwaySeconds: 55
+        ))
+        XCTAssertFalse(PlayerController.holdMayDecideStall(
+            kind: .delivery, publishedEndMs: nil, fetchedEndMs: nil, runwaySeconds: nil
+        ))
+
+        // Ten seconds of published media unfetched with the runway gone is the
+        // same freeze, reported by AVPlayer instead of by the server's clock.
+        XCTAssertFalse(PlayerController.holdMayDecideStall(
+            kind: .buffering, publishedEndMs: 200_000, fetchedEndMs: 190_000, runwaySeconds: 10
+        ))
+        XCTAssertFalse(
+            PlayerController.holdMayDecideStall(
+                kind: .buffering, publishedEndMs: 200_000, fetchedEndMs: 150_000, runwaySeconds: nil
+            ),
+            "an unknown runway is not evidence of health"
+        )
+
+        // A player still holding media ahead of the clock is topping up…
+        XCTAssertTrue(PlayerController.holdMayDecideStall(
+            kind: .buffering, publishedEndMs: 200_000, fetchedEndMs: 190_000, runwaySeconds: 11
+        ))
+        // …and a backlog under the pending threshold is the tail of a stream.
+        XCTAssertTrue(PlayerController.holdMayDecideStall(
+            kind: .buffering, publishedEndMs: 200_000, fetchedEndMs: 190_001, runwaySeconds: 0
+        ))
+        XCTAssertTrue(
+            PlayerController.holdMayDecideStall(
+                kind: .buffering, publishedEndMs: nil, fetchedEndMs: nil, runwaySeconds: 0
+            ),
+            "numbers the poll never carried cannot evidence a wedge"
+        )
+
+        // A silent freeze has bytes in hand and is starved of nothing, so the
+        // server keeps that one and the HDR ladder keeps its case.
+        XCTAssertTrue(PlayerController.holdMayDecideStall(
+            kind: .silent, publishedEndMs: 200_000, fetchedEndMs: 150_000, runwaySeconds: 0
+        ))
+    }
+
+    /// The wedge signature is the server's own, and both of its thresholds are
+    /// `DeliveryStarvationDetector`'s — so the reopen that drops its ticket and
+    /// the watchdog that fires one read the same numbers.
+    func testTheWedgeSignatureIsTheDeliveryDetectorsOwnThresholds() {
+        func wedge(_ idle: Int?, published: Int? = 200_000, fetched: Int? = 190_000) -> Bool {
+            PlayerController.isDeliveryWedge(
+                kind: .buffering,
+                deliveredIdleMs: idle,
+                publishedEndMs: published,
+                fetchedEndMs: fetched
+            )
+        }
+
+        XCTAssertEqual(DeliveryStarvationDetector.deliveredIdleThresholdMs, 16_000)
+        XCTAssertEqual(DeliveryStarvationDetector.pendingMediaThresholdMs, 10_000)
+
+        XCTAssertTrue(wedge(16_000))
+        XCTAssertFalse(wedge(15_999), "delivery silence one millisecond short is cadence")
+        XCTAssertFalse(
+            wedge(16_000, fetched: 190_001),
+            "a backlog one millisecond short of the floor is a stream tail"
+        )
+
+        // A server predating the fields, or a session with no delivery yet,
+        // says nothing about a wedge either way.
+        XCTAssertFalse(wedge(nil))
+        XCTAssertFalse(wedge(60_000, published: nil))
+        XCTAssertFalse(wedge(60_000, fetched: nil))
+    }
+
+    /// The call site, not only the rule. In explicit lease mode the stall is
+    /// itself what makes the server answer `hold`, so a hold allowed to decide
+    /// a wedge leaves the loop no exit but the viewer backing out.
+    @MainActor
+    func testAHeldWedgeSpendsNothingAndSaysNothingSoTheReopenCanAnswer() {
+        let controller = PlayerController()
+        let wedge = PlaybackStallEvent(
+            kind: .delivery, action: .reopen, positionMs: 40_000, durationMs: 19_000
+        )
+
+        for reason in ["demand", "time", "bytes", "global", "ahead", "working_set", "no_room"] {
+            let decided = controller.applyStallVerdict(
+                ControlAction(type: "hold", reason: reason), event: wedge
+            )
+            XCTAssertFalse(
+                decided,
+                "\(reason) vetoed the only thing that could clear the wedge"
+            )
+            XCTAssertNil(
+                controller.playbackNotice,
+                "\(reason) spent a viewer-facing notice on a stall it did not decide"
+            )
+            XCTAssertFalse(controller.failed)
+        }
+
+        // A silent freeze is still the server's to hold, and the notice is the
+        // visible half of that outcome.
+        let freeze = PlaybackStallEvent(
+            kind: .silent, action: .reopen, positionMs: 40_000, durationMs: 19_000
+        )
+        let held = controller.applyStallVerdict(
+            ControlAction(type: "hold", reason: "demand"), event: freeze
+        )
+        XCTAssertTrue(held)
+        XCTAssertEqual(controller.playbackNotice, PlayerController.holdNotice("demand"))
+        XCTAssertFalse(controller.failed, "a hold is not a failure")
+
+        // A terminal verdict is untouched: it still decides, and the viewer
+        // still reads the server's words rather than this client's guess.
+        let ended = PlayerController()
+        let stopped = ended.applyStallVerdict(
+            ControlAction(type: "terminal", message: "The library moved."), event: wedge
+        )
+        XCTAssertTrue(stopped)
+        XCTAssertTrue(ended.failed)
+        XCTAssertEqual(ended.playbackError, "The library moved.")
+    }
+
+    /// The server rewrites a ticketed automatic reopen one rung down, which is
+    /// right for a link that cannot hold the rung and wrong for a session whose
+    /// published bytes were never fetched: a 2160p copy session has to come
+    /// back a 2160p copy session.
+    func testAWedgeReopensWithoutATicketSoItsRungSurvivesTheRecovery() {
+        let unbound = PlayerController.applyOpenIntent(
+            to: createBody(),
+            intent: PlayerController.stallReopenIntent(
+                sessionId: "session-a", isVOD: false, requestId: "request-1", wedge: true
+            ),
+            currentSessionId: "session-a",
+            selectedHeight: nil
+        )
+        XCTAssertNil(unbound.previousSessionId)
+        XCTAssertNil(unbound.reopenReason)
+        XCTAssertEqual(unbound.qualityAuto, true, "the viewer is still on Auto")
+
+        // Every other stall still carries today's ticket.
+        let bound = PlayerController.applyOpenIntent(
+            to: createBody(),
+            intent: PlayerController.stallReopenIntent(
+                sessionId: "session-a", isVOD: false, requestId: "request-1", wedge: false
+            ),
+            currentSessionId: "session-a",
+            selectedHeight: nil
+        )
+        XCTAssertEqual(bound.previousSessionId, "session-a")
+        XCTAssertEqual(bound.reopenReason, "stall")
+        XCTAssertEqual(bound.requestId, "request-1")
+
+        // The evidence the reopen reads: a `.delivery` stall is a wedge before
+        // any status poll has landed, which is the state the watchdog fires
+        // from — its own poll is superseded by the recovery it starts.
+        XCTAssertTrue(PlayerController.isDeliveryWedge(
+            kind: .delivery, deliveredIdleMs: nil, publishedEndMs: nil, fetchedEndMs: nil
+        ))
+        XCTAssertFalse(PlayerController.isDeliveryWedge(
+            kind: .buffering, deliveredIdleMs: nil, publishedEndMs: nil, fetchedEndMs: nil
+        ))
+    }
+
+    /// Dropping the ticket changes which rung comes back, not how many times
+    /// this client may ask. Both bounds still own that, and neither reads the
+    /// intent at all.
+    func testAnUnticketedWedgeStillGetsOneAttemptUnderTheSameBounds() {
+        var recovery = SameDeliveryStallRecoveryState()
+        XCTAssertEqual(recovery.next(for: .delivery), .reopen)
+        XCTAssertEqual(
+            recovery.next(for: .delivery),
+            .stop(PlaybackStallKind.delivery.terminalState),
+            "an unticketed reopen is still one reopen"
+        )
+
+        var storm = RecoveryReopenBudget()
+        XCTAssertTrue(storm.admit(at: 300))
+        XCTAssertTrue(storm.admit(at: 301.5))
+        XCTAssertTrue(storm.admit(at: 303))
+        XCTAssertFalse(storm.admit(at: 304.5))
     }
 
     /// One stall, one step. Whatever the drain loop replays after a bound

@@ -888,9 +888,13 @@ async function main() {
   // whole fleet takes, so it is added to every real stall. The Apple client
   // carries the same pair of numbers; if these two ever drift, one platform is
   // making a viewer wait longer than the other for the same reason.
+  // Lifted from the shipped source rather than restated here. A threshold the
+  // harness declares itself is a threshold the tests can agree with while the
+  // player disagrees — and the supply/decode split these fixtures straddle is
+  // decided by exactly one of them.
   const askConstants = ["CONTROL_ASK_MS", "CONTROL_ASK_CAP_MS", "CONTROL_MIN_EXCHANGE_MS",
-    "CONTROL_DEFER_LIMIT"].map((name) => {
-      const found = SHIPPED_UI.match(new RegExp(`const ${name}=\\d+;`));
+    "CONTROL_DEFER_LIMIT", "SUPPLY_RUNWAY_SECS"].map((name) => {
+      const found = SHIPPED_UI.match(new RegExp(`const ${name}=\\d+(?:\\.\\d+)?;`));
       assert.notEqual(found, null, `index.html no longer declares ${name}`);
       return found[0];
     }).join("\n");
@@ -908,7 +912,7 @@ async function main() {
     let hold = null;
     let snapshotFn = null;
     const stub = new Function(
-      "setTimeout", "clearTimeout", "SUPPLY_RUNWAY_SECS", "PERSISTENT_STALL_MS",
+      "setTimeout", "clearTimeout", "PERSISTENT_STALL_MS",
       "PlaybackPolicy", "playQuality", "recordWaitStall", "pbPosSec", "clientLog",
       "setLoading", "startTranscodeFallback", "seekTo", "endWait", "playbackContext",
       "clockFromSec", "CONTROL_CLIENT_ID", "playbackControlSnapshot",
@@ -944,7 +948,6 @@ async function main() {
     )(
       (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
       (id) => { timers.delete(id); },
-      6,
       8_000,
       { stallRecoveryAction: () => "reconnect", stallRecoveryTargetHeight: () => 720 },
       () => "auto",
@@ -1081,11 +1084,34 @@ async function main() {
       "and is bounded where it is shown, not only where it is computed");
   }
 
-  // A hold defers the reopen and NOT the viewer's information. A hold is never
-  // lifted by anything the client does, so a client that only waited would
-  // leave a viewer eight seconds into a frozen picture with no UI, forever.
+  // A supply-starved stall recovers through a hold. The hold says why the
+  // producer paused; it never says whether published bytes can be fetched, and
+  // a player whose buffer is empty has nothing left to wait for. The default
+  // fixture began its wait with 1s buffered, under the shipped threshold.
   {
     const { h, player } = await askWith({ type: "hold", reason: "no_room" });
+    assert.equal(h.reopened.length, 1, "a supply-starved stall reopens through a hold");
+    assert.equal(h.reopened[0].kind, "seek");
+    assert.equal(player.stallRecoveries, 1, "and spends the legacy attempt, exactly once");
+    assert.equal(player.waitTimer, null, "the fall-through arms no deferral timer");
+    assert.equal(player.stallDeferrals, 0, "and counts no deferral");
+    assert.equal(h.loading.filter((l) => /Waiting for the server/.test(l.title || "")).length, 0,
+      "the viewer is told it is reconnecting, not that it is waiting on the server");
+    const fell = h.log.find((entry) => entry.detail === "fallthrough:hold");
+    assert.notEqual(fell, undefined, "the beacon says the hold was recovered through");
+    assert.match(fell.message, /no_room/, "and names the reason the producer gave");
+  }
+
+  // A decode stall still defers to a hold: it holds media it cannot render
+  // rather than media it cannot get, so a reopen would churn against a server
+  // that already knows better. The deferral is of the reopen and NOT of the
+  // viewer's information — a client that only waited would leave a viewer eight
+  // seconds into a frozen picture with no UI, forever.
+  {
+    // This wait began with more buffered than the shipped supply threshold:
+    // plenty left, and still not playing.
+    const { h, player } = await askWith({ type: "hold", reason: "no_room" },
+      { player: { waitRunway: 8 } });
     assert.equal(h.reopened.length, 0, "a hold reopens nothing");
     assert.equal(player.stallRecoveries, 0, "a hold spends no legacy attempt");
     assert.equal(h.loading.length, 1, "a hold tells the viewer what is happening");

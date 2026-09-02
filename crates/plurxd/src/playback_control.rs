@@ -788,7 +788,13 @@ impl DeliveryView {
             HlsSessionInfo::Vod(info) => Self {
                 presentation: "vod".to_owned(),
                 producer_state: info.producer_state.to_owned(),
-                produced_through_ms: info.published_end_ms,
+                // The run from this client's own fetched segment, not from
+                // segment 0. After a far seek past a hole the title's
+                // published frontier sits behind the playhead while the media
+                // this client would fetch next is materialized, and a
+                // frontier behind the playhead would leave that wedge
+                // deadlocked.
+                produced_through_ms: info.ready_ahead_end_ms,
                 fetched_through_ms: info.fetched_end_ms,
                 delivered_bps: None,
                 delivered_idle_ms: None,
@@ -1435,6 +1441,14 @@ pub(crate) struct ActionMetrics {
     pub action: ActionKind,
     pub hold_reason: Option<HoldReason>,
     pub suppressed: bool,
+    /// Held, the client accepts `hold`, and the serving predicate withheld the
+    /// instruction. `hold_reason` carries which hold was withheld.
+    ///
+    /// Distinct from `suppressed` on purpose: that one counts a client too old
+    /// to be told, and an operator watches it fall to zero. This one counts a
+    /// client that was told nothing deliberately, and it should rise only when
+    /// a wedge is being recovered from.
+    pub recovery_withheld: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1456,46 +1470,91 @@ pub(crate) fn action_metrics(
             action: ActionKind::Hold,
             hold_reason: Some(*reason),
             suppressed: false,
+            recovery_withheld: false,
         },
         ControlAction::Terminal { .. } => ActionMetrics {
             action: ActionKind::Terminal,
             hold_reason: None,
             suppressed: false,
+            recovery_withheld: false,
         },
         ControlAction::RetryResource { .. } => ActionMetrics {
             action: ActionKind::RetryResource,
             hold_reason: None,
             suppressed: false,
+            recovery_withheld: false,
         },
-        ControlAction::None => ActionMetrics {
-            action: ActionKind::None,
-            hold_reason: None,
-            // Only a hold this server could actually have named counts as
-            // suppressed. A reason it does not recognise was never a candidate
-            // instruction, so counting it here would inflate the gap with
-            // responses no vocabulary rollout would change.
-            // A producer decision the server could have named outranks a
-            // hold, so it is the thing withheld when the client is passive.
-            suppressed: match delivery
+        ControlAction::None => {
+            let decision = delivery
                 .producer_decision
                 .as_deref()
-                .and_then(ProducerDecisionReason::from_status)
-            {
-                Some(decision) => !request.accepts(if decision.is_permanent() {
-                    TERMINAL_ACTION
-                } else {
-                    RETRY_RESOURCE_ACTION
-                }),
-                None => {
-                    !request.accepts_hold()
-                        && delivery
-                            .hold_reason
-                            .as_deref()
-                            .is_some_and(|reason| HoldReason::from_delivery(reason).is_some())
-                }
-            },
-        },
+                .and_then(ProducerDecisionReason::from_status);
+            // Only a hold this server could actually have named is a candidate
+            // instruction; a reason it does not recognise was never one.
+            let hold = delivery
+                .hold_reason
+                .as_deref()
+                .and_then(HoldReason::from_delivery);
+            // Held, the client could have been told, and the serving predicate
+            // is why it was not. Counted apart from the vocabulary gap so a
+            // withheld hold never reads as a client too old to hear it.
+            let recovery_withheld = decision.is_none()
+                && request.accepts_hold()
+                && hold.is_some()
+                && recovery_outranks_hold(delivery, request);
+            ActionMetrics {
+                action: ActionKind::None,
+                // Which hold was withheld, and only then: every other `none`
+                // carries no reason, because nothing was withheld.
+                hold_reason: if recovery_withheld { hold } else { None },
+                // Only a hold this server could actually have named counts as
+                // suppressed. A reason it does not recognise was never a
+                // candidate instruction, so counting it here would inflate the
+                // gap with responses no vocabulary rollout would change.
+                // A producer decision the server could have named outranks a
+                // hold, so it is the thing withheld when the client is passive.
+                suppressed: match decision {
+                    Some(decision) => !request.accepts(if decision.is_permanent() {
+                        TERMINAL_ACTION
+                    } else {
+                        RETRY_RESOURCE_ACTION
+                    }),
+                    None => !request.accepts_hold() && hold.is_some(),
+                },
+                recovery_withheld,
+            }
+        }
     }
+}
+
+/// Runway at or below which a stalled client is starved. The same 10 s the
+/// Apple `DeliveryStarvationDetector` uses (`runwayCeilingSeconds`), so the
+/// two sides call the same player starved.
+pub(crate) const STARVED_RUNWAY_MS: i64 = 10_000;
+
+/// Published-but-unfetched media that proves a reconnect has something to
+/// fetch. The Apple detector's `pendingMediaThresholdMs`.
+pub(crate) const FETCHABLE_GAP_MS: i64 = 10_000;
+
+/// The one fact that outranks every advisory hold: this client is stalled,
+/// starved, out of runway, and the server has already published media it has
+/// not fetched. Production state cannot veto fetching served bytes.
+///
+/// Conjunctive on purpose. `client_runway_ms` reads 0 for an unknown runway,
+/// so the client's own `stalled` and `starved` reports are the positive
+/// evidence; the gap is the proof there is something to fetch; an unknown
+/// produced frontier proves nothing and fails the predicate.
+pub(crate) fn recovery_outranks_hold(delivery: &DeliveryView, request: &ControlRequestV1) -> bool {
+    request.render_state == RenderState::Stalled
+        && request
+            .observation
+            .as_ref()
+            .and_then(|observation| observation.decoder_state)
+            == Some(DecoderState::Starved)
+        && delivery.client_runway_ms <= STARVED_RUNWAY_MS
+        && delivery.produced_through_ms.is_some_and(|produced| {
+            produced.saturating_sub(delivery.fetched_through_ms) >= FETCHABLE_GAP_MS
+        })
 }
 
 pub(crate) fn resolve_action(
@@ -1541,6 +1600,13 @@ pub(crate) fn resolve_action(
         return ControlAction::None;
     }
     if !request.accepts_hold() {
+        return ControlAction::None;
+    }
+    // Serving outranks production. The hold is still reported in
+    // `delivery.hold_reason` — only the instruction is withheld, because a
+    // stalled client with published bytes it has not fetched must be free to
+    // reconnect and fetch them.
+    if recovery_outranks_hold(delivery, request) {
         return ControlAction::None;
     }
     delivery
@@ -1727,6 +1793,13 @@ pub(crate) struct LocalControlResult {
     pub terminal_handoff: Option<TerminalResponseHandoff>,
     /// Shared result of the one session-owned durable terminal continuation.
     pub terminal_commit: Option<TerminalCommitReceipt>,
+    /// This accepted exchange's selection differs from the last one's.
+    ///
+    /// What the viewer changed and what the device can do about it, answered
+    /// by whichever engine served the exchange. `ControlState::observe` is the
+    /// one implementation, and it is on `ControlState` precisely so both
+    /// engines can answer it.
+    pub selection: SelectionObservation,
 }
 
 #[derive(Clone)]
@@ -2192,6 +2265,16 @@ impl PlaybackDemandSnapshot {
     }
 }
 
+/// What one accepted exchange said about the viewer's intent and the device.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SelectionObservation {
+    /// The selection differs from the last accepted one. `false` on a replay
+    /// and on the first accepted exchange.
+    pub changed: bool,
+    /// The document the **session** is holding, not this exchange's.
+    pub capabilities: Option<DynamicCapabilities>,
+}
+
 #[derive(Debug)]
 pub(crate) struct ControlState {
     generation: Option<String>,
@@ -2201,6 +2284,39 @@ pub(crate) struct ControlState {
     last_sequence: u64,
     last_accepted_at: Option<Instant>,
     prior_action: ControlAction,
+    /// The selection the last accepted exchange carried.
+    ///
+    /// Here rather than on the rolling actor because **both delivery engines
+    /// hold a `ControlState` and only one of them has an actor**. A session is
+    /// served by the VOD engine whenever `try_vod_session` admits it, which it
+    /// does for every `Presentation::Vod` request — and `into_request` sets
+    /// that for every create, since the growing live presentation was removed.
+    /// So a gate that lived on the rolling actor alone would see the minority
+    /// of exchanges and report a confidently undercounted picture, which is
+    /// worse than reporting none.
+    ///
+    /// Cleared with the client identity on an owner-epoch advance: the
+    /// sequence space restarts, and a selection from before the advance is not
+    /// something this client has since departed from.
+    last_selection: Option<ClientSelection>,
+    /// The capability document this session was told, on any exchange.
+    ///
+    /// Here for the same reason as `last_selection`: the rolling actor has its
+    /// own copy, and the VOD engine — which serves most sessions — has no
+    /// actor at all. A consumer reading only the actor's would see nothing on
+    /// the majority path.
+    ///
+    /// **Reading this exchange's document instead is not a workable
+    /// substitute**, and the shipped clients are why: both strip
+    /// `capabilities` on every sequence after the first when the document has
+    /// not changed, exactly as the wire contract permits. So any consumer that
+    /// fires on a *later* exchange — which is every consumer worth having —
+    /// would see `None` every time.
+    ///
+    /// Last write wins over `Some`, and cleared with the client identity on an
+    /// owner-epoch advance: the next accepted exchange must then be sequence 1,
+    /// which the fence requires to carry a document.
+    last_capabilities: Option<DynamicCapabilities>,
 }
 
 impl Default for ControlState {
@@ -2213,6 +2329,8 @@ impl Default for ControlState {
             last_sequence: 0,
             last_accepted_at: None,
             prior_action: ControlAction::None,
+            last_selection: None,
+            last_capabilities: None,
         }
     }
 }
@@ -2267,6 +2385,8 @@ impl ControlState {
             self.last_sequence = 0;
             self.last_accepted_at = None;
             self.prior_action = ControlAction::None;
+            self.last_selection = None;
+            self.last_capabilities = None;
         }
         match self.client_instance_id {
             None => {
@@ -2317,6 +2437,46 @@ impl ControlState {
             self.prior_action.clone(),
             client_platform,
         ))
+    }
+
+    /// Take this exchange's selection and say whether it moved.
+    ///
+    /// M6's gate. Building a candidate recipe costs two store reads — the
+    /// source file and the network prior — the exchange runs about once a
+    /// second per client under an absolute deadline, and the answer is almost
+    /// always *nothing changed*.
+    ///
+    /// **Against the previous selection, never against what is delivered.** A
+    /// client's ask and the height it gets are not the same number: an
+    /// explicit rung snaps onto the ladder, so a client asking 1079 is served
+    /// 1080 and goes on asking 1079. A gate comparing the two would read
+    /// *changed* on every exchange for the rest of that session, spending the
+    /// reads it exists to save on a candidate identical to what is playing.
+    ///
+    /// Called by both delivery engines on acceptance, and only on acceptance:
+    /// a replay is the same exchange arriving twice and changed the selection
+    /// the first time or not at all. `false` on the first accepted exchange —
+    /// a session just created from an intent has not since departed from it.
+    /// Both answers together, because a consumer that wants to know what the
+    /// viewer changed also wants to know what the device can do about it —
+    /// and reading either off the live exchange is wrong for the same reason.
+    pub(crate) fn observe(
+        &mut self,
+        selection: &ClientSelection,
+        capabilities: Option<&DynamicCapabilities>,
+    ) -> SelectionObservation {
+        let changed = self
+            .last_selection
+            .as_ref()
+            .is_some_and(|previous| previous != selection);
+        self.last_selection = Some(selection.clone());
+        if let Some(capabilities) = capabilities {
+            self.last_capabilities = Some(capabilities.clone());
+        }
+        SelectionObservation {
+            changed,
+            capabilities: self.last_capabilities.clone(),
+        }
     }
 
     /// Recover the immutable result for the exact accepted identity/sequence
@@ -3927,7 +4087,7 @@ pub(crate) struct RollingControlOutcome {
     pub platform: ClientPlatform,
     pub lease: RollingLeaseSnapshot,
     pub flow_ticket: u64,
-    /// This exchange's selection differs from the last accepted one.
+    /// What the viewer changed and what the device can do about it.
     ///
     /// M6's gate, and the reason it lives here: building a candidate recipe
     /// costs two store reads (the source file and the network prior), the
@@ -3943,7 +4103,7 @@ pub(crate) struct RollingControlOutcome {
     /// session and spend the reads it exists to save. `false` on a replay and
     /// on the first accepted exchange: a session that has just been created
     /// from an intent has not since departed from it.
-    pub selection_changed: bool,
+    pub selection: SelectionObservation,
 }
 
 /// A session-owned continuation installed synchronously by the rolling actor
@@ -5510,27 +5670,10 @@ struct RollingControlActor {
     last_renewal_kind: &'static str,
     mode: RollingLeaseMode,
     demand: Option<PlaybackDemandSnapshot>,
-    /// The capability document this session is holding, not this exchange's.
-    ///
-    /// `ControlRequestV1::validate` requires `capabilities` only on sequence 1
-    /// and permits every later exchange to omit them, so a consumer reading
-    /// the live snapshot sees `None` for the whole session after the first
-    /// message. For a field meaning *this device can hold two live pipelines*
-    /// that would refuse every transition a capable client ever makes — which
-    /// is every transition that will actually happen.
-    ///
-    /// Last write wins over `Some`. A client that changes its answer
-    /// mid-session is telling the truth about a device that changed — a
-    /// television that woke a second decoder, a phone that lost one — so the
-    /// newer document is the right one and no reconciliation is owed.
-    ///
-    /// **Nothing clears this on an owner-epoch advance, and it cannot go
-    /// stale anyway.** An advance resets `client_instance_id`, after which the
-    /// next accepted exchange must be sequence 1, and a sequence-1 exchange
-    /// that carries no capabilities fails twice over: `validate` rejects the
-    /// body, and the fence's `platform.ok_or(StaleClient)` rejects the accept.
-    /// So the exchange that could read a stale document is the exchange that
-    /// has just overwritten it.
+    /// Superseded by `ControlState::last_capabilities`, which both delivery
+    /// engines can reach; this copy is the rolling actor's own and is kept
+    /// only for the tests that pin the retention property.
+    #[cfg_attr(not(test), allow(dead_code))]
     retained_capabilities: Option<DynamicCapabilities>,
     settled_target: Option<SettledTarget>,
     /// This playback's single preparation slot. One per playback is already
@@ -6284,7 +6427,7 @@ impl RollingControlActor {
                 lease: self.snapshot_at(now),
                 flow_ticket: self.last_flow_ticket,
                 // A terminal replay is not a transition by construction.
-                selection_changed: false,
+                selection: SelectionObservation::default(),
             });
         }
         let (disposition, accepted_sequence, action, platform) = self.control.accept_at(
@@ -6297,14 +6440,19 @@ impl RollingControlActor {
         )?;
         let accepted_end = disposition == ControlDisposition::Accepted
             && request.snapshot.demand == PlaybackDemand::End;
-        // Taken before the snapshot is moved, and only for an accepted
-        // exchange: a replay is the same exchange arriving twice, and it
-        // changed the selection the first time or not at all.
-        let selection_changed = disposition == ControlDisposition::Accepted
-            && self
-                .demand
-                .as_ref()
-                .is_some_and(|previous| previous.selection != request.snapshot.selection);
+        // Delegated to `ControlState` rather than compared against
+        // `self.demand`, because both delivery engines hold a `ControlState`
+        // and only this one has an actor — see `ControlState::last_selection`.
+        // Only for an accepted exchange: a replay is the same exchange
+        // arriving twice.
+        let selection = if disposition == ControlDisposition::Accepted {
+            self.control.observe(
+                &request.snapshot.selection,
+                request.snapshot.capabilities.as_ref(),
+            )
+        } else {
+            SelectionObservation::default()
+        };
         if disposition == ControlDisposition::Accepted {
             self.mode = RollingLeaseMode::Explicit;
             self.settled_target = Some(SettledTarget {
@@ -6352,7 +6500,7 @@ impl RollingControlActor {
             platform,
             lease: self.snapshot_at(now),
             flow_ticket,
-            selection_changed,
+            selection,
         })
     }
 
@@ -10037,6 +10185,11 @@ static PREPARATION_DECISIONS: [[AtomicU64; 5]; 5] = [const { [const { AtomicU64:
 /// Exchanges where production was held and the client had not declared the
 /// action, so it was told nothing. Watch this fall as clients roll out.
 static CONTROL_ACTIONS_SUPPRESSED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// Holds withheld by the serving predicate, by reason and platform. A hold the
+/// client would have understood, not sent because the client was stalled with
+/// published media it had not fetched.
+static CONTROL_RECOVERY_WITHHELD: [[AtomicU64; 3]; 7] =
+    [const { [const { AtomicU64::new(0) }; 3] }; 7];
 /// Clients by platform and whether they declared they accept a hold. This is
 /// the fleet's rollout progress, readable without touching a device.
 static CONTROL_VOCABULARY: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
@@ -10181,7 +10334,13 @@ pub(crate) fn record_action(
     let platform = platform_index(platform);
     CONTROL_ACTIONS[metrics.action as usize][platform].fetch_add(1, Ordering::Relaxed);
     if let Some(reason) = metrics.hold_reason {
-        CONTROL_HOLD_REASONS[reason as usize].fetch_add(1, Ordering::Relaxed);
+        // Holds *sent*. A withheld one was not sent, so it is counted only in
+        // its own slot below.
+        if metrics.recovery_withheld {
+            CONTROL_RECOVERY_WITHHELD[reason as usize][platform].fetch_add(1, Ordering::Relaxed);
+        } else {
+            CONTROL_HOLD_REASONS[reason as usize].fetch_add(1, Ordering::Relaxed);
+        }
     }
     if metrics.suppressed {
         CONTROL_ACTIONS_SUPPRESSED[platform].fetch_add(1, Ordering::Relaxed);
@@ -10315,6 +10474,29 @@ pub(crate) fn prometheus() -> String {
             "plurx_playback_control_actions_suppressed_total{{platform=\"{platform}\"}} {}\n",
             CONTROL_ACTIONS_SUPPRESSED[index].load(Ordering::Relaxed)
         ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_control_recovery_withheld_total Holds a client would have understood, withheld because it was stalled with published media it had not fetched.\n\
+         # TYPE plurx_playback_control_recovery_withheld_total counter\n",
+    );
+    for (reason_index, reason) in [
+        "demand",
+        "time",
+        "bytes",
+        "global",
+        "ahead",
+        "working_set",
+        "no_room",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
+            output.push_str(&format!(
+                "plurx_playback_control_recovery_withheld_total{{reason=\"{reason}\",platform=\"{platform}\"}} {}\n",
+                CONTROL_RECOVERY_WITHHELD[reason_index][platform_index].load(Ordering::Relaxed)
+            ));
+        }
     }
     output.push_str(
         "# HELP plurx_playback_control_vocabulary_total Accepted exchanges by client platform and whether the client declared every action this server can send.\n\
@@ -10770,6 +10952,7 @@ mod tests {
                 action: ActionKind::None,
                 hold_reason: None,
                 suppressed: true,
+                recovery_withheld: false,
             },
         );
 
@@ -10810,7 +10993,291 @@ mod tests {
                 action: ActionKind::Hold,
                 hold_reason: Some(HoldReason::WorkingSet),
                 suppressed: false,
+                recovery_withheld: false,
             },
+        );
+    }
+
+    /// A client the serving predicate is about to speak for: stalled, its
+    /// decoder starved, no runway left, and 35 s of published media it has not
+    /// fetched. `delivery_with_hold` is the healthy counterpart — 15 s of
+    /// runway and a 5 s gap — and every test below plays the two against each
+    /// other.
+    fn stalled_starved() -> (DeliveryView, ControlRequestV1) {
+        let mut delivery = delivery_with_hold(Some("time"));
+        delivery.client_runway_ms = 0;
+        delivery.produced_through_ms = Some(60_000);
+        delivery.fetched_through_ms = 25_000;
+        let mut request = accepts_everything();
+        request.render_state = RenderState::Stalled;
+        request.observation = Some(ClientObservation {
+            dropped_frames: None,
+            decoder_state: Some(DecoderState::Starved),
+            error_code: None,
+            error_detail: None,
+        });
+        (delivery, request)
+    }
+
+    /// A VOD status carrying the two frontiers a far seek pulls apart: the
+    /// title's own published run, and the run measured from the segment this
+    /// client was last served.
+    fn vod_status(
+        published_end_ms: Option<i64>,
+        ready_ahead_end_ms: Option<i64>,
+        fetched_end_ms: i64,
+    ) -> HlsSessionInfo {
+        HlsSessionInfo::Vod(Box::new(crate::vodserve::VodSessionInfo {
+            id: "vod-session".to_owned(),
+            file_id: 7,
+            target_height: 1080,
+            encoder: "vod",
+            playlist_shape: "vod",
+            producer_state: "held",
+            producer_hold: Some("working_set"),
+            producer_failed: None,
+            published_end_ms,
+            ready_ahead_end_ms,
+            fetched_end_ms,
+            fetched_segment: Some(20),
+            ahead_seconds: ready_ahead_end_ms.map(|end| (end - fetched_end_ms).max(0) / 1_000),
+            materialized_segments: 8,
+            planned_segments: 60,
+            materialized_bytes: 8_192,
+            planned_bytes: 61_440,
+            working_set_bytes: 8_192,
+            working_set_budget_bytes: 1 << 30,
+            completed_cache_bytes: 0,
+            admitted: true,
+            suspended: true,
+            final_: false,
+        }))
+    }
+
+    #[test]
+    fn a_vod_seek_past_a_hole_is_judged_by_the_media_ahead_of_the_client() {
+        // The trap this closes: after a far seek the title's published run
+        // ends behind the playhead, so `published − fetched` is negative and
+        // the predicate fails safe — leaving a client wedged in front of
+        // segments that are materialized and servable right now.
+        let (_, mut request) = stalled_starved();
+        // Unlike the resolver fixtures, this one goes through `from_status`,
+        // which computes the runway itself: a stalled player's buffer ends at
+        // its own position.
+        request.buffered_through_ms = request.position_ms;
+        let seeked = DeliveryView::from_status(
+            &vod_status(Some(20_000), Some(240_000), 200_000),
+            &request,
+            "node-a",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(
+            seeked.produced_through_ms,
+            Some(240_000),
+            "the frontier the control plane reads is the one this client can fetch from",
+        );
+        assert_eq!(
+            resolve_action(&ControlAction::None, &seeked, &request),
+            ControlAction::None,
+            "so a post-seek wedge recovers rather than deadlocking",
+        );
+
+        // No hole, no difference: this is a correction to one reading, not a
+        // second policy.
+        let contiguous = DeliveryView::from_status(
+            &vod_status(Some(240_000), Some(240_000), 200_000),
+            &request,
+            "node-a",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(contiguous.produced_through_ms, seeked.produced_through_ms);
+
+        // A rendition that has published nothing ahead of this client proves
+        // nothing, and an unknown frontier must never authorise a reopen.
+        let unknown = DeliveryView::from_status(
+            &vod_status(Some(20_000), None, 200_000),
+            &request,
+            "node-a",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(unknown.produced_through_ms, None);
+        assert_eq!(
+            resolve_action(&ControlAction::None, &unknown, &request),
+            ControlAction::Hold {
+                reason: HoldReason::WorkingSet,
+            },
+        );
+    }
+
+    #[test]
+    fn a_stalled_starved_client_with_fetchable_media_is_not_told_to_hold() {
+        // Whatever the producer paused for, it did not pause the bytes this
+        // client has already been served and has not fetched. Production state
+        // is not authority over serving.
+        let healthy = accepts_everything();
+        for reason in [
+            "demand",
+            "time",
+            "bytes",
+            "global",
+            "ahead",
+            "working_set",
+            "no_room",
+        ] {
+            let (mut wedged, request) = stalled_starved();
+            wedged.hold_reason = Some(reason.to_owned());
+            assert_eq!(
+                resolve_action(&ControlAction::None, &wedged, &request),
+                ControlAction::None,
+                "{reason} must not veto a wedged client's recovery",
+            );
+
+            // The same hold, to a client that is playing, is still an
+            // instruction. Withholding it there would cost a reopen the server
+            // asked for.
+            let held = delivery_with_hold(Some(reason));
+            assert_eq!(
+                resolve_action(&ControlAction::None, &held, &healthy),
+                ControlAction::Hold {
+                    reason: HoldReason::from_delivery(reason).expect("named reason"),
+                },
+                "{reason} must still be sent to a healthy client",
+            );
+        }
+    }
+
+    #[test]
+    fn the_serving_predicate_is_conjunctive() {
+        // Four facts, and no three of them are enough. `client_runway_ms`
+        // reads 0 for an unknown runway, so without the client's own stalled
+        // and starved reports a quiet client would look starved to us.
+        /// One conjunct, removed.
+        type BreakOne = fn(&mut DeliveryView, &mut ControlRequestV1);
+        let cases: [(&str, BreakOne); 6] = [
+            ("not stalled", |_, request| {
+                request.render_state = RenderState::Rendering;
+            }),
+            ("decoder ready", |_, request| {
+                request.observation = Some(ClientObservation {
+                    dropped_frames: None,
+                    decoder_state: Some(DecoderState::Ready),
+                    error_code: None,
+                    error_detail: None,
+                });
+            }),
+            ("no observation", |_, request| {
+                request.observation = None;
+            }),
+            ("runway above the ceiling", |delivery, _| {
+                delivery.client_runway_ms = STARVED_RUNWAY_MS + 1;
+            }),
+            ("gap below the threshold", |delivery, _| {
+                delivery.fetched_through_ms =
+                    delivery.produced_through_ms.expect("produced") - (FETCHABLE_GAP_MS - 1);
+            }),
+            ("unknown produced frontier", |delivery, _| {
+                delivery.produced_through_ms = None;
+            }),
+        ];
+        for (name, break_one) in cases {
+            let (mut delivery, mut request) = stalled_starved();
+            break_one(&mut delivery, &mut request);
+            assert_eq!(
+                resolve_action(&ControlAction::None, &delivery, &request),
+                ControlAction::Hold {
+                    reason: HoldReason::Time,
+                },
+                "{name} alone must leave the hold in force",
+            );
+            assert!(!recovery_outranks_hold(&delivery, &request), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_producer_decision_still_outranks_the_predicate() {
+        // The ranking is unchanged: a producer that has stopped is not
+        // holding, and a wedged client must still be told when trying again
+        // cannot help.
+        let (mut delivery, request) = stalled_starved();
+        delivery.producer_decision = Some("unsupported".to_owned());
+        let ControlAction::Terminal { code, .. } =
+            resolve_action(&ControlAction::None, &delivery, &request)
+        else {
+            panic!("a permanent decision must still end the session");
+        };
+        assert_eq!(code, ProducerDecisionReason::Unsupported);
+
+        delivery.producer_decision = Some("reader_failed".to_owned());
+        assert_eq!(
+            resolve_action(&ControlAction::None, &delivery, &request),
+            ControlAction::RetryResource {
+                after_ms: NEXT_EXCHANGE_MS,
+                reason: ProducerDecisionReason::ReaderFailed,
+            },
+        );
+    }
+
+    #[test]
+    fn a_passive_client_is_still_told_nothing_and_counted_suppressed() {
+        // The vocabulary fence comes first. A client that never declared
+        // `hold` was not withheld from — it was never a candidate.
+        let (delivery, mut request) = stalled_starved();
+        request.supported_actions = None;
+        let action = resolve_action(&ControlAction::None, &delivery, &request);
+        assert_eq!(action, ControlAction::None);
+        assert_eq!(
+            action_metrics(&action, &delivery, &request),
+            ActionMetrics {
+                action: ActionKind::None,
+                hold_reason: None,
+                suppressed: true,
+                recovery_withheld: false,
+            },
+        );
+    }
+
+    #[test]
+    fn a_withheld_hold_is_counted_by_reason_and_never_as_suppressed() {
+        // Two different facts about one exchange. `suppressed` is a client too
+        // old to be told; this is a client deliberately not told. An operator
+        // watching the first fall to zero must not see the second in it.
+        let (delivery, request) = stalled_starved();
+        let action = resolve_action(&ControlAction::None, &delivery, &request);
+        assert_eq!(action, ControlAction::None);
+        let metrics = action_metrics(&action, &delivery, &request);
+        assert_eq!(
+            metrics,
+            ActionMetrics {
+                action: ActionKind::None,
+                hold_reason: Some(HoldReason::Time),
+                suppressed: false,
+                recovery_withheld: true,
+            },
+        );
+
+        let before_withheld =
+            CONTROL_RECOVERY_WITHHELD[HoldReason::Time as usize][1].load(Ordering::Relaxed);
+        let before_sent = CONTROL_HOLD_REASONS[HoldReason::Time as usize].load(Ordering::Relaxed);
+        let before_suppressed = CONTROL_ACTIONS_SUPPRESSED[1].load(Ordering::Relaxed);
+        record_action(&action, &delivery, &request, ClientPlatform::Apple);
+        assert_eq!(
+            CONTROL_RECOVERY_WITHHELD[HoldReason::Time as usize][1].load(Ordering::Relaxed),
+            before_withheld + 1,
+        );
+        // A withheld hold was not sent, so the sent counter must not move.
+        assert_eq!(
+            CONTROL_HOLD_REASONS[HoldReason::Time as usize].load(Ordering::Relaxed),
+            before_sent,
+        );
+        assert_eq!(
+            CONTROL_ACTIONS_SUPPRESSED[1].load(Ordering::Relaxed),
+            before_suppressed,
         );
     }
 
@@ -10834,6 +11301,10 @@ mod tests {
             assert_eq!(reason as usize, expected, "{reason:?} moved slot");
         }
         assert_eq!(CONTROL_HOLD_REASONS.len(), 7);
+        // The withheld exposition indexes the same discriminant, so it moves
+        // with the same variants and is pinned by the same assertion.
+        assert_eq!(CONTROL_RECOVERY_WITHHELD.len(), 7);
+        assert_eq!(CONTROL_RECOVERY_WITHHELD[0].len(), 3);
     }
 
     #[test]
@@ -11602,7 +12073,7 @@ mod tests {
             .control_at(started + Duration::from_secs(1), owned_control(&first))
             .expect("sequence 1 accepted");
         assert!(
-            !outcome.selection_changed,
+            !outcome.selection.changed,
             "a session that has just been created from an intent has not since \
              departed from it",
         );
@@ -11617,7 +12088,7 @@ mod tests {
             .control_at(started + Duration::from_secs(2), owned_control(&same))
             .expect("sequence 2 accepted");
         assert!(
-            !outcome.selection_changed,
+            !outcome.selection.changed,
             "an ordinary exchange must not spend the reads the gate exists to save",
         );
 
@@ -11627,7 +12098,7 @@ mod tests {
         let outcome = actor
             .control_at(started + Duration::from_secs(3), owned_control(&moved))
             .expect("sequence 3 accepted");
-        assert!(outcome.selection_changed, "the viewer picked another track");
+        assert!(outcome.selection.changed, "the viewer picked another track");
 
         // And it is a comparison against the *previous* selection, not a
         // latch: holding the new selection is not a fresh change.
@@ -11637,7 +12108,7 @@ mod tests {
             .control_at(started + Duration::from_secs(4), owned_control(&held))
             .expect("sequence 4 accepted");
         assert!(
-            !outcome.selection_changed,
+            !outcome.selection.changed,
             "the selection is now the previous one",
         );
     }
@@ -11675,7 +12146,7 @@ mod tests {
                 )
                 .expect("accepted");
             assert!(
-                !outcome.selection_changed,
+                !outcome.selection.changed,
                 "sequence {sequence}: an unchanged ask is unchanged however it \
                  was served",
             );
@@ -11703,15 +12174,65 @@ mod tests {
         let accepted = actor
             .control_at(started + Duration::from_secs(2), owned_control(&moved))
             .expect("sequence 2 accepted");
-        assert!(accepted.selection_changed);
+        assert!(accepted.selection.changed);
 
         let replayed = actor
             .control_at(started + Duration::from_secs(3), owned_control(&moved))
             .expect("sequence 2 replayed");
         assert_eq!(replayed.disposition, ControlDisposition::Replay);
         assert!(
-            !replayed.selection_changed,
+            !replayed.selection.changed,
             "one viewer action, one resolution",
+        );
+        assert!(
+            replayed.selection.capabilities.is_none(),
+            "and a replay reports no observation at all, not a stale one",
+        );
+    }
+
+    /// The capability document travels with the observation, and it is the
+    /// **retained** one.
+    ///
+    /// This is the property that decides whether the shadow measures anything
+    /// at all. Both shipped clients strip `capabilities` on every exchange
+    /// after the first when the document has not changed — exactly as the wire
+    /// permits — and the gate never fires on the first. So a consumer reading
+    /// this exchange's document would see `None` every single time it was
+    /// asked, and the metric would read zero forever while looking healthy.
+    #[test]
+    fn the_observation_carries_the_retained_capability_document() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let base = request();
+
+        let mut first = base.clone();
+        first.sequence = 1;
+        first.capabilities = first.capabilities.map(|mut caps| {
+            caps.dual_player_preparation = true;
+            caps
+        });
+        actor
+            .control_at(started + Duration::from_secs(1), owned_control(&first))
+            .expect("sequence 1 accepted");
+
+        // The exchange that actually changes something is a later one, and it
+        // carries no capabilities — which is what the clients send.
+        let mut moved = base.clone();
+        moved.sequence = 2;
+        moved.capabilities = None;
+        moved.selection.audio_track = Some(base.selection.audio_track.unwrap_or(0) + 1);
+        let outcome = actor
+            .control_at(started + Duration::from_secs(2), owned_control(&moved))
+            .expect("sequence 2 accepted");
+        assert!(outcome.selection.changed);
+        assert!(
+            outcome
+                .selection
+                .capabilities
+                .expect("the session was told once")
+                .dual_player_preparation,
+            "the retained document, not this exchange's absent one",
         );
     }
 
@@ -15453,6 +15974,26 @@ mod tests {
         assert!(metrics.contains(
             "plurx_playback_control_platform_exchanges_total{outcome=\"accepted\",platform=\"web\"}"
         ));
+        // A withheld hold is neither sent nor suppressed, so it needs its own
+        // series or it would read as holds simply having stopped happening.
+        for reason in [
+            "demand",
+            "time",
+            "bytes",
+            "global",
+            "ahead",
+            "working_set",
+            "no_room",
+        ] {
+            for platform in ["web", "apple", "android"] {
+                assert!(
+                    metrics.contains(&format!(
+                        "plurx_playback_control_recovery_withheld_total{{reason=\"{reason}\",platform=\"{platform}\"}}"
+                    )),
+                    "{reason}/{platform} has no withheld series",
+                );
+            }
+        }
         assert!(
             metrics.contains("plurx_playback_control_relays_total{outcome=\"invalid_response\"}")
         );

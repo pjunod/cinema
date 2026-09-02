@@ -770,6 +770,20 @@ Three details, each load-bearing:
   that reserve remains available, changing the release point produces more
   media the client is still declining to request.
 
+  A hold is also not an instruction that outranks recovery, and the control
+  plane now says so. When one exchange proves the client is stalled, its
+  decoder starved, its runway at or below 10 s, and at least 10 s of published
+  media unfetched, the resolver answers `none` instead of `hold` — for every
+  hold reason, because the reason describes production and the predicate
+  describes serving. Production state is never authority over serving: a client
+  that can fetch published bytes may reconnect and fetch them. The hold is
+  still reported in `delivery.hold_reason`, so nothing about the diagnosis is
+  withheld — only the instruction, counted by
+  `plurx_playback_control_recovery_withheld_total{reason,platform}`. For VOD
+  the frontier that predicate reads is the contiguous materialized run measured
+  from the client's own fetched segment, since a far seek can leave the title's
+  published run behind the playhead.
+
 - **Freeze attribution.** Session status exposes the last requested resource,
   request idle age, current playlist shape, published and fetched segment
   frontiers, time since producer progress, recent encode/remux speed,
