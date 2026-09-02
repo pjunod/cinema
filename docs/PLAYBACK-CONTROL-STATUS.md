@@ -196,7 +196,7 @@ merge target: two client PRs in flight means the second always fails.
 | M6 handoff | the numbers M6 was waiting for | [#787](https://github.com/pjunod/plurx/pull/787) · [#788](https://github.com/pjunod/plurx/pull/788) | merged |
 | M6 slot | the preparation slot, and that a disconnect is not a commit | [#792](https://github.com/pjunod/plurx/pull/792) | merged |
 | M7 R-M2 | bound native subtitle materialization | [#789](https://github.com/pjunod/plurx/pull/789) | merged |
-| M7 R-M3 | one playback, one live subtitle window | [#830](https://github.com/pjunod/plurx/pull/830) | open |
+| M7 R-M3 | one playback, one live subtitle window | [#830](https://github.com/pjunod/plurx/pull/830) | merged `653569d0` |
 | M6 executor | the executor, and three authorities in order | [#793](https://github.com/pjunod/plurx/pull/793) | merged |
 | M6 tests | the executor's three durable outcomes, pinned | [#796](https://github.com/pjunod/plurx/pull/796) | merged |
 | M6 decision | prepare or fall back, and why it is one axis | [#798](https://github.com/pjunod/plurx/pull/798) | merged |

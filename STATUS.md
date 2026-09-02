@@ -176,6 +176,49 @@ Close #782 only after #794 is qualified and merged, so GitHub never loses the
 visible replacement before the duplicate closes.
 
 
+## M7 R-M3 — one playback owns one subtitle window
+
+**PR [#830](https://github.com/pjunod/plurx/pull/830) — merged `653569d0`,
+2026-09-02.** The subtitle sidecar cache is keyed by span, and a seek storm
+produces a run of legitimately different spans, so twenty extractions could be
+running for one viewer with every registry in the server believing each of them
+correct. A registry keyed by **playback session** now holds the anchor being
+extracted, the control sequence that justified it, a way to stop the real ffmpeg
+and a way to wait for it to be gone. The same anchor joins; a different anchor
+with a strictly newer settled sequence aborts its predecessor **and waits for
+that abort to settle** before starting a successor; a different anchor with
+nothing newer behind it starts nothing.
+
+The window path no longer detaches its extraction — cancelling the outer warm
+used to cancel a waiter rather than the worker, because `ensure_vtt_at` spawned
+a second owner task — while the whole-track path keeps its detached,
+cancellation-independent contract exactly, since that sidecar is what every
+other consumer needs. An abandoned window leaves **no negative memo**: nothing
+was wrong with it except where the viewer went, so the next request for that
+span is a first attempt rather than a suppressed retry. Once bytes exist there
+is no cancellation point at all, and a published sidecar is never removed by
+window-flight cancellation.
+
+The slot is held by a **destructor** and release **fences** the session
+briefly — a panicking task, a runtime shutting down, or a request that read its
+authority a moment before teardown would otherwise leave an owner nothing will
+ever release, with a terminal cleanup parked behind it. Session end releases the
+owner on both lifecycles: rolling after terminal admission, VOD inside
+`detach_reader` once the readers guard is dropped.
+
+Admission reads the client's settled destination immediately before warming, and
+refuses a window that lies behind it or beyond the forward reach a client
+buffers into. That reach is deliberate: containment alone would refuse the
+window immediately *in front of* the playhead at every grid boundary, which is
+the exact gap the bridge exists to close, recurring once per span for the whole
+file.
+
+Acceptance is at the production boundary — a twenty-seek storm through real
+control exchanges and the real subtitle handler, with producers counted by a
+drop guard and flights counted under the owner registry, so a superseded
+extraction is observed dying rather than assumed to. Not deployed.
+
+
 ## Apple pacing-hold freeze — the hold that vetoed its own recovery
 
 **PR [#803](https://github.com/pjunod/plurx/pull/803) — OPEN, awaiting Paul's
