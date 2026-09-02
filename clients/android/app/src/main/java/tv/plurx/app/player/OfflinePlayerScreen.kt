@@ -38,6 +38,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tv.plurx.app.data.offline.OfflineDownloads
+import tv.plurx.app.ui.currentFormFactor
 import tv.plurx.app.ui.components.TvButton
 import tv.plurx.app.ui.components.formatTime
 
