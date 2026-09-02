@@ -309,6 +309,36 @@ and keeps its existing path as the `none`-or-timeout fallback. The fallback
 is not a hedge — a server that has not yet decided must not strand a stalled
 viewer.
 
+## The hold that vetoed recovery, and the counter that watches the repair
+
+```
+plurx_playback_control_recovery_withheld_total{reason,platform}
+```
+
+counts exchanges where production was held, the client would have understood
+the instruction, and the server withheld it anyway because the same request
+proved the client was stalled, its decoder starved, its runway at or below
+10 s, and at least 10 s of published media unfetched. The hold still travels
+in `delivery.hold_reason`; only the instruction is withheld.
+
+It exists because the first three rows of the table below — every induced
+stall answering `hold { reason: "time" }` — turned out to be the freeze rather
+than the diagnosis of it. In explicit lease mode the production target is
+measured from the client's own buffer anchor, so a player frozen with an empty
+buffer asks for 30 s of reserve, already has more, and is held on time: the
+stall manufactures the hold, the client is told to wait for it, and the loop
+has no exit but the viewer backing out.
+
+**What an operator should expect of it.** It rises briefly around a real
+wedge — a handful of exchanges while one session reconnects — and reads zero
+through healthy holds, which is the common case: a viewer with a full buffer
+mid-film is held constantly and must still be told so.
+`plurx_playback_control_holds_total` is unaffected, because it counts holds
+*sent* and a withheld one was not sent. A steady rise on one platform is a
+client failing to act on the `none` it is now given, not a server fault.
+`plurx_playback_control_actions_suppressed_total` keeps its own meaning —
+a client too old to be told — and a withheld hold is never counted there.
+
 ## M5c is struck, and this is the measurement that struck it
 
 **Written 2026-09-01** from induced control exchanges on nuc4 at
