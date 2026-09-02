@@ -1,0 +1,32 @@
+version = 1
+
+[[coverage]]
+commits = ["f48b0454"]
+points = ["cluster.membership", "cluster.operations"]
+checks = ["rust-gate", "cluster-auth", "web-membership"]
+reason = """
+The correction and its evidence landed together. `verify_live_activity_authority` \
+required a committed voter at both ends of every internal peer proof, so a committed \
+learner refused every signed peer request with 401 and every voter refused a learner's \
+— while `learner_route_eligible`, `operations_peers` and `media_peers` all publish that \
+surface to learners in both directions, and \
+`docs/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` section 2 specifies the member-scoped \
+predicate here. Three tests landed in the same commit. \
+`a_committed_learner_is_admitted_as_a_member_and_refused_as_a_voter` and \
+`each_authorizer_asks_for_the_role_its_peer_directory_uses` in \
+`crates/plurx-core/src/cluster/membership.rs` pin the predicate and each authorizer's \
+role constant at its call site; restoring the voter predicate in either internal \
+authorizer, or pointing the member arm at the voter set, fails them under `rust-gate`. \
+`run_learner_membership_case` in `crates/plurx-cluster-check/src/lib.rs` now signs an \
+operations-status read from the leader to the learner, a relay proof from the learner to \
+a voter, and an activity proof from the learner that must stay refused; it was executed \
+against the pre-fix predicate and failed with the inbound message, and against a \
+signer-only revert and failed with the outbound message, so both directions are live \
+under `cluster-check`. The aggregator half — 401 and 403 reported as `refused` and other \
+non-success statuses as `http_error` instead of all of them collapsing into \
+`unreachable`, and every observation code reaching the operator as a sentence — is \
+pinned by `a refusal says the node answered; only silence says unreachable` and `every \
+observation code the aggregator can emit has a sentence` in \
+`tests/web/cluster-membership.test.js`, which `web-membership` runs; the second reads the \
+error classes out of `cluster_operations.rs`, so deleting the `refused` arm fails it too.
+"""

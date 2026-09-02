@@ -12650,7 +12650,7 @@ function clusterNodeOperationsHtml(n,ops){
     <div class="clnodeunknown" style="color:var(--bad)">Direct status is unavailable. Keep every available voter running and retry status above.</div></section>`;
   const row=PlurxClusterPanel.clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
   if(!row||row.observation!=="answered"||!s){
-    const why=PlurxClusterPanel.clusterOperationReason(row&&(row.error_class||row.observation)||"not_observed");
+    const why=PlurxClusterPanel.clusterObservationReason(row&&(row.error_class||row.observation)||"not_observed");
     return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
       <div class="clnodeunknown" style="color:var(--bad)">Not observed · ${esc(why)}. Membership heartbeat state is not a substitute for a direct peer sample.</div></section>`;
   }

@@ -3927,6 +3927,23 @@ pub(crate) struct RollingControlOutcome {
     pub platform: ClientPlatform,
     pub lease: RollingLeaseSnapshot,
     pub flow_ticket: u64,
+    /// This exchange's selection differs from the last accepted one.
+    ///
+    /// M6's gate, and the reason it lives here: building a candidate recipe
+    /// costs two store reads (the source file and the network prior), the
+    /// exchange runs about once a second per client under an absolute
+    /// deadline, and the answer is almost always *nothing changed*. The actor
+    /// holds both selections at the moment of acceptance, so the comparison is
+    /// free here and nowhere else.
+    ///
+    /// **Against the previous selection, never against what is delivered.**
+    /// A client's ask and the height it gets are not the same number — an ask
+    /// of 1079 snaps onto the ladder and is delivered as 1080 — so a gate that
+    /// compared the two would read *changed* on every exchange of a snapped
+    /// session and spend the reads it exists to save. `false` on a replay and
+    /// on the first accepted exchange: a session that has just been created
+    /// from an intent has not since departed from it.
+    pub selection_changed: bool,
 }
 
 /// A session-owned continuation installed synchronously by the rolling actor
@@ -6266,6 +6283,8 @@ impl RollingControlActor {
                 platform,
                 lease: self.snapshot_at(now),
                 flow_ticket: self.last_flow_ticket,
+                // A terminal replay is not a transition by construction.
+                selection_changed: false,
             });
         }
         let (disposition, accepted_sequence, action, platform) = self.control.accept_at(
@@ -6278,6 +6297,14 @@ impl RollingControlActor {
         )?;
         let accepted_end = disposition == ControlDisposition::Accepted
             && request.snapshot.demand == PlaybackDemand::End;
+        // Taken before the snapshot is moved, and only for an accepted
+        // exchange: a replay is the same exchange arriving twice, and it
+        // changed the selection the first time or not at all.
+        let selection_changed = disposition == ControlDisposition::Accepted
+            && self
+                .demand
+                .as_ref()
+                .is_some_and(|previous| previous.selection != request.snapshot.selection);
         if disposition == ControlDisposition::Accepted {
             self.mode = RollingLeaseMode::Explicit;
             self.settled_target = Some(SettledTarget {
@@ -6325,6 +6352,7 @@ impl RollingControlActor {
             platform,
             lease: self.snapshot_at(now),
             flow_ticket,
+            selection_changed,
         })
     }
 
@@ -9994,6 +10022,18 @@ static ROLLING_LEASE_RENEWALS: [AtomicU64; 3] =
 static CONTROL_ACTIONS: [[AtomicU64; 3]; 4] = [const { [const { AtomicU64::new(0) }; 3] }; 4];
 /// Holds actually sent, by reason.
 static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+/// What M6 *would* do about a selection change, by axis and outcome.
+///
+/// Shadow: nothing is staged and no behaviour depends on this. The point is
+/// that `PREPARED_AXIS` and the throughput floor are currently arguments, and
+/// this is what turns them into measurements on real traffic before anything
+/// acts on them. In particular it is the only way to learn whether
+/// `throughput_unproven` refuses so often that the prepared path would never
+/// fire at all — a possibility the rule's own doc names and cannot settle.
+///
+/// Indexed `[axis][outcome]`. Axis order is `PreparationAxis`'s own; outcome
+/// is prepare, then the four `FallbackReason`s in declaration order.
+static PREPARATION_DECISIONS: [[AtomicU64; 5]; 5] = [const { [const { AtomicU64::new(0) }; 5] }; 5];
 /// Exchanges where production was held and the client had not declared the
 /// action, so it was told nothing. Watch this fall as clients roll out.
 static CONTROL_ACTIONS_SUPPRESSED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
@@ -10098,6 +10138,38 @@ fn platform_index(platform: ClientPlatform) -> usize {
     }
 }
 
+/// Record what M6 would have done, without doing it.
+///
+/// Called only when the actor says the selection moved, so the denominator is
+/// *viewer actions*, not exchanges. An `Unchanged` decision is not recorded at
+/// all: it means the selection moved on an axis this type cannot see —
+/// a seek, a different file — and counting it would put a bar labelled
+/// "nothing to do" beside four that mean something.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_preparation_decision(decision: PreparationDecision) {
+    let (axis, outcome) = match decision {
+        PreparationDecision::Unchanged => return,
+        PreparationDecision::Prepare { axis } => (axis, 0),
+        PreparationDecision::Fallback { axis, reason } => (
+            axis,
+            1 + match reason {
+                FallbackReason::ClientCannotPrepare => 0,
+                FallbackReason::AxisNotProven => 1,
+                FallbackReason::MultipleAxes => 2,
+                FallbackReason::ThroughputUnproven => 3,
+            },
+        ),
+    };
+    let axis = match axis {
+        PreparationAxis::ResolutionOrBitrate => 0,
+        PreparationAxis::AudioTrackOrOffset => 1,
+        PreparationAxis::SubtitleBurn => 2,
+        PreparationAxis::DeliveryMethod => 3,
+        PreparationAxis::DynamicRange => 4,
+    };
+    PREPARATION_DECISIONS[axis][outcome].fetch_add(1, Ordering::Relaxed);
+}
+
 /// Record what one accepted exchange's action was, and what it could not be.
 pub(crate) fn record_action(
     action: &ControlAction,
@@ -10179,6 +10251,37 @@ pub(crate) fn prometheus() -> String {
             output.push_str(&format!(
                 "plurx_playback_control_actions_total{{action=\"{action}\",platform=\"{platform}\"}} {}\n",
                 CONTROL_ACTIONS[action_index][platform_index].load(Ordering::Relaxed)
+            ));
+        }
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_decisions_total What M6 would do about a selection change, by axis and outcome. Shadow: nothing is staged.\n\
+         # TYPE plurx_playback_preparation_decisions_total counter\n",
+    );
+    for (axis_index, axis) in [
+        PreparationAxis::ResolutionOrBitrate,
+        PreparationAxis::AudioTrackOrOffset,
+        PreparationAxis::SubtitleBurn,
+        PreparationAxis::DeliveryMethod,
+        PreparationAxis::DynamicRange,
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (outcome_index, outcome) in [
+            "prepare",
+            FallbackReason::ClientCannotPrepare.as_str(),
+            FallbackReason::AxisNotProven.as_str(),
+            FallbackReason::MultipleAxes.as_str(),
+            FallbackReason::ThroughputUnproven.as_str(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            output.push_str(&format!(
+                "plurx_playback_preparation_decisions_total{{axis=\"{}\",outcome=\"{outcome}\"}} {}\n",
+                axis.as_str(),
+                PREPARATION_DECISIONS[axis_index][outcome_index].load(Ordering::Relaxed)
             ));
         }
     }
@@ -11478,6 +11581,138 @@ mod tests {
             sequence: request.sequence,
             snapshot: PlaybackDemandSnapshot::from(request),
         }
+    }
+
+    /// M6's gate: the actor says when a selection moved, because it is the
+    /// only place both selections are in hand for free.
+    ///
+    /// The expensive half — two store reads to resolve a candidate — is what
+    /// this exists to skip, on an exchange that runs about once a second per
+    /// client under an absolute deadline.
+    #[test]
+    fn the_actor_reports_when_a_selection_moved() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let base = request();
+
+        let mut first = base.clone();
+        first.sequence = 1;
+        let outcome = actor
+            .control_at(started + Duration::from_secs(1), owned_control(&first))
+            .expect("sequence 1 accepted");
+        assert!(
+            !outcome.selection_changed,
+            "a session that has just been created from an intent has not since \
+             departed from it",
+        );
+
+        let mut same = base.clone();
+        same.sequence = 2;
+        // A different playhead, buffer and render state — everything an
+        // ordinary exchange carries — with the same selection.
+        same.position_ms = base.position_ms + 4_000;
+        same.buffered_through_ms = base.buffered_through_ms + 4_000;
+        let outcome = actor
+            .control_at(started + Duration::from_secs(2), owned_control(&same))
+            .expect("sequence 2 accepted");
+        assert!(
+            !outcome.selection_changed,
+            "an ordinary exchange must not spend the reads the gate exists to save",
+        );
+
+        let mut moved = base.clone();
+        moved.sequence = 3;
+        moved.selection.audio_track = Some(base.selection.audio_track.unwrap_or(0) + 1);
+        let outcome = actor
+            .control_at(started + Duration::from_secs(3), owned_control(&moved))
+            .expect("sequence 3 accepted");
+        assert!(outcome.selection_changed, "the viewer picked another track");
+
+        // And it is a comparison against the *previous* selection, not a
+        // latch: holding the new selection is not a fresh change.
+        let mut held = moved.clone();
+        held.sequence = 4;
+        let outcome = actor
+            .control_at(started + Duration::from_secs(4), owned_control(&held))
+            .expect("sequence 4 accepted");
+        assert!(
+            !outcome.selection_changed,
+            "the selection is now the previous one",
+        );
+    }
+
+    /// The comparison is against what the client last asked for, never against
+    /// what it is being served — and this is the case that decides it.
+    ///
+    /// An explicit rung snaps onto the ladder, so a client asking 1079 is
+    /// delivered 1080 and keeps asking 1079. A gate that compared the ask to
+    /// the delivered height would read *changed* on every exchange for the
+    /// rest of that session, spend two store reads each time, and produce a
+    /// candidate identical to what is already playing.
+    #[test]
+    fn a_snapped_ask_is_not_a_change_every_second() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let mut base = request();
+        base.selection.quality = QualitySelection::Manual {
+            height: crate::transcode::snap_height(1079) - 1,
+        };
+        assert_ne!(
+            crate::transcode::snap_height(1079),
+            1079,
+            "the fixture is only meaningful if 1079 actually snaps",
+        );
+
+        for (sequence, seconds) in [(1, 1), (2, 2), (3, 3)] {
+            let mut exchange = base.clone();
+            exchange.sequence = sequence;
+            let outcome = actor
+                .control_at(
+                    started + Duration::from_secs(seconds),
+                    owned_control(&exchange),
+                )
+                .expect("accepted");
+            assert!(
+                !outcome.selection_changed,
+                "sequence {sequence}: an unchanged ask is unchanged however it \
+                 was served",
+            );
+        }
+    }
+
+    /// A replay is the same exchange arriving twice. It changed the selection
+    /// the first time or not at all, and answering `true` again would spend
+    /// the reads twice for one viewer action.
+    #[test]
+    fn a_replay_is_not_a_second_change() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let base = request();
+        let mut first = base.clone();
+        first.sequence = 1;
+        actor
+            .control_at(started + Duration::from_secs(1), owned_control(&first))
+            .expect("sequence 1 accepted");
+
+        let mut moved = base.clone();
+        moved.sequence = 2;
+        moved.selection.audio_offset_ms = 250;
+        let accepted = actor
+            .control_at(started + Duration::from_secs(2), owned_control(&moved))
+            .expect("sequence 2 accepted");
+        assert!(accepted.selection_changed);
+
+        let replayed = actor
+            .control_at(started + Duration::from_secs(3), owned_control(&moved))
+            .expect("sequence 2 replayed");
+        assert_eq!(replayed.disposition, ControlDisposition::Replay);
+        assert!(
+            !replayed.selection_changed,
+            "one viewer action, one resolution",
+        );
     }
 
     /// The wire lets a client send capabilities once. Anything that reads
@@ -15138,6 +15373,78 @@ mod tests {
         };
         assert!(unavailable.is_valid_for_status(503));
         assert!(!unavailable.is_valid_for_status(409));
+    }
+
+    /// The shadow metric's full cross product is published from boot, and its
+    /// labels are the decision's own vocabulary.
+    ///
+    /// Published at zero rather than on first observation, because the useful
+    /// reading is a *ratio* — how much of the fallback volume is
+    /// `client_cannot_prepare` against `throughput_unproven` — and a series
+    /// that appears only once it is nonzero cannot be divided by one that has
+    /// not appeared yet.
+    #[test]
+    fn the_shadow_decision_metric_publishes_every_axis_and_outcome() {
+        let metrics = prometheus();
+        for axis in [
+            PreparationAxis::ResolutionOrBitrate,
+            PreparationAxis::AudioTrackOrOffset,
+            PreparationAxis::SubtitleBurn,
+            PreparationAxis::DeliveryMethod,
+            PreparationAxis::DynamicRange,
+        ] {
+            for outcome in [
+                "prepare",
+                FallbackReason::ClientCannotPrepare.as_str(),
+                FallbackReason::AxisNotProven.as_str(),
+                FallbackReason::MultipleAxes.as_str(),
+                FallbackReason::ThroughputUnproven.as_str(),
+            ] {
+                let series = format!(
+                    "plurx_playback_preparation_decisions_total{{axis=\"{}\",outcome=\"{outcome}\"}}",
+                    axis.as_str()
+                );
+                assert!(metrics.contains(&series), "missing {series}");
+            }
+        }
+    }
+
+    /// `Unchanged` is not an outcome, and recording it would put a bar
+    /// labelled "nothing to do" beside four that mean something.
+    ///
+    /// It is reachable: the actor gates on the *selection*, and a selection
+    /// can move on an axis `EffectiveSelection` cannot see — a seek, a
+    /// different file. The decision then correctly answers `Unchanged`, and
+    /// the right thing to do with that is nothing.
+    #[test]
+    fn an_unchanged_decision_is_not_recorded() {
+        let before = prometheus();
+        record_preparation_decision(PreparationDecision::Unchanged);
+        assert_eq!(
+            preparation_series_total(&before),
+            preparation_series_total(&prometheus()),
+        );
+
+        record_preparation_decision(PreparationDecision::Fallback {
+            axis: PreparationAxis::DynamicRange,
+            reason: FallbackReason::ThroughputUnproven,
+        });
+        assert_eq!(
+            preparation_series_total(&prometheus()),
+            preparation_series_total(&before) + 1,
+            "and a real decision is",
+        );
+    }
+
+    /// Sum every `plurx_playback_preparation_decisions_total` series. The
+    /// counters are process-global, so a test that asserted an absolute value
+    /// would depend on which other tests had run.
+    fn preparation_series_total(metrics: &str) -> u64 {
+        metrics
+            .lines()
+            .filter(|line| line.starts_with("plurx_playback_preparation_decisions_total{"))
+            .filter_map(|line| line.rsplit(' ').next()?.parse::<u64>().ok())
+            .sum()
     }
 
     #[test]

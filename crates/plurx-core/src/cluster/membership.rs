@@ -161,6 +161,59 @@ pub enum ClusterRole {
     Learner,
 }
 
+/// Which committed role both ends of an internal peer proof must hold.
+///
+/// The distinction is the peer *directory* each surface is served from, not a
+/// judgement about how trustworthy a learner is. A learner's signing key has
+/// the same provenance as a voter's, is published by the same replicated
+/// statement, and is fenced by the same removal row.
+///
+/// - Activity aggregation is voter-only in both directions, because
+///   [`MembershipManager::activity_peers`] never names a learner. A learner on
+///   either end of an activity proof is answering a request that should not
+///   have been sent, so the stricter predicate is the correct refusal.
+/// - Every other internal peer route is member-scoped.
+///   `learner_route_eligible` in plurxd publishes the learner's internal
+///   surface — the operations-status read and the whole media-session control
+///   set — and [`MembershipManager::operations_peers`] and
+///   [`MembershipManager::media_peers`] deliberately name learners as fan-out
+///   targets. Requiring a voter at either end refuses exactly the traffic
+///   those directories exist to carry, in both directions: a learner cannot
+///   answer a voter's probe, and a voter refuses a learner's.
+///
+/// `docs/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 specifies the member-scoped
+/// predicate for `authorize_internal_peer_request` — "a consistent read that
+/// the signer is a live member" — and gives the committed-voter predicate to
+/// `authorize_membership_mutation` alone, as "the one refusal in this design
+/// that is authorization rather than authentication". Keep it that way: a
+/// learner is refused membership mutations, and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerAuthorityRole {
+    /// Both ends must be committed voters.
+    CommittedVoter,
+    /// Both ends must be committed members; learners included.
+    CommittedMember,
+}
+
+/// Decide one end of an internal proof against committed membership.
+///
+/// Free and iterator-shaped so the predicate itself is testable without a live
+/// Raft node: `MembershipManager` can only be built around a real
+/// `hiqlite::Client`, so a rule that lives inside the method is a rule no unit
+/// test can reach. Both iterators are lazy; only the one the role names is
+/// consumed.
+fn peer_authority_admits(
+    role: PeerAuthorityRole,
+    raft_id: u64,
+    mut voters: impl Iterator<Item = u64>,
+    mut members: impl Iterator<Item = u64>,
+) -> bool {
+    match role {
+        PeerAuthorityRole::CommittedVoter => voters.any(|voter| voter == raft_id),
+        PeerAuthorityRole::CommittedMember => members.any(|member| member == raft_id),
+    }
+}
+
 /// Effective local HTTP capacity role from committed membership plus the
 /// durable removal fence. This is intentionally not the boot/admission role:
 /// promotion takes effect without restarting the daemon.
@@ -4944,6 +4997,10 @@ impl MembershipManager {
 
     /// Authenticate the per-node proof and confirm that its sender is still a
     /// live, non-removed committed voter.
+    ///
+    /// Voter-scoped on purpose: [`Self::activity_peers`] never names a learner,
+    /// so an activity proof signed by one, or presented to one, is a request
+    /// that should not have been sent. See [`PeerAuthorityRole`].
     pub async fn authorize_activity_request(
         &self,
         auth: &ActivityPeerAuth,
@@ -4971,7 +5028,7 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_activity_authority(&auth.node_id, now)
+        self.verify_live_peer_authority(&auth.node_id, now, PeerAuthorityRole::CommittedVoter)
             .await
     }
 
@@ -5005,7 +5062,13 @@ impl MembershipManager {
         })
     }
 
-    /// Authenticate one exact internal request and its live voter authority.
+    /// Authenticate one exact internal request and its live member authority.
+    ///
+    /// Member-scoped: the internal peer surface is published to learners by
+    /// plurxd's `learner_route_eligible`, and both media placement directories
+    /// name learners in both directions. See [`PeerAuthorityRole`]. Membership
+    /// *mutation* keeps the committed-voter predicate; it is authorized
+    /// elsewhere.
     pub async fn authorize_internal_peer_request(
         &self,
         auth: &InternalPeerAuth,
@@ -5062,7 +5125,7 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_activity_authority(&auth.node_id, now)
+        self.verify_live_peer_authority(&auth.node_id, now, PeerAuthorityRole::CommittedMember)
             .await
     }
 
@@ -5070,8 +5133,12 @@ impl MembershipManager {
     /// mandatory, globally rate-bounded, and each signed nonce is single-use
     /// for the complete five-second read window. A separate, right-sized
     /// replay cache keeps segment bursts from consuming mutation admission;
-    /// the live-voter proof is cached for one second per sender behind a
+    /// the live-member proof is cached for one second per sender behind a
     /// single-flight mutex so segment bursts do not become Raft read bursts.
+    ///
+    /// Member-scoped for the same reason as [`Self::authorize_internal_peer_request`]:
+    /// this is the authorizer for the operations-status read that the cluster
+    /// panel fans out to every committed node, learners included.
     pub async fn authorize_internal_peer_read_request(
         &self,
         auth: &InternalPeerAuth,
@@ -5182,7 +5249,11 @@ impl MembershipManager {
             }
         }
         let live = self
-            .verify_live_activity_authority(&auth.node_id, authority_now)
+            .verify_live_peer_authority(
+                &auth.node_id,
+                authority_now,
+                PeerAuthorityRole::CommittedMember,
+            )
             .await?;
         let proof_still_fresh =
             unix_ms()?.abs_diff(auth.timestamp_ms) <= INTERNAL_READ_AUTH_WINDOW_MS as u64;
@@ -5365,18 +5436,30 @@ impl MembershipManager {
             .admit(nonce, now))
     }
 
-    async fn verify_live_activity_authority(
+    /// Confirm both ends of an internal proof against committed membership.
+    ///
+    /// Both ends are checked, and both against the same `role`: the local node
+    /// must be entitled to answer this class of request, and the signer must be
+    /// a live, non-removed committed node of that class. Heartbeat freshness is
+    /// sampled twice around the consistent read so a proof cannot be authorized
+    /// by a liveness observation that expired while the read was in flight.
+    async fn verify_live_peer_authority(
         &self,
         node_id: &str,
         now: i64,
+        role: PeerAuthorityRole,
     ) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
-        if !metrics
-            .membership_config
-            .voter_ids()
-            .any(|raft_id| raft_id == inner.identity.raft_id)
-        {
+        let admits = |raft_id| {
+            peer_authority_admits(
+                role,
+                raft_id,
+                metrics.membership_config.voter_ids(),
+                metrics.membership_config.nodes().map(|(member, _)| *member),
+            )
+        };
+        if !admits(inner.identity.raft_id) {
             return Ok(false);
         }
         let reachable_after = reachable_after(now);
@@ -5395,10 +5478,7 @@ impl MembershipManager {
         let verified_reachable_after = unix_ms()?.saturating_sub(NODE_REACHABLE_WINDOW_MS);
         Ok(rows.len() == 1
             && rows[0].last_seen_at >= verified_reachable_after
-            && metrics
-                .membership_config
-                .voter_ids()
-                .any(|raft_id| raft_id == rows[0].raft_id))
+            && admits(rows[0].raft_id))
     }
 
     async fn refresh_membership_metrics(&self) -> Result<(), MembershipError> {
@@ -8775,6 +8855,100 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A learner refused every internal peer request — its own operations-status
+    // answer to the cluster panel, and every media-session control request it
+    // originated — because the shared authority check required a committed
+    // VOTER at both ends. plurxd's `learner_route_eligible` publishes exactly
+    // that surface to learners, and `operations_peers`/`media_peers` name
+    // learners in both directions, so the predicate refused the traffic those
+    // directories exist to carry. The 401 then reached the operator as
+    // "unreachable" on a node whose heartbeat was fresh.
+    //
+    // `docs/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 already specified the
+    // member-scoped predicate here and gave the voter predicate to membership
+    // mutation alone; the code was stricter than its own design.
+
+    #[test]
+    fn a_committed_learner_is_admitted_as_a_member_and_refused_as_a_voter() {
+        let voters = [1_u64, 2, 3];
+        let members = [1_u64, 2, 3, 7];
+        let admits = |role, raft_id| {
+            peer_authority_admits(role, raft_id, voters.into_iter(), members.into_iter())
+        };
+
+        // The learner: the whole point of the fix.
+        assert!(admits(PeerAuthorityRole::CommittedMember, 7));
+        assert!(!admits(PeerAuthorityRole::CommittedVoter, 7));
+
+        // A voter is admitted under both, so nothing that worked stops working.
+        for raft_id in voters {
+            assert!(admits(PeerAuthorityRole::CommittedMember, raft_id));
+            assert!(admits(PeerAuthorityRole::CommittedVoter, raft_id));
+        }
+
+        // A node in neither set — removed, or never committed — is refused
+        // under both. Widening to members is not widening to strangers.
+        assert!(!admits(PeerAuthorityRole::CommittedMember, 9));
+        assert!(!admits(PeerAuthorityRole::CommittedVoter, 9));
+    }
+
+    #[test]
+    fn an_empty_committed_roster_admits_nobody_under_either_role() {
+        let none: [u64; 0] = [];
+        for role in [
+            PeerAuthorityRole::CommittedVoter,
+            PeerAuthorityRole::CommittedMember,
+        ] {
+            assert!(!peer_authority_admits(
+                role,
+                1,
+                none.into_iter(),
+                none.into_iter()
+            ));
+        }
+    }
+
+    // The predicate above is only correct where it is actually used, and a
+    // helper test leaves the call sites free: the defect was one role constant
+    // in three places. Pin each authorizer to the role it must ask for.
+    #[test]
+    fn each_authorizer_asks_for_the_role_its_peer_directory_uses() {
+        let source = include_str!("membership.rs");
+        let activity = source
+            .split_once("pub async fn authorize_activity_request(")
+            .expect("authorize_activity_request was renamed")
+            .1
+            .split_once("\n    }\n")
+            .expect("authorize_activity_request never closes at fn indent")
+            .0;
+        assert!(
+            activity.contains("PeerAuthorityRole::CommittedVoter"),
+            "activity aggregation is voter-only: activity_peers never names a learner",
+        );
+
+        for authorizer in [
+            "pub async fn authorize_internal_peer_request(",
+            "pub async fn authorize_internal_peer_read_request(",
+        ] {
+            let body = source
+                .split_once(authorizer)
+                .unwrap_or_else(|| panic!("{authorizer} was renamed"))
+                .1
+                .split_once("\n    }\n")
+                .unwrap_or_else(|| panic!("{authorizer} never closes at fn indent"))
+                .0;
+            assert!(
+                body.contains("PeerAuthorityRole::CommittedMember"),
+                "{authorizer} must admit committed learners: plurxd publishes this \
+                 surface to them and both media directories name them",
+            );
+            assert!(
+                !body.contains("PeerAuthorityRole::CommittedVoter"),
+                "{authorizer} must not reinstate the voter predicate",
+            );
+        }
+    }
 
     // The route gate answers 503 for `Fenced`, so the cost of an interim
     // publication is a real outage window on a healthy node, once per
