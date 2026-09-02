@@ -2314,6 +2314,24 @@ fn replay_route_identity_matches(
         && current.media_origin_ms == observed.media_origin_ms
 }
 
+/// Lease time held back from a retried activation confirmation so the
+/// committed-write recovery read always has budget.
+///
+/// The bounded idempotent-write retry can spend the entire remaining owner
+/// lease on consensus timeouts. Spending it here is what
+/// [`wait_for_confirmed_activation`] exists to survive, and that reader is
+/// entered with the same lease deadline: without this reservation it observes
+/// `now >= deadline`, returns `None` on its first statement, and abandons an
+/// activation whose confirmation had in fact committed. One reservation of a
+/// full store deadline keeps at least one complete consistent read available
+/// after the write side gives up.
+const ACTIVATION_CONFIRMATION_RECOVERY_MARGIN: Duration = ACTIVATION_STORE_DEADLINE;
+
+const _: () = assert!(
+    ACTIVATION_CONFIRMATION_RECOVERY_MARGIN.as_millis() * 2 <= LEASE_TTL_MS as u128,
+    "the confirmation recovery reservation must leave most of the owner lease for the write"
+);
+
 fn activation_lease_deadline(activation: &MediaSessionActivation) -> tokio::time::Instant {
     let remaining_ms = activation
         .lease_expires_at_ms
@@ -2482,8 +2500,19 @@ pub(super) async fn activate_session_under_authority(
             i64::try_from(TERMINAL_PROJECTION_SAFETY_WINDOW.as_millis()).unwrap_or(i64::MAX),
         )
     });
+    // The confirmation write may retry inside the Store; the recovery read
+    // below is the only path that can still observe a write that committed
+    // behind a lost response, so it keeps its own reserved share of the lease.
+    let confirmation_deadline = {
+        let reserved = tokio::time::Instant::now() + ACTIVATION_CONFIRMATION_RECOVERY_MARGIN;
+        if lease_deadline > reserved {
+            lease_deadline - ACTIVATION_CONFIRMATION_RECOVERY_MARGIN
+        } else {
+            lease_deadline
+        }
+    };
     let confirmation = tokio::time::timeout_at(
-        lease_deadline,
+        confirmation_deadline,
         state.store.settle_media_session_activation(
             &activation,
             MediaSessionActivationSettlement::Confirm {
