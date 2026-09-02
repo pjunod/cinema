@@ -77,6 +77,78 @@ deploy/install, one real web, Apple, and Android session still has to show the
 directed retry making captions appear without a video restart. No deploy is
 performed by this change.
 
+### M7 R-M3 makes "one destination" a count of live processes
+
+M3 already refused a restart for a destination the viewer had left, and that
+refusal is unchanged. What it could not say was anything about the *subtitle*
+work a storm left behind, because the subtitle cache is keyed by span and a
+storm produces a run of legitimately different spans. Twenty seeks could each
+start their own window extraction, every one of them correct by the cache's
+own rules, and nothing in the server was in a position to notice.
+
+R-M3 gives one playback one window flight. A registry keyed by playback session
+holds the anchor being extracted, the control sequence that justified it, a way
+to stop the real extraction and a way to wait for it to be gone. A request for
+the same anchor joins; a different anchor with a newer settled sequence aborts
+its predecessor **and waits for that abort to settle** before starting its
+successor; a different anchor with nothing newer behind it changes nothing. The
+waiting is the part that matters: dropping a handle and spawning immediately
+overlaps two ffmpeg children, which is the defect wearing a fix's clothes.
+
+Two consequences are worth naming. The window path no longer detaches its
+extraction — cancelling the outer task used to leave the real producer running,
+because `ensure_vtt_at` spawned a second one — while the whole-track path keeps
+its detached, cancellation-independent contract exactly, since a whole-track
+sidecar is what every other consumer needs and a viewer walking away must not
+stop it. And an abandoned extraction leaves no negative memo: nothing was wrong
+with it except where the viewer went, so the next request for that span is a
+first attempt rather than a suppressed retry.
+
+Admission moved too. The subtitle segment arm reads the client's settled
+destination immediately before warming, and declines to start a window that is
+no longer work that destination wants. `None` still warms: it covers a missing
+session, a retired actor and a client that has not exchanged yet, and none of
+those is evidence of staleness.
+
+The comparison is deliberately not containment. The handoff's wording — refuse
+a window that "does not cover its target" — was implemented literally first and
+adversarial review showed what that costs: a settled target is where the viewer
+*is*, while the segment driving the window request is what the player is
+*fetching*, and a player fetches ahead. Containment therefore refuses the window
+immediately in front of the playhead at every grid boundary, reopening the exact
+gap the bridge exists to close, once per span, for the whole file. So a window is
+refused when it lies behind the destination, which means the viewer has left it,
+or beyond the forward reach a client legitimately buffers into, which means the
+request belongs to a destination the client has since abandoned. The reach is the
+same 180 s the server already retains behind the download frontier for Apple's
+measured client lead, and the 1 s tolerance is still `SettledTarget`'s own rather
+than a second copy of the number. This is a deliberate deviation from the
+handoff's literal wording and it does not weaken §8.1: a storm's abandoned
+destinations are further from the settled target than any buffer head, and the
+acceptance still refuses every one of them.
+
+Two guardrails came out of the same review. Releasing a session's owner also
+fences that session briefly, because a segment request that read its authority a
+moment before teardown is otherwise still entitled to install an owner nothing
+will ever release. And the slot is held by a destructor rather than by tail
+statements, so a panicking task, a runtime shutting down, or a cancelled request
+that had already claimed a slot all still release it — the alternative is a
+terminal cleanup parked forever on a settlement that will not come.
+
+Acceptance is at the production boundary, not on the latch. A twenty-seek storm
+drives real control exchanges through the manager and real segment requests
+through the handler, with the producer counted by a drop guard so a superseded
+extraction is observed dying rather than assumed to. It asserts the typed 409
+for a create presented after a later snapshot landed, the unchanged replay and
+stale-sequence rejections, at most one live window producer at every step,
+nothing published by any abandoned window once the fixture releases every
+producer it was holding, the one published window surviving every supersession
+that followed it, a first play with no authority still warming, and exactly one
+producer left at the end carrying the settled target. The ownership latch's own
+arms are unreachable through the handler — the destination gate answers first —
+so they are driven directly, and the fence that the durable pointer honours is
+proved against the Store rather than against the constant in the code.
+
 ## Slice ledger — every PR in the current push
 
 Slices are one platform or one durable-state concern each, because the mobile
@@ -123,6 +195,8 @@ merge target: two client PRs in flight means the second always fails.
 | M5.5 execution | the execution wrapper the spike was missing | [#776](https://github.com/pjunod/plurx/pull/776) | merged; **run 2026-09-01** |
 | M6 handoff | the numbers M6 was waiting for | [#787](https://github.com/pjunod/plurx/pull/787) · [#788](https://github.com/pjunod/plurx/pull/788) | merged |
 | M6 slot | the preparation slot, and that a disconnect is not a commit | [#792](https://github.com/pjunod/plurx/pull/792) | merged |
+| M7 R-M2 | bound native subtitle materialization | [#789](https://github.com/pjunod/plurx/pull/789) | merged |
+| M7 R-M3 | one playback, one live subtitle window | [#830](https://github.com/pjunod/plurx/pull/830) | merged `653569d0` |
 | M6 executor | the executor, and three authorities in order | [#793](https://github.com/pjunod/plurx/pull/793) | merged |
 | M6 tests | the executor's three durable outcomes, pinned | [#796](https://github.com/pjunod/plurx/pull/796) | merged |
 | M6 decision | prepare or fall back, and why it is one axis | [#798](https://github.com/pjunod/plurx/pull/798) | merged |

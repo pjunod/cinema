@@ -1032,14 +1032,42 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn one_completed_peer_wave_is_shared_then_refreshed() {
+    async fn one_in_flight_peer_wave_is_shared_then_refreshed() {
         let gate = Arc::new(tokio::sync::Mutex::new(PeerActivityReadGate::default()));
         let physical = Arc::new(AtomicUsize::new(0));
+        let fetch_started = Arc::new(tokio::sync::Notify::new());
+        let release_fetch = Arc::new(tokio::sync::Notify::new());
+        let leader_gate = Arc::clone(&gate);
+        let leader_physical = Arc::clone(&physical);
+        let leader_started = Arc::clone(&fetch_started);
+        let leader_release = Arc::clone(&release_fetch);
+        let leader = tokio::spawn(async move {
+            shared_peer_activity(
+                &leader_gate,
+                || async { Ok(()) },
+                |()| async move {
+                    leader_physical.fetch_add(1, Ordering::SeqCst);
+                    leader_started.notify_one();
+                    leader_release.notified().await;
+                    vec![("node-b".to_owned(), PeerActivityOutcome::Unhealthy)]
+                },
+            )
+            .await
+            .expect("leading Activity read")
+        });
+        fetch_started.notified().await;
+
+        let followers_ready = Arc::new(tokio::sync::Barrier::new(8));
+        let followers_entered = Arc::new(AtomicUsize::new(0));
         let mut callers = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..7 {
             let gate = Arc::clone(&gate);
             let physical = Arc::clone(&physical);
+            let ready = Arc::clone(&followers_ready);
+            let entered = Arc::clone(&followers_entered);
             callers.push(tokio::spawn(async move {
+                ready.wait().await;
+                entered.fetch_add(1, Ordering::SeqCst);
                 shared_peer_activity(
                     &gate,
                     || async { Ok(()) },
@@ -1052,7 +1080,18 @@ mod tests {
                 .expect("shared Activity read")
             }));
         }
-        let mut snapshots = Vec::new();
+        followers_ready.wait().await;
+        while followers_entered.load(Ordering::SeqCst) != 7 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        // No assertion belongs here: the gate guard is held across the leading
+        // fetch, so `physical` cannot exceed one at this point whatever the
+        // coalescing does, and an assertion no mutation can fail is noise. The
+        // post-join count and the shared-Arc identity below are the oracle.
+        release_fetch.notify_one();
+
+        let mut snapshots = vec![leader.await.expect("leader task")];
         for caller in callers {
             snapshots.push(caller.await.expect("caller task"));
         }

@@ -246,6 +246,82 @@ or failed hosted job on the other pool automatically. That is deliberate: an
 automatic fallback can run privileged repository code on a trust boundary you
 did not select.
 
+### The runner roster — a label is a claim about a machine
+
+[`validation/runner-fleet.toml`](../validation/runner-fleet.toml) lists every
+self-hosted runner registered to this repository, the physical host it sits on,
+and the labels it carries. It mirrors `pjunod/ansible`'s
+`github-runners/inventory/` plus the two hand-registered ARM64 laptop VMs, and
+it must be updated in the same change that changes the fleet — a roster that
+has drifted from reality proves nothing.
+
+It exists because a `runs-on` naming a label nothing carries is not an error
+GitHub reports. The job queues, indefinitely, and is eventually cancelled
+having never started. That failure has happened twice here: the required Store
+lane spent a day at 45 attempts, 15 started and 27 cancelled while queued with
+waits reaching 234 minutes, because exactly one runner carried `ci-store`; and
+`store-shards.yml` pinned a shard to `ci-store-shard-1`, a label the fleet has
+never had, which would have parked every pull request the moment the
+accelerated path became required.
+
+`make operations-check` now parses every `runs-on` in every file under
+`.github/workflows/` — new files included, automatically — and fails when a
+self-hosted label set no rostered runner can satisfy appears. So **adding a
+label to a workflow means adding it to a runner first**: change the ansible
+inventory, apply it, then add the runner to the roster in the change that
+teaches a workflow to ask for it.
+
+The roster also carries two invariants the same check enforces. `ci-store` and
+`ci-topology` each select a three-voter hiqlite test, so at most one runner per
+physical host may carry either, and neither may sit on a production plurx
+voter. Two heavy replicated-cluster runs on one loaded host is the quorum flake
+that produced the artwork-fence failures.
+
+Today that means three `ci-store` slots — `gha-nuc1-general-01` on `nuc1`,
+`gha-rogg16-general-02` on `rogg16` and `gha-nuc2-android-01` on `nuc2` — and
+one `ci-topology` slot on `gha-rogg16-general-01`.
+
+Because one host may hold only one slot, the Store shard count is *bounded by*
+the number of slots rather than chosen: a surplus shard has no runner of its
+own to take and serialises behind a busy one. `make operations-check` enforces
+that bound in both directions, which is worth one worked example.
+
+#### A runner is not a slot until the lane passes on it
+
+`gha-nuc2-android-01` was made the third slot on 2026-09-02 and immediately
+failed `replicated Store contracts (legacy)` three runs in a row — 2840, 2842
+and 2845 — about twelve seconds into each job, before compiling anything:
+
+```text
+warning: failed to write cache, path: /home/runner/.cargo/registry/index/
+index.crates.io-1949cf8c6b5b557f/.cache/as/yn/async-trait,
+error: Permission denied (os error 13)
+Permission denied (os error 13)
+##[error]Process completed with exit code 2.
+```
+
+`gha-nuc1-general-01` (run 2838) and `gha-rogg16-general-02` (run 2837) ran the
+same lane green in the same hour, so it was the host and not the lane. The
+label was revoked, and the shard count had to drop with it — the roster edit
+alone, with the workflow still asking for three shards, failed preflight with
+`2 not greater than or equal to 3: the Store shard count exceeds the number of
+ci-store slots`. That is the bound working: a fleet that loses a slot cannot
+leave an unschedulable shard behind.
+
+The cause was on the guest: `/home/runner/.cargo` was owned `root:root` and
+`/home/runner/.cargo/registry` did not exist, because the runner role seeds
+only the `bin` subdirectory and leaves the root-owned parent alone. Both are now
+`runner:runner`, matching the actions-runner service user (uid 1000, gid 1001).
+
+The label came back only after the lane was proved **on that exact runner**:
+run 2840 attempt 3 was re-run while both other slots were busy so it had to
+land there, and it passed in 27.9 minutes — in family with
+`gha-nuc1-general-01` (25.7–29.1 min) and `gha-rogg16-general-02` (21.8–22.7
+min). An ownership fix, a successful write probe and a convincing explanation
+are not together evidence that a 27-minute three-voter hiqlite test will run on
+a machine. One green run of that test is. **Add a `ci-store` label, then prove
+it, then raise `SHARD_COUNT` — in that order.**
+
 ### Execution mode — fail-safe rollout without renaming the gate
 
 `CI_EXECUTION_MODE` controls how eligible heavyweight lanes execute. It accepts
@@ -266,10 +342,39 @@ scripts/ci-execution-mode shadow
 scripts/ci-execution-mode accelerated
 ```
 
-Changing the mode affects only new runs. Do not enable shadow until both shard
-labels resolve to distinct non-production x86 hosts with verified identity and
-bounded persistent storage. The weekly `replicated Store backstop` workflow is
+Changing the mode affects only new runs. The Store lane fans out to one shard
+per `ci-store` slot — three today — and every shard selects the same label set
+the legacy lane and the weekly backstop already use, so the sharded path
+schedules on verified non-voter hosts rather than waiting on a label nobody has
+assigned. Two is the floor `validation/store_shard.py` enforces, so the count
+tracks the fleet up and down without ever collapsing into a single unsharded
+job wearing the sharded lane's name.
+
+Three shards on three slots trades throughput for latency, and it is worth
+being clear which. One pull request's Store lane should finish in a fraction of
+its present 22–29 minutes, but it occupies the whole `ci-store` pool while it
+does; with several pull requests in flight the shards interleave as slots free
+and aggregate throughput is roughly unchanged. The sharded lane has never run,
+so the per-shard figure is unmeasured — and each shard builds its own test
+binary, a fixed cost sharding does not divide. Rehearse with
+`workflow_dispatch` and read the real numbers before flipping the variable. The weekly `replicated Store backstop` workflow is
 unsharded in every mode and remains the assignment-independent safety net.
+
+Prove the sharded path before flipping the variable, not after. `replicated
+Store shards` accepts `workflow_dispatch` with an `execution-mode` input that
+defaults to `shadow`, so a manual run exercises the same jobs on the same fleet
+while `continue-on-error` keeps the result advisory:
+
+```bash
+# from the Actions tab, or:
+gh workflow run store-shards.yml --ref main -f execution-mode=shadow
+```
+
+The dispatch entry point is only visible once the workflow is on the default
+branch. A rehearsal that schedules, shards, and produces an aggregate receipt
+is what earns `scripts/ci-execution-mode accelerated`; it is not a substitute
+for the shadow campaign, only the cheapest way to find out whether the graph
+can run at all.
 
 Eligible packaging changes require both rows of the `package_smoke` matrix.
 The arm64 row selects the self-hosted Linux/ARM64 `ci-arm64` VM pool, or

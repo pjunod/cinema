@@ -570,7 +570,7 @@ depends_on = ["core.media", "server.api"]
 [[points]]
 id = "playback.pipeline"
 title = "Playback decision, delivery, and presentation"
-contract = "Every supported source reaches a client through the intended direct, remux, copy, or transcode path, follows its durable cluster owner through a streamed relay, and keeps presenting media."
+contract = "Every supported source reaches a client through the intended direct, remux, copy, or transcode path, follows its durable cluster owner through a streamed relay, and keeps presenting media; a seek storm leaves one playback with at most one live subtitle-window extraction, carrying the destination the client settled on, with abandoned windows publishing nothing and remembering nothing."
 paths = [
   "crates/plurx-core/src/fmp4.rs",
   "crates/plurx-core/src/mediafacts.rs",

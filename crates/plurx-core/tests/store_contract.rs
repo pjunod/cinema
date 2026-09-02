@@ -679,6 +679,133 @@ async fn current_media_session(
     activation
 }
 
+#[test]
+fn activation_confirmation_retries_only_its_exact_state_update() {
+    let source = include_str!("../src/store/hiqlite_sessions.rs");
+    let source = source
+        .split_once("    async fn settle_media_session_activation(")
+        .expect("replicated activation settlement method")
+        .1
+        .split_once("\n    async fn publish_media_session_activation(")
+        .expect("activation settlement method boundary")
+        .0;
+    let (confirm, abandon) = source
+        .split_once("MediaSessionActivationSettlement::Abandon")
+        .expect("settlement keeps distinct confirm and abandon branches");
+    assert_eq!(
+        confirm.matches(".execute_idempotent(").count(),
+        1,
+        "confirmation must use the bounded exact-state write retry"
+    );
+    assert!(
+        confirm.contains("publication_ready_at_ms = $1")
+            && confirm.contains("publication_ready_at_ms = $12"),
+        "the retried update must write one exact boundary and remain guarded by the unpublished sentinel"
+    );
+    assert!(
+        !confirm.contains(".txn(") && !abandon.contains(".execute_idempotent("),
+        "ordinary transactions and abandon mutations must not inherit confirmation's retry authority"
+    );
+    // The zero-row branch is what makes the retry safe, and its two proofs are
+    // the pair a mutation would drop silently: the durable pointer still names
+    // this incarnation, and the surviving row carries the boundary this call
+    // wrote rather than one some other confirmation of the same incarnation
+    // committed.
+    assert!(
+        confirm
+            .contains("committed_pointer.as_deref() == Some(activation.incarnation_id.as_str())"),
+        "a zero-row replay must prove the durable pointer still names this activation"
+    );
+    assert!(
+        confirm.contains("route.publication_ready_at_ms == publication_ready_at_ms"),
+        "a zero-row replay must prove the surviving row carries this call's own boundary"
+    );
+    // The embedded twin serves the same method and had the same hole. A fix
+    // applied to one backend and not the other is the parity defect this
+    // repository has paid for before.
+    let sqlite = include_str!("../src/store/sqlite/sessions.rs");
+    let sqlite_confirm = sqlite
+        .split_once("MediaSessionActivationSettlement::Confirm")
+        .expect("embedded settlement keeps a confirm branch")
+        .1
+        .split_once("MediaSessionActivationSettlement::Abandon")
+        .expect("embedded settlement keeps distinct confirm and abandon branches")
+        .0;
+    assert!(
+        sqlite_confirm.contains("route.publication_ready_at_ms == publication_ready_at_ms"),
+        "the embedded twin's confirmation replay must prove the same boundary"
+    );
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn media_activation_confirmation_recovers_a_committed_timeout() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset committed-timeout contract state");
+    let user = store
+        .create_user("activation-committed-timeout-user", "hash", false)
+        .await
+        .expect("create committed-timeout user");
+    let activation = MediaSessionActivation {
+        incarnation_id: "00000000-0000-4000-8000-00000000fc11".to_owned(),
+        session_id: "00000000-0000-4000-8000-00000000fc12".to_owned(),
+        user_id: user.id,
+        playback_id: "activation-committed-timeout-playback".to_owned(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: None,
+        request_fingerprint: "f".repeat(64),
+        owner_node_id: "activation-committed-timeout-node".to_owned(),
+        recipe_json: "{}".to_owned(),
+        response_json: r#"{"session":"committed-timeout"}"#.to_owned(),
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: 1_000,
+        lease_expires_at_ms: 10_000,
+    };
+    store
+        .activate_media_session(&activation)
+        .await
+        .expect("prepare committed-timeout activation")
+        .expect("committed-timeout activation must win");
+
+    store.validation_reset_operation_counts();
+    store.validation_timeout_next_idempotent_write_after_commit();
+    let confirmed = store
+        .settle_media_session_activation(
+            &activation,
+            MediaSessionActivationSettlement::Confirm {
+                publication_ready_at_ms: 0,
+            },
+            activation.now_ms,
+        )
+        .await
+        .expect("retry committed activation confirmation")
+        .expect("committed activation confirmation remains observable");
+
+    assert_eq!(confirmed.incarnation_id, activation.incarnation_id);
+    assert_eq!(confirmed.publication_ready_at_ms, 0);
+    assert_eq!(
+        store.validation_operation_counts().write_calls,
+        2,
+        "one committed attempt plus its zero-row replay must be submitted"
+    );
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(&activation.incarnation_id)
+            .await
+            .expect("read committed-timeout route")
+            .expect("committed-timeout route remains durable")
+            .publication_ready_at_ms,
+        0
+    );
+}
+
 fn staged_preparation(
     user_id: i64,
     playback_id: &str,
