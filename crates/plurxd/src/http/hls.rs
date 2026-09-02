@@ -4994,21 +4994,39 @@ async fn record_preparation_shadow(
         },
         None,
     );
+    // Built once and passed to both decisions, so the two counters can never
+    // disagree about what the transition was — only about the client gate.
+    let delivered_view = crate::playback_control::RecipeView {
+        selection: &delivered,
+        grade: crate::playback_control::GradeIntent::from_request(&recipe.request),
+    };
+    let proposed_view = crate::playback_control::RecipeView {
+        selection: &proposed,
+        grade: crate::playback_control::GradeIntent::from_request(&candidate),
+    };
+    let conditions = crate::playback_control::PreparationConditions {
+        observed_download_bps,
+        delivered_bps,
+    };
     crate::playback_control::record_preparation_decision(
         crate::playback_control::decide_preparation(
-            crate::playback_control::RecipeView {
-                selection: &delivered,
-                grade: crate::playback_control::GradeIntent::from_request(&recipe.request),
-            },
-            crate::playback_control::RecipeView {
-                selection: &proposed,
-                grade: crate::playback_control::GradeIntent::from_request(&candidate),
-            },
+            delivered_view,
+            proposed_view,
             capabilities.as_ref(),
-            crate::playback_control::PreparationConditions {
-                observed_download_bps,
-                delivered_bps,
-            },
+            conditions,
+        ),
+    );
+    // Both shipped clients hardcode the capability `false`, so the counter
+    // above books every single-axis transition as `client_cannot_prepare` and
+    // can say nothing about the axis rule or the throughput floor. This is the
+    // same transition decided as if that literal had already flipped — the
+    // only way, short of shipping a client, to learn whether the prepared path
+    // would ever fire.
+    crate::playback_control::record_preparation_counterfactual(
+        crate::playback_control::decide_preparation_after_client_release(
+            delivered_view,
+            proposed_view,
+            conditions,
         ),
     );
 }

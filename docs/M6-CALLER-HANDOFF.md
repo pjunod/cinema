@@ -438,6 +438,49 @@ The vocabulary is already fixed and tested: `PreparationAxis::as_str` and
 Read it as "this build has decided", captured at the time — these are in-memory
 counters and every deploy resets them (M6 handoff §4).
 
+#### 3.3.2 The counter above cannot answer the question it was built for
+
+**Met the acceptance and measured the wrong thing.** The first production
+datapoint arrived on m6 on 2026-09-02 — one `resolution_or_bitrate` change,
+outcome `client_cannot_prepare` — and every datapoint after it will read the
+same, for a reason visible in `decide_preparation` itself: the client gate is
+checked *above* the axis rule and the throughput floor, and both shipped
+clients hardcode the literal `false`. So the shadow counter reports which axes
+viewers cross, which is worth having, and is structurally incapable of
+reporting the two things §3.3 says it exists for — whether `PREPARED_AXIS`
+refuses most transitions anyway, and whether `throughput_unproven` refuses so
+often that the prepared path would never fire.
+
+The ordering is not the defect; it is deliberate (see the `MultipleAxes`
+comment) and it will be the production decision once §3.4 stages. The defect
+was believing one counter could answer a question about a client release that
+has not shipped. So the same transition is decided twice and recorded twice:
+
+```
+plurx_playback_preparation_decisions_total{axis="…",outcome="…"}       # today
+plurx_playback_preparation_counterfactual_total{axis="…",outcome="…"}  # after the release
+```
+
+The second is `decide_preparation_after_client_release` — the identical
+decision with the client gate assumed satisfied, and nothing else changed. Both
+counters carry the same axis/outcome cross product so they can be subtracted
+series by series; the counterfactual's `client_cannot_prepare` column is zero
+forever by construction, and is published anyway so that a reader who has the
+wrong counter in hand notices.
+
+**How to read them.** `decisions` is what M6 would do on today's fleet.
+`counterfactual` is what M6 would do after a client release flipped Apple's
+literal, and its `prepare` column is therefore the volume that release would
+actually unlock. If that column stays near zero while `throughput_unproven`
+climbs, the client release is not the thing standing between M6 and working,
+and §3.4 should not ship on the strength of the capability alone. The two agree
+exactly on `multiple_axes` and on `unchanged`, by the ranking above — a
+divergence there is a bug in the ranking, and there is a test that says so.
+
+**Acceptance:** `plurx_playback_preparation_counterfactual_total` is nonzero on
+a node serving real traffic, and the `prepare` against `throughput_unproven`
+against `axis_not_proven` split is recorded in the status page with a date.
+
 ### 3.4 Stage on `Prepare`
 
 The first behaviour change, and the first production caller — this is the slice
@@ -448,7 +491,9 @@ that removes `allow(dead_code)` from `PreparationExecutor`.
 `fallback/client_cannot_prepare` until a coordinated client release flips
 Apple's literal. That is handoff §1 working, not a bug — but it does mean §3.3's
 measurement is what tells you the plumbing is right, because §3.4 cannot be
-observed on the fleet until the release ships.
+observed on the fleet until the release ships. Read §3.3.2's counterfactual
+counter before shipping this slice: it is the only reading that says whether
+the staged path would fire at all once the literal flips.
 
 **Acceptance:** with a test client reporting `dual_player_preparation: true` on
 a resolution change with headroom, the ledger holds a staged successor and the

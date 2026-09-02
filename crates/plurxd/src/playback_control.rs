@@ -1226,6 +1226,46 @@ pub(crate) fn decide_preparation(
     retained: Option<&DynamicCapabilities>,
     conditions: PreparationConditions,
 ) -> PreparationDecision {
+    decide_preparation_given_client(
+        delivered,
+        candidate,
+        retained.is_some_and(|caps| caps.dual_player_preparation),
+        conditions,
+    )
+}
+
+/// The same decision with the client capability **assumed satisfied**.
+///
+/// Shadow-only, and it exists because of what the fleet actually measured:
+/// with both shipped clients' `dual_player_preparation` literal hardcoded
+/// `false`, `client_cannot_prepare` is checked before the axis and the
+/// throughput and therefore absorbs *every* single-axis transition. The first
+/// production datapoint (m6, 2026-09-02, one `resolution_or_bitrate` change)
+/// read `client_cannot_prepare`, and so would every datapoint after it — so
+/// the shadow as first shipped can report which axes viewers cross, but cannot
+/// report the thing it was built to report: whether `AxisNotProven` and
+/// `ThroughputUnproven` would refuse so often that the prepared path would
+/// never fire even after a coordinated client release.
+///
+/// Recorded as its own counter rather than by reordering `decide_preparation`,
+/// because that ordering is deliberate — see the `MultipleAxes` comment — and
+/// will be the production decision once M6 stages. This answers a strictly
+/// counterfactual question; nothing reads it but the metric.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn decide_preparation_after_client_release(
+    delivered: RecipeView<'_>,
+    candidate: RecipeView<'_>,
+    conditions: PreparationConditions,
+) -> PreparationDecision {
+    decide_preparation_given_client(delivered, candidate, true, conditions)
+}
+
+fn decide_preparation_given_client(
+    delivered: RecipeView<'_>,
+    candidate: RecipeView<'_>,
+    client_can_prepare: bool,
+    conditions: PreparationConditions,
+) -> PreparationDecision {
     let (delivered_grade, candidate_grade) = (delivered.grade, candidate.grade);
     let (delivered, candidate) = (delivered.selection, candidate.selection);
     let mut crossed: Option<PreparationAxis> = None;
@@ -1282,7 +1322,7 @@ pub(crate) fn decide_preparation(
             reason: FallbackReason::MultipleAxes,
         };
     }
-    if !retained.is_some_and(|caps| caps.dual_player_preparation) {
+    if !client_can_prepare {
         return PreparationDecision::Fallback {
             axis,
             reason: FallbackReason::ClientCannotPrepare,
@@ -10237,6 +10277,20 @@ static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// Indexed `[axis][outcome]`. Axis order is `PreparationAxis`'s own; outcome
 /// is prepare, then the four `FallbackReason`s in declaration order.
 static PREPARATION_DECISIONS: [[AtomicU64; 5]; 5] = [const { [const { AtomicU64::new(0) }; 5] }; 5];
+/// The same measurement with the client capability assumed satisfied.
+///
+/// Same shape and same indices as `PREPARATION_DECISIONS` so the two are
+/// directly comparable, and deliberately including the `client_cannot_prepare`
+/// column, which stays zero forever by construction. That permanent zero is
+/// the point: it is what makes a reader check which counter they are holding,
+/// and it keeps the two emissions one loop rather than two that can drift.
+///
+/// Read it against the other: `preparation_decisions` is what M6 would do
+/// **today**, `preparation_counterfactual` is what M6 would do **after a
+/// client release flipped the literal**, and the difference between them is
+/// the value of shipping that release.
+static PREPARATION_COUNTERFACTUAL: [[AtomicU64; 5]; 5] =
+    [const { [const { AtomicU64::new(0) }; 5] }; 5];
 /// Exchanges where production was held and the client had not declared the
 /// action, so it was told nothing. Watch this fall as clients roll out.
 static CONTROL_ACTIONS_SUPPRESSED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
@@ -10355,8 +10409,27 @@ fn platform_index(platform: ClientPlatform) -> usize {
 /// "nothing to do" beside four that mean something.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn record_preparation_decision(decision: PreparationDecision) {
+    if let Some((axis, outcome)) = preparation_indices(decision) {
+        PREPARATION_DECISIONS[axis][outcome].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Record the same selection change decided as if the client could prepare.
+///
+/// Separate call rather than a second recording inside the one above, because
+/// the two decisions are made from different inputs and a caller that recorded
+/// one without the other would be measuring half a question.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_preparation_counterfactual(decision: PreparationDecision) {
+    if let Some((axis, outcome)) = preparation_indices(decision) {
+        PREPARATION_COUNTERFACTUAL[axis][outcome].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `[axis][outcome]` for one decision, or `None` for `Unchanged`.
+fn preparation_indices(decision: PreparationDecision) -> Option<(usize, usize)> {
     let (axis, outcome) = match decision {
-        PreparationDecision::Unchanged => return,
+        PreparationDecision::Unchanged => return None,
         PreparationDecision::Prepare { axis } => (axis, 0),
         PreparationDecision::Fallback { axis, reason } => (
             axis,
@@ -10375,7 +10448,7 @@ pub(crate) fn record_preparation_decision(decision: PreparationDecision) {
         PreparationAxis::DeliveryMethod => 3,
         PreparationAxis::DynamicRange => 4,
     };
-    PREPARATION_DECISIONS[axis][outcome].fetch_add(1, Ordering::Relaxed);
+    Some((axis, outcome))
 }
 
 /// Record what one accepted exchange's action was, and what it could not be.
@@ -10470,7 +10543,9 @@ pub(crate) fn prometheus() -> String {
     }
     output.push_str(
         "# HELP plurx_playback_preparation_decisions_total What M6 would do about a selection change, by axis and outcome. Shadow: nothing is staged.\n\
-         # TYPE plurx_playback_preparation_decisions_total counter\n",
+         # TYPE plurx_playback_preparation_decisions_total counter\n\
+         # HELP plurx_playback_preparation_counterfactual_total The same, decided as if the client could prepare. outcome=\"client_cannot_prepare\" is zero by construction.\n\
+         # TYPE plurx_playback_preparation_counterfactual_total counter\n",
     );
     for (axis_index, axis) in [
         PreparationAxis::ResolutionOrBitrate,
@@ -10493,9 +10568,12 @@ pub(crate) fn prometheus() -> String {
         .enumerate()
         {
             output.push_str(&format!(
-                "plurx_playback_preparation_decisions_total{{axis=\"{}\",outcome=\"{outcome}\"}} {}\n",
+                "plurx_playback_preparation_decisions_total{{axis=\"{}\",outcome=\"{outcome}\"}} {}\n\
+                 plurx_playback_preparation_counterfactual_total{{axis=\"{}\",outcome=\"{outcome}\"}} {}\n",
                 axis.as_str(),
-                PREPARATION_DECISIONS[axis_index][outcome_index].load(Ordering::Relaxed)
+                PREPARATION_DECISIONS[axis_index][outcome_index].load(Ordering::Relaxed),
+                axis.as_str(),
+                PREPARATION_COUNTERFACTUAL[axis_index][outcome_index].load(Ordering::Relaxed)
             ));
         }
     }
@@ -16019,6 +16097,188 @@ mod tests {
         metrics
             .lines()
             .filter(|line| line.starts_with("plurx_playback_preparation_decisions_total{"))
+            .filter_map(|line| line.rsplit(' ').next()?.parse::<u64>().ok())
+            .sum()
+    }
+
+    /// The counterfactual publishes the same cross product as the decision it
+    /// shadows, including the column it can never fill.
+    ///
+    /// Same shape on purpose: the two counters are read against each other
+    /// series by series, and a counterfactual that omitted
+    /// `client_cannot_prepare` would be a differently-shaped vector that no
+    /// dashboard could subtract.
+    #[test]
+    fn the_counterfactual_metric_publishes_the_same_cross_product() {
+        let metrics = prometheus();
+        for axis in [
+            PreparationAxis::ResolutionOrBitrate,
+            PreparationAxis::AudioTrackOrOffset,
+            PreparationAxis::SubtitleBurn,
+            PreparationAxis::DeliveryMethod,
+            PreparationAxis::DynamicRange,
+        ] {
+            for outcome in [
+                "prepare",
+                FallbackReason::ClientCannotPrepare.as_str(),
+                FallbackReason::AxisNotProven.as_str(),
+                FallbackReason::MultipleAxes.as_str(),
+                FallbackReason::ThroughputUnproven.as_str(),
+            ] {
+                let series = format!(
+                    "plurx_playback_preparation_counterfactual_total{{axis=\"{}\",outcome=\"{outcome}\"}}",
+                    axis.as_str()
+                );
+                assert!(metrics.contains(&series), "missing {series}");
+            }
+        }
+    }
+
+    /// The counterfactual reaches the two rules the client gate hides, and
+    /// that is the whole reason it exists.
+    ///
+    /// Both shipped clients hardcode `dual_player_preparation` false, so on
+    /// today's fleet every single-axis transition books
+    /// `client_cannot_prepare` — which is true, and says nothing about whether
+    /// `PREPARED_AXIS` and the throughput floor would then refuse anyway. The
+    /// first production datapoint (m6, 2026-09-02) read exactly that.
+    #[test]
+    fn the_counterfactual_reaches_the_rules_the_client_gate_hides() {
+        // A link with no room for a second pipeline: the floor wants twice
+        // what is being delivered.
+        let strained = PreparationConditions {
+            observed_download_bps: Some(12_000_000),
+            delivered_bps: Some(12_000_000),
+        };
+        assert_eq!(
+            decide_preparation(view(&playing(2160)), view(&playing(1080)), None, strained),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::ResolutionOrBitrate,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+            "today: the gate answers first and the floor is never consulted",
+        );
+        assert_eq!(
+            decide_preparation_after_client_release(
+                view(&playing(2160)),
+                view(&playing(1080)),
+                strained,
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::ResolutionOrBitrate,
+                reason: FallbackReason::ThroughputUnproven,
+            },
+            "after the release: the floor is what would refuse",
+        );
+
+        let mut audio = playing(2160);
+        audio.audio_track = Some(1);
+        assert_eq!(
+            decide_preparation(view(&playing(2160)), view(&audio), None, roomy()),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::AudioTrackOrOffset,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+        );
+        assert_eq!(
+            decide_preparation_after_client_release(view(&playing(2160)), view(&audio), roomy()),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::AudioTrackOrOffset,
+                reason: FallbackReason::AxisNotProven,
+            },
+            "after the release: the axis rule is what would refuse",
+        );
+
+        assert_eq!(
+            decide_preparation_after_client_release(
+                view(&playing(2160)),
+                view(&playing(1080)),
+                roomy(),
+            ),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::ResolutionOrBitrate,
+            },
+            "and this is the volume a client release would actually unlock",
+        );
+    }
+
+    /// The two decisions differ at the client gate and nowhere else.
+    ///
+    /// `MultipleAxes` is ranked above the gate deliberately so the metric
+    /// stays stable across a client release — this is the test that fails if
+    /// that ranking is undone, because the two counters would then disagree
+    /// about a transition neither client literal has any bearing on.
+    #[test]
+    fn the_counterfactual_differs_only_at_the_client_gate() {
+        let mut two_axes = playing(1080);
+        two_axes.audio_track = Some(1);
+        for conditions in [
+            roomy(),
+            PreparationConditions {
+                observed_download_bps: Some(12_000_000),
+                delivered_bps: Some(12_000_000),
+            },
+        ] {
+            assert_eq!(
+                decide_preparation(view(&playing(2160)), view(&two_axes), None, conditions),
+                decide_preparation_after_client_release(
+                    view(&playing(2160)),
+                    view(&two_axes),
+                    conditions,
+                ),
+                "a multi-axis transition is not the client literal's fault",
+            );
+            assert_eq!(
+                decide_preparation_after_client_release(
+                    view(&playing(2160)),
+                    view(&playing(2160)),
+                    conditions,
+                ),
+                PreparationDecision::Unchanged,
+            );
+        }
+    }
+
+    /// Each counter is moved by its own recorder and by nothing else.
+    #[test]
+    fn the_two_preparation_counters_are_recorded_separately() {
+        let decision = PreparationDecision::Fallback {
+            axis: PreparationAxis::SubtitleBurn,
+            reason: FallbackReason::AxisNotProven,
+        };
+        let before = prometheus();
+        record_preparation_counterfactual(decision);
+        let after = prometheus();
+        assert_eq!(
+            preparation_series_total(&after),
+            preparation_series_total(&before),
+            "the counterfactual does not move the decision counter",
+        );
+        assert_eq!(
+            counterfactual_series_total(&after),
+            counterfactual_series_total(&before) + 1,
+        );
+
+        record_preparation_decision(decision);
+        assert_eq!(
+            counterfactual_series_total(&prometheus()),
+            counterfactual_series_total(&after),
+            "and the decision does not move the counterfactual",
+        );
+        record_preparation_counterfactual(PreparationDecision::Unchanged);
+        assert_eq!(
+            counterfactual_series_total(&prometheus()),
+            counterfactual_series_total(&after),
+            "`Unchanged` is not an outcome in either counter",
+        );
+    }
+
+    /// Sum every `plurx_playback_preparation_counterfactual_total` series, for
+    /// the same reason `preparation_series_total` exists.
+    fn counterfactual_series_total(metrics: &str) -> u64 {
+        metrics
+            .lines()
+            .filter(|line| line.starts_with("plurx_playback_preparation_counterfactual_total{"))
             .filter_map(|line| line.rsplit(' ').next()?.parse::<u64>().ok())
             .sum()
     }
