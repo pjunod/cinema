@@ -85,6 +85,16 @@ def rostered_runners() -> tuple[tuple[str, frozenset[str]], ...]:
     )
 
 
+def store_shard_count() -> int:
+    """The single declared Store shard count, from the shard job's `env`."""
+    return int(
+        re.search(
+            r'(?m)^      SHARD_COUNT: "(\d+)"$',
+            read(".github/workflows/store-shards.yml"),
+        ).group(1)
+    )
+
+
 def self_hosted_label_sets(block: str) -> list[tuple[str, ...]]:
     """Every self-hosted label set a job's `runs-on` can resolve to.
 
@@ -978,13 +988,12 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn(
             "github.event.inputs", shards.split("\njobs:\n", 1)[1]
         )
-        # Three shards, one per `ci-store` slot, every one selecting the same
-        # label set that already schedules the legacy lane and the weekly
-        # backstop. A shard with a runner class of its own is what produced
+        # One shard per `ci-store` slot, every one selecting the same label set
+        # that already schedules the legacy lane and the weekly backstop. A
+        # shard with a runner class of its own is what produced
         # `ci-store-shard-1`, a label the fleet has never carried and which
         # would have queued every pull request forever the moment this path
         # became required.
-        self.assertIn("shard_index: [0, 1, 2]", shard)
         self.assertEqual(
             [("self-hosted", "Linux", "X64", "lab", "ci-store")],
             self_hosted_label_sets(shard),
@@ -992,16 +1001,35 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("fail-fast: false", shard)
         # The count lives in one place and both invocations read it. The matrix
         # is the only unavoidable second mention — a matrix cannot be built
-        # from `env` — and a disagreement between the two still fails closed,
-        # because `validation/store_shard.py` rejects a receipt set whose size
-        # or index set does not match the count the receipts declare.
-        self.assertEqual(shard.count('SHARD_COUNT: "3"'), 1)
-        self.assertEqual(
-            len(re.findall(r"(?m)^\s+shard_index: \[(.+)\]$", shard)[0].split(",")),
-            3,
+        # from `env` — so prove the two agree rather than pinning a literal
+        # that every fleet change has to chase. A disagreement that somehow got
+        # past this still fails closed, because `validation/store_shard.py`
+        # rejects a receipt set whose size or index set does not match the
+        # count the receipts declare.
+        shard_count = store_shard_count()
+        self.assertGreaterEqual(
+            shard_count,
+            2,
+            "validation/store_shard.py rejects a shard count below two",
         )
-        self.assertEqual(shard.count('--shard-count "$SHARD_COUNT"'), 2)
-        self.assertNotIn("--shard-count 2", shard)
+        self.assertEqual(
+            list(range(shard_count)),
+            [
+                int(index)
+                for index in re.search(
+                    r"(?m)^        shard_index: \[(.+)\]$", shard
+                )
+                .group(1)
+                .split(",")
+            ],
+        )
+        self.assertEqual(
+            shard.count('--shard-count "$SHARD_COUNT"'),
+            2,
+            "both store_shard invocations must read the one declared count",
+        )
+        # No step may carry a literal count beside the one `env` declaration.
+        self.assertNotRegex(shard, r"--shard-count \d")
 
         build = workflow_step_blocks(shard)["Build the exact Store test binary"]
         self.assertEqual(workflow_step_scalar(build, "continue-on-error"), "true")
@@ -1710,19 +1738,15 @@ class OperationsContractCase(unittest.TestCase):
                     f"{label} is assigned to a production plurx voter",
                 )
 
-        # The Store fan-out is only as parallel as the fleet. More shards than
-        # `ci-store` slots serialises the surplus behind a runner that is
-        # already busy, which buys a more complicated failure and no wall time
-        # — and it is how one uniquely labelled runner became a queue.
-        shard_count = int(
-            re.search(
-                r'(?m)^      SHARD_COUNT: "(\d+)"$',
-                read(".github/workflows/store-shards.yml"),
-            ).group(1)
-        )
+        # The Store fan-out is only as parallel as the fleet. One host holds at
+        # most one slot, so a surplus shard cannot be given a runner of its
+        # own: it serialises behind a busy one and buys a more complicated
+        # failure and no wall time. This is the check that caught a three-shard
+        # matrix on 2026-09-02 after `gha-nuc2-android-01` lost `ci-store` for
+        # failing the lane on an unwritable Cargo home.
         self.assertGreaterEqual(
             len([r for r in runners if "ci-store" in r["labels"]]),
-            shard_count,
+            store_shard_count(),
             "the Store shard count exceeds the number of ci-store slots",
         )
 
