@@ -5213,6 +5213,11 @@ impl Session {
                 u64,
                 crate::playback_control::ControlAction,
                 crate::playback_control::ClientPlatform,
+                // What the viewer changed and what the device can do about
+                // it. A distinct type rather than a bare `bool`, which also
+                // removes any chance of transposing it with
+                // `acknowledged_end` at the tail of this tuple.
+                crate::playback_control::SelectionObservation,
                 i64,
                 u32,
                 u64,
@@ -5244,6 +5249,7 @@ impl Session {
             outcome.accepted_sequence,
             outcome.action,
             outcome.platform,
+            outcome.selection,
             outcome.lease.expires_at_unix_ms(),
             outcome.lease.timeout_ms(),
             outcome.flow_ticket,
@@ -9494,6 +9500,7 @@ impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmiss
                     outcome.accepted_sequence,
                     outcome.action,
                     outcome.platform,
+                    outcome.selection,
                     outcome.lease.expires_at_unix_ms(),
                     outcome.lease.timeout_ms(),
                     outcome.flow_ticket,
@@ -16417,6 +16424,12 @@ impl TranscodeManager {
                     Err(error) => return Some(Err(error)),
                 };
                 result.disposition = crate::playback_control::ControlDisposition::Replay;
+                // A stored result carries the observation of the exchange that
+                // produced it. Replaying it must not replay that: one viewer
+                // action is one measurement, and a client retrying a lost
+                // terminal response would otherwise pay the shadow's reads and
+                // count its change again on every retry.
+                result.selection = crate::playback_control::SelectionObservation::default();
                 if let Some(commit) = &result.terminal_commit {
                     commit.retry();
                 }
@@ -16491,6 +16504,7 @@ impl TranscodeManager {
             accepted_sequence,
             action,
             platform,
+            selection,
             lease_expires_at_unix_ms,
             lease_timeout_ms,
             flow_ticket,
@@ -16515,6 +16529,10 @@ impl TranscodeManager {
                     Ok(mut result) => {
                         result.disposition = disposition;
                         if disposition == crate::playback_control::ControlDisposition::Replay {
+                            // See the fast path above: a replayed result must
+                            // not replay its observation.
+                            result.selection =
+                                crate::playback_control::SelectionObservation::default();
                             if let Some(commit) = &result.terminal_commit {
                                 commit.retry();
                             }
@@ -16535,6 +16553,7 @@ impl TranscodeManager {
                     accepted_sequence,
                     action,
                     platform,
+                    selection,
                     lease_expires_at_unix_ms,
                     lease_timeout_ms,
                     flow_ticket,
@@ -16558,6 +16577,7 @@ impl TranscodeManager {
         accepted_sequence: u64,
         action: crate::playback_control::ControlAction,
         platform: crate::playback_control::ClientPlatform,
+        selection: crate::playback_control::SelectionObservation,
         lease_expires_at_unix_ms: i64,
         lease_timeout_ms: u32,
         flow_ticket: u64,
@@ -16626,6 +16646,7 @@ impl TranscodeManager {
                 platform,
                 terminal_handoff,
                 terminal_commit: None,
+                selection,
             };
             if acknowledged_end {
                 if let Some(committer) = terminal_committer {

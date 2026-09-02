@@ -4786,6 +4786,19 @@ async fn control_local_inner(
     };
     crate::playback_control::record(outcome);
     crate::playback_control::record_platform(outcome, result.platform);
+    if result.selection.changed {
+        // Spawned, never awaited: see the function's own doc. The exchange has
+        // spent its deadline by here and the response is already built.
+        tokio::spawn(record_preparation_shadow(
+            state.clone(),
+            recipe.clone(),
+            request.selection.clone(),
+            request.observed_download_bps,
+            response.effective_selection.clone(),
+            response.delivery.delivered_bps,
+            result.selection.capabilities.clone(),
+        ));
+    }
     tracing::debug!(
         session = %crate::transcode::session_log_id(&route.session_id),
         owner_epoch,
@@ -4800,6 +4813,125 @@ async fn control_local_inner(
         Json(response),
     )
         .into_response()
+}
+
+/// Shadow measurements in flight, bounding the detached fan-out.
+///
+/// The gate is *this selection differs from the last accepted one*, so a
+/// client alternating between two selections trips it on every exchange —
+/// four a second, against the server's own 250 ms floor. That is adversarial
+/// rather than likely, but a detached task per exchange per client with a
+/// store read inside it is not a shape to leave unbounded for the sake of a
+/// number. Over the cap the measurement is skipped, which it already is on any
+/// failed read: this is best-effort by construction.
+static PREPARATION_SHADOWS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+/// Enough for every node in the fleet to be measuring several clients at once,
+/// and far below the point where the store notices.
+const MAX_PREPARATION_SHADOWS: usize = 32;
+
+/// Record what M6 would have done about this exchange's selection change.
+///
+/// **Shadow: nothing is staged and nothing about the response depends on it.**
+/// `PREPARED_AXIS` and the throughput floor are arguments until this runs on
+/// real traffic — in particular nothing but production can say whether
+/// `throughput_unproven` refuses so often that the prepared path would never
+/// fire, which that rule's own doc names as its open residual.
+///
+/// Called only when the engine reports the selection moved, and spawned rather
+/// than awaited: the exchange is under an absolute deadline it has *already
+/// spent* by this point, the response is fully built, and a store read that
+/// ran long would turn a completed exchange into a 503 — after its accepted
+/// metric had been recorded. A measurement is never worth that.
+///
+/// Measured against **the response this exchange actually sent**: the client
+/// was told a height and a rate, and a shadow measuring different ones would
+/// answer a question nobody asked.
+async fn record_preparation_shadow(
+    state: AppState,
+    recipe: RemoteStartRequest,
+    selection: crate::playback_control::ClientSelection,
+    observed_download_bps: Option<u64>,
+    delivered: crate::playback_control::EffectiveSelection,
+    delivered_bps: Option<i64>,
+    capabilities: Option<crate::playback_control::DynamicCapabilities>,
+) {
+    // Released on every exit below, including the early one.
+    struct InFlight;
+    impl Drop for InFlight {
+        fn drop(&mut self) {
+            PREPARATION_SHADOWS_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    if PREPARATION_SHADOWS_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        >= MAX_PREPARATION_SHADOWS
+    {
+        PREPARATION_SHADOWS_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    let _in_flight = InFlight;
+    let Ok(source) = state.store.get_file(recipe.request.file_id).await else {
+        // Best-effort: a read that fails is a measurement not taken, never an
+        // exchange that fails. Nothing above this depends on the result.
+        return;
+    };
+    // Only a *manual* ask needs resolving, and this is the whole reason the
+    // network prior is not read here.
+    //
+    // `resolve_height`'s Auto arm is the only one that consults the prior, and
+    // Auto is not a client-driven height change: the ladder moving because the
+    // link moved is the server's own adaptation, which M6 is explicitly not
+    // for. So an Auto selection keeps the height it is already being served,
+    // and every case still decides the same way — Auto → Auto crosses nothing,
+    // and anything to or from Auto crosses `ResolutionOrBitrate` on
+    // `quality_auto` regardless of the number. Resolving it instead would
+    // invent a server-driven change and attribute it to the viewer.
+    let height = match selection.quality {
+        crate::playback_control::QualitySelection::Auto => delivered.height,
+        crate::playback_control::QualitySelection::Manual { height } => {
+            resolve_height(
+                &state,
+                source.as_ref(),
+                None,
+                recipe.request.hdr10,
+                Some(height),
+            )
+            .await
+        }
+    };
+    let candidate = crate::playback_control::candidate_request(
+        &recipe.request,
+        &selection,
+        height,
+        source.as_ref().and_then(|file| file.height),
+    );
+    let proposed = crate::playback_control::EffectiveSelection::from_request(
+        &candidate,
+        match candidate.kind {
+            crate::transcode::SessionKind::Transcode { height } => height,
+            // A copy is not a rung, so it keeps the height it is already
+            // delivering rather than one the ladder would have picked.
+            crate::transcode::SessionKind::Copy { .. } => delivered.height,
+        },
+        None,
+    );
+    crate::playback_control::record_preparation_decision(
+        crate::playback_control::decide_preparation(
+            crate::playback_control::RecipeView {
+                selection: &delivered,
+                grade: crate::playback_control::GradeIntent::from_request(&recipe.request),
+            },
+            crate::playback_control::RecipeView {
+                selection: &proposed,
+                grade: crate::playback_control::GradeIntent::from_request(&candidate),
+            },
+            capabilities.as_ref(),
+            crate::playback_control::PreparationConditions {
+                observed_download_bps,
+                delivered_bps,
+            },
+        ),
+    );
 }
 
 async fn status_local_before(
