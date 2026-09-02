@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["f2cadec8"]
+commits = ["f2cadec8", "85d29b74"]
 points = ["cluster.page-reads", "validation.framework"]
-checks = ["cluster-auth"]
-reason = "The retained real-daemon Activity regression proves that concurrent admin and household reads share one physical peer snapshot without exposing the admin-only hostname projection. Its two-caller privacy wave no longer enters the separate eight-request receiver-admission barrier or consumes 500 ms of the common peer deadline; the later eight-caller burst retains that barrier and still proves same-window coalescing and receiver-authority behavior."
+checks = ["cluster-auth", "history-regressions"]
+reason = "The retained real-daemon Activity regression proves that concurrent admin and household reads share one physical peer snapshot without exposing the admin-only hostname projection. Its two-caller privacy wave no longer enters the separate eight-request receiver-admission barrier or consumes 500 ms of the common peer deadline; the later eight-caller burst retains that barrier and still proves same-window coalescing and receiver-authority behavior. The ledger commit is retained and bound to the history-regressions contract so this evidence remains auditable."
