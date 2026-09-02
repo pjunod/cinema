@@ -1,9 +1,11 @@
 # Playback control rewrite — project status
 
 **Updated:** 2026-09-02 · **Baseline:** `main` at `c8ce837` (`v0.3.0`) ·
-**Fleet:** nuc3 `-64` · nuc4 `-108` · m6 `-133` · nynuc `-108`, all `readyz`
-200 — **three different builds**, so any fleet measurement taken now compares
-different servers · **Devices:** Apple 99 and Android 56 were **installed** on
+**Fleet:** level again — all four on `v0.3.0-260-g5b127370`, read off
+`/metrics` 2026-09-02. **nuc3 is a non-voting learner** answering `readyz` 503
+`quorum unavailable`; the other three hold quorum (required 2) with zero
+leader changes, so nothing is degraded, but nuc3 serves only bounded catalogue
+reads and node-local routes · **Devices:** Apple 99 and Android 56 were **installed** on
 2026-08-31; the web arm of the acceptance passed on nuc3, and M5.5 has since
 measured all three platforms on hardware — see §"M5.5 ran, and two thirds of
 it settled" · the tree is Android 60 · Apple 104
@@ -122,7 +124,9 @@ merge target: two client PRs in flight means the second always fails.
 | M6 handoff | the numbers M6 was waiting for | [#787](https://github.com/pjunod/plurx/pull/787) · [#788](https://github.com/pjunod/plurx/pull/788) | merged |
 | M6 slot | the preparation slot, and that a disconnect is not a commit | [#792](https://github.com/pjunod/plurx/pull/792) | merged |
 | M6 executor | the executor, and three authorities in order | [#793](https://github.com/pjunod/plurx/pull/793) | merged |
-| M6 tests | the executor's three durable outcomes, pinned | — | this change |
+| M6 tests | the executor's three durable outcomes, pinned | [#796](https://github.com/pjunod/plurx/pull/796) | merged |
+| M6 decision | prepare or fall back, and why it is one axis | [#798](https://github.com/pjunod/plurx/pull/798) | open |
+| M6 caller | where the decision is made, and the four slices after it | — | this change |
 
 Status-only PRs are not listed: #746, #747, #751, #755, #759, #777, #781,
 #783 and #784 each updated this page and changed nothing else. Nor are the
@@ -554,6 +558,22 @@ and neither is a code problem:
    back recipe- and device-dependent, and a bare boolean cannot say *yes for
    this recipe on this device*. Narrowing it is a v1 protocol change and
    M6's to decide deliberately — handoff §3.
+
+**Where the caller goes is now settled**, in
+[M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md): the control exchange decides and
+the actor still fences. Three of `decide_preparation`'s four inputs already
+converge in `control_local_inner`; the fourth — a *candidate* recipe — does not
+exist anywhere, because the client sends intent (`ClientSelection`: Auto,
+`CodecPolicy::Auto`) and the decision needs delivered output. Resolving one
+into the other is work `hls::create` already does and nothing else can call.
+
+The decision does not live in the actor because the actor would have to acquire
+plan resolution — the store, the render caps, the ladder — and it is a bounded
+mailbox with a lease clock where every store read is a new way to miss an
+exchange deadline. What must not move does not move: `stage_preparation` still
+refuses an occupied slot and a terminal playback, `may_commit_preparation`
+still refuses a forgotten successor, and `terminate` still aborts what it
+holds. The exchange proposes; the actor disposes.
 
 **The disconnect-does-not-imply-commit property is already covered**, in
 `plurx-core`'s own contract suite on three voters
