@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["92152b7d"]
+reason = "Documentation only: the repository status page's caps v2 section stopped at PR #716 and still listed the Apple/Android badge as outstanding after it had merged. Four entries are added for the merges since, and the section chip drops the badge. No runtime behavior changes and the daemon serves the same bytes."
+ignore = true
