@@ -8,10 +8,14 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 
+from validation import ci_scope
 from validation.ci_scope import (
+    CI_ROUTING_PATHS,
     all_scope,
+    catalog_is_the_only_routing_edit,
     is_docs_only,
     needs_rust_gate,
     resolve_scope,
@@ -599,6 +603,347 @@ checks = ["baseline"]
         self.assertEqual(report["checks"][0]["status"], "passed")
         self.assertEqual(suite.attrib["tests"], "1")
         self.assertEqual(suite.attrib["failures"], "0")
+
+
+ROUTING_CATALOG = """
+version = 1
+
+[settings]
+profiles = ["commit", "ci", "full"]
+
+[[checks]]
+id = "rust-gate"
+title = "Workspace suite"
+command = "make rust-check"
+profiles = ["commit", "ci", "full"]
+
+[[checks]]
+id = "cluster-auth"
+title = "Three-voter replicated state"
+command = "make cluster-check"
+profiles = ["ci", "full"]
+timeout_seconds = {cluster_check_timeout}
+
+[[points]]
+id = "cluster.auth"
+title = "Replicated durable state"
+contract = "{cluster_auth_contract}"
+paths = [{cluster_auth_paths}]
+checks = ["rust-gate", "cluster-auth"]
+
+[[points]]
+id = "cluster.membership"
+title = "Cluster membership lifecycle"
+contract = "Removal preserves quorum."
+paths = ["crates/plurx-core/src/cluster/membership.rs"]
+checks = ["rust-gate", "cluster-auth"]
+
+[[points]]
+id = "cluster.page-reads"
+title = "Clustered page reads"
+contract = "Pages read one authority-consistent query."
+paths = ["crates/plurxd/src/http/browse.rs"]
+checks = ["rust-gate", "cluster-auth"]
+
+[[points]]
+id = "web.experience"
+title = "Browser experience"
+contract = "{web_contract}"
+paths = [{web_paths}]
+checks = ["rust-gate"]
+"""
+
+
+def routing_catalog(
+    *,
+    cluster_auth_paths: tuple[str, ...] = (
+        "crates/plurx-core/src/store/hiqlite.rs",
+        "crates/plurxd/src/http/cluster.rs",
+    ),
+    cluster_auth_contract: str = "Three voters agree on the replicated Store.",
+    cluster_check_timeout: int = 1800,
+    web_paths: tuple[str, ...] = ("crates/plurxd/src/web/app.js",),
+    web_contract: str = "The browser renders every library.",
+) -> str:
+    """Render a small catalog whose cluster selectors can be edited one at a time."""
+
+    def literal(paths: tuple[str, ...]) -> str:
+        return ", ".join(f'"{path}"' for path in paths)
+
+    return ROUTING_CATALOG.format(
+        cluster_auth_paths=literal(cluster_auth_paths),
+        cluster_auth_contract=cluster_auth_contract,
+        cluster_check_timeout=cluster_check_timeout,
+        web_paths=literal(web_paths),
+        web_contract=web_contract,
+    )
+
+
+class CatalogRoutingScopeCase(unittest.TestCase):
+    """A `points.toml`-only routing edit runs the Store lane on its content.
+
+    Touching any `CI_ROUTING_PATHS` entry used to force `cluster_auth`, and that
+    lane is `replicated Store contracts (legacy)` — 26-29 minutes, and on
+    2026-09-02 a queue that reached 234-minute waits with 27 jobs cancelled
+    before they started. Three of the four PRs that took a full `ci` run in a
+    four-day sample pulled the lane in by that rule rather than by touching
+    cluster code; #830 paid 27 minutes for editing `validation/points.toml`.
+    The rule's reason survives intact — a catalog edit that could hide the
+    cluster lanes still runs them — and only an edit that provably could not,
+    prose or a point the lane never reads, goes free.
+    """
+
+    def git(self, root: Path, *arguments: str) -> str:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=root,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+    @contextlib.contextmanager
+    def diff_against_base(
+        self, base_catalog: str | None, head_files: dict[str, str]
+    ):
+        """Yield (root, base sha) for a branch that writes `head_files`.
+
+        The fixture is a real repository because the narrowing reads the base
+        revision's blob, which no path list can stand in for. A `base_catalog`
+        of `None` seeds a base revision with no catalog at all.
+        """
+
+        seed = {
+            ".github/workflows/ci.yml": "name: ci\n",
+            "crates/plurx-core/src/store/hiqlite.rs": "pub fn store() {}\n",
+            "crates/plurxd/src/web/app.js": "export const app = 1;\n",
+        }
+        if base_catalog is not None:
+            seed["validation/points.toml"] = base_catalog
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative, content in seed.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            self.git(root, "init", "-q")
+            self.git(root, "checkout", "-qb", "main")
+            self.git(root, "config", "user.name", "Scope Test")
+            self.git(root, "config", "user.email", "scope@example.invalid")
+            self.git(root, "add", "-A")
+            self.git(root, "commit", "-qm", "seed")
+            base = self.git(root, "rev-parse", "HEAD")
+
+            self.git(root, "checkout", "-qb", "feature")
+            for relative, content in head_files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            self.git(root, "add", "-A")
+            self.git(root, "commit", "-qm", "branch work")
+            yield root, base
+
+    def scope(self, root: Path, base: str) -> tuple[dict[str, bool], str]:
+        """Run the production entry point against the fixture repository.
+
+        `resolve_scope` reads `REPO_ROOT` and the default catalog, so both are
+        redirected at the fixture. `load_catalog` keeps its real behavior when
+        it is handed an explicit path, which is how the base blob is parsed.
+        """
+
+        real_load_catalog = load_catalog
+        catalog_path = root / "validation/points.toml"
+        stderr = io.StringIO()
+        with mock.patch.dict(
+            ci_scope.__dict__,
+            {
+                "REPO_ROOT": root,
+                "load_catalog": lambda path=catalog_path: real_load_catalog(path),
+            },
+        ):
+            with contextlib.redirect_stderr(stderr):
+                scope = resolve_scope("pull_request", base)
+        return scope, stderr.getvalue()
+
+    def test_narrowed_paths_on_a_cluster_point_still_run_the_store_lane(self):
+        # Dropping a path from `cluster.auth` is exactly the suppression the
+        # routing rule exists to catch: after this edit a store change no longer
+        # selects the lane, so the edit itself has to run it.
+        narrowed = routing_catalog(
+            cluster_auth_paths=("crates/plurxd/src/http/cluster.rs",)
+        )
+        with self.diff_against_base(
+            routing_catalog(), {"validation/points.toml": narrowed}
+        ) as (root, base):
+            scope, stderr = self.scope(root, base)
+
+        self.assertTrue(scope["cluster_auth"])
+        self.assertTrue(scope["rust"])
+        self.assertEqual(stderr, "")
+
+    def test_prose_on_a_cluster_point_does_not_run_the_store_lane(self):
+        # A `contract` string is documentation. It cannot select or suppress a
+        # single check, and it is the case the narrowing exists to make cheap.
+        with self.diff_against_base(
+            routing_catalog(),
+            {
+                "validation/points.toml": routing_catalog(
+                    cluster_auth_contract="Three voters agree, and say so twice."
+                )
+            },
+        ) as (root, base):
+            scope, stderr = self.scope(root, base)
+
+        self.assertFalse(scope["cluster_auth"])
+        # The Rust lane stays forced for every routing path, the catalog included.
+        self.assertTrue(scope["rust"])
+        self.assertEqual(stderr, "")
+
+    def test_an_unrelated_point_does_not_run_the_store_lane(self):
+        # `web.experience` is not one of the three points `cluster_auth` reads,
+        # so rewriting it whole — paths and prose — hides no cluster evidence.
+        with self.diff_against_base(
+            routing_catalog(),
+            {
+                "validation/points.toml": routing_catalog(
+                    web_paths=("crates/plurxd/src/web/**",),
+                    web_contract="The browser renders every library and its art.",
+                )
+            },
+        ) as (root, base):
+            scope, stderr = self.scope(root, base)
+
+        self.assertFalse(scope["cluster_auth"])
+        self.assertTrue(scope["rust"])
+        self.assertEqual(stderr, "")
+
+    def test_a_field_of_the_cluster_auth_check_runs_the_store_lane(self):
+        # The check record is the lane's own definition. A timeout, command,
+        # profile or platform edit decides whether that evidence runs at all.
+        with self.diff_against_base(
+            routing_catalog(),
+            {"validation/points.toml": routing_catalog(cluster_check_timeout=600)},
+        ) as (root, base):
+            scope, _ = self.scope(root, base)
+
+        self.assertTrue(scope["cluster_auth"])
+
+    def test_any_other_routing_path_alongside_the_catalog_runs_the_store_lane(self):
+        # The narrowing is only consulted when the catalog is the sole routing
+        # path in the diff. A workflow edit changes the job graph, which is not
+        # reducible to a catalog comparison, so it forces the lane even beside a
+        # catalog edit that on its own would not have.
+        with self.diff_against_base(
+            routing_catalog(),
+            {
+                "validation/points.toml": routing_catalog(
+                    cluster_auth_contract="Three voters agree, restated."
+                ),
+                ".github/workflows/ci.yml": "name: ci\non: [push]\n",
+            },
+        ) as (root, base):
+            scope, _ = self.scope(root, base)
+
+        self.assertTrue(scope["cluster_auth"])
+        self.assertFalse(
+            catalog_is_the_only_routing_edit(
+                (".github/workflows/ci.yml", "validation/points.toml")
+            )
+        )
+        # Non-routing paths beside the catalog leave the narrowing available.
+        self.assertTrue(
+            catalog_is_the_only_routing_edit(
+                ("docs/VALIDATION.md", "validation/points.toml")
+            )
+        )
+        # `scope_for_paths` holds that line itself. Told outright that the
+        # catalog edit hides nothing, it still keeps the lane for the workflow
+        # path beside it, so no caller can release a routing path this rule
+        # cannot reason about.
+        self.assertTrue(
+            scope_for_paths(
+                load_catalog(ROOT / "validation/points.toml"),
+                (".github/workflows/ci.yml", "validation/points.toml"),
+                catalog_edit_hides_cluster_lanes=False,
+            )["cluster_auth"]
+        )
+
+    def test_an_unreadable_or_unparseable_base_runs_the_store_lane_and_says_so(self):
+        # Every uncertainty resolves to running the lane. Failing closed here
+        # would silently drop cluster evidence, which costs far more than the
+        # half hour the narrowing saves, so the reason is printed too.
+        with self.diff_against_base(
+            None, {"validation/points.toml": routing_catalog()}
+        ) as (root, base):
+            unreadable, stderr = self.scope(root, base)
+
+        self.assertTrue(unreadable["cluster_auth"])
+        self.assertIn("cannot compare validation/points.toml", stderr)
+        self.assertIn("enabling the replicated Store lane", stderr)
+        self.assertEqual(len(stderr.strip().splitlines()), 1)
+
+        with self.diff_against_base(
+            "version = 1\nthis is not toml\n",
+            {"validation/points.toml": routing_catalog()},
+        ) as (root, base):
+            unparseable, stderr = self.scope(root, base)
+
+        self.assertTrue(unparseable["cluster_auth"])
+        self.assertIn("cannot compare validation/points.toml", stderr)
+
+    def test_a_real_cluster_path_runs_the_store_lane_without_the_catalog(self):
+        # The ordinary points selection is untouched: a store change still
+        # selects `cluster.auth` and therefore the lane, with no catalog edit
+        # and no base comparison involved.
+        with self.diff_against_base(
+            routing_catalog(),
+            {
+                "crates/plurx-core/src/store/hiqlite.rs": (
+                    "pub fn store() { let _ = 1; }\n"
+                )
+            },
+        ) as (root, base):
+            scope, stderr = self.scope(root, base)
+
+        self.assertTrue(scope["cluster_auth"])
+        self.assertEqual(stderr, "")
+
+    def test_the_default_answer_forces_the_lane_for_a_path_only_caller(self):
+        # `scope_for_paths` stays pure over paths. A caller that knows nothing
+        # about the base revision gets the conservative answer, which is why
+        # every existing path-only assertion about `points.toml` still holds.
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        self.assertTrue(
+            scope_for_paths(catalog, ("validation/points.toml",))["cluster_auth"]
+        )
+        self.assertFalse(
+            scope_for_paths(
+                catalog,
+                ("validation/points.toml",),
+                catalog_edit_hides_cluster_lanes=False,
+            )["cluster_auth"]
+        )
+
+    def test_the_compared_selectors_are_the_ones_the_lane_actually_reads(self):
+        # A rename in the catalog would otherwise make the narrowing stale in
+        # the dangerous direction: unknown ids compare equal forever, so the
+        # comparison would stop noticing real suppression. Pin both constants
+        # against the shipped catalog.
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        self.assertEqual(
+            set(ci_scope.CLUSTER_LANE_POINTS),
+            {"cluster.auth", "cluster.membership", "cluster.page-reads"},
+        )
+        self.assertTrue(
+            set(ci_scope.CLUSTER_LANE_POINTS) <= set(catalog.point_map)
+        )
+        self.assertIn(ci_scope.CLUSTER_LANE_CHECK, catalog.check_map)
+        self.assertIn(ci_scope.CATALOG_ROUTING_PATH, CI_ROUTING_PATHS)
+        for point_id in ci_scope.CLUSTER_LANE_POINTS:
+            with self.subTest(point_id=point_id):
+                self.assertIn(
+                    ci_scope.CLUSTER_LANE_CHECK, catalog.point_map[point_id].checks
+                )
 
 
 if __name__ == "__main__":

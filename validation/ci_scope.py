@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import os
+from pathlib import Path
+import subprocess
 import sys
+import tempfile
 
 from validation.runner import (
     Catalog,
@@ -35,6 +39,21 @@ SCOPE_KEYS = (
 # four Rust lanes that pin routing and cluster behavior. Static preflight pins
 # the workflow structure itself; unrelated clients, containers, and cross
 # builds still receive their full proof on merge_group and nightly runs.
+#
+# One of these entries is judged by content instead of by name. When
+# `validation/points.toml` is the only routing path a diff touches, the
+# replicated Store lane is forced only when the catalog edit could actually
+# hide it: the `paths` or `checks` list of a cluster point, the presence or
+# absence of one of those points, or any field of the `cluster-auth` check.
+# A `contract` prose edit, or an edit to an unrelated point, can suppress
+# nothing, and that lane costs 26-29 minutes of queue and runtime. Every other
+# routing path — the two CI workflows, the lint workflow, this selector, and
+# the runner — still forces the lane unconditionally, because a change to the
+# job graph or to selection itself is not reducible to a catalog comparison.
+# The narrowing applies to `cluster_auth` alone: `rust` stays forced for every
+# routing path, `points.toml` included. See
+# `catalog_edit_forces_cluster_lanes`, where every uncertainty resolves to
+# forcing the lane.
 CI_ROUTING_PATHS = (
     ".github/workflows/ci.yml",
     ".github/workflows/effort-ci.yml",
@@ -43,6 +62,14 @@ CI_ROUTING_PATHS = (
     "validation/points.toml",
     "validation/runner.py",
 )
+
+# The routing entry whose edits are judged by content, and the catalog
+# selectors a catalog edit could use to hide the replicated Store lane: the
+# three points `scope_for_paths` reads for `cluster_auth`, and the check they
+# name as that lane's evidence.
+CATALOG_ROUTING_PATH = "validation/points.toml"
+CLUSTER_LANE_POINTS = ("cluster.auth", "cluster.membership", "cluster.page-reads")
+CLUSTER_LANE_CHECK = "cluster-auth"
 
 FFMPEG_ACTION_PATHS = (".github/actions/ffmpeg/**",)
 PLAYWRIGHT_ACTION_PATHS = (".github/actions/playwright/**",)
@@ -203,8 +230,131 @@ def needs_rust_gate(paths: tuple[str, ...]) -> bool:
     )
 
 
-def scope_for_paths(catalog: Catalog, paths: tuple[str, ...]) -> dict[str, bool]:
-    """Map changed paths to independently runnable CI surfaces."""
+def _git(repo_root: Path, *arguments: str) -> bytes:
+    """Read from Git without inheriting an outer repository's environment.
+
+    Git exports repository-local variables such as GIT_INDEX_FILE to hooks, and
+    this helper runs against whatever repository `repo_root` names — the tests
+    build their own. An inherited path would silently answer for the wrong tree.
+    """
+
+    environment = os.environ.copy()
+    for name in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    ):
+        environment.pop(name, None)
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=repo_root,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+    )
+    return result.stdout
+
+
+def _catalog_at_revision(repo_root: Path, revision: str) -> Catalog:
+    """Parse `points.toml` as of `revision` with the catalog's own parser.
+
+    `load_catalog` reads a path rather than a buffer, so the blob is staged in
+    a temporary file. Reusing the parser is the point: the base side then has
+    to satisfy exactly the same contract as the working tree, and any TOML or
+    shape error it does not satisfy surfaces as `CatalogError`.
+    """
+
+    blob = _git(repo_root, "show", f"{revision}:{CATALOG_ROUTING_PATH}")
+    with tempfile.TemporaryDirectory() as directory:
+        staged = Path(directory) / "points.toml"
+        staged.write_bytes(blob)
+        return load_catalog(staged)
+
+
+def _cluster_lane_selectors(catalog: Catalog) -> tuple[object, object]:
+    """Reduce a catalog to everything a diff could use to hide the Store lane.
+
+    The points map deliberately carries `paths` and `checks` only. A point's
+    `contract` is prose that documents the lane rather than selecting it, and a
+    point that disappears drops out of the mapping, so both the content and the
+    presence of the three cluster points are compared. The check is compared as
+    a whole record because every field on it — command, profiles, platforms,
+    requires, timeout — can decide whether that evidence runs.
+    """
+
+    points = {
+        point.id: (point.paths, point.checks)
+        for point in catalog.points
+        if point.id in CLUSTER_LANE_POINTS
+    }
+    check_map = catalog.check_map
+    return (
+        tuple(sorted(points.items())),
+        check_map.get(CLUSTER_LANE_CHECK),
+    )
+
+
+def catalog_edit_forces_cluster_lanes(
+    catalog: Catalog, base: str, *, repo_root: Path = REPO_ROOT
+) -> bool:
+    """Decide a catalog-only routing edit by what it changed, not by its name.
+
+    Answers the one question `scope_for_paths` cannot ask from paths alone:
+    between `base` and the working tree, did this `points.toml` edit touch a
+    selector that could suppress the replicated Store lane? `catalog` is the
+    working-tree catalog the caller is already scoping with.
+
+    Every uncertainty answers yes. An unreadable base blob, a base that will
+    not parse, an unexpected shape, a missing merge base, any exception at all:
+    the lane runs. A narrowing that failed closed would silently drop cluster
+    evidence, which is far worse than a wasted half hour, so no exception is
+    allowed to become a `False` here.
+    """
+
+    try:
+        # `changed_paths` diffs `base...HEAD`, so the comparison baseline is
+        # the merge base, not the tip of a base branch that has moved on.
+        merge_base = _git(repo_root, "merge-base", base, "HEAD").decode().strip()
+        if not merge_base:
+            raise CatalogError(f"no merge base with {base}")
+        base_catalog = _catalog_at_revision(repo_root, merge_base)
+        return _cluster_lane_selectors(base_catalog) != _cluster_lane_selectors(catalog)
+    except Exception as exc:  # noqa: BLE001 - any failure must keep the lane
+        print(
+            f"ci-scope: cannot compare {CATALOG_ROUTING_PATH} against {base} "
+            f"({exc}); enabling the replicated Store lane",
+            file=sys.stderr,
+        )
+        return True
+
+
+def catalog_is_the_only_routing_edit(paths: tuple[str, ...]) -> bool:
+    """Report whether `points.toml` is the sole routing path a diff touches."""
+
+    return {
+        path for path in paths if matches(path, CI_ROUTING_PATHS)
+    } == {CATALOG_ROUTING_PATH}
+
+
+def scope_for_paths(
+    catalog: Catalog,
+    paths: tuple[str, ...],
+    *,
+    catalog_edit_hides_cluster_lanes: bool = True,
+) -> dict[str, bool]:
+    """Map changed paths to independently runnable CI surfaces.
+
+    `catalog_edit_hides_cluster_lanes` carries the one fact a path list cannot:
+    whether a `points.toml`-only routing edit changed a cluster selector. It
+    defaults to the conservative answer, so a caller that knows nothing about
+    the base revision — every existing caller — still forces the lane.
+    """
 
     if is_docs_only(paths):
         return {key: key == "docs_only" for key in SCOPE_KEYS}
@@ -243,7 +393,13 @@ def scope_for_paths(catalog: Catalog, paths: tuple[str, ...]) -> dict[str, bool]
     }
     if any(matches(path, CI_ROUTING_PATHS) for path in paths):
         scope["rust"] = True
-        scope["cluster_auth"] = True
+        # A catalog-only routing edit is the one case decided by content: it
+        # forces the replicated Store lane only when it could hide it. Any
+        # other routing path, alone or alongside the catalog, still forces it.
+        if catalog_edit_hides_cluster_lanes or not catalog_is_the_only_routing_edit(
+            paths
+        ):
+            scope["cluster_auth"] = True
     if any(matches(path, FFMPEG_ACTION_PATHS) for path in paths):
         scope["rust"] = True
         scope["cluster_auth"] = True
@@ -274,7 +430,18 @@ def resolve_scope(event: str, base: str | None) -> dict[str, bool]:
     except CatalogError as exc:
         print(f"ci-scope: cannot resolve diff ({exc}); enabling every job", file=sys.stderr)
         return all_scope()
-    return scope_for_paths(load_catalog(), paths)
+
+    catalog = load_catalog()
+    hides_cluster_lanes = True
+    if catalog_is_the_only_routing_edit(paths):
+        hides_cluster_lanes = catalog_edit_forces_cluster_lanes(
+            catalog, base, repo_root=REPO_ROOT
+        )
+    return scope_for_paths(
+        catalog,
+        paths,
+        catalog_edit_hides_cluster_lanes=hides_cluster_lanes,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

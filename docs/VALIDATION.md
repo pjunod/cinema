@@ -183,6 +183,35 @@ lanes and the static workflow contracts, not every unrelated platform. Final
 effort qualification, main pushes, tags, merge-group events when enabled, and
 the nightly workflow retain the full fan-out before release.
 
+One routing path is judged by content rather than by name. The replicated
+Store lane costs 26-29 minutes, and forcing it on every `validation/points.toml`
+edit charged that to diffs that could not have affected it: three of the four
+pull requests that took a full `ci` run in a four-day sample selected the lane
+by the routing rule alone rather than by touching cluster code. When
+`validation/points.toml` is the **only** routing path a diff touches, the lane
+is now forced only if the catalog edit could actually hide it — that is, if
+between the base revision and the working tree the edit changed the `paths` or
+`checks` list of `cluster.auth`, `cluster.membership`, or `cluster.page-reads`,
+added or removed one of those points, or changed any field of the `cluster-auth`
+check. Those are exactly the fields `resolve_scope` reads to select the lane, so
+an edit that changes none of them cannot suppress cluster evidence. A `contract`
+string is prose that documents a point rather than selecting it, and editing one
+no longer buys a half-hour job. Removing a path from `cluster.auth` still runs
+the lane, because that is precisely the suppression the routing rule exists to
+catch.
+
+Everything else about the rule is unchanged. The Rust gate stays forced for
+every routing path, `validation/points.toml` included. A diff that also touches
+`ci.yml`, `effort-ci.yml`, `lint.yml`, `validation/ci_scope.py`, or
+`validation/runner.py` still forces the cluster lane unconditionally: a change
+to the job graph or to selection itself is not reducible to a catalog
+comparison. The comparison fails open in the same direction as the rest of
+scope selection and more loudly — an unreadable base blob, a base or working
+catalog that will not parse, an unexpected shape, or any other exception prints
+one `ci-scope:` line to stderr and enables the lane. That asymmetry is
+deliberate: a wasted half hour is recoverable, and silently dropped cluster
+evidence is not.
+
 `Main promotion gate` waits for every selected main-workflow job and accepts an
 unselected job only when GitHub records it as skipped. An effort qualification
 is stricter: scope enables every surface and the qualification writer refuses
