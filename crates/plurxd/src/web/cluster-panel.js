@@ -382,6 +382,35 @@
   function clusterOperationReason(value){
     return String(value||"unknown").replaceAll("_"," ");
   }
+  // Why a node has no direct sample, in words that name an action.
+  //
+  // These codes used to reach the operator as the raw identifier with its
+  // underscores swapped for spaces, so the commonest one printed the single
+  // word "unreachable" on a card that was, one row above, reporting a fresh
+  // heartbeat and zero apply lag. The two readings come from different
+  // sources -- the roster and the direct fan-out -- and when they disagree the
+  // operator needs to know which one to act on. "Refused" and "unreachable"
+  // in particular call for opposite next steps: a refusal is proof the node is
+  // up and answering, so the fault is in the proof, not the machine.
+  //
+  // Unknown codes fall back to the mechanical transform rather than to a
+  // sentence that would guess.
+  const OBSERVATION_REASONS={
+    unreachable:"no route to it from this node",
+    timeout:"it did not answer before the deadline",
+    refused:"it answered and refused the signed request from this node",
+    http_error:"it answered with an unexpected error status",
+    invalid_response:"its answer could not be read",
+    identity_mismatch:"the answer came back under a different node identity",
+    raft_identity_mismatch:"the answer came back under a different Raft id",
+    stale_peer_sample:"its answer was older than one refresh window",
+    peer_limit:"the roster is larger than one refresh may sample",
+    not_observed:"this refresh has not sampled it",
+  };
+  function clusterObservationReason(value){
+    const code=String(value||"not_observed");
+    return OBSERVATION_REASONS[code]||clusterOperationReason(code);
+  }
 
   // ---- the replicated database ---------------------------------------------
   // The store is the other half of this screen, and until now it had no section
@@ -635,6 +664,7 @@
     clusterOperationRows,
     clusterOperationAge,
     clusterOperationReason,
+    clusterObservationReason,
     clusterSqliteReplication,
     clusterDatabaseStatus,
     clusterCapacityText,

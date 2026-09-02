@@ -394,6 +394,10 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/activity-node-names.test.js
 	@node tests/web/analysis-node-names.test.js
 	@node tests/web/settings-sections.test.js
+	# The validation runner already has this as `web-membership`, but this is
+	# the target a web change reaches for, and the Cluster panel is a web
+	# surface like any other here. Two seconds.
+	@node tests/web/cluster-membership.test.js
 	@scripts/js-check
 	@scripts/contrast-check --from-index crates/plurxd/src/web/index.html \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \

@@ -5777,9 +5777,29 @@ extension PlayerController {
                 origin: origin,
                 authorize: { request in Session.shared.authorize(&request) }
             ),
-            observe: { [weak self] in self?.playbackControlObservation() }
+            observe: { [weak self] in self?.playbackControlObservation() },
+            onSubtitleReady: { [weak self] in
+                self?.retryNativeSubtitleAfterReadiness()
+            }
         )
         playbackControlSummary = "Owner epoch \(bootstrap.controlEpoch) · reporting"
+    }
+
+    /// AVPlayer may keep the first empty `no-store` subtitle segment. Toggle
+    /// only the legible selection when control reports the demanded window as
+    /// ready; the video item and its producer stay untouched.
+    private func retryNativeSubtitleAfterReadiness() {
+        guard let index = activeNativeSubtitle,
+              let item = player.currentItem
+        else { return }
+        Task { @MainActor [weak self, weak item] in
+            guard let self, let item, self.player.currentItem === item else { return }
+            await self.applyNativeSubtitleSelection(nil, to: item)
+            guard self.activeNativeSubtitle == index,
+                  self.player.currentItem === item
+            else { return }
+            await self.applyNativeSubtitleSelection(index, to: item)
+        }
     }
 
     /// Everything the mapping needs, read from the player once.

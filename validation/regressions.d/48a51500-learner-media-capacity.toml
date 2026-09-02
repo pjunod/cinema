@@ -1,0 +1,32 @@
+version = 1
+
+[[coverage]]
+commits = ["48a51500"]
+points = ["cluster.media-observation", "cluster.membership", "cluster.auth"]
+checks = ["rust-gate"]
+reason = """
+The correction and its evidence landed together. `remote_rollout_ready` \
+(`crates/plurxd/src/media_pool.rs`) and the shared-cache canary \
+(`verify_once_inner`, `crates/plurxd/src/shared_cache.rs`) both required \
+`voter_count == peers.len() + 1`, while `activity_peers` excludes the local node \
+and filters to voters — so on a committed learner both compared `n` against \
+`n + 1` and were false for every roster size, which is why a learner answered 503 \
+to every delegated media-session start, could never place one, and never published \
+a verified shared-cache root. Four tests landed in the same commit. \
+`remote_placement_requires_every_voter_on_the_current_protocol` gained the \
+learner half of the arithmetic in both directions, so pointing the predicate back \
+at an unconditional +1 fails it. \
+`the_rollout_gate_asks_membership_whether_this_node_is_a_voter` and \
+`the_canary_asks_membership_whether_this_node_is_a_voter` pin each call site \
+separately, because the defect was one `+ 1` inside a method and a test on the \
+extracted predicate leaves the caller free; restoring the old form in either file \
+fails its own test. \
+`learner_route_matrix_admits_only_bounded_reads_and_node_local_media` gained the \
+fragment-index peer read — `fragment_index_cluster` hydrates from `media_peers()`, \
+which includes learners, while `/internal/media/fragment-index/{key}` was refused \
+`503 learner_route_ineligible` before its handler ran — plus the relay and canary \
+rows that were already in the matrix and had never been asserted; dropping the \
+route, or widening its prefix to accept a deeper path, fails it. All five \
+mutations were executed under `rust-gate`'s `cargo test -p plurxd` and all five \
+were caught.
+"""

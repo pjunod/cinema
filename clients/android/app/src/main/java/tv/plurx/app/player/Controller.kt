@@ -1357,7 +1357,36 @@ class Controller(
         // the reporter has nothing complete to say.
         scope.launch {
             controlCapabilityProbe.join()
-            playbackControl.begin(bootstrap = bootstrap, observe = ::playbackControlObservation)
+            playbackControl.begin(
+                bootstrap = bootstrap,
+                observe = ::playbackControlObservation,
+                onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
+            )
+        }
+    }
+
+    /**
+     * Media3 may keep the first empty `no-store` subtitle segment. Disable and
+     * re-apply only the text override when control reports the demanded window
+     * ready; the media item and video producer stay attached throughout.
+     */
+    private fun retryNativeSubtitleAfterReadiness() {
+        val index = selectedSubtitle ?: return
+        if (subtitleDelivery != SubtitleDelivery.NativeSession) return
+        textSelectionArmed = false
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            .build()
+        scope.launch {
+            kotlinx.coroutines.yield()
+            if (
+                selectedSubtitle == index &&
+                subtitleDelivery == SubtitleDelivery.NativeSession
+            ) {
+                textSelectionArmed = true
+                applyTextSelection()
+            }
         }
     }
 

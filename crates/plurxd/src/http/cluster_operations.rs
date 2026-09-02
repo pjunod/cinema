@@ -158,6 +158,13 @@ pub(crate) enum ObservationState {
     Answered,
     Unreachable,
     TimedOut,
+    /// The peer answered and refused the proof: 401 or 403. A refusal is
+    /// evidence the node is up and reachable, which is the opposite of what
+    /// `Unreachable` tells an operator, so the two are never merged. This is
+    /// the same split the activity fan-out already draws.
+    Refused,
+    /// The peer answered with some other non-success status.
+    HttpError,
     InvalidResponse,
     IdentityMismatch,
     PeerLimit,
@@ -701,9 +708,21 @@ async fn fetch_peer_status(
                 Err(_) => (ObservationState::InvalidResponse, None),
             }
         }
+        // A non-success status is an answer, not silence. Collapsing it into
+        // `Unreachable` printed "unreachable" on a node that had just replied,
+        // which is how a refused proof read as a dead machine.
+        Ok(response)
+            if matches!(
+                response.status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            ) =>
+        {
+            (ObservationState::Refused, None)
+        }
+        Ok(_) => (ObservationState::HttpError, None),
         Err(PeerTransportError::TimedOut) => (ObservationState::TimedOut, None),
         Err(PeerTransportError::InvalidResponse) => (ObservationState::InvalidResponse, None),
-        Ok(_) | Err(PeerTransportError::Unreachable) => (ObservationState::Unreachable, None),
+        Err(PeerTransportError::Unreachable) => (ObservationState::Unreachable, None),
     };
     PeerStatusOutcome {
         node_id: expected_node_id.to_owned(),
@@ -1227,6 +1246,8 @@ fn observation_error_class(state: ObservationState) -> &'static str {
         ObservationState::Answered => "none",
         ObservationState::Unreachable => "unreachable",
         ObservationState::TimedOut => "timeout",
+        ObservationState::Refused => "refused",
+        ObservationState::HttpError => "http_error",
         ObservationState::InvalidResponse => "invalid_response",
         ObservationState::IdentityMismatch => "identity_mismatch",
         ObservationState::PeerLimit => "peer_limit",
