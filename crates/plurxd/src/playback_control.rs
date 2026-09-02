@@ -2502,8 +2502,17 @@ impl PreparationExecutor {
             .await?
             .is_some();
         if !committed {
-            // The pointer moved: tear this successor down rather than leave a
-            // row the actor has already forgotten.
+            // The pointer moved. On both backends the store's own lost-CAS
+            // branch has already run `abort_staged_generation` before
+            // returning `Ok(None)`, so this call is normally a guaranteed
+            // no-op — every write inside that helper is gated on the ledger
+            // row it has just deleted. It is kept, and kept idempotent, for
+            // the branch the store documents as unreachable (a committed
+            // projection that cannot be read back rolls its transaction
+            // *back*, restoring the ledger row) and so a backend that ever
+            // stopped tearing down on its own does not silently leave a row
+            // the actor has already forgotten. Do not read it as the
+            // teardown: the store's is.
             let _ = self
                 .store
                 .abort_media_session_preparation(
@@ -7749,9 +7758,17 @@ impl RollingControlActor {
                     // A commit that lost its CAS is reported here as
                     // `committed: false`, and it must land as an abort rather
                     // than as nothing: the successor still exists durably and
-                    // something has to own tearing it down. Marking the slot
-                    // aborting first means a retry of the same commit finds
-                    // `may_commit` false instead of racing the teardown.
+                    // something has to own tearing it down.
+                    //
+                    // The `Aborting` state this writes is not observable from
+                    // outside — the actor is single-threaded, so `settle`
+                    // empties the slot in the same turn and no other command
+                    // can interleave. It is written anyway because the two
+                    // calls are the abort lifecycle's own steps, and a future
+                    // settle that must await anything durable would otherwise
+                    // open exactly the window this ordering closes. A retry
+                    // of the same commit is refused either way: `may_commit`
+                    // is false against `Empty` as much as against `Aborting`.
                     if !committed {
                         self.abort_preparation(&staged_incarnation_id);
                     }
@@ -14731,7 +14748,13 @@ mod tests {
             response_json: r#"{"session":"staged"}"#.to_owned(),
             media_origin_ms: 0,
             now_ms,
-            deadline_ms: 800_000,
+            // Derived, not literal: `validate_preparation` requires
+            // `deadline_ms > now_ms`, and the neighbouring tests in this
+            // module take `now_ms` from `unix_ms()`. A constant deadline
+            // silently becomes invalid the moment someone copies this helper
+            // into a test with a real clock, and it surfaces as a bare
+            // `.expect("stage")` panic with no hint of why.
+            deadline_ms: now_ms.saturating_add(798_000),
         }
     }
 
@@ -14823,6 +14846,23 @@ mod tests {
                 .expect("ledger after commit")
                 .is_none(),
             "a committed successor is no longer a preparation",
+        );
+        // The pointer advancing is not the same as the viewer having a
+        // stream, and this is the line that keeps the two apart. A commit
+        // moves the successor off its preparation deadline and nothing else:
+        // the publication fence is still at the sentinel, and arming it is
+        // `arm_media_session_handoff`'s job, exactly as it is for an
+        // activated replacement.
+        let committed = store
+            .media_session_route_by_incarnation(&successor)
+            .await
+            .expect("committed route")
+            .expect("the successor exists");
+        assert_eq!(committed.lease_expires_at_ms, 900_000);
+        assert_eq!(
+            committed.publication_ready_at_ms,
+            plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "commit advances the pointer; it does not publish",
         );
         assert!(
             control
@@ -14924,6 +14964,17 @@ mod tests {
                 .is_none(),
             "the abandoned successor releases the one-per-playback slot",
         );
+        // Delisting the ledger row is not tearing the successor down. A row
+        // left `active` on its preparation lease counts against the user's
+        // admission caps, and the maintenance reaper keys on the *session's*
+        // state — so a successor that stays active is never swept at all.
+        let abandoned = store
+            .media_session_route_by_incarnation(&successor)
+            .await
+            .expect("abandoned route")
+            .expect("the abandoned row is still readable");
+        assert_eq!(abandoned.state, "ended");
+        assert_eq!(abandoned.terminal_reason.as_deref(), Some("replaced"));
         assert!(
             control
                 .stage_preparation(uuid::Uuid::new_v4().to_string(), winner)
@@ -14972,18 +15023,90 @@ mod tests {
             .await
             .expect("ledger after abort")
             .is_none());
-        assert!(
-            control
-                .stage_preparation(uuid::Uuid::new_v4().to_string(), predecessor)
-                .await
-        );
 
         // An owner retrying an abort after a crash reads back the same
-        // outcome rather than a spurious loss.
+        // outcome rather than a spurious loss. Ordered before the slot is
+        // reused, because a replay against a *reused* slot is a different
+        // property — the one asserted below.
         executor
             .abort(&successor, now_ms + 300)
             .await
             .expect("abort replay");
+
+        let replacement = uuid::Uuid::new_v4().to_string();
+        assert!(
+            control
+                .stage_preparation(replacement.clone(), predecessor)
+                .await,
+            "the slot is free, so the next preparation can take it",
+        );
+        // And a stale executor cannot settle the successor it used to hold:
+        // identity is checked rather than assumed, or a crashed owner's late
+        // abort would free a slot holding something else entirely.
+        assert!(
+            !control.settle_preparation(&successor, false).await,
+            "a stale settle must not free a slot holding a replacement",
+        );
+        assert!(
+            control.may_commit_preparation(&replacement).await,
+            "and the replacement is still the successor the actor holds",
+        );
+    }
+
+    /// The actor's gate is the first of the three authorities, and it is the
+    /// only one that can refuse a commit the store would happily accept.
+    ///
+    /// That is the whole point of asking. Here the pointer still names the
+    /// recorded predecessor, so the CAS would win — the commit is stopped
+    /// solely because the actor no longer holds this successor, which is what
+    /// a viewer disconnecting mid-preparation looks like: `terminate` moves
+    /// the slot to aborting and the successor stops being wanted. Without the
+    /// gate the pointer would advance to a generation nobody waited for.
+    #[tokio::test]
+    async fn preparation_executor_refuses_a_commit_the_actor_no_longer_wants() {
+        let now_ms = 2_000;
+        let (predecessor, store, control, executor) = preparation_fixture(now_ms).await;
+
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(executor
+            .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+            .await
+            .expect("stage"));
+
+        // The actor forgets the successor without the store being told.
+        assert!(control.settle_preparation(&successor, false).await);
+        assert!(!control.may_commit_preparation(&successor).await);
+
+        assert!(
+            !executor
+                .commit(&successor, now_ms + 200, 900_000)
+                .await
+                .expect("commit"),
+            "the gate refuses before the store is asked",
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(7, "player-a")
+                .await
+                .expect("route after the refused commit")
+                .expect("the playback has a pointer")
+                .incarnation_id,
+            predecessor,
+            "a refused commit must not advance the pointer",
+        );
+        // And the store still holds the successor, untouched: the gate stops
+        // short of the durable call rather than tearing anything down. Who
+        // reaps it is the disconnect path's problem, and `terminate` aborts
+        // the slot it is holding for exactly this reason.
+        assert_eq!(
+            store
+                .staged_media_session_for_playback(7, "player-a")
+                .await
+                .expect("ledger after the refused commit")
+                .expect("the staged row survives a gate refusal")
+                .staged_incarnation_id,
+            successor,
+        );
     }
 
     /// The durable row is created before the slot is taken, so the slot
@@ -15020,6 +15143,17 @@ mod tests {
                 .is_none(),
             "the durable row is undone rather than left for the backstop",
         );
+        // An empty ledger alone would also be satisfied by never having made
+        // the row, which is the opposite ordering and a different design.
+        // The successor's own session row is what says the row existed and
+        // was aborted: `replaced` is the abort's signature.
+        let rolled_back = store
+            .media_session_route_by_incarnation(&successor)
+            .await
+            .expect("rolled-back route")
+            .expect("the durable row was created before the slot was asked");
+        assert_eq!(rolled_back.state, "ended");
+        assert_eq!(rolled_back.terminal_reason.as_deref(), Some("replaced"));
         assert_eq!(
             store
                 .media_session_route_for_playback(7, "player-a")
