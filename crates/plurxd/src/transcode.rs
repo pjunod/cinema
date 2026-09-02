@@ -2526,6 +2526,20 @@ async fn own_rolling_retirement(
 
     drop(transition);
 
+    // Terminal admission is a fact and no lifecycle lock is held, so this is
+    // where a subtitle window this playback still owns stops being anybody's
+    // work. Releasing it here rather than after the reap matters for the same
+    // reason the reap itself does: a slot that outlived its session would let
+    // the next playback to use this id inherit an obsolete ordering fact and
+    // refuse its own first window. Adoption may rename a session during actor
+    // settlement, so both names it can be known by are released.
+    crate::subtitles::release_session_window(&session_id).await;
+    if let Some(registered) = registered_key.as_deref() {
+        if registered != session_id {
+            crate::subtitles::release_session_window(registered).await;
+        }
+    }
+
     loop {
         let cleanup = {
             let _transition = session.child_transition.lock().await;
@@ -21132,7 +21146,7 @@ fn test_session(dir: PathBuf) -> Session {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -21217,7 +21231,12 @@ mod tests {
         );
     }
 
-    async fn activate_control_route(
+    /// Install the durable route a control exchange is verified against.
+    ///
+    /// Reachable from the HLS boundary tests as well: the seek-coalescing
+    /// acceptance drives real control exchanges through the manager, and a
+    /// second copy of this setup would be a second thing to keep true.
+    pub(crate) async fn activate_control_route(
         store: &dyn Store,
         session_id: &str,
         generation: &str,

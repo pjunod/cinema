@@ -332,6 +332,106 @@ fn warmups() -> &'static Warmups {
     WARMUPS.get_or_init(|| tokio::sync::Mutex::new(HashSet::new()))
 }
 
+/// What one playback owns while a subtitle window is being extracted for it.
+///
+/// [`warmups`] above deduplicates *work* by cache key; this registry bounds
+/// *ownership* by playback. A seek storm produces a run of different anchors
+/// for one session, and every one of them is a legitimate distinct key, so the
+/// key-shaped registries cannot answer the question M7 actually asks: how many
+/// ffmpeg children does one viewer have running at once? The answer has to be
+/// one, and it has to be physical rather than hopeful — which is why this slot
+/// carries a way to stop the real extraction and a way to wait for it to be
+/// gone before a replacement starts.
+struct SessionWindow {
+    /// Distinguishes this flight from a successor claiming the same session, so
+    /// a task that finishes after it was displaced cannot remove the slot that
+    /// replaced it.
+    id: u64,
+    /// The control sequence that justified this flight. `None` is a first play:
+    /// the client has not settled anywhere yet, so there is no ordering fact to
+    /// compare a later request against.
+    sequence: Option<u64>,
+    anchor_seconds: i64,
+    window_seconds: i64,
+    /// Dropping or sending this aborts the flight before it publishes.
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Closed once the flight has finished tearing down — the child is dead,
+    /// the temp file is unlinked and the registries are clear. Waiting on it
+    /// before spawning a successor is the whole difference between "one live
+    /// producer" and "one producer we have stopped waiting for".
+    settled: Arc<tokio::sync::Semaphore>,
+}
+
+type SessionWindows = tokio::sync::Mutex<HashMap<String, SessionWindow>>;
+
+fn session_windows() -> &'static SessionWindows {
+    static SESSION_WINDOWS: OnceLock<SessionWindows> = OnceLock::new();
+    SESSION_WINDOWS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
+fn next_window_flight_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The error a joiner sees when the flight it was waiting on was superseded.
+///
+/// A window is best effort by construction — the caller already has a correct
+/// empty answer to serve — so this reads as "no window", and deliberately
+/// leaves no negative memo behind: nothing was wrong with the extraction except
+/// where the viewer went.
+const WINDOW_SUPERSEDED: &str = "subtitle window extraction was superseded";
+
+/// Whether a window request carries a newer ordering fact than the flight a
+/// playback already owns.
+///
+/// A request with an authority outranks one started without any, because a
+/// settled destination is a fact and a first play is the absence of one. Equal
+/// sequences never displace: the client has not moved, so two anchors under one
+/// sequence are two views of the same destination and the flight already
+/// running is as good as its replacement.
+fn later_window_authority(requested: Option<u64>, live: Option<u64>) -> bool {
+    match (requested, live) {
+        (Some(requested), Some(live)) => requested > live,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
+/// Wait for a displaced flight to finish tearing down.
+async fn await_window_settlement(settled: &tokio::sync::Semaphore) {
+    // `close()` is the completion signal, so the acquire failing is the case
+    // this function exists to observe.
+    let _ = settled.acquire().await;
+}
+
+/// Release the window owner a playback holds, if it holds one.
+///
+/// Cancellation-safe in the sense session teardown needs: the slot is removed
+/// and the cancel signalled before the first await, so a caller that is itself
+/// dropped mid-release still leaves the flight stopping rather than orphaned
+/// and still owning a session id a later playback may reuse.
+pub async fn release_session_window(session: &str) {
+    let live = session_windows().lock().await.remove(session);
+    let Some(mut live) = live else {
+        return;
+    };
+    drop(live.cancel.take());
+    await_window_settlement(&live.settled).await;
+}
+
+/// How a window extraction ended.
+///
+/// The whole-track path has no use for this distinction — it cannot be
+/// cancelled — but the window path turns entirely on it: a failure is
+/// remembered so a broken track is not rescanned every six seconds, while an
+/// abortion must leave no trace at all, because the next request for the same
+/// span is not a retry of something that went wrong.
+enum WindowExtractionOutcome {
+    Complete(Result<PathBuf, String>),
+    Aborted,
+}
+
 /// Why a cache key failed, and when that answer stops being reused.
 struct NegativeMemo {
     why: String,
@@ -766,6 +866,11 @@ where
         });
     }
 
+    join_flight(&flight).await
+}
+
+/// Wait for whoever owns this key to publish an answer.
+async fn join_flight(flight: &Extraction) -> Result<PathBuf, String> {
     loop {
         // Register before inspecting the result so a publish between the two
         // operations cannot become a lost notification.
@@ -775,6 +880,121 @@ where
         }
         notified.await;
     }
+}
+
+/// The window path's owned extraction.
+///
+/// [`ensure_vtt_at`] deliberately detaches the real work: a whole-track sidecar
+/// is what every other consumer needs, so a client that walks away must not
+/// stop it. A window is the opposite. It exists for one playback's current
+/// destination, and when that destination moves the extraction is waste that
+/// holds a stalled mount open. So this runs the extraction inside the caller's
+/// task, where dropping it reaches the ffmpeg child, and reports abortion as a
+/// different outcome from failure.
+async fn ensure_window_owned<F, Fut>(
+    cached: PathBuf,
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    limits: ExtractionLimits,
+    cancel: tokio::sync::oneshot::Receiver<()>,
+    extract: F,
+) -> WindowExtractionOutcome
+where
+    F: FnOnce(PathBuf, MediaFile, i64) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    if valid_sidecar(&cached, limits.max_sidecar_bytes).await {
+        return WindowExtractionOutcome::Complete(Ok(cached));
+    }
+    if let Err(error) = tokio::fs::create_dir_all(dir).await {
+        return WindowExtractionOutcome::Complete(Err(format!("creating subtitle cache: {error}")));
+    }
+    let directory = match plurx_core::fs_secure::SecureDirectory::open(dir).await {
+        Ok(directory) => directory,
+        Err(error) => {
+            return WindowExtractionOutcome::Complete(Err(format!(
+                "opening subtitle cache: {error}"
+            )));
+        }
+    };
+    let (flight, owner) = match enlist(&cached, limits.max_sidecar_bytes).await {
+        Flight::Published => return WindowExtractionOutcome::Complete(Ok(cached)),
+        Flight::Remembered(why) => return WindowExtractionOutcome::Complete(Err(why)),
+        Flight::Join(flight) => (flight, false),
+        Flight::Own(flight) => (flight, true),
+    };
+
+    if !owner {
+        // A flight this playback does not own — another session's warm, or a
+        // request awaiting the same key. Supersession may stop this playback
+        // waiting for it; it may never kill it.
+        return tokio::select! {
+            biased;
+            _ = cancel => WindowExtractionOutcome::Aborted,
+            result = join_flight(&flight) => WindowExtractionOutcome::Complete(result),
+        };
+    }
+
+    let tmp = dir.join(format!(".tmp-{}.vtt", uuid::Uuid::new_v4()));
+    let started = std::time::Instant::now();
+    tracing::info!(
+        file_id = file.id,
+        index,
+        "extracting an embedded text subtitle window to the sidecar cache"
+    );
+    let outcome = publish_extraction_with_cancel(
+        &directory,
+        &cached,
+        &tmp,
+        file,
+        index,
+        limits,
+        Some(cancel),
+        extract,
+    )
+    .await;
+    match &outcome {
+        WindowExtractionOutcome::Complete(Ok(_)) => {
+            tracing::info!(
+                file_id = file.id,
+                index,
+                elapsed_ms = started.elapsed().as_millis(),
+                "windowed text subtitle sidecar cached"
+            );
+            forget_failure(&cached).await;
+        }
+        WindowExtractionOutcome::Complete(Err(why)) => {
+            tracing::warn!(
+                file_id = file.id,
+                index,
+                elapsed_ms = started.elapsed().as_millis(),
+                why,
+                "windowed text subtitle extraction failed; suppressing retries for now"
+            );
+            remember_failure(&cached, why, limits.negative_ttl).await;
+        }
+        WindowExtractionOutcome::Aborted => {
+            tracing::debug!(
+                file_id = file.id,
+                index,
+                elapsed_ms = started.elapsed().as_millis(),
+                "abandoning a windowed subtitle extraction the viewer left behind"
+            );
+        }
+    }
+    // Joiners are released either way. An abortion answers them with the
+    // superseded marker rather than leaving them parked on a flight that will
+    // never publish, and writes no memo, so the next request for this span is a
+    // first attempt rather than a suppressed retry.
+    let published = match &outcome {
+        WindowExtractionOutcome::Complete(result) => result.clone(),
+        WindowExtractionOutcome::Aborted => Err(WINDOW_SUPERSEDED.to_owned()),
+    };
+    *flight.result.lock().await = Some(published);
+    extractions().lock().await.remove(&cached);
+    flight.ready.notify_waiters();
+    outcome
 }
 
 /// Extract one bounded span of an embedded text track.
@@ -871,7 +1091,14 @@ pub async fn read_cached_window(
 /// window costs what the whole track costs, so the honest move is to let
 /// `warm_vtt` produce the authoritative sidecar instead of a disposable one
 /// for the same bytes. Returns whether a window is now the thing to wait for.
+///
+/// `sequence` is the control sequence the playback has settled on, when it has
+/// settled on one. It is the only thing that lets a later anchor displace an
+/// earlier flight: without an ordering fact, a second anchor is just a second
+/// request, and the work already running is as likely to be the right work.
 pub async fn warm_vtt_window(
+    session: &str,
+    sequence: Option<u64>,
     dir: &Path,
     file: &MediaFile,
     index: i64,
@@ -879,6 +1106,8 @@ pub async fn warm_vtt_window(
     window_seconds: i64,
 ) -> bool {
     warm_vtt_window_with(
+        session,
+        sequence,
         dir,
         file,
         index,
@@ -893,10 +1122,13 @@ pub async fn warm_vtt_window(
 
 /// The window-warmer seam used by the HTTP boundary fixture.
 ///
-/// Keeping the injected producer behind the same warmup and extraction
-/// registries is deliberate: the fixture must prove the production
+/// Keeping the injected producer behind the same warmup, extraction and
+/// ownership registries is deliberate: the fixture must prove the production
 /// single-flight behavior, not a test double's imitation of it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn warm_vtt_window_with<F, Fut>(
+    session: &str,
+    sequence: Option<u64>,
     dir: &Path,
     file: &MediaFile,
     index: i64,
@@ -925,30 +1157,114 @@ where
     if valid_sidecar(&cached, MAX_SIDECAR_BYTES).await {
         return true;
     }
+
+    // Ownership is decided before work is deduplicated. "May this playback
+    // start anything" is a question about ordering; "has somebody already
+    // started this exact span" is a question about waste. Answering them in
+    // this order is what stops a storm from leaving a trail of live children.
+    let mut displaced: Option<SessionWindow> = None;
+    let (cancel_rx, settled, id) = loop {
+        if let Some(mut live) = displaced.take() {
+            drop(live.cancel.take());
+            await_window_settlement(&live.settled).await;
+        }
+        let mut owners = session_windows().lock().await;
+        match owners.get(session) {
+            Some(live)
+                if live.anchor_seconds == anchor_seconds
+                    && live.window_seconds == window_seconds =>
+            {
+                // The same destination this playback is already extracting.
+                // Join it; never spawn a second extractor for it.
+                return true;
+            }
+            Some(live) if !later_window_authority(sequence, live.sequence) => {
+                // A different anchor with nothing newer behind it is not
+                // evidence the live flight is wrong, and killing it would turn
+                // an ordinary segment walk into a restart loop.
+                return false;
+            }
+            Some(_) => {
+                // Newer ordering fact, different destination. Take the slot
+                // out of the registry now so nothing else adopts it, then wait
+                // for the real producer to settle outside this lock.
+                displaced = owners.remove(session);
+                continue;
+            }
+            None => {}
+        }
+        let id = next_window_flight_id();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let settled = Arc::new(tokio::sync::Semaphore::new(0));
+        owners.insert(
+            session.to_owned(),
+            SessionWindow {
+                id,
+                sequence,
+                anchor_seconds,
+                window_seconds,
+                cancel: Some(cancel_tx),
+                settled: Arc::clone(&settled),
+            },
+        );
+        break (cancel_rx, settled, id);
+    };
+
+    // Cross-session dedup underneath the per-playback slot: a different
+    // playback already extracting this exact span is work to join rather than
+    // repeat, and it is not a flight this one may cancel.
     if !warmups().lock().await.insert(cached.clone()) {
-        // Already in flight for this exact span. A seek storm inside one
-        // window must not fan out into one ffmpeg per segment request.
+        release_window_slot(session, id).await;
+        settled.close();
         return true;
     }
 
     let dir_owned = dir.to_owned();
     let file_owned = file.clone();
+    let session_owned = session.to_owned();
     let window = bounded_window_seconds(window_seconds);
     tokio::spawn(async move {
-        let _ = ensure_vtt_at(
+        let _ = ensure_window_owned(
             cached.clone(),
             &dir_owned,
             &file_owned,
             index,
             ExtractionLimits::default(),
+            cancel_rx,
             move |tmp, file, index| async move {
                 extract(tmp, file, index, anchor_seconds, window).await
             },
         )
         .await;
         warmups().lock().await.remove(&cached);
+        release_window_slot(&session_owned, id).await;
+        // Last, so anything woken by it finds the registries already clear.
+        settled.close();
     });
     true
+}
+
+/// The window flight a playback owns right now: its anchor, its span and the
+/// control sequence that justified it.
+///
+/// The acceptance needs to say *which* target the surviving producer carries,
+/// not merely that one survived, and that fact lives in this registry rather
+/// than in anything the HTTP boundary returns.
+#[cfg(test)]
+pub(crate) async fn owned_window_for_test(session: &str) -> Option<(i64, i64, Option<u64>)> {
+    session_windows()
+        .lock()
+        .await
+        .get(session)
+        .map(|live| (live.anchor_seconds, live.window_seconds, live.sequence))
+}
+
+/// Drop a session's slot only if it still holds the named flight.
+async fn release_window_slot(session: &str, id: u64) {
+    let mut owners = session_windows().lock().await;
+    if owners.get(session).is_some_and(|live| live.id == id) {
+        owners.remove(session);
+    }
 }
 
 async fn extract_vtt(tmp: &Path, file: &MediaFile, index: i64) -> Result<(), String> {
@@ -986,31 +1302,84 @@ where
     F: FnOnce(PathBuf, MediaFile, i64) -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
-    let cached_name = cached
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "subtitle cache path has no safe filename".to_owned())?;
-    let tmp_name = tmp
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "subtitle temp path has no safe filename".to_owned())?;
+    match publish_extraction_with_cancel(directory, cached, tmp, file, index, limits, None, extract)
+        .await
+    {
+        WindowExtractionOutcome::Complete(result) => result,
+        // Nothing was passed that could abort this call. Answering with the
+        // superseded marker keeps an impossible case from becoming a panic in
+        // production, and a caller that somehow reached it reads "no sidecar",
+        // which is the truth.
+        WindowExtractionOutcome::Aborted => Err(WINDOW_SUPERSEDED.to_owned()),
+    }
+}
+
+/// Publish an extraction, optionally letting a supersession stop it.
+///
+/// The cancellation point is deliberately only around the extractor. Once
+/// bytes exist, validation and the atomic publish run to completion: a window
+/// that has already paid for the scan is worth publishing even for a
+/// destination the viewer has left — some later request may want it — and a
+/// cancel point in the middle of `atomic_write_child` would be a way to strand
+/// a temp file rather than a way to save work.
+#[allow(clippy::too_many_arguments)]
+async fn publish_extraction_with_cancel<F, Fut>(
+    directory: &plurx_core::fs_secure::SecureDirectory,
+    cached: &Path,
+    tmp: &Path,
+    file: &MediaFile,
+    index: i64,
+    limits: ExtractionLimits,
+    cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+    extract: F,
+) -> WindowExtractionOutcome
+where
+    F: FnOnce(PathBuf, MediaFile, i64) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    macro_rules! bail {
+        ($why:expr) => {
+            return WindowExtractionOutcome::Complete(Err($why))
+        };
+    }
+    let Some(cached_name) = cached.file_name().and_then(|name| name.to_str()) else {
+        bail!("subtitle cache path has no safe filename".to_owned())
+    };
+    let Some(tmp_name) = tmp.file_name().and_then(|name| name.to_str()) else {
+        bail!("subtitle temp path has no safe filename".to_owned())
+    };
     // A timeout here rather than around the whole task: expiring drops the
     // extractor future (killing its child) while this frame still owns the
     // temp file and can delete it, so a wedge leaves the cache dir as clean as
     // an ordinary failure does.
-    let extracted =
-        match tokio::time::timeout(limits.timeout, extract(tmp.to_owned(), file.clone(), index))
-            .await
-        {
-            Ok(extracted) => extracted,
-            Err(_) => Err(format!(
-                "subtitle extraction timed out after {}s",
-                limits.timeout.as_secs()
-            )),
-        };
+    let extraction =
+        tokio::time::timeout(limits.timeout, extract(tmp.to_owned(), file.clone(), index));
+    let extracted = match cancel {
+        Some(cancel) => tokio::select! {
+            biased;
+            _ = cancel => {
+                // Dropping `extraction` kills the child through `kill_on_drop`,
+                // and this frame still owns the temp file, so an abandoned
+                // window leaves the cache directory exactly as clean as an
+                // ordinary failure leaves it — but with no memo, because
+                // nothing was wrong with the extraction except its destination.
+                let _ = directory.unlink_child(tmp_name).await;
+                return WindowExtractionOutcome::Aborted;
+            }
+            extracted = extraction => extracted,
+        },
+        None => extraction.await,
+    };
+    let extracted = match extracted {
+        Ok(extracted) => extracted,
+        Err(_) => Err(format!(
+            "subtitle extraction timed out after {}s",
+            limits.timeout.as_secs()
+        )),
+    };
     if let Err(e) = extracted {
         let _ = directory.unlink_child(tmp_name).await;
-        return Err(e);
+        bail!(e);
     }
     // Read through the held directory capability before publication, so an
     // oversized or symlink-swapped temp file is never visible under its cache
@@ -1023,16 +1392,16 @@ where
         Ok(bytes) => bytes,
         Err(error) => {
             let _ = directory.unlink_child(tmp_name).await;
-            return Err(format!("reading extracted subtitle sidecar: {error}"));
+            bail!(format!("reading extracted subtitle sidecar: {error}"));
         }
     };
     let size = bytes.len() as u64;
     if size == 0 || size > limits.max_sidecar_bytes {
         let _ = directory.unlink_child(tmp_name).await;
         if size == 0 {
-            return Err("subtitle extraction produced an empty sidecar".to_owned());
+            bail!("subtitle extraction produced an empty sidecar".to_owned());
         }
-        return Err(format!(
+        bail!(format!(
             "subtitle sidecar is {size} bytes, above the {} byte cap",
             limits.max_sidecar_bytes
         ));
@@ -1045,13 +1414,13 @@ where
             let whole = parent.join(&whole_name);
             if valid_sidecar(&whole, MAX_SIDECAR_BYTES).await {
                 let _ = directory.unlink_child(tmp_name).await;
-                return Ok(whole);
+                return WindowExtractionOutcome::Complete(Ok(whole));
             }
         }
     }
     if let Err(error) = directory.atomic_write_child(cached_name, &bytes).await {
         let _ = directory.unlink_child(tmp_name).await;
-        return Err(format!("publishing subtitle cache: {error}"));
+        bail!(format!("publishing subtitle cache: {error}"));
     }
     let _ = directory.unlink_child(tmp_name).await;
     if let Some(dir) = cached.parent() {
@@ -1060,7 +1429,7 @@ where
         }
         prune(dir).await;
     }
-    Ok(cached.to_owned())
+    WindowExtractionOutcome::Complete(Ok(cached.to_owned()))
 }
 
 /// Drop the oldest cached subtitles once the cache outgrows its cap, and any

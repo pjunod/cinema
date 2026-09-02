@@ -1089,7 +1089,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +1 for the delayed-directory cancellation fixture: its two-second paused-time
 # sleep moves the wire start beyond the initial reservation and is fully owned
 # by the test task that the fixture aborts and joins.
-expected_occurrences = 529
+# +9 with M7 R-M3's seek coalescing. One is shipped: the subtitle segment arm
+# reads the client's settled destination under the same publication deadline
+# that already bounds its sibling reads, and a deadline that expires there
+# starts nothing at all — it cannot leak a producer, only decline to begin one.
+# The other eight are fixture waits in the `seek_coalescing` acceptance: five
+# bound producer-start and teardown observation, one bounds the first window's
+# publication, and two are the above-250 ms spacing the protocol's exchange
+# floor requires for a storm to be measured rather than rate-limited. Every one
+# of them is awaited by the test before its temporary media is released.
+expected_occurrences = 538
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1154,7 +1163,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # loop is that polling the *store* observed only the first of the three writes,
 # so the test could assert against a status its own task had not finished
 # producing. No child process, no producer, no timer.
-expected_occurrences = 200
+# +7 with M7 R-M3's seek-coalescing acceptance: every one is a
+# `Response::status()` assertion on an in-process subtitle-segment response.
+# They launch nothing and own nothing. R-M3 adds no command construction at
+# all — it changes who may *stop* the existing window extractor, not who may
+# start one, and that extractor is still the single bounded ffmpeg inventoried
+# under `process-command-construction` above.
+expected_occurrences = 207
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

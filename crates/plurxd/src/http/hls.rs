@@ -1104,6 +1104,47 @@ fn restart_is_superseded(
     settled.supersedes(control_sequence, requested_anchor_ms)
 }
 
+/// What an admitted restart carries into its activation.
+#[derive(Debug)]
+struct RestartAdmission {
+    expected_predecessor_incarnation_id: Option<String>,
+    fence_predecessor: bool,
+}
+
+/// Refuse a restart whose destination the viewer has already left, and say how
+/// the activation that follows an admitted one is fenced.
+///
+/// Both halves live here because both are part of one claim M7's acceptance
+/// makes: a storm starts work only for the settled target, and each successor
+/// that does start takes the playback pointer from the exact predecessor it
+/// replaces. `create` needs a store, a transcode manager and an authenticated
+/// user, so neither half is reachable from a test through the handler — and a
+/// predicate returning `bool` would let the acceptance assert about the
+/// decision without ever seeing the refusal a client receives or the fence its
+/// successor carries. This returns both.
+fn admit_restart(
+    settled: Option<crate::playback_control::SettledTarget>,
+    control_sequence: Option<u64>,
+    start_seconds: f64,
+    predecessor_incarnation_id: Option<&str>,
+) -> Result<RestartAdmission, ApiError> {
+    if restart_is_superseded(settled, control_sequence, start_seconds) {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "playback_target_superseded",
+            "a later seek replaced this destination, so no session was started for it",
+        ));
+    }
+    Ok(RestartAdmission {
+        expected_predecessor_incarnation_id: predecessor_incarnation_id.map(str::to_owned),
+        // Every activation is a predecessor CAS, an ordinary start included:
+        // `Some` requires the playback pointer to name that exact incarnation
+        // and `None` requires it to be absent, so a storm's losing restart can
+        // never take the pointer from the successor that already has it.
+        fence_predecessor: true,
+    })
+}
+
 /// The height a request resolves to, which is not always the one asked for.
 ///
 /// Three arms and three different promises, which is why this is one function
@@ -1688,21 +1729,18 @@ pub async fn create(
         }
         None => None,
     };
-    if restart_is_superseded(
+    let admission = admit_restart(
         settled_target,
         request.control_sequence,
         request.start_seconds,
-    ) {
-        return Err(ApiError::typed(
-            StatusCode::CONFLICT,
-            "playback_target_superseded",
-            "a later seek replaced this destination, so no session was started for it",
-        ));
-    }
-    let expected_predecessor_incarnation_id = activation_predecessor
-        .as_ref()
-        .map(|route| route.incarnation_id.clone());
-    let fence_predecessor = true;
+        activation_predecessor
+            .as_ref()
+            .map(|route| route.incarnation_id.as_str()),
+    )?;
+    let RestartAdmission {
+        expected_predecessor_incarnation_id,
+        fence_predecessor,
+    } = admission;
     let pinned_owner = if let Some(previous_session_id) = request
         .previous_session_id
         .as_deref()
@@ -6292,8 +6330,17 @@ trait SubtitleSegmentSource: Send + Sync {
         index: i64,
     ) -> BoxFuture<'a, ()>;
 
+    /// Start a bounded window for one playback.
+    ///
+    /// The session id and the control sequence it settled on are what let the
+    /// subtitle owner answer M7's actual question — how many extractions does
+    /// one viewer have running — rather than the key-shaped question of how
+    /// many spans are in flight across the server.
+    #[allow(clippy::too_many_arguments)]
     fn warm_window<'a>(
         &'a self,
+        session: &'a str,
+        sequence: Option<u64>,
         dir: &'a Path,
         file: &'a MediaFile,
         index: i64,
@@ -6342,6 +6389,8 @@ impl SubtitleSegmentSource for ProductionSubtitleSegmentSource {
 
     fn warm_window<'a>(
         &'a self,
+        session: &'a str,
+        sequence: Option<u64>,
         dir: &'a Path,
         file: &'a MediaFile,
         index: i64,
@@ -6349,6 +6398,8 @@ impl SubtitleSegmentSource for ProductionSubtitleSegmentSource {
         window_seconds: i64,
     ) -> BoxFuture<'a, bool> {
         Box::pin(crate::subtitles::warm_vtt_window(
+            session,
+            sequence,
             dir,
             file,
             index,
@@ -6558,22 +6609,53 @@ async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSource + ?Sized
                 )
                 .await
                 .map_err(|_| response_publication_timeout())?;
+                // The destination is read here, immediately before the warm,
+                // and not once at the top of the handler: a seek that lands
+                // between the two reads is exactly the case M7 is about, and
+                // the later read is the one that can still refuse the work.
+                //
+                // `None` is not staleness. It covers a session that is gone, an
+                // actor that retired and a client that has not exchanged yet,
+                // and in all three there is no ordering fact to be stale
+                // against — so a first play still warms.
+                let settled = tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(publication_deadline),
+                    state.transcode.settled_target_for_session(session),
+                )
+                .await;
                 // The window is best effort by construction — it is a bridge,
                 // and the empty segment below is already a correct answer — so
-                // a timeout starting it means "no window", not a failed
-                // request.
-                let windowing = tokio::time::timeout_at(
-                    tokio::time::Instant::from_std(publication_deadline),
-                    source.warm_window(
-                        &state.subs_dir,
-                        &file,
-                        index,
-                        anchor,
-                        subtitle_window_seconds,
-                    ),
-                )
-                .await
-                .unwrap_or(false);
+                // a timeout means "no window", not a failed request.
+                let windowing = match settled {
+                    Ok(Some(target))
+                        if !target.covered_by_window(anchor, subtitle_window_seconds) =>
+                    {
+                        // The client has settled somewhere this window does not
+                        // reach. Starting it would spend a full-source scan on
+                        // a destination that is already history, which is the
+                        // waste the seek-coalescing contract exists to refuse.
+                        false
+                    }
+                    Ok(authority) => tokio::time::timeout_at(
+                        tokio::time::Instant::from_std(publication_deadline),
+                        source.warm_window(
+                            session,
+                            authority.map(|target| target.sequence),
+                            &state.subs_dir,
+                            &file,
+                            index,
+                            anchor,
+                            subtitle_window_seconds,
+                        ),
+                    )
+                    .await
+                    .unwrap_or(false),
+                    // Reading the authority did not fit inside the publication
+                    // deadline. Starting an extraction this request could not
+                    // justify is the failure mode being removed, so the empty
+                    // segment answers alone.
+                    Err(_) => false,
+                };
                 tracing::debug!(
                     session = %crate::transcode::session_log_id(session),
                     file_id = file.id,
@@ -10526,6 +10608,46 @@ mod tests {
         runs: Arc<std::sync::atomic::AtomicUsize>,
         started: Arc<tokio::sync::Semaphore>,
         release: Arc<tokio::sync::Semaphore>,
+        /// Window producers running *right now*.
+        ///
+        /// Counted with a drop guard rather than by subtracting completions,
+        /// because the case this exists to measure is the producer that never
+        /// completes: a superseded extraction is dropped mid-body, and a
+        /// counter incremented at the end of the body would never learn it had
+        /// gone. The guard runs whether the future finishes or is dropped, so
+        /// this is the physical number of live extractions.
+        live: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    /// Decrements the live-producer count however its producer ends.
+    struct LiveProducer(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for LiveProducer {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl WindowFixtureSubtitleSource {
+        fn counting() -> Self {
+            Self {
+                whole_runs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                whole_started: Arc::new(tokio::sync::Semaphore::new(0)),
+                whole_release: Arc::new(tokio::sync::Semaphore::new(0)),
+                runs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                started: Arc::new(tokio::sync::Semaphore::new(0)),
+                release: Arc::new(tokio::sync::Semaphore::new(0)),
+                live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn window_runs(&self) -> usize {
+            self.runs.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn live_window_producers(&self) -> usize {
+            self.live.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     impl SubtitleSegmentSource for WindowFixtureSubtitleSource {
@@ -10563,7 +10685,7 @@ mod tests {
         ) -> BoxFuture<'a, ()> {
             let runs = Arc::clone(&self.whole_runs);
             let started = Arc::clone(&self.whole_started);
-            let release = Arc::clone(&self.whole_release);
+            let whole_release = Arc::clone(&self.whole_release);
             Box::pin(crate::subtitles::warm_vtt_with(
                 dir,
                 file,
@@ -10571,7 +10693,11 @@ mod tests {
                 move |tmp, _, _| async move {
                     runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     started.add_permits(1);
-                    let _permit = release.acquire().await.expect("release whole producer");
+                    whole_release
+                        .acquire()
+                        .await
+                        .expect("release whole producer")
+                        .forget();
                     tokio::fs::write(tmp, b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nwhole cue\n")
                         .await
                         .map_err(|error| error.to_string())
@@ -10581,6 +10707,8 @@ mod tests {
 
         fn warm_window<'a>(
             &'a self,
+            session: &'a str,
+            sequence: Option<u64>,
             dir: &'a Path,
             file: &'a MediaFile,
             index: i64,
@@ -10590,7 +10718,10 @@ mod tests {
             let runs = Arc::clone(&self.runs);
             let started = Arc::clone(&self.started);
             let release = Arc::clone(&self.release);
+            let live = Arc::clone(&self.live);
             Box::pin(crate::subtitles::warm_vtt_window_with(
+                session,
+                sequence,
                 dir,
                 file,
                 index,
@@ -10598,8 +10729,21 @@ mod tests {
                 window_seconds,
                 move |tmp, _, _, _, _| async move {
                     runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _live = LiveProducer(live);
                     started.add_permits(1);
-                    let _permit = release.acquire().await.expect("release window producer");
+                    // A superseded producer is dropped exactly here, which is
+                    // what makes `live` fall again without this body ever
+                    // reaching its end.
+                    // `forget` rather than holding the guard: a permit that
+                    // returned to the semaphore when one producer finished
+                    // would silently release the next one, and this fixture
+                    // exists to decide exactly which producers get to run.
+                    release
+                        .acquire()
+                        .await
+                        .expect("release window producer")
+                        .forget();
                     tokio::fs::write(tmp, b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nready cue\n")
                         .await
                         .map_err(|error| error.to_string())
@@ -10651,14 +10795,7 @@ mod tests {
             "the fixture advertises exactly one subtitle interval"
         );
 
-        let source = Arc::new(WindowFixtureSubtitleSource {
-            whole_runs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            whole_started: Arc::new(tokio::sync::Semaphore::new(0)),
-            whole_release: Arc::new(tokio::sync::Semaphore::new(0)),
-            runs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            started: Arc::new(tokio::sync::Semaphore::new(0)),
-            release: Arc::new(tokio::sync::Semaphore::new(0)),
-        });
+        let source = Arc::new(WindowFixtureSubtitleSource::counting());
         let request = |state: AppState, source: Arc<WindowFixtureSubtitleSource>| async move {
             subtitle_vtt_local_before_with_source(
                 &state,
@@ -10786,6 +10923,644 @@ mod tests {
         })
         .await
         .expect("slow whole-track producer settles before fixture cleanup");
+    }
+
+    /// M7 R-M3: seek coalescing at the production boundary.
+    ///
+    /// The acceptance language is that "a 20-seek storm starts work only for
+    /// the settled target". Nineteen logical `supersedes` verdicts do not say
+    /// that — they say the latch can rank two numbers. What says it is a storm
+    /// driven through real control exchanges and the real subtitle-segment
+    /// handler, with the producer counted as it spawns and as it dies.
+    mod seek_coalescing {
+        use super::*;
+
+        /// One segment per window anchor, so a storm walks a real grid rather
+        /// than re-requesting one key. Sixty-second segments sit under the
+        /// hundred-and-twenty-second retention cap, and pinning the operator's
+        /// span to its thirty-second minimum makes every segment start its own
+        /// anchor. The fixture film is 6,000 s and a window declines past its
+        /// midpoint, so every segment used here stays well below 3,000 s.
+        const SEGMENT_SECONDS: i64 = 60;
+        const SEGMENTS: i64 = 15;
+        const WINDOW_SECONDS: i64 = 30;
+
+        /// A subtitle-capable session with a cold cache and a long playlist.
+        async fn cold_windowed_fixture(
+            dir: &std::path::Path,
+            session_id: &str,
+        ) -> (HlsDeliveryFixture, MediaFile) {
+            let mut fixture = HlsDeliveryFixture::publish(dir, session_id).await;
+            fixture
+                .store
+                .put_setting(
+                    plurx_core::store::keys::SUBTITLE_WINDOW_SECS,
+                    &WINDOW_SECONDS.to_string(),
+                )
+                .await
+                .expect("pin the operator's window span");
+            add_http_text_subtitle(&mut fixture, session_id).await;
+            let file = fixture
+                .store
+                .get_file(fixture.file_id())
+                .await
+                .expect("fixture file lookup")
+                .expect("fixture file");
+            tokio::fs::remove_file(crate::subtitles::vtt_path(
+                &fixture.state.subs_dir,
+                &file,
+                0,
+            ))
+            .await
+            .expect("return the fixture to a cold cache");
+            let mut playlist = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:60\n");
+            for index in 0..SEGMENTS {
+                let name = format!("seg{index:05}.ts");
+                tokio::fs::write(dir.join(&name), b"video")
+                    .await
+                    .expect("video segment");
+                playlist.push_str(&format!("#EXTINF:60.000,\n{name}\n"));
+            }
+            tokio::fs::write(dir.join("index.m3u8"), playlist.as_bytes())
+                .await
+                .expect("video playlist");
+            // The segment index is built by the publication flow, not by the
+            // file on disk, so ask for the last interval once. It both primes
+            // the index every subtitle request reads and proves the fixture
+            // really advertises the grid this storm walks.
+            assert_eq!(
+                fixture
+                    .state
+                    .transcode
+                    .segment_window(session_id, SEGMENTS - 1)
+                    .await,
+                Some((
+                    ((SEGMENTS - 1) * SEGMENT_SECONDS) as f64,
+                    (SEGMENTS * SEGMENT_SECONDS) as f64
+                )),
+                "the fixture advertises every segment the storm asks for"
+            );
+            (fixture, file)
+        }
+
+        /// Wait until the producer a request just started is actually running.
+        ///
+        /// `warm_window` returns as soon as the flight is owned; the extraction
+        /// itself begins one poll later. Counting live producers before that
+        /// happens would measure the scheduler, not the contract.
+        async fn producer_started(source: &WindowFixtureSubtitleSource) {
+            match tokio::time::timeout(Duration::from_secs(5), source.started.acquire()).await {
+                Ok(permit) => permit.expect("started semaphore remains open").forget(),
+                Err(_) => panic!(
+                    "no window producer started: runs={} live={}",
+                    source.window_runs(),
+                    source.live_window_producers()
+                ),
+            }
+        }
+
+        async fn subtitle_segment(
+            state: &AppState,
+            session: &str,
+            segment: i64,
+            source: &WindowFixtureSubtitleSource,
+        ) -> Response {
+            subtitle_vtt_local_before_with_source(
+                state,
+                session,
+                0,
+                &format!("seg{segment:05}.vtt"),
+                Instant::now() + Duration::from_secs(5),
+                source,
+            )
+            .await
+            .expect("an advertised subtitle segment")
+        }
+
+        /// One accepted control exchange naming where the client now is.
+        async fn settle_on(
+            fixture: &HlsDeliveryFixture,
+            session_id: &str,
+            generation: &str,
+            client: &str,
+            sequence: u64,
+            target_seconds: i64,
+        ) -> Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        > {
+            let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Web,
+            );
+            let target_ms = target_seconds.saturating_mul(1_000);
+            snapshot.position_ms = target_ms;
+            snapshot.seek_target_ms = Some(target_ms);
+            snapshot.buffered_from_ms = Some(target_ms);
+            snapshot.buffered_through_ms = target_ms.saturating_add(15_000);
+            fixture
+                .state
+                .transcode
+                .hls_session_control(crate::playback_control::LocalControlRequest {
+                    session_id,
+                    generation,
+                    owner_node_id: "test-node",
+                    owner_epoch: 1,
+                    client_instance_id: client,
+                    sequence,
+                    snapshot,
+                })
+                .await
+                .expect("the storm session is local")
+        }
+
+        /// The twenty destinations. It walks forward and scrubs back, because
+        /// a real storm is a scrub bar being dragged, not a monotonic ramp —
+        /// and a revisited anchor proves an aborted flight left no memo behind
+        /// to suppress its own retry.
+        const STORM: [i64; 20] = [
+            0, 3, 1, 6, 2, 9, 4, 11, 5, 13, 8, 14, 7, 12, 10, 6, 9, 3, 11, 7,
+        ];
+
+        #[tokio::test]
+        async fn a_twenty_seek_storm_starts_work_only_for_the_settled_target() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let session_id = &uuid::Uuid::new_v4().to_string();
+            let generation = uuid::Uuid::new_v4().to_string();
+            let client = uuid::Uuid::new_v4().to_string();
+            let (fixture, file) = cold_windowed_fixture(dir.path(), session_id).await;
+            crate::transcode::tests::activate_control_route(
+                fixture.store.as_ref(),
+                session_id,
+                &generation,
+                "test-node",
+            )
+            .await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+            let window_seconds = fixture.state.subtitle_window_seconds().await;
+
+            // Fact 6 needs a window that really published, and it has to
+            // publish before the storm moves on, so the first destination is
+            // driven to completion on its own.
+            let first =
+                subtitle_segment(&fixture.state, session_id, STORM[0], source.as_ref()).await;
+            assert_eq!(first.status(), StatusCode::OK);
+            producer_started(source.as_ref()).await;
+            source.release.add_permits(1);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(
+                    crate::subtitles::read_cached_window(
+                        &fixture.state.subs_dir,
+                        &file,
+                        0,
+                        STORM[0] * SEGMENT_SECONDS,
+                        window_seconds,
+                    )
+                    .await,
+                    Ok(Some(_))
+                ) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the first window publishes");
+
+            let mut sequence = 0_u64;
+            // A create that the storm has already passed, held back so it
+            // reaches admission after a later snapshot was accepted.
+            let mut pending_create: Option<(u64, f64)> = None;
+            let mut refusals = 0_usize;
+            for segment in STORM {
+                sequence += 1;
+                let target_seconds = segment * SEGMENT_SECONDS;
+
+                let outcome = settle_on(
+                    &fixture,
+                    session_id,
+                    &generation,
+                    &client,
+                    sequence,
+                    target_seconds,
+                )
+                .await
+                .expect("the storm's exchanges are accepted");
+                assert_eq!(
+                    outcome.disposition,
+                    crate::playback_control::ControlDisposition::Accepted
+                );
+
+                // Fact 1, with the ordering the acceptance names: snapshot
+                // `N+1` is accepted before create `N` reaches admission, so the
+                // refusal is a real race rather than a replayed decision.
+                if let Some((stale_sequence, stale_start)) = pending_create.take() {
+                    let settled = fixture
+                        .state
+                        .transcode
+                        .settled_target_for_session(session_id)
+                        .await;
+                    let before = source.window_runs();
+                    let refused = admit_restart(settled, Some(stale_sequence), stale_start, None);
+                    match refused {
+                        Err(ApiError::Typed { status, code, .. }) => {
+                            assert_eq!(status, StatusCode::CONFLICT);
+                            assert_eq!(code, "playback_target_superseded");
+                            refusals += 1;
+                        }
+                        other => panic!("a create for a destination the storm left: {other:?}"),
+                    }
+                    assert_eq!(
+                        source.window_runs(),
+                        before,
+                        "the refusal happens before anything is spawned"
+                    );
+                }
+
+                // Fact 2: the ordering rules the storm relies on are unchanged.
+                assert!(matches!(
+                    settle_on(
+                        &fixture,
+                        session_id,
+                        &generation,
+                        &client,
+                        sequence,
+                        target_seconds
+                    )
+                    .await,
+                    Ok(crate::playback_control::LocalControlResult {
+                        disposition: crate::playback_control::ControlDisposition::Replay,
+                        ..
+                    })
+                ));
+                assert!(matches!(
+                    settle_on(
+                        &fixture,
+                        session_id,
+                        &generation,
+                        &client,
+                        sequence - 1,
+                        target_seconds
+                    )
+                    .await,
+                    Err(crate::playback_control::ControlStateError::StaleSequence)
+                ));
+
+                let response =
+                    subtitle_segment(&fixture.state, session_id, segment, source.as_ref()).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                if segment != STORM[0] {
+                    // Every destination but the first is cold, so every one of
+                    // them spawns. The first is already published and correctly
+                    // starts nothing at all.
+                    producer_started(source.as_ref()).await;
+                }
+
+                // Fact 4, asserted at every step rather than at the end: one
+                // playback never has more than one live window producer.
+                assert!(
+                    source.live_window_producers() <= 1,
+                    "sequence {sequence} left {} window producers alive",
+                    source.live_window_producers()
+                );
+
+                // Hold back this destination's create so the next iteration
+                // presents it after a later snapshot has landed.
+                pending_create = Some((sequence, target_seconds as f64));
+
+                // Above the protocol's 250 ms exchange floor, which is what
+                // makes the next sequence an acceptance rather than a
+                // rate-limit rejection.
+                tokio::time::sleep(Duration::from_millis(260)).await;
+            }
+
+            assert!(
+                refusals >= 15,
+                "the storm should have refused most of its own stale creates, refused {refusals}"
+            );
+
+            // Fact 8: exactly one producer survives, and it carries the target
+            // the client actually settled on.
+            let settled = fixture
+                .state
+                .transcode
+                .settled_target_for_session(session_id)
+                .await
+                .expect("the storm settled somewhere");
+            let final_anchor =
+                crate::subtitles::window_anchor_seconds(settled.anchor_ms / 1_000, window_seconds);
+            let owned = crate::subtitles::owned_window_for_test(session_id)
+                .await
+                .expect("the settled destination is still being extracted");
+            assert_eq!(
+                owned.0, final_anchor,
+                "the survivor carries the final target"
+            );
+            assert_eq!(owned.1, window_seconds);
+            assert_eq!(owned.2, Some(sequence));
+            assert_eq!(
+                source.live_window_producers(),
+                1,
+                "the storm settles on exactly one live producer"
+            );
+
+            // Fact 5: every destination the storm passed through published
+            // nothing. Only the first, which was deliberately driven to
+            // completion, is on disk.
+            for segment in STORM {
+                if segment == STORM[0] || segment * SEGMENT_SECONDS == final_anchor {
+                    continue;
+                }
+                assert!(
+                    matches!(
+                        crate::subtitles::read_cached_window(
+                            &fixture.state.subs_dir,
+                            &file,
+                            0,
+                            segment * SEGMENT_SECONDS,
+                            window_seconds,
+                        )
+                        .await,
+                        Ok(None)
+                    ),
+                    "an abandoned window at {segment} published bytes"
+                );
+            }
+
+            // Fact 6: the window that did publish is untouched by every
+            // supersession that followed it.
+            assert!(matches!(
+                crate::subtitles::read_cached_window(
+                    &fixture.state.subs_dir,
+                    &file,
+                    0,
+                    STORM[0] * SEGMENT_SECONDS,
+                    window_seconds,
+                )
+                .await,
+                Ok(Some(_))
+            ));
+
+            // Release the surviving producers so the fixture directory is not
+            // removed under a live extraction.
+            source.release.add_permits(4);
+            source.whole_release.add_permits(4);
+            crate::subtitles::release_session_window(session_id).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(
+                    crate::subtitles::read_cached_vtt(&fixture.state.subs_dir, &file, 0).await,
+                    Ok(Some(_))
+                ) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the whole-track producer settles before cleanup");
+        }
+
+        /// Fact 3. Every admitted restart takes the playback pointer from the
+        /// exact incarnation it replaces, so the loser of a storm can never
+        /// take it back from the winner.
+        #[test]
+        fn an_admitted_successor_fences_the_predecessor_it_replaces() {
+            let admitted = admit_restart(
+                Some(crate::playback_control::SettledTarget {
+                    sequence: 4,
+                    anchor_ms: 1_800_000,
+                }),
+                Some(9),
+                1_800.0,
+                Some("incarnation-4"),
+            )
+            .expect("a create carrying the newest sequence is admitted");
+            assert!(admitted.fence_predecessor);
+            assert_eq!(
+                admitted.expected_predecessor_incarnation_id.as_deref(),
+                Some("incarnation-4")
+            );
+
+            let first_play = admit_restart(None, Some(1), 0.0, None)
+                .expect("a first play has no ordering to be stale against");
+            assert!(
+                first_play.fence_predecessor,
+                "an ordinary start is a CAS against the pointer being absent"
+            );
+            assert_eq!(first_play.expected_predecessor_incarnation_id, None);
+        }
+
+        /// Fact 7. `None` is the absence of an ordering fact, not evidence of
+        /// staleness, so a client that has never exchanged still gets its
+        /// bridge.
+        #[tokio::test]
+        async fn a_first_play_with_no_settled_target_still_warms() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let session_id = &uuid::Uuid::new_v4().to_string();
+            let (fixture, file) = cold_windowed_fixture(dir.path(), session_id).await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+            assert!(
+                fixture
+                    .state
+                    .transcode
+                    .settled_target_for_session(session_id)
+                    .await
+                    .is_none(),
+                "the fixture session has never exchanged"
+            );
+
+            let response = subtitle_segment(&fixture.state, session_id, 2, source.as_ref()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            producer_started(source.as_ref()).await;
+            assert_eq!(source.window_runs(), 1);
+            let owned = crate::subtitles::owned_window_for_test(session_id)
+                .await
+                .expect("the first play owns its flight");
+            assert_eq!(owned.2, None, "with no ordering fact behind it");
+
+            source.release.add_permits(2);
+            source.whole_release.add_permits(2);
+            crate::subtitles::release_session_window(session_id).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(
+                    crate::subtitles::read_cached_vtt(&fixture.state.subs_dir, &file, 0).await,
+                    Ok(Some(_))
+                ) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the whole-track producer settles before cleanup");
+        }
+
+        /// The deterministic core: three anchors traversed, a same-anchor
+        /// request joining rather than spawning, a different anchor with no
+        /// newer authority refused, and the slot gone at session end.
+        #[tokio::test]
+        async fn one_session_traverses_anchors_joins_refuses_and_releases() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let session_id = &uuid::Uuid::new_v4().to_string();
+            let generation = uuid::Uuid::new_v4().to_string();
+            let client = uuid::Uuid::new_v4().to_string();
+            let (fixture, file) = cold_windowed_fixture(dir.path(), session_id).await;
+            crate::transcode::tests::activate_control_route(
+                fixture.store.as_ref(),
+                session_id,
+                &generation,
+                "test-node",
+            )
+            .await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+            let window_seconds = fixture.state.subtitle_window_seconds().await;
+
+            let mut sequence = 0;
+            for segment in [1_i64, 4, 9] {
+                sequence += 1;
+                settle_on(
+                    &fixture,
+                    session_id,
+                    &generation,
+                    &client,
+                    sequence,
+                    segment * SEGMENT_SECONDS,
+                )
+                .await
+                .expect("accepted exchange");
+                let response =
+                    subtitle_segment(&fixture.state, session_id, segment, source.as_ref()).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                producer_started(source.as_ref()).await;
+                let owned = crate::subtitles::owned_window_for_test(session_id)
+                    .await
+                    .expect("the current destination is owned");
+                assert_eq!(owned.0, segment * SEGMENT_SECONDS);
+                assert_eq!(source.live_window_producers(), 1);
+                assert_eq!(source.window_runs() as u64, sequence);
+                tokio::time::sleep(Duration::from_millis(260)).await;
+            }
+
+            // Same anchor, same destination: joined, never respawned.
+            let response = subtitle_segment(&fixture.state, session_id, 9, source.as_ref()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                source.window_runs(),
+                3,
+                "a second request for the live destination joins it"
+            );
+
+            // A different anchor with no newer exchange behind it: the live
+            // flight is not evidence-free to kill, so nothing starts.
+            let response = subtitle_segment(&fixture.state, session_id, 2, source.as_ref()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                source.window_runs(),
+                3,
+                "a different anchor without newer authority starts nothing"
+            );
+            assert_eq!(
+                crate::subtitles::owned_window_for_test(session_id)
+                    .await
+                    .expect("the live flight is kept")
+                    .0,
+                9 * SEGMENT_SECONDS
+            );
+
+            // Session end releases the owner, and does it by waiting for the
+            // real producer rather than by dropping a handle.
+            crate::subtitles::release_session_window(session_id).await;
+            assert!(crate::subtitles::owned_window_for_test(session_id)
+                .await
+                .is_none());
+            assert_eq!(
+                source.live_window_producers(),
+                0,
+                "release waits for the extraction to settle"
+            );
+            assert!(
+                matches!(
+                    crate::subtitles::read_cached_window(
+                        &fixture.state.subs_dir,
+                        &file,
+                        0,
+                        9 * SEGMENT_SECONDS,
+                        window_seconds,
+                    )
+                    .await,
+                    Ok(None)
+                ),
+                "a released flight publishes nothing"
+            );
+
+            source.whole_release.add_permits(2);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(
+                    crate::subtitles::read_cached_vtt(&fixture.state.subs_dir, &file, 0).await,
+                    Ok(Some(_))
+                ) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the whole-track producer settles before cleanup");
+        }
+
+        /// The window a settled client cannot reach is never started at all —
+        /// the refusal happens in the handler, before the owner is consulted.
+        #[tokio::test]
+        async fn a_window_that_misses_the_settled_target_starts_nothing() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let session_id = &uuid::Uuid::new_v4().to_string();
+            let generation = uuid::Uuid::new_v4().to_string();
+            let client = uuid::Uuid::new_v4().to_string();
+            let (fixture, file) = cold_windowed_fixture(dir.path(), session_id).await;
+            crate::transcode::tests::activate_control_route(
+                fixture.store.as_ref(),
+                session_id,
+                &generation,
+                "test-node",
+            )
+            .await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+
+            settle_on(
+                &fixture,
+                session_id,
+                &generation,
+                &client,
+                1,
+                12 * SEGMENT_SECONDS,
+            )
+            .await
+            .expect("accepted exchange");
+            let response = subtitle_segment(&fixture.state, session_id, 1, source.as_ref()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("empty VTT body")
+                .to_bytes();
+            assert_eq!(
+                body.as_ref(),
+                b"WEBVTT\n\n",
+                "the unchanged empty fallback still answers"
+            );
+            assert_eq!(
+                source.window_runs(),
+                0,
+                "no window is started for a destination the client already left"
+            );
+            assert!(crate::subtitles::owned_window_for_test(session_id)
+                .await
+                .is_none());
+
+            source.whole_release.add_permits(2);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(
+                    crate::subtitles::read_cached_vtt(&fixture.state.subs_dir, &file, 0).await,
+                    Ok(Some(_))
+                ) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the whole-track producer settles before cleanup");
+        }
     }
 
     #[tokio::test]

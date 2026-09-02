@@ -2141,6 +2141,24 @@ impl SettledTarget {
     pub(crate) fn supersedes(&self, sequence: u64, anchor_ms: i64) -> bool {
         self.sequence > sequence && (self.anchor_ms - anchor_ms).abs() > SETTLED_TARGET_SLACK_MS
     }
+
+    /// Does a subtitle window anchored here reach the destination the client
+    /// settled on?
+    ///
+    /// Control positions and subtitle window anchors are both absolute film
+    /// time, so this is one span containment. It lives beside
+    /// [`SettledTarget::supersedes`] on purpose: the 1 s tolerance is a single
+    /// fact about how precisely a client's reported destination can be
+    /// trusted, and a second `1_000` written into the subtitle path would be a
+    /// second fact free to drift away from this one.
+    pub(crate) fn covered_by_window(&self, anchor_seconds: i64, window_seconds: i64) -> bool {
+        let start_ms = anchor_seconds.saturating_mul(1_000);
+        let end_ms = anchor_seconds
+            .saturating_add(window_seconds.max(0))
+            .saturating_mul(1_000);
+        self.anchor_ms >= start_ms.saturating_sub(SETTLED_TARGET_SLACK_MS)
+            && self.anchor_ms <= end_ms.saturating_add(SETTLED_TARGET_SLACK_MS)
+    }
 }
 
 impl PlaybackDemandSnapshot {
