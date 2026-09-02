@@ -290,7 +290,41 @@ each field:
   new encode recipe — and `decide_preparation` would correctly refuse it, for
   the wrong reason.
 
-Write that mapping down as a function with its own tests before wiring the
+**And a `CreateSession` may be the wrong shape for a candidate entirely.**
+`into_request` hardcodes `convert_dolby_vision: false` and says why: *"a client
+cannot ask to be handed a conversion — whether one happens is decided from its
+caps and the node's, and create overwrites this from the plan it re-derives."*
+Only `apply_plan_review` ever sets it.
+
+So a candidate built as a `CreateSession` and resolved **without** a review can
+never carry `convert_dolby_vision: true`. For a session that *is* converting
+Profile 7 to 8.1, the candidate's `GradeIntent` then differs from the delivered
+one on that field alone — and `decide_preparation` reports a `dynamic_range`
+crossing on **every exchange, forever**, for a viewer who changed nothing. That
+is precisely the confident wrong measurement this section exists to prevent, and
+it would look entirely plausible in the metric: DV titles simply never prepare.
+
+Two ways out, and the choice is the slice's first decision:
+
+1. **Build the candidate as a `SessionRequest`, not a `CreateSession.`** The
+   session already has one; a selection change edits the fields it names and
+   leaves the rest — including `convert_dolby_vision` — alone. Then
+   `resolve_plan`'s job shrinks to the height, which is the only part a
+   selection cannot answer for itself. Truthful by construction, but it means
+   the exchange no longer shares the whole of `create`'s path, which is the
+   drift risk §3.2 was written to avoid.
+2. **Keep `CreateSession` and carry the session's plan answers alongside it**,
+   applying them the way `apply_plan_review` does. Shares the path, but
+   re-introduces exactly the "derive from what you were given, do not accept it
+   alongside" seam that #809's review closed on `hdr10_requested` — so it needs
+   the answers to come from the session's own request rather than from a
+   caller's argument.
+
+Whichever is chosen, the test that proves it is the same: **a converting
+Profile 7 session, with the client changing nothing, must read `Unchanged`.**
+Write that test first; it fails on both the obvious implementations.
+
+Write the mapping down as a function with its own tests before wiring the
 metric. A shadow mode fed a wrong candidate produces a *confident* wrong
 measurement, and the whole point of the slice is that the measurement is
 trustworthy enough to act on.
