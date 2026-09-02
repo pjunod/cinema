@@ -10,6 +10,23 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **A read-only cluster member can do the work it was admitted for.** Two
+  arithmetic guards asked whether the local node was a voter by *assuming* it
+  was. `remote_rollout_ready` required `voter_count == peers.len() + 1`, and
+  `activity_peers` excludes this node and filters to voters — so on a learner
+  that compares `n` against `n + 1` and is false for every roster size. A
+  learner therefore answered `503` to every delegated media-session start and
+  could never place one itself, which is why a healthy learner shows zero
+  active streams; the shared-cache canary refused for the same reason, so a
+  learner never published a verified cache root. Both now count the voters this
+  node can actually see. The local-only canary branch keys on having no peer to
+  probe rather than on a voter count, which is what it always meant.
+- **Peer hydration of a fragment index reaches a learner.**
+  `fragment_index_cluster` hydrates from `media_peers()`, which deliberately
+  includes learners, but `/internal/media/fragment-index/{key}` was missing
+  from the learner route matrix — so every hydration aimed at a learner was
+  refused `503 learner_route_ineligible` before its handler ran. The matrix
+  admits exactly one key segment; the handler still validates the key.
 - **A read-only cluster member answers the internal peer surface again, and the
   Cluster panel stops calling it unreachable.** Every internal peer proof is
   verified by one shared authority check, and that check required a committed

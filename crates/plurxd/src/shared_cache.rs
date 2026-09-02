@@ -395,10 +395,24 @@ impl SharedCacheCoordinator {
             .activity_peers()
             .await
             .map_err(|error| error.to_string())?;
-        if peers.len().saturating_add(1) != voter_count {
+        // `activity_peers` returns the other VOTERS: it excludes this node and
+        // filters to voters. The voters this node can see therefore number
+        // `peers.len()` plus itself only when it is one. Adding the 1
+        // unconditionally made this `n != n + 1` on a learner, so the canary
+        // refused before it ran and the shared cache root was never published
+        // there — the same arithmetic that made `remote_rollout_ready`
+        // unsatisfiable on a learner.
+        let local_is_voter = self
+            .membership
+            .local_node_is_committed_voter()
+            .await
+            .map_err(|error| error.to_string())?;
+        if peers.len().saturating_add(usize::from(local_is_voter)) != voter_count {
             return Err("the complete voter directory is not available".to_owned());
         }
-        if voter_count == 1 {
+        // No peer to probe is the honest condition for the local-only canary.
+        // Testing `voter_count == 1` said the same thing only for a voter.
+        if peers.is_empty() {
             let name = canary_name("single");
             let bytes = random_canary_bytes();
             canaries
@@ -1390,6 +1404,32 @@ fn unix_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    // Same defect, same shape, different file: the canary refused to run at all
+    // on a learner because it counted this node into the voter directory. Pin
+    // the call site — a helper test would not have caught the original.
+    #[test]
+    fn the_canary_asks_membership_whether_this_node_is_a_voter() {
+        let body = include_str!("shared_cache.rs")
+            .split_once("async fn verify_once_inner(")
+            .expect("verify_once_inner was renamed")
+            .1
+            .split_once("\n    }\n")
+            .expect("verify_once_inner never closes at fn indent")
+            .0;
+        assert!(
+            body.contains("local_node_is_committed_voter()"),
+            "the canary must read the local committed role, not assume it",
+        );
+        assert!(
+            body.contains("saturating_add(usize::from(local_is_voter))"),
+            "the visible-voter count must depend on the local role",
+        );
+        assert!(
+            body.contains("if peers.is_empty()"),
+            "the local-only canary branch must key on having no peer, not on a voter count",
+        );
+    }
+
     use super::*;
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     use plurx_core::store::{SqliteStore, Store};
