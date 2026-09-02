@@ -563,6 +563,12 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("./.github/actions/playwright", fast_rust)
         self.assertIn("uses: ./.github/actions/ffmpeg", fast_rust)
         self.assertIn('major: "6"', fast_rust)
+        # Membership alone would stay green with the step moved below the gate
+        # it provisions, which is exactly the failure this contract records.
+        self.assertLess(
+            fast_rust.index("uses: ./.github/actions/ffmpeg"),
+            fast_rust.index("run: make ci-rust-gate"),
+        )
         self.assertIn("if: needs.scope.outputs.apple == 'true'", workflow)
         web_layout = workflow.split("\n  web_layout:", 1)[1].split(
             "\n  android_jvm:", 1
