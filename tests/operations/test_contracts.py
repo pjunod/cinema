@@ -561,7 +561,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("scripts/validate run", fast_rust)
         self.assertNotIn("actions/setup-node", fast_rust)
         self.assertNotIn("./.github/actions/playwright", fast_rust)
-        self.assertIn("./.github/actions/ffmpeg", fast_rust)
+        self.assertNotIn("./.github/actions/ffmpeg", fast_rust)
         self.assertIn("if: needs.scope.outputs.apple == 'true'", workflow)
         web_layout = workflow.split("\n  web_layout:", 1)[1].split(
             "\n  android_jvm:", 1
@@ -682,6 +682,14 @@ class OperationsContractCase(unittest.TestCase):
                 contract_preflight.index("actions/setup-node@v4"),
                 contract_preflight.index("run: make operations-check"),
             )
+            # The shared player-input fixtures compile into no Rust and no
+            # client on a fixture-only diff, so without this step a ruling
+            # could be edited out of the contract with nothing to notice.
+            self.assertIn(
+                "node tests/playback/player-input-contract.test.js",
+                contract_preflight,
+            )
+            self.assertIn("node tests/web/player-dom.test.js", contract_preflight)
 
         lint = read(".github/workflows/lint.yml")
         self.assertNotIn("\n  pull_request:\n", lint)

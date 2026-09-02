@@ -90,9 +90,6 @@ packaging. Local profiles (`commit`, `full`, `nightly`) run `rust-gate` —
 `make rust-check`, the one-command fmt + clippy + full-workspace suite. The
 `ci` profile and the PR workflow run `rust-gate-ci` — `make ci-rust-gate` —
 which owns formatting, Clippy, unit tests, and SQLite contracts in one job.
-The workflow resolves ffmpeg 6 through the shared action before that job runs:
-persistent runners take its no-op path against their provisioned binary, while
-GitHub-hosted qualification has the same media-tool prerequisite as the tests.
 Four stable verdicts separately own replicated Store semantics, the topology
 harness, WAL recovery, and real daemons. The Store verdict selects either the
 complete legacy run or two binary-level shards according to
