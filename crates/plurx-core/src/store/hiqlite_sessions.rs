@@ -2030,9 +2030,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                         "invalid media-session activation confirmation".to_owned(),
                     ));
                 }
+                // Confirmation is an exact-state mutation: a replay writes
+                // the same publication boundary and timestamp, while the
+                // sentinel guard turns an already-committed replay into zero
+                // changed rows. Use the bounded idempotent-write path so an
+                // ambiguous client timeout cannot strand a committed
+                // activation behind a lost response.
                 let changed = self
                     .client()
-                    .txn([(
+                    .execute_idempotent(
                         "UPDATE media_sessions SET publication_ready_at_ms = $1,
                                     updated_at_ms = $2
                               WHERE incarnation_id = $3 AND session_id = $4 AND user_id = $5
@@ -2067,16 +2073,17 @@ impl MediaSessionStore for HiqliteAuthStore {
                             activation.lease_expires_at_ms,
                             request_id
                         ),
-                    )])
-                    .await?
-                    .into_iter()
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(database_error)?;
+                    )
+                    .await?;
                 let route = route_by(self, "incarnation_id", &activation.incarnation_id)
                     .await?
                     .filter(|route| {
                         activation_route_matches(route, activation)
                             && route.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED
+                            // Identity alone would accept a boundary some other
+                            // confirmation of this incarnation committed. A
+                            // replay of *this* call wrote exactly $1.
+                            && route.publication_ready_at_ms == publication_ready_at_ms
                     });
                 let committed_pointer = self
                     .client()
@@ -2089,7 +2096,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     .into_iter()
                     .next()
                     .map(|row| row.0);
-                if matches!(changed.as_slice(), [1] | [0])
+                if matches!(changed, 1 | 0)
                     && committed_pointer.as_deref() == Some(activation.incarnation_id.as_str())
                 {
                     Ok(route)

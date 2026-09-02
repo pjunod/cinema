@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["81b6b0da"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained source contract requires the confirmation write to be awaited on the reserved deadline and never on the raw owner lease, requires the committed-write recovery read to keep the full lease, and requires the split itself to be taken from the lease actually remaining rather than as an all-or-nothing margin, so reverting any of those four properties turns the contract red in the fast Rust gate."

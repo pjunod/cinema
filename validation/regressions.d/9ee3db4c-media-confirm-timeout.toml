@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9ee3db4c"]
+points = ["core.media", "cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained Store source contract requires activation confirmation alone to use the bounded idempotent-write path, while the validation-only three-voter fault seam commits the first update, replaces its response with the exact production timeout, and proves the zero-row replay still returns the durable confirmed route."

@@ -561,7 +561,14 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("scripts/validate run", fast_rust)
         self.assertNotIn("actions/setup-node", fast_rust)
         self.assertNotIn("./.github/actions/playwright", fast_rust)
-        self.assertNotIn("./.github/actions/ffmpeg", fast_rust)
+        self.assertIn("uses: ./.github/actions/ffmpeg", fast_rust)
+        self.assertIn('major: "6"', fast_rust)
+        # Membership alone would stay green with the step moved below the gate
+        # it provisions, which is exactly the failure this contract records.
+        self.assertLess(
+            fast_rust.index("uses: ./.github/actions/ffmpeg"),
+            fast_rust.index("run: make ci-rust-gate"),
+        )
         self.assertIn("if: needs.scope.outputs.apple == 'true'", workflow)
         web_layout = workflow.split("\n  web_layout:", 1)[1].split(
             "\n  android_jvm:", 1
@@ -1481,10 +1488,9 @@ class OperationsContractCase(unittest.TestCase):
                     expected = ci_store
                 elif path == ".github/workflows/ci.yml" and name == "cluster_topology":
                     expected = ci_topology
-                elif path == ".github/workflows/ci.yml" and name in {
-                    "check",
-                    "cluster_wal",
-                }:
+                elif path == ".github/workflows/ci.yml" and name == "check":
+                    expected = high_cpu_ffmpeg6
+                elif path == ".github/workflows/ci.yml" and name == "cluster_wal":
                     expected = high_cpu
                 elif (
                     path == ".github/workflows/effort-ci.yml"
