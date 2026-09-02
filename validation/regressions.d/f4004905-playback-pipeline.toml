@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f4004905"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The throughput refusal is now two outcomes and the counters carry a platform, so the evidence has to separate the two refusals and prove the label is a real dimension: the headroom unit drives six conditions through decide_preparation and pins which reason each one names, with a measured-but-tight link and a hair under twice answering throughput_insufficient while a client that reported nothing, a server that has not measured delivery, a zero delivered rate and a negative one answer throughput_unreported; the counterfactual unit asserts the same transition reaches throughput_insufficient and axis_not_proven where the shipped decision can only answer client_cannot_prepare, and reaches prepare on the prepared axis with headroom; the separation unit records into one platform-axis-outcome cell of each family and asserts the other family and the other platform are untouched and that Unchanged moves neither, which also removes the process-global family-sum race two tests previously shared; and the exposition unit asserts both families publish all ninety platform-by-axis-by-outcome series from boot, that each family's samples are contiguous, and that each HELP precedes its own samples."
