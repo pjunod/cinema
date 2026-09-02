@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["637fab47"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Two retained regressions carry the property in both directions. `the_encoders_answer_is_not_the_grade_the_decision_reads` drives a session whose HDR10 rung the encoder refused — delivered `sdr`, request still HDR10 — through a plain height change and asserts it is prepared, and drives two selections the encoder delivered identically through differing requests and asserts a `dynamic_range` fallback. Reading the axis off `EffectiveSelection.dynamic_range` again fails the first; ignoring the request's grade fails the second. `a_grade_intent_comes_off_the_request` pins the mapping itself: a transcode answers both Dolby Vision questions `false`, a copy carries both through, the AAC re-encode is an audio fact and not a grade fact, and preserving without converting is a third answer rather than a rounding of the other two."
