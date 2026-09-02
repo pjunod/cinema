@@ -257,6 +257,157 @@ pre-review request — the comment at `:1291-1293` is the specification.
 Call `decide_preparation` in the exchange and emit the outcome as a metric.
 Stage nothing.
 
+**Settle this first: there is no mapping from a client's selection to a create
+body.** `resolve_plan` (slice 3.2, merged) takes a `CreateSession`. The
+exchange has a `ClientSelection` — `QualitySelection::Auto | Manual { height }`,
+`CodecPolicy`, `DynamicRangePolicy`, an audio track, an offset, a subtitle mode
+— and the two are different vocabularies, not two spellings of one.
+
+The base is not in doubt: the exchange already holds the session's own
+`RemoteStartRequest` as `recipe`, so the candidate is *that body with the
+client's selection applied*, not a body built from nothing. What is in doubt is
+each field:
+
+- **`QualitySelection::Manual { height }` → `CreateSession::height`** is the
+  easy one, and `Auto` → `None` with `quality_auto: Some(true)`. Note that
+  `into_request`'s `automatic` falls back to *wire presence* when
+  `quality_auto` is absent, and a subtitle burn sends the source height as a
+  promise rather than as a quality answer — so the candidate must set
+  `quality_auto` explicitly rather than let presence infer it.
+- **`CodecPolicy` and `DynamicRangePolicy` are client *policies*, not the
+  server's `copy` / `hdr10` / `preserve_dolby_vision` answers.** `create`
+  derives those from the caps document through `review_client_plan`, which the
+  selection does not carry. The honest reading is that a selection change on
+  those axes means *re-review*, and until that is settled a candidate should
+  carry the session's existing answers rather than invent new ones — which also
+  means a codec or grade selection change is not yet expressible as a
+  candidate at all. `decide_preparation` refuses both axes anyway
+  (`AxisNotProven`), so nothing is lost today; it will matter the moment the
+  capability is narrowed.
+- **`SubtitleSelection` is not `subtitle_burn`.** `Off`/`Native`/`Overlay` are
+  not burns; only `Burn` is. Mapping `track` into `subtitle_burn`
+  unconditionally would turn every native-subtitle change into a burn — a whole
+  new encode recipe — and `decide_preparation` would correctly refuse it, for
+  the wrong reason.
+
+**And a `CreateSession` may be the wrong shape for a candidate entirely.**
+`into_request` hardcodes `convert_dolby_vision: false` and says why: *"a client
+cannot ask to be handed a conversion — whether one happens is decided from its
+caps and the node's, and create overwrites this from the plan it re-derives."*
+Only `apply_plan_review` ever sets it.
+
+So a candidate built as a `CreateSession` and resolved **without** a review can
+never carry `convert_dolby_vision: true`. For a session that *is* converting
+Profile 7 to 8.1, the candidate's `GradeIntent` then differs from the delivered
+one on that field alone — and `decide_preparation` reports a `dynamic_range`
+crossing on **every exchange, forever**, for a viewer who changed nothing. That
+is precisely the confident wrong measurement this section exists to prevent, and
+it would look entirely plausible in the metric: DV titles simply never prepare.
+
+Two ways out, and the choice is the slice's first decision:
+
+1. **Build the candidate as a `SessionRequest`, not a `CreateSession.`** The
+   session already has one; a selection change edits the fields it names and
+   leaves the rest — including `convert_dolby_vision` — alone. Then
+   `resolve_plan`'s job shrinks to the height, which is the only part a
+   selection cannot answer for itself. Truthful by construction, but it means
+   the exchange no longer shares the whole of `create`'s path, which is the
+   drift risk §3.2 was written to avoid.
+2. **Keep `CreateSession` and carry the session's plan answers alongside it**,
+   applying them the way `apply_plan_review` does. Shares the path, but
+   re-introduces exactly the "derive from what you were given, do not accept it
+   alongside" seam that #809's review closed on `hdr10_requested` — so it needs
+   the answers to come from the session's own request rather than from a
+   caller's argument.
+
+**Ruled: build the candidate as a `SessionRequest`** (option 1). Decided
+2026-09-02 under Paul's standing authority to decide when he is not here, and
+recorded rather than left open.
+
+The argument that looked like a cost — *the exchange stops sharing the whole of
+`create`'s path* — does not survive inspection. Ask what sharing actually buys.
+`resolve_plan` does four things, and only one of them is knowledge a candidate
+lacks:
+
+| step | does a candidate need it? |
+|---|---|
+| `review_client_plan` | **no** — a candidate carries the session's existing plan answers; a selection does not re-review |
+| the height resolution | **yes**, and only this — it needs the store, the ladder ceiling and the network prior |
+| `into_request` | **no** — it turns a *wire body* into a request, and a candidate does not come from the wire |
+| `apply_plan_review` | **no** — nothing to apply |
+
+So the shared surface worth protecting is the height resolution, and it is
+protectable on its own: lift it out of `resolve_plan` as `resolve_height` and
+have both callers use it. Everything `into_request` would contribute is
+information the candidate already has more accurately, in the request the
+session is actually running.
+
+Option 2 buys the appearance of a shared path and pays for it by round-tripping
+through a type that provably loses a field — and then needs the lost field
+handed back alongside, which is the seam #809's review closed. A shape that has
+to be repaired at every call site is the wrong shape.
+
+**What this makes the next slice.** Not "map a selection to a create body", but:
+
+1. lift `resolve_height` out of `resolve_plan`, both callers using it;
+2. `fn candidate_request(current: &SessionRequest, selection: &ClientSelection,
+   height: i64) -> SessionRequest` — edit the fields the selection names, leave
+   the rest;
+3. the test below.
+
+**Expect (2) to be the hard part, and expect it to be policy rather than
+mapping.** A quality change on a `Copy` session is the case to think about
+first: a copy has no height, so honouring a rung means becoming a transcode —
+which is a `DeliveryMethod` crossing and refused anyway, but the candidate has
+to *say* so rather than silently keep copying. Each branch like that is a
+decision; write them down as they are made, the way this file writes down the
+ones before it.
+
+Whichever is built, the test that proves it is the same: **a converting
+Profile 7 session, with the client changing nothing, must read `Unchanged`.**
+Write that test first; it fails on both the obvious implementations.
+
+Write the mapping down as a function with its own tests before wiring the
+metric. A shadow mode fed a wrong candidate produces a *confident* wrong
+measurement, and the whole point of the slice is that the measurement is
+trustworthy enough to act on.
+
+**Done**, as [#816](https://github.com/pjunod/plurx/pull/816):
+`candidate_request` and `EffectiveSelection::from_request`, with the converting
+Profile 7 property pinned. What remains is the wiring — and it has a cost worth
+knowing before it is written.
+
+#### 3.3.1 Building a candidate costs two store reads
+
+`resolve_height` needs the source file and the network prior. Both are store
+reads, and the control exchange runs about once a second per client under an
+absolute deadline. Doing them unconditionally, on every exchange, to answer a
+question that is almost always "nothing changed", is the wrong shape.
+
+**Gate them behind a cheap comparison.** Everything a selection names —
+quality, audio track, audio offset, subtitle mode and track — is already on the
+snapshot, and the delivered values are already on the delivery view. Compare
+those first; resolve and build a candidate only when one of them moved. The
+expensive path then runs at the rate viewers change something, which is orders
+of magnitude below the exchange rate.
+
+This works because of what the comparison is actually looking at, and that is
+worth stating plainly:
+
+**M6 prepares for a change the *client* asked for.** A selection is the
+viewer's intent, and a transition exists when that intent stops matching what
+is being delivered. A server-driven Auto rung change — the adaptive ladder
+moving because the link moved — is *not* a selection change and this path never
+sees one. That is plan §6.1's territory, not M6's, and conflating them is how a
+prepared handoff would start firing on exactly the congestion the throughput
+gate exists to refuse.
+
+The throughput gate still earns its place: a viewer who pins 2160p on a bad
+link is a client-driven change that doubles demand at the worst moment. But the
+gate is protecting against a viewer's choice, not against the server's own
+adaptation — and if a future slice does bring adaptive rung changes into this
+path, that is a new decision and not an extension of this one.
+
 **Why this slice exists at all:** the axis restriction in `PREPARED_AXIS` is an
 argument. Shadow mode turns it into a measurement — how many transitions would
 prepare, how many fall back and on which axis, and how often

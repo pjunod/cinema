@@ -826,20 +826,121 @@ impl EffectiveSelection {
         delivered_height: i64,
         dynamic_range: Option<String>,
     ) -> Self {
-        let codec = match &recipe.request.kind {
+        Self::from_request(&recipe.request, delivered_height, dynamic_range)
+    }
+
+    /// The same view, from the request alone.
+    ///
+    /// A *candidate* recipe has no `RemoteStartRequest` — that carries the
+    /// incarnation, the source stat and the playlist shape of a session that
+    /// exists. Everything this reads is on the request itself, so a recipe
+    /// that will never be built can have one too.
+    ///
+    /// `dynamic_range` is the delivered grade and belongs to a built session,
+    /// so a candidate passes `None`. That is safe now and was not before:
+    /// `decide_preparation` reads the grade axis off `GradeIntent` — the
+    /// request's own answers — precisely because the delivered grade is the
+    /// encoder's and a candidate has no encoder.
+    pub(crate) fn from_request(
+        request: &crate::transcode::SessionRequest,
+        delivered_height: i64,
+        dynamic_range: Option<String>,
+    ) -> Self {
+        let codec = match &request.kind {
             SessionKind::Copy { .. } => "source",
             SessionKind::Transcode { .. } => "server_selected",
         };
         Self {
-            quality_auto: recipe.request.automatic,
+            quality_auto: request.automatic,
             height: delivered_height,
-            audio_track: recipe.request.audio_index,
-            subtitle_burn: recipe.request.subtitle_burn,
-            audio_offset_ms: recipe.request.audio_offset_ms,
+            audio_track: request.audio_index,
+            subtitle_burn: request.subtitle_burn,
+            audio_offset_ms: request.audio_offset_ms,
             codec: codec.to_owned(),
             dynamic_range,
         }
     }
+}
+
+/// The recipe a client's selection asks for, from the one it is being served.
+///
+/// **An edit, not a construction.** Every field the selection does not name is
+/// carried through unchanged, and that is the whole reason the candidate is a
+/// `SessionRequest` rather than a `CreateSession`: a create body structurally
+/// cannot express `convert_dolby_vision` — `into_request` hardcodes it false,
+/// because a client cannot ask to be handed a Profile 7 → 8.1 conversion — so
+/// a candidate round-tripped through one would differ from a *converting*
+/// session on that field alone, and report a grade crossing on every exchange
+/// for a viewer who changed nothing.
+///
+/// `height` is resolved by the caller through
+/// [`crate::http::hls::resolve_height`], because it is the one part a
+/// selection cannot answer for itself: it needs the store, the ladder ceiling
+/// and the network prior. `source_height` is passed separately and is **not**
+/// interchangeable with it — see the third ruling.
+///
+/// Four rulings are baked in here, and each is a decision rather than a
+/// mapping:
+///
+/// * **The client's codec and dynamic-range *policies* are not the server's
+///   answers.** `hdr10`, `preserve_dolby_vision` and `convert_dolby_vision`
+///   come from the caps document through `review_client_plan`, which a
+///   selection does not carry, so they are carried through untouched. A
+///   selection change on those axes means *re-review*, which nothing does yet
+///   — and nothing is lost today, because `decide_preparation` refuses both
+///   axes anyway. It will matter the moment the capability is narrowed.
+/// * **Only `SubtitleMode::Burn` is a burn.** Off, Native and Overlay are not
+///   video replacements at all (plan §5.2). Mapping a track into
+///   `subtitle_burn` for any of them would turn every native-subtitle change
+///   into a whole new encode recipe.
+/// * **A manual rung on a copy becomes a transcode, except at the source's own
+///   height.** A copy has no rung — asking for one is asking for something a
+///   copy cannot be. The source height is the exception because that *is* what
+///   a copy delivers: asking for it is asking for what you already have. The
+///   resulting `DeliveryMethod` crossing is then refused by the decision,
+///   which is the point: the candidate says what was asked for, and the
+///   decision says no.
+///
+///   The comparison is against `source_height`, **never** against the resolved
+///   `height`. A 1080 ask on a 2160 source resolves to 1080 — it is already a
+///   ladder rung, so the snap is the identity — and comparing the ask to the
+///   result would find them equal and leave a copy copying a rung it cannot
+///   serve.
+/// * **Auto never changes the delivery method.** It is a request to let the
+///   server choose, not a request to stop copying, and turning a direct play
+///   into a transcode because the viewer selected Auto would be a downgrade
+///   nobody asked for.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn candidate_request(
+    current: &crate::transcode::SessionRequest,
+    selection: &ClientSelection,
+    height: i64,
+    source_height: Option<i64>,
+) -> crate::transcode::SessionRequest {
+    let mut candidate = current.clone();
+    candidate.automatic = matches!(selection.quality, QualitySelection::Auto);
+    candidate.audio_index = selection.audio_track;
+    candidate.audio_offset_ms = selection.audio_offset_ms;
+    candidate.subtitle_burn = match selection.subtitle.mode {
+        SubtitleMode::Burn => selection.subtitle.track,
+        SubtitleMode::Off | SubtitleMode::Native | SubtitleMode::Overlay => None,
+    };
+    match (&current.kind, selection.quality) {
+        // A transcode simply moves rung.
+        (SessionKind::Transcode { .. }, _) => {
+            candidate.kind = SessionKind::Transcode { height };
+        }
+        // Auto leaves a copy copying, and a source-height ask is a copy's own
+        // delivery asked for by name. Both leave `kind` exactly as it was,
+        // which is what carries `convert_dolby_vision` through.
+        (SessionKind::Copy { .. }, QualitySelection::Auto) => {}
+        (SessionKind::Copy { .. }, QualitySelection::Manual { height: asked })
+            if Some(asked) == source_height => {}
+        (SessionKind::Copy { .. }, QualitySelection::Manual { .. }) => {
+            candidate.kind = SessionKind::Transcode { height };
+        }
+    }
+    candidate
 }
 
 /// Which axis of the *delivered* selection a proposed transition crosses.
@@ -15387,6 +15488,274 @@ mod tests {
                 axis.as_str(),
             );
         }
+    }
+
+    fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
+        crate::transcode::SessionRequest {
+            file_id: 5615,
+            playback_id: "player-a".to_owned(),
+            request_id: None,
+            control_sequence: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind,
+            start_seconds: 12.5,
+            audio_index: Some(0),
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: crate::transcode::Presentation::Vod,
+            block_budget_secs: None,
+        }
+    }
+
+    fn converting_copy() -> crate::transcode::SessionRequest {
+        session_request(SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: true,
+        })
+    }
+
+    fn selection_at(quality: QualitySelection) -> ClientSelection {
+        ClientSelection {
+            quality,
+            audio_track: Some(0),
+            subtitle: SubtitleSelection {
+                mode: SubtitleMode::Off,
+                track: None,
+            },
+            audio_offset_ms: 0,
+            codec: CodecPolicy::Auto,
+            dynamic_range: DynamicRangePolicy::Auto,
+        }
+    }
+
+    /// The property that ruled the candidate's shape: a converting Profile 7
+    /// session, with the client changing nothing, must read `Unchanged`.
+    ///
+    /// It fails on both obvious implementations. A candidate round-tripped
+    /// through a `CreateSession` loses `convert_dolby_vision` — `into_request`
+    /// hardcodes it false, because a client cannot ask to be handed a
+    /// conversion — so the candidate's `GradeIntent` differs from the
+    /// delivered one on that field alone, and every exchange reports a grade
+    /// crossing for a viewer who changed nothing. Dolby Vision titles would
+    /// simply never prepare, and the metric would look entirely plausible.
+    #[test]
+    fn a_converting_session_that_changed_nothing_is_unchanged() {
+        let current = converting_copy();
+        let candidate = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Manual { height: 2160 }),
+            2160,
+            Some(2160),
+        );
+        assert_eq!(
+            candidate.kind, current.kind,
+            "a source-height ask on a copy is that copy, asked for by name",
+        );
+        assert_eq!(
+            GradeIntent::from_request(&candidate),
+            GradeIntent::from_request(&current),
+            "the conversion must survive the round trip, or DV never prepares",
+        );
+
+        let delivered =
+            EffectiveSelection::from_request(&current, 2160, Some("dolby_vision".into()));
+        let proposed = EffectiveSelection::from_request(&candidate, 2160, None);
+        assert_eq!(
+            decide_preparation(
+                RecipeView {
+                    selection: &delivered,
+                    grade: GradeIntent::from_request(&current),
+                },
+                RecipeView {
+                    selection: &proposed,
+                    grade: GradeIntent::from_request(&candidate),
+                },
+                Some(&can_prepare(true)),
+                roomy(),
+            ),
+            PreparationDecision::Unchanged,
+        );
+    }
+
+    /// A copy has no rung, so a manual rung that is not the source's own is a
+    /// request to stop copying — and the candidate must say so rather than
+    /// silently keep copying. The decision then refuses it, which is the
+    /// point: the candidate reports what was asked for, and the decision is
+    /// what says no.
+    ///
+    /// It is refused as a **grade** change, not a delivery-method one, and
+    /// that is not an accident of this fixture: leaving a Dolby Vision copy
+    /// *always* crosses the grade axis, because a transcode carries no RPUs at
+    /// all — `GradeIntent::from_request` answers both DV questions `false` for
+    /// a transcode as a statement about its output. So the hardest axis names
+    /// it, and for a DV title that is `dynamic_range`.
+    #[test]
+    fn a_rung_a_copy_cannot_serve_becomes_a_transcode() {
+        let current = converting_copy();
+        let candidate = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Manual { height: 1080 }),
+            1080,
+            Some(2160),
+        );
+        assert_eq!(candidate.kind, SessionKind::Transcode { height: 1080 });
+
+        let delivered = EffectiveSelection::from_request(&current, 2160, None);
+        let proposed = EffectiveSelection::from_request(&candidate, 1080, None);
+        assert_eq!(
+            decide_preparation(
+                RecipeView {
+                    selection: &delivered,
+                    grade: GradeIntent::from_request(&current),
+                },
+                RecipeView {
+                    selection: &proposed,
+                    grade: GradeIntent::from_request(&candidate),
+                },
+                Some(&can_prepare(true)),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DynamicRange,
+                reason: FallbackReason::MultipleAxes,
+            },
+            "method, height and grade all move; the hardest names it",
+        );
+        // A copy with no Dolby Vision to lose crosses method and height only,
+        // and then the delivery method is the hardest axis moving.
+        let plain = session_request(SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        });
+        let plain_candidate = candidate_request(
+            &plain,
+            &selection_at(QualitySelection::Manual { height: 1080 }),
+            1080,
+            Some(2160),
+        );
+        let plain_delivered = EffectiveSelection::from_request(&plain, 2160, None);
+        let plain_proposed = EffectiveSelection::from_request(&plain_candidate, 1080, None);
+        assert_eq!(
+            decide_preparation(
+                RecipeView {
+                    selection: &plain_delivered,
+                    grade: GradeIntent::from_request(&plain),
+                },
+                RecipeView {
+                    selection: &plain_proposed,
+                    grade: GradeIntent::from_request(&plain_candidate),
+                },
+                Some(&can_prepare(true)),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DeliveryMethod,
+                reason: FallbackReason::MultipleAxes,
+            },
+        );
+    }
+
+    /// The comparison that decides it is against the **source** height, never
+    /// against the resolved one. A 1080 ask on a 2160 source resolves to 1080
+    /// — it is already a ladder rung, so the snap is the identity — and
+    /// comparing the ask to the result would find them equal and leave a copy
+    /// copying a rung it cannot serve.
+    #[test]
+    fn the_copy_escape_is_the_source_height_not_the_resolved_one() {
+        let current = converting_copy();
+        let resolved_equals_ask = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Manual { height: 1080 }),
+            1080,
+            Some(2160),
+        );
+        assert_eq!(
+            resolved_equals_ask.kind,
+            SessionKind::Transcode { height: 1080 },
+            "ask == resolved height is not the escape; ask == source height is",
+        );
+    }
+
+    /// Auto never changes the delivery method. It asks the server to choose a
+    /// rung, not to stop copying — turning a direct play into a transcode
+    /// because the viewer selected Auto would be a downgrade nobody asked for.
+    #[test]
+    fn auto_leaves_a_copy_copying() {
+        let current = converting_copy();
+        let candidate = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Auto),
+            1080,
+            Some(2160),
+        );
+        assert_eq!(candidate.kind, current.kind);
+        assert!(candidate.automatic, "and it is Auto now");
+    }
+
+    /// Only a burn is a burn. Off, Native and Overlay are not video
+    /// replacements at all, and mapping their track into `subtitle_burn` would
+    /// turn every native-subtitle change into a whole new encode recipe.
+    #[test]
+    fn only_a_burn_reaches_subtitle_burn() {
+        let mut current = session_request(SessionKind::Transcode { height: 1080 });
+        current.subtitle_burn = Some(2);
+
+        for mode in [
+            SubtitleMode::Off,
+            SubtitleMode::Native,
+            SubtitleMode::Overlay,
+        ] {
+            let mut selection = selection_at(QualitySelection::Manual { height: 1080 });
+            selection.subtitle = SubtitleSelection {
+                mode,
+                track: if matches!(mode, SubtitleMode::Off) {
+                    None
+                } else {
+                    Some(3)
+                },
+            };
+            let candidate = candidate_request(&current, &selection, 1080, Some(2160));
+            assert_eq!(candidate.subtitle_burn, None, "{mode:?} is not a burn");
+        }
+
+        let mut burning = selection_at(QualitySelection::Manual { height: 1080 });
+        burning.subtitle = SubtitleSelection {
+            mode: SubtitleMode::Burn,
+            track: Some(3),
+        };
+        assert_eq!(
+            candidate_request(&current, &burning, 1080, Some(2160)).subtitle_burn,
+            Some(3),
+        );
+    }
+
+    /// The client's codec and dynamic-range answers are *policies*, and the
+    /// server's are answers. A selection carries the first and cannot carry the
+    /// second, so the session's own are carried through untouched — a change on
+    /// those axes means re-review, which nothing does yet.
+    #[test]
+    fn a_selection_cannot_rewrite_the_servers_plan_answers() {
+        let mut current = converting_copy();
+        current.hdr10 = true;
+        let mut selection = selection_at(QualitySelection::Auto);
+        selection.codec = CodecPolicy::Av1;
+        selection.dynamic_range = DynamicRangePolicy::Sdr;
+
+        let candidate = candidate_request(&current, &selection, 1080, Some(2160));
+        assert_eq!(
+            GradeIntent::from_request(&candidate),
+            GradeIntent::from_request(&current),
+            "a policy is not an answer",
+        );
+        // And everything the selection does not name survives.
+        assert_eq!(candidate.file_id, current.file_id);
+        assert_eq!(candidate.start_seconds, current.start_seconds);
+        assert_eq!(candidate.playback_id, current.playback_id);
     }
 
     /// The grade intent is read off the request, and a transcode answers both

@@ -130,7 +130,13 @@ merge target: two client PRs in flight means the second always fails.
 | M6 retention | the session keeps the capability it was told once | [#801](https://github.com/pjunod/plurx/pull/801) | merged |
 | M6 grade axis | read the grade off the request, on both sides | [#805](https://github.com/pjunod/plurx/pull/805) · [#807](https://github.com/pjunod/plurx/pull/807) | merged |
 | status | what M6 landed, and what it cannot yet do | [#804](https://github.com/pjunod/plurx/pull/804) | merged |
-| status | M6's night, closed out | — | this change |
+| status | M6's night, closed out | [#808](https://github.com/pjunod/plurx/pull/808) | merged |
+| M6 resolver | one resolver for "what would we deliver" | [#809](https://github.com/pjunod/plurx/pull/809) | merged |
+| M6 shadow prep | the mapping slice 3.3 needs first | [#811](https://github.com/pjunod/plurx/pull/811) · [#812](https://github.com/pjunod/plurx/pull/812) · [#813](https://github.com/pjunod/plurx/pull/813) | merged |
+| M6 height | the height resolution is one function, shared | [#815](https://github.com/pjunod/plurx/pull/815) | merged |
+| M6 candidate | the recipe a selection asks for | [#816](https://github.com/pjunod/plurx/pull/816) | merged |
+| trakt flake | wait for the last write, not the first | [#817](https://github.com/pjunod/plurx/pull/817) | merged |
+| M6 shadow cost | what the wiring costs, and what it is allowed to see | — | this change |
 
 Status-only PRs are not listed: #746, #747, #751, #755, #759, #777, #781,
 #783 and #784 each updated this page and changed nothing else. Nor are the
@@ -618,13 +624,15 @@ holds. The exchange proposes; the actor disposes.
 **What is left, in order** ([M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3,
 with the extraction map in §3.2.1):
 
-1. candidate resolution becomes callable — one span of `create`, of which only
-   the height resolution is inline. Its map is
-   [M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.2.1, **including the
-   correction**: the delivered grade is not predictable for an unbuilt recipe,
-   which is why the axis moved to the request;
-2. shadow mode: decide, emit the metric, change nothing. This is what turns
-   `PREPARED_AXIS` from an argument into a measurement;
+1. ~~candidate resolution becomes callable~~ — **done**, as
+   [#809](https://github.com/pjunod/plurx/pull/809). `resolve_plan` is the one
+   answer to "what would we deliver", and `create` calls it;
+2. shadow mode: decide, emit the metric, change nothing — but **first** the
+   mapping from a client's `ClientSelection` to a create body, which does not
+   exist and is not mechanical: codec and dynamic-range *policies* are not the
+   server's `copy`/`hdr10` answers, and a subtitle selection is not a burn.
+   [M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.3. A shadow mode fed a wrong
+   candidate produces a confident wrong measurement;
 3. stage on `Prepare` — the first behaviour change, which fires on nothing
    until a client release flips Apple's literal;
 4. the commit trigger — blocked on the acknowledgements, and not on code.
