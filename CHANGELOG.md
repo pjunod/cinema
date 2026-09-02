@@ -8,6 +8,35 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A read-only cluster member answers the internal peer surface again, and the
+  Cluster panel stops calling it unreachable.** Every internal peer proof is
+  verified by one shared authority check, and that check required a committed
+  *voter* at both ends. A learner therefore refused every signed peer request
+  with 401 — its own operations-status answer to the Cluster panel, and every
+  media-session relay, control and abort a learner ingress originated — and
+  every voter refused the learner's. The predicate is now member-scoped for the
+  internal peer routes, which is what
+  `docs/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 specified: the committed-voter
+  predicate belongs to membership mutation alone. Activity aggregation is
+  unchanged and stays voter-only at both ends, because its peer directory never
+  names a learner. The cluster-check learner scenario now sends an internal
+  proof in both directions and fails on the old predicate.
+- **The cluster fan-out no longer reports a node that answered as
+  unreachable.** A non-success response was collapsed into `unreachable`
+  alongside a dead socket, so a refused proof reached the operator as a dead
+  machine — on a card that was, one row above, showing a fresh heartbeat and
+  zero apply lag. 401 and 403 are now `refused` and any other non-success
+  status is `http_error`, matching the split the activity fan-out already drew.
+- **Every "not observed" reason on the Cluster panel is a sentence.** The
+  reason codes reached the operator as their raw identifiers with the
+  underscores swapped for spaces, so the commonest one printed the single word
+  "unreachable". Each code now says what happened and what it implies about the
+  machine — a refusal is proof the node is up — and a test reads the
+  aggregator's error classes out of the Rust source so a new one cannot ship
+  without a sentence.
+
 ### Changed
 
 - **Settings is reorganised: one route per section, a grouped rail, one Save

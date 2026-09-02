@@ -393,6 +393,10 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/activity-node-names.test.js
 	@node tests/web/analysis-node-names.test.js
 	@node tests/web/settings-sections.test.js
+	# 2,900 lines of assertions on the Cluster panel's words that CI had never
+	# run: the file was only named in docs, as something to run by hand. It
+	# takes about two seconds.
+	@node tests/web/cluster-membership.test.js
 	@scripts/js-check
 	@scripts/contrast-check --from-index crates/plurxd/src/web/index.html \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \

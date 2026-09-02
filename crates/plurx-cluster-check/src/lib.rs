@@ -5576,6 +5576,137 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .require_ok()?;
     wait_for_learner_ready(&mut cluster, leader, LEARNER).await?;
 
+    // The learner's internal peer surface, in both directions.
+    //
+    // plurxd publishes the operations-status read and the whole media-session
+    // control set to learners through `learner_route_eligible`, and both
+    // `operations_peers` and `media_peers` name learners as fan-out targets.
+    // None of that surface worked: the shared authority check required a
+    // committed VOTER at BOTH ends, so a learner refused every internal peer
+    // request with 401 and every voter refused the learner's. The refusal then
+    // reached the operator as "unreachable" on a node whose heartbeat was
+    // fresh. Nothing in the harness had ever sent an internal proof to a
+    // learner, or one signed by a learner, which is why it was never seen.
+    //
+    // Both directions are asserted, and the activity proof is asserted to be
+    // STILL refused: activity aggregation is voter-only by construction, and
+    // widening it would be a different change than this one.
+    //
+    // The voters in this scenario never started a heartbeat loop, so publish
+    // one liveness row each first: the authority check reads committed
+    // `cluster_nodes.last_seen_at` for the SIGNER, and a signer that has never
+    // beaten is refused for staleness whatever its role. Without this the
+    // assertions below would pass or fail for the wrong reason.
+    for voter in [1, 2, 3] {
+        cluster
+            .request(voter, Request::ForceHeartbeat)
+            .await?
+            .require_ok()?;
+    }
+    let peer_proof_now =
+        i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+    let operations_status_path = "/api/v1/internal/cluster/operations-status";
+    let inbound = match cluster
+        .request(
+            leader,
+            Request::SignInternalPeerRequest {
+                target_node_id: format!("node-{LEARNER}"),
+                timestamp_ms: peer_proof_now,
+                nonce: "6f1c1a4e-8f2a-4d3b-9c11-0a4d2f7b5e01".to_owned(),
+                method: "GET".to_owned(),
+                path: operations_status_path.to_owned(),
+                body: Vec::new(),
+            },
+        )
+        .await?
+    {
+        Response::InternalPeerAuth { auth } => auth,
+        response => bail!("leader could not sign a learner-directed read proof: {response:?}"),
+    };
+    match cluster
+        .request(
+            LEARNER,
+            Request::AuthorizeInternalPeerReadRequest {
+                auth: inbound,
+                method: "GET".to_owned(),
+                path: operations_status_path.to_owned(),
+                body: Vec::new(),
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: true } => {}
+        response => bail!(
+            "the learner refused the leader's operations-status proof, so the cluster panel \
+             can only ever render it as unobserved: {response:?}"
+        ),
+    }
+
+    let outbound = match cluster
+        .request(
+            LEARNER,
+            Request::SignInternalPeerRequest {
+                target_node_id: "node-2".to_owned(),
+                timestamp_ms: peer_proof_now,
+                nonce: "6f1c1a4e-8f2a-4d3b-9c11-0a4d2f7b5e02".to_owned(),
+                method: "POST".to_owned(),
+                path: "/internal/v1/media/sessions/relay".to_owned(),
+                body: Vec::new(),
+            },
+        )
+        .await?
+    {
+        Response::InternalPeerAuth { auth } => auth,
+        response => bail!("the learner could not sign an internal peer proof: {response:?}"),
+    };
+    match cluster
+        .request(
+            2,
+            Request::AuthorizeInternalPeerReadRequest {
+                auth: outbound,
+                method: "POST".to_owned(),
+                path: "/internal/v1/media/sessions/relay".to_owned(),
+                body: Vec::new(),
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: true } => {}
+        response => bail!(
+            "a voter refused the learner's relay proof, so a learner ingress cannot serve \
+             media owned by another node: {response:?}"
+        ),
+    }
+
+    let learner_activity = match cluster
+        .request(
+            LEARNER,
+            Request::SignActivityRequest {
+                target_node_id: "node-2".to_owned(),
+                timestamp_ms: peer_proof_now,
+            },
+        )
+        .await?
+    {
+        Response::ActivityAuth { auth } => auth,
+        response => bail!("the learner could not sign an activity proof: {response:?}"),
+    };
+    match cluster
+        .request(
+            2,
+            Request::AuthorizeActivityRequest {
+                auth: learner_activity,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!(
+            "activity aggregation accepted a learner: activity_peers never names one, so \
+             this must stay refused: {response:?}"
+        ),
+    }
+
     // A ready learner is useful read capacity only while its target-local
     // applied index stays inside the bounded-replica freshness contract.
     // Pause the real state-machine apply path, commit beyond it, and force the
@@ -7283,6 +7414,12 @@ pub enum Request {
         body: Vec<u8>,
     },
     AuthorizeInternalPeerRequest {
+        auth: InternalPeerAuth,
+        method: String,
+        path: String,
+        body: Vec<u8>,
+    },
+    AuthorizeInternalPeerReadRequest {
         auth: InternalPeerAuth,
         method: String,
         path: String,
@@ -9473,6 +9610,16 @@ async fn handle_request(
         } => Ok(Response::Flag {
             value: membership_ref(membership)?
                 .authorize_internal_peer_request(&auth, &method, &path, &body)
+                .await?,
+        }),
+        Request::AuthorizeInternalPeerReadRequest {
+            auth,
+            method,
+            path,
+            body,
+        } => Ok(Response::Flag {
+            value: membership_ref(membership)?
+                .authorize_internal_peer_read_request(&auth, &method, &path, &body)
                 .await?,
         }),
         Request::ActivityPeers => Ok(Response::ActivityPeers {
