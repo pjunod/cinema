@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["947398d9"]
+points = ["cluster.page-reads"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained daemon contract requires the summary-led shared wave to name the remote node in both the detail projection's peer status and its deliveries, so a detail read that rides a snapshot it did not lead cannot silently drop the remote-only streams behind an assertion that is vacuously true on an empty peer array."

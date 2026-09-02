@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["03dbd7dd"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "playback-recovery"]
+reason = "The retained source contract requires the activation confirmation to be awaited on a deadline strictly inside the owner lease, so the committed-write recovery read is never entered at or past its own deadline, and a const assertion binds the reserved margin to at most half the lease so the reservation cannot grow until it starves the write it protects."
