@@ -1466,7 +1466,7 @@ async fn boot(
 /// because registering one puts a service on the local network, which a test
 /// must not do to check that discovery is best-effort.
 type MdnsAdvertiser =
-    fn(&str, &str, Option<&str>, SocketAddr, &str) -> anyhow::Result<mdns_sd::ServiceDaemon>;
+    fn(&str, &str, &str, Option<&str>, SocketAddr, &str) -> anyhow::Result<mdns_sd::ServiceDaemon>;
 
 /// Console logging plus separate bounded rings for general and cluster events.
 ///
@@ -1593,19 +1593,16 @@ fn start_bonjour(
         tracing::info!("in-process Bonjour advertising disabled");
         return None;
     }
-    let discovery_name = discovery_display_name(
+    let name = discovery_name(
         &config.server.name,
         system_hostname().as_deref(),
         primary_lan_address().as_ref(),
     );
-    let advertised_name = if node_id.is_some() {
-        config.server.name.as_str()
-    } else {
-        discovery_name.as_str()
-    };
+    let instance_name = instance_label(&name, node_id);
     match advertiser(
         instance_id,
-        advertised_name,
+        &name.label,
+        &instance_name,
         node_id,
         config.server.bind,
         crate::version::SEMVER,
@@ -2269,30 +2266,88 @@ fn mdns_advertising_value_enabled(value: &str) -> bool {
     )
 }
 
+/// The name a picker shows for this server, and whether that name already
+/// tells this node apart from the other nodes of the same cluster.
+///
+/// Distinctness is the only reason a cluster node ever falls back to its node
+/// id. Three machines serving one logical server all report the same
+/// `server.name`, so a picker built from that alone would offer three
+/// identical rows and DNS-SD would rename two of them. A label taken from the
+/// machine hostname, or one carrying this node's own LAN address, is already
+/// unique on the network — and far more use to a person than a UUID prefix.
+struct DiscoveryName {
+    label: String,
+    distinct: bool,
+}
+
 /// A fresh Compose deployment is named `plurx`, which is useful branding but
 /// useless when three machines appear in one picker. Use the machine hostname
 /// for that default only; an operator's explicit server name remains theirs.
-fn discovery_display_name(
+fn discovery_name(
     configured: &str,
     hostname: Option<&str>,
     address: Option<&IpAddr>,
-) -> String {
+) -> DiscoveryName {
     let configured = configured.trim();
-    let label = if !configured.is_empty() && !configured.eq_ignore_ascii_case("plurx") {
-        configured.to_owned()
-    } else {
-        hostname
-            .and_then(normalized_hostname)
-            .unwrap_or_else(|| "plurx".to_owned())
+    let machine = hostname.and_then(normalized_hostname);
+    let (label, names_the_machine) =
+        if !configured.is_empty() && !configured.eq_ignore_ascii_case("plurx") {
+            (configured.to_owned(), false)
+        } else {
+            match machine {
+                Some(host) => (host, true),
+                None => ("plurx".to_owned(), false),
+            }
+        };
+    let Some(address) = address else {
+        return DiscoveryName {
+            label,
+            distinct: names_the_machine,
+        };
     };
-    let Some(address) = address else { return label };
     let identified = format!("{label} · {address}");
     // A DNS-SD service instance is one DNS label (63 bytes). A long custom
     // name remains more useful than a registration failure merely to add IP.
     if identified.len() <= 63 {
-        identified
+        DiscoveryName {
+            label: identified,
+            distinct: true,
+        }
     } else {
-        label
+        DiscoveryName {
+            label,
+            distinct: names_the_machine,
+        }
+    }
+}
+
+/// The DNS-SD instance name this node publishes: its display name, given a
+/// node-id suffix only when the display name cannot tell two peers apart.
+///
+/// The full node id stays in the TXT record and the host record either way, so
+/// nothing that resolves a node loses information; this is only what a person
+/// reads in a picker.
+fn instance_label(name: &DiscoveryName, node_id: Option<&str>) -> String {
+    match node_id {
+        Some(node_id) if !name.distinct => {
+            clustered_instance_name(&name.label, &node_label_suffix(node_id))
+        }
+        _ => truncated_label(&name.label),
+    }
+}
+
+/// The bounded, DNS-safe fragment of an identity that names one node's host
+/// record — and, when nothing else can distinguish it, its instance too.
+fn node_label_suffix(identity: &str) -> String {
+    let suffix: String = identity
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(12)
+        .collect();
+    if suffix.is_empty() {
+        "server".to_owned()
+    } else {
+        suffix
     }
 }
 
@@ -2376,15 +2431,14 @@ async fn advertise_with(
 
     let host_name = system_hostname();
     let lan_address = primary_lan_address();
-    let discovery_name = if info.cluster_advertisement {
-        info.name.clone()
-    } else {
-        discovery_display_name(&info.name, host_name.as_deref(), lan_address.as_ref())
-    };
+    let node_id = info.cluster_advertisement.then_some(info.node_id.as_str());
+    let name = discovery_name(&info.name, host_name.as_deref(), lan_address.as_ref());
+    let instance_name = instance_label(&name, node_id);
     let daemon = advertiser(
         &info.instance_id,
-        &discovery_name,
-        info.cluster_advertisement.then_some(info.node_id.as_str()),
+        &name.label,
+        &instance_name,
+        node_id,
         SocketAddr::from(([0, 0, 0, 0], port)),
         &info.version,
     )?;
@@ -2545,6 +2599,7 @@ fn register_advertiser(
     daemon: &impl MdnsRegistrar,
     instance_id: &str,
     name: &str,
+    instance_name: &str,
     node_id: Option<&str>,
     bind: SocketAddr,
     version: &str,
@@ -2555,11 +2610,12 @@ fn register_advertiser(
         .spawn(move || log_mdns_events(monitor))
         .context("starting mDNS monitor")?;
 
-    let service = mdns_service_info(instance_id, name, node_id, bind, version)?;
+    let service = mdns_service_info(instance_id, name, instance_name, node_id, bind, version)?;
     daemon.register(service)?;
     tracing::info!(
         service = MDNS_SERVICE_TYPE,
         server_name = name,
+        instance_name,
         port = bind.port(),
         "Bonjour discovery advertiser registered"
     );
@@ -2572,12 +2628,21 @@ fn register_advertiser(
 fn start_mdns_advertiser(
     instance_id: &str,
     name: &str,
+    instance_name: &str,
     node_id: Option<&str>,
     bind: SocketAddr,
     version: &str,
 ) -> anyhow::Result<mdns_sd::ServiceDaemon> {
     let daemon = mdns_sd::ServiceDaemon::new().context("starting mDNS daemon")?;
-    register_advertiser(&daemon, instance_id, name, node_id, bind, version)?;
+    register_advertiser(
+        &daemon,
+        instance_id,
+        name,
+        instance_name,
+        node_id,
+        bind,
+        version,
+    )?;
     Ok(daemon)
 }
 
@@ -2586,30 +2651,28 @@ fn start_mdns_advertiser(
 fn mdns_service_info(
     instance_id: &str,
     name: &str,
+    instance_name: &str,
     node_id: Option<&str>,
     bind: SocketAddr,
     version: &str,
 ) -> anyhow::Result<mdns_sd::ServiceInfo> {
-    let host_identity = node_id.unwrap_or(instance_id);
-    let host_suffix: String = host_identity
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(12)
-        .collect();
-    let host_suffix = if host_suffix.is_empty() {
-        "server"
-    } else {
-        &host_suffix
-    };
+    let host_suffix = node_label_suffix(node_id.unwrap_or(instance_id));
     let hostname = format!("plurx-{host_suffix}.local.");
     let logical_name = if name.trim().is_empty() {
         "plurx"
     } else {
         name
     };
-    let instance_name = node_id
-        .map(|_| clustered_instance_name(logical_name, host_suffix))
-        .unwrap_or_else(|| logical_name.to_owned());
+    // A caller that hands over nothing usable still gets a registrable
+    // record: an empty instance label is a DNS-SD failure, not an unnamed
+    // server. An over-long one is *not* silently cut here — the bound belongs
+    // to whoever chooses the label, and a record that cannot be published is
+    // an error the caller reports.
+    let instance_name = if instance_name.trim().is_empty() {
+        logical_name
+    } else {
+        instance_name.trim()
+    };
     let mut properties = vec![
         ("id", instance_id),
         ("name", logical_name),
@@ -2626,7 +2689,7 @@ fn mdns_service_info(
     };
     let service = mdns_sd::ServiceInfo::new(
         MDNS_SERVICE_TYPE,
-        &instance_name,
+        instance_name,
         &hostname,
         addresses.as_str(),
         bind.port(),
@@ -2640,21 +2703,35 @@ fn mdns_service_info(
 }
 
 fn clustered_instance_name(logical_name: &str, node_suffix: &str) -> String {
-    const DNS_LABEL_BYTES: usize = 63;
     let suffix = format!(" · {node_suffix}");
-    let name_budget = DNS_LABEL_BYTES.saturating_sub(suffix.len());
-    let mut name = String::new();
-    for ch in logical_name.chars() {
-        if name.len() + ch.len_utf8() > name_budget {
-            break;
-        }
-        name.push(ch);
-    }
+    let name = truncate_to_bytes(logical_name, DNS_LABEL_BYTES.saturating_sub(suffix.len()));
     if name.is_empty() {
         node_suffix.to_owned()
     } else {
         format!("{name}{suffix}")
     }
+}
+
+/// One DNS-SD service instance is a single DNS label: 63 bytes, and a
+/// registration that overflows it fails outright.
+const DNS_LABEL_BYTES: usize = 63;
+
+/// The instance label as it can actually be published.
+fn truncated_label(value: &str) -> String {
+    truncate_to_bytes(value.trim(), DNS_LABEL_BYTES)
+}
+
+/// Cut to a byte budget on a character boundary — the label is bounded in
+/// bytes, and a multi-byte name cut mid-character is not a name at all.
+fn truncate_to_bytes(value: &str, budget: usize) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if out.len() + ch.len_utf8() > budget {
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// First line of `ffmpeg -version` (e.g. "ffmpeg version 6.1.1 …"), if the
@@ -4747,6 +4824,7 @@ mod startup_tests {
     fn advertiser_that_fails(
         _instance_id: &str,
         _name: &str,
+        _instance_name: &str,
         _node_id: Option<&str>,
         _bind: SocketAddr,
         _version: &str,
@@ -4761,6 +4839,7 @@ mod startup_tests {
     fn advertiser_without_a_record(
         _instance_id: &str,
         _name: &str,
+        _instance_name: &str,
         _node_id: Option<&str>,
         _bind: SocketAddr,
         _version: &str,
@@ -4950,21 +5029,30 @@ mod startup_tests {
         let advertised = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         // A fn pointer cannot capture, so the record lands in a static the
         // test reads back.
-        static SEEN: std::sync::Mutex<Vec<(String, String, u16, String)>> =
-            std::sync::Mutex::new(Vec::new());
+        /// One registration attempt, as the companion made it.
+        struct Advertised {
+            instance_id: String,
+            name: String,
+            instance_name: String,
+            port: u16,
+            version: String,
+        }
+        static SEEN: std::sync::Mutex<Vec<Advertised>> = std::sync::Mutex::new(Vec::new());
         fn record(
             instance_id: &str,
             name: &str,
+            instance_name: &str,
             _node_id: Option<&str>,
             bind: SocketAddr,
             version: &str,
         ) -> anyhow::Result<mdns_sd::ServiceDaemon> {
-            SEEN.lock().expect("lock").push((
-                instance_id.to_owned(),
-                name.to_owned(),
-                bind.port(),
-                version.to_owned(),
-            ));
+            SEEN.lock().expect("lock").push(Advertised {
+                instance_id: instance_id.to_owned(),
+                name: name.to_owned(),
+                instance_name: instance_name.to_owned(),
+                port: bind.port(),
+                version: version.to_owned(),
+            });
             anyhow::bail!("no mDNS daemon in this test")
         }
 
@@ -4981,20 +5069,34 @@ mod startup_tests {
         );
         assert!(error.contains("no mDNS daemon"), "{error}");
 
-        let seen = SEEN.lock().expect("lock").clone();
+        let seen = SEEN.lock().expect("lock");
         advertised.lock().expect("lock").push(());
         assert_eq!(seen.len(), 1, "exactly one registration was attempted");
-        let (instance_id, name, advertised_port, version) = seen[0].clone();
+        let record = &seen[0];
         assert_eq!(
-            instance_id, "abc",
+            record.instance_id, "abc",
             "the server's own identity, not a new one"
         );
-        assert_eq!(version, "0.2.0");
+        assert_eq!(record.version, "0.2.0");
         assert_eq!(
-            advertised_port, port,
+            record.port, port,
             "the host's published port must be advertised, not the container's"
         );
-        assert!(name.contains("Living Room"), "{name}");
+        assert!(record.name.contains("Living Room"), "{}", record.name);
+        // The label a picker shows is the one this machine computes for
+        // itself. Reverting the companion to publishing `info.name` for a
+        // cluster node — the 2026-08-20 regression — fails here on any host
+        // with a hostname or a LAN address.
+        let expected = instance_label(
+            &discovery_name(
+                "Living Room",
+                system_hostname().as_deref(),
+                primary_lan_address().as_ref(),
+            ),
+            Some("node-b"),
+        );
+        assert_eq!(record.instance_name, expected);
+        drop(seen);
         server.abort();
     }
 
@@ -5016,11 +5118,19 @@ mod startup_tests {
         fn daemon_without_a_record(
             instance_id: &str,
             name: &str,
+            instance_name: &str,
             node_id: Option<&str>,
             bind: SocketAddr,
             version: &str,
         ) -> anyhow::Result<mdns_sd::ServiceDaemon> {
-            let daemon = advertiser_without_a_record(instance_id, name, node_id, bind, version)?;
+            let daemon = advertiser_without_a_record(
+                instance_id,
+                name,
+                instance_name,
+                node_id,
+                bind,
+                version,
+            )?;
             REGISTERED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(daemon)
         }
@@ -5278,6 +5388,7 @@ mod startup_tests {
                 &daemon,
                 "plurxd-selftest-instance",
                 "Living Room",
+                "Living Room",
                 None,
                 "192.168.1.9:32400".parse().expect("addr"),
                 "0.2.0",
@@ -5324,6 +5435,7 @@ mod startup_tests {
             register_advertiser(
                 &daemon,
                 "instance-1",
+                &"Living Room ".repeat(30),
                 &"Living Room ".repeat(30),
                 None,
                 "192.168.1.9:32400".parse().expect("addr"),
@@ -5448,6 +5560,7 @@ mod startup_tests {
                 &daemon,
                 "instance-1",
                 "Living Room",
+                "Living Room",
                 None,
                 "192.168.1.9:32400".parse().expect("addr"),
                 "0.2.0",
@@ -5475,6 +5588,7 @@ mod startup_tests {
             register_advertiser(
                 &daemon,
                 "instance-1",
+                "Living Room",
                 "Living Room",
                 None,
                 "192.168.1.9:32400".parse().expect("addr"),
@@ -5605,6 +5719,7 @@ mod startup_tests {
         let info = mdns_service_info(
             "",
             "   ",
+            "   ",
             None,
             "0.0.0.0:32400".parse().expect("socket address"),
             "0.2.0",
@@ -5623,13 +5738,13 @@ mod startup_tests {
         let address: IpAddr = "192.168.100.200".parse().expect("IP");
         let long = "L".repeat(60);
         assert_eq!(
-            discovery_display_name(&long, Some("m6"), Some(&address)),
+            display_name(&long, Some("m6"), Some(&address)),
             long,
             "the address must be dropped rather than overflow the label"
         );
         // One that still fits keeps both.
         assert_eq!(
-            discovery_display_name("Loft", Some("m6"), Some(&address)),
+            display_name("Loft", Some("m6"), Some(&address)),
             "Loft · 192.168.100.200"
         );
     }
@@ -5822,28 +5937,140 @@ mod startup_tests {
     fn default_discovery_name_uses_the_machine_but_custom_names_win() {
         let address: IpAddr = "192.168.1.20".parse().expect("IP");
         assert_eq!(
-            discovery_display_name("plurx", Some("m6"), Some(&address)),
+            display_name("plurx", Some("m6"), Some(&address)),
             "m6 · 192.168.1.20"
         );
+        assert_eq!(display_name("PLURX", Some("nuc4.local."), None), "nuc4");
         assert_eq!(
-            discovery_display_name("PLURX", Some("nuc4.local."), None),
-            "nuc4"
-        );
-        assert_eq!(
-            discovery_display_name("Living Room", Some("m6"), Some(&address)),
+            display_name("Living Room", Some("m6"), Some(&address)),
             "Living Room · 192.168.1.20"
         );
+        assert_eq!(display_name("plurx", Some("localhost"), None), "plurx");
+        assert_eq!(display_name("plurx", None, None), "plurx");
+    }
+
+    /// The label alone, which is all a name test is asking about.
+    fn display_name(configured: &str, hostname: Option<&str>, address: Option<&IpAddr>) -> String {
+        discovery_name(configured, hostname, address).label
+    }
+
+    /// A cluster node is named for its machine, not for its UUID.
+    ///
+    /// Every node of one logical server reports the same `server.name`, so
+    /// from 2026-08-20 a clustered node published that bare name plus twelve
+    /// characters of its node id — three rows of `plurx · 5deeeebc8f39` in the
+    /// Apple TV picker, on a fleet whose machines have perfectly good names.
+    /// The hostname and the LAN address are what tell nodes apart, and unlike
+    /// a UUID prefix a person can read them.
+    #[test]
+    fn a_clustered_node_is_named_for_its_machine_not_its_uuid() {
+        let address: IpAddr = "192.168.4.8".parse().expect("IP");
+        let node = "6b98c6cb-8388-48ba-8c2b-69c9dc6fc8a9";
         assert_eq!(
-            discovery_display_name("plurx", Some("localhost"), None),
+            instance_label(
+                &discovery_name("plurx", Some("nuc4"), Some(&address)),
+                Some(node),
+            ),
+            "nuc4 · 192.168.4.8"
+        );
+        // A hostname is already unique on one LAN, address or no address.
+        assert_eq!(
+            instance_label(&discovery_name("plurx", Some("nuc4"), None), Some(node)),
+            "nuc4"
+        );
+    }
+
+    /// The uniqueness the node id was protecting is still protected: a node
+    /// with nothing of its own to show falls back to it rather than becoming
+    /// the second identical row DNS-SD would have to rename.
+    #[test]
+    fn a_clustered_node_with_nothing_to_tell_it_apart_keeps_its_node_id() {
+        let address: IpAddr = "192.168.4.8".parse().expect("IP");
+        let node = "6b98c6cb-8388-48ba-8c2b-69c9dc6fc8a9";
+        assert_eq!(
+            instance_label(&discovery_name("plurx", None, None), Some(node)),
+            "plurx · 6b98c6cb8388"
+        );
+        // An operator's custom name is configured identically on every node
+        // of the cluster, so it does not distinguish one either.
+        assert_eq!(
+            instance_label(
+                &discovery_name("Living Room", Some("nuc4"), None),
+                Some(node),
+            ),
+            "Living Room · 6b98c6cb8388"
+        );
+        // With this node's own address it does.
+        assert_eq!(
+            instance_label(
+                &discovery_name("Living Room", Some("nuc4"), Some(&address)),
+                Some(node),
+            ),
+            "Living Room · 192.168.4.8"
+        );
+        // A standalone server has no peers to be confused with.
+        assert_eq!(
+            instance_label(&discovery_name("plurx", None, None), None),
             "plurx"
         );
-        assert_eq!(discovery_display_name("plurx", None, None), "plurx");
+    }
+
+    /// The call site, not just the helper: `start_bonjour` must publish the
+    /// name this machine computed for itself. Restoring the branch that
+    /// handed a clustered node its bare `server.name` fails here on any host
+    /// that has either a hostname or a LAN address.
+    #[test]
+    fn a_clustered_server_advertises_the_name_it_computed_for_itself() {
+        static SEEN: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+        fn record(
+            _instance_id: &str,
+            name: &str,
+            instance_name: &str,
+            _node_id: Option<&str>,
+            _bind: SocketAddr,
+            _version: &str,
+        ) -> anyhow::Result<mdns_sd::ServiceDaemon> {
+            SEEN.lock()
+                .expect("lock")
+                .push((name.to_owned(), instance_name.to_owned()));
+            anyhow::bail!("no mDNS daemon in this test")
+        }
+
+        const NODE: &str = "6b98c6cb-8388-48ba-8c2b-69c9dc6fc8a9";
+        let tmp = crate::test_tempdir().expect("tempdir");
+        let mut config = config_in(tmp.path());
+        config.server.bind = "0.0.0.0:32400".parse().expect("addr");
+        config.server.name = "plurx".to_owned();
+        SEEN.lock().expect("lock").clear();
+
+        assert!(
+            start_bonjour(&config, "logical-server", Some(NODE), record, true).is_none(),
+            "the stub advertiser refuses, and discovery is best-effort"
+        );
+
+        let seen = SEEN.lock().expect("lock").clone();
+        assert_eq!(seen.len(), 1, "exactly one registration was attempted");
+        let (name, instance_name) = seen[0].clone();
+        let expected = discovery_name(
+            &config.server.name,
+            system_hostname().as_deref(),
+            primary_lan_address().as_ref(),
+        );
+        assert_eq!(name, expected.label, "the TXT name is the display label");
+        assert_eq!(instance_name, instance_label(&expected, Some(NODE)));
+        if expected.distinct {
+            assert!(
+                !instance_name.contains("6b98c6cb8388"),
+                "a machine that can name itself must not be published as a UUID: {instance_name}"
+            );
+        }
     }
 
     #[test]
     fn wildcard_bind_advertises_the_native_plurx_contract() {
         let info = mdns_service_info(
             "550e8400-e29b-41d4-a716-446655440000",
+            "Living Room",
             "Living Room",
             None,
             "0.0.0.0:32400".parse().expect("socket address"),
@@ -5862,9 +6089,12 @@ mod startup_tests {
 
     #[test]
     fn clustered_bonjour_records_keep_the_logical_id_but_address_the_node() {
+        let instance_name =
+            instance_label(&discovery_name("Living Room", None, None), Some("node-b"));
         let info = mdns_service_info(
             "logical-server",
             "Living Room",
+            &instance_name,
             Some("node-b"),
             "0.0.0.0:32400".parse().expect("socket address"),
             "0.2.0",
@@ -5894,6 +6124,7 @@ mod startup_tests {
         let address = "192.168.1.20".parse().expect("IP address");
         let info = mdns_service_info(
             "server-id",
+            "plurx",
             "plurx",
             None,
             "192.168.1.20:32400".parse().expect("socket address"),
