@@ -1023,7 +1023,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # so nothing outlives the test. It owns no producer, no process and no timer
 # beyond the actor's own lease clock, and no test in the group advances that
 # clock.
-expected_occurrences = 379
+# 379 -> 380: the deterministic Activity in-flight-sharing regression holds
+# one leading fetch in a joined test task while seven followers queue behind
+# the same process-local gate. The fixture releases and awaits every task; it
+# owns no shipped producer, timer, or process.
+expected_occurrences = 380
 
 [[module_structures]]
 id = "method-spawn"
@@ -1159,7 +1163,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # these are in-process test synchronization, not child-process lifecycle calls.
 # +4 M5b: conversion helpers explicitly wait/reap their bounded child or use
 # deterministic in-process synchronization in tests.
-expected_occurrences = 304
+# 304 -> 306: the Activity in-flight-sharing regression's two barrier `wait`
+# calls coordinate test tasks before the leading fetch is released. They are
+# in-process synchronization and do not address or reap an operating-system
+# process.
+expected_occurrences = 306
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
