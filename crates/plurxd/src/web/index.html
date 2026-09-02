@@ -374,7 +374,7 @@
   .ptransport{bottom:0;gap:10px;padding:8px 20px calc(12px + env(safe-area-inset-bottom,0px));
     background:linear-gradient(to top,rgba(0,0,0,.8),rgba(0,0,0,0))}
   .ptransport-spacer{flex:1 1 auto}
-  .player.idle .ptransport,.player.idle .ptimeline{opacity:0;pointer-events:none;visibility:hidden;transition:opacity .2s,visibility 0s .2s}
+  .player.idle .ptransport,.player.idle .ptimeline,.player.idle .pskip{opacity:0;pointer-events:none;visibility:hidden;transition:opacity .2s,visibility 0s .2s}
   .picon{background:transparent;border:0;color:#fff;font-size:17px;line-height:1;cursor:pointer;padding:4px;opacity:.92;text-shadow:0 1px 4px rgba(0,0,0,.6)}
   .picon:hover{opacity:1;color:var(--accent)}
   /* CC sits in the transport (where people look for subtitles) and lights up
@@ -8527,6 +8527,7 @@ function resetMediaSource(v){
 function stopPlayerTimers(){
   if(!PLAYER) return;
   stopPlaybackControl(PLAYER);
+  clearPendingSeekTimer();
   clearInterval(PLAYER.timer); PLAYER.timer=null;
   clearTimeout(PLAYER.idleTimer); PLAYER.idleTimer=null;
   clearTimeout(PLAYER.stallTimer); PLAYER.stallTimer=null;
@@ -8987,28 +8988,43 @@ function playerActivity(){
     if(last) last.focus({preventScroll:true});
   }
   clearTimeout(PLAYER.idleTimer);
+  // The idle tick is an input like any other. Asking the routing table which
+  // states may hide keeps one answer in one place: the hand-written
+  // suppression list that used to live here had already drifted from the
+  // contract (it did not know about a pointer scrub).
   PLAYER.idleTimer=setTimeout(function idle(){
     const v=document.getElementById("video");
-    const m=document.getElementById("pmenu");
-    const so=document.getElementById("statsov"), loading=document.getElementById("ploading");
-    const held=(PLAYER&&PLAYER._seekPending!=null)||
-      (m&&m.classList.contains("on"))||
-      (so&&so.classList.contains("on")&&so.dataset.mode!=="mini")||
-      (loading&&loading.classList.contains("failed"));
-    if(held){ PLAYER.idleTimer=setTimeout(idle,4000); return; }
-    if(v&&!v.paused&&!v.ended) p.classList.add("idle");
+    const outcome=(v&&!v.paused&&!v.ended)
+      ? PlaybackPolicy.routeInput(playerInputSurface(),playerInputState(),"idle")
+      : "ignore";
+    if(outcome==="ignore"){ PLAYER.idleTimer=setTimeout(idle,4000); return; }
+    applyPlayerOutcome(outcome,{direction:"idle"});
   },4000);
 }
+// A pointer that can hover is a desktop; a coarse one follows the touch
+// table, on the same page. `tap_surface` and the scrub gestures are the two
+// places where the tables disagree, and an iPad opening the desktop page used
+// to get the desktop answer for both.
+function playerInputSurface(){ return coarsePointer()?"touch":"desktop"; }
+// One pending position, however it was started: arrows and J/L set
+// `_seekPending`, a pointer drag sets `_seekPreview`. Either one means the
+// bar is showing a time the film is not at yet.
+function playerSeekPending(){ return !!(PLAYER&&(PLAYER._seekPending!=null||PLAYER._seekPreview!=null)); }
 function playerInputState(){
   const p=document.getElementById("player");
   const loading=document.getElementById("ploading");
   if(loading&&loading.classList.contains("failed")) return "failed";
-  const so=document.getElementById("statsov");
-  if(so&&so.classList.contains("on")&&so.dataset.mode!=="mini") return "info";
+  // Contract §2.2 orders the precedence scrub → menu → info: a pending seek
+  // is the most local thing on screen, so Escape cancels it rather than
+  // closing whatever is behind it.
+  const seek=document.getElementById("pseek");
+  const onSeek=document.activeElement===seek||!!(PLAYER&&PLAYER._seekDragging);
+  if(onSeek&&playerSeekPending()) return "scrub";
   const menu=document.getElementById("pmenu");
   if(menu&&menu.classList.contains("on")) return "menu";
-  const seek=document.getElementById("pseek");
-  if(document.activeElement===seek) return PLAYER&&PLAYER._seekPending!=null?"scrub":"timeline";
+  const so=document.getElementById("statsov");
+  if(so&&so.classList.contains("on")&&so.dataset.mode!=="mini") return "info";
+  if(onSeek) return "timeline";
   if(p&&p.classList.contains("idle")) return "hidden";
   return "transport";
 }
@@ -9127,15 +9143,31 @@ function togglePlay(){
 // on the scrubber, and fire ONE seekTo after a short quiet — so mashing a
 // button (or an arrow) doesn't restart the transcode stream over and over.
 let NUDGE_T=null;
+// A skip and a scrub preview are the same pending position with different
+// commit rules — the skip commits itself after a quiet, the scrub waits for
+// Select. Keeping them in one field is what stops a debounced skip from
+// firing over a committed scrub (and from seeking a player that has closed).
+function clearPendingSeekTimer(){ clearTimeout(NUDGE_T); NUDGE_T=null; }
+function commitPendingSeek(){
+  const me=PLAYER; if(!me) return;
+  clearPendingSeekTimer();
+  const t=me._seekPending; me._seekPending=null;
+  if(t!=null) seekTo(t); else pbTick();
+}
+function cancelPendingSeek(){
+  const me=PLAYER; if(!me) return;
+  clearPendingSeekTimer();
+  me._seekPending=null; me._seekPreview=null;
+  pbTick();
+}
 function nudge(d){
   const me=PLAYER; if(!me) return;
-  me._nudgeAcc=(me._nudgeAcc||0)+d;
-  if(me._nudgeBase==null) me._nudgeBase=pbPosSec();
-  me._seekPreview=Math.max(0, me._nudgeBase+me._nudgeAcc); pbTick(); playerActivity();
+  const total=pbTotalSec();
+  const base=me._seekPending!=null?me._seekPending:pbPosSec();
+  let t=Math.max(0,base+d); if(total>0) t=Math.min(total,t);
+  me._seekPending=t; pbTick(); playerActivity();
   clearTimeout(NUDGE_T);
-  NUDGE_T=setTimeout(()=>{ if(PLAYER!==me) return;
-    const t=Math.max(0, me._nudgeBase+me._nudgeAcc);
-    me._nudgeAcc=0; me._nudgeBase=null; me._seekPreview=null; seekTo(t); }, 350);
+  NUDGE_T=setTimeout(()=>{ if(PLAYER!==me) return; commitPendingSeek(); }, 350);
 }
 async function togglePip(){ const v=document.getElementById("video"); try{ if(document.pictureInPictureElement) await document.exitPictureInPicture(); else if(v) await v.requestPictureInPicture(); }catch(e){} }
 // Is the player fullscreen by any of the three routes into it? The document
@@ -9185,22 +9217,31 @@ function pbWireSeek(){
   const frac=e=>{ const r=seek.getBoundingClientRect(); return r.width?Math.min(1,Math.max(0,((e.clientX||0)-r.left)/r.width)):0; };
   let drag=false;
   seek.addEventListener("pointerdown",e=>{ drag=true; try{seek.setPointerCapture(e.pointerId);}catch(_){}
+    // A finger on the bar replaces whatever the keyboard had pending; leaving
+    // it behind froze the clock at a preview nobody could see any more.
+    clearPendingSeekTimer(); PLAYER._seekPending=null; PLAYER._seekDragging=true;
     PLAYER._seekPreview=frac(e)*pbTotalSec(); pbTick(); playerActivity(); });
   seek.addEventListener("pointermove",e=>{ if(!drag)return; PLAYER._seekPreview=frac(e)*pbTotalSec(); pbTick(); playerActivity(); });
   // With no trustworthy total (see pbTotalSec) a fraction means nothing — drop
   // the drag rather than seeking to a number we made up.
   const done=e=>{ if(!drag)return; drag=false; const tot=pbTotalSec(); const t=frac(e)*tot;
-    PLAYER._seekPreview=null; if(tot>0) seekTo(t); else pbTick(); };
+    clearPendingSeekTimer();
+    PLAYER._seekDragging=false; PLAYER._seekPreview=null; PLAYER._seekPending=null;
+    if(tot>0) seekTo(t); else pbTick(); };
   seek.addEventListener("pointerup",done);
-  seek.addEventListener("pointercancel",()=>{ if(!drag)return; drag=false; PLAYER._seekPreview=null; pbTick(); });
-  seek.addEventListener("blur",()=>{ if(!PLAYER)return; PLAYER._seekPending=null; pbTick(); });
+  seek.addEventListener("pointercancel",()=>{ if(!drag)return; drag=false; PLAYER._seekDragging=false; cancelPendingSeek(); });
+  seek.addEventListener("blur",()=>{ if(!PLAYER||PLAYER._seekDragging)return; cancelPendingSeek(); });
 }
 // Attach the persistent listeners once; they read live PLAYER state each fire.
 function wirePlayer(){
   if(PLAYER_WIRED) return; PLAYER_WIRED=true;
   const p=document.getElementById("player"), v=document.getElementById("video");
   if(!p||!v) return;
-  ["mousemove","pointerdown","touchstart","keydown"].forEach(ev=>window.addEventListener(ev,()=>{
+  // Deliberately no "keydown": a second listener that reveals the chrome is a
+  // second answer to what a key does, and it made every `ignore` row in the
+  // routing table have an effect anyway. The adapter reveals where the
+  // contract says to.
+  ["mousemove","pointerdown","touchstart"].forEach(ev=>window.addEventListener(ev,()=>{
     const modal=document.getElementById("modal"); if(modal&&modal.classList.contains("open")) playerActivity();
   }));
   v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.controlPositionHintSec=null; PLAYER.controlRenderOverride=null; PLAYER.controlObservationOverride=null; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl(); if(first) reportTtff(); });
@@ -9291,7 +9332,7 @@ function wirePlayer(){
   v.addEventListener("click",()=>{
     if(PLAYER&&PLAYER._menuDismissedByPointer){ PLAYER._menuDismissedByPointer=false; return; }
     if(ptrKind==="touch"&&ptrWoke){ playerActivity(); return; }
-    applyPlayerOutcome(PlaybackPolicy.routeInput("desktop",playerInputState(),"tap_surface"),{direction:"tap_surface",repeatCount:0});
+    applyPlayerOutcome(PlaybackPolicy.routeInput(playerInputSurface(),playerInputState(),"tap_surface"),{direction:"tap_surface",repeatCount:0});
   });
   v.addEventListener("dblclick",e=>{ e.preventDefault(); toggleFullscreen(); });
   // Custom transport: keep the scrubber, times, buffered bar, and play icon in
@@ -9762,11 +9803,14 @@ function toggleMenu(kind,low){
   // what a quality change does to it, and having the menu dismiss it meant the
   // numbers you came to compare were gone before you could change anything.
   // positionMenu() slides the menu clear of the panel rather than over it.
-  const sov=document.getElementById("statsov");
-  if(coarsePointer() && sov && sov.classList.contains("on")) toggleStats();
   const anchorId=MENU_ANCHORS[kind]&&MENU_ANCHORS[kind][low?1:0];
+  // Read the opener before anything else moves focus: closing the info panel
+  // below focuses its own button, and recording that meant Escape handed
+  // focus back to the wrong control.
   const opener=document.activeElement&&document.activeElement!==document.body
     ?document.activeElement:(anchorId?document.getElementById(anchorId):null);
+  const sov=document.getElementById("statsov");
+  if(coarsePointer() && sov && sov.classList.contains("on")) toggleStats();
   if(PLAYER) PLAYER._menuOpener=opener;
   if(opener&&opener.setAttribute) opener.setAttribute("aria-expanded","true");
   m.dataset.kind=kind; m.classList.toggle("low",!!low);
@@ -10460,7 +10504,7 @@ function playbackStatsTelemetry(){
     started_in:p.ttffMs!=null?`${(p.ttffMs/1000).toFixed(1)} s`:null,
     status,encoder,encode_speed:speed==null?null:`${speed.toFixed(2)}×${h&&h.recent_speed==null?" (avg)":""}`,
     server_ahead:h&&h.ahead_seconds!=null?`${Math.max(0,h.ahead_seconds).toFixed(1)} s`:null,
-    server_ahead_note:serverAheadNote,ahead_bytes:h&&h.ahead_bytes!=null?fmtBytes(h.ahead_bytes):null,
+    server_ahead_note:serverAheadNote,ahead_bytes:h&&h.ahead_bytes!=null?(fmtBytes(h.ahead_bytes)||"0 B"):null,
     produced:h&&h.out_time_ms!=null?clockFromSec(h.out_time_ms/1000):null,
     pacing:h&&h.readrate!=null?`${Number(h.readrate).toFixed(2)}×`:null,
     held:h? (h.suspended?"Yes":"No"):null,hold_reason:h&&h.hold_reason||null,
@@ -10560,7 +10604,10 @@ function closePlayer(){
   // minute later. An AirPlay target fetching this same session keeps it alive
   // by fetching; a browser that has closed the player is not going to.
   if(PLAYER && PLAYER.sessionId){ releaseSession(PLAYER.sessionId); PLAYER.sessionId=null; }
-  if(PLAYER){ PLAYER.aoffset=0; PLAYER._seekPending=null; PLAYER._seekPreview=null; }
+  // Disarm the pending seek as well as clearing it: a skip's self-commit is a
+  // timer, and PLAYER survives the close, so an armed one would have fired
+  // seekTo on a player the viewer had already left.
+  if(PLAYER){ PLAYER.aoffset=0; PLAYER._seekDragging=false; cancelPendingSeek(); }
   // Same reason, same scope: the track choice was this playback's, and this
   // playback is over. PLAYER survives the close, so leaving `preplay` set would
   // make playbackSelection() keep matching on the next cold start of the same
@@ -10617,11 +10664,22 @@ function playerContractInput(e,state){
   if(e.key==="l"||e.key==="L") return "skip_forward";
   return null;
 }
-function playerHotkey(e){
+function playerHotkey(e,state){
   const onButton=(e.target&&e.target.tagName||"")==="BUTTON";
-  if((e.key==="i"||e.key==="I")&&!e.repeat){ toggleStats(); e.preventDefault(); return true; }
-  if(!onButton&&(e.key==="f"||e.key==="F")&&!e.repeat){ toggleFullscreen(); e.preventDefault(); return true; }
-  if(!onButton&&(e.key==="c"||e.key==="C")&&!e.repeat){ cycleSub(); e.preventDefault(); return true; }
+  // `role="slider"` promises Home/End (WAI-ARIA APG). The contract has no row
+  // for either, so they behave as the pattern requires and no more: jump the
+  // pending position to an end, and commit it the way Select would.
+  if((state==="timeline"||state==="scrub")&&(e.key==="Home"||e.key==="End")){
+    const total=pbTotalSec(); if(!(total>0)) return true;
+    if(PLAYER) PLAYER._seekPending=e.key==="Home"?0:total;
+    commitPendingSeek(); playerActivity(); e.preventDefault(); return true;
+  }
+  if((e.key==="i"||e.key==="I")&&!e.repeat){ toggleStats(); playerActivity(); e.preventDefault(); return true; }
+  if(!onButton&&(e.key==="f"||e.key==="F")&&!e.repeat){ toggleFullscreen(); playerActivity(); e.preventDefault(); return true; }
+  if(!onButton&&(e.key==="c"||e.key==="C")&&!e.repeat){ cycleSub(); playerActivity(); e.preventDefault(); return true; }
+  // Tab is the browser's, but a focus ring the viewer cannot see is worse than
+  // no focus ring: reveal the chrome and let the move happen.
+  if(e.key==="Tab"){ playerActivity(); return false; }
   return false;
 }
 function applyPlayerOutcome(outcome,ctx={}){
@@ -10650,35 +10708,33 @@ function applyPlayerOutcome(outcome,ctx={}){
       const step=PlaybackPolicy.previewStepSeconds(ctx.repeatCount||0);
       const sign=direction==="left"?-1:1;
       const base=PLAYER._seekPending!=null?PLAYER._seekPending:pbPosSec();
+      // A preview waits for Select. If the pending position arrived from a
+      // skip it is still carrying that skip's self-commit — drop it.
+      clearPendingSeekTimer();
       PLAYER._seekPending=Math.max(0,Math.min(total,base+sign*step));
       pbTick(); playerActivity(); return true;
     }
-    case "commit": {
-      const target=PLAYER&&PLAYER._seekPending;
-      if(PLAYER) PLAYER._seekPending=null;
-      if(target!=null) seekTo(target); else pbTick();
-      return true;
-    }
+    case "commit":
+      commitPendingSeek(); return true;
     case "cancel":
-      if(PLAYER) PLAYER._seekPending=null;
-      pbTick(); playerActivity(); return true;
+      cancelPendingSeek(); playerActivity(); return true;
     case "cancel_then_focus_transport":
-      if(PLAYER) PLAYER._seekPending=null;
-      pbTick(); return applyPlayerOutcome("focus_transport",ctx);
+      cancelPendingSeek(); return applyPlayerOutcome("focus_transport",ctx);
     case "cancel_then_focus_marker_or_ignore":
-      if(PLAYER) PLAYER._seekPending=null;
-      pbTick(); return applyPlayerOutcome("focus_marker_or_ignore",ctx);
+      cancelPendingSeek(); return applyPlayerOutcome("focus_marker_or_ignore",ctx);
     case "commit_then_toggle_play": {
-      const target=PLAYER&&PLAYER._seekPending;
-      if(PLAYER) PLAYER._seekPending=null;
-      if(target!=null) seekTo(target);
-      togglePlay(); return true;
+      commitPendingSeek(); togglePlay(); return true;
     }
     case "toggle_play": togglePlay(); return true;
     case "close_menu": closeMenu(); return true;
     case "close_info": toggleStats(); return true;
     case "hide": {
       const player=document.getElementById("player"); if(player) player.classList.add("idle");
+      // `focusin` has already recorded which control this was, so `reveal`
+      // can put it back. Blur, or the browser keeps focus on a control the
+      // viewer can no longer see (and `hidden` would be a lie).
+      const active=document.activeElement;
+      if(active&&active!==document.body&&player&&player.contains(active)&&active.blur) active.blur();
       return true;
     }
     case "exit": closePlayer(); return true;
@@ -10687,9 +10743,21 @@ function applyPlayerOutcome(outcome,ctx={}){
       if(player&&player.classList.contains("idle")) playerActivity(); else if(player) player.classList.add("idle");
       return true;
     }
+    case "menu_focus": {
+      const menu=document.getElementById("pmenu");
+      const open=menu&&menu.classList.contains("on")?menu:document.getElementById("statsov");
+      if(!open||!open.classList.contains("on")) return false;
+      const items=Array.from(new Set(Array.from(
+        open.querySelectorAll('button:not([disabled]),[data-stats-mode]:not([disabled])'))));
+      if(!items.length) return false;
+      const at=items.indexOf(document.activeElement);
+      const forward=direction==="down"||direction==="right";
+      const next=at<0?(forward?0:items.length-1):(at+(forward?1:-1)+items.length)%items.length;
+      items[next].focus({preventScroll:true});
+      return true;
+    }
     case "focus_row":
     case "activate":
-    case "menu_focus":
     case "ignore":
       return false;
     default: throw new Error(`unknown player outcome ${outcome}`);
@@ -10704,31 +10772,29 @@ function handlePlayerKeydown(e){
   if(/^(INPUT|TEXTAREA|SELECT)$/.test((e.target&&e.target.tagName)||"")) return;
   const state=playerInputState();
   const input=playerContractInput(e,state);
-  if(input==null){ playerHotkey(e); return; }
+  if(input==null){ playerHotkey(e,state); return; }
   if(PLAYER_REPEAT_KEY!==e.key){ PLAYER_REPEAT_KEY=e.key; PLAYER_REPEAT_COUNT=0; }
   else if(e.repeat) PLAYER_REPEAT_COUNT+=1;
-  const outcome=PlaybackPolicy.routeInput("desktop",state,input);
+  const outcome=PlaybackPolicy.routeInput(playerInputSurface(),state,input);
   const consumed=applyPlayerOutcome(outcome,{repeat:e.repeat,repeatCount:PLAYER_REPEAT_COUNT,direction:input});
   if(consumed) e.preventDefault();
   return consumed;
 }
 window.addEventListener("keydown",handlePlayerKeydown);
-window.addEventListener("keyup",()=>{ PLAYER_REPEAT_KEY=null; PLAYER_REPEAT_COUNT=0; });
-document.getElementById("pmenu").addEventListener("keydown",e=>{
-  if(e.key!=="Tab") return;
-  const items=Array.from(e.currentTarget.querySelectorAll("button:not([disabled])")); if(!items.length) return;
+// Only the key that owns the ladder resets it: releasing Shift mid-hold used
+// to drop the acceleration back to the first rung.
+window.addEventListener("keyup",e=>{ if(e.key===PLAYER_REPEAT_KEY){ PLAYER_REPEAT_KEY=null; PLAYER_REPEAT_COUNT=0; } });
+// Both panels are dialogs while they are open, so Tab cycles inside them
+// rather than walking out into chrome the viewer cannot see. Arrow movement
+// inside them belongs to `menu_focus` above — one answer, one place.
+["pmenu","statsov"].forEach(id=>document.getElementById(id).addEventListener("keydown",e=>{
+  if(e.key!=="Tab"||!e.currentTarget.classList.contains("on")) return;
+  const items=Array.from(e.currentTarget.querySelectorAll('button:not([disabled]),[data-stats-mode]:not([disabled])'));
+  if(!items.length) return;
   const first=items[0],last=items[items.length-1];
   if(e.shiftKey&&document.activeElement===first){ e.preventDefault(); last.focus(); }
   else if(!e.shiftKey&&document.activeElement===last){ e.preventDefault(); first.focus(); }
-});
-document.getElementById("statsov").addEventListener("keydown",e=>{
-  if(e.key!=="ArrowLeft"&&e.key!=="ArrowRight") return;
-  const radios=Array.from(e.currentTarget.querySelectorAll("[data-stats-mode]"));
-  const at=radios.indexOf(document.activeElement); if(at<0) return;
-  e.preventDefault(); e.stopPropagation();
-  const next=(at+(e.key==="ArrowLeft"?-1:1)+radios.length)%radios.length;
-  radios[next].focus({preventScroll:true});
-});
+}));
 document.getElementById("player").addEventListener("pointerdown",e=>{
   const menu=document.getElementById("pmenu"),opener=PLAYER&&PLAYER._menuOpener;
   if(!menu.classList.contains("on")||menu.contains(e.target)||(opener&&(opener===e.target||opener.contains(e.target)))) return;

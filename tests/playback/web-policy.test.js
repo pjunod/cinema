@@ -1821,14 +1821,16 @@ test("the shipped player adapter applies state precedence and preview-then-commi
     };
   };
   const body = { tagName: "DIV" };
+  const calls = { seek: [], play: 0, menu: 0, close: 0, fullscreen: 0, ticks: 0, blurs: [], stats: 0 };
+  const control = (id) => ({ id, focus() { document.activeElement = elements[id]; }, blur() { calls.blurs.push(id); document.activeElement = body; } });
   const elements = {
     modal: { classList: makeClasses("open") },
-    player: { classList: makeClasses() },
+    player: { classList: makeClasses(), contains: () => true },
     ploading: { classList: makeClasses() },
-    statsov: { classList: makeClasses(), dataset: { mode: "standard" } },
-    pmenu: { classList: makeClasses("on") },
-    pseek: { id: "pseek" },
-    pbplay: { focus() {} },
+    statsov: { classList: makeClasses(), dataset: { mode: "standard" }, querySelectorAll: () => [] },
+    pmenu: { classList: makeClasses("on"), querySelectorAll: () => [] },
+    pseek: control("pseek"),
+    pbplay: control("pbplay"),
   };
   const document = {
     body,
@@ -1836,27 +1838,41 @@ test("the shipped player adapter applies state precedence and preview-then-commi
     getElementById: (id) => elements[id] || null,
     querySelector: () => null,
   };
-  const player = { _seekPending: null, _lastFocusedControl: "pbplay" };
-  const calls = { nudge: [], seek: [], play: 0, menu: 0, close: 0, fullscreen: 0, ticks: 0 };
+  const player = { _seekPending: null, _seekPreview: null, _seekDragging: false, _lastFocusedControl: "pbplay" };
+  // Timers are parameters so the 350 ms self-commit can be fired by hand: the
+  // defect this pins is a skip's debounce outliving the commit that replaced it.
+  let pending = null;
+  const setTimeoutStub = (fn) => { pending = fn; return 1; };
+  const clearTimeoutStub = () => { pending = null; };
+  let surface = "desktop";
   const build = new Function(
     "document", "PLAYER", "PlaybackPolicy", "isFullscreenAnywhere", "toggleFullscreen",
-    "toggleStats", "cycleSub", "playerActivity", "nudge", "pbTotalSec", "pbPosSec",
-    "pbTick", "seekTo", "togglePlay", "closeMenu", "closePlayer",
+    "toggleStats", "cycleSub", "playerActivity", "pbTotalSec", "pbPosSec",
+    "pbTick", "seekTo", "togglePlay", "closeMenu", "closePlayer", "coarsePointer",
+    "setTimeout", "clearTimeout",
     [
-      "let PLAYER_REPEAT_KEY=null; let PLAYER_REPEAT_COUNT=0;",
+      "let PLAYER_REPEAT_KEY=null; let PLAYER_REPEAT_COUNT=0; let NUDGE_T=null;",
+      shippedSource("playerInputSurface"),
+      shippedSource("playerSeekPending"),
       shippedSource("playerInputState"),
+      shippedSource("clearPendingSeekTimer"),
+      shippedSource("commitPendingSeek"),
+      shippedSource("cancelPendingSeek"),
+      shippedSource("nudge"),
       shippedSource("playerContractInput"),
       shippedSource("playerHotkey"),
       shippedSource("applyPlayerOutcome"),
       shippedSource("handlePlayerKeydown"),
-      "return {playerInputState,playerContractInput,applyPlayerOutcome,handlePlayerKeydown};",
+      "return {playerInputState,playerInputSurface,playerContractInput,applyPlayerOutcome,handlePlayerKeydown};",
     ].join("\n"),
   );
   const adapter = build(
     document, player, policy, () => false, () => { calls.fullscreen += 1; },
-    () => {}, () => {}, () => {}, (delta) => calls.nudge.push(delta), () => 100, () => 20,
+    () => { calls.stats += 1; }, () => {}, () => {}, () => 100, () => 20,
     () => { calls.ticks += 1; }, (target) => calls.seek.push(target),
     () => { calls.play += 1; }, () => { calls.menu += 1; }, () => { calls.close += 1; },
+    () => surface === "touch",
+    setTimeoutStub, clearTimeoutStub,
   );
   const key = (value, extra = {}) => ({
     key: value, target: body, repeat: false, ctrlKey: false, metaKey: false, altKey: false,
@@ -1874,18 +1890,81 @@ test("the shipped player adapter applies state precedence and preview-then-commi
   adapter.handlePlayerKeydown(key("ArrowRight", { repeat: true }));
   assert.equal(player._seekPending, 50);
   assert.deepEqual(calls.seek, []);
-  assert.deepEqual(calls.nudge, []);
   adapter.handlePlayerKeydown(key("Enter"));
   assert.deepEqual(calls.seek, [50]);
+  assert.equal(player._seekPending, null);
+
+  // A pending seek outranks an open panel: Escape cancels the scrub and
+  // leaves the panel alone (contract §2.2 — scrub, then menu, then info).
+  document.activeElement = elements.pseek;
+  adapter.handlePlayerKeydown(key("ArrowLeft"));
+  elements.statsov.classList.add("on");
+  assert.equal(adapter.playerInputState(), "scrub");
+  assert.equal(player._seekPending, 10);
+  adapter.handlePlayerKeydown(key("Escape"));
+  assert.equal(player._seekPending, null);
+  assert.equal(calls.stats, 0);
+  assert.equal(calls.close, 0);
+  assert.equal(adapter.playerInputState(), "info");
+  elements.statsov.classList.remove("on");
+
+  // A pointer drag is a scrub even though the keyboard set nothing.
+  document.activeElement = elements.pseek;
+  player._seekDragging = true; player._seekPreview = 42;
+  assert.equal(adapter.playerInputState(), "scrub");
+  player._seekDragging = false; player._seekPreview = null;
+
+  // A skip commits itself after a quiet — unless something commits or
+  // cancels first, in which case the debounce must not fire over it.
+  document.activeElement = body;
+  adapter.handlePlayerKeydown(key("l"));
+  assert.equal(player._seekPending, 30);
+  assert.ok(pending, "the skip arms a self-commit");
+  document.activeElement = elements.pseek;
+  adapter.handlePlayerKeydown(key("ArrowRight"));
+  adapter.handlePlayerKeydown(key("Enter"));
+  assert.deepEqual(calls.seek, [50, 40]);
+  assert.equal(pending, null, "committing the preview disarms the skip");
 
   document.activeElement = body;
-  const before = { ...calls, nudge: [...calls.nudge], seek: [...calls.seek] };
+  adapter.handlePlayerKeydown(key("j"));
+  assert.equal(player._seekPending, 10);
+  pending();
+  assert.deepEqual(calls.seek, [50, 40, 10]);
+
+  // Hidden chrome on a desktop keyboard still seeks (ruling 1 is a ten-foot
+  // rule); the arrow does not fall through to a second listener.
+  elements.player.classList.add("idle");
+  assert.equal(adapter.playerInputState(), "hidden");
+  adapter.handlePlayerKeydown(key("ArrowRight"));
+  assert.equal(player._seekPending, 30);
+  clearTimeoutStub();
+  player._seekPending = null;
+  elements.player.classList.remove("idle");
+
+  // Hiding releases focus: hidden chrome that still holds it is a focus ring
+  // the viewer cannot see.
+  document.activeElement = elements.pbplay;
+  adapter.applyPlayerOutcome("hide", { direction: "idle" });
+  assert.deepEqual(calls.blurs, ["pbplay"]);
+  assert.equal(adapter.playerInputState(), "hidden");
+  elements.player.classList.remove("idle");
+
+  document.activeElement = body;
+  const before = { seek: [...calls.seek], play: calls.play };
   adapter.handlePlayerKeydown(key("ArrowUp"));
-  assert.deepEqual(calls.nudge, before.nudge);
   assert.deepEqual(calls.seek, before.seek);
   assert.equal(calls.play, before.play);
   adapter.handlePlayerKeydown(key("f", { ctrlKey: true }));
   assert.equal(calls.fullscreen, 0);
+
+  // A coarse pointer follows the touch table on the same page: arrows are
+  // ignored there, where the desktop table seeks.
+  surface = "touch";
+  assert.equal(adapter.playerInputSurface(), "touch");
+  adapter.handlePlayerKeydown(key("ArrowRight"));
+  assert.equal(player._seekPending, null);
+  surface = "desktop";
 
   elements.ploading.classList.add("failed");
   assert.equal(adapter.playerInputState(), "failed");
@@ -2810,6 +2889,7 @@ function carryHarness(player) {
     "setTimeout",
     "prePlayPreview",
     "PLAY_OPEN_GATE",
+    "cancelPendingSeek",
     [
       shippedBinding("let", "PREPLAY"),
       shippedSource("prePlaySelection"),
@@ -2839,6 +2919,7 @@ function carryHarness(player) {
     () => {},
     () => {},
     { invalidate() {} },
+    () => { player._seekPending = null; player._seekPreview = null; },
   );
 }
 
