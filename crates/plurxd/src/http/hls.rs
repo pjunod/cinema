@@ -4865,7 +4865,63 @@ async fn control_local_inner(
     };
     crate::playback_control::record(outcome);
     crate::playback_control::record_platform(outcome, result.platform);
+    // The replacement seam. A viewer's quality change arrives as a new session
+    // that replaces the old one, so the transition to measure is
+    // predecessor-delivered against this session's delivered — both already
+    // resolved, which is why nothing here reads the store or spawns.
+    //
+    // `reopen_reason: Some(Stall)` is excluded deliberately: that is the
+    // client adapting to a failure, not a viewer asking for something, and
+    // §3.3's own rule is that M6 prepares for a change the *client asked for*.
+    let replaced = if recipe.request.reopen_reason.is_none() {
+        remember_delivered_selection(
+            &route.session_id,
+            &response.effective_selection,
+            crate::playback_control::GradeIntent::from_request(&recipe.request),
+            recipe.request.previous_session_id.as_deref(),
+        )
+    } else {
+        None
+    };
+    if let Some((previous, previous_grade)) = replaced {
+        crate::playback_control::record_preparation_observation(
+            crate::playback_control::PreparationSeam::Replacement,
+        );
+        let delivered_view = crate::playback_control::RecipeView {
+            selection: &previous,
+            grade: previous_grade,
+        };
+        let proposed_view = crate::playback_control::RecipeView {
+            selection: &response.effective_selection,
+            grade: crate::playback_control::GradeIntent::from_request(&recipe.request),
+        };
+        let conditions = crate::playback_control::PreparationConditions {
+            observed_download_bps: request.observed_download_bps,
+            delivered_bps: response.delivery.delivered_bps,
+        };
+        let capabilities = result.selection.capabilities.clone();
+        crate::playback_control::record_preparation_decision(
+            result.platform,
+            crate::playback_control::decide_preparation(
+                delivered_view,
+                proposed_view,
+                capabilities.as_ref(),
+                conditions,
+            ),
+        );
+        crate::playback_control::record_preparation_counterfactual(
+            result.platform,
+            crate::playback_control::decide_preparation_after_client_release(
+                delivered_view,
+                proposed_view,
+                conditions,
+            ),
+        );
+    }
     if result.selection.changed {
+        crate::playback_control::record_preparation_observation(
+            crate::playback_control::PreparationSeam::InSession,
+        );
         // Spawned, never awaited: see the function's own doc. The exchange has
         // spent its deadline by here and the response is already built.
         tokio::spawn(record_preparation_shadow(
@@ -4916,6 +4972,84 @@ static PREPARATION_SHADOWS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
 /// Enough for every node in the fleet to be measuring several clients at once,
 /// and far below the point where the store notices.
 const MAX_PREPARATION_SHADOWS: usize = 32;
+
+/// Last delivered selection of each session, so a session that *replaces*
+/// another can be measured against the one it replaced.
+///
+/// This exists because of what m6 measured on 2026-09-02: 949 accepted
+/// exchanges and one recorded decision. `ControlState::last_selection` sees a
+/// selection change only *within* one session, and Apple does not change a
+/// selection within a session — `PlayerController.selectQuality` calls
+/// `reopen`, whose own comment says the replacement "intentionally removes the
+/// older session". So a viewer's quality change arrives as a brand-new session
+/// with no predecessor to differ from, and the gate is false by construction.
+///
+/// The seam M6 is actually about is therefore the replacement, not the
+/// exchange — which is the whole point of the milestone: today a quality
+/// change tears the session down, and M6 exists so that it does not.
+static DELIVERED_SELECTIONS: std::sync::Mutex<Option<DeliveredSelections>> =
+    std::sync::Mutex::new(None);
+
+/// Bounded FIFO of `session id -> what it was last delivering`.
+///
+/// Process-local and best-effort by construction: a replacement served by a
+/// different node measures nothing, which understates the count and never
+/// misreports one. Bounded because a long-lived node serves unboundedly many
+/// sessions; the oldest is dropped, and dropping one costs a measurement.
+#[derive(Default)]
+struct DeliveredSelections {
+    by_session: std::collections::HashMap<
+        String,
+        (
+            crate::playback_control::EffectiveSelection,
+            crate::playback_control::GradeIntent,
+        ),
+    >,
+    order: std::collections::VecDeque<String>,
+}
+
+/// Enough for every session a node serves in the window a viewer might change
+/// quality in, and small enough to be invisible.
+const MAX_REMEMBERED_SELECTIONS: usize = 512;
+
+/// Remember what this session is delivering; answer what its predecessor was.
+///
+/// One lock, one pass, on the first accepted exchange of a session only —
+/// later exchanges of the same session re-record and answer `None`, so a
+/// replacement is measured once rather than on every exchange after it.
+fn remember_delivered_selection(
+    session: &str,
+    delivered: &crate::playback_control::EffectiveSelection,
+    grade: crate::playback_control::GradeIntent,
+    predecessor: Option<&str>,
+) -> Option<(
+    crate::playback_control::EffectiveSelection,
+    crate::playback_control::GradeIntent,
+)> {
+    let Ok(mut guard) = DELIVERED_SELECTIONS.lock() else {
+        // A poisoned lock costs measurements, never an exchange.
+        return None;
+    };
+    let table = guard.get_or_insert_with(DeliveredSelections::default);
+    let first_sighting = !table.by_session.contains_key(session);
+    if first_sighting {
+        table.order.push_back(session.to_owned());
+        while table.order.len() > MAX_REMEMBERED_SELECTIONS {
+            if let Some(evicted) = table.order.pop_front() {
+                table.by_session.remove(&evicted);
+            }
+        }
+    }
+    table
+        .by_session
+        .insert(session.to_owned(), (delivered.clone(), grade));
+    // Only the first sighting can be a replacement: after that this session is
+    // its own predecessor and the transition has already been counted.
+    if !first_sighting {
+        return None;
+    }
+    table.by_session.get(predecessor?).cloned()
+}
 
 /// Everything one exchange said, gathered for the shadow measurement.
 ///
@@ -9424,6 +9558,106 @@ mod tests {
     }
     use super::*;
 
+    /// The replacement seam, which is where a viewer's quality change actually
+    /// arrives.
+    ///
+    /// m6 recorded one decision against 949 accepted exchanges because
+    /// `ControlState::last_selection` only sees a change *within* a session,
+    /// and Apple's `selectQuality` replaces the session instead. This is the
+    /// table that lets the replacement be measured, and these are the three
+    /// things it has to get right.
+    #[test]
+    fn a_replacement_is_measured_against_the_session_it_replaced() {
+        let selection = |height: i64| crate::playback_control::EffectiveSelection {
+            height,
+            ..sample_effective_selection()
+        };
+        let grade = crate::playback_control::GradeIntent {
+            hdr10: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        let old = format!("seam-old-{}", std::process::id());
+        let new = format!("seam-new-{}", std::process::id());
+
+        // The predecessor's first exchange has no predecessor of its own.
+        assert_eq!(
+            remember_delivered_selection(&old, &selection(2160), grade, None),
+            None,
+        );
+        // Its later exchanges answer nothing, so a session is never measured
+        // against itself.
+        assert_eq!(
+            remember_delivered_selection(&old, &selection(2160), grade, None),
+            None,
+        );
+        // The replacement's first exchange answers what the old one was
+        // delivering — the transition the viewer actually made.
+        let (previous, previous_grade) =
+            remember_delivered_selection(&new, &selection(1080), grade, Some(&old))
+                .expect("the predecessor is remembered");
+        assert_eq!(previous.height, 2160);
+        assert_eq!(previous_grade, grade);
+        // And exactly once: every exchange after the first answers nothing, or
+        // one quality change would be counted for the life of the session.
+        assert_eq!(
+            remember_delivered_selection(&new, &selection(1080), grade, Some(&old)),
+            None,
+        );
+        // A predecessor this node never served is not a measurement.
+        assert_eq!(
+            remember_delivered_selection(
+                &format!("seam-third-{}", std::process::id()),
+                &selection(720),
+                grade,
+                Some("a-session-served-elsewhere"),
+            ),
+            None,
+        );
+    }
+
+    /// The table is bounded, because a node serves unboundedly many sessions.
+    #[test]
+    fn the_remembered_selections_are_bounded() {
+        let grade = crate::playback_control::GradeIntent {
+            hdr10: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        let tag = format!("bound-{}", std::process::id());
+        let first = format!("{tag}-0");
+        remember_delivered_selection(&first, &sample_effective_selection(), grade, None);
+        for index in 1..=MAX_REMEMBERED_SELECTIONS {
+            remember_delivered_selection(
+                &format!("{tag}-{index}"),
+                &sample_effective_selection(),
+                grade,
+                None,
+            );
+        }
+        let guard = DELIVERED_SELECTIONS.lock().expect("lock");
+        let table = guard.as_ref().expect("table");
+        assert!(table.by_session.len() <= MAX_REMEMBERED_SELECTIONS);
+        assert_eq!(table.by_session.len(), table.order.len());
+        assert!(
+            !table.by_session.contains_key(&first),
+            "the oldest entry is evicted, not the newest",
+        );
+    }
+
+    /// A minimal delivered selection; only `height` matters to these tests.
+    fn sample_effective_selection() -> crate::playback_control::EffectiveSelection {
+        crate::playback_control::EffectiveSelection {
+            height: 1080,
+            quality_auto: false,
+            codec: "server_selected".to_owned(),
+            dynamic_range: Some("sdr".to_owned()),
+            audio_track: None,
+            audio_offset_ms: 0,
+            subtitle_burn: None,
+        }
+    }
+
     /// A fixed clock for the plan-review tests. `review_client_plan` reads it
     /// to decide which of the client's learned limits still apply, so a test
     /// on the real clock would rot the moment a fixture aged out.
@@ -11016,6 +11250,14 @@ mod tests {
                     let now = live.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     peak_live.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
                     let _live = LiveProducer(live);
+                    // The partial write happens BEFORE the park, so a producer
+                    // that is superseded has a temp file on disk when it dies.
+                    // A real ffmpeg is the same shape — it is writing while it
+                    // runs — and without it "an abort unlinks its own temp
+                    // file" would be a claim about a file that never existed.
+                    tokio::fs::write(&tmp, b"WEBVTT\n\n")
+                        .await
+                        .map_err(|error| error.to_string())?;
                     started.add_permits(1);
                     // A superseded producer is dropped exactly here, which is
                     // what makes `live` fall again without this body ever
@@ -11631,18 +11873,35 @@ mod tests {
             // Nothing was left half-written. An abort unlinks its own temp
             // file and only its own temp file, so inverting that unlink to the
             // cache name — the one way a cancellation could reach a published
-            // sidecar — shows up here as a stray `.tmp-` entry.
-            let mut entries = tokio::fs::read_dir(&fixture.state.subs_dir)
-                .await
-                .expect("subtitle cache directory");
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                assert!(
-                    !name.starts_with(".tmp-"),
-                    "an abandoned window left {name} behind"
-                );
-            }
+            // sidecar — shows up here as a `.tmp-` entry that never goes away.
+            //
+            // Waited for rather than sampled once: the survivor's publication is
+            // what proved the gate opened, and `read_cached_window` starts
+            // answering at the atomic write, one unlink before that producer is
+            // finished. Sampling on that edge measures how fast the runner is.
+            // The wait still fails on the defect, because a temp file nothing
+            // will ever unlink outlasts any timeout.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let mut stray = None;
+                    let mut entries = tokio::fs::read_dir(&fixture.state.subs_dir)
+                        .await
+                        .expect("subtitle cache directory");
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        if name.starts_with(".tmp-") {
+                            stray = Some(name);
+                            break;
+                        }
+                    }
+                    match stray {
+                        None => return,
+                        Some(_) => tokio::task::yield_now().await,
+                    }
+                }
+            })
+            .await
+            .expect("every abandoned window unlinked its own temp file");
 
             // Release the whole-track producer last: publishing it prunes the
             // matching windows, which would erase the evidence above.

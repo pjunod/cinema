@@ -10426,6 +10426,35 @@ fn platform_index(platform: ClientPlatform) -> usize {
     }
 }
 
+/// Which seam a measured selection change arrived on.
+///
+/// Two, because they are not equally common and folding them would hide that.
+/// A viewer's quality change on Apple arrives as `Replacement` — see
+/// `DELIVERED_SELECTIONS` in `hls.rs` — and `InSession` is what the shadow was
+/// originally built to watch, which on this fleet is nearly nothing.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreparationSeam {
+    InSession,
+    Replacement,
+}
+
+/// Selection changes seen, by the seam they arrived on.
+///
+/// The decision counters' denominator, split so an operator can tell a fleet
+/// that never changes quality from one whose changes the server never noticed.
+static PREPARATION_OBSERVATIONS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Count one measured selection change against the seam it came in on.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_preparation_observation(seam: PreparationSeam) {
+    let index = match seam {
+        PreparationSeam::InSession => 0,
+        PreparationSeam::Replacement => 1,
+    };
+    PREPARATION_OBSERVATIONS[index].fetch_add(1, Ordering::Relaxed);
+}
+
 /// Record what M6 would have done, without doing it.
 ///
 /// Called only when the actor says the selection moved, so the denominator is
@@ -10623,6 +10652,16 @@ pub(crate) fn prometheus() -> String {
                 }
             }
         }
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_observations_total Selection changes measured, by the seam they arrived on.\n\
+         # TYPE plurx_playback_preparation_observations_total counter\n",
+    );
+    for (index, seam) in ["in_session", "replacement"].iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_preparation_observations_total{{seam=\"{seam}\"}} {}\n",
+            PREPARATION_OBSERVATIONS[index].load(Ordering::Relaxed)
+        ));
     }
     output.push_str(
         "# HELP plurx_playback_control_holds_total Holds sent to a client, by the reason production is not advancing.\n\
