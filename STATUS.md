@@ -41,6 +41,11 @@ listeners have been selected, preventing OS port recycling between fixtures.
       the matching `ffmpeg-6` capability on self-hosted runners. Operations
       contracts and the complete local Rust gate (1560 passed, 0 failed, 3
       ignored) cover that prerequisite.
+- [x] Integrate #820 and #822 by rebasing cleanly onto current `main`
+      `c52a0f49`; refresh every SHA-bound mapping to its new ancestor. The
+      intervening changes are confined to M6 playback-selection telemetry and
+      its handoff; operations pass 156/156 and ownership inventories pass
+      11/11 on the combined tree.
 - [ ] Push the re-reviewed exact head to #794, require its full GitHub
       qualification and promotion receipt, merge it, close partial duplicate
       #782 with a cross-link, and verify `main` after the merge.
