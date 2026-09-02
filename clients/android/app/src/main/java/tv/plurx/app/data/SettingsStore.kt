@@ -46,6 +46,7 @@ class SettingsStore(private val context: Context) {
         val POSTER_SIZE = stringPreferencesKey("poster_size")
         val HOME_GROUPING = stringPreferencesKey("home_grouping")
         val PLAYBACK_QUALITY = stringPreferencesKey("playback_quality")
+        val SUBTITLE_READINESS = stringPreferencesKey("subtitle_readiness")
         val AUTO_SKIP = booleanPreferencesKey("auto_skip")
         val AUTOPLAY_NEXT = booleanPreferencesKey("autoplay_next")
         val OFFLINE_QUALITY = stringPreferencesKey("offline_quality")
@@ -67,6 +68,7 @@ class SettingsStore(private val context: Context) {
                 posterSize = PosterSize.fromStorage(p[Keys.POSTER_SIZE]),
                 homeGrouping = HomeGrouping.fromStorage(p[Keys.HOME_GROUPING]),
                 playbackQuality = PlaybackQuality.fromStorage(p[Keys.PLAYBACK_QUALITY]),
+                subtitleReadiness = SubtitleReadiness.fromStorage(p[Keys.SUBTITLE_READINESS]),
                 autoSkip = p[Keys.AUTO_SKIP] ?: false,
                 autoplayNext = p[Keys.AUTOPLAY_NEXT] ?: true,
                 offlineQuality = OfflineQuality.fromStorage(p[Keys.OFFLINE_QUALITY]),
@@ -149,6 +151,7 @@ class SettingsStore(private val context: Context) {
             p[Keys.POSTER_SIZE] = value.posterSize.storageValue
             p[Keys.HOME_GROUPING] = value.homeGrouping.storageValue
             p[Keys.PLAYBACK_QUALITY] = value.playbackQuality.storageValue
+            p[Keys.SUBTITLE_READINESS] = value.subtitleReadiness.storageValue
             p[Keys.AUTO_SKIP] = value.autoSkip
             p[Keys.AUTOPLAY_NEXT] = value.autoplayNext
             p[Keys.OFFLINE_QUALITY] = value.offlineQuality.storageValue

@@ -65,6 +65,32 @@ struct MarkerOfferLedger {
     }
 }
 
+/// One automatic seek per marker per playback — the web client's `m._auto`
+/// flag and Android's `lastAutoSkipped`, as a value the controller resets in
+/// `start`. Scoped to the playback rather than to the attached item on
+/// purpose: the skip's own seek can reopen the stream and land a tolerance
+/// short of the marker's end, and a per-item ledger would fire again there.
+/// A viewer who seeks back into a skipped region has undone the skip and is
+/// not skipped a second time.
+///
+/// Only the preference and `Marker.isAutoSkipEligible` decide; a preview or
+/// an estimate keeps its button and is never entered here.
+struct MarkerAutoSkipLedger {
+    private var skipped: Set<String> = []
+
+    /// Whether an automatic skip is *possible* for this marker — the button
+    /// is withheld exactly when this is true, so it never flashes for the
+    /// half-second before the seek.
+    static func isAutomatic(_ marker: Marker, autoSkip: Bool) -> Bool {
+        autoSkip && marker.isAutoSkipEligible
+    }
+
+    mutating func shouldSkip(_ marker: Marker, autoSkip: Bool) -> Bool {
+        guard Self.isAutomatic(marker, autoSkip: autoSkip) else { return false }
+        return skipped.insert("\(marker.kind):\(marker.startMs)").inserted
+    }
+}
+
 /// A repeated end notification at one early media boundary is a terminal
 /// playback failure even though AVPlayer reports no NSError. Give it its own
 /// event so server logs do not mislabel a playlist/timestamp failure as a
@@ -1487,6 +1513,11 @@ final class PlayerController: ObservableObject {
     /// stream rebuilt under them mid-film. The choice a title started with is
     /// the choice it finishes with.
     private var subtitleReadiness: SubtitleReadiness = .onDemand
+    /// Read once, in `start`, for the same reason: the Settings preference is
+    /// the rung a title *starts* on. It shapes the `/decision` request and
+    /// resolves to `selectedHeight` once the ladder is known; the player's
+    /// own quality menu owns every change after that.
+    private var startingQuality: PlaybackQuality = .auto
     /// Sticky for this playback. Once a native text track has been asked for —
     /// by automatic selection at cold start, or by the viewer — the stream keeps
     /// its subtitle renditions, including after subtitles are turned off again:
@@ -1554,6 +1585,7 @@ final class PlayerController: ObservableObject {
     private var playbackAttemptId = UUID().uuidString
     private var lastMarkerSkipEndMs: Int?
     private var markerOfferLedger = MarkerOfferLedger()
+    private var markerAutoSkipLedger = MarkerAutoSkipLedger()
     private var pgsOverlayTrackIndex: Int?
     private var pgsOverlayManifest: PGSOverlayManifest?
     private var pgsOverlayPrepareTask: Task<Void, Never>?
@@ -1574,6 +1606,17 @@ final class PlayerController: ObservableObject {
     var qualityRungs: [QualityRung] { decision?.ladder ?? [] }
     var activeMarker: Marker? {
         decision?.markers?.first { currentMs >= $0.startMs && currentMs < $0.endMs }
+    }
+
+    /// The marker whose button belongs on screen: the active one, unless the
+    /// Skip preference is about to take it — the Android player hides the
+    /// button on the same condition. Previews and estimates are never
+    /// automatic, so their buttons stay whatever the preference says.
+    var offeredMarker: Marker? {
+        guard let marker = activeMarker,
+              !MarkerAutoSkipLedger.isAutomatic(marker, autoSkip: model?.autoSkip ?? false)
+        else { return nil }
+        return marker
     }
 
     var methodLabel: String {
@@ -1775,6 +1818,8 @@ final class PlayerController: ObservableObject {
         finished = false
         playbackFailureTitle = Self.playbackStartFailureTitle
         subtitleReadiness = model.subtitleReadiness
+        startingQuality = model.playbackQuality
+        markerAutoSkipLedger = MarkerAutoSkipLedger()
         wantsNativeSubtitleRenditions = false
         canRetryCurrentItemWithHDRBase = false
         dolbyVisionFallbackAttempted = false
@@ -1852,6 +1897,7 @@ final class PlayerController: ObservableObject {
         usesDirectTimeline = true
         isDirectPlayback = true
         decision = Self.offlineDecision(offline)
+        markerAutoSkipLedger = MarkerAutoSkipLedger()
         wantsPlayback = true
         attachmentRecovery.opened(at: currentMs)
         blackFrameWatchdog.opened()
@@ -2031,6 +2077,37 @@ final class PlayerController: ObservableObject {
         guard let marker = activeMarker else { return }
         reportMarkerEvent(
             "marker_manual_skip",
+            detail: marker.kind,
+            message: "playback marker skipped"
+        )
+        reportMarkerEvent(
+            "marker_prewarm",
+            detail: "miss",
+            message: "skip destination was not prewarmed"
+        )
+        lastMarkerSkipEndMs = marker.endMs
+        seek(toMs: marker.endMs)
+    }
+
+    /// The automatic half of the marker button — the web client's
+    /// `checkMarkers` and the Android auto-skip effect, driven here by the
+    /// position clock. It issues exactly the seek `skipActiveMarker` does,
+    /// once per marker per playback, only while the Skip preference is on
+    /// and only for a marker `Marker.isAutoSkipEligible` admits. The
+    /// preference is read live, like the other two clients: nothing about
+    /// the stream depends on it.
+    ///
+    /// Held while a seek or a stream change is in flight: `currentMs` is
+    /// then an optimistic target rather than a position the film reached,
+    /// and a marker it happens to fall in has not been entered.
+    func autoSkipActiveMarkerIfNeeded() {
+        guard let model, started,
+              !isChangingStream, seekState.pendingMs == nil,
+              let marker = activeMarker,
+              markerAutoSkipLedger.shouldSkip(marker, autoSkip: model.autoSkip)
+        else { return }
+        reportMarkerEvent(
+            "marker_automatic_skip",
             detail: marker.kind,
             message: "playback marker skipped"
         )
@@ -2329,13 +2406,24 @@ final class PlayerController: ObservableObject {
         do {
             let playbackDecision = try await model.playbackDecision(
                 fileId: fileId,
-                selection: prePlaySelection
+                selection: prePlaySelection,
+                quality: startingQuality
             )
             let decision = playbackDecision.decision
             guard started else { return }
             decisionCaps = playbackDecision.caps
             self.decision = decision
             if knownDurationMs <= 0 { knownDurationMs = decision.source?.durationMs ?? 0 }
+            // The standing Quality preference becomes this playback's rung
+            // now that the ladder says which rungs exist for this source. An
+            // explicit `initialHeight` (debug acceptance) is a stronger
+            // answer and is left alone.
+            if selectedHeight == nil {
+                selectedHeight = Self.startingHeight(
+                    for: startingQuality,
+                    ladder: decision.ladder ?? []
+                )
+            }
             // `default` on a decision track is the server's own shared-policy
             // pick, not the muxer's flag (crates/plurxd http/stream.rs
             // overwrites both lists from `select_tracks`) — and for a
@@ -3710,6 +3798,10 @@ final class PlayerController: ObservableObject {
                 if self.seekState.pendingMs == nil && !self.isChangingStream {
                     self.currentMs = self.realPositionMs()
                 }
+                // On the same clock that reveals the marker button, so an
+                // automatic skip happens where a viewer would first see the
+                // button rather than one tick later.
+                self.autoSkipActiveMarkerIfNeeded()
                 self.playbackControlPlayerChanged()
                 if let overlayPosition = PGSOverlayPolicy.periodicRefreshPosition(
                     currentMs: self.currentMs,
@@ -5337,6 +5429,23 @@ final class PlayerController: ObservableObject {
         if let selectedHeight { return selectedHeight }
         guard burnSubtitle != nil, mode != "transcode" else { return nil }
         return sourceHeight
+    }
+
+    /// The `selectedHeight` a title starts on for a standing Quality
+    /// preference, given the ladder `/decision` advertised for this source.
+    ///
+    /// Auto and Original name no rung: Original is a `force=original` verdict
+    /// (never re-encode), and a rung here would turn it into the transcode
+    /// it exists to refuse. A rung is snapped to the tallest advertised one
+    /// that does not exceed it — the ladder never contains an upscale, so a
+    /// 1080p title under "4K" starts at 1080p — and a source with no ladder
+    /// at all falls back to the server's Auto rung.
+    nonisolated static func startingHeight(
+        for quality: PlaybackQuality,
+        ladder: [QualityRung]
+    ) -> Int? {
+        guard let wanted = quality.rungHeight else { return nil }
+        return ladder.map(\.height).filter { $0 <= wanted }.max()
     }
 
     /// The `subtitle_burn` / `subtitle` pair one selection puts on the wire.

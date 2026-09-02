@@ -382,7 +382,8 @@ test("Settings polls only the visible data panel and never overlaps", async () =
   const tick = shippedSource("settingsTick");
   assert.match(tick, /SETTINGS_TICKING\.generation===generation/);
   assert.match(tick, /if\(tab==="libraries"\)\{[\s\S]*api\("\/scan\/status"\)/);
-  assert.match(tick, /if\(tab==="metadata"&&!TRAKT_EDIT\)\{[\s\S]*api\("\/trakt\/status"\)/);
+  assert.match(tick, /if\(tab==="integrations"&&!TRAKT_EDIT\)\{[\s\S]*api\("\/trakt\/status"\)/);
+  assert.match(tick, /!isSettingsRoute\(h\)/, "the tick recognises every settings section route");
   assert.match(tick, /await Promise\.all\(secondary\)/);
   assert.match(tick, /finally\{ if\(SETTINGS_TICKING===owner\) SETTINGS_TICKING=null; \}/);
 
@@ -396,6 +397,7 @@ test("Settings polls only the visible data panel and never overlaps", async () =
     `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,TRAKT=null,
        SETTINGS_DATA={}; const SETTINGS_LOADED=new Set();
      const cacheTrakt=(value)=>{TRAKT=value;SETTINGS_DATA.trakt=value;return value;};
+     ${shippedSource("isSettingsRoute")}
      ${tick}; return {settingsTick,busy:()=>SETTINGS_TICKING};`,
   )(
     document, location, api, () => tab,
@@ -414,10 +416,13 @@ test("Settings polls only the visible data panel and never overlaps", async () =
   await harness.settingsTick();
   assert.equal(requests.length, 1, "static settings tabs do not poll store state");
   tab = "metadata";
-  const metadata = harness.settingsTick();
+  await harness.settingsTick();
+  assert.equal(requests.length, 1, "Metadata holds provider keys only; Trakt polling moved with the card");
+  tab = "integrations";
+  const integrations = harness.settingsTick();
   assert.equal(requests[1].url, "/trakt/status");
   requests[1].resolve({ configured: false });
-  await metadata;
+  await integrations;
   document.visibilityState = "hidden";
   await harness.settingsTick();
   assert.equal(requests.length, 2);
@@ -460,14 +465,15 @@ test("an old Settings tick cannot block or release a newer generation", async ()
     `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,TRAKT=null,
        SETTINGS_DATA={},SETTINGS_LOADED=new Set();
      const cacheTrakt=(value)=>{TRAKT=value;SETTINGS_DATA.trakt=value;return value;};
+     ${shippedSource("isSettingsRoute")}
      ${shippedSource("settingsTick")};
      return {settingsTick,switchGeneration:()=>{PAGE_RENDER_GENERATION=2;},busy:()=>SETTINGS_TICKING};`,
   )(
     document,location,api,()=>tab,()=>true,async()=>{},async()=>{},()=>{},
   );
   const old=harness.settingsTick(1,"libraries");
-  tab="metadata"; harness.switchGeneration();
-  const current=harness.settingsTick(2,"metadata");
+  tab="integrations"; harness.switchGeneration();
+  const current=harness.settingsTick(2,"integrations");
   assert.deepEqual(requests.map(request=>request.url),["/scan/status","/trakt/status"]);
   requests[0].resolve({}); await old;
   assert.equal(harness.busy().generation,2,"old finally cannot release the current tick owner");
@@ -702,12 +708,14 @@ test("Settings loads only the active tab manifest", () => {
   const manifest = new Function(`${declaration[0]}; return SETTINGS_MANIFEST;`)();
   assert.deepEqual(manifest, {
     libraries: { required: ["settings", "libs", "status", "dvConversions"], secondary: [] },
-    metadata: { required: ["settings", "trakt"], secondary: ["libs"] },
+    metadata: { required: ["settings"], secondary: ["libs"] },
     playback: { required: ["settings"], secondary: [] },
     analysis: { required: ["settings", "analysis"], secondary: [] },
+    maintenance: { required: ["settings", "dvConversions"], secondary: [] },
     users: { required: ["users"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
     cluster: { required: ["cluster"], secondary: ["clusterOps"] },
+    integrations: { required: ["settings", "trakt"], secondary: [] },
   });
   const view = shippedSource("viewSettings");
   assert.doesNotMatch(view, /Promise\.all\(\[\s*api/,
@@ -715,10 +723,17 @@ test("Settings loads only the active tab manifest", () => {
   assert.match(view, /layoutChrome\("settings",settingsShell\(tab\)\)/);
   assert.ok(view.indexOf("await loadSettingsTab") < view.indexOf("setPageTimer"),
     "polling starts only after the required tab load, never over the initial read");
+  // A section switch is a route change: the address bar names the section
+  // and render() keeps the cached aggregate because the previous route was
+  // also Settings. Nothing short-circuits around the router any more.
   const switchTab = shippedSource("setSettingsTab");
   assert.match(switchTab, /if\(t===settingsTab\(\)\) return/);
-  assert.match(switchTab, /\+\+PAGE_RENDER_GENERATION/);
-  assert.match(switchTab, /viewSettings\(\+\+PAGE_RENDER_GENERATION,false\)/);
+  assert.match(switchTab, /location\.hash=`#\/settings\/\$\{t\}`/);
+  assert.doesNotMatch(switchTab, /viewSettings\(/);
+  const router = shippedSource("render");
+  assert.match(router, /const stayingInSettings=isSettingsRoute\(h\)&&isSettingsRoute\(LAST_ROUTE\)/);
+  assert.match(router, /else if\(isSettingsRoute\(h\)\) await viewSettings\(generation,!stayingInSettings\)/);
+  assert.match(router, /history\.replaceState\(null,"",h\)/, "a bare #\/settings is rewritten to its section");
   const loadTab = shippedSource("loadSettingsTab");
   assert.match(loadTab, /manifest\.required/);
   assert.match(loadTab, /patchSettingsSecondary/);
@@ -1006,8 +1021,9 @@ test("Dolby Vision settings controls have accessible names", () => {
     "attached guard state is visible before commit, after failure, and at the terminal row");
   const mode = shippedSource("dvModeSelect");
   assert.match(mode, /aria-label="Dolby Vision conversion mode for/);
-  assert.match(mode, /aria-label="Save Dolby Vision conversion mode for/);
   assert.match(mode, /aria-label="Convert Dolby Vision files in/);
+  assert.doesNotMatch(mode, /aria-label="Save Dolby Vision conversion mode for/,
+    "the drawer's one Save owns the mode; the select has no Save button of its own");
   const renderMode = new Function(
     "esc", "dvProgressText",
     `${mode}; return dvModeSelect;`,
@@ -1027,19 +1043,24 @@ test("Dolby Vision settings controls have accessible names", () => {
   assert.match(unavailable, /<option value="auto" selected disabled>Automatic<\/option>/,
     "unavailable conversion modes cannot be newly selected");
 
+  // One Save owns the whole library drawer now (saveLibDrawer writes the DV
+  // mode with identity and schedule), so the mode select has no Save button of
+  // its own — only Convert now, which stays refused without the tools.
   const select = { value: "off", dataset: { dvToolsAvailable: "false" } };
-  const save = { disabled: true };
   const convert = { disabled: true };
   const updateMode = new Function(
     "document",
     `${shippedSource("updateDvModeControls")}; return updateDvModeControls;`,
-  )({ getElementById: (id) => id === "dv-mode-7" ? select : id === "dv-mode-save-7" ? save : convert });
+  )({ getElementById: (id) => id === "dv-mode-7" ? select : id === "dv-convert-7" ? convert : null });
   updateMode(7);
-  assert.equal(save.disabled, false, "Off can be saved while tools are unavailable");
-  assert.equal(convert.disabled, true, "conversion remains refused while tools are unavailable");
+  assert.equal(convert.disabled, true, "conversion remains refused while tools are unavailable and mode is off");
   select.value = "auto";
   updateMode(7);
-  assert.equal(save.disabled, true, "Manual/Automatic cannot be saved without tools");
+  assert.equal(convert.disabled, true, "Automatic without tools still cannot convert");
+  assert.doesNotMatch(shippedSource("dvModeSelect"), /dv-mode-save-/,
+    "the mode select no longer carries its own Save — the drawer's Save owns it");
+  assert.match(shippedSource("saveLibDrawer"), /libraries\/\$\{id\}\/dv-conversion/,
+    "the drawer Save writes the Dolby Vision mode");
   const panel = shippedSource("dvDiskPanel");
   assert.match(panel, /<label class="schedpair" for="dv-parallel">Parallel files/);
   assert.match(panel, /aria-label="Save Dolby Vision conversion settings"/);
@@ -1467,12 +1488,14 @@ test("Settings executes exact required and secondary waves for every tab", async
   assert.ok(endpointDeclaration&&manifestDeclaration);
   const cases={
     libraries:{required:["/settings","/libraries","/scan/status","/dv-conversions"],secondary:[]},
-    metadata:{required:["/settings","/trakt/status"],secondary:["/libraries"]},
+    metadata:{required:["/settings"],secondary:["/libraries"]},
     playback:{required:["/settings"],secondary:[]},
     analysis:{required:["/settings","/analysis/summary"],secondary:[]},
+    maintenance:{required:["/settings","/dv-conversions"],secondary:[]},
     users:{required:["/users"],secondary:[]},
     system:{required:["/system"],secondary:["playback-events","system-log"]},
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","cluster-log"]},
+    integrations:{required:["/settings","/trakt/status"],secondary:[]},
   };
   for(const [tab,expected] of Object.entries(cases)){
     const requests=[], phases=[], logReleases=[];
@@ -1486,6 +1509,7 @@ test("Settings executes exact required and secondary waves for every tab", async
       "setPageFailure","setPagePhase","document",
       `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
          SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+       ${shippedSource("isSettingsRoute")};
        ${shippedSource("settingsCurrent")};
        ${shippedSource("cacheSettings")};
        ${shippedSource("cacheTrakt")};
@@ -1649,6 +1673,7 @@ test("Page phases are generation-fenced, ordered, and wired to measured routes",
   const harness = new Function(
     "document", "location", "performance",
     `let PAGE_RENDER_GENERATION=7;
+     ${shippedSource("isSettingsRoute")};
      ${shippedSource("pagePhaseName")};
      ${shippedSource("setPagePhase")};
      ${shippedSource("setPageFailure")};

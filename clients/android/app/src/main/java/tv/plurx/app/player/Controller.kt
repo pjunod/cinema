@@ -63,6 +63,7 @@ import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.ReopenReason
 import tv.plurx.app.data.AudioTrack
 import tv.plurx.app.data.SubTrack
+import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlaybackSessionStatus
 import tv.plurx.app.data.Session
@@ -221,9 +222,23 @@ class Controller(
             else -> plan.mode
         }
 
+    /**
+     * Settings → Playback → "Subtitle switching", read once per controller so
+     * it applies to the next title started rather than moving a stream that
+     * is already up — the same per-title capture the Apple client makes.
+     */
+    private val subtitleReadiness: SubtitleReadiness = vm.preferences.value.subtitleReadiness
+
+    /** Whether a session could publish any rendition at all for this file. */
+    private val hasNativeSubtitleTrack: Boolean = plan.subtitles.any { it.isNativeHls }
+
+    /** [subtitleRoute] with this playback's fixed inputs filled in. */
+    private fun routeSubtitle(track: SubTrack?, current: SubtitleDelivery): SubtitleRoute =
+        subtitleRoute(track, planMode, current, subtitleReadiness, hasNativeSubtitleTrack)
+
     /** How that selection is being carried — see `SubtitlePolicy.kt`. */
     private var subtitleDelivery: SubtitleDelivery =
-        subtitleRoute(trackFor(selectedSubtitle), planMode, SubtitleDelivery.Plan).delivery
+        routeSubtitle(trackFor(selectedSubtitle), SubtitleDelivery.Plan).delivery
 
     /**
      * The dynamic range the *current* delivery puts on the wire, as the server
@@ -520,7 +535,7 @@ class Controller(
                     compatibilityRemuxUsed = true
                     forceCompatibilityRemux = true
                     subtitleDelivery =
-                        subtitleRoute(trackFor(selectedSubtitle), planMode, subtitleDelivery).delivery
+                        routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
                     restartAt(position, "fallback")
                 }
                 PlaybackErrorAction.RetryAsCompatibilityTranscode -> {
@@ -533,7 +548,7 @@ class Controller(
                     // selection's route with it: an embedded track on a
                     // directly-played file has to become a rendition.
                     subtitleDelivery =
-                        subtitleRoute(trackFor(selectedSubtitle), planMode, subtitleDelivery).delivery
+                        routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
                     restartAt(position, "fallback")
                 }
                 PlaybackErrorAction.Fail -> onError(
@@ -703,7 +718,7 @@ class Controller(
         // Read the position before the state moves: which timeline the player
         // is on depends on the delivery about to change.
         val position = realPosition()
-        val route = subtitleRoute(track, planMode, subtitleDelivery)
+        val route = routeSubtitle(track, subtitleDelivery)
         selectedSubtitle = index
         subtitleDelivery = route.delivery
         pgsOverlay.select(index.takeIf { route.delivery == SubtitleDelivery.BitmapOverlay })
@@ -739,7 +754,7 @@ class Controller(
         // remuxer's progressive stream carries no subtitle tracks — so the
         // current selection has to be re-routed, not just replayed.
         subtitleDelivery =
-            subtitleRoute(trackFor(selectedSubtitle), planMode, subtitleDelivery).delivery
+            routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
         restartAt(position, "audio")
     }
 

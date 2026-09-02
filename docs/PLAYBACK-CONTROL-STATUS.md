@@ -65,7 +65,7 @@ then serve real cues without advertising a 404 interval.
 Source evidence is `cargo test -p plurxd subtitles` (22 passing),
 `cargo test -p plurxd subtitle_readiness` (4 passing), the settings API
 round-trip, the web control/policy suites, Android unit tests and lint, and the
-complete iOS/tvOS simulator suites. Apple build 109 and Android versionCode 65
+complete iOS/tvOS simulator suites. Apple build 110 and Android versionCode 66
 are above the merge target. The dated large-MKV deadline evidence remains in
 [M7-M1-LARGE-MKV-OBSERVATION.md](M7-M1-LARGE-MKV-OBSERVATION.md).
 

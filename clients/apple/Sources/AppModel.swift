@@ -34,6 +34,8 @@ final class AppModel: ObservableObject {
     @Published var appearance: ViewerAppearance
     @Published var posterSize: PosterSize
     @Published var subtitleReadiness: SubtitleReadiness
+    @Published var playbackQuality: PlaybackQuality
+    @Published var autoSkip: Bool
     @Published var offlineQuality: OfflineQuality
     @Published var offlineNetwork: OfflineNetworkPolicy
 
@@ -64,6 +66,8 @@ final class AppModel: ObservableObject {
         appearance = settings.appearance
         posterSize = settings.posterSize
         subtitleReadiness = settings.subtitleReadiness
+        playbackQuality = settings.playbackQuality
+        autoSkip = settings.autoSkip
         libraryGrouping = settings.libraryGrouping
         offlineQuality = settings.offlineQuality
         offlineNetwork = settings.offlineNetwork
@@ -462,6 +466,22 @@ final class AppModel: ObservableObject {
         settings.subtitleReadiness = readiness
     }
 
+    /// Like `subtitleReadiness`, read once by `PlayerController.start`: it is
+    /// the rung a title *starts* on, and the player's own quality menu owns
+    /// every change after that.
+    func setPlaybackQuality(_ quality: PlaybackQuality) {
+        playbackQuality = quality
+        settings.playbackQuality = quality
+    }
+
+    /// Read live by the player on every clock tick, like the Android and web
+    /// clients: nothing about the stream depends on it, so a change mid-film
+    /// is safe to honor immediately.
+    func setAutoSkip(_ enabled: Bool) {
+        autoSkip = enabled
+        settings.autoSkip = enabled
+    }
+
     func setTheme(_ theme: ViewerTheme) {
         // Write before publishing so adaptive UIKit colors resolve the new
         // palette during the SwiftUI redraw triggered by this assignment.
@@ -783,17 +803,24 @@ final class AppModel: ObservableObject {
     /// The player owns the capability facts that produced its decision. Other
     /// detail screens may request decisions concurrently, so an app-global
     /// "latest" document cannot safely identify a later session create.
+    ///
+    /// `quality` is the viewer's standing Quality preference, spelled as the
+    /// request-local `force` override (`PlaybackQuality.decisionForce`). It is
+    /// request-local only — the server never writes a Playback setting from it
+    /// — and `.auto` adds nothing, so an ordinary play keeps its request.
     func playbackDecision(
         fileId: Int,
-        selection: PrePlaySelection = .none
+        selection: PrePlaySelection = .none,
+        quality: PlaybackQuality = .auto
     ) async throws -> (decision: Decision, caps: DeviceCaps) {
         let snapshot = Caps.snapshot()
+        let query = quality.decisionQueryItems + selection.queryItems
         do {
             let decision = try await requireAPI().decision(
                 fileId: fileId,
                 caps: snapshot.document,
-                query: selection.queryItems,
-                legacyQuery: { snapshot.legacyQuery + selection.queryItems }
+                query: query,
+                legacyQuery: { snapshot.legacyQuery + query }
             )
             return (decision, snapshot.document)
         } catch {
