@@ -58,6 +58,31 @@ private struct NativeAPIContractFixture: Decodable {
     let decision: Decision
 }
 
+private struct PlayerInputContractFixture: Decodable {
+    struct PreviewStep: Decodable {
+        let fromRepeat: Int
+        let stepSeconds: Double
+    }
+
+    struct Steps: Decodable {
+        let previewAcceleration: [PreviewStep]
+    }
+
+    let routing: [String: [String: [String: String]]]
+    let steps: Steps
+}
+
+private struct PlaybackInfoFieldsFixture: Decodable {
+    struct Field: Decodable {
+        let id: String
+        let label: String
+        let modes: [String]
+        let availableOn: [String]?
+    }
+
+    let fields: [Field]
+}
+
 private actor ArtworkDownloadProbe {
     private var starts = 0
     private var cancellations = 0
@@ -2266,94 +2291,108 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
-    func testDirectionalSeeksUseShortHorizontalAndLongVerticalSteps() {
-        XCTAssertEqual(PlayerSeekDirection.left.seconds, -10)
-        XCTAssertEqual(PlayerSeekDirection.right.seconds, 10)
-        XCTAssertEqual(PlayerSeekDirection.down.seconds, -30)
-        XCTAssertEqual(PlayerSeekDirection.up.seconds, 30)
+    func testPlayerInputRoutingMatchesTheSharedContract() throws {
+        let fixture = try playerInputContractFixture()
+        for surfaceName in ["ten-foot", "touch"] {
+            let surface = try XCTUnwrap(PlayerInputSurface(rawValue: surfaceName))
+            for (stateName, row) in try XCTUnwrap(fixture.routing[surfaceName]) {
+                let state = try XCTUnwrap(PlayerInputState(rawValue: stateName))
+                for (inputName, expected) in row {
+                    let input = try XCTUnwrap(PlayerContractInput(rawValue: inputName))
+                    XCTAssertEqual(
+                        PlayerInputRouting.route(surface: surface, state: state, input: input).rawValue,
+                        expected,
+                        "\(surfaceName)/\(stateName)/\(inputName)"
+                    )
+                }
+            }
+        }
     }
 
-    func testTVProgressOnlySeeksAfterTheViewerEngagesIt() {
-        XCTAssertEqual(
-            TVPlayerRemoteRouting.moveOutcome(
-                focusedControl: .progress,
-                progressEngaged: false,
-                direction: .left
-            ),
-            .focus(.skipForward)
-        )
-        XCTAssertEqual(
-            TVPlayerRemoteRouting.moveOutcome(
-                focusedControl: .progress,
-                progressEngaged: false,
-                direction: .right,
-                progressRightNeighbor: .audio
-            ),
-            .focus(.audio)
-        )
-        XCTAssertEqual(
-            TVPlayerRemoteRouting.moveOutcome(
-                focusedControl: .progress,
-                progressEngaged: true,
-                direction: .left
-            ),
-            .seek(seconds: -10)
-        )
-        XCTAssertEqual(
-            TVPlayerRemoteRouting.moveOutcome(
-                focusedControl: .progress,
-                progressEngaged: true,
-                direction: .right
-            ),
-            .seek(seconds: 10)
-        )
-    }
-
-    func testTVHiddenControlsKeepDirectionalSeeking() {
-        for direction in PlayerSeekDirection.allCases {
+    func testPreviewAccelerationMatchesTheContractLadder() throws {
+        let fixture = try playerInputContractFixture()
+        for step in fixture.steps.previewAcceleration {
             XCTAssertEqual(
-                TVPlayerRemoteRouting.moveOutcome(
-                    focusedControl: .reveal,
-                    progressEngaged: false,
-                    direction: direction
-                ),
-                .seek(seconds: direction.seconds),
-                "hidden controls should preserve the \(direction) seek"
+                PlayerInputRouting.previewStepSeconds(repeatCount: step.fromRepeat),
+                step.stepSeconds
             )
         }
     }
 
-    func testTVProgressUpAndDownRoutingIsDeliberate() {
-        for engaged in [false, true] {
+    func testTVHiddenControlsRevealWithoutSeeking() {
+        for input in [
+            PlayerContractInput.left, .right, .up, .down,
+        ] {
             XCTAssertEqual(
-                TVPlayerRemoteRouting.moveOutcome(
-                    focusedControl: .progress,
-                    progressEngaged: engaged,
-                    direction: .up,
-                    markerAvailable: false
-                ),
-                .ignore,
-                "up should remain inert when there is no visible control above"
-            )
-            XCTAssertEqual(
-                TVPlayerRemoteRouting.moveOutcome(
-                    focusedControl: .progress,
-                    progressEngaged: engaged,
-                    direction: .up,
-                    markerAvailable: true
-                ),
-                .focus(.marker),
-                "up should reach a visible skip marker above the transport row"
-            )
-            XCTAssertEqual(
-                TVPlayerRemoteRouting.moveOutcome(
-                    focusedControl: .progress,
-                    progressEngaged: engaged,
-                    direction: .down
-                ),
-                .focus(.playPause)
+                PlayerInputRouting.route(surface: .tenFoot, state: .hidden, input: input),
+                .reveal
             )
         }
+    }
+
+    func testPlaybackInfoRowsMatchTheSharedFieldList() throws {
+        let fixtureURL = try XCTUnwrap(
+            Bundle(for: AppleClientTests.self).url(
+                forResource: "playback-info-fields",
+                withExtension: "json"
+            )
+        )
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let fixture = try decoder.decode(
+            PlaybackInfoFieldsFixture.self,
+            from: Data(contentsOf: fixtureURL)
+        )
+        for mode in PlaybackStatsMode.allCases {
+            let expected = fixture.fields.filter { field in
+                field.modes.contains(mode.rawValue)
+                    && (field.availableOn == nil || field.availableOn?.contains("apple") == true)
+            }.map(\.label)
+            XCTAssertEqual(
+                PlaybackStatsView.contractFieldLabels(for: mode),
+                expected,
+                mode.rawValue
+            )
+        }
+    }
+
+    func testPlayerRootCarriesTheRemoteAdapter() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let sourcesDirectory = testsDirectory
+            .appendingPathComponent("../Sources", isDirectory: true)
+            .standardizedFileURL
+        let playerSource = try String(
+            contentsOf: sourcesDirectory.appendingPathComponent("PlayerView.swift"),
+            encoding: .utf8
+        )
+        let adapterSource = try String(
+            contentsOf: sourcesDirectory.appendingPathComponent("PlayerRemoteAdapter.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n            .root"))
+        XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n                            .surface"))
+        XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n            .timeline"))
+        for token in [".onMoveCommand", ".onExitCommand", ".onPlayPauseCommand"] {
+            XCTAssertFalse(playerSource.contains(token), "PlayerView must not own \(token)")
+            XCTAssertTrue(adapterSource.contains(token), "the adapter must own \(token)")
+        }
+        XCTAssertTrue(adapterSource.contains("PlayerInputRouting.route("))
+    }
+
+    private func playerInputContractFixture() throws -> PlayerInputContractFixture {
+        let fixtureURL = try XCTUnwrap(
+            Bundle(for: AppleClientTests.self).url(
+                forResource: "player-input-contract",
+                withExtension: "json"
+            )
+        )
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(
+            PlayerInputContractFixture.self,
+            from: Data(contentsOf: fixtureURL)
+        )
     }
 
     func testLiveSeekTargetClearsOnlyAfterTheAttachedReopen() {
@@ -5658,35 +5697,72 @@ final class AppleClientTests: XCTestCase {
     func testPlayerOverlayAutoHidesWheneverItIsIdle() {
         XCTAssertFalse(PlayerView.shouldAutoHideControls(
             visible: true,
+            playing: true,
             scrubbing: true,
             changingStream: false,
-            optionMenuOpen: false
+            optionMenuOpen: false,
+            failed: false,
+            infoOpen: false,
+            previewPending: false
         ))
         XCTAssertFalse(PlayerView.shouldAutoHideControls(
             visible: true,
+            playing: true,
             scrubbing: false,
             changingStream: false,
-            optionMenuOpen: true
+            optionMenuOpen: true,
+            failed: false,
+            infoOpen: false,
+            previewPending: false
         ))
         XCTAssertTrue(PlayerView.shouldAutoHideControls(
             visible: true,
-            scrubbing: false,
-            changingStream: false,
-            optionMenuOpen: false
-        ))
-        XCTAssertFalse(PlayerView.shouldAutoHideControls(
-            visible: false,
-            scrubbing: false,
-            changingStream: false,
-            optionMenuOpen: false
-        ))
-        XCTAssertFalse(PlayerView.shouldAutoHideControls(
-            visible: true,
+            playing: true,
             scrubbing: false,
             changingStream: false,
             optionMenuOpen: false,
+            failed: false,
+            infoOpen: false,
+            previewPending: false
+        ))
+        XCTAssertFalse(PlayerView.shouldAutoHideControls(
+            visible: false,
+            playing: true,
+            scrubbing: false,
+            changingStream: false,
+            optionMenuOpen: false,
+            failed: false,
+            infoOpen: false,
+            previewPending: false
+        ))
+        XCTAssertFalse(PlayerView.shouldAutoHideControls(
+            visible: true,
+            playing: true,
+            scrubbing: false,
+            changingStream: false,
+            optionMenuOpen: false,
+            failed: false,
+            infoOpen: false,
+            previewPending: false,
             tearingDown: true
         ))
+        for held in [
+            (false, false, false, false),
+            (true, true, false, false),
+            (true, false, true, false),
+            (true, false, false, true),
+        ] {
+            XCTAssertFalse(PlayerView.shouldAutoHideControls(
+                visible: true,
+                playing: held.0,
+                scrubbing: false,
+                changingStream: false,
+                optionMenuOpen: false,
+                failed: held.1,
+                infoOpen: held.2,
+                previewPending: held.3
+            ))
+        }
     }
 
     func testPlaybackInfoStaysVisibleAfterControlsAutoHide() {

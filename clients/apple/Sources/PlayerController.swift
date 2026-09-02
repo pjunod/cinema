@@ -1404,6 +1404,8 @@ final class PlayerController: ObservableObject {
     @Published private(set) var finished = false
     @Published private(set) var pgsOverlayWindow: PGSOverlayWindow?
     @Published private(set) var pgsOverlayStatus: PGSOverlayStatus = .off
+    @Published private(set) var lastTTFFMs: Int?
+    @Published private(set) var playbackControlSummary: String?
 
     private var baseMs = 0
     private var itemId = 0
@@ -1783,6 +1785,8 @@ final class PlayerController: ObservableObject {
         compatibilityFallbackAttempted = false
         forceCompatibilityTranscode = false
         ttffReason = currentMs > 0 ? "resume" : "cold-start"
+        lastTTFFMs = nil
+        playbackControlSummary = nil
         ttffMeasurement.opened(at: currentMs)
         attachmentRecovery.opened(at: startMs)
         blackFrameWatchdog.opened()
@@ -2268,6 +2272,7 @@ final class PlayerController: ObservableObject {
         clearPGSOverlaySelection()
         pgsOverlayItemGeneration &+= 1
         playbackControl.end()
+        playbackControlSummary = nil
         // A verdict survives a reopen because the failure it explains usually
         // arrives after one. It must not survive the title: a confident
         // sentence about the wrong film is worse than a generic one.
@@ -4223,6 +4228,7 @@ final class PlayerController: ObservableObject {
         guard let ms = ttffMeasurement.observe(positionMs: positionMs, playing: playing) else {
             return
         }
+        lastTTFFMs = ms
         let method = clientLogMethod
         let height = sessionStatus?.targetHeight
             ?? selectedHeight
@@ -5624,6 +5630,7 @@ extension PlayerController {
     func beginPlaybackControl(_ hls: HlsStart, origin: String) {
         guard let bootstrap = hls.control, bootstrap.isValid else {
             playbackControl.end()
+            playbackControlSummary = nil
             return
         }
         // The override describes the session that just ended. Carrying it into
@@ -5640,6 +5647,7 @@ extension PlayerController {
             ),
             observe: { [weak self] in self?.playbackControlObservation() }
         )
+        playbackControlSummary = "Owner epoch \(bootstrap.controlEpoch) · reporting"
     }
 
     /// Everything the mapping needs, read from the player once.
