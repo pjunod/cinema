@@ -981,22 +981,38 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
         "the coalesced valid wave must not hit the receiver key-lookup guard"
     );
 
-    // Summary and detail are two views of one physical snapshot. Both reuse
-    // the completed wave immediately; a read well beyond the TTL starts one
-    // new fanout.
-    let after_burst = proxy.request_count();
-    let summary = client
-        .get(format!("{a_base}/api/v1/activity"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .expect("Activity summary request");
+    // Summary and detail are two views of one process-wide peer wave. Expire
+    // the preceding burst deliberately: response shaping and the receiver
+    // metric reads above are outside the peer cache, so their wall-clock cost
+    // must not decide whether this assertion starts from a live snapshot.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    proxy.begin_collection(2);
+    let before_views = proxy.request_count();
+    let (summary, _) = tokio::join!(
+        async {
+            client
+                .get(format!("{a_base}/api/v1/activity"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("Activity summary request")
+        },
+        activity_detail(&client, &a_base, &token),
+    );
+    proxy.end_collection();
     assert_eq!(summary.status(), StatusCode::OK);
-    let _ = activity_detail(&client, &a_base, &token).await;
-    assert_eq!(proxy.request_count(), after_burst);
+    assert_eq!(
+        proxy.request_count() - before_views,
+        1,
+        "summary and detail created more than one physical peer request"
+    );
+
+    // A later view beyond the completed-result TTL starts exactly one new
+    // fanout. The paused-time unit pins the exact boundary itself.
+    let after_views = proxy.request_count();
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     let _ = activity_detail(&client, &a_base, &token).await;
-    assert_eq!(proxy.request_count(), after_burst + 1);
+    assert_eq!(proxy.request_count(), after_views + 1);
 
     // Reproduce the receiver's actual per-sender refusal independently of the
     // fixed sender gate: the proxy duplicates one valid signed request three
