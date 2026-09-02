@@ -62,14 +62,36 @@ private struct PlayerInputContractFixture: Decodable {
     struct PreviewStep: Decodable {
         let fromRepeat: Int
         let stepSeconds: Double
+
+        enum CodingKeys: String, CodingKey {
+            case fromRepeat = "from_repeat"
+            case stepSeconds = "step_seconds"
+        }
     }
 
     struct Steps: Decodable {
         let previewAcceleration: [PreviewStep]
+
+        enum CodingKeys: String, CodingKey {
+            case previewAcceleration = "preview_acceleration"
+        }
     }
 
+    struct Timings: Decodable {
+        let hideAfterMs: Int
+
+        enum CodingKeys: String, CodingKey {
+            case hideAfterMs = "hide_after_ms"
+        }
+    }
+
+    // Spelled out rather than decoded with `.convertFromSnakeCase`: that
+    // strategy rewrites dictionary KEYS too, so the routing table's inputs
+    // arrive as `playPause`/`skipBack`/`tapSurface` and no longer match the
+    // contract's raw values — which is the whole point of this fixture.
     let routing: [String: [String: [String: String]]]
     let steps: Steps
+    let timings: Timings
 }
 
 private struct PlaybackInfoFieldsFixture: Decodable {
@@ -2293,6 +2315,14 @@ final class AppleClientTests: XCTestCase {
 
     func testPlayerInputRoutingMatchesTheSharedContract() throws {
         let fixture = try playerInputContractFixture()
+        let inputNames = Set(
+            try XCTUnwrap(fixture.routing["ten-foot"]?["transport"]).keys
+        )
+        XCTAssertEqual(
+            inputNames,
+            Set(PlayerContractInput.allCases.map(\.rawValue)),
+            "the fixture's input names are the contract's raw values"
+        )
         for surfaceName in ["ten-foot", "touch"] {
             let surface = try XCTUnwrap(PlayerInputSurface(rawValue: surfaceName))
             for (stateName, row) in try XCTUnwrap(fixture.routing[surfaceName]) {
@@ -2307,6 +2337,14 @@ final class AppleClientTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testAutoHideDelayMatchesTheContractTiming() throws {
+        let fixture = try playerInputContractFixture()
+        XCTAssertEqual(
+            PlayerView.controlAutoHideDelayNanoseconds,
+            UInt64(fixture.timings.hideAfterMs) * 1_000_000
+        )
     }
 
     func testPreviewAccelerationMatchesTheContractLadder() throws {
@@ -2381,6 +2419,91 @@ final class AppleClientTests: XCTestCase {
         XCTAssertTrue(adapterSource.contains("PlayerInputRouting.route("))
     }
 
+    func testMiniInfoIsAStripAndDoesNotSuppressTheIdleHide() {
+        // Mini keeps the transport live and is not the `info` state, so
+        // `transport × idle → hide` still applies. Treating it as a modal
+        // meant the chrome never hid while the strip was up, and `back` then
+        // hid the chrome and stranded the strip with no producer to close it.
+        XCTAssertFalse(
+            PlayerView.infoSuppressesAutoHide(showStats: true, statsMode: .mini)
+        )
+        XCTAssertTrue(
+            PlayerView.infoSuppressesAutoHide(showStats: true, statsMode: .standard)
+        )
+        XCTAssertTrue(
+            PlayerView.infoSuppressesAutoHide(showStats: true, statsMode: .debug)
+        )
+        XCTAssertFalse(
+            PlayerView.infoSuppressesAutoHide(showStats: false, statsMode: .standard)
+        )
+    }
+
+    func testRevealDoesNotRestoreFocusToAMarkerThatIsNoLongerOffered() {
+        XCTAssertEqual(
+            PlayerView.revealFocusTarget(remembered: .marker, markerOffered: true),
+            .marker
+        )
+        XCTAssertEqual(
+            PlayerView.revealFocusTarget(remembered: .marker, markerOffered: false),
+            .playPause
+        )
+        XCTAssertEqual(
+            PlayerView.revealFocusTarget(remembered: .subtitles, markerOffered: false),
+            .subtitles
+        )
+    }
+
+    func testTheRevealSurfaceIsNotDrawnOverTheFailureView() throws {
+        // The reveal surface is full-screen, focusable and carries the
+        // remote adapter. Drawn beside the retry buttons it consumed every
+        // direction, and `failed × up/down` is `ignore` — only Menu escaped.
+        let source = try playerViewSource()
+        XCTAssertTrue(source.contains("if !controlsVisible && !controller.failed {"))
+    }
+
+    func testThePhonePanelSwallowsTheTapsThatMissIt() throws {
+        let source = try playerViewSource()
+        let backdropStart = try XCTUnwrap(source.range(of: "private var ledgerBackdrop: some View {"))
+        let backdrop = String(source[backdropStart.lowerBound...].prefix(400))
+        XCTAssertTrue(backdrop.contains("Color.clear.contentShape(Rectangle())"))
+    }
+
+    func testTheLockScreenRoutesThroughTheContract() throws {
+        let source = try playerControllerSource()
+        for input in ["routeRemote(.playPause)", "routeRemote(.skipBack)", "routeRemote(.skipForward)"] {
+            XCTAssertTrue(source.contains(input), "\(input) must go through the reducer")
+        }
+        XCTAssertTrue(try playerViewSource().contains("controller.remoteInput = { input in"))
+    }
+
+    func testTheLedgerHeaderPillReadsServerStateRatherThanStalls() throws {
+        let source = try playerViewSource()
+        XCTAssertTrue(source.contains("private var playbackServerHealth: some View"))
+        XCTAssertFalse(
+            source.contains("healthLabel"),
+            "the stall count is the Stalls row; the pill is server state"
+        )
+    }
+
+    private func playerViewSource() throws -> String {
+        try sharedClientSource("PlayerView.swift")
+    }
+
+    private func playerControllerSource() throws -> String {
+        try sharedClientSource("PlayerController.swift")
+    }
+
+    private func sharedClientSource(_ name: String) throws -> String {
+        let sourcesDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../Sources", isDirectory: true)
+            .standardizedFileURL
+        return try String(
+            contentsOf: sourcesDirectory.appendingPathComponent(name),
+            encoding: .utf8
+        )
+    }
+
     func testPlayerOptionsFollowTheSharedContractOrderAndSettingsFold() throws {
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let playerSource = try String(
@@ -2420,9 +2543,7 @@ final class AppleClientTests: XCTestCase {
                 withExtension: "json"
             )
         )
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(
+        return try JSONDecoder().decode(
             PlayerInputContractFixture.self,
             from: Data(contentsOf: fixtureURL)
         )
@@ -7253,22 +7374,6 @@ final class AppleClientTests: XCTestCase {
                 + (TVPlaybackInfoPresentation.debugEdgeInset * 2),
             1_080,
             "debug diagnostics must remain inside the tvOS canvas"
-        )
-        XCTAssertEqual(
-            TVPlaybackInfoPresentation.healthLabel(stalls: nil),
-            "Measuring"
-        )
-        XCTAssertEqual(
-            TVPlaybackInfoPresentation.healthLabel(stalls: 0),
-            "No stalls"
-        )
-        XCTAssertEqual(
-            TVPlaybackInfoPresentation.healthLabel(stalls: 1),
-            "1 stall"
-        )
-        XCTAssertEqual(
-            TVPlaybackInfoPresentation.healthLabel(stalls: 3),
-            "3 stalls"
         )
     }
 

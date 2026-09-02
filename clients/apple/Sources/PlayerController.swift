@@ -5651,6 +5651,20 @@ final class PlayerController: ObservableObject {
     }
 
     #if os(iOS)
+    /// Set by the player view while it is on screen. The lock screen and the
+    /// control centre are inputs like any other: without this they were a
+    /// second answer to "what does skip do", and they answered it during a
+    /// pending scrub, where the touch table says `ignore`.
+    var remoteInput: ((PlayerContractInput) -> Bool)?
+
+    private func routeRemote(_ input: PlayerContractInput, otherwise fallback: () -> Void) {
+        if let remoteInput {
+            _ = remoteInput(input)
+        } else {
+            fallback()
+        }
+    }
+
     private func installRemoteCommands() {
         let commands = MPRemoteCommandCenter.shared()
         commands.playCommand.isEnabled = true
@@ -5682,17 +5696,26 @@ final class PlayerController: ObservableObject {
         }))
         remoteTargets.append((commands.togglePlayPauseCommand,
                               commands.togglePlayPauseCommand.addTarget { [weak self] _ in
-            Task { @MainActor in self?.togglePlayPause() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.routeRemote(.playPause) { self.togglePlayPause() }
+            }
             return .success
         }))
         remoteTargets.append((commands.skipBackwardCommand,
                               commands.skipBackwardCommand.addTarget { [weak self] _ in
-            Task { @MainActor in self?.skip(seconds: -10) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.routeRemote(.skipBack) { self.skip(seconds: -10) }
+            }
             return .success
         }))
         remoteTargets.append((commands.skipForwardCommand,
                               commands.skipForwardCommand.addTarget { [weak self] _ in
-            Task { @MainActor in self?.skip(seconds: 10) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.routeRemote(.skipForward) { self.skip(seconds: 10) }
+            }
             return .success
         }))
         remoteTargets.append((commands.changePlaybackPositionCommand,
