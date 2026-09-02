@@ -320,7 +320,50 @@ Two ways out, and the choice is the slice's first decision:
    the answers to come from the session's own request rather than from a
    caller's argument.
 
-Whichever is chosen, the test that proves it is the same: **a converting
+**Ruled: build the candidate as a `SessionRequest`** (option 1). Decided
+2026-09-02 under Paul's standing authority to decide when he is not here, and
+recorded rather than left open.
+
+The argument that looked like a cost — *the exchange stops sharing the whole of
+`create`'s path* — does not survive inspection. Ask what sharing actually buys.
+`resolve_plan` does four things, and only one of them is knowledge a candidate
+lacks:
+
+| step | does a candidate need it? |
+|---|---|
+| `review_client_plan` | **no** — a candidate carries the session's existing plan answers; a selection does not re-review |
+| the height resolution | **yes**, and only this — it needs the store, the ladder ceiling and the network prior |
+| `into_request` | **no** — it turns a *wire body* into a request, and a candidate does not come from the wire |
+| `apply_plan_review` | **no** — nothing to apply |
+
+So the shared surface worth protecting is the height resolution, and it is
+protectable on its own: lift it out of `resolve_plan` as `resolve_height` and
+have both callers use it. Everything `into_request` would contribute is
+information the candidate already has more accurately, in the request the
+session is actually running.
+
+Option 2 buys the appearance of a shared path and pays for it by round-tripping
+through a type that provably loses a field — and then needs the lost field
+handed back alongside, which is the seam #809's review closed. A shape that has
+to be repaired at every call site is the wrong shape.
+
+**What this makes the next slice.** Not "map a selection to a create body", but:
+
+1. lift `resolve_height` out of `resolve_plan`, both callers using it;
+2. `fn candidate_request(current: &SessionRequest, selection: &ClientSelection,
+   height: i64) -> SessionRequest` — edit the fields the selection names, leave
+   the rest;
+3. the test below.
+
+**Expect (2) to be the hard part, and expect it to be policy rather than
+mapping.** A quality change on a `Copy` session is the case to think about
+first: a copy has no height, so honouring a rung means becoming a transcode —
+which is a `DeliveryMethod` crossing and refused anyway, but the candidate has
+to *say* so rather than silently keep copying. Each branch like that is a
+decision; write them down as they are made, the way this file writes down the
+ones before it.
+
+Whichever is built, the test that proves it is the same: **a converting
 Profile 7 session, with the client changing nothing, must read `Unchanged`.**
 Write that test first; it fails on both the obvious implementations.
 
