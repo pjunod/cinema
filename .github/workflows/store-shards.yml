@@ -51,22 +51,23 @@ jobs:
       # dropping tests: `validation/store_shard.py` rejects a receipt set whose
       # size or index set disagrees with the count the receipts declare.
       #
-      # Two, because the fleet carries two `ci-store` slots and one physical
-      # host may hold only one. Two is also the floor `validation/
-      # store_shard.py` enforces — `assigned_tests` and the aggregate validator
-      # both reject a count below two — so this is the smallest legal fan-out,
-      # not a degenerate one. A third shard is this line plus one matrix index,
-      # once `gha-nuc2-android-01` has a writable Cargo home; that runner's
-      # entry in `validation/runner-fleet.toml` records why it is not a slot.
-      SHARD_COUNT: "2"
+      # Three, because the fleet carries three `ci-store` slots and one physical
+      # host may hold only one — so this number is bounded by eligible hosts
+      # rather than chosen, and `make operations-check` fails when it exceeds
+      # the slots `validation/runner-fleet.toml` records. The floor is two,
+      # enforced by `validation/store_shard.py` in `assigned_tests` and again
+      # in the aggregate validator, so the count can track the fleet up and
+      # down without ever collapsing into a single unsharded job wearing the
+      # sharded lane's name.
+      SHARD_COUNT: "3"
     strategy:
       fail-fast: false
       matrix:
-        # One shard per `ci-store` slot: `nuc1` and `rogg16`, one per physical
-        # non-voter host. Keep this list and SHARD_COUNT in step —
+        # One shard per `ci-store` slot: `nuc1`, `rogg16` and `nuc2`, one per
+        # physical non-voter host. Keep this list and SHARD_COUNT in step —
         # `make operations-check` fails when they disagree, and when the count
         # exceeds the number of slots the fleet actually carries.
-        shard_index: [0, 1]
+        shard_index: [0, 1, 2]
     steps:
       - uses: actions/checkout@v4
         with:

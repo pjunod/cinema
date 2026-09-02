@@ -60,8 +60,10 @@ voter_hosts = ["m6", "nuc3", "nuc4", "nynuc"]
 # `ci-store` slots rather than chosen freely: a surplus shard cannot be given a
 # second runner on a host that already holds one, so it serialises behind a
 # busy runner and buys a more complicated failure instead of wall time. The
-# fleet carries two slots today, on `nuc1` and `rogg16`. That is an eligibility
-# fact, not a capacity decision — see `gha-nuc2-android-01` below.
+# fleet carries three slots today, on `nuc1`, `rogg16` and `nuc2` — one per
+# physical non-voter host. That number is an eligibility fact rather than a
+# capacity decision: a runner counts as a slot only once the Store lane has
+# passed on it. See `gha-nuc2-android-01` below for what that cost to learn.
 host_exclusive_labels = ["ci-store", "ci-topology"]
 
 # --- nuc1: Incus guest host, non-voter -------------------------------------
@@ -73,10 +75,11 @@ arch = "X64"
 labels = ["lab", "incus", "ubuntu-24.04", "ci-store"]
 
 # --- nuc2: Incus guest host, non-voter --------------------------------------
-# Not a `ci-store` slot, and not because nuc2 is busy. It carried the label for
-# part of 2026-09-02 as a third shard slot and failed `replicated Store
-# contracts (legacy)` three times in a row — runs 2840, 2842 and 2845 — about
-# twelve seconds into each job, before compiling anything:
+# A `ci-store` slot, and the entry to read before adding or removing one.
+#
+# It carried the label earlier on 2026-09-02 and failed `replicated Store
+# contracts (legacy)` three runs in a row — 2840, 2842 and 2845 — about twelve
+# seconds into each job, before compiling anything:
 #
 #   warning: failed to write cache, path: /home/runner/.cargo/registry/index/
 #   index.crates.io-1949cf8c6b5b557f/.cache/as/yn/async-trait,
@@ -84,18 +87,29 @@ labels = ["lab", "incus", "ubuntu-24.04", "ci-store"]
 #   Permission denied (os error 13)
 #   ##[error]Process completed with exit code 2.
 #
-# This guest has no runner-writable Cargo home, so `cargo test` dies on the
-# registry index. `gha-nuc1-general-01` (run 2838) and `gha-rogg16-general-02`
-# (run 2837) ran the same lane green in the same hour, so it is the host and
-# not the lane. Do not re-add `ci-store` here until that Cargo home is writable
-# and this runner passes the lane: adding the label back without fixing the
-# host buys three failed jobs, not a third shard.
+# The label was revoked and the shard count dropped to two. The cause was on
+# the host and not in the lane: `/home/runner/.cargo` was owned `root:root` and
+# `/home/runner/.cargo/registry` did not exist at all, because the runner role
+# seeds only the `bin` subdirectory and leaves the root-owned parent alone. Both
+# are now `runner:runner`, matching the actions-runner service user (uid 1000,
+# gid 1001), and a write probe as that user succeeds.
+#
+# The label came back only after the lane itself was proved here: run 2840
+# attempt 3 was re-run while both other slots were busy, so it had to land on
+# this runner, and it passed in 27.9 minutes — in family with
+# `gha-nuc1-general-01` (25.7-29.1 min) and `gha-rogg16-general-02` (21.8-22.7
+# min) on the same lane.
+#
+# That sequence is the standing rule: **a runner is not a slot until the lane
+# passes on it.** An ownership fix, a successful write probe and a convincing
+# explanation are not together evidence that a 27-minute three-voter hiqlite
+# test will run here. One green run of that test is.
 [[runners]]
 name = "gha-nuc2-android-01"
 host = "nuc2"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "android-kvm"]
+labels = ["lab", "incus", "ubuntu-24.04", "android-kvm", "ci-store"]
 
 [[runners]]
 name = "gha-nuc2-android-02"

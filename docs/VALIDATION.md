@@ -248,15 +248,20 @@ physical host may carry either, and neither may sit on a production plurx
 voter. Two heavy replicated-cluster runs on one loaded host is the quorum flake
 that produced the artwork-fence failures.
 
-Today that means **two** `ci-store` slots — `gha-nuc1-general-01` on `nuc1` and
-`gha-rogg16-general-02` on `rogg16` — and one `ci-topology` slot on
-`gha-rogg16-general-01`.
+Today that means three `ci-store` slots — `gha-nuc1-general-01` on `nuc1`,
+`gha-rogg16-general-02` on `rogg16` and `gha-nuc2-android-01` on `nuc2` — and
+one `ci-topology` slot on `gha-rogg16-general-01`.
 
-Two is an eligibility fact, not a capacity decision.
-`gha-nuc2-android-01` carried `ci-store` as a third slot for part of
-2026-09-02 and failed `replicated Store contracts (legacy)` three times in a
-row — runs 2840, 2842 and 2845 — about twelve seconds into each job, before
-compiling anything:
+Because one host may hold only one slot, the Store shard count is *bounded by*
+the number of slots rather than chosen: a surplus shard has no runner of its
+own to take and serialises behind a busy one. `make operations-check` enforces
+that bound in both directions, which is worth one worked example.
+
+#### A runner is not a slot until the lane passes on it
+
+`gha-nuc2-android-01` was made the third slot on 2026-09-02 and immediately
+failed `replicated Store contracts (legacy)` three runs in a row — 2840, 2842
+and 2845 — about twelve seconds into each job, before compiling anything:
 
 ```text
 warning: failed to write cache, path: /home/runner/.cargo/registry/index/
@@ -266,19 +271,27 @@ Permission denied (os error 13)
 ##[error]Process completed with exit code 2.
 ```
 
-That Android guest has no runner-writable Cargo home, so `cargo test` dies on
-the registry index. `gha-nuc1-general-01` (run 2838) and
-`gha-rogg16-general-02` (run 2837) ran the same lane green in the same hour, so
-it is the host and not the lane, and the label was revoked. **Do not re-add
-`ci-store` to that runner until its Cargo home is writable and it passes the
-lane** — adding the label back without fixing the host buys three failed jobs,
-not a third shard.
+`gha-nuc1-general-01` (run 2838) and `gha-rogg16-general-02` (run 2837) ran the
+same lane green in the same hour, so it was the host and not the lane. The
+label was revoked, and the shard count had to drop with it — the roster edit
+alone, with the workflow still asking for three shards, failed preflight with
+`2 not greater than or equal to 3: the Store shard count exceeds the number of
+ci-store slots`. That is the bound working: a fleet that loses a slot cannot
+leave an unschedulable shard behind.
 
-Because one host may hold only one slot, the Store shard count is *bounded by*
-the number of slots rather than chosen: a surplus shard has no runner of its
-own to take and serialises behind a busy one. `make operations-check` enforces
-that bound, which is what caught the three-shard matrix the moment the fleet
-dropped to two slots.
+The cause was on the guest: `/home/runner/.cargo` was owned `root:root` and
+`/home/runner/.cargo/registry` did not exist, because the runner role seeds
+only the `bin` subdirectory and leaves the root-owned parent alone. Both are now
+`runner:runner`, matching the actions-runner service user (uid 1000, gid 1001).
+
+The label came back only after the lane was proved **on that exact runner**:
+run 2840 attempt 3 was re-run while both other slots were busy so it had to
+land there, and it passed in 27.9 minutes — in family with
+`gha-nuc1-general-01` (25.7–29.1 min) and `gha-rogg16-general-02` (21.8–22.7
+min). An ownership fix, a successful write probe and a convincing explanation
+are not together evidence that a 27-minute three-voter hiqlite test will run on
+a machine. One green run of that test is. **Add a `ci-store` label, then prove
+it, then raise `SHARD_COUNT` — in that order.**
 
 ### Execution mode — fail-safe rollout without renaming the gate
 
@@ -301,12 +314,21 @@ scripts/ci-execution-mode accelerated
 ```
 
 Changing the mode affects only new runs. The Store lane fans out to one shard
-per `ci-store` slot — two today — and every shard selects the same label set the
-legacy lane and the weekly backstop already use, so the sharded path schedules
-on verified non-voter hosts rather than waiting on a label nobody has assigned.
-Two is also the floor `validation/store_shard.py` enforces, so the smallest
-eligible fleet still shards; a third shard is one `SHARD_COUNT` line and one
-matrix index once a third host qualifies. The weekly `replicated Store backstop` workflow is
+per `ci-store` slot — three today — and every shard selects the same label set
+the legacy lane and the weekly backstop already use, so the sharded path
+schedules on verified non-voter hosts rather than waiting on a label nobody has
+assigned. Two is the floor `validation/store_shard.py` enforces, so the count
+tracks the fleet up and down without ever collapsing into a single unsharded
+job wearing the sharded lane's name.
+
+Three shards on three slots trades throughput for latency, and it is worth
+being clear which. One pull request's Store lane should finish in a fraction of
+its present 22–29 minutes, but it occupies the whole `ci-store` pool while it
+does; with several pull requests in flight the shards interleave as slots free
+and aggregate throughput is roughly unchanged. The sharded lane has never run,
+so the per-shard figure is unmeasured — and each shard builds its own test
+binary, a fixed cost sharding does not divide. Rehearse with
+`workflow_dispatch` and read the real numbers before flipping the variable. The weekly `replicated Store backstop` workflow is
 unsharded in every mode and remains the assignment-independent safety net.
 
 Prove the sharded path before flipping the variable, not after. `replicated
