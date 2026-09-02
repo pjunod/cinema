@@ -70,10 +70,24 @@ test("every section is a route, grouped in the rail's order", () => {
     "libraries", "metadata", "playback", "analysis",
     "maintenance", "users", "system", "cluster", "integrations",
   ]);
+  const dispatch = {
+    metadata: "metadataPanel(d.settings)",
+    playback: "playbackPanel(d.settings)",
+    analysis: "analysisSettingsPanel(d.settings,d.analysis)",
+    maintenance: "maintenancePanel(d.settings,d.dvConversions)",
+    users: "usersPanel(d.users)",
+    system: "systemPanel(d.sys,d.playbackEvents)",
+    cluster: "clusterPanel(d)",
+    integrations: "integrationsPanel(d.settings,d.trakt)",
+  };
+  const panel = shippedSource("settingsPanel");
   for (const [id] of r.SET_TABS) {
     assert.equal(r.settingsRouteTab(`#/settings/${id}`), id);
-    assert.ok(SHIPPED_UI.includes(`if(tab==="${id}")`) || id === "libraries",
-      `${id} is dispatched by settingsPanel`);
+    if (id === "libraries")
+      assert.match(panel, /return librariesPanel\(d\.libs,d\.status,d\.settings,d\.dvConversions\)/, "libraries is the fall-through panel");
+    else
+      assert.ok(panel.includes(`if(tab==="${id}") `) && panel.includes(dispatch[id]),
+        `${id} routes to ${dispatch[id]}`);
   }
   assert.equal(r.settingsRouteTab("#/settings/nothere"), null, "an unknown section is not a route");
   assert.equal(r.settingsRouteTab("#/settings/"), null);
@@ -244,15 +258,26 @@ test("a library row reports; its drawer configures; only one drawer is open", ()
   const home = { id: 2, name: "Home", kind: "home", paths: ["/h"] };
   const closed = build(null)(movies, {}, {});
   assert.doesNotMatch(closed, /sched-scan-1|<dv\/>|setdrawer/, "a closed row carries no configuration controls");
-  assert.match(closed, /aria-expanded="false" aria-controls="libdrawer-1"/);
+  assert.match(closed, /aria-expanded="false" onclick="openLibDrawer\(1\)"/);
+  assert.doesNotMatch(closed, /aria-controls/, "a closed row does not point aria-controls at a drawer that is not in the DOM");
   const open = build(1)(movies, {}, {});
   assert.match(open, /<tr id="librow-1" class="setopen">/);
+  assert.match(open, /aria-expanded="true" aria-controls="libdrawer-1"/, "an open row points aria-controls at its live drawer");
   assert.match(open, /<tr class="setdrawer" id="libdrawer-1">/);
   for (const id of ["eln-1", "elk-1", "elp-1", "sched-scan-1", "sched-ref-1"]) assert.match(open, new RegExp(`id="${id}"`));
   assert.match(open, /<dv\/>/, "the Dolby Vision mode lives in the drawer");
   assert.match(open, /saveLibDrawer\(1,this\)/);
   assert.match(open, /delLib\(1\)/);
   assert.doesNotMatch(build(1)(home, {}, {}), /setdrawer/, "another row's drawer stays shut");
+  // The Configure toggle opens a row, closes it on a second click, and never
+  // stacks two open drawers.
+  const toggle = new Function(
+    "renderSettings", "document",
+    `let LIB_DRAWER=null; ${shippedSource("openLibDrawer")} return {open:(id)=>openLibDrawer(id),get:()=>LIB_DRAWER};`,
+  )(() => {}, { querySelector: () => null });
+  toggle.open(1); assert.equal(toggle.get(), 1, "a row opens");
+  toggle.open(1); assert.equal(toggle.get(), null, "the same row closes");
+  toggle.open(1); toggle.open(2); assert.equal(toggle.get(), 2, "opening another switches, never stacks");
   assert.match(build(null)(home, {}, {}), /disabled title="This kind of library has no metadata provider"/);
   assert.doesNotMatch(build(null)({ id: 3, name: "Anime", kind: "shows", anime: true, paths: [] }, {}, {}), /no metadata provider/,
     "anime has a provider (AniList), so Refresh art stays live");
@@ -261,21 +286,22 @@ test("a library row reports; its drawer configures; only one drawer is open", ()
 test("the drawer's Save writes identity then schedule, and stops on the first refusal", async () => {
   const calls = [];
   let fail = false;
-  const values = { "eln-1": "Movies ", "elk-1": "anime", "elp-1": " /a, /b ,", "sched-scan-1": "60", "sched-ref-1": "10080" };
+  const values = { "eln-1": "Movies ", "elk-1": "anime", "elp-1": " /a, /b ,", "sched-scan-1": "60", "sched-ref-1": "10080", "dv-mode-1": "auto" };
   const err = { textContent: "" };
   const save = new Function(
     "api", "document", "invalidateLibs", "toast", "viewSettings",
     `let LIB_DRAWER=1; ${shippedSource("saveLibDrawer")} return {saveLibDrawer,drawer:()=>LIB_DRAWER};`,
   )(
     async (path, opts) => { calls.push([opts.method, path, opts.body]); if (fail && calls.length === 1) throw new Error("no such path"); return {}; },
-    { getElementById: (id) => (id === "ele-1" ? err : { value: values[id] }) },
+    { getElementById: (id) => (id === "ele-1" ? err : id in values ? { value: values[id] } : null) },
     () => calls.push(["invalidate"]), () => {}, () => calls.push(["view"]),
   );
   const btn = { disabled: false };
   await save.saveLibDrawer(1, btn);
   assert.deepEqual(calls[0], ["PUT", "/libraries/1", { name: "Movies", kind: "shows", paths: ["/a", "/b"], anime: true }]);
   assert.deepEqual(calls[1], ["PUT", "/libraries/1/schedule", { scan_interval_mins: 60, refresh_interval_mins: 10080 }]);
-  assert.deepEqual(calls.slice(2), [["invalidate"], ["view"]]);
+  assert.deepEqual(calls[2], ["PUT", "/libraries/1/dv-conversion", { mode: "auto" }]);
+  assert.deepEqual(calls.slice(3), [["invalidate"], ["view"]]);
   assert.equal(save.drawer(), null, "a successful save closes the drawer");
   calls.length = 0; fail = true;
   await save.saveLibDrawer(1, btn);
@@ -298,7 +324,11 @@ test("password reset is a form with a confirm field, not two prompt() dialogs", 
     { getElementById: (id) => (id === "uerr" ? err : { value: values[id] }) },
     () => {}, () => calls.push(["render"]),
   );
-  values["up2-7"] = "different";
+  values["up-7"] = "short"; values["up2-7"] = "short";
+  await reset.resetPw(7, "guest", { disabled: false });
+  assert.equal(calls.length, 0, "a password under 8 characters writes nothing");
+  assert.match(err.textContent, /at least 8/);
+  values["up-7"] = "hunter2hunter2"; values["up2-7"] = "different";
   await reset.resetPw(7, "guest", { disabled: false });
   assert.equal(calls.length, 0, "a mismatch writes nothing");
   assert.match(err.textContent, /don't match/);

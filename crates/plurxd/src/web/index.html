@@ -751,6 +751,7 @@
   .setfields>div{min-width:0}
   .setfields label{margin:0 0 4px;font-size:11.5px}
   .setfields select,.setfields input{width:auto;min-width:150px}
+  select.every{width:auto;max-width:180px;font-size:13px;padding:6px 9px}
   .setfields input[type=number]{min-width:0;width:110px}
   .setfields .err{flex-basis:100%;margin-top:0}
   .tog{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 0;border-top:1px solid var(--line);font-size:13.5px;color:var(--text);margin:0}
@@ -11929,7 +11930,7 @@ async function savePrecache(btn){
     cacheSettings(await api("/settings",{method:"PUT",body:{
       cache_produce_mins:Number(document.getElementById("cache-produce").value),
       cache_max_gb:Number(document.getElementById("cache-gb").value)}}));
-    toast("Pre-transcoding saved"); renderSettings();
+    toast("Pre-transcoding saved"); setCardSaved(btn);
   }catch(e){ toast(e.message||"Couldn't save"); btn.disabled=false; }
 }
 function dvProgressText(progress){
@@ -11950,17 +11951,14 @@ function dvModeSelect(l,dv){
     <select id="dv-mode-${l.id}" aria-label="Dolby Vision conversion mode for ${esc(l.name)}" aria-describedby="dv-progress-${l.id}" data-dv-tools-available="${unavailable?'false':'true'}" onchange="updateDvModeControls(${l.id})">
       ${[["off","Off"],["manual","Manual"],["auto","Automatic"]].map(([v,label])=>`<option value="${v}"${mode===v?' selected':''}${unavailable&&v!=="off"?' disabled':''}>${label}</option>`).join("")}
     </select></div>
-    <div><label>&nbsp;</label><button class="ghost sm" id="dv-mode-save-${l.id}" aria-label="Save Dolby Vision conversion mode for ${esc(l.name)}" aria-describedby="dv-progress-${l.id}" onclick="saveDvMode(${l.id},this)"${unavailable&&mode!=="off"?' disabled':''}>Save mode</button>
-    <button class="ghost sm" id="dv-convert-${l.id}" aria-label="Convert Dolby Vision files in ${esc(l.name)} now" aria-describedby="dv-progress-${l.id}" onclick="convertDvLibrary(${l.id},this)"${unavailable||mode==="off"?' disabled':''}>Convert now</button></div>
+    <div><label>&nbsp;</label><button class="ghost sm" id="dv-convert-${l.id}" aria-label="Convert Dolby Vision files in ${esc(l.name)} now" aria-describedby="dv-progress-${l.id}" onclick="convertDvLibrary(${l.id},this)"${unavailable||mode==="off"?' disabled':''}>Convert now</button></div>
     <div><label>&nbsp;</label><span class="muted" id="dv-progress-${l.id}" aria-live="polite" style="font-size:12px">${esc(unavailable?`Unavailable: ${reason}`:dvProgressText(dv.progress_by_library&&dv.progress_by_library[String(l.id)]))}</span></div></div>`;
 }
 function updateDvModeControls(id){
   const select=document.getElementById(`dv-mode-${id}`);
   if(!select) return;
   const unavailable=select.dataset.dvToolsAvailable!=="true";
-  const save=document.getElementById(`dv-mode-save-${id}`);
   const convert=document.getElementById(`dv-convert-${id}`);
-  if(save) save.disabled=unavailable&&select.value!=="off";
   if(convert) convert.disabled=unavailable||select.value==="off";
 }
 async function refreshDvConversions(){
@@ -11980,21 +11978,6 @@ function paintDvConversionProgress(snapshot){
   }
   const recovery=document.getElementById("dv-recovery-guards");
   if(recovery) recovery.innerHTML=dvRecoveryGuardsHtml(snapshot);
-}
-async function saveDvMode(id,btn){
-  const mode=document.getElementById(`dv-mode-${id}`).value;
-  btn.disabled=true;
-  try{
-    const saved=await api(`/libraries/${id}/dv-conversion`,{method:"PUT",body:{mode}});
-    const snapshot=SETTINGS_DATA.dvConversions;
-    if(snapshot){
-      snapshot.library_modes=snapshot.library_modes||{};
-      snapshot.library_modes[String(id)]=saved.mode;
-    }
-    toast(mode==="off"?"On-disk conversion disabled":mode==="auto"?"Automatic conversion enabled":"Manual conversion enabled");
-    renderSettings();
-  }catch(e){ toast(e.message||"Couldn't save Dolby Vision mode"); }
-  finally{ btn.disabled=false; }
 }
 function noteDvLibraryQueueResult(id,result){
   const queued=Math.max(0,Number(result&&result.queued||0));
@@ -12081,7 +12064,7 @@ function libRow(l,status,dv){
       <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end;gap:5px">
         <button class="ghost sm" onclick="scanLib(${l.id})">Scan</button>
         <button class="ghost sm" onclick="refreshLib(${l.id})"${provider?"":' disabled title="This kind of library has no metadata provider"'} title="Re-fetch all metadata & artwork (incl. season posters)">Refresh art</button>
-        <button class="ghost sm" aria-expanded="${open?"true":"false"}" aria-controls="libdrawer-${l.id}" onclick="openLibDrawer(${l.id})">Configure ${open?"⌃":"⌄"}</button></div></td></tr>${open?libDrawerHtml(l,dv):""}`;
+        <button class="ghost sm" aria-expanded="${open?"true":"false"}"${open?` aria-controls="libdrawer-${l.id}"`:""} onclick="openLibDrawer(${l.id})">Configure ${open?"⌃":"⌄"}</button></div></td></tr>${open?libDrawerHtml(l,dv):""}`;
 }
 function librariesPanel(libs,status,settings,dv){
   const rows=libs.map(l=>libRow(l,status,dv)).join("")||(LIB_DRAWER==="new"?"":`<tr><td colspan="5" class="muted">No libraries yet.</td></tr>`);
@@ -13408,9 +13391,13 @@ async function saveLibDrawer(id,btn){
   const ref=Number(document.getElementById(`sched-ref-${id}`).value);
   const err=document.getElementById("ele-"+id); if(err) err.textContent="";
   btn.disabled=true;
+  const dvSelect=document.getElementById(`dv-mode-${id}`);
   try{
     await api(`/libraries/${id}`,{method:"PUT",body:{name,kind,paths,anime}});
     await api(`/libraries/${id}/schedule`,{method:"PUT",body:{scan_interval_mins:scan,refresh_interval_mins:ref}});
+    // The Dolby Vision mode is part of the same drawer, so one Save writes it
+    // too — the select is only present when the conversion tools are available.
+    if(dvSelect) await api(`/libraries/${id}/dv-conversion`,{method:"PUT",body:{mode:dvSelect.value}});
     invalidateLibs(); LIB_DRAWER=null; toast("Library saved"); viewSettings();
   }catch(e){ if(err) err.textContent=e.message; btn.disabled=false; }
 }
@@ -13441,14 +13428,27 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         const el=document.getElementById("st-"+id);
         if(el) el.innerHTML=statusText(st,lastScans.get(String(id)));
       }
-      // Conversion progress is deliberately colder than scan status. Refresh
-      // only while durable work is active, and stop spending the extra request
-      // as soon as the next snapshot is terminal.
-      if(dvSnapshotHasActive(SETTINGS_DATA.dvConversions)&&Date.now()>=DV_SETTINGS_POLL_AT){
+      // The per-library conversion line only exists while a row drawer is open;
+      // refresh it there, deliberately colder than scan status, and only while
+      // durable work is active.
+      if(LIB_DRAWER!==null&&dvSnapshotHasActive(SETTINGS_DATA.dvConversions)&&Date.now()>=DV_SETTINGS_POLL_AT){
         try{
           const snapshot=await refreshDvConversions();
           if(!settingsCurrent(generation,tab)) return;
           paintDvConversionProgress(snapshot);
+        }catch(error){ if(error&&error.status===401) throw error; }
+      }
+    }
+    if(tab==="maintenance"){
+      // Dolby Vision on disk — the guard lifecycle and parallel work — lives
+      // here now, so its live refresh does too. Same cold cadence and same
+      // stop-when-terminal rule as the old Libraries branch.
+      if(dvSnapshotHasActive(SETTINGS_DATA.dvConversions)&&Date.now()>=DV_SETTINGS_POLL_AT){
+        try{
+          const snapshot=await refreshDvConversions();
+          if(!settingsCurrent(generation,tab)) return;
+          const guards=document.getElementById("dv-recovery-guards");
+          if(guards) guards.innerHTML=dvRecoveryGuardsHtml(snapshot);
         }catch(error){ if(error&&error.status===401) throw error; }
       }
     }
@@ -13788,7 +13788,7 @@ function userRow(u){
   const open = USER_DRAWER===u.id;
   const created = new Date(u.created_at*1000).toLocaleDateString();
   const role = u.is_admin?`<span class="pill acc">admin</span>`:`<span class="muted">user</span>`;
-  const btns=[`<button class="ghost sm" aria-expanded="${open?"true":"false"}" aria-controls="userdrawer-${u.id}" onclick="openUserDrawer(${u.id})">Reset password</button>`];
+  const btns=[`<button class="ghost sm" aria-expanded="${open?"true":"false"}"${open?` aria-controls="userdrawer-${u.id}"`:""} onclick="openUserDrawer(${u.id})">Reset password</button>`];
   btns.push(`<button class="ghost sm" onclick="setAdmin(${u.id},${u.is_admin?0:1})">${u.is_admin?'Revoke admin':'Make admin'}</button>`);
   if(!me) btns.push(`<button class="ghost sm" onclick='delUser(${u.id},${esc(JSON.stringify(u.username))})'>Delete</button>`);
   return `<tr${open?' class="setopen"':""}><td class="libname"><b>${esc(u.username)}</b>${me?' <span class="muted">(you)</span>':''}</td><td data-label="Role">${role}</td><td class="muted" data-label="Created">${created}</td>

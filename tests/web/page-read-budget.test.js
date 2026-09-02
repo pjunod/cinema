@@ -1021,8 +1021,9 @@ test("Dolby Vision settings controls have accessible names", () => {
     "attached guard state is visible before commit, after failure, and at the terminal row");
   const mode = shippedSource("dvModeSelect");
   assert.match(mode, /aria-label="Dolby Vision conversion mode for/);
-  assert.match(mode, /aria-label="Save Dolby Vision conversion mode for/);
   assert.match(mode, /aria-label="Convert Dolby Vision files in/);
+  assert.doesNotMatch(mode, /aria-label="Save Dolby Vision conversion mode for/,
+    "the drawer's one Save owns the mode; the select has no Save button of its own");
   const renderMode = new Function(
     "esc", "dvProgressText",
     `${mode}; return dvModeSelect;`,
@@ -1042,19 +1043,24 @@ test("Dolby Vision settings controls have accessible names", () => {
   assert.match(unavailable, /<option value="auto" selected disabled>Automatic<\/option>/,
     "unavailable conversion modes cannot be newly selected");
 
+  // One Save owns the whole library drawer now (saveLibDrawer writes the DV
+  // mode with identity and schedule), so the mode select has no Save button of
+  // its own — only Convert now, which stays refused without the tools.
   const select = { value: "off", dataset: { dvToolsAvailable: "false" } };
-  const save = { disabled: true };
   const convert = { disabled: true };
   const updateMode = new Function(
     "document",
     `${shippedSource("updateDvModeControls")}; return updateDvModeControls;`,
-  )({ getElementById: (id) => id === "dv-mode-7" ? select : id === "dv-mode-save-7" ? save : convert });
+  )({ getElementById: (id) => id === "dv-mode-7" ? select : id === "dv-convert-7" ? convert : null });
   updateMode(7);
-  assert.equal(save.disabled, false, "Off can be saved while tools are unavailable");
-  assert.equal(convert.disabled, true, "conversion remains refused while tools are unavailable");
+  assert.equal(convert.disabled, true, "conversion remains refused while tools are unavailable and mode is off");
   select.value = "auto";
   updateMode(7);
-  assert.equal(save.disabled, true, "Manual/Automatic cannot be saved without tools");
+  assert.equal(convert.disabled, true, "Automatic without tools still cannot convert");
+  assert.doesNotMatch(shippedSource("dvModeSelect"), /dv-mode-save-/,
+    "the mode select no longer carries its own Save — the drawer's Save owns it");
+  assert.match(shippedSource("saveLibDrawer"), /libraries\/\$\{id\}\/dv-conversion/,
+    "the drawer Save writes the Dolby Vision mode");
   const panel = shippedSource("dvDiskPanel");
   assert.match(panel, /<label class="schedpair" for="dv-parallel">Parallel files/);
   assert.match(panel, /aria-label="Save Dolby Vision conversion settings"/);
