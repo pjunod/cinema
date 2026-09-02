@@ -726,7 +726,7 @@ id = "apple.client"
 title = "Native iOS and tvOS clients"
 contract = "The Apple clients preserve the shared API, navigation, preferences, and playback policies on both platforms."
 paths = ["clients/apple/**"]
-checks = ["apple-simulators"]
+checks = ["apple-simulators", "player-input-fence"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline", "offline.viewing"]
 
 [[points]]
@@ -734,7 +734,7 @@ id = "android.client"
 title = "Native Android and Google TV clients"
 contract = "The Android clients preserve API models, TV focus, preferences, and Media3 playback policy."
 paths = ["clients/android/**"]
-checks = ["android-jvm", "android-device"]
+checks = ["android-jvm", "android-device", "player-input-fence"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline", "offline.viewing"]
 
 [[points]]
