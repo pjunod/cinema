@@ -772,7 +772,8 @@ private fun PlayerContent(
         // The marker chip is composed only while a marker is offered; asking
         // for it after the marker has passed is asking for a node that is not
         // there.
-        focusAfterComposition = if (control == PlayerControlId.Marker && activeMarker == null) {
+        val markerOnScreen = plan.markers.any { positionMs in it.start_ms until it.end_ms }
+        focusAfterComposition = if (control == PlayerControlId.Marker && !markerOnScreen) {
             PlayerControlId.PlayPause
         } else {
             control
