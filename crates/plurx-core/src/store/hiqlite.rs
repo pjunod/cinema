@@ -214,7 +214,8 @@ struct OperationCounters {
     consistent_query_calls: AtomicU64,
     non_consistent_query_calls: AtomicU64,
     write_calls: AtomicU64,
-    fail_next_non_consistent_query: std::sync::atomic::AtomicBool,
+    fail_next_non_consistent_query: AtomicBool,
+    fail_next_idempotent_write_after_commit: AtomicBool,
 }
 
 #[cfg(feature = "cluster-read-cost-validation")]
@@ -224,6 +225,8 @@ impl OperationCounters {
         self.non_consistent_query_calls.store(0, Ordering::Relaxed);
         self.write_calls.store(0, Ordering::Relaxed);
         self.fail_next_non_consistent_query
+            .store(false, Ordering::Relaxed);
+        self.fail_next_idempotent_write_after_commit
             .store(false, Ordering::Relaxed);
     }
 
@@ -1070,10 +1073,30 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        // The arm is client-wide, but only the activation confirmation is
+        // under contract here. Scoping it to that statement keeps an unrelated
+        // idempotent write (settings upserts share this path) from stealing the
+        // injection and failing the contract for the wrong reason.
+        #[cfg(feature = "cluster-read-cost-validation")]
+        let injectable = sql.contains("UPDATE media_sessions");
         time_idempotent_write_with_retry(&STORE_OPERATION_METRICS, || {
             #[cfg(feature = "cluster-read-cost-validation")]
             self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-            timeout_store(self.inner().execute(sql.clone(), params.clone()))
+            let operation = timeout_store(self.inner().execute(sql.clone(), params.clone()));
+            async move {
+                let result = operation.await;
+                #[cfg(feature = "cluster-read-cost-validation")]
+                if result.is_ok()
+                    && injectable
+                    && self
+                        .operations
+                        .fail_next_idempotent_write_after_commit
+                        .swap(false, Ordering::Relaxed)
+                {
+                    return Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()));
+                }
+                result
+            }
         })
         .await
     }
@@ -1191,6 +1214,22 @@ impl HiqliteAuthStore {
             .operations
             .fail_next_non_consistent_query
             .store(true, Ordering::Relaxed);
+    }
+
+    /// Let exactly one idempotent write commit, then replace its successful
+    /// response with the production timeout error. The retry must discover
+    /// the already-committed state rather than submit a different mutation.
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[doc(hidden)]
+    pub fn validation_timeout_next_idempotent_write_after_commit(&self) {
+        assert!(
+            !self
+                .client
+                .operations
+                .fail_next_idempotent_write_after_commit
+                .swap(true, Ordering::Relaxed),
+            "an idempotent after-commit timeout is already armed"
+        );
     }
 
     /// Snapshot successful calls from the production metrics recorder. The

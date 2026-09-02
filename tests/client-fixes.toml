@@ -200,10 +200,10 @@ test_anchor = "testTVSeriesAndSeasonShelvesAcceptDirectionalFocusFromTheirHeader
 [[fixes]]
 id = "apple.tvos-progress-engagement-seeks"
 commits = ["7cf9bec6", "3991d34b"]
-source = "clients/apple/Sources/PlayerView.swift"
-source_anchor = "enum TVPlayerRemoteRouting"
+source = "clients/apple/Sources/PlayerInputRouting.swift"
+source_anchor = "enum PlayerInputRouting"
 test = "clients/apple/Tests/AppleClientTests.swift"
-test_anchor = "testTVProgressOnlySeeksAfterTheViewerEngagesIt"
+test_anchor = "testPlayerInputRoutingMatchesTheSharedContract"
 
 [[fixes]]
 id = "apple.pgs-overlay-menu-diagnostic"
@@ -638,9 +638,33 @@ test = "clients/android/app/src/test/java/tv/plurx/app/data/MarkerLabelTest.kt"
 test_anchor = "aPreviewIsNeverAutomaticWhateverItsProvenance"
 
 [[fixes]]
+id = "android.player-input-state-and-focus"
+commits = ["89b916ad"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "fun inputState(): PlayerInputState = when {"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
+test_anchor = "revealRestoresTheControlThatWasFocusedRatherThanPlayPause"
+
+[[fixes]]
+id = "apple.player-input-surrounds"
+commits = ["a96ce15b"]
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "static func revealFocusTarget("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testRevealDoesNotRestoreFocusToAMarkerThatIsNoLongerOffered"
+
+[[fixes]]
 id = "apple.subtitle-readiness-directed-retry"
 commits = ["bca640c5"]
 source = "clients/apple/Sources/PlaybackControlReporter.swift"
 source_anchor = "final class SubtitleReadinessRetryState: @unchecked Sendable"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testSubtitleReadinessDecisionAndTransitionAreClosedAndSingleShot"
+
+[[fixes]]
+id = "android.focus-request-is-an-event"
+commits = ["3dd6cb68"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/TvFocus.kt"
+source_anchor = "token: Any? = null,"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
+test_anchor = "verticalDpadLeavesTheProgressSliderWithoutSeeking"

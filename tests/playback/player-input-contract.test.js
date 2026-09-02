@@ -12,6 +12,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const table = require("../../scripts/player-contract-table");
+const webPolicy = require("../../crates/plurxd/src/web/playback-policy.js");
 
 const contract = JSON.parse(fs.readFileSync(table.FIXTURE, "utf8"));
 
@@ -76,6 +77,10 @@ test("the rulings of 2026-09-02 are encoded, not just narrated", () => {
   }
 });
 
+test("the served web routing table is the fixture routing table", () => {
+  assert.deepEqual(webPolicy.INPUT_ROUTING, contract.routing);
+});
+
 test("the timeline is never a horizontal neighbour of a button", () => {
   const rows = contract.controls.rows;
   const timelineRow = rows.find((r) => r.id === "timeline");
@@ -102,6 +107,11 @@ test("the preview acceleration ladder only ever gets coarser", () => {
 });
 
 const fields = JSON.parse(fs.readFileSync(table.FIELDS, "utf8"));
+
+test("the served web playback-info field list is the fixture field list", () => {
+  const web = fs.readFileSync(table.WEB, "utf8");
+  assert.ok(web.includes(table.renderFieldsEmbedBlock(fields)));
+});
 
 test("every playback-info row has a unique id, a known section, a known format, and at least one mode", () => {
   const modes = new Set(Object.keys(fields.modes));
@@ -139,10 +149,13 @@ test("every playback-info row has a unique id, a known section, a known format, 
   }
 });
 
-test("docs/PLAYER-INPUT-CONTRACT.md embeds both fixtures verbatim", () => {
+test("docs/PLAYER-INPUT-CONTRACT.md embeds every generated block verbatim", () => {
   const doc = fs.readFileSync(table.DOC, "utf8");
   for (const [begin, end, rendered, label] of [
     [table.BEGIN, table.END, table.renderBlock(contract), "routing"],
+    [table.OUTCOMES_BEGIN, table.OUTCOMES_END, table.renderOutcomesBlock(contract), "outcomes"],
+    [table.ROWS_BEGIN, table.ROWS_END, table.renderRowsBlock(contract), "rows"],
+    [table.TIMINGS_BEGIN, table.TIMINGS_END, table.renderTimingsBlock(contract), "timings"],
     [table.INFO_BEGIN, table.INFO_END, table.renderInfoBlock(fields), "info"],
   ]) {
     const start = doc.indexOf(begin);

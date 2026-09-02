@@ -124,6 +124,7 @@ data class ViewerPreferences(
     val subtitleReadiness: SubtitleReadiness = SubtitleReadiness.OnDemand,
     val autoSkip: Boolean = false,
     val autoplayNext: Boolean = true,
+    val playbackInfoMode: String = "standard",
     val offlineQuality: OfflineQuality = OfflineQuality.Standard,
     val offlineNetwork: OfflineNetwork = OfflineNetwork.WifiOnly,
 )

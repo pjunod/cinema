@@ -17,8 +17,24 @@ enum PlayerControl: Hashable {
     case audio
     case subtitles
     case quality
-    case autoplay
+    case settings
     case stats
+}
+
+extension PlayerControl {
+    var isTransportControl: Bool {
+        switch self {
+        case .skipBack, .playPause, .skipForward, .pictureInPicture,
+             .audio, .subtitles, .quality, .settings, .stats:
+            true
+        default:
+            false
+        }
+    }
+
+    var isChromeControl: Bool {
+        isTransportControl || self == .progress || self == .marker
+    }
 }
 
 #if os(iOS)
@@ -26,7 +42,7 @@ private enum PlayerOptionMenu: Hashable {
     case audio
     case subtitles
     case quality
-    case more
+    case settings
 }
 
 enum PlayerOptionMenuPalette {
@@ -51,60 +67,6 @@ private struct PlayerOptionMenuButtonStyle: ButtonStyle {
     }
 }
 #endif
-
-enum PlayerSeekDirection: CaseIterable {
-    case left
-    case right
-    case up
-    case down
-
-    var seconds: Double {
-        switch self {
-        case .left: return -10
-        case .right: return 10
-        case .up: return 30
-        case .down: return -30
-        }
-    }
-}
-
-enum PlayerRemoteMoveOutcome: Equatable {
-    case seek(seconds: Double)
-    case focus(PlayerControl)
-    case ignore
-}
-
-enum TVPlayerRemoteRouting {
-    static func moveOutcome(
-        focusedControl: PlayerControl,
-        progressEngaged: Bool,
-        direction: PlayerSeekDirection,
-        progressRightNeighbor: PlayerControl = .autoplay,
-        markerAvailable: Bool = false
-    ) -> PlayerRemoteMoveOutcome {
-        switch focusedControl {
-        case .reveal:
-            return .seek(seconds: direction.seconds)
-        case .progress:
-            switch direction {
-            case .left:
-                return progressEngaged
-                    ? .seek(seconds: PlayerSeekDirection.left.seconds)
-                    : .focus(.skipForward)
-            case .right:
-                return progressEngaged
-                    ? .seek(seconds: PlayerSeekDirection.right.seconds)
-                    : .focus(progressRightNeighbor)
-            case .down:
-                return .focus(.playPause)
-            case .up:
-                return markerAvailable ? .focus(.marker) : .ignore
-            }
-        default:
-            return .ignore
-        }
-    }
-}
 
 struct PlayerMetadataBadge: Equatable, Identifiable {
     enum Kind: String, Equatable {
@@ -360,11 +322,6 @@ enum TVPlaybackInfoPresentation {
     static let debugPanelMaxHeight: CGFloat = 850
     static let debugEdgeInset: CGFloat = 48
 
-    static func healthLabel(stalls: Int?) -> String {
-        guard let stalls else { return "Measuring" }
-        if stalls == 0 { return "No stalls" }
-        return stalls == 1 ? "1 stall" : "\(stalls) stalls"
-    }
 }
 #endif
 
@@ -728,11 +685,12 @@ struct PlayerView: View {
     @StateObject private var pictureInPicture = PictureInPictureController()
     @StateObject private var lifecycle = PlayerLifecycleCoordinator()
     @State private var showStats = false
-    @State private var statsMode = PlaybackStatsMode.standard
+    @State private var statsMode = PlaybackStatsMode.persisted
     @State private var findingNext = false
     @State private var nextEpisodeTask: Task<Void, Never>?
     @State private var isScrubbing = false
     @State private var scrubMs = 0.0
+    @State private var pendingMs: Int?
     @State private var controlsVisible = true
     @State private var autoHideGeneration = 0
     #if os(iOS)
@@ -740,7 +698,12 @@ struct PlayerView: View {
     #endif
     #if os(tvOS)
     @FocusState private var focusedControl: PlayerControl?
-    @State private var tvProgressEngaged = false
+    @State private var lastFocusedControl: PlayerControl = .playPause
+    @State private var repeatedInput: PlayerContractInput?
+    @State private var repeatCount = 0
+    @State private var lastMoveAt: TimeInterval = 0
+    @State private var tvMenuOpen = false
+    @State private var menuOpener: PlayerControl = .playPause
     #endif
 
     var body: some View {
@@ -774,19 +737,23 @@ struct PlayerView: View {
 
             if !lifecycle.isTearingDown {
                 #if os(tvOS)
-                if !controlsVisible {
+                // Not while the stream has failed: the surface is full-screen,
+                // focusable and carries the remote adapter, so once the chrome
+                // had auto-hidden it sat in front of the retry buttons
+                // consuming every direction — `failed × up/down` is `ignore`,
+                // and only Menu got out.
+                if !controlsVisible && !controller.failed {
                     Color.clear
                         .contentShape(Rectangle())
                         .ignoresSafeArea()
                         .focusable()
                         .focusEffectDisabled()
                         .focused($focusedControl, equals: .reveal)
-                        .onTapGesture { revealControlsFromRemote() }
-                        .onMoveCommand { direction in seekFromRemote(direction) }
-                        .onPlayPauseCommand {
-                            controller.togglePlayPause()
-                            revealControlsFromRemote()
-                        }
+                        .playerRemoteAdapter(
+                            .surface,
+                            state: inputState,
+                            apply: applyPlayerInputOutcome
+                        )
                         .accessibilityLabel("Show playback controls")
                 }
                 #endif
@@ -795,7 +762,17 @@ struct PlayerView: View {
                 Color.clear
                     .contentShape(Rectangle())
                     .ignoresSafeArea()
-                    .onTapGesture { toggleControls() }
+                    .onTapGesture {
+                        let input = PlayerContractInput.tapSurface
+                        _ = applyPlayerInputOutcome(
+                            PlayerInputRouting.route(
+                                surface: .touch,
+                                state: inputState(),
+                                input: input
+                            ),
+                            input: input
+                        )
+                    }
                     .accessibilityLabel("Show or hide playback controls")
                 #endif
 
@@ -878,6 +855,13 @@ struct PlayerView: View {
                 }
             }
         }
+        #if os(tvOS)
+        .playerRemoteAdapter(
+            .root,
+            state: inputState,
+            apply: applyPlayerInputOutcome
+        )
+        #endif
         .task {
             #if os(iOS)
             if let offlineItem {
@@ -918,23 +902,51 @@ struct PlayerView: View {
             #endif
         }
         .onDisappear {
+            #if os(iOS)
+            controller.remoteInput = nil
+            #endif
             lifecycle.teardown { teardownPlayback() }
+        }
+        .onAppear {
+            // The lock screen and the control centre reach the same player, so
+            // they route through the same table: a skip while a scrub is
+            // pending is `ignore`, and play/pause commits it first.
+            #if os(iOS)
+            controller.remoteInput = { input in
+                applyPlayerInputOutcome(
+                    PlayerInputRouting.route(
+                        surface: .touch,
+                        state: inputState(),
+                        input: input
+                    ),
+                    input: input
+                )
+            }
+            #endif
         }
         .task(id: autoHideGeneration) {
             guard Self.shouldAutoHideControls(
                 visible: controlsVisible,
+                playing: controller.isPlaying,
                 scrubbing: isScrubbing,
                 changingStream: controller.isChangingStream,
                 optionMenuOpen: optionMenuOpen,
+                failed: controller.failed,
+                infoOpen: Self.infoSuppressesAutoHide(showStats: showStats, statsMode: statsMode),
+                previewPending: pendingMs != nil,
                 tearingDown: lifecycle.isTearingDown
             ) else { return }
             try? await Task.sleep(nanoseconds: Self.controlAutoHideDelayNanoseconds)
             guard !Task.isCancelled,
                   Self.shouldAutoHideControls(
                       visible: controlsVisible,
+                      playing: controller.isPlaying,
                       scrubbing: isScrubbing,
                       changingStream: controller.isChangingStream,
                       optionMenuOpen: optionMenuOpen,
+                      failed: controller.failed,
+                      infoOpen: Self.infoSuppressesAutoHide(showStats: showStats, statsMode: statsMode),
+                      previewPending: pendingMs != nil,
                       tearingDown: lifecycle.isTearingDown
                   ) else { return }
             hideControls()
@@ -943,6 +955,11 @@ struct PlayerView: View {
         .onChange(of: controller.isChangingStream) { _, _ in revealControls() }
         .onChange(of: showStats) { _, _ in restartAutoHideTimer() }
         .onChange(of: isScrubbing) { _, _ in restartAutoHideTimer() }
+        .onChange(of: pendingMs) { _, _ in restartAutoHideTimer() }
+        .onChange(of: statsMode) { _, mode in
+            mode.persist()
+            restartAutoHideTimer()
+        }
         .onChange(of: optionMenuOpen) { _, _ in restartAutoHideTimer() }
         .onChange(of: controller.finished) { _, finished in
             let action = itemDurationMs != nil && offlineItem == nil
@@ -969,21 +986,21 @@ struct PlayerView: View {
             guard failed else { return }
             focusedControl = controller.canRetryPlaybackFailure ? .retry : .close
         }
-        .onChange(of: focusedControl) { _, newControl in
-            if newControl != .progress { tvProgressEngaged = false }
-            if controlsVisible { restartAutoHideTimer() }
-        }
-        .onExitCommand {
-            if tvProgressEngaged {
-                tvProgressEngaged = false
-                revealControls()
-            } else if showStats {
-                dismissPlaybackInfo()
-            } else if controlsVisible {
-                hideControls()
-            } else {
-                finishPlayback()
+        .onChange(of: focusedControl) { oldControl, newControl in
+            if let newControl, newControl.isChromeControl {
+                lastFocusedControl = newControl
             }
+            if let oldControl,
+               oldControl.isTransportControl,
+               newControl == nil,
+               controlsVisible,
+               !showStats {
+                menuOpener = oldControl
+                tvMenuOpen = true
+            } else if newControl != nil {
+                tvMenuOpen = false
+            }
+            if controlsVisible { restartAutoHideTimer() }
         }
         #endif
         #if os(iOS)
@@ -1060,14 +1077,37 @@ struct PlayerView: View {
         )
     }
 
+    /// Mini is a strip, not a modal: the transport stays live beside it, it
+    /// is not the `info` state, and so it does not suppress the idle hide.
+    /// Standard and Debug do.
+    static func infoSuppressesAutoHide(showStats: Bool, statsMode: PlaybackStatsMode) -> Bool {
+        showStats && statsMode != .mini
+    }
+
+    /// Where `reveal` puts focus. The marker button is drawn only while a
+    /// marker is offered, so remembering it across the marker's life means
+    /// restoring focus to a view nobody is rendering.
+    static func revealFocusTarget(
+        remembered: PlayerControl,
+        markerOffered: Bool
+    ) -> PlayerControl {
+        if remembered == .marker && !markerOffered { return .playPause }
+        return remembered
+    }
+
     static func shouldAutoHideControls(
         visible: Bool,
+        playing: Bool,
         scrubbing: Bool,
         changingStream: Bool,
         optionMenuOpen: Bool,
+        failed: Bool,
+        infoOpen: Bool,
+        previewPending: Bool,
         tearingDown: Bool = false
     ) -> Bool {
-        visible && !scrubbing && !changingStream && !optionMenuOpen && !tearingDown
+        visible && playing && !scrubbing && !changingStream && !optionMenuOpen
+            && !failed && !infoOpen && !previewPending && !tearingDown
     }
 
     static func naturalEndAction(
@@ -1115,10 +1155,11 @@ struct PlayerView: View {
         showStats = false
         findingNext = false
         isScrubbing = false
+        pendingMs = nil
         #if os(iOS)
         activeOptionMenu = nil
         #else
-        tvProgressEngaged = false
+        tvMenuOpen = false
         #endif
         pictureInPicture.detach()
         controller.stop(deactivateAudioSession: deactivateAudioSession)
@@ -1129,16 +1170,12 @@ struct PlayerView: View {
     /// the controls therefore removes its presentation anchor and dismisses the
     /// menu too. On tvOS, focus on a menu button is the equivalent interaction:
     /// keep the chrome up while the viewer is opening or navigating that menu.
-    /// An engaged progress bar holds it open for the same reason.
+        /// A system menu holds it open for the same reason.
     private var optionMenuOpen: Bool {
         #if os(iOS)
         activeOptionMenu != nil
         #else
-        if tvProgressEngaged { return true }
-        switch focusedControl {
-        case .audio, .subtitles, .quality: return true
-        default: return false
-        }
+        tvMenuOpen
         #endif
     }
 
@@ -1162,11 +1199,19 @@ struct PlayerView: View {
     }
 
     private func hideControls() {
-        guard controlsVisible else { return }
+        guard controlsVisible, !controller.failed else { return }
+        // Mini is a strip beside the transport, not a panel of its own: it no
+        // longer suppresses the idle hide, so it has to leave with the chrome.
+        // Left behind it would sit on screen with no transport and no producer
+        // to close it — and `hidden × back` is exit, not close.
+        if showStats && statsMode == .mini { showStats = false }
         #if os(iOS)
         activeOptionMenu = nil
         #else
-        tvProgressEngaged = false
+        if let focusedControl, focusedControl.isChromeControl {
+            lastFocusedControl = focusedControl
+        }
+        tvMenuOpen = false
         #endif
         withAnimation(.easeOut(duration: 0.2)) {
             controlsVisible = false
@@ -1183,60 +1228,197 @@ struct PlayerView: View {
     private func dismissPlaybackInfo() {
         withAnimation { showStats = false }
         #if os(tvOS)
-        revealControlsFromRemote()
+        revealControls()
+        Task { @MainActor in
+            await Task.yield()
+            if controlsVisible { focusedControl = .stats }
+        }
         #else
         revealControls()
         #endif
     }
 
+    private func inputState() -> PlayerInputState {
+        if controller.failed { return .failed }
+        // Contract §2.2 orders the precedence scrub → menu → info. A pending
+        // position is the most local thing on screen: on the phone the slider
+        // stays live under the panel, so asking `info` first meant a drag with
+        // Debug open answered `close_info` where the contract says `cancel`.
+        #if os(iOS)
+        if isScrubbing { return .scrub }
+        if activeOptionMenu != nil { return .menu }
+        #else
+        if focusedControl == .progress && pendingMs != nil { return .scrub }
+        if tvMenuOpen { return .menu }
+        #endif
+        if showStats && statsMode != .mini { return .info }
+        // Chrome-hidden outranks the focus flag, as it does on Android: the
+        // reveal surface takes focus when the chrome goes, but not before the
+        // next press can arrive.
+        if !controlsVisible { return .hidden }
+        #if os(tvOS)
+        if focusedControl == .progress { return .timeline }
+        #endif
+        return .transport
+    }
+
+    @discardableResult
+    private func applyPlayerInputOutcome(
+        _ outcome: PlayerInputOutcome,
+        input: PlayerContractInput
+    ) -> Bool {
+        #if os(tvOS)
+        if input != .left && input != .right {
+            repeatedInput = nil
+            repeatCount = 0
+        }
+        #endif
+        switch outcome {
+        case .reveal:
+            #if os(tvOS)
+            revealControlsFromRemote()
+            #else
+            revealControls()
+            #endif
+            return true
+        case .focusRow:
+            return false
+        case .focusMarkerOrIgnore:
+            #if os(tvOS)
+            // `offeredMarker`, not `activeMarker`: the button is drawn only
+            // for a marker the viewer is offered. An auto-skip-eligible
+            // marker seeked back into is active with no button on screen, and
+            // focusing it dropped focus entirely.
+            if controller.offeredMarker != nil { focusedControl = .marker }
+            #endif
+            return true
+        case .focusTransport:
+            #if os(tvOS)
+            focusedControl = lastFocusedControl.isTransportControl
+                ? lastFocusedControl
+                : .playPause
+            #endif
+            revealControls()
+            return true
+        case .activate, .menuFocus, .ignore:
+            return false
+        case .togglePlay:
+            controller.togglePlayPause()
+            revealControls()
+            return true
+        case .skip:
+            if input == .skipBack { controller.skip(seconds: -10) }
+            if input == .skipForward { controller.skip(seconds: 10) }
+            revealControls()
+            return true
+        case .preview:
+            #if os(tvOS)
+            let direction = input == .left ? -1 : input == .right ? 1 : 0
+            guard direction != 0 else { return false }
+            let repeats = registerPreviewInput(input)
+            let step = Int(PlayerInputRouting.previewStepSeconds(repeatCount: repeats) * 1_000)
+            let duration = max(controller.knownDurationMs, 0)
+            let base = pendingMs ?? controller.currentMs
+            pendingMs = min(max(base + direction * step, 0), duration)
+            revealControls()
+            return true
+            #else
+            return false
+            #endif
+        case .commit:
+            commitPendingPosition()
+            return true
+        case .cancel:
+            cancelPendingPosition()
+            return true
+        case .cancelThenFocusTransport:
+            cancelPendingPosition()
+            #if os(tvOS)
+            focusedControl = lastFocusedControl.isTransportControl
+                ? lastFocusedControl
+                : .playPause
+            #endif
+            revealControls()
+            return true
+        case .cancelThenFocusMarkerOrIgnore:
+            cancelPendingPosition()
+            #if os(tvOS)
+            if controller.offeredMarker != nil { focusedControl = .marker }
+            #endif
+            revealControls()
+            return true
+        case .commitThenTogglePlay:
+            commitPendingPosition()
+            controller.togglePlayPause()
+            revealControls()
+            return true
+        case .closeMenu:
+            #if os(iOS)
+            dismissOptionMenu()
+            #else
+            tvMenuOpen = false
+            focusedControl = menuOpener
+            #endif
+            revealControls()
+            return true
+        case .closeInfo:
+            dismissPlaybackInfo()
+            return true
+        case .hide:
+            hideControls()
+            return true
+        case .exit:
+            finishPlayback()
+            return true
+        case .toggleChrome:
+            #if os(iOS)
+            toggleControls()
+            #else
+            if controlsVisible { hideControls() } else { revealControlsFromRemote() }
+            #endif
+            return true
+        }
+    }
+
+    private func commitPendingPosition() {
+        if let pendingMs {
+            controller.seek(toMs: pendingMs)
+            self.pendingMs = nil
+        } else if isScrubbing {
+            controller.seek(toMs: Int(scrubMs))
+            isScrubbing = false
+        }
+        revealControls()
+    }
+
+    private func cancelPendingPosition() {
+        pendingMs = nil
+        isScrubbing = false
+        revealControls()
+    }
+
     #if os(tvOS)
+    private func registerPreviewInput(_ input: PlayerContractInput) -> Int {
+        let now = Date.timeIntervalSinceReferenceDate
+        if repeatedInput == input, now - lastMoveAt <= 0.25 {
+            repeatCount += 1
+        } else {
+            repeatedInput = input
+            repeatCount = 0
+        }
+        lastMoveAt = now
+        return repeatCount
+    }
+
     private func revealControlsFromRemote() {
         revealControls()
         Task { @MainActor in
             await Task.yield()
-            if controlsVisible { focusedControl = .playPause }
-        }
-    }
-
-    private func seekFromRemote(_ direction: MoveCommandDirection) {
-        guard let seekDirection = Self.playerSeekDirection(direction) else { return }
-        let outcome = TVPlayerRemoteRouting.moveOutcome(
-            focusedControl: .reveal,
-            progressEngaged: false,
-            direction: seekDirection
-        )
-        applyRemoteMoveOutcome(outcome, revealingFromHiddenControls: true)
-    }
-
-    private static func playerSeekDirection(
-        _ direction: MoveCommandDirection
-    ) -> PlayerSeekDirection? {
-        switch direction {
-        case .left: .left
-        case .right: .right
-        case .up: .up
-        case .down: .down
-        @unknown default: nil
-        }
-    }
-
-    private func applyRemoteMoveOutcome(
-        _ outcome: PlayerRemoteMoveOutcome,
-        revealingFromHiddenControls: Bool = false
-    ) {
-        switch outcome {
-        case let .seek(seconds):
-            controller.skip(seconds: seconds)
-            if revealingFromHiddenControls {
-                revealControlsFromRemote()
-            } else {
-                revealControls()
-            }
-        case let .focus(control):
-            focusedControl = control
-            revealControls()
-        case .ignore:
-            revealControls()
+            guard controlsVisible else { return }
+            focusedControl = Self.revealFocusTarget(
+                remembered: lastFocusedControl,
+                markerOffered: controller.offeredMarker != nil
+            )
         }
     }
     #endif
@@ -1284,7 +1466,17 @@ struct PlayerView: View {
 
     #if os(iOS)
     private var closeButton: some View {
-        Button { finishPlayback() } label: {
+        Button {
+            let input = PlayerContractInput.back
+            _ = applyPlayerInputOutcome(
+                PlayerInputRouting.route(
+                    surface: .touch,
+                    state: inputState(),
+                    input: input
+                ),
+                input: input
+            )
+        } label: {
             Image(systemName: "xmark.circle.fill")
                 .font(.largeTitle)
                 .foregroundStyle(.white.opacity(0.9))
@@ -1307,14 +1499,17 @@ struct PlayerView: View {
             }
 
             #if os(tvOS)
-            HStack(spacing: 12) {
-                transportControlGroup
-                if controller.knownDurationMs > 0 {
-                    playbackTimeLabel(controller.currentMs)
-                    tvProgressBar
+            if controller.knownDurationMs > 0 {
+                HStack(spacing: 12) {
+                    playbackTimeLabel(pendingMs ?? controller.currentMs)
+                    tvTimeline
                         .layoutPriority(1)
                     playbackTimeLabel(controller.knownDurationMs)
                 }
+            }
+            HStack(spacing: 12) {
+                transportControlGroup
+                Spacer(minLength: 8)
                 playbackOptionGroup
             }
             #else
@@ -1775,24 +1970,20 @@ struct PlayerView: View {
 
     private var playbackOptionGroup: some View {
         HStack(spacing: 8) {
-            if pictureInPicture.isSupported { pictureInPictureButton }
             if controller.audioTracks.count > 1 { audioMenu }
             if !controller.subtitles.isEmpty { subtitleMenu }
             if !controller.qualityRungs.isEmpty { qualityMenu }
-            autoplayButton
+            settingsMenu
             statsButton
+            if pictureInPicture.isSupported { pictureInPictureButton }
         }
     }
 
     #if os(iOS)
     private var compactControlRow: some View {
-        HStack(spacing: 8) {
-            skipBackButton
-            playPauseButton
-            skipForwardButton
-            Spacer(minLength: 4)
-            if pictureInPicture.isSupported { pictureInPictureButton }
-            moreMenu
+        VStack(alignment: .leading, spacing: 8) {
+            transportControlGroup
+            playbackOptionGroup
         }
         .frame(maxWidth: .infinity)
     }
@@ -1865,22 +2056,6 @@ struct PlayerView: View {
         #endif
     }
 
-    private var autoplayButton: some View {
-        Button {
-            model.setAutoplay(!model.autoplay)
-            revealControls()
-        } label: {
-            Image(systemName: "play.square.stack.fill")
-                .foregroundStyle(model.autoplay ? Palette.accent : .white)
-        }
-        .accessibilityLabel(model.autoplay ? "Autoplay next on" : "Autoplay next off")
-        #if os(tvOS)
-        .buttonStyle(TVPlayerControlButtonStyle())
-        .focusEffectDisabled()
-        .focused($focusedControl, equals: .autoplay)
-        #endif
-    }
-
     private var statsButton: some View {
         Button {
             withAnimation { showStats.toggle() }
@@ -1897,66 +2072,66 @@ struct PlayerView: View {
         #endif
     }
 
-    #if os(iOS)
-    private var moreMenu: some View {
+    private var settingsMenu: some View {
+        #if os(iOS)
         Button {
-            presentOptionMenu(.more)
+            presentOptionMenu(.settings)
         } label: {
-            Image(systemName: "ellipsis.circle.fill")
+            Image(systemName: "gearshape.fill")
         }
-        .accessibilityLabel("More playback options")
-        .popover(isPresented: optionMenuBinding(.more), arrowEdge: .bottom) {
-            optionMenuPanel("Playback options") {
-                if controller.audioTracks.count > 1 {
-                    optionMenuSection("Audio") { audioChoices }
-                }
-                if !controller.subtitles.isEmpty {
-                    optionMenuSection("Subtitles") { subtitleChoices }
-                }
-                if !controller.qualityRungs.isEmpty {
-                    optionMenuSection("Quality") { qualityChoices }
-                }
-                Divider()
-                Button {
-                    model.setAutoplay(!model.autoplay)
-                    dismissOptionMenu()
-                    revealControls()
-                } label: {
-                    Label(model.autoplay ? "Turn off autoplay" : "Turn on autoplay",
-                          systemImage: "play.square.stack.fill")
-                }
-                Button {
-                    withAnimation { showStats.toggle() }
-                    dismissOptionMenu()
-                    revealControls()
-                } label: {
-                    Label(showStats ? "Hide playback info" : "Playback info",
-                          systemImage: "info.circle.fill")
-                }
-            }
+        .accessibilityLabel("Playback settings")
+        .popover(isPresented: optionMenuBinding(.settings), arrowEdge: .bottom) {
+            optionMenuPanel("Playback settings") { autoplaySettingsButton }
+        }
+        #else
+        Menu { autoplaySettingsButton } label: {
+            Image(systemName: "gearshape.fill")
+        }
+        .accessibilityLabel("Playback settings")
+        .buttonStyle(TVPlayerControlButtonStyle())
+        .focusEffectDisabled()
+        .focused($focusedControl, equals: .settings)
+        #endif
+    }
+
+    private var autoplaySettingsButton: some View {
+        Button {
+            model.setAutoplay(!model.autoplay)
+            #if os(iOS)
+            dismissOptionMenu()
+            #endif
+            revealControls()
+        } label: {
+            Label(model.autoplay ? "Turn off autoplay" : "Turn on autoplay",
+                  systemImage: "play.square.stack.fill")
         }
     }
-    #endif
 
     #if os(tvOS)
-    /// SwiftUI's Slider is unavailable on tvOS. This focusable bar uses the
-    /// Siri Remote's left/right commands as ordinary focus navigation until
-    /// Select engages scrubbing; engaged presses move through the same
-    /// absolute film timeline in 10-second steps. Up reaches a visible skip
-    /// marker above the transport row and is inert when no marker is present;
-    /// Down returns to play/pause. This is not a Button:
+    /// SwiftUI's Slider is unavailable on tvOS. This focusable bar previews
+    /// Left/Right without seeking, commits with Select, and cancels with Menu.
+    /// Up reaches the marker row and Down restores the transport row. This is
+    /// not a Button:
     /// tvOS adds a large white pressed/focus surround to Buttons even when the
     /// ordinary focus effect is disabled.
-    private var tvProgressBar: some View {
+    private var tvTimeline: some View {
         GeometryReader { geometry in
-            let fraction = controller.knownDurationMs > 0
+            let playedFraction = controller.knownDurationMs > 0
                 ? min(max(Double(controller.currentMs) / Double(controller.knownDurationMs), 0), 1)
+                : 0
+            let previewFraction = controller.knownDurationMs > 0
+                ? min(max(Double(pendingMs ?? controller.currentMs) / Double(controller.knownDurationMs), 0), 1)
                 : 0
             ZStack(alignment: .leading) {
                 Capsule().fill(.white.opacity(0.25))
                 Capsule()
                     .fill(Palette.accent)
-                    .frame(width: geometry.size.width * fraction)
+                    .frame(width: geometry.size.width * playedFraction)
+                if pendingMs != nil {
+                    Capsule()
+                        .fill(Palette.accent.opacity(0.5))
+                        .frame(width: geometry.size.width * previewFraction)
+                }
             }
             .overlay {
                 if focusedControl == .progress {
@@ -1976,44 +2151,20 @@ struct PlayerView: View {
                     }
                 }
             }
-            .scaleEffect(y: tvProgressEngaged ? 1.5 : 1)
-            .animation(.easeOut(duration: 0.12), value: tvProgressEngaged)
         }
         .frame(height: 8)
         .contentShape(Rectangle())
         .focusable()
         .focusEffectDisabled()
         .focused($focusedControl, equals: .progress)
-        .onTapGesture {
-            tvProgressEngaged.toggle()
-            revealControls()
-        }
-        .onMoveCommand { direction in
-            guard let seekDirection = Self.playerSeekDirection(direction) else { return }
-            applyRemoteMoveOutcome(TVPlayerRemoteRouting.moveOutcome(
-                focusedControl: .progress,
-                progressEngaged: tvProgressEngaged,
-                direction: seekDirection,
-                progressRightNeighbor: progressRightControl,
-                markerAvailable: controller.offeredMarker != nil
-            ))
-        }
+        .playerRemoteAdapter(
+            .timeline,
+            state: inputState,
+            apply: applyPlayerInputOutcome
+        )
         .accessibilityLabel("Playback position")
-        .accessibilityValue(tvProgressEngaged ? "Scrubbing" : "Not scrubbing")
-        .accessibilityHint(tvProgressEngaged
-            ? "Left or right seeks 10 seconds. Press Select or Menu to finish."
-            : "Press Select to scrub. Left or right moves between controls.")
-    }
-
-    private var progressRightControl: PlayerControl {
-        if pictureInPicture.isSupported,
-           pictureInPicture.isActive || pictureInPicture.isPossible {
-            return .pictureInPicture
-        }
-        if controller.audioTracks.count > 1 { return .audio }
-        if !controller.subtitles.isEmpty { return .subtitles }
-        if !controller.qualityRungs.isEmpty { return .quality }
-        return .autoplay
+        .accessibilityValue(pendingMs == nil ? "Timeline" : "Previewing \(formatTime(pendingMs!))")
+        .accessibilityHint("Left or right previews. Select commits. Menu cancels.")
     }
     #endif
 
@@ -2268,6 +2419,19 @@ enum PlaybackStatsMode: String, CaseIterable, Identifiable {
 
     var id: Self { self }
 
+    private static let defaultsKey = "plurx.playbackInfoMode"
+
+    static var persisted: Self {
+        guard let raw = UserDefaults.standard.string(forKey: defaultsKey),
+              let mode = Self(rawValue: raw)
+        else { return .standard }
+        return mode
+    }
+
+    func persist() {
+        UserDefaults.standard.set(rawValue, forKey: Self.defaultsKey)
+    }
+
     var label: String {
         switch self {
         case .mini: return "Mini"
@@ -2277,7 +2441,7 @@ enum PlaybackStatsMode: String, CaseIterable, Identifiable {
     }
 }
 
-private enum PlaybackStatTone {
+enum PlaybackStatTone {
     case neutral
     case muted
     case good
@@ -2298,7 +2462,7 @@ private enum PlaybackStatTone {
 /// Where a ledger section sits in the panel. The column is assigned
 /// structurally rather than measured, so the rendered order is always the
 /// declared order no matter how long the values happen to be this second.
-private enum PlaybackLedgerColumn: Equatable {
+enum PlaybackLedgerColumn: Equatable {
     case left
     case right
 }
@@ -2306,7 +2470,7 @@ private enum PlaybackLedgerColumn: Equatable {
 /// Whether a row belongs in the two-column grid or in the notes strip that
 /// spans the panel underneath it. Sentence-shaped values leave the grid so
 /// they can never stretch a column.
-private enum PlaybackLedgerPlacement: Equatable {
+enum PlaybackLedgerPlacement: Equatable {
     case grid
     case notes
 }
@@ -2314,7 +2478,7 @@ private enum PlaybackLedgerPlacement: Equatable {
 /// One label/value pair. Rows are plain data rather than views so the
 /// alignment and density decisions below can inspect them before anything is
 /// laid out.
-private struct PlaybackLedgerRow: Identifiable {
+struct PlaybackLedgerRow: Identifiable {
     var section: String = ""
     let label: String
     let value: String
@@ -2353,7 +2517,7 @@ private struct PlaybackLedgerRow: Identifiable {
 
 /// A section aligns as a unit: a column of numbers reads as a column only if
 /// every value in it shares the same edge and the same digit width.
-private struct PlaybackLedgerSection: Identifiable {
+struct PlaybackLedgerSection: Identifiable {
     let id: String
     let title: String
     let column: PlaybackLedgerColumn
@@ -2437,6 +2601,82 @@ private struct PlaybackLedgerSection: Identifiable {
     }
 }
 
+struct ApplePlaybackInfoField: Identifiable {
+    let id: String
+    let label: String
+    let section: String
+    let modes: Set<PlaybackStatsMode>
+    let placement: PlaybackLedgerPlacement
+    let always: Bool
+
+    init(
+        _ id: String,
+        _ label: String,
+        _ section: String,
+        _ modes: [PlaybackStatsMode],
+        placement: PlaybackLedgerPlacement = .grid,
+        always: Bool = false
+    ) {
+        self.id = id
+        self.label = label
+        self.section = section
+        self.modes = Set(modes)
+        self.placement = placement
+        self.always = always
+    }
+}
+
+/// Apple-applicable rows from playback-info-fields.json, in fixture order.
+/// The renderer and parity test both consume this list.
+let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
+    .init("method", "Method", "PLAYBACK", [.mini, .standard, .debug]),
+    .init("position", "Position", "PLAYBACK", [.mini, .standard, .debug]),
+    .init("reason", "Reason", "PLAYBACK", [.standard, .debug], placement: .notes),
+    .init("build", "Build", "PLAYBACK", [.debug], always: true),
+    .init("transport", "Transport", "PLAYBACK", [.debug], placement: .notes),
+    .init("file_id", "File ID", "PLAYBACK", [.debug]),
+    .init("session", "Session", "PLAYBACK", [.debug], placement: .notes),
+    .init("source_video", "Video", "SOURCE", [.standard, .debug], placement: .notes),
+    .init("source_resolution", "Resolution", "SOURCE", [.standard, .debug]),
+    .init("source_bitrate", "Bitrate", "SOURCE", [.standard, .debug]),
+    .init("container", "Container", "SOURCE", [.standard, .debug]),
+    .init("source_audio", "Audio", "SOURCE", [.standard, .debug], placement: .notes),
+    .init("source_file", "File", "SOURCE", [.debug], placement: .notes),
+    .init("av_offset", "AV offset", "SOURCE", [.debug], always: true),
+    .init("decode_resolution", "Resolution", "NOW DECODING", [.mini, .standard, .debug]),
+    .init("dynamic_range", "Dynamic range", "NOW DECODING", [.mini, .standard, .debug], placement: .notes),
+    .init("decode_audio", "Audio", "NOW DECODING", [.debug], placement: .notes),
+    .init("buffer", "Buffer", "NOW DECODING", [.mini, .standard, .debug]),
+    .init("player_state", "Player state", "NOW DECODING", [.debug]),
+    .init("waiting_reason", "Waiting reason", "NOW DECODING", [.debug], placement: .notes),
+    .init("stalls", "Stalls", "NOW DECODING", [.standard, .debug]),
+    .init("subtitles", "Subtitles", "NOW DECODING", [.standard, .debug]),
+    .init("delivery_rate", "Delivery rate", "NETWORK", [.mini, .standard, .debug]),
+    .init("observed_rate", "Observed rate", "NETWORK", [.debug]),
+    .init("stream_rate", "Stream rate", "NETWORK", [.debug]),
+    .init("delivered", "Delivered", "NETWORK", [.standard, .debug]),
+    .init("transferred", "Transferred", "NETWORK", [.debug]),
+    .init("requests", "Requests", "NETWORK", [.debug]),
+    .init("delivery_idle", "Delivery idle", "NETWORK", [.debug]),
+    .init("started_in", "Started in", "NETWORK", [.debug]),
+    .init("status", "Status", "SERVER", [.standard, .debug], always: true),
+    .init("encoder", "Encoder", "SERVER", [.standard, .debug]),
+    .init("encode_speed", "Encode speed", "SERVER", [.standard, .debug]),
+    .init("server_ahead", "Server ahead", "SERVER", [.standard, .debug]),
+    .init("ahead_bytes", "Ahead bytes", "SERVER", [.debug]),
+    .init("produced", "Produced", "SERVER", [.debug]),
+    .init("pacing", "Pacing", "SERVER", [.debug]),
+    .init("held", "Held", "SERVER", [.debug]),
+    .init("hold_reason", "Hold reason", "SERVER", [.debug]),
+    .init("suspend_count", "Suspend count", "SERVER", [.debug]),
+    .init("request_idle", "Request idle", "SERVER", [.debug]),
+    .init("last_request", "Last request", "SERVER", [.debug], placement: .notes),
+    .init("playlist", "Playlist", "SERVER", [.debug]),
+    .init("published_end", "Published end", "SERVER", [.debug]),
+    .init("fetched_end", "Fetched end", "SERVER", [.debug]),
+    .init("control", "Control", "SERVER", [.standard, .debug]),
+]
+
 /// The same three playback-info levels used by the web and Android players.
 /// Each client renders them natively, but Mini, Standard, and Debug keep the
 /// same job and information hierarchy on every screen size.
@@ -2446,10 +2686,14 @@ private struct PlaybackLedgerSection: Identifiable {
 /// values. Only the field set and a handful of platform metrics change
 /// between them, so switching mode grows the same block downward from the
 /// same top-trailing corner instead of relaying the screen.
-private struct PlaybackStatsView: View {
+struct PlaybackStatsView: View {
     @ObservedObject var controller: PlayerController
     @Binding var mode: PlaybackStatsMode
     let onDismiss: () -> Void
+
+    static func contractFieldLabels(for mode: PlaybackStatsMode) -> [String] {
+        applePlaybackInfoFields.filter { $0.modes.contains(mode) }.map(\.label)
+    }
 
     #if os(tvOS)
     @FocusState private var dismissFocused: Bool
@@ -2474,7 +2718,20 @@ private struct PlaybackStatsView: View {
                 ledgerBody
             }
         }
+        #if os(tvOS)
+        .onAppear { requestInitialFocus() }
+        .onChange(of: mode) { _, _ in requestInitialFocus() }
+        #endif
     }
+
+    #if os(tvOS)
+    private func requestInitialFocus() {
+        Task { @MainActor in
+            await Task.yield()
+            dismissFocused = true
+        }
+    }
+    #endif
 
     private var modeSelector: some View {
         HStack(spacing: 6) {
@@ -2609,11 +2866,34 @@ private struct PlaybackStatsView: View {
     }
 
     private var miniFacts: [PlaybackLedgerRow] {
-        [
-            PlaybackLedgerRow(label: "Playing", value: miniPlayingSummary, tone: playbackTone),
-            PlaybackLedgerRow(label: "Buffer", value: miniBufferSummary, tone: bufferTone),
-            PlaybackLedgerRow(label: "Network", value: miniNetworkSummary, tone: networkTone),
-        ]
+        var rows: [PlaybackLedgerRow] = []
+        let size = controller.presentationSize
+        if size.width > 0 && size.height > 0 {
+            rows.append(PlaybackLedgerRow(
+                label: "Resolution",
+                value: "\(Int(size.width))×\(Int(size.height))",
+                tone: playbackTone
+            ))
+        }
+        if let range = PlayerView.dynamicRangeSummary(
+            source: controller.decision?.source,
+            delivered: controller.deliveredRange,
+            displayHDR: Caps.displayIsHDR,
+            reasons: []
+        ) {
+            rows.append(PlaybackLedgerRow(
+                label: "Dynamic range",
+                value: range.components(separatedBy: " — ").first ?? range,
+                tone: playbackTone
+            ))
+        }
+        rows.append(PlaybackLedgerRow(label: "Buffer", value: miniBufferSummary, tone: bufferTone))
+        rows.append(PlaybackLedgerRow(
+            label: "Delivery rate",
+            value: miniNetworkSummary,
+            tone: networkTone
+        ))
+        return rows
     }
 
     private func miniFact(_ fact: PlaybackLedgerRow) -> some View {
@@ -2633,12 +2913,12 @@ private struct PlaybackStatsView: View {
     }
 
     private var miniHealth: some View {
-        let stalls = controller.stalls ?? 0
+        let status = playbackServerStatus
         return HStack(spacing: 5) {
             Circle()
-                .fill(stalls > 0 ? Color.orange : Color.green)
+                .fill(status.tone.color)
                 .frame(width: miniHealthDotSize, height: miniHealthDotSize)
-            Text(stalls > 0 ? "\(stalls) stall\(stalls == 1 ? "" : "s")" : "Healthy")
+            Text(status.value)
                 .font(.system(size: miniDetailSize, weight: .semibold, design: .rounded))
                 .foregroundStyle(playbackTone.color)
                 .lineLimit(1)
@@ -2649,35 +2929,19 @@ private struct PlaybackStatsView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var miniPlayingSummary: String {
-        let size = controller.presentationSize
-        let resolution = size.width > 0 && size.height > 0
-            ? "\(Int(size.width))×\(Int(size.height))"
-            : "Waiting"
-        let range = PlayerView.dynamicRangeSummary(
-            source: controller.decision?.source,
-            delivered: controller.deliveredRange,
-            displayHDR: Caps.displayIsHDR,
-            reasons: []
-        )
-        return [resolution, range?.components(separatedBy: " — ").first]
-            .compactMap { $0 }
-            .joined(separator: " · ")
-    }
-
     private var miniBufferSummary: String {
         if let runway = controller.bufferedRunwaySeconds() {
-            return String(format: "%.1f s ahead", runway)
+            return String(format: "%.1f s", runway)
         }
         return "Measuring"
     }
 
     private var miniNetworkSummary: String {
+        // `Delivery rate` is the server-reported rate. The player's own
+        // estimate is `Observed rate`, a different row with a different
+        // label — printing it here put two numbers under one label.
         if let delivered = controller.sessionStatus?.deliveredBps, delivered > 0 {
             return bitRate(delivered)
-        }
-        if let observed = controller.observedBitrate, observed > 0 {
-            return bitRate(Int(observed))
         }
         return "Measuring"
     }
@@ -2836,12 +3100,13 @@ private struct PlaybackStatsView: View {
     @ViewBuilder
     private var ledgerBackdrop: some View {
         #if os(iOS)
-        if mode == .debug {
-            Color.clear
-                .contentShape(Rectangle())
-                .ignoresSafeArea()
-                .accessibilityHidden(true)
-        }
+        // Hit-testable and invisible. Without it the taps that miss the panel
+        // reach the transport controls behind it; with it they are the touch
+        // table's `info × tap_surface`, which is `close_info`.
+        Color.clear
+            .contentShape(Rectangle())
+            .ignoresSafeArea()
+            .onTapGesture { onDismiss() }
         #else
         EmptyView()
         #endif
@@ -2851,12 +3116,7 @@ private struct PlaybackStatsView: View {
     /// focus at all, which left the panel unreachable.
     private func ledgerInitialFocus<V: View>(_ view: V) -> some View {
         #if os(tvOS)
-        return view.onAppear {
-            Task { @MainActor in
-                await Task.yield()
-                dismissFocused = true
-            }
-        }
+        return view.onAppear { requestInitialFocus() }
         #else
         return view
         #endif
@@ -2939,7 +3199,7 @@ private struct PlaybackStatsView: View {
     private var ledgerHeaderHealth: some View {
         #if os(tvOS)
         if mode == .standard {
-            playbackHealth
+            playbackServerHealth
         }
         #else
         EmptyView()
@@ -2962,22 +3222,17 @@ private struct PlaybackStatsView: View {
     }
 
     #if os(tvOS)
-    private var playbackHealth: some View {
-        let stalls = controller.stalls
-        let label = TVPlaybackInfoPresentation.healthLabel(stalls: stalls)
-        let color: Color
-        if let stalls, stalls > 0 {
-            color = .orange
-        } else if stalls == 0 {
-            color = .green
-        } else {
-            color = .white.opacity(0.6)
-        }
+    /// The pill means server state on every client and in every mode — the
+    /// stall count is the `Stalls` row and nothing else. The tvOS Standard
+    /// header used to print "No stalls" beside that row: two spellings of one
+    /// datum, and no server state in the header at all.
+    private var playbackServerHealth: some View {
+        let status = playbackServerStatus
         return HStack(spacing: 9) {
             Circle()
-                .fill(color)
+                .fill(status.tone.color)
                 .frame(width: 11, height: 11)
-            Text(label)
+            Text(status.value)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
                 .foregroundStyle(playbackTone.color)
         }
@@ -2985,7 +3240,7 @@ private struct PlaybackStatsView: View {
         .padding(.vertical, 7)
         .background(.white.opacity(0.07), in: Capsule())
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Playback health, \(label)")
+        .accessibilityLabel("Playback health, \(status.value)")
     }
     #endif
 
@@ -3206,491 +3461,259 @@ private struct PlaybackStatsView: View {
 
     // MARK: - Debug field set
 
-    private var debugSections: [PlaybackLedgerSection] {
-        [
-            PlaybackLedgerSection("Playback", column: .left, rows: debugPlaybackRows),
-            PlaybackLedgerSection("Source", column: .left, rows: debugSourceRows),
-            PlaybackLedgerSection("Now decoding", column: .left, rows: debugDecodingRows),
-            PlaybackLedgerSection("Network", column: .right, rows: debugNetworkRows),
-            PlaybackLedgerSection(
-                "Server",
-                column: .right,
-                keepsNotesInBox: true,
-                rows: debugServerRows
-            ),
-        ]
+    private struct ContractFieldValue {
+        let value: String
+        var tone: PlaybackStatTone = .neutral
+        var note: String?
     }
 
-    private var debugPlaybackRows: [PlaybackLedgerRow] {
-        // The method label picks up qualifiers as the user works — a burned-in
-        // subtitle, a PGS overlay, a cached transcode — so the mode is the
-        // datum and the qualifiers are the clause.
-        let method = ledgerSeam(controller.methodLabel)
-        var rows: [PlaybackLedgerRow] = [ledgerRow("Build", buildLabel)]
-        rows.append(contentsOf: ledgerSplitRows("Method", method.datum, clause: method.clause))
-        rows.append(contentsOf: [
-            ledgerRow(
-                "Transport",
-                controller.currentSessionId == nil
-                    ? "Continuous file · range requests · Apple AVPlayer"
-                    : "Segmented HLS · Apple AVPlayer"
-            ),
-            ledgerRow(
-                "Position",
-                "\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))"
-            ),
-            ledgerRow("File ID", controller.decision.map { "#\($0.fileId)" } ?? "—"),
-        ])
-        if let session = controller.currentSessionId {
-            rows.append(ledgerRow("Session", session))
+    private func contractSections(for requestedMode: PlaybackStatsMode) -> [PlaybackLedgerSection] {
+        let definitions = applePlaybackInfoFields.filter { $0.modes.contains(requestedMode) }
+        let sectionOrder = ["PLAYBACK", "SOURCE", "NOW DECODING", "NETWORK", "SERVER"]
+        return sectionOrder.compactMap { sectionName in
+            let fields = definitions.filter { $0.section == sectionName }
+            let rows = fields.flatMap { field -> [PlaybackLedgerRow] in
+                guard let supplied = contractValue(for: field.id) else {
+                    guard field.always else { return [] }
+                    return [PlaybackLedgerRow(
+                        label: field.label,
+                        value: "—",
+                        tone: .muted,
+                        placement: field.placement
+                    )]
+                }
+                var result = [PlaybackLedgerRow(
+                    label: field.label,
+                    value: supplied.value,
+                    tone: supplied.tone,
+                    placement: field.placement
+                )]
+                if let note = supplied.note, !note.isEmpty {
+                    result.append(PlaybackLedgerRow(
+                        label: field.label,
+                        value: note,
+                        tone: supplied.tone,
+                        placement: .notes
+                    ))
+                }
+                return result
+            }
+            guard !rows.isEmpty else { return nil }
+            let column: PlaybackLedgerColumn = ["PLAYBACK", "SOURCE", "NOW DECODING"]
+                .contains(sectionName) ? .left : .right
+            return PlaybackLedgerSection(
+                sectionName.capitalized,
+                column: column,
+                keepsNotesInBox: false,
+                rows: rows
+            )
         }
-        if let reasons = controller.decision?.reasons, !reasons.isEmpty {
-            rows.append(ledgerRow("Reason", reasons.joined(separator: "; ")))
-        }
-        return rows
     }
 
-    private var debugSourceRows: [PlaybackLedgerRow] {
-        var rows: [PlaybackLedgerRow] = []
-        if let source = controller.decision?.source {
-            let video = [
+    private func contractValue(for id: String) -> ContractFieldValue? {
+        let snapshot = controller.currentDiagnosticSnapshot
+        let status = controller.sessionStatus
+        let source = controller.decision?.source
+        switch id {
+        case "method":
+            return ContractFieldValue(value: controller.methodLabel, tone: playbackTone)
+        case "position":
+            let rate = controller.player.rate
+            let rateClause = rate != 0 && rate != 1 ? String(format: " · %.1f×", rate) : ""
+            return ContractFieldValue(
+                value: "\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))\(rateClause)"
+            )
+        case "reason":
+            guard let reasons = controller.decision?.reasons, !reasons.isEmpty else { return nil }
+            return ContractFieldValue(value: reasons.joined(separator: " · "))
+        case "build":
+            return ContractFieldValue(value: buildLabel)
+        case "transport":
+            return ContractFieldValue(value: controller.currentSessionId == nil
+                ? "Continuous file · range requests · Apple AVPlayer"
+                : "Segmented HLS · Apple AVPlayer")
+        case "file_id":
+            guard let fileID = controller.decision?.fileId else { return nil }
+            return ContractFieldValue(value: "#\(fileID)")
+        case "session":
+            return controller.currentSessionId.map { ContractFieldValue(value: $0) }
+        case "source_video":
+            guard let source else { return nil }
+            let parts = [
                 source.videoCodec?.uppercased(),
                 source.videoProfile,
                 source.bitDepth.map { "\($0)-bit" },
                 source.hdrFormat ?? source.hdr?.uppercased(),
-            ].compactMap { $0 }.joined(separator: " · ")
-            rows.append(ledgerRow("Video", video.isEmpty ? "—" : video))
-            rows.append(ledgerRow(
-                "Resolution",
-                source.width.flatMap { width in source.height.map { "\(width)×\($0)" } } ?? "—"
-            ))
-            rows.append(ledgerRow("Bitrate", source.bitrate.map(bitRate) ?? "—"))
-            rows.append(ledgerRow("Container", source.container?.uppercased() ?? "—"))
-        }
-        if let audio = selectedAudioDescription {
-            rows.append(ledgerRow("Audio", audio))
-        }
-        rows.append(ledgerRow("AV offset", "\(controller.decision?.audioOffsetMs ?? 0) ms"))
-        return rows
-    }
-
-    private var debugDecodingRows: [PlaybackLedgerRow] {
-        let snapshot = controller.currentDiagnosticSnapshot
-        let size = controller.presentationSize
-        var rows: [PlaybackLedgerRow] = [
-            ledgerRow(
-                "Resolution",
-                size.width > 0 && size.height > 0
-                    ? "\(Int(size.width))×\(Int(size.height))"
-                    : "—"
+            ].compactMap { $0 }
+            guard !parts.isEmpty else { return nil }
+            return ContractFieldValue(value: parts.joined(separator: " · "))
+        case "source_resolution":
+            guard let width = source?.width, let height = source?.height else { return nil }
+            return ContractFieldValue(value: "\(width)×\(height)")
+        case "source_bitrate":
+            return source?.bitrate.map { ContractFieldValue(value: bitRate($0)) }
+        case "container":
+            return source?.container.map { ContractFieldValue(value: $0.uppercased()) }
+        case "source_audio":
+            guard let selectedAudioDescription else { return nil }
+            let extra = max(0, controller.audioTracks.count - 1)
+            return ContractFieldValue(
+                value: selectedAudioDescription + (extra > 0 ? " · +\(extra) tracks" : "")
             )
-        ]
-        if let range = PlayerView.dynamicRangeSummary(
-            source: controller.decision?.source,
-            delivered: controller.deliveredRange,
-            displayHDR: Caps.displayIsHDR,
-            reasons: controller.decision?.reasons
-        ) {
-            rows.append(ledgerRow("Dynamic range", range))
+        case "source_file":
+            guard let raw = controller.decision?.delivery?.url ?? controller.decision?.playUrl else {
+                return nil
+            }
+            let decoded = raw.removingPercentEncoding ?? raw
+            return ContractFieldValue(value: decoded)
+        case "av_offset":
+            let applied = controller.decision?.audioOffsetMs ?? 0
+            let declared = controller.decision?.declaredOffsetMs
+            let note = declared.flatMap { $0 != applied ? "Container declared \($0) ms" : nil }
+            return ContractFieldValue(value: "\(applied) ms", note: note)
+        case "decode_resolution":
+            let size = controller.presentationSize
+            guard size.width > 0, size.height > 0 else { return nil }
+            return ContractFieldValue(value: "\(Int(size.width))×\(Int(size.height))")
+        case "dynamic_range":
+            guard let range = PlayerView.dynamicRangeSummary(
+                source: source,
+                delivered: controller.deliveredRange,
+                displayHDR: Caps.displayIsHDR,
+                reasons: controller.decision?.reasons
+            ) else { return nil }
+            return ContractFieldValue(value: range)
+        case "decode_audio":
+            return selectedAudioDescription.map { ContractFieldValue(value: $0) }
+        case "buffer":
+            guard let runway = snapshot.runway else { return nil }
+            return ContractFieldValue(value: String(format: "%.1f s", runway), tone: runwayTone(runway))
+        case "player_state":
+            return ContractFieldValue(
+                value: normalizedPlayerState(snapshot.timeControlStatus),
+                tone: playerStateTone(snapshot.timeControlStatus)
+            )
+        case "waiting_reason":
+            return snapshot.waitingReason.map { ContractFieldValue(value: $0, tone: .warning) }
+        case "stalls":
+            guard let supply = snapshot.accessStalls ?? controller.stalls else { return nil }
+            return ContractFieldValue(
+                value: "\(supply) (\(supply) supply · 0 decode)",
+                tone: stallTone(supply)
+            )
+        case "subtitles":
+            let subtitle = selectedSubtitleParts
+            return ContractFieldValue(value: subtitle.name, note: subtitle.delivery)
+        case "delivery_rate":
+            guard let delivered = status?.deliveredBps else { return nil }
+            let idle = (status?.deliveredIdleMs ?? 0) >= 1_000 ? " · idle" : ""
+            return ContractFieldValue(value: bitRate(delivered) + idle, tone: networkTone)
+        case "observed_rate":
+            return snapshot.observedBitrateBps.map { ContractFieldValue(value: bitRate(Int($0))) }
+        case "stream_rate":
+            return snapshot.indicatedBitrateBps.map { ContractFieldValue(value: bitRate(Int($0))) }
+        case "delivered":
+            return status?.deliveredBytes.map { ContractFieldValue(value: byteCount($0)) }
+        case "transferred":
+            return snapshot.bytesTransferred.map { ContractFieldValue(value: byteCount($0)) }
+        case "requests":
+            return snapshot.mediaRequests.map { ContractFieldValue(value: String($0)) }
+        case "delivery_idle":
+            return status?.deliveredIdleMs.map {
+                ContractFieldValue(value: "\($0) ms", tone: idleTone($0, suspended: status?.suspended ?? false))
+            }
+        case "started_in":
+            return controller.lastTTFFMs.map {
+                ContractFieldValue(value: String(format: "%.1f s", Double($0) / 1_000.0))
+            }
+        case "status":
+            return playbackServerStatus
+        case "encoder":
+            return (status?.encoder ?? controller.encoder).map { ContractFieldValue(value: $0) }
+        case "encode_speed":
+            if let recent = status?.recentSpeed {
+                return ContractFieldValue(value: String(format: "%.2f×", recent), tone: encodeTone(speed: recent, status: status!))
+            }
+            if let average = status?.speed {
+                return ContractFieldValue(value: String(format: "%.2f× (avg)", average), tone: encodeTone(speed: average, status: status!))
+            }
+            return nil
+        case "server_ahead":
+            guard let seconds = status?.aheadSeconds else { return nil }
+            let note = status?.suspended == true
+                ? "Holding buffer\(status.map(holdReleaseDescription) ?? "")"
+                : nil
+            return ContractFieldValue(
+                value: String(format: "%.1f s", Double(max(0, seconds))),
+                tone: runwayTone(Double(seconds), suspended: status?.suspended ?? false),
+                note: note
+            )
+        case "ahead_bytes":
+            return status?.aheadBytes.map { ContractFieldValue(value: byteCount($0)) }
+        case "produced":
+            return status?.outTimeMs.map { ContractFieldValue(value: formatTime($0)) }
+        case "pacing":
+            return status?.readrate.map { ContractFieldValue(value: String(format: "%.2f×", $0)) }
+        case "held":
+            return status?.suspended.map { ContractFieldValue(value: $0 ? "Yes" : "No") }
+        case "hold_reason":
+            return status?.holdReason.map { ContractFieldValue(value: $0) }
+        case "suspend_count":
+            return status?.suspendCount.map { ContractFieldValue(value: String($0)) }
+        case "request_idle":
+            return status?.idleSeconds.map { ContractFieldValue(value: String(format: "%.1f s", Double($0))) }
+        case "last_request":
+            return status?.lastRequest.map { ContractFieldValue(value: $0) }
+        case "playlist":
+            return status?.playlistShape.map { ContractFieldValue(value: $0) }
+        case "published_end":
+            return status?.publishedEndMs.map { ContractFieldValue(value: "\($0) ms") }
+        case "fetched_end":
+            return status?.fetchedEndMs.map { ContractFieldValue(value: "\($0) ms") }
+        case "control":
+            return controller.playbackControlSummary.map { ContractFieldValue(value: $0) }
+        default:
+            return nil
         }
-        rows.append(ledgerRow(
-            "Buffer",
-            snapshot.runway.map { String(format: "%.1f s", $0) } ?? "—",
-            tone: runwayTone(snapshot.runway)
-        ))
-        rows.append(ledgerRow(
-            "Player state",
-            snapshot.timeControlStatus ?? "unknown",
-            tone: playerStateTone(snapshot.timeControlStatus)
-        ))
-        if let waiting = snapshot.waitingReason {
-            rows.append(ledgerRow("Waiting reason", waiting, tone: .warning))
-        }
-        rows.append(ledgerRow(
-            "Buffer empty",
-            yesNo(snapshot.playbackBufferEmpty),
-            tone: snapshot.playbackBufferEmpty == true ? .critical : .good
-        ))
-        rows.append(ledgerRow(
-            "Likely to keep up",
-            yesNo(snapshot.playbackLikelyToKeepUp),
-            tone: snapshot.playbackLikelyToKeepUp == false ? .critical : .good
-        ))
-        rows.append(ledgerRow("Buffer full", yesNo(snapshot.playbackBufferFull)))
-        rows.append(ledgerRow(
-            "Stalls",
-            snapshot.accessStalls.map(String.init) ?? "—",
-            tone: stallTone(snapshot.accessStalls)
-        ))
-        let subtitle = selectedSubtitleParts
-        rows.append(contentsOf: ledgerSplitRows(
-            "Subtitles",
-            subtitle.name,
-            clause: subtitle.delivery
-        ))
-        return rows
     }
 
-    private var debugNetworkRows: [PlaybackLedgerRow] {
-        let snapshot = controller.currentDiagnosticSnapshot
-        return [
-            ledgerRow(
-                "Delivery rate",
-                controller.sessionStatus?.deliveredBps.map(bitRate) ?? "—",
-                tone: networkTone
-            ),
-            ledgerRow("Observed rate", snapshot.observedBitrateBps.map { bitRate(Int($0)) } ?? "—"),
-            ledgerRow("Stream rate", snapshot.indicatedBitrateBps.map { bitRate(Int($0)) } ?? "—"),
-            ledgerRow("Requests", snapshot.mediaRequests.map(String.init) ?? "—"),
-            ledgerRow(
-                "Downloaded media",
-                snapshot.downloadedDuration.map { String(format: "%.1f s", $0) } ?? "—"
-            ),
-            ledgerRow("Transferred", snapshot.bytesTransferred.map(byteCount) ?? "—"),
-            ledgerRow(
-                "Transfer time",
-                snapshot.transferDuration.map { String(format: "%.2f s", $0) } ?? "—"
-            ),
-        ]
-    }
-
-    private var debugServerRows: [PlaybackLedgerRow] {
-        if controller.isVOD {
-            return [
-                ledgerNote("Stream", "Already transcoded · served from cache", tone: .good)
-            ]
-        }
+    private var playbackServerStatus: ContractFieldValue {
+        if controller.failed { return ContractFieldValue(value: "Failed", tone: .critical) }
+        if controller.isVOD { return ContractFieldValue(value: "Served from cache", tone: .good) }
         guard let status = controller.sessionStatus else {
-            return [ledgerRow("Status", "No server-side session", tone: .muted)]
+            return ContractFieldValue(value: "No server-side session", tone: .muted)
         }
-        let speed = status.recentSpeed ?? status.speed
-        var rows: [PlaybackLedgerRow] = [
-            ledgerRow("Encoder", status.encoder ?? controller.encoder ?? "—"),
-            ledgerRow(
-                "Encode speed",
-                speed.map { String(format: "%.2f×", $0) } ?? "—",
-                tone: speed.map { encodeTone(speed: $0, status: status) } ?? .muted
-            ),
-            ledgerRow(
-                "Server ahead",
-                status.aheadSeconds.map { "\(max(0, $0)) s" } ?? "—",
-                tone: runwayTone(
-                    status.aheadSeconds.map(Double.init),
-                    suspended: status.suspended ?? false
-                )
-            ),
-            ledgerRow("Ahead bytes", status.aheadBytes.map(byteCount) ?? "—"),
-            ledgerRow("Produced", status.outTimeMs.map { formatTime($0) } ?? "—"),
-            ledgerRow("Pacing", status.readrate.map { String(format: "%.2f×", $0) } ?? "—"),
-            ledgerRow(
-                "Held",
-                yesNo(status.suspended),
-                tone: status.suspended == true ? .good : .neutral
-            ),
-        ]
-        if let reason = status.holdReason {
-            rows.append(ledgerRow("Hold reason", reason, tone: .good))
+        if status.suspended == true {
+            return ContractFieldValue(value: "Holding buffer", tone: .good)
         }
-        rows.append(ledgerRow(
-            "Suspend count",
-            status.suspendCount.map(String.init) ?? "0",
-            tone: (status.suspendCount ?? 0) > 8 ? .warning : .neutral
-        ))
-        rows.append(ledgerRow("Delivered", status.deliveredBytes.map(byteCount) ?? "—"))
-        rows.append(ledgerRow(
-            "Delivery idle",
-            status.deliveredIdleMs.map { "\($0) ms" } ?? "—",
-            tone: idleTone(
-                status.deliveredIdleMs,
-                suspended: status.suspended ?? false
-            )
-        ))
-        if let request = status.lastRequest {
-            rows.append(ledgerRow("Last request", request))
-        }
-        rows.append(ledgerRow(
-            "Request idle",
-            status.idleSeconds.map { "\($0) s" } ?? "—",
-            tone: requestIdleTone(
-                status.idleSeconds,
-                suspended: status.suspended ?? false
-            )
-        ))
-        if let shape = status.playlistShape {
-            rows.append(ledgerRow("Playlist", shape))
-        }
-        rows.append(ledgerRow("Published end", status.publishedEndMs.map { "\($0) ms" } ?? "—"))
-        rows.append(ledgerRow("Fetched end", status.fetchedEndMs.map { "\($0) ms" } ?? "—"))
-        return rows
+        return ContractFieldValue(value: "Active", tone: .good)
+    }
+
+    private func normalizedPlayerState(_ raw: String?) -> String {
+        if controller.failed { return "Failed" }
+        if controller.finished { return "Ended" }
+        guard let raw = raw?.lowercased() else { return controller.isPlaying ? "Playing" : "Paused" }
+        if raw.contains("wait") { return "Buffering" }
+        if raw.contains("play") { return "Playing" }
+        return controller.isPlaying ? "Playing" : "Paused"
+    }
+
+    var debugSections: [PlaybackLedgerSection] {
+        contractSections(for: .debug)
     }
 
     // MARK: - Standard field set
 
-    /// Standard keeps each platform's own field set and value text; only the
-    /// arrangement is shared.
-    private var standardSections: [PlaybackLedgerSection] {
-        #if os(tvOS)
-        return televisionStandardSections
-        #else
-        return compactStandardSections
-        #endif
+    /// Standard and Debug are both rendered from the shared fixture's field
+    /// order. Platform telemetry supplies values; it never chooses labels or
+    /// moves rows between sections. The hand-written builders that used to
+    /// sit here — five Debug row lists and a second, television-only Standard
+    /// set — became unreachable when that landed, and they still carried
+    /// labels the contract abolished ("Buffer full", "Downloaded media",
+    /// "Transfer time").
+    var standardSections: [PlaybackLedgerSection] {
+        contractSections(for: .standard)
     }
-
-    #if os(tvOS)
-    private var televisionStandardSections: [PlaybackLedgerSection] {
-        [
-            PlaybackLedgerSection("Playback", column: .left, rows: televisionPlaybackRows),
-            PlaybackLedgerSection(
-                "Source",
-                column: .left,
-                placeholder: "Waiting for source details",
-                rows: televisionSourceRows
-            ),
-            PlaybackLedgerSection("Now decoding", column: .left, rows: televisionDecodingRows),
-            PlaybackLedgerSection(
-                "Server",
-                column: .right,
-                placeholder: "Waiting for server details",
-                rows: televisionServerRows
-            ),
-        ]
-    }
-
-    /// The header already carries method and position on the television, so
-    /// this section exists only to route the decision reason into the notes.
-    private var televisionPlaybackRows: [PlaybackLedgerRow] {
-        guard let reasons = controller.decision?.reasons, !reasons.isEmpty else { return [] }
-        return [ledgerRow("Reason", reasons.joined(separator: " · "))]
-    }
-
-    private var televisionSourceRows: [PlaybackLedgerRow] {
-        guard let source = controller.decision?.source else { return [] }
-        let resolution = source.width.flatMap { width in
-            source.height.map { "\(width) × \($0)" }
-        } ?? "Unknown"
-        let video = [
-            source.videoCodec?.uppercased(),
-            source.bitDepth.map { "\($0)-bit" },
-            source.hdrFormat ?? source.hdr?.uppercased(),
-        ]
-            .compactMap { $0 }
-            .joined(separator: " · ")
-        var rows: [PlaybackLedgerRow] = [
-            ledgerRow("Resolution", resolution),
-            ledgerRow("Video", video.isEmpty ? "Unknown" : video),
-            ledgerRow("Container", source.container?.uppercased() ?? "Unknown"),
-        ]
-        if let bitrate = source.bitrate {
-            rows.append(ledgerRow("Bitrate", bitRate(bitrate)))
-        }
-        return rows
-    }
-
-    private var televisionDecodingRows: [PlaybackLedgerRow] {
-        var rows: [PlaybackLedgerRow] = []
-        let size = controller.presentationSize
-        if size.width > 0 && size.height > 0 {
-            rows.append(ledgerRow("Output", "\(Int(size.width)) × \(Int(size.height))"))
-        }
-        if let range = PlayerView.dynamicRangeSummary(
-            source: controller.decision?.source,
-            delivered: controller.deliveredRange,
-            displayHDR: Caps.displayIsHDR,
-            reasons: controller.decision?.reasons
-        ) {
-            rows.append(ledgerRow("Dynamic range", range))
-        }
-        if let bitrate = controller.observedBitrate, bitrate > 0 {
-            rows.append(ledgerRow("Observed bitrate", bitRate(Int(bitrate))))
-        } else if let bitrate = controller.indicatedBitrate, bitrate > 0 {
-            rows.append(ledgerRow("Stream bitrate", bitRate(Int(bitrate))))
-        }
-        let subtitle = selectedSubtitleParts
-        rows.append(contentsOf: ledgerSplitRows(
-            "Subtitles",
-            subtitle.name,
-            clause: subtitle.delivery
-        ))
-        return rows
-    }
-
-    private var televisionServerRows: [PlaybackLedgerRow] {
-        if controller.isVOD && controller.methodLabel.contains("cached") {
-            return [ledgerRow("Status", "Served from cache", tone: .good)]
-        }
-        guard let status = controller.sessionStatus else { return [] }
-        var rows: [PlaybackLedgerRow] = [
-            ledgerRow(
-                "Status",
-                (status.suspended ?? false) ? "Holding buffer" : "Active",
-                tone: .good
-            )
-        ]
-        if let encoder = status.encoder ?? controller.encoder {
-            rows.append(ledgerRow("Encoder", encoder))
-        }
-        if let speed = status.recentSpeed ?? status.speed {
-            rows.append(ledgerRow(
-                "Encode speed",
-                String(format: "%.2f×", speed),
-                tone: encodeTone(speed: speed, status: status)
-            ))
-        }
-        if let ahead = status.aheadSeconds {
-            // The hold clause appears and disappears every couple of seconds as
-            // the client buffer fills and drains, so it is a note of its own
-            // rather than a tail on the seconds — the seconds never move.
-            let held = (status.suspended ?? false)
-                ? "held\(holdReleaseDescription(status))"
-                : nil
-            rows.append(contentsOf: ledgerSplitRows(
-                "Buffer ahead",
-                "\(max(0, ahead)) s",
-                clause: held,
-                tone: runwayTone(Double(ahead), suspended: status.suspended ?? false)
-            ))
-        }
-        if let delivered = status.deliveredBps {
-            rows.append(ledgerRow("Delivery", bitRate(delivered)))
-        }
-        if let bytes = status.deliveredBytes {
-            rows.append(ledgerRow("Transferred", byteCount(bytes)))
-        }
-        return rows
-    }
-    #else
-    private var compactStandardSections: [PlaybackLedgerSection] {
-        [
-            PlaybackLedgerSection("Playback", column: .left, rows: compactPlaybackRows),
-            PlaybackLedgerSection("Source", column: .left, rows: compactSourceRows),
-            PlaybackLedgerSection("Now decoding", column: .left, rows: compactDecodingRows),
-            PlaybackLedgerSection(
-                "Server",
-                column: .right,
-                keepsNotesInBox: true,
-                rows: compactServerRows
-            ),
-        ]
-    }
-
-    private var compactPlaybackRows: [PlaybackLedgerRow] {
-        // Same seam as Debug: the mode is the datum, the qualifiers the user's
-        // choices add to it are the clause.
-        let method = ledgerSeam(controller.methodLabel)
-        var rows: [PlaybackLedgerRow] = ledgerSplitRows(
-            "Method",
-            method.datum,
-            clause: method.clause
-        )
-        rows.append(
-            ledgerRow(
-                "Position",
-                "\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))"
-            )
-        )
-        if let reasons = controller.decision?.reasons, !reasons.isEmpty {
-            rows.append(ledgerRow("Reason", reasons.joined(separator: "; ")))
-        }
-        return rows
-    }
-
-    private var compactSourceRows: [PlaybackLedgerRow] {
-        guard let source = controller.decision?.source else { return [] }
-        let resolution = source.width.flatMap { width in
-            source.height.map { "\(width)×\($0)" }
-        } ?? "—"
-        let video = [
-            source.videoCodec?.uppercased(),
-            source.bitDepth.map { "\($0)-bit" },
-            source.hdrFormat ?? source.hdr?.uppercased(),
-        ]
-            .compactMap { $0 }
-            .joined(separator: " · ")
-        // Resolution is the datum; the codec facts hung off it run past what a
-        // grid row can show on an iPad, so they are a note rather than a tail
-        // the grid would have to truncate.
-        var rows: [PlaybackLedgerRow] = ledgerSplitRows(
-            "Source",
-            resolution,
-            clause: video.isEmpty ? "—" : video
-        )
-        rows.append(ledgerRow("Container", source.container?.uppercased() ?? "—"))
-        if let bitrate = source.bitrate {
-            rows.append(ledgerRow("Source rate", bitRate(bitrate)))
-        }
-        return rows
-    }
-
-    private var compactDecodingRows: [PlaybackLedgerRow] {
-        var rows: [PlaybackLedgerRow] = []
-        let size = controller.presentationSize
-        if size.width > 0 && size.height > 0 {
-            rows.append(ledgerRow("Output", "\(Int(size.width))×\(Int(size.height))"))
-        }
-        // The badge says it in three characters; this says it in words, with
-        // the server's own reason for the difference.
-        if let range = PlayerView.dynamicRangeSummary(
-            source: controller.decision?.source,
-            delivered: controller.deliveredRange,
-            displayHDR: Caps.displayIsHDR,
-            reasons: controller.decision?.reasons
-        ) {
-            rows.append(ledgerRow("Dynamic range", range))
-        }
-        if let bitrate = controller.observedBitrate, bitrate > 0 {
-            rows.append(ledgerRow("Observed rate", bitRate(Int(bitrate))))
-        } else if let bitrate = controller.indicatedBitrate, bitrate > 0 {
-            rows.append(ledgerRow("Stream rate", bitRate(Int(bitrate))))
-        }
-        if let stalls = controller.stalls {
-            rows.append(ledgerRow("Player stalls", String(stalls)))
-        }
-        return rows
-    }
-
-    private var compactServerRows: [PlaybackLedgerRow] {
-        var rows: [PlaybackLedgerRow] = []
-        if controller.isVOD && controller.methodLabel.contains("cached") {
-            rows.append(ledgerNote("Server", "Already transcoded · served from cache"))
-        } else if let status = controller.sessionStatus {
-            if let encoder = status.encoder ?? controller.encoder {
-                rows.append(ledgerRow("Encoder", encoder))
-            }
-            if let speed = status.recentSpeed ?? status.speed {
-                rows.append(ledgerRow("Encode speed", String(format: "%.2f×", speed)))
-            }
-            if let ahead = status.aheadSeconds {
-                // Same seam as the television: the seconds stay in the grid
-                // and the hold clause is a note that comes and goes with the
-                // hold, so neither half changes column as the server suspends.
-                let held = (status.suspended ?? false)
-                    ? "held\(holdReleaseDescription(status))"
-                    : nil
-                rows.append(contentsOf: ledgerSplitRows(
-                    "Server ahead",
-                    "\(max(0, ahead)) s",
-                    clause: held
-                ))
-            }
-            if let delivered = status.deliveredBps {
-                rows.append(ledgerRow("Delivery rate", bitRate(delivered)))
-            }
-            if let bytes = status.deliveredBytes {
-                rows.append(ledgerRow("Delivered", byteCount(bytes)))
-            }
-        }
-        if let subtitle = controller.selectedSubtitle,
-           let track = controller.subtitles.first(where: { $0.index == subtitle }) {
-            let parts = subtitleParts(track, index: subtitle)
-            rows.append(contentsOf: ledgerSplitRows(
-                "Subtitles",
-                parts.name,
-                clause: parts.delivery
-            ))
-        }
-        return rows
-    }
-    #endif
 
     private func ledgerRow(
         _ label: String,
@@ -3905,7 +3928,14 @@ private struct PlaybackStatsView: View {
     }
 
     private func bitRate(_ bits: Int) -> String {
-        String(format: "%.2f Mb/s", Double(bits) / 1_000_000.0)
+        let megabits = Double(bits) / 1_000_000.0
+        if megabits < 1 {
+            return String(format: "%.0f kb/s", Double(bits) / 1_000.0)
+        }
+        if megabits < 10 {
+            return String(format: "%.1f Mb/s", megabits)
+        }
+        return String(format: "%.0f Mb/s", megabits)
     }
 
     private func byteCount(_ bytes: Int) -> String {

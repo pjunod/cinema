@@ -409,7 +409,7 @@ test("operations card renders the server rollout verdict and direct evidence", (
   assert.match(summary, /Ready to restart one voter/);
   assert.match(summary, /3 voters · majority 2 · 3 ready/);
   assert.match(nodeHtml, /Follower · term 81 · lag 0/);
-  assert.match(nodeHtml, /open.*3 segments.*6\.0 MB/s);
+  assert.match(nodeHtml, /open.*3 segments.*6\.3 MB/s);
   assert.match(nodeHtml, /WAL durable index[\s\S]*482191/);
   assert.match(nodeHtml, /Unknown here — drain proxy connections separately/);
   assert.match(nodeHtml, /v0\.2\.7-operations/);
@@ -2006,7 +2006,7 @@ test("every action on the rail carries its precondition", () => {
   const promote = rows.get("Promote node-d to voter");
   assert.equal(promote.blocked, true);
   assert.match(promote.reason, /durable free-space reserve/);
-  assert.match(promote.reason, /20 GB free/);
+  assert.match(promote.reason, /22 GB free/);
   assert.match(promote.action, /disabled/);
 
   // Leaving is always available and always permanent; it is never "ready".

@@ -343,7 +343,7 @@
     .pbar{top:calc(env(safe-area-inset-top,0px) + 44px)}
     .pskip{bottom:calc(env(safe-area-inset-bottom,0px) + 120px)}
   }
-  .player.idle .pbar{opacity:0;pointer-events:none}
+  .player.idle .pbar{opacity:0;pointer-events:none;visibility:hidden;transition:opacity .2s,visibility 0s .2s}
   /* a dropdown menu tracks the bar: if the chrome ever hides, the menu goes
      with it instead of floating alone (the JS also keeps the bar up while a
      menu is open, so this is a safety net) */
@@ -369,10 +369,12 @@
      native <video> bar can't show either for a progressive remux (its duration
      grows) or an offset HLS stream, so we own the control. Auto-hides with the
      rest of the chrome; the seek fires on release, not on every drag tick. */
-  .ptransport{position:absolute;left:0;right:0;bottom:0;z-index:5;display:flex;align-items:center;gap:10px;
-    padding:12px 20px calc(12px + env(safe-area-inset-bottom,0px));
-    background:linear-gradient(to top,rgba(0,0,0,.8),rgba(0,0,0,0));transition:opacity .2s ease-out}
-  .player.idle .ptransport{opacity:0;pointer-events:none}
+  .ptimeline,.ptransport{position:absolute;left:0;right:0;z-index:5;display:flex;align-items:center;transition:opacity .2s ease-out,visibility 0s}
+  .ptimeline{bottom:calc(44px + env(safe-area-inset-bottom,0px));gap:8px;padding:8px 20px}
+  .ptransport{bottom:0;gap:10px;padding:8px 20px calc(12px + env(safe-area-inset-bottom,0px));
+    background:linear-gradient(to top,rgba(0,0,0,.8),rgba(0,0,0,0))}
+  .ptransport-spacer{flex:1 1 auto}
+  .player.idle .ptransport,.player.idle .ptimeline,.player.idle .pskip{opacity:0;pointer-events:none;visibility:hidden;transition:opacity .2s,visibility 0s .2s}
   .picon{background:transparent;border:0;color:#fff;font-size:17px;line-height:1;cursor:pointer;padding:4px;opacity:.92;text-shadow:0 1px 4px rgba(0,0,0,.6)}
   .picon:hover{opacity:1;color:var(--accent)}
   /* CC sits in the transport (where people look for subtitles) and lights up
@@ -402,7 +404,7 @@
     padding:9px 16px;font-size:13.5px;font-weight:600;cursor:pointer}
   .ploadAct button:hover{background:var(--accent);border-color:var(--accent)}
   .ptime{color:#fff;font:12px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;text-shadow:0 1px 4px rgba(0,0,0,.7);min-width:46px;text-align:center;flex:0 0 auto}
-  .pseek{position:relative;flex:1 1 auto;height:16px;display:flex;align-items:center;cursor:pointer;touch-action:none}
+  .pseek{position:relative;flex:1;height:16px;display:flex;align-items:center;cursor:pointer;touch-action:none}
   .pseek::before{content:"";position:absolute;left:0;right:0;height:5px;border-radius:3px;background:rgba(255,255,255,.26)}
   .pseek-buf,.pseek-fill{position:absolute;left:0;height:5px;border-radius:3px;width:0}
   .pseek-buf{background:rgba(255,255,255,.4)}
@@ -3121,7 +3123,7 @@ if(window.matchMedia){ try{ window.matchMedia("(prefers-color-scheme: dark)").ad
 </head>
 <body>
 <div id="app"></div>
-<div class="modal" id="modal"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="audiobtn" style="display:none" onclick="toggleMenu('audio')">🔊 Audio</button><button class="pbtn" id="subsbtn" style="display:none" onclick="toggleMenu('subs')">💬 Subtitles</button><button class="pbtn" id="qualbtn" title="Playback quality" onclick="toggleMenu('quality')">◆ Quality</button><button class="pbtn" id="syncbtn" title="Audio sync adjustment" onclick="toggleMenu('sync')">⇄ Sync</button><button class="pbtn" id="statsbtn" title="Playback info (i)" onclick="toggleStats()">ⓘ Stats</button><button class="pbtn" id="skipbtn" title="Auto-skip intro & credits" onclick="togglePlayerAutoskip()">⏭ Auto-skip</button><button class="pbtn" id="autonextbtn" title="Auto-play the next episode when one finishes" onclick="togglePlayerAutonext()">▶ Autoplay</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptransport" id="ptransport"><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon nudge" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon nudge" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span><button class="picon paud" id="pbaudio" aria-label="Audio track" title="Audio track (a)" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">ⓘ</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="statsov" id="statsov" data-mode="standard"><div class="statshd"><span>Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback info size"><button type="button" data-stats-mode="mini" role="radio" onclick="setStatsMode('mini')">Mini</button><button type="button" data-stats-mode="standard" role="radio" onclick="setStatsMode('standard')">Standard</button><button type="button" data-stats-mode="debug" role="radio" onclick="setStatsMode('debug')">Debug</button></div><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu"></div></div></div>
+<div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="Player"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="statsbtn" aria-haspopup="dialog" aria-expanded="false" title="Playback info (i)" onclick="toggleStats()">ⓘ Playback info</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" id="pbclose" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptimeline" id="ptimeline"><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span></div><div class="ptransport" id="ptransport"><button class="picon" id="pbback" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon" id="pbforward" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptransport-spacer" aria-hidden="true"></span><button class="picon paud" id="pbaudio" aria-haspopup="menu" aria-expanded="false" aria-label="Audio track" title="Audio track" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-haspopup="menu" aria-expanded="false" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbquality" aria-haspopup="menu" aria-expanded="false" aria-label="Playback quality" title="Playback quality" onclick="toggleMenu('quality',1)">◆</button><button class="picon" id="pbsettings" aria-haspopup="menu" aria-expanded="false" aria-label="Playback settings" title="Playback settings" onclick="toggleMenu('settings',1)">⚙</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">≡</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="statsov" id="statsov" data-mode="standard"><div class="statshd"><span id="statstitle">Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback info size"><button type="button" data-stats-mode="mini" role="radio" onclick="setStatsMode('mini')">Mini</button><button type="button" data-stats-mode="standard" role="radio" onclick="setStatsMode('standard')">Standard</button><button type="button" data-stats-mode="debug" role="radio" onclick="setStatsMode('debug')">Debug</button></div><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu" role="menu"></div></div></div>
 <div class="toast" id="toast"></div>
 
 <script src="/assets/cluster-panel.js"></script>
@@ -3652,6 +3654,7 @@ function showStallRecoveryFailure(note){
     `<button onclick="retryPlayback()">Try again</button>`+
     (p.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-manual')">Force transcode</button>`:``)+
     `<button onclick="closePlayer()">Close</button>`);
+  const loading=document.getElementById("ploading"); if(loading) loading.classList.add("failed");
 }
 // The failure every per-frame counter forgives: hardware decode, a full
 // buffer, and the presentation clock quietly running at three-quarter speed.
@@ -3846,8 +3849,68 @@ function renderLogin(){
     });
 }
 
+// ---- keyboard reach for click-only cards ----------------------------------
+// nav-keyboard-adapter:begin — posters and episode rows are emitted as
+// `<div onclick>`, so without this they are mouse-only: no tab stop, nothing
+// announced, and Enter does nothing. Catalog and Theater each carried a
+// near-copy of this (their own comment said so) and Classic carried none, so
+// the layout you picked decided whether the library was reachable at all.
+function navEnhanceClickables(){
+  for(const el of document.querySelectorAll(
+    ".poster[onclick]:not([tabindex]),.eprow[onclick]:not([tabindex])")){
+    el.setAttribute("tabindex","0");
+    // Cards that navigate are links; the photo cards call openLightbox() and
+    // are buttons. Announcing every card as a link would promise a page that
+    // a lightbox never delivers.
+    el.setAttribute("role", /location\.hash/.test(el.getAttribute("onclick")||"") ? "link" : "button");
+  }
+}
+let NAV_KEYS_WIRED=false;
+function navKeyboardWireOnce(){
+  if(NAV_KEYS_WIRED) return;
+  NAV_KEYS_WIRED=true;
+  document.addEventListener("keydown",e=>{
+    // The player and the lightbox own the keyboard while they are up.
+    const modal=document.getElementById("modal");
+    if(lightboxOpen()||(modal&&modal.classList.contains("open"))) return;
+    const el=e.target;
+    if(!el||!el.classList) return;
+    if(!el.classList.contains("poster")&&!el.classList.contains("eprow")) return;
+    // Enter and Space are what a role=link/button promises. "Spacebar" is the
+    // legacy key name older WebKit still reports.
+    if(e.key!=="Enter"&&e.key!==" "&&e.key!=="Spacebar") return;
+    e.preventDefault();          // Space would otherwise page the grid down
+    el.click();                  // fires the inline handler the card emitted
+  });
+  // #app itself is never replaced (every view assigns to its innerHTML), so
+  // one observer on it outlives every route change.
+  const app=document.getElementById("app");
+  if(app&&window.MutationObserver) new MutationObserver(navEnhanceClickables).observe(app,{childList:true,subtree:true});
+  navEnhanceClickables();
+}
+// nav-keyboard-adapter:end
+
+// The header is re-emitted on every route change, and a search field is typed
+// into WHILE the route changes — every keystroke re-renders and the element
+// the viewer was typing in is gone. Carry focus and the caret across the
+// rebuild; the value already survives, because it is read back out of the
+// hash.
+function captureSearchFocus(){
+  const q=document.getElementById("q");
+  if(!q||document.activeElement!==q) return null;
+  return {start:q.selectionStart,end:q.selectionEnd};
+}
+function restoreSearchFocus(state){
+  if(!state) return;
+  const q=document.getElementById("q");
+  if(!q) return;
+  q.focus({preventScroll:true});
+  try{ q.setSelectionRange(state.start,state.end); }catch(e){}
+}
+
 // ---- chrome ---------------------------------------------------------------
 function classicChrome(active, inner){
+  const searchFocus=captureSearchFocus();
   const admin = ME&&ME.is_admin ? `<a href="#/settings" class="${active==='settings'?'active':''}">Settings</a>`:"";
   const getapp = installAvailable() ? `<button class="ghost sm getappbtn" onclick="showInstall()" title="Install the ${APP_NAME} app">Get app</button>` : "";
   document.getElementById("app").innerHTML=`
@@ -3873,6 +3936,8 @@ function classicChrome(active, inner){
    </header><main id="main">${inner}<div class="versionstamp">Version ${esc(buildLabel())}</div></main>`;
   const q=document.getElementById("q");
   let t; q.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>{ location.hash= q.value?("#/search/"+encodeURIComponent(q.value)):"#/"; },300); });
+  restoreSearchFocus(searchFocus);
+  navKeyboardWireOnce();
   pollActivity();
 }
 function getQ(){ const m=location.hash.match(/^#\/search\/(.*)$/); return m?decodeURIComponent(m[1]):""; }
@@ -4007,10 +4072,13 @@ function closeConnectQr(){
 }
 function connectQrOpen(){ return !!document.getElementById("connectdialog"); }
 // Capture Escape before layout-specific sheet handlers so one key closes only
-// the QR dialog, never both the dialog and something behind it.
+// the topmost modal, never it and something behind it. The edit dialog is
+// here rather than in its own listener for the same reason: two Escape
+// handlers is how a key ends up closing two things.
 window.addEventListener("keydown",e=>{
-  if(e.key!=="Escape"||!connectQrOpen()) return;
-  e.preventDefault(); e.stopImmediatePropagation(); closeConnectQr();
+  if(e.key!=="Escape") return;
+  if(connectQrOpen()){ e.preventDefault(); e.stopImmediatePropagation(); closeConnectQr(); return; }
+  if(document.getElementById("editwrap")){ e.preventDefault(); e.stopImmediatePropagation(); closeEdit(); }
 },true);
 
 // ---- global activity indicator --------------------------------------------
@@ -4165,6 +4233,13 @@ function openLightbox(id){
   if(!box){
     box=document.createElement("div");
     box.id="lightbox"; box.className="lightbox";
+    // It behaves as a modal — it takes the keyboard, locks the page behind it
+    // and closes on Escape — so it says it is one. Without the role a screen
+    // reader announces a photo appearing in the middle of the grid.
+    box.setAttribute("role","dialog");
+    box.setAttribute("aria-modal","true");
+    box.setAttribute("aria-label","Photo");
+    box.tabIndex=-1;
     box.innerHTML=`<img id="lbimg" alt="">
       <button class="lbx" aria-label="Close (Esc)" title="Close (Esc)" onclick="closeLightbox()">✕</button>
       <button class="lbprev" aria-label="Previous photo" onclick="lbStep(-1)">‹</button>
@@ -4179,9 +4254,14 @@ function openLightbox(id){
     document.body.appendChild(box);
   }
   document.body.style.overflow="hidden";
+  // Remember what opened it; a dialog that returns focus to the body drops a
+  // keyboard viewer at the top of the page.
+  LB_OPENER=document.activeElement;
   paintLightbox();
+  box.focus({preventScroll:true});
 }
 let LB_TOUCH=0;
+let LB_OPENER=null;
 function paintLightbox(){
   const p=PHOTO_SET[LB_AT]; if(!p) return closeLightbox();
   const img=document.getElementById("lbimg"); if(img) img.src=photoUrl(p.id);
@@ -4205,6 +4285,8 @@ function closeLightbox(){
   const box=document.getElementById("lightbox"); if(box) box.remove();
   document.body.style.overflow="";
   LB_AT=-1;
+  const opener=LB_OPENER; LB_OPENER=null;
+  if(opener&&opener.focus&&document.contains(opener)) opener.focus({preventScroll:true});
 }
 function lightboxOpen(){ return !!document.getElementById("lightbox"); }
 
@@ -4893,7 +4975,7 @@ async function viewSearch(q){
 // ---- detail helpers -------------------------------------------------------
 function fmtChannels(n){ return n===8?"7.1":n===7?"6.1":n===6?"5.1":n===2?"2.0":n===1?"Mono":(n?n+"ch":""); }
 function fmtMbps(bps){ return bps? (bps>=1000000? (bps/1000000).toFixed(bps>=10000000?0:1)+" Mb/s" : Math.round(bps/1000)+" kb/s") : ""; }
-function fmtBytes(n){ if(!n) return ""; const u=["B","KB","MB","GB"]; let i=0; while(n>=1024&&i<u.length-1){ n/=1024; i++; } return (i?n.toFixed(n>=10?0:1):Math.round(n))+" "+u[i]; }
+function fmtBytes(n){ if(!n) return ""; const u=["B","KB","MB","GB","TB"]; let i=0; while(n>=1000&&i<u.length-1){ n/=1000; i++; } return (i?n.toFixed(n>=10?0:1):Math.round(n))+" "+u[i]; }
 function audioLabel(a){ return [a.codec&&a.codec.toUpperCase(), fmtChannels(a.channels), a.language].filter(Boolean).join(" · "); }
 // Apache-2.0 Google Material icon paths. Inline SVG keeps the self-hosted web
 // client usable without a font or CDN connection.
@@ -5955,10 +6037,16 @@ function classicItemBody(p){
 // what you type here, and plurx never writes back to the .nfo (or anything
 // else) in your media folder.
 let EDIT_TAGS=[];
+let EDIT_OPENER=null;
 function openEdit(it){
   EDIT_TAGS=(it.tags||[]).slice();
   const wrap=document.createElement("div");
   wrap.className="editwrap"; wrap.id="editwrap";
+  // Same three promises the connect dialog already makes: it is a dialog, it
+  // closes on Escape, and it gives focus back to the control that opened it.
+  wrap.setAttribute("role","dialog");
+  wrap.setAttribute("aria-modal","true");
+  wrap.setAttribute("aria-label","Edit details");
   wrap.innerHTML=`<div class="editcard">
     <h2 class="section" style="margin-top:0">Edit details</h2>
     <label for="ed-title">Title</label>
@@ -5976,6 +6064,7 @@ function openEdit(it){
       <button onclick="saveEdit(${it.id})">Save</button>
     </div></div>`;
   wrap.addEventListener("click",e=>{ if(e.target===wrap) closeEdit(); });
+  EDIT_OPENER=document.activeElement;
   document.body.appendChild(wrap);
   paintTagChips();
   const t=document.getElementById("ed-title"); if(t) t.focus();
@@ -5986,18 +6075,22 @@ function paintTagChips(){
     +`<input id="ed-tag" placeholder="${EDIT_TAGS.length?"":"beach, kids"}" onkeydown="tagKey(event)">`;
 }
 function dropTag(i){ EDIT_TAGS.splice(i,1); paintTagChips(); document.getElementById("ed-tag").focus(); }
-function tagKey(e){
-  const el=e.target;
-  if(e.key==="Enter"||e.key===","){
-    e.preventDefault();
+function tagKey(event){
+  const el=event.target;
+  if(event.key==="Enter"||event.key===","){
+    event.preventDefault();
     const v=(el.value||"").trim();
     if(v && !EDIT_TAGS.some(t=>t.toLowerCase()===v.toLowerCase())) EDIT_TAGS.push(v);
     el.value=""; paintTagChips(); document.getElementById("ed-tag").focus();
-  } else if(e.key==="Backspace" && !el.value && EDIT_TAGS.length){
+  } else if(event.key==="Backspace" && !el.value && EDIT_TAGS.length){
     EDIT_TAGS.pop(); paintTagChips(); document.getElementById("ed-tag").focus();
   }
 }
-function closeEdit(){ const w=document.getElementById("editwrap"); if(w) w.remove(); }
+function closeEdit(){
+  const w=document.getElementById("editwrap"); if(w) w.remove();
+  const opener=EDIT_OPENER; EDIT_OPENER=null;
+  if(opener&&opener.focus&&document.contains(opener)) opener.focus({preventScroll:true});
+}
 async function saveEdit(id){
   const title=(document.getElementById("ed-title").value||"").trim();
   const date=(document.getElementById("ed-date").value||"").trim();
@@ -6054,7 +6147,7 @@ async function setWatched(id, watched){
 //  direct_play → native <video>, client-side seek/resume
 //  remux       → progressive fMP4 from ffmpeg, server fast-seek for resume
 //  transcode   → HLS via hls.js (ffmpeg tone-maps/re-encodes), offset resume
-let PLAYER={fileId:null,timer:null,offset:0,hls:null,knownDur:0,durMs:0,markers:[],source:null,started:false,idleTimer:null,autoskip:false,deliveredRange:null,deliveredDvProfile:null,waitTimer:null,bookOffset:0,bookDuration:0,bookParts:null};
+let PLAYER={fileId:null,timer:null,offset:0,hls:null,knownDur:0,durMs:0,markers:[],source:null,started:false,idleTimer:null,autoskip:false,deliveredRange:null,deliveredDvProfile:null,waitTimer:null,bookOffset:0,bookDuration:0,bookParts:null,_seekPreview:null,_seekPending:null,_lastFocusedControl:"pbplay",_opener:null,_openerClick:null};
 let PLAYER_WIRED=false;
 // Native HLS (`video.src = playlist.m3u8`) is for real Safari ONLY — it's what
 // makes AirPlay work (an MSE stream can't be flung to an Apple TV). The trap:
@@ -6408,6 +6501,7 @@ function attachHls(video, playlistUrl, startAt){
         return;
       }
       setLoading(true,"Playback failed to start ("+d.details+").","the server couldn't build this stream — see Settings → Logs");
+      const loading=document.getElementById("ploading"); if(loading) loading.classList.add("failed");
       toast("Playback failed ("+d.details+")");
     });
   } else {
@@ -7413,6 +7507,12 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   // cold start, what is already playing on an internal reopen.
   const selection=playbackSelection(PLAYER, fileId);
   const modal=document.getElementById("modal"), video=document.getElementById("video");
+  const playerWasOpen=modal.classList.contains("open");
+  const playerOpener=playerWasOpen?(PLAYER&&PLAYER._opener):document.activeElement;
+  const playerOpenerClick=playerWasOpen?(PLAYER&&PLAYER._openerClick):
+    (playerOpener&&playerOpener.getAttribute&&playerOpener.getAttribute("onclick"));
+  const playerLastFocused=(PLAYER&&PLAYER._lastFocusedControl)||"pbplay";
+  if(PLAYER){ PLAYER._opener=playerOpener; PLAYER._openerClick=playerOpenerClick; }
   wirePlayer();
   // Stamp the click, not the decision: time-to-first-frame is what the person
   // waiting actually experiences, and it includes every server round trip
@@ -7420,6 +7520,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const clickedAt=performance.now();
   document.getElementById("playTitle").textContent=title;
   modal.classList.add("open");
+  if(!playerWasOpen){
+    const app=document.getElementById("app"); if(app) app.inert=true;
+    const initial=document.getElementById("pbplay"); if(initial) initial.focus({preventScroll:true});
+  }
   setLoading(true,"Reading media…","checking the file on the server");
   // The selection travels WITH the decision, so `method`, `reasons`, `delivery`
   // and the marked default tracks all describe the tracks that are about to
@@ -7521,6 +7625,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     preplay:selection||null,
     markers:(decision.markers||[]).map(m=>({...m})), source:src, started:false,
     _markerOffers:new Set(),
+    _seekPreview:null, _seekPending:null, _lastFocusedControl:playerLastFocused,
+    _opener:playerOpener, _openerClick:playerOpenerClick,
     idleTimer:null, autoskip:autoskipOn(), stallTimer:null, probeUrl:null, directUrl:null,
     triedFallback:false,
     refusedOriginal:false,
@@ -8350,7 +8456,7 @@ function forgetDecodeLimits(){
 function forgetDecodeLimitHere(){
   const p=PLAYER; if(!p) return;
   const had=clearDecodeLimit(p.source||{});
-  const m=document.getElementById("pmenu"); if(m) m.classList.remove("on");
+  closeMenu();
   if(!had){ toast("Nothing measured for this stream"); return; }
   toast("Forgotten — measuring this stream again");
   if(qualityForce()==='auto' && p.fileId){
@@ -8570,6 +8676,7 @@ function resetMediaSource(v){
 function stopPlayerTimers(){
   if(!PLAYER) return;
   stopPlaybackControl(PLAYER);
+  clearPendingSeekTimer();
   clearInterval(PLAYER.timer); PLAYER.timer=null;
   clearTimeout(PLAYER.idleTimer); PLAYER.idleTimer=null;
   clearTimeout(PLAYER.stallTimer); PLAYER.stallTimer=null;
@@ -8949,6 +9056,7 @@ function armStall(fromSec, graceMs){
 // were trying to reach, rather than making the user close and re-open the item.
 function retryPlayback(){
   if(!PLAYER) return;
+  const loading=document.getElementById("ploading"); if(loading) loading.classList.remove("failed");
   PLAYER.stallPrompt=false;
   const t=(PLAYER.stallFrom!=null)?PLAYER.stallFrom:pbPosSec();
   setLoading(true,"Retrying…","");
@@ -8996,6 +9104,7 @@ async function stallDiagnose(){
     `<button onclick="retryPlayback()">Try again</button>`+
     (PLAYER.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-manual')">Force transcode</button>`:``)+
     `<button onclick="closePlayer()">Close</button>`);
+  const loading=document.getElementById("ploading"); if(loading) loading.classList.add("failed");
   PLAYER.stallPrompt=true;
   toast(verdict);
 }
@@ -9007,6 +9116,7 @@ function setLoading(on,text,sub,actionHtml){
   const l=document.getElementById("ploading"); if(!l) return;
   const a=document.getElementById("ploadAct");
   if(on){
+    l.classList.remove("failed");
     const t=document.getElementById("ploadText"), s=document.getElementById("ploadSub");
     if(t&&text!=null) t.textContent=text;
     if(s) s.textContent=sub||"";
@@ -9014,22 +9124,58 @@ function setLoading(on,text,sub,actionHtml){
     // recovery buttons a previous stall left behind.
     if(a) a.innerHTML=actionHtml||"";
     l.classList.add("on");
-  } else { l.classList.remove("on"); if(a) a.innerHTML=""; }
+  } else { l.classList.remove("on","failed"); if(a) a.innerHTML=""; }
 }
 // Reveal the title bar / cursor on activity; hide them after a quiet spell
 // while the video is actually playing (projection feel).
 function playerActivity(){
   const p=document.getElementById("player"); if(!p) return;
+  const wasIdle=p.classList.contains("idle");
   p.classList.remove("idle");
+  if(wasIdle&&document.activeElement===document.body){
+    const last=document.getElementById((PLAYER&&PLAYER._lastFocusedControl)||"pbplay")||document.getElementById("pbplay");
+    if(last) last.focus({preventScroll:true});
+  }
   clearTimeout(PLAYER.idleTimer);
+  // The idle tick is an input like any other. Asking the routing table which
+  // states may hide keeps one answer in one place: the hand-written
+  // suppression list that used to live here had already drifted from the
+  // contract (it did not know about a pointer scrub).
   PLAYER.idleTimer=setTimeout(function idle(){
     const v=document.getElementById("video");
-    // Never idle while a track/quality/sync menu is open — the bar would fade
-    // out from under the dropdown, leaving it floating. Re-arm and wait.
-    const m=document.getElementById("pmenu");
-    if(m&&m.classList.contains("on")){ PLAYER.idleTimer=setTimeout(idle,2600); return; }
-    if(v&&!v.paused&&!v.ended) p.classList.add("idle");
-  },2600);
+    const outcome=(v&&!v.paused&&!v.ended)
+      ? PlaybackPolicy.routeInput(playerInputSurface(),playerInputState(),"idle")
+      : "ignore";
+    if(outcome==="ignore"){ PLAYER.idleTimer=setTimeout(idle,4000); return; }
+    applyPlayerOutcome(outcome,{direction:"idle"});
+  },4000);
+}
+// A pointer that can hover is a desktop; a coarse one follows the touch
+// table, on the same page. `tap_surface` and the scrub gestures are the two
+// places where the tables disagree, and an iPad opening the desktop page used
+// to get the desktop answer for both.
+function playerInputSurface(){ return coarsePointer()?"touch":"desktop"; }
+// One pending position, however it was started: arrows and J/L set
+// `_seekPending`, a pointer drag sets `_seekPreview`. Either one means the
+// bar is showing a time the film is not at yet.
+function playerSeekPending(){ return !!(PLAYER&&(PLAYER._seekPending!=null||PLAYER._seekPreview!=null)); }
+function playerInputState(){
+  const p=document.getElementById("player");
+  const loading=document.getElementById("ploading");
+  if(loading&&loading.classList.contains("failed")) return "failed";
+  // Contract §2.2 orders the precedence scrub → menu → info: a pending seek
+  // is the most local thing on screen, so Escape cancels it rather than
+  // closing whatever is behind it.
+  const seek=document.getElementById("pseek");
+  const onSeek=document.activeElement===seek||!!(PLAYER&&PLAYER._seekDragging);
+  if(onSeek&&playerSeekPending()) return "scrub";
+  const menu=document.getElementById("pmenu");
+  if(menu&&menu.classList.contains("on")) return "menu";
+  const so=document.getElementById("statsov");
+  if(so&&so.classList.contains("on")&&so.dataset.mode!=="mini") return "info";
+  if(onSeek) return "timeline";
+  if(p&&p.classList.contains("idle")) return "hidden";
+  return "transport";
 }
 // ---- title info panel -----------------------------------------------------
 // What you're watching, sat above the transport: title (series + SxEyy for an
@@ -9101,7 +9247,7 @@ function pbTick(){
   if(!PLAYER) return;
   const v=document.getElementById("video");
   const tot=pbTotalSec();
-  const pos=PLAYER._seekPreview!=null?PLAYER._seekPreview:pbShownSec();
+  const pos=PLAYER._seekPending!=null?PLAYER._seekPending:(PLAYER._seekPreview!=null?PLAYER._seekPreview:pbShownSec());
   const f=tot>0?Math.min(1,Math.max(0,pos/tot)):0;
   const fill=document.getElementById("pseekfill"), thumb=document.getElementById("pseekthumb"), buf=document.getElementById("pseekbuf");
   if(fill) fill.style.width=(f*100)+"%";
@@ -9146,15 +9292,32 @@ function togglePlay(){
 // on the scrubber, and fire ONE seekTo after a short quiet — so mashing a
 // button (or an arrow) doesn't restart the transcode stream over and over.
 let NUDGE_T=null;
+// A skip and a scrub preview are the same pending position with different
+// commit rules — the skip commits itself after a quiet, the scrub waits for
+// Select. Keeping them in one field is what stops a debounced skip from
+// firing over a committed scrub (and from seeking a player that has closed).
+function clearPendingSeekTimer(){ clearTimeout(NUDGE_T); NUDGE_T=null; }
+function commitPendingSeek(){
+  const me=PLAYER; if(!me) return;
+  clearPendingSeekTimer();
+  const t=me._seekPending; me._seekPending=null;
+  if(t!=null) seekTo(t); else pbTick();
+}
+function cancelPendingSeek(){
+  const me=PLAYER; if(!me) return;
+  clearPendingSeekTimer();
+  me._seekPending=null; me._seekPreview=null;
+  pbTick();
+}
 function nudge(d){
   const me=PLAYER; if(!me) return;
-  me._nudgeAcc=(me._nudgeAcc||0)+d;
-  if(me._nudgeBase==null) me._nudgeBase=pbPosSec();
-  me._seekPreview=Math.max(0, me._nudgeBase+me._nudgeAcc); pbTick(); playerActivity();
+  const total=pbTotalSec();
+  const base=me._seekPending!=null?me._seekPending:pbPosSec();
+  let t=Math.max(0,base+d); if(total>0) t=Math.min(total,t);
+  me._seekPending=t; pbTick(); playerActivity();
   clearTimeout(NUDGE_T);
-  NUDGE_T=setTimeout(()=>{ if(PLAYER!==me) return;
-    const t=Math.max(0, me._nudgeBase+me._nudgeAcc);
-    me._nudgeAcc=0; me._nudgeBase=null; me._seekPreview=null; seekTo(t); }, 350);
+  NUDGE_T=setTimeout(()=>{ if(PLAYER!==me) return; commitPendingSeek(); },
+    PlaybackPolicy.contractTiming("desktop_hotkey_coalesce_ms"));
 }
 async function togglePip(){ const v=document.getElementById("video"); try{ if(document.pictureInPictureElement) await document.exitPictureInPicture(); else if(v) await v.requestPictureInPicture(); }catch(e){} }
 // Is the player fullscreen by any of the three routes into it? The document
@@ -9204,27 +9367,33 @@ function pbWireSeek(){
   const frac=e=>{ const r=seek.getBoundingClientRect(); return r.width?Math.min(1,Math.max(0,((e.clientX||0)-r.left)/r.width)):0; };
   let drag=false;
   seek.addEventListener("pointerdown",e=>{ drag=true; try{seek.setPointerCapture(e.pointerId);}catch(_){}
-    PLAYER._seekPreview=frac(e)*pbTotalSec(); pbTick(); playerActivity(); e.preventDefault(); });
+    // A finger on the bar replaces whatever the keyboard had pending; leaving
+    // it behind froze the clock at a preview nobody could see any more.
+    clearPendingSeekTimer(); PLAYER._seekPending=null; PLAYER._seekDragging=true;
+    PLAYER._seekPreview=frac(e)*pbTotalSec(); pbTick(); playerActivity(); });
   seek.addEventListener("pointermove",e=>{ if(!drag)return; PLAYER._seekPreview=frac(e)*pbTotalSec(); pbTick(); playerActivity(); });
   // With no trustworthy total (see pbTotalSec) a fraction means nothing — drop
   // the drag rather than seeking to a number we made up.
   const done=e=>{ if(!drag)return; drag=false; const tot=pbTotalSec(); const t=frac(e)*tot;
-    PLAYER._seekPreview=null; if(tot>0) seekTo(t); else pbTick(); };
+    clearPendingSeekTimer();
+    PLAYER._seekDragging=false; PLAYER._seekPreview=null; PLAYER._seekPending=null;
+    if(tot>0) seekTo(t); else pbTick(); };
   seek.addEventListener("pointerup",done);
-  seek.addEventListener("pointercancel",()=>{ if(!drag)return; drag=false; const t=PLAYER._seekPreview; PLAYER._seekPreview=null; if(t!=null) seekTo(t); else pbTick(); });
-  // Keyboard on the focused slider: Home/End jump to start/end (directional
-  // seeks are handled by the global player key handler).
-  seek.addEventListener("keydown",e=>{
-    if(e.key==='Home'){ e.preventDefault(); seekTo(0); }
-    else if(e.key==='End'){ e.preventDefault(); const t=pbTotalSec(); if(t>0) seekTo(Math.max(0,t-1)); }
-  });
+  seek.addEventListener("pointercancel",()=>{ if(!drag)return; drag=false; PLAYER._seekDragging=false; cancelPendingSeek(); });
+  seek.addEventListener("blur",()=>{ if(!PLAYER||PLAYER._seekDragging)return; cancelPendingSeek(); });
 }
 // Attach the persistent listeners once; they read live PLAYER state each fire.
 function wirePlayer(){
   if(PLAYER_WIRED) return; PLAYER_WIRED=true;
   const p=document.getElementById("player"), v=document.getElementById("video");
   if(!p||!v) return;
-  ["mousemove","pointerdown","touchstart","keydown"].forEach(ev=>p.addEventListener(ev,playerActivity));
+  // Deliberately no "keydown": a second listener that reveals the chrome is a
+  // second answer to what a key does, and it made every `ignore` row in the
+  // routing table have an effect anyway. The adapter reveals where the
+  // contract says to.
+  ["mousemove","pointerdown","touchstart"].forEach(ev=>window.addEventListener(ev,()=>{
+    const modal=document.getElementById("modal"); if(modal&&modal.classList.contains("open")) playerActivity();
+  }));
   v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.controlPositionHintSec=null; PLAYER.controlRenderOverride=null; PLAYER.controlObservationOverride=null; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl(); if(first) reportTtff(); });
   v.addEventListener("canplay",()=>{ if(PLAYER.started) setLoading(false); });
   // Only a stream that HAS started can "buffer". Before that, the loading
@@ -9298,6 +9467,7 @@ function wirePlayer(){
       message:(names[code]||("error "+code))+(msg?" ("+msg+")":""),
       control_trigger:controlTrigger});
     setLoading(true,"Playback failed: "+(names[code]||("error "+code))+".",(msg?msg+" — ":"")+"see Settings → Logs for the server side");
+    const loading=document.getElementById("ploading"); if(loading) loading.classList.add("failed");
     toast("Playback failed — "+(names[code]||("error "+code)));
   });
   document.addEventListener("visibilitychange",notifyPlaybackControl);
@@ -9309,7 +9479,11 @@ function wirePlayer(){
   // just wakes it: reaching for the controls shouldn't pause the film.
   let ptrKind="mouse", ptrWoke=false;
   v.addEventListener("pointerdown",e=>{ ptrKind=e.pointerType||"mouse"; ptrWoke=p.classList.contains("idle"); });
-  v.addEventListener("click",()=>{ if(ptrKind==="touch"&&ptrWoke){ playerActivity(); return; } togglePlay(); });
+  v.addEventListener("click",()=>{
+    if(PLAYER&&PLAYER._menuDismissedByPointer){ PLAYER._menuDismissedByPointer=false; return; }
+    if(ptrKind==="touch"&&ptrWoke){ playerActivity(); return; }
+    applyPlayerOutcome(PlaybackPolicy.routeInput(playerInputSurface(),playerInputState(),"tap_surface"),{direction:"tap_surface",repeatCount:0});
+  });
   v.addEventListener("dblclick",e=>{ e.preventDefault(); toggleFullscreen(); });
   // Custom transport: keep the scrubber, times, buffered bar, and play icon in
   // sync; enable the drag handler and the PiP button where supported.
@@ -9721,19 +9895,16 @@ function subLabelMenu(s){
     +(subNeedsBurn(s)?" · burned in":"");
 }
 function setupTrackMenus(){
-  const ab=document.getElementById("audiobtn"), sb=document.getElementById("subsbtn"), m=document.getElementById("pmenu");
-  if(m){ m.classList.remove("on"); m.innerHTML=""; }
-  // Audio track selection now sits in the transport next to CC — that is where
-  // people look for it, and the top bar fades out from under the cursor during
-  // playback. The top-bar button stays as a second door to the same menu.
+  const m=document.getElementById("pmenu");
+  if(m){ closeMenu(false); m.innerHTML=""; }
+  // Track selection has one door per option in the transport row. Duplicating
+  // the same menus in the header made the focus order depend on the client.
   const multi=!!(PLAYER.audio&&PLAYER.audio.length>1);
-  if(ab) ab.style.display=multi?"":"none";
   const pa=document.getElementById("pbaudio"); if(pa) pa.style.display=multi?"":"none";
   // Subtitles are offered in every playback mode. A stream that starts at an
   // offset (transcode, copy-HLS, a resumed remux) shifts the cues to match —
   // see setSub() — so the track lines up wherever playback actually began.
   const has=!!(PLAYER.subs&&PLAYER.subs.length);
-  if(sb) sb.style.display=has?"":"none";
   const cc=document.getElementById("pbsubs"); if(cc) cc.style.display=has?"":"none";
   pbSyncSubIcon();
 }
@@ -9742,22 +9913,57 @@ function pbSyncSubIcon(){ const cc=document.getElementById("pbsubs");
   if(cc) cc.classList.toggle("on", !!(PLAYER&&PLAYER.curSub>=0)); }
 // `low` = opened from the bottom transport, so the menu anchors above that
 // button instead of jumping to the top-right corner of the screen.
+function closeMenu(restoreFocus=true){
+  const m=document.getElementById("pmenu"); if(!m) return;
+  m.classList.remove("on","low");
+  m.style.left=""; m.style.top=""; m.style.bottom="";
+  const opener=PLAYER&&PLAYER._menuOpener;
+  if(opener&&opener.setAttribute) opener.setAttribute("aria-expanded","false");
+  if(restoreFocus&&opener&&opener.focus) opener.focus({preventScroll:true});
+  if(PLAYER) PLAYER._menuOpener=null;
+  playerActivity();
+}
+function settingsMenuHtml(){
+  return `<div class="amsec">Playback settings</div>
+    <button id="pmenu-autoskip" role="menuitemcheckbox" aria-checked="${autoskipOn()}" class="${autoskipOn()?'sel':''}" onclick="togglePlayerAutoskip(); refreshPlayerSettingsMenu('pmenu-autoskip')">Auto-skip intro and credits</button>
+    <button id="pmenu-autoplay" role="menuitemcheckbox" aria-checked="${autoNextOn()}" class="${autoNextOn()?'sel':''}" onclick="togglePlayerAutonext(); refreshPlayerSettingsMenu('pmenu-autoplay')">Autoplay next episode</button>
+    ${syncMenuHtml()}`;
+}
+function refreshPlayerSettingsMenu(focusId){
+  const m=document.getElementById("pmenu");
+  if(!m||!m.classList.contains("on")||m.dataset.kind!=="settings") return;
+  m.innerHTML=settingsMenuHtml();
+  m.querySelectorAll("button").forEach(button=>{
+    if(!button.hasAttribute("role")) button.setAttribute("role","menuitem");
+  });
+  const target=focusId&&document.getElementById(focusId);
+  if(target) target.focus({preventScroll:true});
+}
 function toggleMenu(kind,low){
   const m=document.getElementById("pmenu"); if(!m) return;
-  if(m.classList.contains("on") && m.dataset.kind===kind){ m.classList.remove("on"); return; }
+  if(m.classList.contains("on") && m.dataset.kind===kind){ closeMenu(); return; }
+  if(m.classList.contains("on")) closeMenu(false);
   // On a phone the two panels take turns: each wants most of the screen, and
   // stacking them left neither one dismissible. On a mouse there is room for
   // both, and wanting both is the normal case — you open the readout to watch
   // what a quality change does to it, and having the menu dismiss it meant the
   // numbers you came to compare were gone before you could change anything.
   // positionMenu() slides the menu clear of the panel rather than over it.
+  const anchorId=MENU_ANCHORS[kind]&&MENU_ANCHORS[kind][low?1:0];
+  // Read the opener before anything else moves focus: closing the info panel
+  // below focuses its own button, and recording that meant Escape handed
+  // focus back to the wrong control.
+  const opener=document.activeElement&&document.activeElement!==document.body
+    ?document.activeElement:(anchorId?document.getElementById(anchorId):null);
   const sov=document.getElementById("statsov");
   if(coarsePointer() && sov && sov.classList.contains("on")) toggleStats();
+  if(PLAYER) PLAYER._menuOpener=opener;
+  if(opener&&opener.setAttribute) opener.setAttribute("aria-expanded","true");
   m.dataset.kind=kind; m.classList.toggle("low",!!low);
   if(kind==="audio"){
     m.innerHTML=PLAYER.audio.map((a,i)=>`<button class="${PLAYER.curAudio===i?'sel':''}" onclick="switchAudio(${i})">${esc(audioLabelMenu(a,i))}</button>`).join("");
-  } else if(kind==="sync"){
-    m.innerHTML=syncMenuHtml();
+  } else if(kind==="settings"){
+    m.innerHTML=settingsMenuHtml();
   } else if(kind==="quality"){
     // If a remembered measurement is why Auto is not giving this viewer the
     // source, say so HERE — this menu is where somebody goes when they wonder
@@ -9792,14 +9998,20 @@ function toggleMenu(kind,low){
     m.innerHTML=`<button class="${PLAYER.curSub<0?'sel':''}" onclick="setSub(-1)">Off</button>`+
       PLAYER.subs.map(s=>`<button class="${PLAYER.curSub===s.index?'sel':''}" onclick="setSub(${s.index})">${esc(subLabelMenu(s))}</button>`).join("");
   }
+  m.querySelectorAll("button").forEach(button=>{
+    if(!button.hasAttribute("role")) button.setAttribute("role","menuitem");
+  });
   m.classList.add("on");
   positionMenu(kind,low);
+  const initial=m.querySelector(".sel")||m.querySelector("button");
+  if(initial) initial.focus({preventScroll:true});
+  playerActivity();
 }
 
 // Which control owns each menu. The menu is one shared element, so the button
 // that opened it is the only thing that says where it belongs.
-const MENU_ANCHORS={audio:["audiobtn","pbaudio"],subs:["subsbtn","pbsubs"],
-                    quality:["qualbtn",null],sync:["syncbtn",null]};
+const MENU_ANCHORS={audio:[null,"pbaudio"],subs:[null,"pbsubs"],
+                    quality:[null,"pbquality"],settings:[null,"pbsettings"]};
 
 // Put the menu under (or above) the button that opened it.
 //
@@ -9875,7 +10087,7 @@ window.addEventListener("resize",()=>{
 function setQuality(q){
   let from="auto"; try{ from=localStorage.getItem("plurx_quality")||"auto"; }catch(e){}
   try{ localStorage.setItem("plurx_quality", q); }catch(e){}
-  const m=document.getElementById("pmenu"); if(m) m.classList.remove("on");
+  closeMenu();
   toast("Quality: "+qualityLabel());
   if(PLAYER && PLAYER.fileId){
     clientLog(Object.assign({level:"warn",event:"quality_switch",
@@ -9907,7 +10119,7 @@ async function setSync(v){
   const me=PLAYER; if(!me||!me.fileId) return;
   PLAYER.aoffset=Math.max(-15000,Math.min(15000,Math.round(v)));
   const m=document.getElementById("pmenu");
-  if(m&&m.classList.contains("on")&&m.dataset.kind==="sync") m.innerHTML=syncMenuHtml();
+  if(m&&m.classList.contains("on")&&m.dataset.kind==="settings") refreshPlayerSettingsMenu();
   toast("Audio sync: "+offsetLabel(PLAYER.aoffset));
   const video=document.getElementById("video");
   const pos=(PLAYER.offset||0)+((video&&video.currentTime)||0);
@@ -9964,7 +10176,7 @@ function rememberPlaybackSelection(kind, index){
   PLAYER.preplay=Object.assign({audio:null,subtitle:null}, PLAYER.preplay||{}, {[kind]:index});
 }
 async function setSub(index){
-  const m=document.getElementById("pmenu"); if(m) m.classList.remove("on");
+  closeMenu();
   const me=PLAYER; if(!me) return;
   endWait(false); // a viewer-directed track change supersedes stall recovery
   // A bitmap subtitle (PGS on a Blu-ray remux, VobSub on a DVD one) is a
@@ -10111,7 +10323,7 @@ async function cycleSub(){
   toast("Subtitles: "+(next<0?"off":subLabelFor(s,next)));
 }
 async function switchAudio(idx){
-  const m=document.getElementById("pmenu"); if(m) m.classList.remove("on");
+  closeMenu();
   if(idx===PLAYER.curAudio) return;
   endWait(false); // cancel a timer armed for the stream this switch replaces
   PLAYER.curAudio=idx;
@@ -10152,6 +10364,78 @@ async function switchAudio(idx){
 }
 
 // ---- playback stats overlay (press i, or the Stats button) ----------------
+// ---- generated from tests/playback/playback-info-fields.json by
+// scripts/player-contract-table --embed; do not edit by hand ----
+const PLAYBACK_INFO_FIELDS=[{"id":"method","label":"Method","section":"PLAYBACK","modes":["mini","standard","debug"],"format":"text","note":"The delivery verdict — the same vocabulary on every client: Direct play · Remux · Transcode · Transcode · cached; the encoder and rung follow as a clause (\"Transcode · nvenc · 1080p\")."},{"id":"playback_mode","label":"Playback mode","section":"PLAYBACK","modes":["debug"],"format":"text","available_on":["web"],"note":"Live HLS / VOD HLS / progressive — the web presentation kind. Native players have one presentation."},{"id":"position","label":"Position","section":"PLAYBACK","modes":["mini","standard","debug"],"format":"position"},{"id":"reason","label":"Reason","section":"PLAYBACK","modes":["standard","debug"],"format":"list","placement":"notes","note":"Why the server chose this method."},{"id":"build","label":"Build","section":"PLAYBACK","modes":["debug"],"format":"text","always":true},{"id":"transport","label":"Transport","section":"PLAYBACK","modes":["debug"],"format":"text","placement":"notes"},{"id":"file_id","label":"File ID","section":"PLAYBACK","modes":["debug"],"format":"text"},{"id":"session","label":"Session","section":"PLAYBACK","modes":["debug"],"format":"text","placement":"notes"},{"id":"switched","label":"Switched","section":"PLAYBACK","modes":["debug"],"format":"list","placement":"notes","available_on":["web"],"note":"Auto-quality moves this session."},{"id":"source_video","label":"Video","section":"SOURCE","modes":["standard","debug"],"format":"list","placement":"notes","note":"codec · profile · bit depth · HDR format."},{"id":"source_resolution","label":"Resolution","section":"SOURCE","modes":["standard","debug"],"format":"resolution"},{"id":"source_bitrate","label":"Bitrate","section":"SOURCE","modes":["standard","debug"],"format":"bitrate"},{"id":"container","label":"Container","section":"SOURCE","modes":["standard","debug"],"format":"text"},{"id":"source_audio","label":"Audio","section":"SOURCE","modes":["standard","debug"],"format":"list","placement":"notes","note":"codec · channels · language, \"+N tracks\" when more exist."},{"id":"source_file","label":"File","section":"SOURCE","modes":["debug"],"format":"text","placement":"notes"},{"id":"av_offset","label":"AV offset","section":"SOURCE","modes":["debug"],"format":"millis","always":true,"note":"Applied offset; the container-declared value follows in parentheses when it differs."},{"id":"decode_resolution","label":"Resolution","section":"NOW DECODING","modes":["mini","standard","debug"],"format":"resolution"},{"id":"dynamic_range","label":"Dynamic range","section":"NOW DECODING","modes":["mini","standard","debug"],"format":"text","placement":"notes","note":"Mini shows the chip form (\"DV P7 → HDR10\"); the ledger shows the sentence."},{"id":"decode_audio","label":"Audio","section":"NOW DECODING","modes":["debug"],"format":"list","placement":"notes","note":"What the player's audio output actually is (route-aware where the platform says)."},{"id":"buffer","label":"Buffer","section":"NOW DECODING","modes":["mini","standard","debug"],"format":"seconds","note":"Runway ahead of the playhead. Seconds only — no clock form, no percentage."},{"id":"frames","label":"Frames","section":"NOW DECODING","modes":["standard","debug"],"format":"fraction","available_on":["web","android"],"note":"dropped / total. AVPlayer does not expose it."},{"id":"frame_rate","label":"Frame rate","section":"NOW DECODING","modes":["debug"],"format":"text","available_on":["web"]},{"id":"player_state","label":"Player state","section":"NOW DECODING","modes":["debug"],"format":"text","note":"One vocabulary: Playing · Paused · Buffering · Ended · Failed."},{"id":"waiting_reason","label":"Waiting reason","section":"NOW DECODING","modes":["debug"],"format":"text","placement":"notes","available_on":["apple"]},{"id":"decoder","label":"Decoder","section":"NOW DECODING","modes":["debug"],"format":"text","available_on":["web","android"],"note":"hardware / software, with the reason when software."},{"id":"stalls","label":"Stalls","section":"NOW DECODING","modes":["standard","debug"],"format":"text","note":"\"2 (1 supply · 1 decode)\" — player-side stall count this session."},{"id":"subtitles","label":"Subtitles","section":"NOW DECODING","modes":["standard","debug"],"format":"text","note":"Track name; the delivery clause (native · burned · overlay) is a note under the same label."},{"id":"delivery_rate","label":"Delivery rate","section":"NETWORK","modes":["mini","standard","debug"],"format":"bitrate","note":"Server-reported delivered rate; \"· idle\" appended when delivery has gone quiet. One label — not Delivery in one mode and Delivery rate in another."},{"id":"observed_rate","label":"Observed rate","section":"NETWORK","modes":["debug"],"format":"bitrate","note":"The player's own throughput estimate."},{"id":"stream_rate","label":"Stream rate","section":"NETWORK","modes":["debug"],"format":"bitrate","note":"The declared rate of the rendition being played."},{"id":"delivered","label":"Delivered","section":"NETWORK","modes":["standard","debug"],"format":"bytes","note":"Server-reported bytes for this session. Never labelled Transferred."},{"id":"transferred","label":"Transferred","section":"NETWORK","modes":["debug"],"format":"bytes","available_on":["apple"],"note":"Client access-log bytes — a different number from Delivered, so a different label."},{"id":"requests","label":"Requests","section":"NETWORK","modes":["debug"],"format":"count","available_on":["apple"]},{"id":"delivery_idle","label":"Delivery idle","section":"NETWORK","modes":["debug"],"format":"millis"},{"id":"started_in","label":"Started in","section":"NETWORK","modes":["debug"],"format":"seconds","note":"Time to first frame."},{"id":"status","label":"Status","section":"SERVER","modes":["standard","debug"],"format":"text","always":true,"note":"One vocabulary: No server-side session · Active · Holding buffer · Served from cache (+ the VOD states on the web). Debug shows it too."},{"id":"encoder","label":"Encoder","section":"SERVER","modes":["standard","debug"],"format":"text"},{"id":"encode_speed","label":"Encode speed","section":"SERVER","modes":["standard","debug"],"format":"speed","note":"\"(avg)\" appended when only the cumulative figure exists. Never abbreviated to Encode."},{"id":"server_ahead","label":"Server ahead","section":"SERVER","modes":["standard","debug"],"format":"seconds","note":"Produced beyond the playhead. Held state and time-release are a note under the same label, never inlined into the value. One label — not Ahead / Buffer ahead / Server ahead."},{"id":"ahead_bytes","label":"Ahead bytes","section":"SERVER","modes":["debug"],"format":"bytes"},{"id":"produced","label":"Produced","section":"SERVER","modes":["debug"],"format":"clock"},{"id":"pacing","label":"Pacing","section":"SERVER","modes":["debug"],"format":"speed"},{"id":"held","label":"Held","section":"SERVER","modes":["debug"],"format":"yesno"},{"id":"hold_reason","label":"Hold reason","section":"SERVER","modes":["debug"],"format":"text"},{"id":"suspend_count","label":"Suspend count","section":"SERVER","modes":["debug"],"format":"count"},{"id":"demand_window","label":"Demand window","section":"SERVER","modes":["debug"],"format":"text","available_on":["web"]},{"id":"request_idle","label":"Request idle","section":"SERVER","modes":["debug"],"format":"seconds"},{"id":"last_request","label":"Last request","section":"SERVER","modes":["debug"],"format":"text","placement":"notes"},{"id":"playlist","label":"Playlist","section":"SERVER","modes":["debug"],"format":"text"},{"id":"published_end","label":"Published end","section":"SERVER","modes":["debug"],"format":"millis"},{"id":"fetched_end","label":"Fetched end","section":"SERVER","modes":["debug"],"format":"millis"},{"id":"control","label":"Control","section":"SERVER","modes":["standard","debug"],"format":"text","note":"Playback-control session owner and state; timing and failure are notes under the same label in Debug."}];
+// ---- end playback info fields ----
+const STATS_ROWS=Object.freeze(Object.fromEntries(PLAYBACK_INFO_FIELDS.map(field=>[
+  field.id,Object.freeze({
+    id:field.id,label:field.label,section:field.section,modes:field.modes,
+    placement:field.placement||"grid",always:!!field.always,
+    build:(telemetry,mode)=>field.id==="dynamic_range"&&mode==="mini"
+      ?telemetry.dynamic_range_mini:telemetry[field.id],
+    note:(telemetry)=>telemetry[`${field.id}_note`]??null
+  })
+])));
+function playbackInfoRows(mode,telemetry){
+  return PLAYBACK_INFO_FIELDS.filter(field=>
+    field.modes.includes(mode)&&(!field.available_on||field.available_on.includes("web")))
+    .map(field=>{
+      const spec=STATS_ROWS[field.id];
+      let value=spec.build(telemetry,mode);
+      if(value==null&&spec.always) value="—";
+      if(value==null) return null;
+      return {id:spec.id,label:spec.label,section:spec.section,placement:spec.placement,
+        value:String(value),note:spec.note(telemetry),tone:telemetry[`${field.id}_tone`]||""};
+    }).filter(Boolean);
+}
+function playbackInfoSectionTitle(section){
+  return section==="NOW DECODING"?"Now decoding":section.charAt(0)+section.slice(1).toLowerCase();
+}
+function playbackInfoMarkup(mode,rows,healthWord,healthStatus){
+  if(mode==="mini"){
+    return `<div class="statsmini">`+rows.map((row,index)=>
+      `${index?'<div class="sdiv" aria-hidden="true"></div>':''}<div class="sval" data-stats-id="${row.id}"><span class="v"></span></div>`
+    ).join("")+`<div class="sdiv" aria-hidden="true"></div><div class="spill" data-stats-health title="${esc(healthStatus)}"><span class="sdot" aria-hidden="true"></span><span class="v">${esc(healthWord)}</span></div></div>`;
+  }
+  const sections=PLAYBACK_INFO_FIELDS.map(field=>field.section).filter((section,index,all)=>all.indexOf(section)===index);
+  const gridSection=section=>{
+    const sectionRows=rows.filter(row=>row.section===section&&row.placement!=="notes");
+    if(!sectionRows.length) return "";
+    return `<div class="stsec"><div class="sechd">${playbackInfoSectionTitle(section)}</div>`+
+      sectionRows.map(row=>`<div class="r" data-stats-id="${row.id}"><b>${esc(row.label)}</b><span class="v"></span></div>`).join("")+`</div>`;
+  };
+  const left=["PLAYBACK","SOURCE","NOW DECODING"].map(gridSection).join("");
+  const right=["NETWORK","SERVER"].map(gridSection).join("");
+  const noteHtml=rows.length?`<div class="snotes">`+rows.map(row=>
+    `<div class="snote" ${row.placement==="notes"?`data-stats-id="${row.id}"`:`data-stats-note="${row.id}"`}><b>${esc(row.label)}</b><span class="v"></span></div>`
+  ).join("")+`</div>`:"";
+  return `<div class="statscols${!left||!right?' one':''}">${left?`<div>${left}</div>`:""}${right?`<div>${right}</div>`:""}</div>${noteHtml}`;
+}
+function patchPlaybackInfoRows(body,mode,rows,healthWord,healthStatus){
+  const schema=`${mode}:`+rows.map(row=>`${row.id}:${row.placement}`).join("|");
+  if(body.dataset.statsSchema!==schema){
+    body.innerHTML=playbackInfoMarkup(mode,rows,healthWord,healthStatus);
+    body.dataset.statsSchema=schema;
+  }
+  for(const row of rows){
+    const main=body.querySelector(`[data-stats-id="${row.id}"]`);
+    if(main){
+      const value=main.querySelector(".v"); if(value&&value.textContent!==row.value) value.textContent=row.value;
+      main.classList.toggle("stat-good",row.tone==="good");
+      main.classList.toggle("stat-warn",row.tone==="warn");
+      main.classList.toggle("stat-bad",row.tone==="bad");
+      main.classList.toggle("stat-muted",row.tone==="muted");
+    }
+    const noteRow=body.querySelector(`[data-stats-note="${row.id}"]`),note=noteRow&&noteRow.querySelector(".v");
+    if(note&&note.textContent!==(row.note||"")) note.textContent=row.note||"";
+    if(noteRow) noteRow.hidden=row.note==null;
+  }
+  const notes=body.querySelector(".snotes");
+  if(notes) notes.hidden=!rows.some(row=>row.placement==="notes"||row.note!=null);
+  const pill=body.querySelector("[data-stats-health]");
+  if(pill){ pill.title=healthStatus; const value=pill.querySelector(".v"); if(value) value.textContent=healthWord; }
+}
 let STATS_TIMER=null;
 let STATS_MODE="standard";
 try{
@@ -10161,6 +10445,7 @@ try{
 function applyStatsMode(){
   const ov=document.getElementById("statsov"); if(!ov) return;
   ov.dataset.mode=STATS_MODE;
+  const title=document.getElementById("statstitle"); if(title) title.textContent=STATS_MODE==="debug"?"Playback debug":"Playback info";
   ov.querySelectorAll("[data-stats-mode]").forEach(button=>{
     const selected=button.dataset.statsMode===STATS_MODE;
     button.classList.toggle("on",selected);
@@ -10183,16 +10468,27 @@ function toggleStats(){
   // turns rather than stacking (which left neither one dismissible). A mouse
   // gets both — see toggleMenu.
   const m=document.getElementById("pmenu");
-  if(on && coarsePointer() && m) m.classList.remove("on");
+  if(on && coarsePointer() && m&&m.classList.contains("on")) closeMenu(false);
   const pl=document.getElementById("player"); if(pl) pl.classList.toggle("statson",on);
-  const sb=document.getElementById("statsbtn"); if(sb) sb.classList.toggle("on",on);
+  const sb=document.getElementById("statsbtn");
+  if(sb){ sb.classList.toggle("on",on); sb.setAttribute("aria-expanded",on?"true":"false"); }
   clearInterval(STATS_TIMER); STATS_TIMER=null;
-  if(on){ applyStatsMode(); updateStats(); positionStats(); STATS_TIMER=setInterval(updateStats,1000); }
-  else { ov.style.top=""; ov.style.maxHeight=""; }
+  if(on){
+    if(PLAYER) PLAYER._statsOpener=sb;
+    applyStatsMode(); updateStats(); positionStats(); STATS_TIMER=setInterval(updateStats,1000);
+    const selected=ov.querySelector('[data-stats-mode][aria-checked="true"]')||ov.querySelector("[data-stats-mode]");
+    if(selected) selected.focus({preventScroll:true});
+  }
+  else {
+    ov.style.top=""; ov.style.maxHeight="";
+    const opener=(PLAYER&&PLAYER._statsOpener)||sb; if(opener&&opener.focus) opener.focus({preventScroll:true});
+    if(PLAYER) PLAYER._statsOpener=null;
+  }
   // The panel that just appeared (or left) changes where the menu belongs, and
   // a menu open across that change is anchored to the old geometry — same
   // reason the resize listener re-runs it.
   if(m && m.classList.contains("on")) positionMenu(m.dataset.kind, m.classList.contains("low"));
+  playerActivity();
 }
 // The top button row wraps to two or three lines on a phone, so the panel's
 // ceiling isn't a constant — measure it, or the readout parks itself over the
@@ -10206,7 +10502,7 @@ function positionStats(){
   // Cap the height against the transport's real top rather than pinning the
   // panel's bottom edge there: a short readout should be a short panel, which
   // on a tablet is the difference between a card and a wall.
-  const tr=document.getElementById("ptransport");
+  const tr=document.getElementById("ptimeline")||document.getElementById("ptransport");
   const floor=tr? Math.round(tr.getBoundingClientRect().top)-10 : 0;
   ov.style.maxHeight = (y>0&&floor>y)? (floor-y)+"px" : "";
 }
@@ -10273,580 +10569,119 @@ function playbackModeDetail(player){
   if(player&&player.sessionId) return "Live HLS · growing recovery timeline";
   return "Progressive file · byte-range delivery";
 }
+function statsCount(value){
+  return String(Math.max(0,Math.trunc(Number(value)||0))).replace(/\B(?=(\d{3})+(?!\d))/g," ");
+}
+function playbackStatsTelemetry(){
+  const v=document.getElementById("video"),p=PLAYER||{},s=p.source||{},h=p.health||null;
+  const audio=p.audio&&p.audio[p.curAudio];
+  const encoder=(h&&h.encoder)||p.encoder||null;
+  const rung=p.autoHeight?`${p.autoHeight}p`:null;
+  const method=p.vod?"Transcode · cached":p.method==="direct_play"?"Direct play":
+    p.method==="transcode"?["Transcode",encoder,rung].filter(Boolean).join(" · "):"Remux";
+  const total=pbTotalSec(),position=pbShownSec();
+  const range=playerRangeBadge(s);
+  const sourceVideo=[s.video_codec&&String(s.video_codec).toUpperCase(),s.profile,
+    s.bit_depth?`${s.bit_depth}-bit`:null,s.hdr_format||(s.hdr?hdrLabel(s.hdr):null)].filter(Boolean).join(" · ")||null;
+  const sourceAudio=audio?[audio.codec&&String(audio.codec).toUpperCase(),
+    audio.channels?fmtChannels(audio.channels):null,
+    audio.language?(langName(audio.language)||audio.language):null,
+    p.audio&&p.audio.length>1?`+${p.audio.length-1} tracks`:null].filter(Boolean).join(" · "):null;
+  let bufferSeconds=0;
+  try{ bufferSeconds=bufferRunway(v); }catch(e){}
+  let frames=null,droppedCount=null,frameRate=p._fpsVal==null?null:p._fpsVal;
+  try{
+    const quality=v&&v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
+    if(quality){
+      droppedCount=quality.droppedVideoFrames;
+      frames=`${statsCount(quality.droppedVideoFrames)} / ${statsCount(quality.totalVideoFrames)} frames`;
+      const now=performance.now(),previous=p._statsFrames;
+      if(v&&!v.paused&&!v.seeking&&previous&&now-previous.at>=950){
+        const measured=(quality.totalVideoFrames-previous.total)/((now-previous.at)/1000);
+        p._fpsVal=frameRate=frameRate==null?measured:frameRate*0.5+measured*0.5;
+      }
+      if(!previous||now-previous.at>=950) p._statsFrames={total:quality.totalVideoFrames,at:now};
+    }
+  }catch(e){}
+  const subtitle=p.curSub>=0
+    ?subLabelFor((p.subs||[]).find(track=>track.index===p.curSub),p.curSub):"Off";
+  const subtitleDelivery=p.burnedSub!=null?"burned":p.curSub>=0?"native":null;
+  const stalls=p.stalls||0,stallKinds=p.stallsByKind||{};
+  const stallParts=[stallKinds.supply?`${stallKinds.supply} supply`:null,
+    stallKinds.decode?`${stallKinds.decode} decode`:null].filter(Boolean);
+  const playbackState=document.getElementById("ploading").classList.contains("failed")?"Failed":
+    v&&v.ended?"Ended":v&&v.paused?"Paused":v&&v.readyState<3?"Buffering":"Playing";
+  const stale=h&&!h.final&&(h.delivered_idle_ms||0)>8000;
+  const delivery=h&&h.delivered_bps!=null?`${fmtMbps(h.delivered_bps)}${stale?" · idle":""}`:"Measuring";
+  const status=p.vod?vodServerState(h):h?(h.suspended?"Holding buffer":"Active"):"No server-side session";
+  const healthWord=p.vod?vodHealthWord(h):h?(h.suspended?"Held":"Active"):"Direct";
+  const speed=h&&h.recent_speed!=null?h.recent_speed:h&&h.speed!=null?h.speed:null;
+  let serverAheadNote=null;
+  if(h&&h.suspended){
+    const release=h.hold_reason==="time"&&h.resume_below_seconds!=null?`time release ≤${h.resume_below_seconds} s`:
+      (h.resume_below_bytes!=null?`${h.hold_reason||"buffer"} release ≤${fmtBytes(h.resume_below_bytes)}`:"held");
+    serverAheadNote=[release,h.suspend_count?`${h.suspend_count} suspends`:null].filter(Boolean).join(" · ");
+  }
+  const level=p.hls&&p.hls.levels&&p.hls.levels[p.hls.currentLevel];
+  const controlStatus=p.controlReporter&&p.controlReporter.status&&p.controlReporter.status();
+  const controlHealth=h||{};
+  const leaseMode=PlaybackPolicy.controlLeaseMode(controlHealth.lease_mode,p.vod,controlStatus&&controlStatus.accepted_sequence);
+  const lease=PlaybackPolicy.controlLeasePresentation(leaseMode);
+  const control=controlStatus?(controlStatus.accepted_sequence
+    ?`${lease.ownership} · accepted #${controlStatus.accepted_sequence}`:`${lease.ownership} · connecting`):null;
+  const controlNote=controlStatus&&STATS_MODE==="debug"?
+    `${(controlStatus.next_exchange_ms/1000).toFixed(1)} s cadence · ${Math.round(controlStatus.lease_timeout_ms/1000)} s ${lease.label} lease`+
+      (p.controlLastError?` · ${p.controlLastError.message}`:""):null;
+  return {
+    method,playback_mode:playbackModeDetail(p),position:`${clockFromSec(position)} / ${total>0?clockFromSec(total):"—"}`+
+      (v&&v.playbackRate&&v.playbackRate!==1?` · ${v.playbackRate}×`:""),
+    reason:p.reasons&&p.reasons.length?p.reasons.join(" · "):null,
+    build:buildLabel(),transport:p.hls?(p.method==="transcode"?"Segmented MPEG-TS · MediaSource":"Segmented fMP4 · MediaSource"):
+      (p.copyHls||p.sessionId)?"Segmented HLS":"Progressive file · range requests",
+    file_id:p.fileId==null?null:String(p.fileId),session:p.sessionId||p.streamId||null,
+    switched:p.rescuedNote||((p.abr&&p.abr.switches)||[]).map(item=>`${item.from} → ${item.to} · ${item.reason}`).join(" · ")||null,
+    source_video:sourceVideo,source_resolution:s.width&&s.height?`${s.width}×${s.height}`:null,
+    source_bitrate:s.bitrate?fmtMbps(s.bitrate):null,container:s.container?String(s.container).toUpperCase():null,
+    source_audio:sourceAudio,source_file:s.filename||p.filename||null,
+    av_offset:`${p.aoffset||0} ms`,av_offset_note:p.declared&&p.declared!==(p.aoffset||0)?`container ${p.declared>0?"+":""}${p.declared} ms`:null,
+    decode_resolution:v&&v.videoWidth?`${v.videoWidth}×${v.videoHeight}`:null,
+    dynamic_range:range?range.panel:null,dynamic_range_mini:range?range.text:null,
+    decode_audio:sourceAudio,buffer:`${Math.max(0,bufferSeconds).toFixed(1)} s`,
+    frames,frames_tone:droppedCount==null?"muted":droppedCount===0?"good":droppedCount<3?"warn":"bad",
+    frame_rate:frameRate==null?null:`${frameRate.toFixed(1)} fps`,player_state:playbackState,
+    decoder:p.decodeInfo?(p.decodeInfo.hw?"hardware":"software · this machine has no GPU path for this stream"):null,
+    stalls:`${stalls}${stallParts.length?` (${stallParts.join(" · ")})`:""}`,
+    subtitles:subtitle,subtitles_note:subtitleDelivery,
+    delivery_rate:delivery,observed_rate:p.hls&&p.hls.bandwidthEstimate?fmtMbps(p.hls.bandwidthEstimate):null,
+    stream_rate:level&&level.bitrate?fmtMbps(level.bitrate):null,
+    delivered:h&&h.delivered_bytes!=null?(fmtBytes(h.delivered_bytes)||"0 B"):null,
+    delivery_idle:h&&h.delivered_idle_ms!=null?`${Math.round(h.delivered_idle_ms)} ms`:null,
+    started_in:p.ttffMs!=null?`${(p.ttffMs/1000).toFixed(1)} s`:null,
+    status,encoder,encode_speed:speed==null?null:`${speed.toFixed(2)}×${h&&h.recent_speed==null?" (avg)":""}`,
+    server_ahead:h&&h.ahead_seconds!=null?`${Math.max(0,h.ahead_seconds).toFixed(1)} s`:null,
+    server_ahead_note:serverAheadNote,ahead_bytes:h&&h.ahead_bytes!=null?(fmtBytes(h.ahead_bytes)||"0 B"):null,
+    produced:h&&h.out_time_ms!=null?clockFromSec(h.out_time_ms/1000):null,
+    pacing:h&&h.readrate!=null?`${Number(h.readrate).toFixed(2)}×`:null,
+    held:h? (h.suspended?"Yes":"No"):null,hold_reason:h&&h.hold_reason||null,
+    suspend_count:h&&h.suspend_count!=null?String(h.suspend_count):null,
+    demand_window:h&&h.production_policy==="explicit_demand"?
+      `${h.production_ahead_seconds==null?"waiting for publication":`${h.production_ahead_seconds} s produced ahead`}`+
+        (h.production_target_seconds==null?"":` · target ${h.production_target_seconds} s`):null,
+    request_idle:h&&h.request_idle_seconds!=null?`${Number(h.request_idle_seconds).toFixed(1)} s`:
+      h&&h.request_idle_ms!=null?`${(h.request_idle_ms/1000).toFixed(1)} s`:null,
+    last_request:h&&h.last_request||null,playlist:h&&h.playlist||null,
+    published_end:h&&h.published_end_ms!=null?`${Math.round(h.published_end_ms)} ms`:null,
+    fetched_end:h&&h.fetched_end_ms!=null?`${Math.round(h.fetched_end_ms)} ms`:null,
+    control,control_note:controlNote,_health_word:healthWord,_health_status:status
+  };
+}
 function updateStats(){
   const ov=document.getElementById("statsov"); if(!ov||!ov.classList.contains("on")) return;
   const body=document.getElementById("statsbody"); if(!body) return;
-  const v=document.getElementById("video");
-  const s=PLAYER.source||{};
-  const baseMethod = PLAYER.method==='direct_play'?'Direct play'
-    : PLAYER.method==='transcode'?('Transcode'+(PLAYER.encoder?` · ${PLAYER.encoder}`:''))
-    : 'Remux';
-  const playbackMode=playbackModeName(PLAYER);
-  const playbackModeLong=playbackModeDetail(PLAYER);
-  // source (from the server probe — the browser never sees these numbers)
-  const srcVideo=[ (s.video_codec||'').toUpperCase(), s.bit_depth?`${s.bit_depth}-bit`:null, (s.hdr_format||(s.hdr?hdrLabel(s.hdr):null)) ].filter(Boolean).join(" · ")||'—';
-  const srcRes = s.width&&s.height? `${s.width}×${s.height}`:'—';
-  const srcBr = s.bitrate? fmtMbps(s.bitrate):'—';
-  const srcCont=(s.container||'—').toUpperCase();
-  const a=PLAYER.audio&&PLAYER.audio[PLAYER.curAudio];
-  const aLine=a? ([ (a.codec||'').toUpperCase(), a.channels?fmtChannels(a.channels):null, a.language?(langName(a.language)||a.language):null ].filter(Boolean).join(" · ")||'—') : '—';
-  // now decoding (what the <video> element actually reports)
-  const tgtRes = v.videoWidth? `${v.videoWidth}×${v.videoHeight}` : '—';
-  let dropped='—', droppedCount=null;
-  // How fast frames are actually reaching the screen, measured rather than
-  // inferred. The dropped counter alone cannot see this: `droppedVideoFrames`
-  // counts frames the compositor discarded, and a decoder that is merely
-  // *late* drops nothing while still visibly juddering. A session reading
-  // 22 fps against a 24 fps source is one frame in eleven never produced —
-  // which is exactly what "it stutters but the buffer is full" looks like
-  // from in here, and the difference between blaming the link and blaming
-  // the decoder.
-  //
-  // Sampled over a second at least. The overlay ticks at 1 s; a shorter
-  // interval divides a small integer by a small float and reads as wild
-  // swings on a stream that is perfectly steady.
-  let fps=null;
-  try{
-    const q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
-    if(q){
-      dropped=`${q.droppedVideoFrames} / ${q.totalVideoFrames}`;
-      droppedCount=q.droppedVideoFrames;
-      const now=performance.now(), prev=PLAYER._fps;
-      // Only while actually playing: a paused or seeking element produces no
-      // frames, and reporting 0 fps for a stream nobody asked to advance is
-      // an alarm about nothing. The last reading is kept across a pause
-      // rather than blanked, so the line doesn't flicker while being read.
-      if(!v.paused && !v.seeking && prev && now-prev.t>=950){
-        const got=(q.totalVideoFrames-prev.n)/((now-prev.t)/1000);
-        PLAYER._fpsVal=(PLAYER._fpsVal==null)?got:(PLAYER._fpsVal*0.5+got*0.5);
-      }
-      if(!prev || now-prev.t>=950) PLAYER._fps={n:q.totalVideoFrames,t:now};
-      fps=PLAYER._fpsVal;
-    }
-  }catch(e){}
-  // Prefer PRESENTED frames when the detector is seeing them.
-  // totalVideoFrames counts decoded frames, and Safari decodes ahead in
-  // bursts — its panel read "31.3 fps rendered" on a 23.976 film that was
-  // measurably playing at 1.000x. The per-presented-frame callback counts
-  // what actually reached the screen, which is the only meaning "rendered"
-  // should have.
-  if(PLAYER.hitches&&PLAYER.hitches.renderedFps!=null) fps=PLAYER.hitches.renderedFps;
-  let buf='—';
-  try{ if(v.buffered&&v.buffered.length){ buf=Math.max(0,v.buffered.end(v.buffered.length-1)-v.currentTime).toFixed(1)+' s'; } }catch(e){}
-  // The contiguous runway from the playhead, as a number — the Server section
-  // needs it to tell "the encoder can't keep up" from "nobody is asking it to".
-  const bufSec=bufferRunway(v);
-  // Network. The delivery rate comes from the SERVER, deliberately: it is the
-  // only participant present on every transport. hls.js has an estimator, but
-  // it exists only while hls.js is the one fetching — so the bandwidth line
-  // used to vanish on Safari's native-HLS path (its HEVC route) and on Chrome's
-  // progressive remux, which is to say on exactly the big files where anyone
-  // wants to see it. Measured where the bytes leave, it is always there.
-  //
-  // A full buffer means nobody is fetching, and the last measured rate is then
-  // a memory rather than a measurement. Rather than blank the line (the whole
-  // complaint) or quietly lie, it says so.
-  // Rows are DATA now, not html strings: {l:label, v:value html, c:tone class,
-  // a:extra attributes, note:true to send it to the notes strip}. The layout
-  // decisions below — which column a section sits in, whether its values are
-  // numbers worth right-aligning, whether it is short enough to run two-up,
-  // which values are sentences that belong out of the grid — are all made by
-  // counting and measuring the rows, and a string of html cannot be counted.
-  // Every value expression is unchanged from when they were strings.
-  const net=[];
-  if(PLAYER.health && PLAYER.health.delivered_bps!=null){
-    const h=PLAYER.health;
-    const stale=!h.final && (h.delivered_idle_ms||0) > 8000;
-    const tag=h.final?' · final':(stale?' · idle':'');
-    const why=h.final?'the stream finished — these are its last figures'
-            :stale?'nothing has been fetched recently — a full buffer, not a slow link':'';
-    const deliveryTone=h.final?"good":statsIdleTone(h.delivered_idle_ms,h.suspended);
-    net.push({l:"Delivery rate",c:statsToneClass(deliveryTone),
-      a:why?` style="opacity:.78" title="${why}"`:'',
-      v:`${fmtMbps(h.delivered_bps)}${tag}`});
-  }
-  if(PLAYER.hls){
-    if(PLAYER.hls.bandwidthEstimate) net.push({l:"Client estimate",v:`${fmtMbps(PLAYER.hls.bandwidthEstimate)}`});
-    const lv=PLAYER.hls.levels&&PLAYER.hls.levels[PLAYER.hls.currentLevel];
-    if(lv&&lv.bitrate) net.push({l:"Stream rate",v:`${fmtMbps(lv.bitrate)}`});
-  }
-  if(PLAYER.health && PLAYER.health.delivered_bytes) net.push({l:"Delivered",v:`${fmtBytes(PLAYER.health.delivered_bytes)}`});
-  // How the server side of this stream is doing. Until this existed, a
-  // stutter had two indistinguishable explanations — the link can't carry it,
-  // or the encoder can't make it fast enough — and the overlay could only
-  // describe the client's half. `speed` under 1.0x names the second one
-  // outright; "held" means the transcoder is deliberately parked because the
-  // buffer ahead is already deep, which is health, not a problem.
-  const srv=[];
-  if(PLAYER.vod){
-    // A cache hit has no encoder, so it has no rate and no lead. Reporting the
-    // usual figures would be actively misleading: "Server ahead 1:32:00" reads
-    // as a runaway encoder rather than as a film that was finished yesterday.
-    srv.push({l:"Stream",v:`already transcoded — served from the cache`,note:true});
-  } else if(PLAYER.health){
-    const h=PLAYER.health;
-    // Prefer the recent rate over ffmpeg's cumulative one. A session that
-    // burst ahead and then fell behind reports a healthy lifetime average
-    // while actively draining the viewer's reserve — the cumulative number is
-    // the one that hides the problem this line exists to show.
-    const rate=(h.recent_speed!=null)?h.recent_speed:h.speed;
-    if(rate!=null){
-      // Under 1.0x is only bad news when the viewer is also running out. A
-      // progressive remux is consumed through TCP back-pressure, so a player
-      // with a full buffer *stops reading* and ffmpeg's rate falls to match
-      // demand — the steady state of a perfectly healthy stream is a number
-      // near 1.0x. Warning on the rate alone would cry wolf on every well-fed
-      // session, which is the same mistake the stall counter used to make.
-      const reserve=(h.ahead_seconds!=null)?h.ahead_seconds:bufSec;
-      const slow=rate<1.0 && !h.suspended && !h.final && reserve<10;
-      const label=(h.recent_speed!=null)?'':' (avg)';
-      // Otherwise, name what is holding it back, because "9.7x" and "1.0x" on
-      // the same healthy stream five seconds apart are otherwise a mystery.
-      // The pace test is a band, not a floor — the initial burst runs well
-      // past the cap and calling that "at the pace" would be exactly backwards.
-      const paced=h.readrate>0 && rate>=h.readrate*0.9 && rate<=h.readrate*1.15;
-      const fed=h.ahead_seconds==null && !slow && reserve>=10 && rate<h.readrate*0.9;
-      const note=h.final?' — finished'
-               :slow?' — slower than realtime'
-               :paced?' — at the configured pace'
-               :fed?' — throttled by a full client buffer':'';
-      const rateTone=statsRateTone(rate,reserve,h.suspended,h.final);
-      // WHERE a row lives is a property of the row, never of its value.
-      //
-      // This used to be `note:!!note`, and `note` is derived from live
-      // telemetry: at 0.92× the clause was "slower than realtime" and the row
-      // was a sentence in the notes strip; a second later at 1.00× against a
-      // readrate of 1.0 it was "at the configured pace" — still a note; a
-      // second after that at 1.40× the clause was empty and the row jumped
-      // back up into the Server ledger. The panel re-renders once a second, so
-      // "Encode speed" physically migrated between the right-hand column and
-      // the foot of the panel while someone was reading it, taking the
-      // section's row count — and therefore its numeric-alignment verdict for
-      // every OTHER row — with it. That is precisely the reflow instability
-      // the fixed section→column assignment above exists to eliminate, put
-      // back one row at a time.
-      //
-      // Now: the number is always a ledger row, and the clause is always a
-      // note. Both placements are constant; only the presence of the clause
-      // varies, which is what a clause is allowed to do. The row also carries
-      // the clause as a tooltip so the ledger alone answers "why 1.00×".
-      const clause=note?note.replace(/^\s*—\s*/,''):'';
-      srv.push({l:"Encode speed",c:statsToneClass(rateTone),
-        a:clause?` title="${esc(clause)}"`:'',
-        v:`${rate.toFixed(2)}×${label}`});
-      if(clause) srv.push({l:"Encode speed",c:statsToneClass(rateTone),note:true,v:`${esc(clause)}`});
-    }
-    if(h.ahead_seconds!=null){
-      const release=!h.suspended?''
-        :h.hold_reason==='time' && h.resume_below_seconds!=null
-          ?` · time release ≤${h.resume_below_seconds} s`
-        :h.hold_reason==='bytes' && h.resume_below_bytes!=null
-          ?` · bytes release ≤${fmtBytes(h.resume_below_bytes)}`
-        :h.hold_reason==='global' && h.resume_below_bytes!=null
-          ?` · global release ≤${fmtBytes(h.resume_below_bytes)}`:'';
-      const transitions=h.suspend_count?` · ${h.suspend_count} suspend${h.suspend_count===1?'':'s'}`:'';
-      srv.push({l:"Server ahead",c:statsToneClass(statsRunwayTone(h.ahead_seconds,h.suspended)),
-        v:`${Math.max(0,h.ahead_seconds)} s${h.suspended?` · held${release}`:''}${transitions}`});
-    }
-    if(h.production_policy==='explicit_demand'){
-      const produced=h.production_ahead_seconds==null?'waiting for publication'
-        :h.production_ahead_seconds<0
-          ?`${Math.abs(h.production_ahead_seconds)} s production deficit`
-          :`${h.production_ahead_seconds} s produced ahead`;
-      const target=h.production_target_seconds==null?'':` · target ${Math.max(0,h.production_target_seconds)} s`;
-      const demand=h.control_demand?` · ${h.control_demand}`:'';
-      const held=h.suspended?` · held (${esc(h.hold_reason||'policy')})`:'';
-      const demandTone=h.lease_state&&h.lease_state!=='active'?'warn'
-        :h.suspended&&h.hold_reason!=='demand'?'warn':'good';
-      srv.push({l:"Demand window",c:statsToneClass(demandTone),
-        v:`${produced}${target}${demand}${held}`});
-    }
-    if(h.out_time_ms!=null && h.ahead_seconds==null){
-      // A progressive stream has no published-media frontier to report; what
-      // it can say is how much content ffmpeg has produced, which is the same
-      // reserve seen from the other end.
-      srv.push({l:"Produced",v:`${clockFromSec(h.out_time_ms/1000)}`});
-    }
-  }
-  if(PLAYER.ttffMs!=null) srv.push({l:"Started in",v:`${(PLAYER.ttffMs/1000).toFixed(1)} s`});
-  // Named by kind, because the two mean opposite things and the raw count sent
-  // people to look at the wrong half of the system. `supply` ran out of
-  // buffered video — a server or link problem. `decode` had video in hand and
-  // still could not play it, which is the browser, and which no amount of
-  // pacing or buffering will improve.
-  if(PLAYER.stalls){
-    const k=PLAYER.stallsByKind||{};
-    const parts=[];
-    if(k.supply) parts.push(`${k.supply} supply`);
-    if(k.decode) parts.push(`${k.decode} decode`);
-    // One <span> around the whole value, not a bare number plus a sibling:
-    // the row is a two-column grid and a third child would drop into the next
-    // row's label column. The renderer below now guarantees that shape for
-    // every row — a value with parts nests them INSIDE the one span.
-    const stallTone=PLAYER.stalls>=3?"bad":"warn";
-    srv.push({l:"Stalls",c:statsToneClass(stallTone),
-      v:`${PLAYER.stalls}${parts.length?` <span style="opacity:.78">(${parts.join(" · ")})</span>`:''}`});
-  }
-  // Control remains passive for recovery actions, but an explicit rolling
-  // session now owns liveness and producer demand. This is the join point an
-  // operator needs during the staged cutover:
-  // whether the client is exchanging, the last sequence the owner accepted,
-  // whether an event arrived while the previous exchange was in flight, and
-  // the advertised cadence/lease rather than another inferred idle clock.
-  const controlReporter=PLAYER.controlReporter;
-  const controlStatus=controlReporter&&controlReporter.status();
-  if(controlStatus){
-    const controlHealth=PLAYER.health||null;
-    const leaseMode=PlaybackPolicy.controlLeaseMode(
-      controlHealth&&controlHealth.lease_mode,PLAYER.vod,controlStatus.accepted_sequence);
-    const leasePresentation=PlaybackPolicy.controlLeasePresentation(leaseMode);
-    const leaseState=controlHealth&&controlHealth.lease_state?controlHealth.lease_state:'active';
-    const phase=controlStatus.stopped?"stopped"
-      :controlStatus.in_flight?(controlStatus.retrying?"retry in flight":"exchange in flight")
-      :controlStatus.retrying?"retry scheduled"
-      :controlStatus.pending?"new state queued":"scheduled";
-    const accepted=controlStatus.accepted_sequence
-      ?`accepted #${controlStatus.accepted_sequence}`:"awaiting first acceptance";
-    const acceptedAge=PLAYER.controlLastExchangeAt
-      ?` · ${Math.max(0,Math.round((Date.now()-PLAYER.controlLastExchangeAt)/1000))} s ago`:"";
-    srv.push({l:"Control",c:statsToneClass(PLAYER.controlLastError||leaseState!=='active'?"warn":"good"),
-      v:`${leasePresentation.ownership} · ${leaseState} · ${accepted}${acceptedAge} · ${phase}`});
-    const enforcedLease=controlHealth&&Number.isSafeInteger(controlHealth.lease_timeout_ms)
-      ?controlHealth.lease_timeout_ms:controlStatus.lease_timeout_ms;
-    srv.push({l:"Control timing",c:"stat-muted",
-      v:`${(controlStatus.next_exchange_ms/1000).toFixed(1)} s cadence · `+
-        `${Math.round(enforcedLease/1000)} s ${leasePresentation.label} lease`});
-  }
-  if(PLAYER.controlLastError){
-    const age=Math.max(0,Math.round((Date.now()-PLAYER.controlLastError.at)/1000));
-    srv.push({l:"Control failure",c:"stat-warn",note:true,
-      v:`${esc(PLAYER.controlLastError.message)} · ${age} s ago · playback recovery remains legacy-owned`});
-  }
-  const rate = v.playbackRate&&v.playbackRate!==1? ` · ${v.playbackRate}×`:'';
-  const durTxt = PLAYER.durMs? ' / '+clockFromSec(PLAYER.durMs/1000):'';
-  // The value as a reader sees it, with the markup taken back out — the two
-  // layout tests below are about the TEXT (does it start with a digit, is it
-  // short) and a tone class or a nested opacity span is not text.
-  const plainVal=html=>String(html).replace(/<[^>]*>/g,"").trim();
-  // "Carries a numeric value" means it reads as a quantity: it opens with a
-  // number. "1920×1080", "0 / 512 frames" and "12.4 Mb/s" all do; "hardware",
-  // "Direct play" and "MKV" do not. Opening, not containing, on purpose —
-  // "software — this machine has no GPU path" contains digits nowhere near
-  // the front and is a sentence.
-  const rowIsNumeric=row=>/^[+-]?[\d.,]/.test(plainVal(row.v));
-  // …and the minority report. The section verdict below is a majority vote,
-  // so a section that is four numbers and one sentence sets the sentence
-  // flush right too — "Now decoding" scores 4 of 5 and right-ragged the
-  // Decoder line over three wrapped lines, plus the frame-rate clause over
-  // two. A row opts out of the section's alignment when its value is not a
-  // bare quantity: either it does not open with a digit at all ("MKV",
-  // "hardware", "Direct play", a subtitle track name) or it is long enough
-  // that whatever follows the number is a clause rather than a unit.
-  // "Longer than ~16 characters" alone was too blunt a proxy for the second
-  // case: "12 / 51200 frames" is seventeen characters and is still a count.
-  // What actually marks a clause is a clause JOINT — " · ", " — " or an
-  // opening parenthesis — so that is the test, with a generous length cap
-  // behind it for anything that runs long without one. Quantities with units
-  // ("12 / 51200 frames", "12.4 Mb/s", "1920×1080", "3.9 GB") keep their
-  // place in the number column; "38.2 Mb/s · final", "42 s · 2 suspends" and
-  // "22.0 fps rendered · playing at 95.0% speed" leave it.
-  const rowIsProse=row=>{ const t=plainVal(row.v);
-    return !rowIsNumeric(row) || /\s[·—(]/.test(t) || t.length>24; };
-  // Exactly one <span> holds the whole value, always. The row is a two-cell
-  // grid, so a bare text node beside a span would be a THIRD grid item and
-  // would fall into the next row's label column — the bug this shape exists
-  // to make unrepresentable.
-  const rowHtml=row=>`<div class="r${rowIsProse(row)?' txt':''}"><b>${row.l}</b><span class="${row.c||''}"${row.a||''}>${row.v}</span></div>`;
-  // A section carries its own alignment, computed from the rows that actually
-  // rendered — not from the rows it might have had. A section whose values are
-  // nearly all numbers aligns right on tabular figures.
-  //
-  // There is no `.dense` two-up variant any more. It required ten-plus rows in
-  // one section and the web panel's sections have a structural ceiling of five
-  // (Playback 4, Source 4, Now decoding 5, Network 4, with Server allowed a
-  // small control ledger while the preview is enabled) — the branch
-  // and its `@media(min-width:721px)` stylesheet block could never run. The
-  // Android panel's equivalent IS reachable and is untouched; it groups rows
-  // differently.
-  const sec=(title,rows)=>{
-    const shown=(rows||[]).filter(row=>row&&!row.note);
-    if(!shown.length) return '';
-    const numeric=shown.filter(rowIsNumeric).length;
-    const cls=(numeric/shown.length>=0.7?' num':'');
-    return `<div class="stsec${cls}"><div class="sechd">${title}</div>`+shown.map(rowHtml).join("")+`</div>`;
-  };
-  // The two columns are named, not filled in order: a section knows which
-  // side it belongs on, and a section that has nothing to say this second
-  // simply isn't there rather than shuffling the others across.
-  const LEFT_COL=["Playback","Source","Now decoding"], RIGHT_COL=["Network","Server"];
-  const panelHtml=sections=>{
-    const find=name=>{ const s=sections.find(x=>x.t===name); return s?sec(s.t,s.rows):''; };
-    const left=LEFT_COL.map(find).join(""), right=RIGHT_COL.map(find).join("");
-    // A direct-play session has no health, no hls and no cache entry, so both
-    // Network and Server come back empty — correctly, no orphan headings. But
-    // the grid still reserved their track, leaving half a 1040px panel blank
-    // while the ledger that DOES have something to say was squeezed into
-    // 503px. panelHtml is the one place that knows both answers, so it is the
-    // one place that can say "one column"; `.statscols.one` and the panel's
-    // `.onecol` width do the rest.
-    const one=!left||!right;
-    // Sentences, grouped by the section that owns them. Flat, the strip was
-    // `Reason / Switched / Auto log / Auto log / Video / Audio / Dynamic range
-    // / Hitches / Buffer target` with nothing saying that Video and Audio
-    // describe the FILE while Dynamic range and Hitches describe this
-    // playback — a distinction the ledgers above make by position and which
-    // is lost the moment a row leaves the grid. The label only appears when
-    // more than one section contributed; on a single-source strip it would be
-    // a heading over the whole thing, which is what the panel heading already
-    // is. Order follows the sections, so the strip reads in the same order as
-    // the columns it hangs under.
-    const groups=sections.map(s=>({t:s.t,rows:(s.rows||[]).filter(row=>row&&row.note)}))
-                         .filter(g=>g.rows.length);
-    const noteHtml=row=>`<div class="snote"><b>${row.l}</b><span class="${row.c||''}"${row.a||''}>${row.v}</span></div>`;
-    const notes=groups.length
-      ? `<div class="snotes">`+groups.map(g=>
-          (groups.length>1?`<div class="snotegrp">${g.t}</div>`:'')+g.rows.map(noteHtml).join("")
-        ).join("")+`</div>`
-      : '';
-    return `<div class="statscols${one?' one':''}">`
-      + (left?`<div>${left}</div>`:'')
-      + (right?`<div>${right}</div>`:'')
-      + `</div>`
-      + notes;
-  };
-  // Each switch is its own note line: they are a log, and a log squashed into
-  // one cell is unreadable at the moment it matters.
-  const autoLog=((PLAYER.abr&&PLAYER.abr.switches)||[]).map(entry=>({l:"Auto log",note:true,
-    v:`${clockFromSec(entry.position)} · ${esc(entry.from)} → `+
-      `${esc(entry.to)} · ${esc(entry.reason)}`}));
-  const debugSections=[
-    {t:"Playback",rows:[
-    // **Which build this is, in the place people photograph.**
-    //
-    // It lives on the admin-only System page and nowhere else, so the answer to
-    // "is my fix running?" was behind a login, two clicks away from the thing
-    // being tested, and absent from every screenshot anybody has ever sent.
-    // Three separate debugging sessions have stalled on me asking which build
-    // was running and being told, reasonably, that nobody knew.
-    //
-    // The page and the binary are the same artifact — index.html is
-    // `include_str!`-embedded — so the server's stamp is also this UI's stamp.
-    // That is what makes one line able to answer for both.
-    {l:"Build",c:"stat-muted",v:`${esc(buildLabel())}`},
-    {l:"Playback mode",c:PLAYER.vod?"stat-good":PLAYER.sessionId?"stat-warn":"stat-muted",v:`${esc(playbackModeLong)}`},
-    {l:"Delivery method",v:`${esc(baseMethod)}`},
-    // Said outright, because the two transports are different code paths in
-    // the browser and "which one ran" was previously only inferable from
-    // which other rows happened to be missing. The wire container is named
-    // honestly: a transcode ships MPEG-TS segments that hls.js transmuxes,
-    // a copy ships fMP4 that goes to the SourceBuffer untouched — and that
-    // difference mattered to the stutter investigation (STUTTER-4K.md §4).
-    {l:"Transport",c:"stat-muted",v:`${
-      PLAYER.hls ? (PLAYER.method==='transcode'
-          ? "segmented MPEG-TS · MediaSource (hls.js transmuxes)"
-          : "segmented fMP4 · MediaSource")
-      : (PLAYER.copyHls||PLAYER.sessionId)
-        ? `segmented ${PLAYER.method==='transcode'?'MPEG-TS':'fMP4'} · native HLS`
-        : "one continuous file · range requests"}`},
-    ((PLAYER.reasons&&PLAYER.reasons.length)?{l:"Reason",note:true,v:`${esc(PLAYER.reasons.join("; "))}`}:null),
-    // A session the player moved off the original owes the viewer a standing
-    // answer, not a toast that disappears. The Reason line above is the
-    // server's verdict on the FILE and does not change when the client
-    // switches, so it cannot carry this.
-    (PLAYER.rescuedNote?{l:"Switched",c:"stat-warn",note:true,v:`${esc(PLAYER.rescuedNote)}`}:null),
-    ...autoLog,
-    {l:"Position",v:`${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}${rate}`}
-    ]},
-    {t:"Source",rows:[
-    {l:"Video",note:true,v:`${esc(srcVideo)}`},
-    {l:"Resolution",v:`${srcRes}`},
-    {l:"Bitrate",v:`${srcBr}`},
-    {l:"Container",v:`${esc(srcCont)}`},
-    {l:"Audio",note:true,v:`${esc(aLine)}`},
-    {l:"AV offset",v:`${(PLAYER.aoffset||0)+" ms"}${PLAYER.declared?` <span style="opacity:.6">(container ${PLAYER.declared>0?"+":""}${PLAYER.declared} ms)</span>`:''}`}
-    ]},
-    {t:"Now decoding",rows:[
-    {l:"Resolution",v:`${tgtRes}`},
-    // The chip says it in three characters and an arrow; this says it in a
-    // sentence, with the server's own reason. Same pure function, same parts —
-    // the two can never drift into disagreeing. Absent for an SDR source:
-    // there is no grade to have an opinion about.
-    (()=>{ const d=playerRangeBadge(PLAYER.source||{});
-      return d?{l:"Dynamic range",note:true,c:d.off?"stat-muted":"",v:`${esc(d.panel)}`}:null; })(),
-    {l:"Dropped",c:statsToneClass(droppedCount==null?'muted':droppedCount===0?'good':droppedCount<3?'warn':'bad'),
-      v:`${dropped} frames`},
-    (fps!=null?(()=>{
-      const h=PLAYER.hitches, want=(v.playbackRate||1);
-      const chased=h&&h.rate!=null&&Math.abs(h.rate-want)>0.02;
-      return {l:"Frame rate",c:(fps<20?'stat-warn':''),
-        v:`${fps.toFixed(1)} fps rendered${
-        chased?` · <span class="stat-warn">playing at ${(h.rate*100).toFixed(1)}% speed${
-          want===1?" — the browser is rate-chasing":""}</span>`:''}`};
-    })():null),
-    // The browser's own verdict on whether it is using the GPU for this. A
-    // software 4K HEVC decode is a full buffer, few dropped frames and
-    // constant judder — indistinguishable from a delivery problem on every
-    // other line of this panel.
-    // A blind detector says so: zero faults with zero CALLBACKS after ten
-    // seconds of playback is the browser declining to fire rVFC on this
-    // pipeline, not a clean session — and a stutter with an empty Hitches
-    // row would otherwise read as exoneration.
-    (PLAYER.hitches&&!PLAYER.hitches.frames&&PLAYER.started
-      &&PLAYER.hitchArmedAt&&(performance.now()-PLAYER.hitchArmedAt)>10000?
-      {l:"Hitches",c:"stat-muted",note:true,
-       v:`this browser gives the detector no frame callbacks — faults here are invisible, not absent`}:null),
-    // One note, not three rows. The counts, the last fault and the verdict on
-    // what caused it are one statement: they were split across a row and two
-    // LABEL-LESS continuation rows, which in a two-column ledger read as
-    // orphaned values belonging to whatever was above them.
-    (PLAYER.hitches&&(PLAYER.hitches.back||PLAYER.hitches.held||PLAYER.hitches.late||PLAYER.hitches.drop||PLAYER.hitches.gap||PLAYER.hitches.slow)?
-      (()=>{
-        const tail=[PLAYER.hitches.last||'', hitchBlame()||''].filter(Boolean)
-          .map(part=>` · <span class="stat-muted" style="font-size:9.5px">${esc(part)}</span>`).join("");
-        return {l:"Hitches",c:"stat-warn",note:true,v:`${
-        [PLAYER.hitches.back?`${PLAYER.hitches.back} back`:null,
-         PLAYER.hitches.held?`${PLAYER.hitches.held} held`:null,
-         PLAYER.hitches.late?`${PLAYER.hitches.late} late`:null,
-         PLAYER.hitches.drop?`${PLAYER.hitches.drop} drop`:null,
-         PLAYER.hitches.gap?`${PLAYER.hitches.gap} skip`:null,
-         PLAYER.hitches.slow?`${PLAYER.hitches.slow} slow`:null].filter(Boolean).join(" · ")
-      }${hitchInterval()?` · every ~${hitchInterval().toFixed(1)}s`:''}${tail}`};
-      })():null),
-    (PLAYER.hls&&PLAYER.hls.config?(()=>{
-      // The peak is the number that matters, and it was the number nobody was
-      // looking at: the browser holds the forward buffer, the back buffer AND
-      // the segment being appended at the same moment, and it is that sum the
-      // quota refuses. Stating the parts without the sum is what let a 128 MB
-      // budget quietly ask for 190 MB.
-      const t=PLAYER.bufTarget, q=(PLAYER.bufferLimits&&PLAYER.bufferLimits.quota)|0;
-      const peak=(t&&t.budgeted)?` · peak ${Math.round(t.peakBytes/1e6)}MB of ~${
-        Math.round(MSE_QUOTA_BYTES/1e6)}MB (+ a ${t.seg}s segment)`:'';
-      return {l:"Buffer target",note:true,c:(q?'stat-warn':'stat-muted'),v:`${
-        PLAYER.hls.config.maxBufferLength}s ahead · ${PLAYER.hls.config.backBufferLength}s behind${
-        peak}${q?` · ${q} quota refusals — the browser is refusing data`:''}`};
-    })():null),
-    (PLAYER.decodeInfo?(()=>{
-      // The measured margin, next to the browser's own claim — because the
-      // claim was `powerEfficient: true` on the exact session whose median
-      // decode equalled the frame budget. The measurement outranks it.
-      const h=PLAYER.hitches; let margin='';
-      if(h&&h.decodeMs!=null&&h.fps){
-        const b=1000/h.fps;
-        // Stated flat, and never amber. This used to warn "delivering
-        // just-in-time, no slack" whenever the figure passed 80% of the frame
-        // budget — and then said exactly that about a 7.5 Mb/s 1080p transcode
-        // with zero dropped frames, on the machine it was accusing. It is
-        // `processingDuration`: pipeline latency, which grows as the pipeline
-        // gets healthier. A number that condemns every stream condemns none of
-        // them, and dressing it in a warning colour is how it came to be
-        // believed. Frames lost per minute is the row that means something —
-        // it is in the notes below, under Hitches.
-        margin=` · <span class="stat-muted">${h.decodeMs.toFixed(0)}ms/frame in the pipeline `+
-          `against a ${b.toFixed(0)}ms budget — latency, not load</span>`;
-      }
-      return {l:"Decoder",c:(PLAYER.decodeInfo.hw?'stat-good':'stat-warn'),v:`${
-        PLAYER.decodeInfo.hw?'hardware':'software — this machine has no GPU path for this stream'}${
-        PLAYER.decodeInfo.smooth?'':' · browser does not expect it to be smooth'}${margin}`};
-    })():null),
-    {l:"Buffer",c:statsToneClass(statsRunwayTone(bufSec,false)),v:`${buf}`}
-    ]},
-    {t:"Network",rows:net},
-    {t:"Server",rows:srv}
-  ];
-  const debugHtml=panelHtml(debugSections);
-
-  const rangeBadge=playerRangeBadge(PLAYER.source||{});
-  // Two forms, two audiences. `.panel` is the full sentence ("SDR — this
-  // browser did not expose HDR presentation") and it belongs in the standard
-  // and debug ledgers, where there is a column for a sentence. `.text` is the
-  // chip form ("DV P7 → SDR"): same fact, four words shorter, which is what
-  // mini's single line can carry. Mini used the sentence, and on any HDR or
-  // Dolby Vision source played to an ordinary display that one cell made the
-  // whole balloon 918px wide at 1440 — and squeezed the two numbers beside it
-  // until they ellipsized.
-  const rangeText=rangeBadge?rangeBadge.panel:"—";
-  const rangeShort=rangeBadge?rangeBadge.text:"—";
-  const selectedSub=PLAYER.curSub>=0
-    ? subLabelFor((PLAYER.subs||[]).find(track=>track.index===PLAYER.curSub),PLAYER.curSub)
-    : "Off";
-  const clientRate=PLAYER.health&&PLAYER.health.delivered_bps!=null
-    ? fmtMbps(PLAYER.health.delivered_bps)
-    : PLAYER.hls&&PLAYER.hls.bandwidthEstimate
-      ? fmtMbps(PLAYER.hls.bandwidthEstimate)
-      : "Measuring";
-  const health=PLAYER.health;
-  const serverState=PLAYER.vod?vodServerState(health)
-    : health?(health.suspended?"Holding buffer":"Active")
-    : "No server-side session";
-  const serverRate=health&&((health.recent_speed!=null)?health.recent_speed:health.speed);
-  const deliveryTone=health
-    ? (health.final?"good":(statsIdleTone(health.delivered_idle_ms,health.suspended)||"good"))
-    : "muted";
-  const serverTone=health||PLAYER.vod?"good":"muted";
-  const serverRateTone=statsRateTone(
-    serverRate,
-    health&&health.ahead_seconds!=null?health.ahead_seconds:bufSec,
-    health&&health.suspended,
-    health&&health.final
-  );
-  const frameTone=droppedCount==null?"muted":droppedCount===0?"good":droppedCount<3?"warn":"bad";
-  const runwayTone=statsRunwayTone(bufSec,false);
-  const cardRow=(label,value,tone)=>({l:label,c:statsToneClass(tone),v:value});
-  const reason=(PLAYER.reasons&&PLAYER.reasons.length)?esc(PLAYER.reasons.join(" · ")):"";
-  // The pill says in one word what the Server section's Status row says in
-  // three or four — same `serverState`, so the two can never disagree.
-  const healthWord=PLAYER.vod?vodHealthWord(health)
-    :health?(health.suspended?"Held":"Active"):"Direct";
-  const miniDiv=`<div class="sdiv" aria-hidden="true"></div>`;
-  const miniHtml=`<div class="statsmini">`
-    +`<div class="smethod">${esc(playbackMode)} · ${esc(baseMethod)}</div>`+miniDiv
-    +`<div class="spos">${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}</div>`+miniDiv
-    +`<div class="sval ${statsToneClass(frameTone)}" title="${esc(rangeBadge?rangeBadge.full||rangeText:rangeText)}">${esc(tgtRes)} · ${esc(rangeShort)}</div>`+miniDiv
-    +`<div class="sval sfix ${statsToneClass(runwayTone)}">${esc(buf)}</div>`+miniDiv
-    +`<div class="sval sfix ${statsToneClass(deliveryTone)}">${esc(clientRate)}</div>`+miniDiv
-    +`<div class="spill ${statsToneClass(serverTone)}" title="${esc(serverState)}">`
-      +`<span class="sdot" aria-hidden="true"></span>${esc(healthWord)}</div>`
-    +`</div>`;
-  // Standard is the same ledger as debug, with fewer rows in it — it was three
-  // bordered cards with a stacked caption over every value, which is a third
-  // layout to hold in your head and half again the height for the same eleven
-  // facts. Its "Playing" card is debug's "Now decoding" section under the name
-  // debug already used; one name for one thing, in both sizes.
-  const standardLeasePresentation=PlaybackPolicy.controlLeasePresentation(
-    PlaybackPolicy.controlLeaseMode(health&&health.lease_mode,PLAYER.vod,
-      controlStatus&&controlStatus.accepted_sequence));
-  const standardHtml=panelHtml([
-    {t:"Playback",rows:[reason?{l:"Reason",note:true,v:reason}:null]},
-    {t:"Source",rows:[
-      cardRow("Resolution",esc(srcRes)),
-      Object.assign(cardRow("Video",esc(srcVideo)),{note:true}),
-      cardRow("Container",esc(srcCont)),
-      cardRow("Bitrate",esc(srcBr)),
-      Object.assign(cardRow("Audio",esc(aLine)),{note:true})]},
-    {t:"Now decoding",rows:[
-      cardRow("Resolution",esc(tgtRes)),
-      Object.assign(cardRow("Dynamic range",esc(rangeText)),{note:true}),
-      cardRow("Buffer",esc(buf),runwayTone),
-      cardRow("Dropped / total",esc(dropped+" frames"),frameTone),
-      cardRow("Subtitles",esc(selectedSub))]},
-    {t:"Server",rows:[
-      cardRow("Playback mode",esc(playbackModeLong),PLAYER.vod?"good":PLAYER.sessionId?"warn":"muted"),
-      cardRow("Status",esc(serverState),serverTone),
-      controlStatus?cardRow("Control",controlStatus.accepted_sequence
-        ?`${standardLeasePresentation.ownership} · accepted #${controlStatus.accepted_sequence}`
-        :`${standardLeasePresentation.ownership} · connecting`,
-        PLAYER.controlLastError?"warn":"good"):null,
-      (health&&health.encoder)||PLAYER.encoder?cardRow("Encoder",esc((health&&health.encoder)||PLAYER.encoder)):null,
-      serverRate!=null?cardRow("Encode speed",esc(serverRate.toFixed(2)+"×"),serverRateTone):null,
-      health&&health.ahead_seconds!=null?cardRow("Ahead",esc(Math.max(0,health.ahead_seconds)+" s"),statsRunwayTone(health.ahead_seconds,health.suspended)):null,
-      cardRow("Delivery",esc(clientRate),deliveryTone)]}
-  ]);
-  body.innerHTML=STATS_MODE==="mini"?miniHtml:STATS_MODE==="debug"?debugHtml:standardHtml;
-  // The panel is sized for two ledgers; when panelHtml only had one to give,
-  // narrow it to match rather than framing a column of blank. Read back off
-  // the DOM instead of threading a flag out of panelHtml, because which of
-  // the three strings actually rendered is decided on the line above.
-  ov.classList.toggle("onecol", !!body.querySelector(".statscols.one"));
+  const telemetry=playbackStatsTelemetry();
+  const contractRows=playbackInfoRows(STATS_MODE,telemetry);
+  patchPlaybackInfoRows(body,STATS_MODE,contractRows,telemetry._health_word,telemetry._health_status);
+  ov.classList.toggle("onecol",!!body.querySelector(".statscols.one"));
 }
 // Poll the session's server-side health while the stats overlay is open, and
 // only then: this is a diagnostic readout, not telemetry the server needs, and
@@ -10902,6 +10737,9 @@ function closePlayer(){
   PLAY_OPEN_GATE.invalidate();
   const video=document.getElementById("video");
   const player=document.getElementById("player");
+  const opener=PLAYER&&PLAYER._opener;
+  const openerClick=PLAYER&&PLAYER._openerClick;
+  const closingFileId=PLAYER&&PLAYER.fileId;
   if(player){ player.classList.remove("audio"); player.style.backgroundImage=""; }
   // First, before anything is torn down: give the screen back. Hiding `#modal`
   // sets `display:none` on an ancestor, which draws nothing but does not end
@@ -10921,7 +10759,10 @@ function closePlayer(){
   // minute later. An AirPlay target fetching this same session keeps it alive
   // by fetching; a browser that has closed the player is not going to.
   if(PLAYER && PLAYER.sessionId){ releaseSession(PLAYER.sessionId); PLAYER.sessionId=null; }
-  if(PLAYER) PLAYER.aoffset=0;
+  // Disarm the pending seek as well as clearing it: a skip's self-commit is a
+  // timer, and PLAYER survives the close, so an armed one would have fired
+  // seekTo on a player the viewer had already left.
+  if(PLAYER){ PLAYER.aoffset=0; PLAYER._seekDragging=false; cancelPendingSeek(); }
   // Same reason, same scope: the track choice was this playback's, and this
   // playback is over. PLAYER survives the close, so leaving `preplay` set would
   // make playbackSelection() keep matching on the next cold start of the same
@@ -10933,14 +10774,26 @@ function closePlayer(){
   clearInterval(STATS_TIMER); STATS_TIMER=null; teardownHls();
   setLoading(false);
   const ov=document.getElementById("statsov"); if(ov){ ov.classList.remove("on"); ov.style.top=""; }
-  const pm=document.getElementById("pmenu"); if(pm) pm.classList.remove("on");
-  const sb=document.getElementById("statsbtn"); if(sb) sb.classList.remove("on");
+  const pm=document.getElementById("pmenu"); if(pm) pm.classList.remove("on","low");
+  if(PLAYER&&PLAYER._menuOpener&&PLAYER._menuOpener.setAttribute) PLAYER._menuOpener.setAttribute("aria-expanded","false");
+  const sb=document.getElementById("statsbtn"); if(sb){ sb.classList.remove("on"); if(sb.setAttribute) sb.setAttribute("aria-expanded","false"); }
   const sk=document.getElementById("pskip"); if(sk){ sk.innerHTML=""; sk.dataset.k=""; }
   const pl=document.getElementById("player"); if(pl) pl.classList.remove("idle","statson");
   [...video.querySelectorAll("track")].forEach(t=>t.remove());
   video.pause(); video.removeAttribute("src"); video.load();
   document.getElementById("modal").classList.remove("open");
-  if(location.hash.startsWith("#/item/")) { const id=location.hash.split("/")[2]; setTimeout(()=>viewItem(id),100); }
+  const app=document.getElementById("app"); if(app) app.inert=false;
+  const restoreFocus=()=>{
+    const buttons=document.querySelectorAll?Array.from(document.querySelectorAll("button")):[];
+    const target=buttons.find(button=>openerClick&&button.getAttribute("onclick")===openerClick)||
+      buttons.find(button=>closingFileId!=null&&(button.getAttribute("onclick")||"").includes(`play(${closingFileId},`))||
+      (opener&&opener.isConnected?opener:null)||document.getElementById("main");
+    if(target&&target.focus) target.focus({preventScroll:true});
+  };
+  if(location.hash.startsWith("#/item/")) {
+    const id=location.hash.split("/")[2];
+    setTimeout(()=>{ Promise.resolve(viewItem(id)).catch(()=>{}).finally(restoreFocus); },100);
+  } else setTimeout(restoreFocus,0);
 }
 // Keyboard while the player is open: 'i' toggles stats, Esc closes (unless the
 // native fullscreen is up — then Esc belongs to the browser's exit-fullscreen).
@@ -10952,20 +10805,163 @@ window.addEventListener("keydown",e=>{
   else if(e.key==="ArrowLeft"){ e.preventDefault(); lbStep(-1); }
   else if(e.key==="ArrowRight"){ e.preventDefault(); lbStep(1); }
 });
-window.addEventListener("keydown",e=>{
+// player-input-adapter:begin — the only place in the player that reads e.key
+function playerContractInput(e,state){
+  if(e.key==="Escape") return "back";
+  if(e.key==="ArrowLeft") return "left";
+  if(e.key==="ArrowRight") return "right";
+  if(e.key==="ArrowUp") return "up";
+  if(e.key==="ArrowDown") return "down";
+  if(e.key==="Enter") return "select";
+  if(e.key===" ") return state==="timeline"||state==="scrub"?"select":"play_pause";
+  if(e.key==="k"||e.key==="K") return "play_pause";
+  if(e.key==="j"||e.key==="J") return "skip_back";
+  if(e.key==="l"||e.key==="L") return "skip_forward";
+  return null;
+}
+function playerHotkey(e,state){
+  const onButton=(e.target&&e.target.tagName||"")==="BUTTON";
+  // `role="slider"` promises Home/End (WAI-ARIA APG). The contract has no row
+  // for either, so they behave as the pattern requires and no more: jump the
+  // pending position to an end, and commit it the way Select would.
+  if((state==="timeline"||state==="scrub")&&(e.key==="Home"||e.key==="End")){
+    const total=pbTotalSec(); if(!(total>0)) return true;
+    if(PLAYER) PLAYER._seekPending=e.key==="Home"?0:total;
+    commitPendingSeek(); playerActivity(); e.preventDefault(); return true;
+  }
+  if((e.key==="i"||e.key==="I")&&!e.repeat){ toggleStats(); playerActivity(); e.preventDefault(); return true; }
+  if(!onButton&&(e.key==="f"||e.key==="F")&&!e.repeat){ toggleFullscreen(); playerActivity(); e.preventDefault(); return true; }
+  if(!onButton&&(e.key==="c"||e.key==="C")&&!e.repeat){ cycleSub(); playerActivity(); e.preventDefault(); return true; }
+  // Tab is the browser's, but a focus ring the viewer cannot see is worse than
+  // no focus ring: reveal the chrome and let the move happen.
+  if(e.key==="Tab"){ playerActivity(); return false; }
+  return false;
+}
+function applyPlayerOutcome(outcome,ctx={}){
+  const direction=ctx.direction;
+  switch(outcome){
+    case "reveal": {
+      playerActivity();
+      const last=document.getElementById((PLAYER&&PLAYER._lastFocusedControl)||"pbplay")||document.getElementById("pbplay");
+      if(last) last.focus({preventScroll:true});
+      return true;
+    }
+    case "focus_transport": {
+      const last=document.getElementById((PLAYER&&PLAYER._lastFocusedControl)||"pbplay")||document.getElementById("pbplay");
+      if(last) last.focus({preventScroll:true});
+      return true;
+    }
+    case "focus_marker_or_ignore": {
+      const marker=document.querySelector("#pskip button"); if(marker) marker.focus({preventScroll:true});
+      return !!marker;
+    }
+    case "skip":
+      nudge(direction==="left"||direction==="skip_back"?-10:10);
+      return true;
+    case "preview": {
+      const total=pbTotalSec(); if(!(total>0)) return true;
+      const step=PlaybackPolicy.previewStepSeconds(ctx.repeatCount||0);
+      const sign=direction==="left"?-1:1;
+      const base=PLAYER._seekPending!=null?PLAYER._seekPending:pbPosSec();
+      // A preview waits for Select. If the pending position arrived from a
+      // skip it is still carrying that skip's self-commit — drop it.
+      clearPendingSeekTimer();
+      PLAYER._seekPending=Math.max(0,Math.min(total,base+sign*step));
+      pbTick(); playerActivity(); return true;
+    }
+    case "commit":
+      commitPendingSeek(); return true;
+    case "cancel":
+      cancelPendingSeek(); playerActivity(); return true;
+    case "cancel_then_focus_transport":
+      cancelPendingSeek(); return applyPlayerOutcome("focus_transport",ctx);
+    case "cancel_then_focus_marker_or_ignore":
+      cancelPendingSeek(); return applyPlayerOutcome("focus_marker_or_ignore",ctx);
+    case "commit_then_toggle_play": {
+      commitPendingSeek(); togglePlay(); return true;
+    }
+    case "toggle_play": togglePlay(); return true;
+    case "close_menu": closeMenu(); return true;
+    case "close_info": toggleStats(); return true;
+    case "hide": {
+      const player=document.getElementById("player"); if(player) player.classList.add("idle");
+      // `focusin` has already recorded which control this was, so `reveal`
+      // can put it back. Blur, or the browser keeps focus on a control the
+      // viewer can no longer see (and `hidden` would be a lie).
+      const active=document.activeElement;
+      if(active&&active!==document.body&&player&&player.contains(active)&&active.blur) active.blur();
+      return true;
+    }
+    case "exit": closePlayer(); return true;
+    case "toggle_chrome": {
+      const player=document.getElementById("player");
+      if(player&&player.classList.contains("idle")) playerActivity(); else if(player) player.classList.add("idle");
+      return true;
+    }
+    case "menu_focus": {
+      const menu=document.getElementById("pmenu");
+      const open=menu&&menu.classList.contains("on")?menu:document.getElementById("statsov");
+      if(!open||!open.classList.contains("on")) return false;
+      const items=Array.from(new Set(Array.from(
+        open.querySelectorAll('button:not([disabled]),[data-stats-mode]:not([disabled])'))));
+      if(!items.length) return false;
+      const at=items.indexOf(document.activeElement);
+      const forward=direction==="down"||direction==="right";
+      const next=at<0?(forward?0:items.length-1):(at+(forward?1:-1)+items.length)%items.length;
+      items[next].focus({preventScroll:true});
+      return true;
+    }
+    case "focus_row":
+    case "activate":
+    case "ignore":
+      return false;
+    default: throw new Error(`unknown player outcome ${outcome}`);
+  }
+}
+let PLAYER_REPEAT_KEY=null;
+let PLAYER_REPEAT_COUNT=0;
+function handlePlayerKeydown(e){
   if(!document.getElementById("modal").classList.contains("open")) return;
-  const typing=/^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName||""));
-  const seekDelta=PlaybackPolicy.seekDeltaSeconds(e.key);
-  // A focused control (or key auto-repeat) shouldn't also drive the hotkeys —
-  // otherwise Space both activates the button and toggles play, etc.
-  const onBtn=/^BUTTON$/.test((e.target.tagName||""));
-  if((e.key==='i'||e.key==='I') && !typing){ e.preventDefault(); toggleStats(); }
-  else if(e.key==='Escape' && !document.fullscreenElement){ closePlayer(); }
-  else if(!typing && !onBtn && !e.repeat && (e.key===' '||e.key==='k'||e.key==='K')){ e.preventDefault(); togglePlay(); }
-  else if(!typing && !onBtn && !e.repeat && seekDelta!=null){ e.preventDefault(); nudge(seekDelta); }
-  else if(!typing && !onBtn && (e.key==='f'||e.key==='F')){ e.preventDefault(); toggleFullscreen(); }
-  else if(!typing && !onBtn && !e.repeat && (e.key==='c'||e.key==='C')){ e.preventDefault(); cycleSub(); }
+  if(e.key==="Escape"&&isFullscreenAnywhere()) return;
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  if(/^(INPUT|TEXTAREA|SELECT)$/.test((e.target&&e.target.tagName)||"")) return;
+  const state=playerInputState();
+  const input=playerContractInput(e,state);
+  if(input==null){ playerHotkey(e,state); return; }
+  if(PLAYER_REPEAT_KEY!==e.key){ PLAYER_REPEAT_KEY=e.key; PLAYER_REPEAT_COUNT=0; }
+  else if(e.repeat) PLAYER_REPEAT_COUNT+=1;
+  const outcome=PlaybackPolicy.routeInput(playerInputSurface(),state,input);
+  const consumed=applyPlayerOutcome(outcome,{repeat:e.repeat,repeatCount:PLAYER_REPEAT_COUNT,direction:input});
+  if(consumed) e.preventDefault();
+  return consumed;
+}
+window.addEventListener("keydown",handlePlayerKeydown);
+// Only the key that owns the ladder resets it: releasing Shift mid-hold used
+// to drop the acceleration back to the first rung.
+window.addEventListener("keyup",e=>{ if(e.key===PLAYER_REPEAT_KEY){ PLAYER_REPEAT_KEY=null; PLAYER_REPEAT_COUNT=0; } });
+// Both panels are dialogs while they are open, so Tab cycles inside them
+// rather than walking out into chrome the viewer cannot see. Arrow movement
+// inside them belongs to `menu_focus` above — one answer, one place.
+["pmenu","statsov"].forEach(id=>document.getElementById(id).addEventListener("keydown",e=>{
+  if(e.key!=="Tab"||!e.currentTarget.classList.contains("on")) return;
+  const items=Array.from(e.currentTarget.querySelectorAll('button:not([disabled]),[data-stats-mode]:not([disabled])'));
+  if(!items.length) return;
+  const first=items[0],last=items[items.length-1];
+  if(e.shiftKey&&document.activeElement===first){ e.preventDefault(); last.focus(); }
+  else if(!e.shiftKey&&document.activeElement===last){ e.preventDefault(); first.focus(); }
+}));
+document.getElementById("player").addEventListener("pointerdown",e=>{
+  const menu=document.getElementById("pmenu"),opener=PLAYER&&PLAYER._menuOpener;
+  if(!menu.classList.contains("on")||menu.contains(e.target)||(opener&&(opener===e.target||opener.contains(e.target)))) return;
+  if(e.target===document.getElementById("video")&&PLAYER) PLAYER._menuDismissedByPointer=true;
+  closeMenu();
 });
+document.getElementById("player").addEventListener("focusin",e=>{
+  const target=e.target;
+  if(!PLAYER||!target||!target.id||!target.closest("#pbar,#ptimeline,#ptransport,#pskip")) return;
+  PLAYER._lastFocusedControl=target.id;
+});
+// player-input-adapter:end
 // map fileId → itemId, filled by viewItem so progress posts to the right item
 const ITEM_FOR_FILE={};
 
@@ -14040,44 +14036,20 @@ function catalogFillNav(){
 // the check, classic would start emitting posters carrying tabindex — a diff
 // in the byte-identical baseline the gate re-checks after every layout lands.
 let CATALOG_WIRED=false;
-function catalogEnhanceCards(){
-  if(layoutId()!=="catalog") return;
-  for(const el of document.querySelectorAll(".poster[onclick]:not([tabindex])")){
-    el.setAttribute("tabindex","0");
-    // Cards that navigate are links; the photo cards call openLightbox() and
-    // are buttons. Announcing every card as a link would promise a page that
-    // a lightbox never delivers.
-    el.setAttribute("role", /location\.hash/.test(el.getAttribute("onclick")||"") ? "link" : "button");
-  }
-}
 function catalogWireOnce(){
   if(CATALOG_WIRED) return;
   CATALOG_WIRED=true;
+  // Card reach is navKeyboardWireOnce()'s job on every layout now. What is
+  // left here is the one thing only this layout has: the phone library sheet,
+  // which Escape closes.
+  navKeyboardWireOnce();
   document.addEventListener("keydown",e=>{
-    if(layoutId()!=="catalog") return;
-    // The player and the lightbox own the keyboard while they are up; both of
-    // the shipped handlers guard on that and this one has to agree, or Esc
-    // closes a sheet nobody can see instead of the video.
+    if(layoutId()!=="catalog"||e.key!=="Escape") return;
     const modal=document.getElementById("modal");
     if(lightboxOpen()||(modal&&modal.classList.contains("open"))) return;
-    if(e.key==="Escape"){
-      const shell=document.getElementById("pxshell");
-      if(shell&&shell.classList.contains("px-open")){ e.preventDefault(); catalogToggleLibs(); }
-      return;
-    }
-    const el=e.target;
-    if(!el||!el.classList||!el.classList.contains("poster")) return;
-    // Enter and Space are what a role=link/button promises. "Spacebar" is the
-    // legacy key name older WebKit still reports.
-    if(e.key!=="Enter"&&e.key!==" "&&e.key!=="Spacebar") return;
-    e.preventDefault();          // Space would otherwise page the grid down
-    el.click();                  // fires the inline handler card() emitted
+    const shell=document.getElementById("pxshell");
+    if(shell&&shell.classList.contains("px-open")){ e.preventDefault(); catalogToggleLibs(); }
   });
-  // #app itself is never replaced (every view assigns to its innerHTML), so
-  // one observer on it outlives every route change.
-  const app=document.getElementById("app");
-  if(app&&window.MutationObserver) new MutationObserver(catalogEnhanceCards).observe(app,{childList:true,subtree:true});
-  catalogEnhanceCards();
 }
 
 // ---- phone: the library sheet and the search tab --------------------------
@@ -14138,6 +14110,7 @@ function catalogTabsHtml(active, homeOn){
 // the layout picker inside the theme menu keeps working from inside catalog and a
 // change to any of those menus lands in both layouts at once.
 function catalogChrome(active, inner){
+  const searchFocus=captureSearchFocus();
   const hash=location.hash||"#/";
   // Library, category and search routes all call layoutChrome("home", …), so
   // `active==="home"` alone would light Home up while the user is looking at a
@@ -14201,6 +14174,7 @@ function catalogChrome(active, inner){
   catalogFillNav();
   const q=document.getElementById("q");
   let t; q.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>{ location.hash= q.value?("#/search/"+encodeURIComponent(q.value)):"#/"; },300); });
+  restoreSearchFocus(searchFocus);
   catalogWireOnce();
   pollActivity();
 }
@@ -14669,6 +14643,7 @@ function theaterNavHtml(active){
   ).join("");
 }
 function theaterChrome(active, inner){
+  const searchFocus=captureSearchFocus();
   // ${APP_NAME}, never the literal product name — the shipped header's title
   // attribute still says "plurx" here; that is a bug this layout does not copy.
   const getapp = installAvailable()
@@ -14698,6 +14673,7 @@ function theaterChrome(active, inner){
    <nav class="th-pills" aria-label="Sections">${theaterNavHtml(active)}</nav>`;
   const q=document.getElementById("q");
   let t; q.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>{ location.hash= q.value?("#/search/"+encodeURIComponent(q.value)):"#/"; },300); });
+  restoreSearchFocus(searchFocus);
   theaterWireOnce();
   pollActivity();
 }
@@ -15092,51 +15068,20 @@ function theaterStickyFloor(){
 // A poster is a <div onclick=…>: clickable, but not focusable and not operable
 // from the keyboard. Theater is the TV flagship (plan §2.5) — without this
 // there is no D-pad path through the app at all, and the ten-foot focus
-// treatment in styles.css has nothing to attach to. A MutationObserver rather
-// than a call at the end of each view because theater does not own the
-// activity, settings or search views.
+// treatment in styles.css has nothing to attach to.
 //
-// The layoutId() guard is the important line: switching layout re-runs
-// render(), which repaints classic's DOM under the same live observer. Without
-// the check, classic would start emitting posters carrying tabindex — a diff
-// in the structural golden the gate re-checks after every layout lands.
-//
-// This is a near-copy of catalogWireOnce()/catalogEnhanceCards() and it should not
-// be. NOTES §5.5 asks for it to move into shared wiring behind a per-layout
-// flag before G5 — at five layouts it is five copies of the same observer.
+// This used to be a near-copy of catalogWireOnce()/catalogEnhanceCards(), with
+// a layoutId() guard on each so Classic kept emitting posters that nothing
+// could focus — the golden churn was the reason, and being unreachable by
+// keyboard was the price. NOTES §5.5 asked for shared wiring; it is
+// navKeyboardWireOnce(), it covers episode rows too, and the golden was
+// regenerated once for all three layouts.
 let THEATER_WIRED=false;
-function theaterEnhanceCards(){
-  if(layoutId()!=="theater") return;
-  for(const el of document.querySelectorAll(".poster[onclick]:not([tabindex])")){
-    el.setAttribute("tabindex","0");
-    // Cards that navigate are links; the photo cards call openLightbox() and
-    // are buttons. Announcing every card as a link would promise a page that a
-    // lightbox never delivers.
-    el.setAttribute("role", /location\.hash/.test(el.getAttribute("onclick")||"") ? "link" : "button");
-  }
-}
 function theaterWireOnce(){
   if(THEATER_WIRED) return;
   THEATER_WIRED=true;
-  document.addEventListener("keydown",e=>{
-    if(layoutId()!=="theater") return;
-    // The player and the lightbox own the keyboard while they are up; both of
-    // the shipped handlers guard on that and this one has to agree.
-    const modal=document.getElementById("modal");
-    if(lightboxOpen()||(modal&&modal.classList.contains("open"))) return;
-    const el=e.target;
-    if(!el||!el.classList||!el.classList.contains("poster")) return;
-    // Enter and Space are what a role=link/button promises. "Spacebar" is the
-    // legacy key name older WebKit still reports.
-    if(e.key!=="Enter"&&e.key!==" "&&e.key!=="Spacebar") return;
-    e.preventDefault();          // Space would otherwise page the grid down
-    el.click();                  // fires the inline handler card() emitted
-  });
-  // #app itself is never replaced (every view assigns to its innerHTML), so
-  // one observer on it outlives every route change.
-  const app=document.getElementById("app");
-  if(app&&window.MutationObserver) new MutationObserver(theaterEnhanceCards).observe(app,{childList:true,subtree:true});
-  theaterEnhanceCards();
+  // Card reach is shared with every other layout — see navKeyboardWireOnce().
+  navKeyboardWireOnce();
 }
 
 // ---- registration ---------------------------------------------------------

@@ -73,6 +73,10 @@ jobs:
           node-version: "22"
       - name: Check CI, deploy, and shipping contracts
         run: make operations-check
+      - name: Check the shared player input contract
+        run: |
+          node tests/playback/player-input-contract.test.js
+          node tests/web/player-dom.test.js
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only effort diff; compile surfaces are skipped."

@@ -671,7 +671,11 @@ pattern = "publication_ready_at_ms"
 # two assertions that a *commit* leaves the fence at the sentinel. All three
 # are test-only. The fence is not moved by any new shipped path — a commit
 # updates the lease and nothing else, exactly as before.
-expected_occurrences = 71
+# 71 -> 72 with R-M3's pointer test: one test-only activation built from what
+# admission returned, so the fence it asks for is proved against the durable
+# pointer rather than against the constant in the code. It sets the sentinel
+# like every other first commit and moves no shipped fence.
+expected_occurrences = 72
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -689,7 +693,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # the pointer sets it, and the commit test asserts a committed successor is
 # still at it. Both test-only; no shipped path writes or clears the sentinel
 # that did not before.
-expected_occurrences = 22
+# 22 -> 23 with R-M3's pointer test, for the same activation described in
+# `m4-activation-publication-handoff-fence` above.
+expected_occurrences = 23
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -1045,7 +1051,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # 379 -> 381 with M7 R-M2's handler acceptance fixture: its two concurrent
 # subtitle-segment request tasks are both joined by the fixture's bounded wait.
 # Neither task is a shipped producer or process owner.
-expected_occurrences = 382
+# 382 -> 383: the deterministic Activity in-flight-sharing regression holds
+# one leading fetch in a joined test task while seven followers queue behind
+# the same process-local gate. The fixture releases and awaits every task; it
+# owns no shipped producer, timer, or process.
+expected_occurrences = 383
 
 [[module_structures]]
 id = "method-spawn"
@@ -1104,7 +1114,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +1 for the delayed-directory cancellation fixture: its two-second paused-time
 # sleep moves the wire start beyond the initial reservation and is fully owned
 # by the test task that the fixture aborts and joins.
-expected_occurrences = 529
+# +9 with M7 R-M3's seek coalescing. One is shipped: the subtitle segment arm
+# reads the client's settled destination under the same publication deadline
+# that already bounds its sibling reads, and a deadline that expires there
+# starts nothing at all — it cannot leak a producer, only decline to begin one.
+# The other eight are fixture waits in the `seek_coalescing` acceptance: five
+# bound producer-start and teardown observation, one bounds the first window's
+# publication, and two are the above-250 ms spacing the protocol's exchange
+# floor requires for a storm to be measured rather than rate-limited. Every one
+# of them is awaited by the test before its temporary media is released.
+# +2 with R-M3's review findings: one fixture wait for the surviving producer to
+# publish once the storm releases its gate — the wait that stops "nothing was
+# published" from being true because nothing was ever let through — and one in
+# the latch tests that drive the owner registry directly. Both are awaited by
+# their test before its temporary media is released.
+expected_occurrences = 540
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1172,7 +1196,17 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +2 for the VOD fetched-side frontier test: two `VodServe::status()` reads of
 # one session's diagnostics, before and after the hole is filled. They take a
 # manifest lock and return a struct; nothing is launched and nothing is owned.
-expected_occurrences = 202
+# +7 with M7 R-M3's seek-coalescing acceptance: every one is a
+# `Response::status()` assertion on an in-process subtitle-segment response.
+# They launch nothing and own nothing. R-M3 adds no command construction at
+# all — it changes who may *stop* the existing window extractor, not who may
+# start one, and that extractor is still the single bounded ffmpeg inventoried
+# under `process-command-construction` above.
+# +1 with R-M3's terminal-retirement test: one more `Response::status()` read on
+# an in-process subtitle response, this time to prove that retiring a playback
+# releases the window it owned. The two counts above are independent and add:
+# the pacing-hold work and R-M3 landed against the same base.
+expected_occurrences = 210
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1193,7 +1227,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # these are in-process test synchronization, not child-process lifecycle calls.
 # +4 M5b: conversion helpers explicitly wait/reap their bounded child or use
 # deterministic in-process synchronization in tests.
-expected_occurrences = 304
+# 304 -> 306: the Activity in-flight-sharing regression's two barrier `wait`
+# calls coordinate test tasks before the leading fetch is released. They are
+# in-process synchronization and do not address or reap an operating-system
+# process.
+expected_occurrences = 306
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

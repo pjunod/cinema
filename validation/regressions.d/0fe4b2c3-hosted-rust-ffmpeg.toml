@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["0fe4b2c3"]
+points = ["operations.packaging", "validation.framework"]
+checks = ["rust-gate", "operations-contract", "history-regressions"]
+reason = "The fast Rust gate runs ffmpeg-backed daemon tests on both trusted self-hosted runners and the GitHub-hosted fallback. The retained workflow contract requires the self-hosted lane to advertise the ffmpeg-6 capability and requires the composite ffmpeg action to provision major 6 before the Rust suite on a hosted runner; reverting either side makes the operations contract fail before the gate can silently run without the binary. The Rust gate then executes the same ffmpeg-backed unit coverage that exposed the missing hosted prerequisite."

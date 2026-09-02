@@ -1,8 +1,8 @@
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@file:kotlin.OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 
 package tv.plurx.app.player
 
-import android.view.KeyEvent
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.graphics.Rect
@@ -15,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -53,8 +54,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
@@ -69,17 +68,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.clipRect
-import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -130,8 +130,10 @@ import tv.plurx.app.data.Rung
 import tv.plurx.app.data.Session
 import tv.plurx.app.data.SubTrack
 import tv.plurx.app.ui.AppViewModel
+import tv.plurx.app.ui.FormFactor
 import tv.plurx.app.ui.PlaybackTarget
 import tv.plurx.app.ui.catchingUnlessCancelled
+import tv.plurx.app.ui.currentFormFactor
 import tv.plurx.app.ui.components.LoadingBox
 import tv.plurx.app.ui.components.MediaFact
 import tv.plurx.app.ui.components.MediaFactChip
@@ -305,55 +307,64 @@ internal fun playerRuntimeLabel(milliseconds: Long): String {
 
 private enum class PlayerPanel { Tracks, Settings, Info }
 
-internal enum class PlaybackStatsMode(val label: String) {
-    Mini("Mini"),
-    Standard("Standard"),
-    Debug("Debug"),
+internal enum class PlayerControlId {
+    SkipBack,
+    PlayPause,
+    SkipForward,
+    Tracks,
+    Settings,
+    Info,
+    PictureInPicture,
+    Timeline,
+    Marker,
+    ;
+
+    val isTransport: Boolean get() = this !in setOf(Timeline, Marker)
 }
 
-private enum class PlaybackStatTone(val color: Color) {
+internal class PlayerControlFocus {
+    val skipBack = FocusRequester()
+    val playPause = FocusRequester()
+    val skipForward = FocusRequester()
+    val tracks = FocusRequester()
+    val settings = FocusRequester()
+    val info = FocusRequester()
+    val pictureInPicture = FocusRequester()
+    val timeline = FocusRequester()
+    val marker = FocusRequester()
+
+    fun requester(control: PlayerControlId): FocusRequester = when (control) {
+        PlayerControlId.SkipBack -> skipBack
+        PlayerControlId.PlayPause -> playPause
+        PlayerControlId.SkipForward -> skipForward
+        PlayerControlId.Tracks -> tracks
+        PlayerControlId.Settings -> settings
+        PlayerControlId.Info -> info
+        PlayerControlId.PictureInPicture -> pictureInPicture
+        PlayerControlId.Timeline -> timeline
+        PlayerControlId.Marker -> marker
+    }
+}
+
+internal enum class PlaybackStatsMode(val storageValue: String, val label: String) {
+    Mini("mini", "Mini"),
+    Standard("standard", "Standard"),
+    Debug("debug", "Debug"),
+    ;
+
+    companion object {
+        fun fromStorage(value: String?): PlaybackStatsMode = entries.firstOrNull {
+            it.storageValue == value
+        } ?: Standard
+    }
+}
+
+internal enum class PlaybackStatTone(val color: Color) {
     Neutral(Color(0xFFEEEEF2)),
     Muted(Color(0xFF9697A2)),
     Good(Color(0xFF6DDB98)),
     Warning(Color(0xFFFFBD4A)),
     Critical(Color(0xFFFF6268)),
-}
-
-internal enum class PlayerBackAction { ClosePanel, HideControls, ExitPlayback }
-
-internal fun playerBackAction(panelOpen: Boolean, controlsVisible: Boolean): PlayerBackAction = when {
-    panelOpen -> PlayerBackAction.ClosePanel
-    controlsVisible -> PlayerBackAction.HideControls
-    else -> PlayerBackAction.ExitPlayback
-}
-
-/**
- * Directional playback shortcuts only own the bare video surface. Visible
- * controls keep normal D-pad focus navigation.
- */
-internal fun playerSeekDeltaMs(keyCode: Int, controlsVisible: Boolean): Long? {
-    if (controlsVisible) return null
-    return when (keyCode) {
-        KeyEvent.KEYCODE_DPAD_LEFT -> -10_000L
-        KeyEvent.KEYCODE_DPAD_RIGHT -> 10_000L
-        KeyEvent.KEYCODE_DPAD_DOWN -> -30_000L
-        KeyEvent.KEYCODE_DPAD_UP -> 30_000L
-        else -> null
-    }
-}
-
-/** Accumulates bare-surface D-pad repeats against one frozen player position. */
-internal class HiddenSeekAccumulator(private val durationMs: Long) {
-    var pendingTargetMs: Long? = null
-        private set
-
-    fun nudge(currentPositionMs: Long, deltaMs: Long): Long {
-        val base = pendingTargetMs ?: currentPositionMs.coerceAtLeast(0L)
-        val ceiling = durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE
-        return (base + deltaMs).coerceIn(0L, ceiling).also { pendingTargetMs = it }
-    }
-
-    fun consume(): Long? = pendingTargetMs.also { pendingTargetMs = null }
 }
 
 private const val MAX_PIP_ASPECT_RATIO = 2.39
@@ -653,13 +664,8 @@ private fun PlayerContent(
     val displayHdrTypes = remember(context) { Caps.displayHdrTypes(context) }
 
     var positionMs by remember { mutableLongStateOf(startMs) }
-    val hiddenSeekAccumulator = remember(controller, plan.durationMs) {
-        HiddenSeekAccumulator(plan.durationMs)
-    }
-    var hiddenSeekTargetMs by remember(controller) { mutableStateOf<Long?>(null) }
-    var seekHudPositionMs by remember(controller) { mutableStateOf<Long?>(null) }
-    var scrubbing by remember { mutableStateOf(false) }
-    var scrubPreview by remember { mutableLongStateOf(startMs) }
+    var pendingMs by remember(controller) { mutableStateOf<Long?>(null) }
+    var timelineFocused by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(true) }
     var buffering by remember { mutableStateOf(true) }
     var controlsVisible by remember { mutableStateOf(true) }
@@ -670,7 +676,20 @@ private fun PlayerContent(
     // is the only way to reserve the right amount, and zero the rest of the time.
     var transportHeightPx by remember { mutableIntStateOf(0) }
     var panel by remember { mutableStateOf<PlayerPanel?>(null) }
-    var statsMode by remember { mutableStateOf(PlaybackStatsMode.Standard) }
+    var statsMode by remember(preferences.playbackInfoMode) {
+        mutableStateOf(PlaybackStatsMode.fromStorage(preferences.playbackInfoMode))
+    }
+    var lastFocusedControl by rememberSaveable { mutableStateOf(PlayerControlId.PlayPause) }
+    var panelOpener by rememberSaveable { mutableStateOf(PlayerControlId.PlayPause) }
+    var focusAfterComposition by remember { mutableStateOf<PlayerControlId?>(null) }
+    // Bumped by every focus() call. Two requests for the SAME control are two
+    // moves — `focus_transport` from the timeline asks for the control it is
+    // already remembering — so the request has to carry something that changes.
+    var focusRequestTicket by remember { mutableIntStateOf(0) }
+    // One surface for every producer on this screen — see OfflinePlayerScreen.
+    val playerSurface = playerInputSurfaceFor(currentFormFactor())
+    var repeatCount by remember { mutableIntStateOf(0) }
+    val controlFocus = remember { PlayerControlFocus() }
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     var isInPip by remember(activity) {
         mutableStateOf(
@@ -734,22 +753,180 @@ private fun PlayerContent(
         controller.seekTo(targetMs)
     }
 
-    fun nudgeHiddenSeek(deltaMs: Long) {
-        hiddenSeekAccumulator.nudge(controller.realPosition(), deltaMs).let { target ->
-            hiddenSeekTargetMs = target
-            seekHudPositionMs = target
+    fun inputState(): PlayerInputState = when {
+        playFailure != null -> PlayerInputState.Failed
+        panel == PlayerPanel.Info && statsMode != PlaybackStatsMode.Mini -> PlayerInputState.Info
+        panel != null && panel != PlayerPanel.Info -> PlayerInputState.Menu
+        // Chrome-hidden outranks the timeline flag. `hide` removes Controls
+        // from composition, and the flag is cleared by a focus callback the
+        // runtime does not promise to deliver before the next key arrives —
+        // so asking it first let a direction scrub chrome nobody could see,
+        // which is the one thing ruling 1 forbids.
+        !controlsVisible -> PlayerInputState.Hidden
+        timelineFocused && pendingMs != null -> PlayerInputState.Scrub
+        timelineFocused -> PlayerInputState.Timeline
+        else -> PlayerInputState.Transport
+    }
+
+    fun focus(control: PlayerControlId) {
+        // The marker chip is composed only while a marker is offered; asking
+        // for it after the marker has passed is asking for a node that is not
+        // there.
+        val markerOnScreen = plan.markers.any { positionMs in it.start_ms until it.end_ms }
+        focusAfterComposition = if (control == PlayerControlId.Marker && !markerOnScreen) {
+            PlayerControlId.PlayPause
+        } else {
+            control
+        }
+        focusRequestTicket += 1
+    }
+
+    fun applyOutcome(outcome: PlayerInputOutcome, input: PlayerContractInput): Boolean {
+        fun commitPreview() {
+            pendingMs?.let(::seekWithMarkerUndo)
+            pendingMs = null
+            poke()
+        }
+
+        fun focusTransport() {
+            val target = lastFocusedControl.takeIf { it.isTransport }
+                ?: PlayerControlId.PlayPause
+            controlsVisible = true
+            focus(target)
+        }
+
+        fun focusMarkerOrIgnore() {
+            if (plan.markers.any { positionMs in it.start_ms until it.end_ms }) {
+                focus(PlayerControlId.Marker)
+            }
+        }
+
+        return when (outcome) {
+            PlayerInputOutcome.Reveal -> {
+                controlsVisible = true
+                poke()
+                focus(lastFocusedControl)
+                true
+            }
+            // These three want the focus engine or the button's own click, so
+            // the event is deliberately not consumed.
+            PlayerInputOutcome.FocusRow,
+            PlayerInputOutcome.Activate,
+            -> {
+                poke()
+                false
+            }
+            PlayerInputOutcome.MenuFocus -> false
+            // `ignore` is "nothing happens", not "somebody else may act" — for
+            // the media keys, which the Media3 session would otherwise act on,
+            // seeking the player the contract just said to leave alone. A
+            // directional or Select `ignore` stays unconsumed: on a touch
+            // surface with a keyboard attached every direction is `ignore`,
+            // and swallowing those would leave the focus engine with nothing.
+            PlayerInputOutcome.Ignore -> input == PlayerContractInput.PlayPause ||
+                input == PlayerContractInput.SkipBack ||
+                input == PlayerContractInput.SkipForward
+            PlayerInputOutcome.FocusMarkerOrIgnore -> {
+                focusMarkerOrIgnore()
+                true
+            }
+            PlayerInputOutcome.FocusTransport -> {
+                focusTransport()
+                true
+            }
+            PlayerInputOutcome.TogglePlay -> {
+                controller.playPause()
+                poke()
+                true
+            }
+            PlayerInputOutcome.Skip -> {
+                val delta = if (input == PlayerContractInput.SkipBack || input == PlayerContractInput.Left) {
+                    -PlayerInputPolicy.SKIP_STEP_MS
+                } else {
+                    PlayerInputPolicy.SKIP_STEP_MS
+                }
+                seekWithMarkerUndo(controller.realPosition() + delta)
+                poke()
+                true
+            }
+            PlayerInputOutcome.Preview -> {
+                // No trustworthy total means no position to preview against,
+                // and no timeline row on screen either — the press is spent
+                // waking the chrome, as it is on every other client.
+                val ceiling = plan.durationMs
+                if (ceiling > 0L) {
+                    val direction = if (input == PlayerContractInput.Left) -1 else 1
+                    pendingMs = ((pendingMs ?: controller.realPosition()) +
+                        direction * PlayerInputPolicy.previewStepMs(repeatCount)).coerceIn(0L, ceiling)
+                }
+                poke()
+                true
+            }
+            PlayerInputOutcome.Commit -> {
+                commitPreview()
+                true
+            }
+            PlayerInputOutcome.Cancel -> {
+                pendingMs = null
+                poke()
+                true
+            }
+            PlayerInputOutcome.CancelThenFocusTransport -> {
+                pendingMs = null
+                focusTransport()
+                poke()
+                true
+            }
+            PlayerInputOutcome.CancelThenFocusMarkerOrIgnore -> {
+                pendingMs = null
+                focusMarkerOrIgnore()
+                poke()
+                true
+            }
+            PlayerInputOutcome.CommitThenTogglePlay -> {
+                commitPreview()
+                controller.playPause()
+                true
+            }
+            PlayerInputOutcome.CloseMenu,
+            PlayerInputOutcome.CloseInfo,
+            -> {
+                panel = null
+                poke()
+                focus(panelOpener)
+                true
+            }
+            PlayerInputOutcome.Hide -> {
+                if (panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini) {
+                    panel = null
+                }
+                controlsVisible = false
+                focusAfterComposition = null
+                true
+            }
+            PlayerInputOutcome.Exit -> {
+                onExit()
+                true
+            }
+            PlayerInputOutcome.ToggleChrome -> {
+                if (controlsVisible) controlsVisible = false else {
+                    poke()
+                    focus(lastFocusedControl)
+                }
+                true
+            }
         }
     }
 
     BackHandler(enabled = !isInPip) {
-        when (playerBackAction(panel != null, controlsVisible)) {
-            PlayerBackAction.ClosePanel -> {
-                panel = null
-                poke()
-            }
-            PlayerBackAction.HideControls -> controlsVisible = false
-            PlayerBackAction.ExitPlayback -> onExit()
-        }
+        applyOutcome(
+            PlayerInputPolicy.route(
+                playerSurface,
+                inputState(),
+                PlayerContractInput.Back,
+            ),
+            PlayerContractInput.Back,
+        )
     }
 
     // Keyed on the controller alone. Keying it on the preference too meant
@@ -889,22 +1066,9 @@ private fun PlayerContent(
 
     LaunchedEffect(controller) {
         while (true) {
-            if (!scrubbing) positionMs = controller.realPosition()
+            if (pendingMs == null) positionMs = controller.realPosition()
             delay(500)
         }
-    }
-    LaunchedEffect(hiddenSeekTargetMs) {
-        val target = hiddenSeekTargetMs ?: return@LaunchedEffect
-        delay(300)
-        if (hiddenSeekTargetMs == target) {
-            hiddenSeekAccumulator.consume()?.let(controller::seekTo)
-            hiddenSeekTargetMs = null
-        }
-    }
-    LaunchedEffect(seekHudPositionMs) {
-        val target = seekHudPositionMs ?: return@LaunchedEffect
-        delay(1_600)
-        if (seekHudPositionMs == target) seekHudPositionMs = null
     }
     LaunchedEffect(controller.playbackNotice) {
         val notice = controller.playbackNotice ?: return@LaunchedEffect
@@ -917,10 +1081,18 @@ private fun PlayerContent(
             if (isPlaying) vm.reportProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
         }
     }
-    LaunchedEffect(lastInteraction, isPlaying, panel) {
-        if (isPlaying && panel == null) {
-            delay(3_800)
-            controlsVisible = false
+    LaunchedEffect(lastInteraction, isPlaying, panel, pendingMs, playFailure) {
+        val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
+        if (isPlaying && (panel == null || miniInfo) && pendingMs == null && playFailure == null) {
+            delay(PlayerInputPolicy.HIDE_AFTER_MS)
+            applyOutcome(
+                PlayerInputPolicy.route(
+                    playerSurface,
+                    inputState(),
+                    PlayerContractInput.Idle,
+                ),
+                PlayerContractInput.Idle,
+            )
         }
     }
 
@@ -930,12 +1102,12 @@ private fun PlayerContent(
         activeMarker?.start_ms,
         activeMarker?.isAutoSkipEligible,
         isInPip,
-        scrubbing,
+        pendingMs,
         preferences.autoSkip,
     ) {
         val marker = activeMarker ?: return@LaunchedEffect
         val automatic = preferences.autoSkip && marker.isAutoSkipEligible
-        if (!isInPip && !scrubbing && !automatic &&
+        if (!isInPip && pendingMs == null && !automatic &&
             markerOfferLedger.shouldReport(markerOfferGeneration, marker.kind, marker.start_ms)
         ) {
             recordMarkerEvent("marker_offer", marker.kind, "playback marker offered")
@@ -952,65 +1124,24 @@ private fun PlayerContent(
         }
     }
 
+    // `reveal` and `close_menu` re-enter Controls from scratch, and Controls
+    // asks for its own initial focus a frame later — so a request made here
+    // was overwritten every time. The target now travels into Controls as
+    // `initialFocus` and there is one requester; this effect only parks focus
+    // on the invisible surface when the chrome is gone.
     LaunchedEffect(controlsVisible, panel, isInPip) {
         if (!isInPip && !controlsVisible && panel == null) {
             surfaceFocusRequester.requestFocus()
         }
     }
 
-    playFailure?.let { message ->
-        PlaybackFailed(
-            message = message,
-            onRetry = { onReload(controller.realPosition(), "fallback") },
-            onExit = onExit,
-        )
-        return
-    }
-
     Box(
         Modifier.fillMaxSize()
             .focusRequester(surfaceFocusRequester)
             .focusable()
-            .onPreviewKeyEvent { event ->
-                if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onPreviewKeyEvent false
-                val seekDelta = playerSeekDeltaMs(
-                    keyCode = event.nativeKeyEvent.keyCode,
-                    controlsVisible = controlsVisible,
-                )
-                if (seekDelta != null) {
-                    nudgeHiddenSeek(seekDelta)
-                    return@onPreviewKeyEvent true
-                }
-                when (event.nativeKeyEvent.keyCode) {
-                    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
-                        controller.playPause()
-                        true
-                    }
-                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                        if (!controlsVisible) {
-                            poke()
-                            true
-                        } else {
-                            poke()
-                            false
-                        }
-                    }
-                    KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                        seekWithMarkerUndo(controller.realPosition() - 10_000); poke(); true
-                    }
-                    KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                        seekWithMarkerUndo(controller.realPosition() + 10_000); poke(); true
-                    }
-                    KeyEvent.KEYCODE_DPAD_LEFT,
-                    KeyEvent.KEYCODE_DPAD_RIGHT,
-                    KeyEvent.KEYCODE_DPAD_UP,
-                    KeyEvent.KEYCODE_DPAD_DOWN,
-                    -> {
-                        poke()
-                        false
-                    }
-                    else -> false
-                }
+            .playerInputAdapter(surface = playerSurface, state = ::inputState) { outcome, input, repeats ->
+                repeatCount = repeats
+                applyOutcome(outcome, input)
             },
     ) {
         AndroidView(
@@ -1035,12 +1166,18 @@ private fun PlayerContent(
             )
         }
 
-        if (!isInPip) {
+        if (!isInPip && playFailure == null) {
             Box(
                 Modifier.fillMaxSize().focusProperties { canFocus = false }.clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                ) { if (controlsVisible) controlsVisible = false else poke() },
+                ) {
+                    val input = PlayerContractInput.TapSurface
+                    applyOutcome(
+                        PlayerInputPolicy.route(playerSurface, inputState(), input),
+                        input,
+                    )
+                },
             )
         }
 
@@ -1051,21 +1188,7 @@ private fun PlayerContent(
             }
         }
 
-        if (!isInPip) {
-            seekHudPositionMs?.let { target ->
-                Text(
-                    text = "Seek ${formatTime(target)}",
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .background(Color.Black.copy(alpha = 0.78f), MaterialTheme.shapes.medium)
-                        .padding(horizontal = 18.dp, vertical = 10.dp),
-                )
-            }
-        }
-
-        if (!isInPip && activeMarker != null && !scrubbing &&
+        if (!isInPip && controlsVisible && playFailure == null && activeMarker != null && pendingMs == null &&
             !(preferences.autoSkip && activeMarker.isAutoSkipEligible)
         ) {
             TvButton(
@@ -1076,21 +1199,39 @@ private fun PlayerContent(
                     seekWithMarkerUndo(activeMarker.end_ms)
                     poke()
                 },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 28.dp, bottom = 112.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 28.dp, bottom = 112.dp)
+                    .focusRequester(controlFocus.marker)
+                    .onFocusChanged {
+                        if (it.isFocused) lastFocusedControl = PlayerControlId.Marker
+                    },
             ) { Text(activeMarker.displayLabel, fontWeight = FontWeight.SemiBold) }
         }
 
-        if (!isInPip && controlsVisible) {
+        val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
+        if (!isInPip && controlsVisible && (panel == null || miniInfo) && playFailure == null) {
             Controls(
                 title = plan.title,
                 subtitle = plan.subtitle,
                 releaseDate = plan.releaseDate,
                 runtimeLabel = plan.durationMs.takeIf { it > 0 }?.let(::playerRuntimeLabel),
                 overview = plan.overview,
-                positionMs = if (scrubbing) scrubPreview else positionMs,
+                positionMs = positionMs,
                 durationMs = plan.durationMs,
+                pendingMs = pendingMs,
                 isPlaying = isPlaying,
                 requestInitialFocus = panel == null,
+                initialFocus = focusAfterComposition ?: PlayerControlId.PlayPause,
+                focusRequestTicket = focusRequestTicket,
+                focus = controlFocus,
+                markerAvailable = activeMarker != null,
+                lastFocusedControl = lastFocusedControl,
+                onControlFocused = { control ->
+                    lastFocusedControl = control
+                    lastInteraction += 1
+                },
+                onTimelineFocused = { timelineFocused = it },
                 mediaFacts = playerMediaFacts(
                     file = plan.source,
                     audio = plan.audio.firstOrNull { it.index == controller.selectedAudio }
@@ -1105,17 +1246,32 @@ private fun PlayerContent(
                     deliveredDolbyVisionProfile = controller.deliveredDolbyVisionProfile,
                 ),
                 onTransportHeight = { transportHeightPx = it },
-                onBack = onExit,
+                onBack = {
+                    val input = PlayerContractInput.Back
+                    applyOutcome(
+                        PlayerInputPolicy.route(playerSurface, inputState(), input),
+                        input,
+                    )
+                },
                 onPlayPause = { controller.playPause(); poke() },
                 onSeekBack = { seekWithMarkerUndo(controller.realPosition() - 10_000); poke() },
                 onSeekForward = { seekWithMarkerUndo(controller.realPosition() + 10_000); poke() },
-                onScrubStart = { scrubbing = true; scrubPreview = positionMs },
-                onScrub = { scrubPreview = it },
-                onScrubEnd = { seekWithMarkerUndo(scrubPreview); scrubbing = false; poke() },
-                onTracks = { panel = PlayerPanel.Tracks },
-                onSettings = { panel = PlayerPanel.Settings },
+                onScrub = { pendingMs = it.coerceIn(0L, plan.durationMs.coerceAtLeast(0L)) },
+                onScrubEnd = {
+                    pendingMs?.let(::seekWithMarkerUndo)
+                    pendingMs = null
+                    poke()
+                },
+                onTracks = {
+                    panelOpener = PlayerControlId.Tracks
+                    panel = PlayerPanel.Tracks
+                },
+                onSettings = {
+                    panelOpener = PlayerControlId.Settings
+                    panel = PlayerPanel.Settings
+                },
                 onInfo = {
-                    controlsVisible = false
+                    panelOpener = PlayerControlId.Info
                     panel = PlayerPanel.Info
                 },
                 onPip = if (canUsePip && activity != null) {
@@ -1132,7 +1288,7 @@ private fun PlayerContent(
             )
         }
 
-        when (if (isInPip) null else panel) {
+        when (if (isInPip || playFailure != null) null else panel) {
             PlayerPanel.Tracks -> TrackMenu(
                 player = controller.player,
                 serverAudio = plan.audio,
@@ -1140,13 +1296,24 @@ private fun PlayerContent(
                 serverControlledAudio = controller.deliveryMode != "direct",
                 selectedServerAudio = controller.selectedAudio,
                 selectedServerSubtitle = controller.selectedSubtitle,
-                onServerAudio = { onAudioChanged(it); controller.switchAudio(it); panel = null; poke() },
+                onServerAudio = {
+                    onAudioChanged(it)
+                    controller.switchAudio(it)
+                    panel = null
+                    poke()
+                    focus(panelOpener)
+                },
                 onServerSubtitle = {
                     if (controller.switchSubtitle(it)) onSubtitleChanged(it)
                     panel = null
                     poke()
+                    focus(panelOpener)
                 },
-                onDismiss = { panel = null; poke() },
+                onDismiss = {
+                    panel = null
+                    poke()
+                    focus(panelOpener)
+                },
             )
             PlayerPanel.Settings -> PlayerSettings(
                 vm = vm,
@@ -1159,7 +1326,11 @@ private fun PlayerContent(
                     controller.setAudioOffset(it)
                     onAudioOffsetChanged(it)
                 },
-                onDismiss = { panel = null; poke() },
+                onDismiss = {
+                    panel = null
+                    poke()
+                    focus(panelOpener)
+                },
             )
             PlayerPanel.Info -> PlayerInfo(
                 plan = plan,
@@ -1168,10 +1339,25 @@ private fun PlayerContent(
                 displayHdrTypes = displayHdrTypes,
                 transportReserve = playbackTransportReserve(controlsVisible, transportHeightPx),
                 mode = statsMode,
-                onMode = { statsMode = it },
-                onDismiss = { panel = null; poke() },
+                onMode = {
+                    statsMode = it
+                    vm.setPlaybackInfoMode(it.storageValue)
+                },
+                onDismiss = {
+                    panel = null
+                    poke()
+                    focus(PlayerControlId.Info)
+                },
             )
             null -> Unit
+        }
+
+        playFailure?.let { message ->
+            PlaybackFailed(
+                message = message,
+                onRetry = { onReload(controller.realPosition(), "fallback") },
+                onExit = onExit,
+            )
         }
 
         controller.playbackNotice?.let { notice ->
@@ -1243,46 +1429,101 @@ internal fun Controls(
     overview: String? = null,
     positionMs: Long,
     durationMs: Long,
+    pendingMs: Long? = null,
     isPlaying: Boolean,
     requestInitialFocus: Boolean,
+    initialFocus: PlayerControlId = PlayerControlId.PlayPause,
+    focusRequestTicket: Int = 0,
     mediaFacts: List<MediaFact> = emptyList(),
+    markerAvailable: Boolean = false,
+    focus: PlayerControlFocus? = null,
+    lastFocusedControl: PlayerControlId = PlayerControlId.PlayPause,
+    onControlFocused: (PlayerControlId) -> Unit = {},
+    onTimelineFocused: (Boolean) -> Unit = {},
     onBack: () -> Unit,
     onPlayPause: () -> Unit,
     onSeekBack: () -> Unit,
     onSeekForward: () -> Unit,
-    onScrubStart: () -> Unit,
     onScrub: (Long) -> Unit,
     onScrubEnd: () -> Unit,
-    onTracks: () -> Unit,
-    onSettings: () -> Unit,
+    onTracks: (() -> Unit)?,
+    onSettings: (() -> Unit)?,
     onInfo: () -> Unit,
     onPip: (() -> Unit)?,
     onTransportHeight: (Int) -> Unit = {},
 ) {
-    val playFocusRequester = remember { FocusRequester() }
-    RequestInitialFocus(playFocusRequester, enabled = requestInitialFocus)
+    val ownFocus = remember { PlayerControlFocus() }
+    val resolvedFocus = focus ?: ownFocus
+    val formFactor = currentFormFactor()
+    RequestInitialFocus(
+        resolvedFocus.requester(initialFocus),
+        enabled = requestInitialFocus,
+        token = focusRequestTicket,
+        // Navigation, not arrival: a second request 80 ms later would undo a
+        // press the viewer made in between.
+        reinforce = false,
+    )
+    // The timeline row is composed only when a duration is known, so pointing
+    // `up` at its requester on an unknown-duration stream aimed focus at a
+    // node that was never attached.
+    val upFromTransport = if (durationMs > 0L) resolvedFocus.timeline else FocusRequester.Cancel
+
+    fun transportModifier(control: PlayerControlId): Modifier = Modifier
+        .focusRequester(resolvedFocus.requester(control))
+        .focusProperties { up = upFromTransport }
+        .onFocusChanged { if (it.isFocused) onControlFocused(control) }
+
+    @Composable
+    fun TransportOptions() {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (onTracks != null) {
+                TvIconButton(
+                    onClick = onTracks,
+                    modifier = transportModifier(PlayerControlId.Tracks),
+                ) {
+                    Icon(Icons.Filled.ClosedCaption, contentDescription = "Audio and subtitles", tint = Color.White)
+                }
+            }
+            if (onSettings != null) {
+                TvIconButton(
+                    onClick = onSettings,
+                    modifier = transportModifier(PlayerControlId.Settings),
+                ) {
+                    Icon(Icons.Filled.Tune, contentDescription = "Playback settings", tint = Color.White)
+                }
+            }
+            TvIconButton(
+                onClick = onInfo,
+                modifier = transportModifier(PlayerControlId.Info),
+            ) {
+                Icon(Icons.Filled.Info, contentDescription = "Playback info", tint = Color.White)
+            }
+            if (onPip != null) {
+                TvIconButton(
+                    onClick = onPip,
+                    modifier = transportModifier(PlayerControlId.PictureInPicture),
+                ) {
+                    Icon(Icons.Filled.PictureInPictureAlt, contentDescription = "Picture in picture", tint = Color.White)
+                }
+            }
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
         Row(
             Modifier.align(Alignment.TopStart).fillMaxWidth().padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TvIconButton(onClick = onBack) {
+            TvIconButton(
+                onClick = onBack,
+                modifier = Modifier.focusProperties {
+                    canFocus = formFactor != FormFactor.Television
+                },
+            ) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
-            }
-            Spacer(Modifier.weight(1f))
-            TvIconButton(onClick = onTracks) {
-                Icon(Icons.Filled.ClosedCaption, contentDescription = "Audio and subtitles", tint = Color.White)
-            }
-            TvIconButton(onClick = onSettings) {
-                Icon(Icons.Filled.Tune, contentDescription = "Playback settings", tint = Color.White)
-            }
-            TvIconButton(onClick = onInfo) {
-                Icon(Icons.Filled.Info, contentDescription = "Playback info", tint = Color.White)
-            }
-            if (onPip != null) {
-                TvIconButton(onClick = onPip) {
-                    Icon(Icons.Filled.PictureInPictureAlt, contentDescription = "Picture in picture", tint = Color.White)
-                }
             }
         }
 
@@ -1337,8 +1578,29 @@ internal fun Controls(
                 )
             }
 
+            if (durationMs > 0L) {
+                TimelineRow(
+                    positionMs = positionMs,
+                    durationMs = durationMs,
+                    pendingMs = pendingMs,
+                    focusRequester = resolvedFocus.timeline,
+                    upRequester = if (markerAvailable) resolvedFocus.marker else FocusRequester.Cancel,
+                    downRequester = resolvedFocus.requester(
+                        lastFocusedControl.takeIf { it.isTransport } ?: PlayerControlId.PlayPause,
+                    ),
+                    onFocusChanged = { focused ->
+                        onTimelineFocused(focused)
+                        if (focused) onControlFocused(PlayerControlId.Timeline)
+                    },
+                    onTouchPreview = onScrub,
+                    onTouchCommit = onScrubEnd,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+
             BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 4.dp)) {
-                if (maxWidth >= 700.dp) {
+                val splitTransport = formFactor == FormFactor.Compact && maxWidth < 700.dp
+                if (!splitTransport) {
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -1346,46 +1608,31 @@ internal fun Controls(
                     ) {
                         TransportButtons(
                             isPlaying = isPlaying,
-                            playFocusRequester = playFocusRequester,
+                            timelineAbove = durationMs > 0L,
+                            focus = resolvedFocus,
+                            onFocused = onControlFocused,
                             onPlayPause = onPlayPause,
                             onSeekBack = onSeekBack,
                             onSeekForward = onSeekForward,
                         )
-                        PlaybackTime(positionMs)
-                        PlaybackPositionSlider(
-                            positionMs = positionMs,
-                            durationMs = durationMs,
-                            playFocusRequester = playFocusRequester,
-                            onScrubStart = onScrubStart,
-                            onScrub = onScrub,
-                            onScrubEnd = onScrubEnd,
-                            modifier = Modifier.weight(1f),
-                        )
-                        PlaybackTime(durationMs)
+                        Spacer(Modifier.weight(1f))
+                        TransportOptions()
                     }
                 } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                             TransportButtons(
                                 isPlaying = isPlaying,
-                                playFocusRequester = playFocusRequester,
+                                timelineAbove = durationMs > 0L,
+                                focus = resolvedFocus,
+                                onFocused = onControlFocused,
                                 onPlayPause = onPlayPause,
                                 onSeekBack = onSeekBack,
                                 onSeekForward = onSeekForward,
                             )
                         }
-                        PlaybackPositionSlider(
-                            positionMs = positionMs,
-                            durationMs = durationMs,
-                            playFocusRequester = playFocusRequester,
-                            onScrubStart = onScrubStart,
-                            onScrub = onScrub,
-                            onScrubEnd = onScrubEnd,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            PlaybackTime(positionMs)
-                            PlaybackTime(durationMs)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                            TransportOptions()
                         }
                     }
                 }
@@ -1407,16 +1654,24 @@ internal fun playerContextLine(releaseDate: String?, runtimeLabel: String?): Str
 @Composable
 private fun TransportButtons(
     isPlaying: Boolean,
-    playFocusRequester: FocusRequester,
+    timelineAbove: Boolean,
+    focus: PlayerControlFocus,
+    onFocused: (PlayerControlId) -> Unit,
     onPlayPause: () -> Unit,
     onSeekBack: () -> Unit,
     onSeekForward: () -> Unit,
 ) {
+    fun modifier(control: PlayerControlId, size: Dp): Modifier = Modifier
+        .size(size)
+        .focusRequester(focus.requester(control))
+        .focusProperties { up = if (timelineAbove) focus.timeline else FocusRequester.Cancel }
+        .onFocusChanged { if (it.isFocused) onFocused(control) }
+
     Row(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TvIconButton(onClick = onSeekBack, modifier = Modifier.size(48.dp)) {
+        TvIconButton(onClick = onSeekBack, modifier = modifier(PlayerControlId.SkipBack, 48.dp)) {
             Icon(
                 Icons.Filled.Replay10,
                 contentDescription = "Back 10 seconds",
@@ -1426,7 +1681,7 @@ private fun TransportButtons(
         }
         TvIconButton(
             onClick = onPlayPause,
-            modifier = Modifier.size(56.dp).focusRequester(playFocusRequester),
+            modifier = modifier(PlayerControlId.PlayPause, 56.dp),
         ) {
             Icon(
                 if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
@@ -1435,7 +1690,7 @@ private fun TransportButtons(
                 modifier = Modifier.size(42.dp),
             )
         }
-        TvIconButton(onClick = onSeekForward, modifier = Modifier.size(48.dp)) {
+        TvIconButton(onClick = onSeekForward, modifier = modifier(PlayerControlId.SkipForward, 48.dp)) {
             Icon(
                 Icons.Filled.Forward10,
                 contentDescription = "Forward 10 seconds",
@@ -1444,53 +1699,6 @@ private fun TransportButtons(
             )
         }
     }
-}
-
-@Composable
-private fun PlaybackPositionSlider(
-    positionMs: Long,
-    durationMs: Long,
-    playFocusRequester: FocusRequester,
-    onScrubStart: () -> Unit,
-    onScrub: (Long) -> Unit,
-    onScrubEnd: () -> Unit,
-    modifier: Modifier,
-) {
-    val range = if (durationMs > 0) durationMs.toFloat() else 1f
-    Slider(
-        value = positionMs.coerceIn(0, durationMs.coerceAtLeast(0)).toFloat(),
-        onValueChange = { onScrubStart(); onScrub(it.toLong()) },
-        onValueChangeFinished = onScrubEnd,
-        valueRange = 0f..range,
-        modifier = modifier
-            .semantics { contentDescription = "Playback position" }
-            .onPreviewKeyEvent { event ->
-                val vertical = event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_UP ||
-                    event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_DOWN
-                if (vertical) {
-                    if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN) {
-                        playFocusRequester.requestFocus()
-                    }
-                    true
-                } else {
-                    false
-                }
-            },
-        colors = SliderDefaults.colors(
-            thumbColor = Accent,
-            activeTrackColor = Accent,
-            inactiveTrackColor = Color(0x55FFFFFF),
-        ),
-    )
-}
-
-@Composable
-private fun PlaybackTime(milliseconds: Long) {
-    Text(
-        formatTime(milliseconds),
-        color = Color.White,
-        style = MaterialTheme.typography.labelMedium,
-    )
 }
 
 @Composable
@@ -1507,17 +1715,18 @@ private fun PlayerSettings(
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     val initialFocusRequester = remember { FocusRequester() }
     var offset by remember(audioOffsetMs) { mutableLongStateOf(audioOffsetMs) }
-    RequestInitialFocus(initialFocusRequester)
+    val focusIndex = playerSettingsFocusIndex(preferences.playbackQuality, qualityOptions)
+    RequestInitialFocus(initialFocusRequester, enabled = qualityOptions.isNotEmpty())
     PlayerPanelSurface("Playback settings", onDismiss) {
         Text("Quality", color = Muted, style = MaterialTheme.typography.labelMedium)
         // The rungs are the server's, filtered to what this source can feed —
         // a 1080p file never offers to upscale itself to 4K.
-        qualityOptions.forEach { option ->
+        qualityOptions.forEachIndexed { index, option ->
             val quality = option.quality
             PanelRow(
                 label = option.label,
                 selected = preferences.playbackQuality == quality,
-                modifier = if (preferences.playbackQuality == quality) {
+                modifier = if (index == focusIndex) {
                     Modifier.focusRequester(initialFocusRequester)
                 } else {
                     Modifier
@@ -1550,6 +1759,11 @@ private fun PlayerSettings(
     }
 }
 
+internal fun playerSettingsFocusIndex(
+    storedQuality: tv.plurx.app.data.PlaybackQuality,
+    qualityOptions: List<QualityOption>,
+): Int = qualityOptions.indexOfFirst { it.quality == storedQuality }.coerceAtLeast(0)
+
 @Composable
 private fun PlayerInfo(
     plan: Plan,
@@ -1572,19 +1786,37 @@ private fun PlayerInfo(
     ).let { label ->
         controller.pgsOverlayStatus.label?.let { "$label · $it" } ?: label
     }
+    val videoFormat = player.videoFormat
+    val source = plan.source
+    val bufferSeconds = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0) / 1_000.0
+    val method = buildList {
+        add(deliveryLabel(controller.deliveryMode))
+        if (controller.deliveryMode == "transcode") {
+            controller.encoder?.takeIf { it.isNotBlank() }?.let(::add)
+            controller.sessionStatus?.target_height?.takeIf { it > 0 }?.let { add("${it}p") }
+        }
+    }.joinToString(" · ")
     PlaybackInfoOverlay(
         details = PlaybackInfoDetails(
             title = plan.title,
             fileId = plan.fileId,
-            delivery = deliveryLabel(controller.deliveryMode),
+            delivery = method,
             position = "${formatTime(positionMs)} / ${formatTime(plan.durationMs)}",
-            buffer = "${formatTime((player.bufferedPosition - player.currentPosition).coerceAtLeast(0))} ahead · " +
-                "${player.bufferedPercentage.coerceIn(0, 100)}%",
+            buffer = String.format(Locale.US, "%.1f s", bufferSeconds),
             videoHealth = videoHealthSummary(player),
-            sourceFile = plan.source?.filename,
-            sourceVideo = sourceVideoSummary(plan.source),
-            sourceAudio = sourceAudioSummary(plan.source),
-            playingVideo = videoFormatSummary(player.videoFormat),
+            frames = videoFramesSummary(player),
+            sourceFile = source?.filename,
+            sourceVideo = sourceVideoCodecSummary(source),
+            sourceResolution = if (source?.width != null && source.height != null) {
+                "${source.width}×${source.height}"
+            } else null,
+            sourceBitrate = source?.bitrate?.takeIf { it > 0 }?.let(::formatBitrate),
+            container = source?.container?.uppercase(),
+            sourceAudio = sourceAudioSummary(source),
+            playingVideo = videoFormatSummary(videoFormat),
+            decodeResolution = videoFormat?.takeIf {
+                it.width != Format.NO_VALUE && it.height != Format.NO_VALUE
+            }?.let { "${it.width}×${it.height}" },
             playingAudio = selectedAudio,
             dynamicRange = dynamicRangeSummary(
                 source = sourceDynamicRange(plan.source),
@@ -1598,6 +1830,14 @@ private fun PlayerInfo(
                 reasons = plan.reasons,
             ),
             subtitles = selectedSubtitle,
+            decoder = videoFormat?.codecs ?: videoFormat?.sampleMimeType,
+            stalls = "${controller.playbackStallCount} (${controller.playbackStallCount} supply · 0 decode)",
+            observedRate = controller.observedBitsPerSecond?.let(::formatBitrate),
+            streamRate = videoFormat?.bitrate?.takeIf { it != Format.NO_VALUE && it > 0 }
+                ?.toLong()?.let(::formatBitrate),
+            startedIn = controller.lastTimeToFirstFrameMs?.let {
+                String.format(Locale.US, "%.1f s", it / 1_000.0)
+            },
             encoder = controller.encoder,
             audioSync = controller.audioOffsetMs.takeIf { it != 0L }?.let(::offsetLabel),
             build = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
@@ -1609,6 +1849,7 @@ private fun PlayerInfo(
             sessionId = controller.currentSessionId,
             sessionStatus = controller.sessionStatus,
             playerState = playerStateLabel(player),
+            control = controller.currentSessionId?.let { "Client reporting active" },
         ),
         reasons = plan.reasons,
         mode = mode,
@@ -1638,13 +1879,23 @@ internal data class PlaybackInfoDetails(
     val position: String,
     val buffer: String,
     val videoHealth: String? = null,
+    val frames: String? = null,
     val sourceFile: String? = null,
     val sourceVideo: String? = null,
+    val sourceResolution: String? = null,
+    val sourceBitrate: String? = null,
+    val container: String? = null,
     val sourceAudio: String? = null,
     val playingVideo: String? = null,
+    val decodeResolution: String? = null,
     val playingAudio: String? = null,
     val dynamicRange: String? = null,
     val subtitles: String = "Off",
+    val decoder: String? = null,
+    val stalls: String? = null,
+    val observedRate: String? = null,
+    val streamRate: String? = null,
+    val startedIn: String? = null,
     val encoder: String? = null,
     val audioSync: String? = null,
     val build: String = "development",
@@ -1652,6 +1903,7 @@ internal data class PlaybackInfoDetails(
     val sessionId: String? = null,
     val sessionStatus: PlaybackSessionStatus? = null,
     val playerState: String = "Unknown",
+    val control: String? = null,
 )
 
 /** Floating playback details with the same Mini/Standard/Debug contract as Apple and web. */
@@ -1665,14 +1917,19 @@ internal fun PlaybackInfoOverlay(
     /** Height of the transport block currently on screen; zero when it is not. */
     transportReserve: Dp = 0.dp,
 ) {
-    val closeFocusRequester = remember { FocusRequester() }
+    val closeFocusRequester = remember(mode) { FocusRequester() }
     RequestInitialFocus(closeFocusRequester)
+    val backdrop = Modifier.fillMaxSize().focusProperties { canFocus = false }
     Box(
-        Modifier.fillMaxSize().focusProperties { canFocus = false }.clickable(
-            interactionSource = remember { MutableInteractionSource() },
-            indication = null,
-            onClick = onDismiss,
-        ),
+        if (mode == PlaybackStatsMode.Mini) {
+            backdrop
+        } else {
+            backdrop.clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss,
+            )
+        },
     ) {
         // One corner for all three modes: the block grows downward from a fixed
         // point instead of re-centring itself when the mode changes, and the
@@ -1768,12 +2025,20 @@ private fun PlaybackInfoMini(
         PlaybackMiniDivider()
         PlaybackMiniValue(details.position)
         PlaybackMiniDivider()
+        // `decode_resolution` is Mini's third row in
+        // tests/playback/playback-info-fields.json. The old composite
+        // (codec · W×H · HDR · bitrate) is a datum no mode of the contract
+        // has, and it is blank for an offline file.
         PlaybackMiniValue(
-            details.playingVideo ?: "Waiting",
+            details.decodeResolution ?: "Waiting",
             playbackTone(details),
             Modifier.weight(1f, fill = false),
         )
         PlaybackMiniDivider()
+        details.dynamicRange?.let {
+            PlaybackMiniValue(it, modifier = Modifier.weight(1f, fill = false))
+            PlaybackMiniDivider()
+        }
         PlaybackMiniValue(
             details.buffer,
             bufferTone(details.sessionStatus?.ahead_seconds),
@@ -1889,6 +2154,8 @@ private fun PlaybackInfoLedgerPanel(
                 indication = null,
                 onClick = {},
             )
+            .focusGroup()
+            .focusProperties { onExit = { cancelFocusChange() } }
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
@@ -1938,7 +2205,13 @@ private fun PlaybackStatLedger(sections: List<PlaybackStatSection>, dense: Boole
     val notes = (left + right).filter { it.notes.isNotEmpty() }
     if (notes.isNotEmpty()) {
         HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .tvFocusRing(MaterialTheme.shapes.medium, focusedScale = 1f)
+                .focusable(),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
             PlaybackInfoSection("NOTES")
             notes.forEach { section ->
                 if (notes.size > 1) {
@@ -2068,6 +2341,8 @@ private fun PlaybackDebugCard(
             .fillMaxWidth()
             .background(Color.White.copy(alpha = 0.045f), MaterialTheme.shapes.medium)
             .border(1.dp, Color.White.copy(alpha = 0.08f), MaterialTheme.shapes.medium)
+            .tvFocusRing(MaterialTheme.shapes.medium, focusedScale = 1f)
+            .focusable()
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -2153,14 +2428,14 @@ private val PlaybackLedgerLeft = listOf("PLAYBACK", "SOURCE", "NOW DECODING")
 private val PlaybackLedgerRight = listOf("NETWORK", "SERVER")
 
 /** One row of the ledger. `note` sends it to the full-width strip instead of the grid. */
-private data class PlaybackStat(
+internal data class PlaybackStat(
     val label: String,
     val value: String,
     val tone: PlaybackStatTone = PlaybackStatTone.Neutral,
     val note: Boolean = false,
 )
 
-private class PlaybackStatSection(val title: String, val stats: List<PlaybackStat>) {
+internal class PlaybackStatSection(val title: String, val stats: List<PlaybackStat>) {
     val grid: List<PlaybackStat> = stats.filter { !it.note }
     val notes: List<PlaybackStat> = stats.filter { it.note }
 }
@@ -2197,190 +2472,174 @@ private fun isNumericStat(value: String): Boolean {
     return (head == '#' || head == '+' || head == '-') && trimmed.getOrNull(1)?.isDigit() == true
 }
 
+internal data class InfoRow(
+    val id: String,
+    val label: String,
+    val section: String,
+    val modes: Set<PlaybackStatsMode>,
+    val value: String?,
+    val note: String? = null,
+    val placement: String = "grid",
+    val tone: PlaybackStatTone = PlaybackStatTone.Neutral,
+)
+
+private val StandardAndDebug = setOf(PlaybackStatsMode.Standard, PlaybackStatsMode.Debug)
+private val AllInfoModes = PlaybackStatsMode.entries.toSet()
+
+/** Android's fixture-order row model. Platform-exclusive web/Apple fields are absent. */
+internal fun playbackInfoRows(
+    details: PlaybackInfoDetails,
+    reasons: List<String>,
+): List<InfoRow> {
+    val status = details.sessionStatus
+    val speed = status?.recent_speed ?: status?.speed
+    val subtitleParts = splitLedgerValue(details.subtitles, facts = 1)
+    val aheadNote = buildList {
+        if (status?.suspended == true) add("Holding buffer")
+        status?.resume_below_seconds?.let { add("releases below $it s") }
+        status?.suspend_count?.let { add("$it suspends") }
+    }.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+    return listOf(
+        InfoRow("method", "Method", "PLAYBACK", AllInfoModes, details.delivery),
+        InfoRow("position", "Position", "PLAYBACK", AllInfoModes, details.position),
+        InfoRow(
+            "reason",
+            "Reason",
+            "PLAYBACK",
+            StandardAndDebug,
+            reasons.takeIf { it.isNotEmpty() }?.joinToString(" · "),
+            placement = "notes",
+            tone = PlaybackStatTone.Muted,
+        ),
+        InfoRow("build", "Build", "PLAYBACK", setOf(PlaybackStatsMode.Debug), details.build.ifBlank { "—" }),
+        InfoRow("transport", "Transport", "PLAYBACK", setOf(PlaybackStatsMode.Debug), details.transport, placement = "notes"),
+        InfoRow("file_id", "File ID", "PLAYBACK", setOf(PlaybackStatsMode.Debug), "#${details.fileId}"),
+        InfoRow("session", "Session", "PLAYBACK", setOf(PlaybackStatsMode.Debug), details.sessionId, placement = "notes"),
+        InfoRow("source_video", "Video", "SOURCE", StandardAndDebug, details.sourceVideo, placement = "notes"),
+        InfoRow("source_resolution", "Resolution", "SOURCE", StandardAndDebug, details.sourceResolution),
+        InfoRow("source_bitrate", "Bitrate", "SOURCE", StandardAndDebug, details.sourceBitrate),
+        InfoRow("container", "Container", "SOURCE", StandardAndDebug, details.container),
+        InfoRow("source_audio", "Audio", "SOURCE", StandardAndDebug, details.sourceAudio, placement = "notes"),
+        InfoRow("source_file", "File", "SOURCE", setOf(PlaybackStatsMode.Debug), details.sourceFile, placement = "notes"),
+        InfoRow("av_offset", "AV offset", "SOURCE", setOf(PlaybackStatsMode.Debug), details.audioSync ?: "0 ms"),
+        InfoRow("decode_resolution", "Resolution", "NOW DECODING", AllInfoModes, details.decodeResolution),
+        InfoRow("dynamic_range", "Dynamic range", "NOW DECODING", AllInfoModes, details.dynamicRange, placement = "notes"),
+        InfoRow("decode_audio", "Audio", "NOW DECODING", setOf(PlaybackStatsMode.Debug), details.playingAudio, placement = "notes"),
+        InfoRow("buffer", "Buffer", "NOW DECODING", AllInfoModes, details.buffer, tone = bufferTone(status?.ahead_seconds)),
+        InfoRow("frames", "Frames", "NOW DECODING", StandardAndDebug, details.frames, tone = videoHealthTone(details.videoHealth)),
+        InfoRow(
+            "player_state",
+            "Player state",
+            "NOW DECODING",
+            setOf(PlaybackStatsMode.Debug),
+            details.playerState,
+            tone = playerStateTone(details.playerState),
+        ),
+        InfoRow("decoder", "Decoder", "NOW DECODING", setOf(PlaybackStatsMode.Debug), details.decoder),
+        InfoRow("stalls", "Stalls", "NOW DECODING", StandardAndDebug, details.stalls),
+        InfoRow("subtitles", "Subtitles", "NOW DECODING", StandardAndDebug, subtitleParts.first, subtitleParts.second),
+        InfoRow(
+            "delivery_rate",
+            "Delivery rate",
+            "NETWORK",
+            AllInfoModes,
+            status?.delivered_bps?.let(::formatBitrate),
+            note = status?.delivered_idle_ms?.takeIf { it > 0 }?.let { "idle for $it ms" },
+            tone = networkTone(details),
+        ),
+        InfoRow("observed_rate", "Observed rate", "NETWORK", setOf(PlaybackStatsMode.Debug), details.observedRate),
+        InfoRow("stream_rate", "Stream rate", "NETWORK", setOf(PlaybackStatsMode.Debug), details.streamRate),
+        InfoRow("delivered", "Delivered", "NETWORK", StandardAndDebug, status?.delivered_bytes?.let(::formatBytes)),
+        InfoRow(
+            "delivery_idle",
+            "Delivery idle",
+            "NETWORK",
+            setOf(PlaybackStatsMode.Debug),
+            status?.delivered_idle_ms?.let { "$it ms" },
+            tone = idleTone(status?.delivered_idle_ms, status?.suspended == true),
+        ),
+        InfoRow("started_in", "Started in", "NETWORK", setOf(PlaybackStatsMode.Debug), details.startedIn),
+        InfoRow(
+            "status",
+            "Status",
+            "SERVER",
+            StandardAndDebug,
+            when {
+                status == null -> "No server-side session"
+                status.suspended == true -> "Holding buffer"
+                else -> "Active"
+            },
+            tone = if (status == null) PlaybackStatTone.Muted else PlaybackStatTone.Good,
+        ),
+        InfoRow("encoder", "Encoder", "SERVER", StandardAndDebug, status?.encoder ?: details.encoder),
+        InfoRow(
+            "encode_speed",
+            "Encode speed",
+            "SERVER",
+            StandardAndDebug,
+            speed?.let { String.format(Locale.US, "%.2f×", it) },
+            note = if (status?.recent_speed == null && status?.speed != null) "average" else null,
+            tone = speed?.let { encodeTone(it, status) } ?: PlaybackStatTone.Muted,
+        ),
+        InfoRow(
+            "server_ahead",
+            "Server ahead",
+            "SERVER",
+            StandardAndDebug,
+            status?.ahead_seconds?.let { String.format(Locale.US, "%.1f s", it.coerceAtLeast(0).toDouble()) },
+            note = aheadNote,
+            tone = bufferTone(status?.ahead_seconds, status?.suspended == true),
+        ),
+        InfoRow("ahead_bytes", "Ahead bytes", "SERVER", setOf(PlaybackStatsMode.Debug), status?.ahead_bytes?.let(::formatBytes)),
+        InfoRow("produced", "Produced", "SERVER", setOf(PlaybackStatsMode.Debug), status?.out_time_ms?.let(::formatTime)),
+        InfoRow("pacing", "Pacing", "SERVER", setOf(PlaybackStatsMode.Debug), status?.readrate?.let { String.format(Locale.US, "%.2f×", it) }),
+        InfoRow("held", "Held", "SERVER", setOf(PlaybackStatsMode.Debug), status?.let { if (it.suspended == true) "Yes" else "No" }),
+        InfoRow("hold_reason", "Hold reason", "SERVER", setOf(PlaybackStatsMode.Debug), status?.hold_reason),
+        InfoRow("suspend_count", "Suspend count", "SERVER", setOf(PlaybackStatsMode.Debug), status?.suspend_count?.toString()),
+        InfoRow("request_idle", "Request idle", "SERVER", setOf(PlaybackStatsMode.Debug), status?.idle_seconds?.let { String.format(Locale.US, "%.1f s", it.toDouble()) }),
+        InfoRow("last_request", "Last request", "SERVER", setOf(PlaybackStatsMode.Debug), status?.last_request, placement = "notes"),
+        InfoRow("playlist", "Playlist", "SERVER", setOf(PlaybackStatsMode.Debug), status?.playlist_shape),
+        InfoRow("published_end", "Published end", "SERVER", setOf(PlaybackStatsMode.Debug), status?.published_end_ms?.let { "$it ms" }),
+        InfoRow("fetched_end", "Fetched end", "SERVER", setOf(PlaybackStatsMode.Debug), status?.fetched_end_ms?.let { "$it ms" }),
+        InfoRow("control", "Control", "SERVER", StandardAndDebug, details.control),
+    )
+}
+
+internal fun playbackInfoSections(
+    details: PlaybackInfoDetails,
+    reasons: List<String>,
+    mode: PlaybackStatsMode,
+): List<PlaybackStatSection> {
+    val rows = playbackInfoRows(details, reasons).filter { mode in it.modes && it.value != null }
+    return listOf("PLAYBACK", "SOURCE", "NOW DECODING", "NETWORK", "SERVER").map { section ->
+        PlaybackStatSection(
+            section,
+            rows.filter { it.section == section }.flatMap { row ->
+                buildList {
+                    add(
+                        PlaybackStat(
+                            row.label,
+                            checkNotNull(row.value),
+                            row.tone,
+                            note = row.placement == "notes",
+                        ),
+                    )
+                    row.note?.let { add(PlaybackStat(row.label, it, row.tone, note = true)) }
+                }
+            },
+        )
+    }
+}
+
 private fun playbackStandardSections(
     details: PlaybackInfoDetails,
     reasons: List<String>,
-): List<PlaybackStatSection> {
-    val status = details.sessionStatus
-    return listOf(
-        PlaybackStatSection(
-            "PLAYBACK",
-            listOfNotNull(
-                reasons.takeIf { it.isNotEmpty() }?.let {
-                    PlaybackStat("Reason", it.joinToString(" · "), PlaybackStatTone.Muted, note = true)
-                },
-            ),
-        ),
-        // The codec/resolution head of each line is a datum and carries the
-        // card; only the filename and the trailing facts are prose enough to
-        // go to the notes strip. Left as all-notes this card never rendered.
-        PlaybackStatSection(
-            "SOURCE",
-            buildList {
-                details.sourceFile?.let { add(PlaybackStat("File", it, note = true)) }
-                addAll(ledgerSplitStats("Video", details.sourceVideo ?: "Unknown"))
-                details.sourceAudio?.let { addAll(ledgerSplitStats("Audio", it)) }
-            },
-        ),
-        PlaybackStatSection(
-            "NOW DECODING",
-            listOfNotNull(
-                PlaybackStat("Video", details.playingVideo ?: "Waiting", note = true),
-                details.dynamicRange?.let { PlaybackStat("Range", it, note = true) },
-                details.playingAudio?.let { PlaybackStat("Audio", it, note = true) },
-                PlaybackStat("Subtitles", details.subtitles),
-                PlaybackStat("Buffer", details.buffer, bufferTone(status?.ahead_seconds)),
-                details.videoHealth?.let {
-                    PlaybackStat("Frames", it, videoHealthTone(it), note = true)
-                },
-            ),
-        ),
-        PlaybackStatSection(
-            "SERVER",
-            listOfNotNull(
-                PlaybackStat(
-                    "Status",
-                    when {
-                        status == null -> "No server-side session"
-                        status.suspended == true -> "Holding buffer"
-                        else -> "Active"
-                    },
-                    if (status == null) PlaybackStatTone.Muted else PlaybackStatTone.Good,
-                ),
-                (status?.encoder ?: details.encoder)?.let { PlaybackStat("Encoder", it) },
-                (status?.recent_speed ?: status?.speed)?.let {
-                    PlaybackStat("Encode", String.format(Locale.US, "%.2f×", it), encodeTone(it, status))
-                },
-                status?.ahead_seconds?.let {
-                    PlaybackStat(
-                        "Ahead",
-                        "${it.coerceAtLeast(0)} s",
-                        bufferTone(it, status.suspended == true),
-                    )
-                },
-                status?.delivered_bps?.let {
-                    PlaybackStat("Delivery", formatBitrate(it), networkTone(details))
-                },
-            ),
-        ),
-    )
-}
+): List<PlaybackStatSection> = playbackInfoSections(details, reasons, PlaybackStatsMode.Standard)
 
 private fun playbackDebugSections(
     details: PlaybackInfoDetails,
     reasons: List<String>,
-): List<PlaybackStatSection> {
-    val status = details.sessionStatus
-    return listOf(
-        PlaybackStatSection(
-            "PLAYBACK",
-            listOfNotNull(
-                PlaybackStat("Build", details.build),
-                PlaybackStat("Method", details.delivery),
-                PlaybackStat("Transport", details.transport, note = true),
-                PlaybackStat("Position", details.position),
-                PlaybackStat("Player state", details.playerState, playerStateTone(details.playerState)),
-                PlaybackStat("File ID", "#${details.fileId}"),
-                details.sessionId?.let { PlaybackStat("Session", it, note = true) },
-                reasons.takeIf { it.isNotEmpty() }?.let {
-                    PlaybackStat("Reason", it.joinToString("; "), PlaybackStatTone.Muted, note = true)
-                },
-            ),
-        ),
-        // Same split as Standard: datum head in the grid, prose tail in notes.
-        // "AV offset" is "+250 ms — audio plays later"; the measurement is the
-        // datum, the explanation of it is the clause.
-        PlaybackStatSection(
-            "SOURCE",
-            buildList {
-                details.sourceFile?.let { add(PlaybackStat("File", it, note = true)) }
-                details.sourceVideo?.let { addAll(ledgerSplitStats("Video", it)) }
-                details.sourceAudio?.let { addAll(ledgerSplitStats("Audio", it)) }
-                details.audioSync?.let { addAll(ledgerSplitStats("AV offset", it)) }
-            },
-        ),
-        PlaybackStatSection(
-            "NOW DECODING",
-            listOfNotNull(
-                details.playingVideo?.let { PlaybackStat("Video", it, note = true) },
-                details.dynamicRange?.let { PlaybackStat("Range", it, note = true) },
-                details.playingAudio?.let { PlaybackStat("Audio", it, note = true) },
-                PlaybackStat("Subtitles", details.subtitles),
-                PlaybackStat("Buffer", details.buffer, bufferTone(status?.ahead_seconds)),
-                details.videoHealth?.let {
-                    PlaybackStat("Frames", it, videoHealthTone(it), note = true)
-                },
-            ),
-        ),
-        PlaybackStatSection(
-            "NETWORK",
-            listOfNotNull(
-                status?.delivered_bps?.let {
-                    PlaybackStat("Delivery", formatBitrate(it), networkTone(details))
-                },
-                status?.delivered_bytes?.let { PlaybackStat("Transferred", formatBytes(it)) },
-                status?.delivered_idle_ms?.let {
-                    PlaybackStat("Delivery idle", "$it ms", idleTone(it, status.suspended == true))
-                },
-            ),
-        ),
-        PlaybackStatSection("SERVER", playbackDebugServerStats(details)),
-    )
-}
-
-private fun playbackDebugServerStats(details: PlaybackInfoDetails): List<PlaybackStat> {
-    val status = details.sessionStatus
-        ?: return listOf(PlaybackStat("Status", "No server session", PlaybackStatTone.Muted))
-    val speed = status.recent_speed ?: status.speed
-    return listOfNotNull(
-        PlaybackStat(
-            "Status",
-            if (status.suspended == true) "Holding" else "Active",
-            PlaybackStatTone.Good,
-        ),
-        PlaybackStat("Encoder", status.encoder ?: details.encoder ?: "—"),
-        PlaybackStat(
-            "Encode speed",
-            speed?.let { String.format(Locale.US, "%.2f×", it) } ?: "—",
-            speed?.let { encodeTone(it, status) } ?: PlaybackStatTone.Muted,
-        ),
-        status.ahead_seconds?.let {
-            PlaybackStat(
-                "Server ahead",
-                "${it.coerceAtLeast(0)} s",
-                bufferTone(it, status.suspended == true),
-            )
-        },
-        status.ahead_bytes?.let { PlaybackStat("Ahead bytes", formatBytes(it)) },
-        status.out_time_ms?.let { PlaybackStat("Produced", formatTime(it)) },
-        status.progress_idle_ms?.let {
-            PlaybackStat("Progress idle", "$it ms", idleTone(it, status.suspended == true))
-        },
-        PlaybackStat(
-            "Held",
-            if (status.suspended == true) "Yes" else "No",
-            if (status.suspended == true) PlaybackStatTone.Good else PlaybackStatTone.Neutral,
-        ),
-        status.hold_reason?.let { PlaybackStat("Hold reason", it, PlaybackStatTone.Good) },
-        status.suspend_count?.let {
-            PlaybackStat(
-                "Suspend count",
-                it.toString(),
-                if (it > 8) PlaybackStatTone.Warning else PlaybackStatTone.Neutral,
-            )
-        },
-        status.readrate?.let { PlaybackStat("Pacing", String.format(Locale.US, "%.2f×", it)) },
-        status.playlist_shape?.let { PlaybackStat("Playlist", it) },
-        status.last_request?.let { PlaybackStat("Last request", it) },
-        status.idle_seconds?.let {
-            PlaybackStat("Request idle", "$it s", requestIdleTone(it, status.suspended == true))
-        },
-        status.published_end_ms?.let { PlaybackStat("Published end", "$it ms") },
-        status.fetched_end_ms?.let { PlaybackStat("Fetched end", "$it ms") },
-        status.fetched_segment?.let { PlaybackStat("Fetched segment", it.toString()) },
-        status.first_retained_segment?.let { PlaybackStat("First retained", it.toString()) },
-    )
-}
+): List<PlaybackStatSection> = playbackInfoSections(details, reasons, PlaybackStatsMode.Debug)
 
 private fun playbackTone(details: PlaybackInfoDetails): PlaybackStatTone =
     videoHealthTone(details.videoHealth)
@@ -2454,8 +2713,8 @@ private fun requestIdleTone(seconds: Long, suspended: Boolean): PlaybackStatTone
 
 internal fun deliveryLabel(mode: String): String = when (mode) {
     "direct" -> "Direct play"
-    "remux" -> "Direct stream · remux"
-    "transcode" -> "Transcode · HLS"
+    "remux" -> "Remux"
+    "transcode" -> "Transcode"
     else -> mode.ifBlank { "Unknown" }.replace('_', ' ').replaceFirstChar { it.uppercase() }
 }
 
@@ -2468,6 +2727,16 @@ internal fun sourceVideoSummary(file: MediaFileDto?): String? {
         (file.hdr_format ?: file.hdr)?.takeIf { it.isNotBlank() },
         file.bit_depth?.takeIf { it > 0 }?.let { "${it}-bit" },
         file.bitrate?.takeIf { it > 0 }?.let(::formatBitrate),
+    ).joinToString(" · ").ifBlank { null }
+}
+
+private fun sourceVideoCodecSummary(file: MediaFileDto?): String? {
+    if (file == null) return null
+    return listOfNotNull(
+        file.video_codec?.uppercase(),
+        file.video_profile?.takeIf { it.isNotBlank() },
+        file.bit_depth?.takeIf { it > 0 }?.let { "${it}-bit" },
+        (file.hdr_format ?: file.hdr)?.takeIf { it.isNotBlank() },
     ).joinToString(" · ").ifBlank { null }
 }
 
@@ -2551,16 +2820,16 @@ private fun channelLabel(channels: Int): String = when (channels) {
     else -> "${channels}ch"
 }
 
-private fun formatBitrate(bitsPerSecond: Long): String = if (bitsPerSecond >= 1_000_000) {
-    "%.1f Mbps".format(bitsPerSecond / 1_000_000.0)
-} else {
-    "${bitsPerSecond / 1_000} kbps"
+internal fun formatBitrate(bitsPerSecond: Long): String = when {
+    bitsPerSecond >= 10_000_000 -> String.format(Locale.US, "%.0f Mb/s", bitsPerSecond / 1_000_000.0)
+    bitsPerSecond >= 1_000_000 -> String.format(Locale.US, "%.1f Mb/s", bitsPerSecond / 1_000_000.0)
+    else -> String.format(Locale.US, "%.0f kb/s", bitsPerSecond / 1_000.0)
 }
 
 private fun formatBytes(bytes: Long): String {
     val value = bytes.coerceAtLeast(0)
     return when {
-        value >= 1_000_000_000 -> String.format(Locale.US, "%.2f GB", value / 1_000_000_000.0)
+        value >= 1_000_000_000 -> String.format(Locale.US, "%.1f GB", value / 1_000_000_000.0)
         value >= 1_000_000 -> String.format(Locale.US, "%.1f MB", value / 1_000_000.0)
         value >= 1_000 -> String.format(Locale.US, "%.1f KB", value / 1_000.0)
         else -> "$value B"
@@ -2583,6 +2852,15 @@ private fun videoHealthSummary(player: ExoPlayer): String? {
         droppedFrames = counters.droppedBufferCount,
         maxConsecutiveDroppedFrames = counters.maxConsecutiveDroppedBufferCount,
     )
+}
+
+private fun videoFramesSummary(player: ExoPlayer): String? {
+    val counters = player.videoDecoderCounters ?: return null
+    counters.ensureUpdated()
+    val dropped = counters.droppedBufferCount.coerceAtLeast(0)
+    val total = dropped.toLong() + counters.renderedOutputBufferCount.coerceAtLeast(0)
+    fun count(value: Long): String = String.format(Locale.US, "%,d", value).replace(',', ' ')
+    return "${count(dropped.toLong())} / ${count(total)} frames"
 }
 
 internal fun videoHealthSummary(
@@ -2616,16 +2894,12 @@ private fun PlayerPanelSurface(title: String, onDismiss: () -> Unit, content: @C
         Column(
             Modifier.align(Alignment.CenterEnd).fillMaxHeight().widthIn(max = 420.dp).fillMaxWidth(0.92f)
                 .background(Surface).verticalScroll(rememberScrollState()).padding(24.dp)
-                .focusProperties { canFocus = false }
+                .focusGroup()
+                .focusProperties { onExit = { cancelFocusChange() } }
                 .clickable(onClick = {}),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                TvIconButton(onClick = onDismiss) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close")
-                }
-            }
+            Text(title, style = MaterialTheme.typography.titleLarge)
             content()
         }
     }

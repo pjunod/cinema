@@ -26,11 +26,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.CancellationException
 import tv.plurx.app.data.Item
 import tv.plurx.app.ui.components.ChoicePicker
+import tv.plurx.app.ui.components.RequestInitialFocus
 import tv.plurx.app.ui.components.LoadingBox
 import tv.plurx.app.ui.components.PosterCard
 import tv.plurx.app.ui.components.SafeTopRow
@@ -92,11 +95,17 @@ fun LibraryScreen(
     }
     val posterWidth = (preferences.posterSize.widthDp * formFactor.posterScale()).dp
 
+    // This screen arrived with focus nowhere, so a television's first D-pad
+    // press was spent finding a stop instead of moving between them. Back is
+    // the one control that is always composed here.
+    val backFocus = remember { FocusRequester() }
+    RequestInitialFocus(backFocus)
+
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
         SafeTopRow(
             Modifier.fillMaxWidth().padding(start = side - 12.dp, end = side, top = 8.dp),
         ) {
-            TvIconButton(onClick = onBack) {
+            TvIconButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
             Column(Modifier.weight(1f)) {

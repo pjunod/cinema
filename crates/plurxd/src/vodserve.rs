@@ -1132,11 +1132,20 @@ impl Rendition {
     }
 
     async fn detach_reader(&self, session_id: &str) {
-        let mut readers = self.readers.lock().await;
-        readers.remove(session_id);
-        if readers.is_empty() {
-            *self.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
+        {
+            let mut readers = self.readers.lock().await;
+            readers.remove(session_id);
+            if readers.is_empty() {
+                *self.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
+            }
         }
+        // Every VOD session end converges here — terminal, idle reap and
+        // reattachment alike — so this is the one place a departing viewer's
+        // subtitle window is released. The readers guard is deliberately
+        // dropped first: releasing waits for a real ffmpeg to settle, and
+        // holding a rendition-wide lifecycle lock across that await would let
+        // one leaving viewer stall every other reader of the same rendition.
+        crate::subtitles::release_session_window(session_id).await;
     }
 
     /// Eviction windows for every attached reader (plan §2.4's reader guard).

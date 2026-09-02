@@ -4,6 +4,178 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The player input contract, reviewed and finished
+
+**Lane [`effort/player-input-contract`](https://github.com/pjunod/plurx/pull/814),
+open into main, 2026-09-02.** M1–M4 (web #795, Android #797, Apple #799,
+fence and settings fold #810) landed first. Each was then reviewed
+adversarially against the fixtures rather than against its own description,
+which found 29 defects the suites could not see — five of them blockers —
+and each became its own task PR into the lane:
+
+- **#825, the gates.** The lane's `check` job had grown an ffmpeg step it has
+  no runner label for, so the fast Rust gate was red and the Store contracts
+  and the promotion gate cascaded behind it. Two selection gaps went with it:
+  `player-input-fence` hung off no client point, so the Kotlin and Swift diffs
+  it exists to police never selected it, and a fixture-only diff selected no
+  client suite and ran `player-input-contract.test.js` in no job at all — a
+  ruling could have been deleted from the contract and merged green.
+- **#826, web.** Four producers of playback position became one pending seek:
+  a pointer click used to leave a keyboard preview pending (the clock froze
+  on a time nobody could see), and a skip's 350 ms debounce could fire over
+  the commit that replaced it — or over a player that had already closed.
+  `idle` is now an input like any other, so auto-hide stopped keeping its own
+  drifting copy of the suppression list, and the second `keydown` listener
+  that made every `ignore` row act anyway is gone.
+- **#827, Android.** `inputState()` asked a stale focus flag before it asked
+  whether the chrome was hidden, so a direction could scrub a player with no
+  chrome on screen — the one thing ruling 1 forbids. `reveal` came back on
+  Play/Pause every time because `Controls` re-requested its own initial focus
+  a frame later. `ignore` was implemented as "not consumed", which handed the
+  key to the Media3 session.
+- **#828, Apple.** The routing fixture was decoded with
+  `.convertFromSnakeCase`, which renames dictionary keys: the contract's own
+  input names no longer matched their raw values. tvOS Standard still printed
+  a stall-count pill beside the `Stalls` row; focus was sent to a marker
+  button that is drawn only while a marker is offered; the invisible reveal
+  surface was drawn in front of the failure view, eating every press; and the
+  lock screen skipped straight past the reducer.
+- **#829, enforcement.** The fence knew one spelling of platform key handling
+  (Compose's `Key.` constants, an `onkeydown=` attribute and
+  `MPRemoteCommandCenter` all passed) and failed *open* on a missing file.
+  Three tables in the contract were hand-written copies of the fixture; they
+  are generated now, and the web reads `hide_after_ms`, `skip_seconds` and
+  the coalesce window from the fixture instead of repeating them.
+- **#831, the rest of the navigation (M5).** Cards and episode rows are
+  reachable from a keyboard and a D-pad in every web layout — Classic, the
+  default, had no path through the library at all — the header search keeps
+  its caret across the re-render its own typing causes, the lightbox and edit
+  dialogs announce themselves and return focus, Android's library, search and
+  settings screens start with focus somewhere, Search uses the select-to-edit
+  field a television needs, and tvOS detail stops re-grabbing focus on every
+  appearance. `tests/ui-structure.golden` was regenerated for the new tab
+  stops.
+
+Reviewing my own work found five more: a focus request that had become a
+value and so stopped moving focus at all, an `ignore` that swallowed
+directions on every non-television device, a request that could crash on an
+uncomposed node, Home re-grabbing focus on each reload, and Apple's Mini
+strip stranded on screen by its own auto-hide fix.
+
+**Open, and deliberately not decided here:** the web's transport row does not
+match `controls.rows` (playback `info` and `close` sit in the top bar, and
+fullscreen and title info have no fixture entry); Home/End and lock-screen
+scrubbing have no contract row; `touch` cannot reach `scrub` through the
+table at all; and Android's hide delay and skip step are still literals
+rather than fixture reads. Nothing here has run on hardware: Chrome remux,
+Google TV / Shield, an Android phone, Apple TV and iPhone are all unclaimed.
+
+## M7 M4 burn-join and current-main corrections
+
+**PR [#794](https://github.com/pjunod/plurx/pull/794) — FINAL CI-PREREQUISITE
+FIX UNDER REVIEW.** M7 M4 shipped through the effort train and its first
+post-merge repair, then current-`main` CI exposed an ambiguous-success timeout
+while confirming a replacement media session. The exact sentinel-guarded
+confirmation now uses the bounded idempotent-write path; a zero-row replay is
+accepted only after the durable route and current pointer prove the same
+activation. Abandonment and ordinary transactions remain non-retryable.
+
+The same qualification work reproduced two existing daemon-harness flakes.
+Healthy Activity waves no longer spend 500 ms of the production two-second
+peer deadline waiting for synthetic proxy receivers; exact physical-request
+counts remain, and a paused unit now proves seven followers serialize behind
+one leading physical fetch and are handed its completed snapshot. The summary
+must retain node B's two-stream count and the detail read must name node B
+among its deliveries even on a wave the summary led, closing an adversarially
+found false-green. Activation fixtures hold all three reserved
+HTTP/Raft/Hiqlite listeners open together until the set is chosen, so no
+fixture can hand the same ephemeral port to two of its own listeners. The reservation is released before the daemon binds, so
+it narrows one fixture's own selection rather than sequencing two fixtures.
+
+- [x] Three adversarial reviews found the summary false-green and a rebased
+      evidence commit that named a non-ancestor; both findings are fixed.
+- [x] The corrective series is split into Store behavior/evidence and daemon
+      harness behavior/evidence, with every mapping naming an ancestor.
+- [x] **Superseded evidence, kept for the record.** Before the rebase and the
+      two review rounds below, the affected-surface profile passed 12 checks
+      with 0 failures over full workspace Rust, 118 executed real-cluster Store
+      contracts, topology and failure drills, activation 7/7 and Activity 2/2,
+      and hosted run
+      [33622277315](https://github.com/pjunod/plurx/actions/runs/33622277315)
+      passed policy, WAL, daemon, Store, topology and both package lanes. That
+      run's only failure was all 107 ffmpeg-backed Rust cases missing `ffmpeg`
+      on the GitHub image, against 1454 other passes from the same binary --
+      the prerequisite this branch repairs. Eleven commits have landed since,
+      so none of those numbers describes the current head; they are diagnosis,
+      not merge evidence. Two Playwright-only preflights were skipped because
+      Playwright is not installed on the device host and remain runner work.
+- [x] The fast Rust lane now provisions pinned major 6 on hosted runners and
+      requires the matching `ffmpeg-6` capability on self-hosted runners, with
+      the operations contract binding both sides and pinning the step ahead of
+      the gate it provisions. Seven self-hosted runners carry that capability
+      alongside `high-cpu`, and two other required jobs already select the same
+      class, so the label narrows the pool without stranding the gate.
+- [x] Integrate #820, #822 and #806 by rebasing onto `main` `b4a1f108`, and
+      refresh every SHA-bound mapping to its new ancestor.
+- [x] Two independent adversarial reviews of the rebased head both found that
+      the ancestry-refresh commit had renamed the four mapping fragments to
+      their new ancestors while leaving each fragment's `commits` field on the
+      previous generation, so `make history-check` failed on the committed tree
+      while passing in the working tree. Fixed, and six further findings
+      implemented: the retried confirmation now reserves a recovery window
+      inside the owner lease, the zero-row replay is bound to this call's own
+      publication boundary, that guard and the durable-pointer proof are pinned
+      at the call site, the after-commit fault injection is scoped to the
+      activation statement, the summary-led wave now asserts detail retains node
+      B's remote-only streams, and the operations contract pins the hosted
+      ffmpeg step ahead of the gate it provisions.
+- [x] A second pair of independent adversarial reviews of the repaired head
+      agreed on two further defects and found three more. The recovery
+      reservation was taken only when the whole margin fitted, so it vanished
+      in exactly the case that needs it -- the split is now proportional to the
+      lease actually left and lives in one named function. Nothing executed
+      that reservation, so a source contract now pins it; four mutations were
+      checked against that contract and all four turn it red. The embedded
+      SQLite twin had not received the replay-boundary proof its replicated
+      counterpart got, and the contract now scans both twins. One assertion in
+      the paused Activity unit could not be failed by any mutation and is
+      gone. The recovery-window mapping claimed a contract that did not yet
+      exist and now states what is actually enforced.
+- [x] **The branch moved underneath this work twice.** Another session pushed
+      a merge of current `main` onto the PR head while the review repairs were
+      being verified, and `main` itself advanced four times in two hours --
+      #806, then #821/#824/#789, then #823. Rather than force-push over that
+      session's integration, this series is restacked onto the pushed head and
+      current `main` is merged in. Nothing of the other session's work is
+      discarded; every corrective commit on the series took a new identity, so
+      all nine evidence fragments are renamed and rewritten in one commit --
+      filename and payload together, which is the pairing the first refresh got
+      wrong. The one merge conflict was the rolling-producer ownership
+      inventory: #823's production shadow task and this branch's Activity
+      in-flight fixture each described the step 381 -> 382, so the merged count
+      is 383 and both narratives are kept. The inventory audit settles that
+      number, not the prose.
+- [x] Every gate re-run on this exact merged head: catalog 23 points / 27
+      checks / 1297 audited files; history 1234 corrective commits / 737
+      explicit mappings; operations 156/156; ownership and routing inventories
+      11/11; `git diff --check` clean. Under the pinned `rustc 1.97.1`,
+      `cargo fmt --all -- --check`, `cargo check --workspace --all-targets` and
+      `cargo clippy --workspace --all-targets -- -D warnings` are clean,
+      including `plurx-core` with `cluster-read-cost-validation`, and the fast
+      unit lane passes 1574 with 0 failed and 3 ignored. The
+      real-cluster Store, daemon-harness and hosted lanes remain the
+      qualification run's work; they are not claimed here.
+- [ ] Push the re-reviewed exact head to #794, require its full GitHub
+      qualification and promotion receipt, merge it, close partial duplicate
+      #782 with a cross-link, and verify `main` after the merge.
+
+**Decisions made without Paul (flagged for review):** consolidate #782's useful
+activation port reservation into #794, but replace its privacy-only Activity
+barrier removal with the complete three-wave repair and deterministic unit.
+Close #782 only after #794 is qualified and merged, so GitHub never loses the
+visible replacement before the duplicate closes.
+
+
 ## Apple pacing-hold freeze — the hold that vetoed its own recovery
 
 **PR [#803](https://github.com/pjunod/plurx/pull/803) — OPEN, awaiting Paul's
@@ -47,6 +219,7 @@ answers is why the producer paused.**
   build 110 claimed; Swift and Kotlin compile on the self-hosted runners, and
   device acceptance is opportunistic because the AVPlayer wedge cannot be
   induced on demand. Not deployed.
+
 
 ## Everything a read-only cluster member could not do
 
