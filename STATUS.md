@@ -4,6 +4,72 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The player input contract, reviewed and finished
+
+**Lane [`effort/player-input-contract`](https://github.com/pjunod/plurx/pull/814),
+open into main, 2026-09-02.** M1–M4 (web #795, Android #797, Apple #799,
+fence and settings fold #810) landed first. Each was then reviewed
+adversarially against the fixtures rather than against its own description,
+which found 29 defects the suites could not see — five of them blockers —
+and each became its own task PR into the lane:
+
+- **#825, the gates.** The lane's `check` job had grown an ffmpeg step it has
+  no runner label for, so the fast Rust gate was red and the Store contracts
+  and the promotion gate cascaded behind it. Two selection gaps went with it:
+  `player-input-fence` hung off no client point, so the Kotlin and Swift diffs
+  it exists to police never selected it, and a fixture-only diff selected no
+  client suite and ran `player-input-contract.test.js` in no job at all — a
+  ruling could have been deleted from the contract and merged green.
+- **#826, web.** Four producers of playback position became one pending seek:
+  a pointer click used to leave a keyboard preview pending (the clock froze
+  on a time nobody could see), and a skip's 350 ms debounce could fire over
+  the commit that replaced it — or over a player that had already closed.
+  `idle` is now an input like any other, so auto-hide stopped keeping its own
+  drifting copy of the suppression list, and the second `keydown` listener
+  that made every `ignore` row act anyway is gone.
+- **#827, Android.** `inputState()` asked a stale focus flag before it asked
+  whether the chrome was hidden, so a direction could scrub a player with no
+  chrome on screen — the one thing ruling 1 forbids. `reveal` came back on
+  Play/Pause every time because `Controls` re-requested its own initial focus
+  a frame later. `ignore` was implemented as "not consumed", which handed the
+  key to the Media3 session.
+- **#828, Apple.** The routing fixture was decoded with
+  `.convertFromSnakeCase`, which renames dictionary keys: the contract's own
+  input names no longer matched their raw values. tvOS Standard still printed
+  a stall-count pill beside the `Stalls` row; focus was sent to a marker
+  button that is drawn only while a marker is offered; the invisible reveal
+  surface was drawn in front of the failure view, eating every press; and the
+  lock screen skipped straight past the reducer.
+- **#829, enforcement.** The fence knew one spelling of platform key handling
+  (Compose's `Key.` constants, an `onkeydown=` attribute and
+  `MPRemoteCommandCenter` all passed) and failed *open* on a missing file.
+  Three tables in the contract were hand-written copies of the fixture; they
+  are generated now, and the web reads `hide_after_ms`, `skip_seconds` and
+  the coalesce window from the fixture instead of repeating them.
+- **#831, the rest of the navigation (M5).** Cards and episode rows are
+  reachable from a keyboard and a D-pad in every web layout — Classic, the
+  default, had no path through the library at all — the header search keeps
+  its caret across the re-render its own typing causes, the lightbox and edit
+  dialogs announce themselves and return focus, Android's library, search and
+  settings screens start with focus somewhere, Search uses the select-to-edit
+  field a television needs, and tvOS detail stops re-grabbing focus on every
+  appearance. `tests/ui-structure.golden` was regenerated for the new tab
+  stops.
+
+Reviewing my own work found five more: a focus request that had become a
+value and so stopped moving focus at all, an `ignore` that swallowed
+directions on every non-television device, a request that could crash on an
+uncomposed node, Home re-grabbing focus on each reload, and Apple's Mini
+strip stranded on screen by its own auto-hide fix.
+
+**Open, and deliberately not decided here:** the web's transport row does not
+match `controls.rows` (playback `info` and `close` sit in the top bar, and
+fullscreen and title info have no fixture entry); Home/End and lock-screen
+scrubbing have no contract row; `touch` cannot reach `scrub` through the
+table at all; and Android's hide delay and skip step are still literals
+rather than fixture reads. Nothing here has run on hardware: Chrome remux,
+Google TV / Shield, an Android phone, Apple TV and iPhone are all unclaimed.
+
 ## Everything a read-only cluster member could not do
 
 **PRs [#806](https://github.com/pjunod/plurx/pull/806) (`b4a1f108`) and

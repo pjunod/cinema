@@ -305,6 +305,8 @@ internal fun AuthTextField(
     placeholder: String? = null,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    leadingIcon: (@Composable () -> Unit)? = null,
+    trailingIcon: (@Composable () -> Unit)? = null,
 ) {
     val television = currentFormFactor() == FormFactor.Television
     var editing by remember { mutableStateOf(false) }
@@ -316,6 +318,8 @@ internal fun AuthTextField(
         label = { Text(label) },
         placeholder = placeholder?.let { { Text(it) } },
         singleLine = true,
+        leadingIcon = leadingIcon,
+        trailingIcon = trailingIcon,
         visualTransformation = visualTransformation,
         keyboardOptions = keyboardOptions.copy(showKeyboardOnFocus = !television || editing),
         modifier = modifier

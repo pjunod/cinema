@@ -660,3 +660,11 @@ source = "clients/apple/Sources/PlaybackControlReporter.swift"
 source_anchor = "final class SubtitleReadinessRetryState: @unchecked Sendable"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testSubtitleReadinessDecisionAndTransitionAreClosedAndSingleShot"
+
+[[fixes]]
+id = "android.focus-request-is-an-event"
+commits = ["3dd6cb68"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/TvFocus.kt"
+source_anchor = "token: Any? = null,"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
+test_anchor = "verticalDpadLeavesTheProgressSliderWithoutSeeking"

@@ -3837,8 +3837,68 @@ function renderLogin(){
     });
 }
 
+// ---- keyboard reach for click-only cards ----------------------------------
+// nav-keyboard-adapter:begin — posters and episode rows are emitted as
+// `<div onclick>`, so without this they are mouse-only: no tab stop, nothing
+// announced, and Enter does nothing. Catalog and Theater each carried a
+// near-copy of this (their own comment said so) and Classic carried none, so
+// the layout you picked decided whether the library was reachable at all.
+function navEnhanceClickables(){
+  for(const el of document.querySelectorAll(
+    ".poster[onclick]:not([tabindex]),.eprow[onclick]:not([tabindex])")){
+    el.setAttribute("tabindex","0");
+    // Cards that navigate are links; the photo cards call openLightbox() and
+    // are buttons. Announcing every card as a link would promise a page that
+    // a lightbox never delivers.
+    el.setAttribute("role", /location\.hash/.test(el.getAttribute("onclick")||"") ? "link" : "button");
+  }
+}
+let NAV_KEYS_WIRED=false;
+function navKeyboardWireOnce(){
+  if(NAV_KEYS_WIRED) return;
+  NAV_KEYS_WIRED=true;
+  document.addEventListener("keydown",e=>{
+    // The player and the lightbox own the keyboard while they are up.
+    const modal=document.getElementById("modal");
+    if(lightboxOpen()||(modal&&modal.classList.contains("open"))) return;
+    const el=e.target;
+    if(!el||!el.classList) return;
+    if(!el.classList.contains("poster")&&!el.classList.contains("eprow")) return;
+    // Enter and Space are what a role=link/button promises. "Spacebar" is the
+    // legacy key name older WebKit still reports.
+    if(e.key!=="Enter"&&e.key!==" "&&e.key!=="Spacebar") return;
+    e.preventDefault();          // Space would otherwise page the grid down
+    el.click();                  // fires the inline handler the card emitted
+  });
+  // #app itself is never replaced (every view assigns to its innerHTML), so
+  // one observer on it outlives every route change.
+  const app=document.getElementById("app");
+  if(app&&window.MutationObserver) new MutationObserver(navEnhanceClickables).observe(app,{childList:true,subtree:true});
+  navEnhanceClickables();
+}
+// nav-keyboard-adapter:end
+
+// The header is re-emitted on every route change, and a search field is typed
+// into WHILE the route changes — every keystroke re-renders and the element
+// the viewer was typing in is gone. Carry focus and the caret across the
+// rebuild; the value already survives, because it is read back out of the
+// hash.
+function captureSearchFocus(){
+  const q=document.getElementById("q");
+  if(!q||document.activeElement!==q) return null;
+  return {start:q.selectionStart,end:q.selectionEnd};
+}
+function restoreSearchFocus(state){
+  if(!state) return;
+  const q=document.getElementById("q");
+  if(!q) return;
+  q.focus({preventScroll:true});
+  try{ q.setSelectionRange(state.start,state.end); }catch(e){}
+}
+
 // ---- chrome ---------------------------------------------------------------
 function classicChrome(active, inner){
+  const searchFocus=captureSearchFocus();
   const admin = ME&&ME.is_admin ? `<a href="#/settings" class="${active==='settings'?'active':''}">Settings</a>`:"";
   const getapp = installAvailable() ? `<button class="ghost sm getappbtn" onclick="showInstall()" title="Install the ${APP_NAME} app">Get app</button>` : "";
   document.getElementById("app").innerHTML=`
@@ -3864,6 +3924,8 @@ function classicChrome(active, inner){
    </header><main id="main">${inner}<div class="versionstamp">Version ${esc(buildLabel())}</div></main>`;
   const q=document.getElementById("q");
   let t; q.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>{ location.hash= q.value?("#/search/"+encodeURIComponent(q.value)):"#/"; },300); });
+  restoreSearchFocus(searchFocus);
+  navKeyboardWireOnce();
   pollActivity();
 }
 function getQ(){ const m=location.hash.match(/^#\/search\/(.*)$/); return m?decodeURIComponent(m[1]):""; }
@@ -3998,10 +4060,13 @@ function closeConnectQr(){
 }
 function connectQrOpen(){ return !!document.getElementById("connectdialog"); }
 // Capture Escape before layout-specific sheet handlers so one key closes only
-// the QR dialog, never both the dialog and something behind it.
+// the topmost modal, never it and something behind it. The edit dialog is
+// here rather than in its own listener for the same reason: two Escape
+// handlers is how a key ends up closing two things.
 window.addEventListener("keydown",e=>{
-  if(e.key!=="Escape"||!connectQrOpen()) return;
-  e.preventDefault(); e.stopImmediatePropagation(); closeConnectQr();
+  if(e.key!=="Escape") return;
+  if(connectQrOpen()){ e.preventDefault(); e.stopImmediatePropagation(); closeConnectQr(); return; }
+  if(document.getElementById("editwrap")){ e.preventDefault(); e.stopImmediatePropagation(); closeEdit(); }
 },true);
 
 // ---- global activity indicator --------------------------------------------
@@ -4156,6 +4221,13 @@ function openLightbox(id){
   if(!box){
     box=document.createElement("div");
     box.id="lightbox"; box.className="lightbox";
+    // It behaves as a modal — it takes the keyboard, locks the page behind it
+    // and closes on Escape — so it says it is one. Without the role a screen
+    // reader announces a photo appearing in the middle of the grid.
+    box.setAttribute("role","dialog");
+    box.setAttribute("aria-modal","true");
+    box.setAttribute("aria-label","Photo");
+    box.tabIndex=-1;
     box.innerHTML=`<img id="lbimg" alt="">
       <button class="lbx" aria-label="Close (Esc)" title="Close (Esc)" onclick="closeLightbox()">✕</button>
       <button class="lbprev" aria-label="Previous photo" onclick="lbStep(-1)">‹</button>
@@ -4170,9 +4242,14 @@ function openLightbox(id){
     document.body.appendChild(box);
   }
   document.body.style.overflow="hidden";
+  // Remember what opened it; a dialog that returns focus to the body drops a
+  // keyboard viewer at the top of the page.
+  LB_OPENER=document.activeElement;
   paintLightbox();
+  box.focus({preventScroll:true});
 }
 let LB_TOUCH=0;
+let LB_OPENER=null;
 function paintLightbox(){
   const p=PHOTO_SET[LB_AT]; if(!p) return closeLightbox();
   const img=document.getElementById("lbimg"); if(img) img.src=photoUrl(p.id);
@@ -4196,6 +4273,8 @@ function closeLightbox(){
   const box=document.getElementById("lightbox"); if(box) box.remove();
   document.body.style.overflow="";
   LB_AT=-1;
+  const opener=LB_OPENER; LB_OPENER=null;
+  if(opener&&opener.focus&&document.contains(opener)) opener.focus({preventScroll:true});
 }
 function lightboxOpen(){ return !!document.getElementById("lightbox"); }
 
@@ -5946,10 +6025,16 @@ function classicItemBody(p){
 // what you type here, and plurx never writes back to the .nfo (or anything
 // else) in your media folder.
 let EDIT_TAGS=[];
+let EDIT_OPENER=null;
 function openEdit(it){
   EDIT_TAGS=(it.tags||[]).slice();
   const wrap=document.createElement("div");
   wrap.className="editwrap"; wrap.id="editwrap";
+  // Same three promises the connect dialog already makes: it is a dialog, it
+  // closes on Escape, and it gives focus back to the control that opened it.
+  wrap.setAttribute("role","dialog");
+  wrap.setAttribute("aria-modal","true");
+  wrap.setAttribute("aria-label","Edit details");
   wrap.innerHTML=`<div class="editcard">
     <h2 class="section" style="margin-top:0">Edit details</h2>
     <label for="ed-title">Title</label>
@@ -5967,6 +6052,7 @@ function openEdit(it){
       <button onclick="saveEdit(${it.id})">Save</button>
     </div></div>`;
   wrap.addEventListener("click",e=>{ if(e.target===wrap) closeEdit(); });
+  EDIT_OPENER=document.activeElement;
   document.body.appendChild(wrap);
   paintTagChips();
   const t=document.getElementById("ed-title"); if(t) t.focus();
@@ -5988,7 +6074,11 @@ function tagKey(event){
     EDIT_TAGS.pop(); paintTagChips(); document.getElementById("ed-tag").focus();
   }
 }
-function closeEdit(){ const w=document.getElementById("editwrap"); if(w) w.remove(); }
+function closeEdit(){
+  const w=document.getElementById("editwrap"); if(w) w.remove();
+  const opener=EDIT_OPENER; EDIT_OPENER=null;
+  if(opener&&opener.focus&&document.contains(opener)) opener.focus({preventScroll:true});
+}
 async function saveEdit(id){
   const title=(document.getElementById("ed-title").value||"").trim();
   const date=(document.getElementById("ed-date").value||"").trim();
@@ -13934,44 +14024,20 @@ function catalogFillNav(){
 // the check, classic would start emitting posters carrying tabindex — a diff
 // in the byte-identical baseline the gate re-checks after every layout lands.
 let CATALOG_WIRED=false;
-function catalogEnhanceCards(){
-  if(layoutId()!=="catalog") return;
-  for(const el of document.querySelectorAll(".poster[onclick]:not([tabindex])")){
-    el.setAttribute("tabindex","0");
-    // Cards that navigate are links; the photo cards call openLightbox() and
-    // are buttons. Announcing every card as a link would promise a page that
-    // a lightbox never delivers.
-    el.setAttribute("role", /location\.hash/.test(el.getAttribute("onclick")||"") ? "link" : "button");
-  }
-}
 function catalogWireOnce(){
   if(CATALOG_WIRED) return;
   CATALOG_WIRED=true;
+  // Card reach is navKeyboardWireOnce()'s job on every layout now. What is
+  // left here is the one thing only this layout has: the phone library sheet,
+  // which Escape closes.
+  navKeyboardWireOnce();
   document.addEventListener("keydown",e=>{
-    if(layoutId()!=="catalog") return;
-    // The player and the lightbox own the keyboard while they are up; both of
-    // the shipped handlers guard on that and this one has to agree, or Esc
-    // closes a sheet nobody can see instead of the video.
+    if(layoutId()!=="catalog"||e.key!=="Escape") return;
     const modal=document.getElementById("modal");
     if(lightboxOpen()||(modal&&modal.classList.contains("open"))) return;
-    if(e.key==="Escape"){
-      const shell=document.getElementById("pxshell");
-      if(shell&&shell.classList.contains("px-open")){ e.preventDefault(); catalogToggleLibs(); }
-      return;
-    }
-    const el=e.target;
-    if(!el||!el.classList||!el.classList.contains("poster")) return;
-    // Enter and Space are what a role=link/button promises. "Spacebar" is the
-    // legacy key name older WebKit still reports.
-    if(e.key!=="Enter"&&e.key!==" "&&e.key!=="Spacebar") return;
-    e.preventDefault();          // Space would otherwise page the grid down
-    el.click();                  // fires the inline handler card() emitted
+    const shell=document.getElementById("pxshell");
+    if(shell&&shell.classList.contains("px-open")){ e.preventDefault(); catalogToggleLibs(); }
   });
-  // #app itself is never replaced (every view assigns to its innerHTML), so
-  // one observer on it outlives every route change.
-  const app=document.getElementById("app");
-  if(app&&window.MutationObserver) new MutationObserver(catalogEnhanceCards).observe(app,{childList:true,subtree:true});
-  catalogEnhanceCards();
 }
 
 // ---- phone: the library sheet and the search tab --------------------------
@@ -14032,6 +14098,7 @@ function catalogTabsHtml(active, homeOn){
 // the layout picker inside the theme menu keeps working from inside catalog and a
 // change to any of those menus lands in both layouts at once.
 function catalogChrome(active, inner){
+  const searchFocus=captureSearchFocus();
   const hash=location.hash||"#/";
   // Library, category and search routes all call layoutChrome("home", …), so
   // `active==="home"` alone would light Home up while the user is looking at a
@@ -14095,6 +14162,7 @@ function catalogChrome(active, inner){
   catalogFillNav();
   const q=document.getElementById("q");
   let t; q.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>{ location.hash= q.value?("#/search/"+encodeURIComponent(q.value)):"#/"; },300); });
+  restoreSearchFocus(searchFocus);
   catalogWireOnce();
   pollActivity();
 }
@@ -14563,6 +14631,7 @@ function theaterNavHtml(active){
   ).join("");
 }
 function theaterChrome(active, inner){
+  const searchFocus=captureSearchFocus();
   // ${APP_NAME}, never the literal product name — the shipped header's title
   // attribute still says "plurx" here; that is a bug this layout does not copy.
   const getapp = installAvailable()
@@ -14592,6 +14661,7 @@ function theaterChrome(active, inner){
    <nav class="th-pills" aria-label="Sections">${theaterNavHtml(active)}</nav>`;
   const q=document.getElementById("q");
   let t; q.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>{ location.hash= q.value?("#/search/"+encodeURIComponent(q.value)):"#/"; },300); });
+  restoreSearchFocus(searchFocus);
   theaterWireOnce();
   pollActivity();
 }
@@ -14986,51 +15056,20 @@ function theaterStickyFloor(){
 // A poster is a <div onclick=…>: clickable, but not focusable and not operable
 // from the keyboard. Theater is the TV flagship (plan §2.5) — without this
 // there is no D-pad path through the app at all, and the ten-foot focus
-// treatment in styles.css has nothing to attach to. A MutationObserver rather
-// than a call at the end of each view because theater does not own the
-// activity, settings or search views.
+// treatment in styles.css has nothing to attach to.
 //
-// The layoutId() guard is the important line: switching layout re-runs
-// render(), which repaints classic's DOM under the same live observer. Without
-// the check, classic would start emitting posters carrying tabindex — a diff
-// in the structural golden the gate re-checks after every layout lands.
-//
-// This is a near-copy of catalogWireOnce()/catalogEnhanceCards() and it should not
-// be. NOTES §5.5 asks for it to move into shared wiring behind a per-layout
-// flag before G5 — at five layouts it is five copies of the same observer.
+// This used to be a near-copy of catalogWireOnce()/catalogEnhanceCards(), with
+// a layoutId() guard on each so Classic kept emitting posters that nothing
+// could focus — the golden churn was the reason, and being unreachable by
+// keyboard was the price. NOTES §5.5 asked for shared wiring; it is
+// navKeyboardWireOnce(), it covers episode rows too, and the golden was
+// regenerated once for all three layouts.
 let THEATER_WIRED=false;
-function theaterEnhanceCards(){
-  if(layoutId()!=="theater") return;
-  for(const el of document.querySelectorAll(".poster[onclick]:not([tabindex])")){
-    el.setAttribute("tabindex","0");
-    // Cards that navigate are links; the photo cards call openLightbox() and
-    // are buttons. Announcing every card as a link would promise a page that a
-    // lightbox never delivers.
-    el.setAttribute("role", /location\.hash/.test(el.getAttribute("onclick")||"") ? "link" : "button");
-  }
-}
 function theaterWireOnce(){
   if(THEATER_WIRED) return;
   THEATER_WIRED=true;
-  document.addEventListener("keydown",e=>{
-    if(layoutId()!=="theater") return;
-    // The player and the lightbox own the keyboard while they are up; both of
-    // the shipped handlers guard on that and this one has to agree.
-    const modal=document.getElementById("modal");
-    if(lightboxOpen()||(modal&&modal.classList.contains("open"))) return;
-    const el=e.target;
-    if(!el||!el.classList||!el.classList.contains("poster")) return;
-    // Enter and Space are what a role=link/button promises. "Spacebar" is the
-    // legacy key name older WebKit still reports.
-    if(e.key!=="Enter"&&e.key!==" "&&e.key!=="Spacebar") return;
-    e.preventDefault();          // Space would otherwise page the grid down
-    el.click();                  // fires the inline handler card() emitted
-  });
-  // #app itself is never replaced (every view assigns to its innerHTML), so
-  // one observer on it outlives every route change.
-  const app=document.getElementById("app");
-  if(app&&window.MutationObserver) new MutationObserver(theaterEnhanceCards).observe(app,{childList:true,subtree:true});
-  theaterEnhanceCards();
+  // Card reach is shared with every other layout — see navKeyboardWireOnce().
+  navKeyboardWireOnce();
 }
 
 // ---- registration ---------------------------------------------------------

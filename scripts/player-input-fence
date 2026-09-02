@@ -74,9 +74,14 @@ INDEX_REGIONS = (
         "The web player adapter maps browser keys to contract inputs.",
     ),
     (
+        "// nav-keyboard-adapter:begin",
+        "// nav-keyboard-adapter:end",
+        "Card and episode-row activation (Enter/Space) outside playback, shared by every layout.",
+    ),
+    (
         "function catalogWireOnce(){",
         "// ---- phone: the library sheet and the search tab",
-        "Catalog poster keys provide link/button activation outside playback.",
+        "Catalog owns Escape for its phone library sheet.",
     ),
     (
         "function theaterWireOnce(){",

@@ -42,16 +42,35 @@ internal var SemanticsPropertyReceiver.tvFocusVisible by TvFocusVisibleKey
 
 /** Requests focus after the target has been attached and laid out for a frame. */
 @Composable
-fun RequestInitialFocus(focusRequester: FocusRequester, enabled: Boolean = true) {
-    LaunchedEffect(focusRequester, enabled) {
+fun RequestInitialFocus(
+    focusRequester: FocusRequester,
+    enabled: Boolean = true,
+    /**
+     * Changing this re-issues the request even when the requester and
+     * `enabled` are unchanged — a caller that asks for the SAME control twice
+     * (the player moving focus back to the transport row it is already
+     * remembering) is asking for a move, not restating a fact.
+     */
+    token: Any? = null,
+    /**
+     * The 80 ms second request wins races against focus layout, but it also
+     * undoes a press made inside that window. Callers that re-request focus
+     * during ordinary navigation, rather than once on arrival, pass false.
+     */
+    reinforce: Boolean = true,
+) {
+    LaunchedEffect(focusRequester, enabled, token) {
         if (!enabled) return@LaunchedEffect
         // Detail content is nested in lazy containers. One frame can attach a
         // button before the outer column has completed focus layout, allowing
         // the breadcrumb above it to win. Reinforce the request after layout.
         withFrameNanos { }
-        focusRequester.requestFocus()
+        // A requester whose node is not composed throws; asking for focus is
+        // never worth a crash.
+        runCatching { focusRequester.requestFocus() }
+        if (!reinforce) return@LaunchedEffect
         delay(80)
-        focusRequester.requestFocus()
+        runCatching { focusRequester.requestFocus() }
     }
 }
 
