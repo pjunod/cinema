@@ -987,6 +987,77 @@ impl PreparationConditions {
     }
 }
 
+/// The grade a recipe *asks for*, which is the only grade two recipes can be
+/// compared on.
+///
+/// [`EffectiveSelection::dynamic_range`] carries the grade the encoder
+/// actually built, and that is the right thing for a badge — `create`'s own
+/// comment says so: *"the server refuses the HDR10 rung for a source or a rung
+/// that cannot prove it, and the badge has to follow the encoder."* It is the
+/// wrong thing for a *candidate*, because a recipe that will never be built
+/// has no encoder and therefore no such grade.
+///
+/// Comparing an encoder's answer against a request would fail in one of two
+/// ways, both bad: a candidate given no grade lets a real grade change
+/// classify as resolution-only and be **prepared**, which is exactly what
+/// `PREPARED_AXIS` exists to prevent; a candidate given the grade its body
+/// asked for reads as a crossing on *every* exchange of a session whose HDR10
+/// rung the encoder refused, so that viewer never gets a prepared handoff at
+/// all.
+///
+/// So the grade axis is read off the request on both sides. Both are available
+/// where the decision is made: the exchange holds the session's own
+/// `RemoteStartRequest` and resolves the candidate's.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GradeIntent {
+    /// The HDR10 rung was asked for. After the plan review, so this is the
+    /// server's answer to the client's ask rather than the ask itself.
+    pub hdr10: bool,
+    /// Dolby Vision RPUs survive the bitstream filter.
+    pub preserve_dolby_vision: bool,
+    /// Profile 7 RPUs are rewritten to Profile 8.1 on the way through. Beside
+    /// preserving rather than inside it because they answer different
+    /// questions, and a viewer can see the difference between them.
+    pub convert_dolby_vision: bool,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl GradeIntent {
+    pub(crate) fn from_request(request: &crate::transcode::SessionRequest) -> Self {
+        let (preserve_dolby_vision, convert_dolby_vision) = match &request.kind {
+            SessionKind::Copy {
+                preserve_dolby_vision,
+                convert_dolby_vision,
+                ..
+            } => (*preserve_dolby_vision, *convert_dolby_vision),
+            // A transcode never carries RPUs through: the two questions only
+            // arise for a copy, and answering them `false` for a transcode is
+            // a statement about the output rather than a default.
+            SessionKind::Transcode { .. } => (false, false),
+        };
+        Self {
+            hdr10: request.hdr10,
+            preserve_dolby_vision,
+            convert_dolby_vision,
+        }
+    }
+}
+
+/// One side of a proposed transition: what is delivered, and what was asked
+/// for.
+///
+/// Two halves because neither answers alone. The selection carries the height,
+/// the delivery method and the audio and subtitle facts; the intent carries
+/// the grade, which the selection can only report after an encoder has settled
+/// it.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecipeView<'a> {
+    pub selection: &'a EffectiveSelection,
+    pub grade: GradeIntent,
+}
+
 /// The only axis M6 prepares across, and the reason it is one rather than a
 /// set.
 ///
@@ -1044,11 +1115,13 @@ const PREPARED_AXIS: PreparationAxis = PreparationAxis::ResolutionOrBitrate;
 /// mean *this session has never been told*, and the caller owns the retention.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn decide_preparation(
-    delivered: &EffectiveSelection,
-    candidate: &EffectiveSelection,
+    delivered: RecipeView<'_>,
+    candidate: RecipeView<'_>,
     retained: Option<&DynamicCapabilities>,
     conditions: PreparationConditions,
 ) -> PreparationDecision {
+    let (delivered_grade, candidate_grade) = (delivered.grade, candidate.grade);
+    let (delivered, candidate) = (delivered.selection, candidate.selection);
     let mut crossed: Option<PreparationAxis> = None;
     let mut multiple = false;
     // The hardest axis wins, by the enum's own ordering rather than by the
@@ -1064,16 +1137,12 @@ pub(crate) fn decide_preparation(
     if delivered.codec != candidate.codec {
         cross(PreparationAxis::DeliveryMethod);
     }
-    // Unknown abstains rather than votes. `None` is not a grade: it means the
-    // source row could not be read, and there is nothing honest to say about a
-    // file we cannot see. Treating it as a crossing would turn a rescan into a
-    // grade change.
-    if let (Some(delivered_range), Some(candidate_range)) =
-        (&delivered.dynamic_range, &candidate.dynamic_range)
-    {
-        if delivered_range != candidate_range {
-            cross(PreparationAxis::DynamicRange);
-        }
+    // Read off the request on both sides, never off `dynamic_range` — see
+    // `GradeIntent`. The delivered selection's grade is the encoder's answer,
+    // and a candidate that will never be built has no encoder to answer for
+    // it, so comparing the two would be comparing unlike things.
+    if delivered_grade != candidate_grade {
+        cross(PreparationAxis::DynamicRange);
     }
     if delivered.audio_track != candidate.audio_track
         || delivered.audio_offset_ms != candidate.audio_offset_ms
@@ -15141,6 +15210,35 @@ mod tests {
         }
     }
 
+    /// A recipe's grade intent. `sdr()` is the default both sides use, so a
+    /// test that does not mention the grade is testing a transition that does
+    /// not cross it.
+    fn sdr() -> GradeIntent {
+        GradeIntent {
+            hdr10: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        }
+    }
+
+    fn hdr10() -> GradeIntent {
+        GradeIntent {
+            hdr10: true,
+            ..sdr()
+        }
+    }
+
+    fn view(selection: &EffectiveSelection) -> RecipeView<'_> {
+        RecipeView {
+            selection,
+            grade: sdr(),
+        }
+    }
+
+    fn view_at(selection: &EffectiveSelection, grade: GradeIntent) -> RecipeView<'_> {
+        RecipeView { selection, grade }
+    }
+
     fn can_prepare(dual_player_preparation: bool) -> DynamicCapabilities {
         DynamicCapabilities {
             platform: ClientPlatform::Apple,
@@ -15169,10 +15267,10 @@ mod tests {
         for (from, to) in [(2160, 1080), (1080, 2160)] {
             assert_eq!(
                 decide_preparation(
-                    &playing(from),
-                    &playing(to),
+                    view(&playing(from)),
+                    view(&playing(to)),
                     Some(&can_prepare(true)),
-                    roomy()
+                    roomy(),
                 ),
                 PreparationDecision::Prepare {
                     axis: PreparationAxis::ResolutionOrBitrate,
@@ -15185,7 +15283,12 @@ mod tests {
         let mut auto = playing(1080);
         auto.quality_auto = true;
         assert_eq!(
-            decide_preparation(&playing(1080), &auto, Some(&can_prepare(true)), roomy()),
+            decide_preparation(
+                view(&playing(1080)),
+                view(&auto),
+                Some(&can_prepare(true)),
+                roomy(),
+            ),
             PreparationDecision::Prepare {
                 axis: PreparationAxis::ResolutionOrBitrate,
             },
@@ -15199,10 +15302,10 @@ mod tests {
     fn a_client_that_did_not_say_it_can_prepare_gets_the_fallback() {
         assert_eq!(
             decide_preparation(
-                &playing(2160),
-                &playing(1080),
+                view(&playing(2160)),
+                view(&playing(1080)),
                 Some(&can_prepare(false)),
-                roomy()
+                roomy(),
             ),
             PreparationDecision::Fallback {
                 axis: PreparationAxis::ResolutionOrBitrate,
@@ -15211,7 +15314,7 @@ mod tests {
             "the platform is Apple and Apple measured true; the literal still says false",
         );
         assert_eq!(
-            decide_preparation(&playing(2160), &playing(1080), None, roomy()),
+            decide_preparation(view(&playing(2160)), view(&playing(1080)), None, roomy()),
             PreparationDecision::Fallback {
                 axis: PreparationAxis::ResolutionOrBitrate,
                 reason: FallbackReason::ClientCannotPrepare,
@@ -15221,10 +15324,14 @@ mod tests {
         // And the capability outranks the axis: an incapable client crossing
         // an unproven axis is reported as incapable, because that is the fact
         // that would change if the literal flipped.
-        let mut grade = playing(2160);
-        grade.dynamic_range = Some("sdr".to_owned());
+        let playing = playing(2160);
         assert_eq!(
-            decide_preparation(&playing(2160), &grade, Some(&can_prepare(false)), roomy()),
+            decide_preparation(
+                view(&playing),
+                view_at(&playing, hdr10()),
+                Some(&can_prepare(false)),
+                roomy(),
+            ),
             PreparationDecision::Fallback {
                 axis: PreparationAxis::DynamicRange,
                 reason: FallbackReason::ClientCannotPrepare,
@@ -15238,24 +15345,41 @@ mod tests {
         let caps = can_prepare(true);
         let mut method = playing(2160);
         method.codec = "source".to_owned();
-        let mut grade = playing(2160);
-        grade.dynamic_range = Some("sdr".to_owned());
         let mut audio = playing(2160);
         audio.audio_track = Some(1);
         let mut offset = playing(2160);
         offset.audio_offset_ms = 250;
         let mut burn = playing(2160);
         burn.subtitle_burn = Some(3);
+        // Each Dolby Vision answer is its own crossing: preserving decides
+        // whether the RPUs survive the filter and converting decides whether
+        // they are rewritten, and a viewer can see the difference.
+        let preserve = GradeIntent {
+            preserve_dolby_vision: true,
+            ..sdr()
+        };
+        let convert = GradeIntent {
+            preserve_dolby_vision: true,
+            convert_dolby_vision: true,
+            ..sdr()
+        };
 
-        for (candidate, axis) in [
-            (method, PreparationAxis::DeliveryMethod),
-            (grade, PreparationAxis::DynamicRange),
-            (audio, PreparationAxis::AudioTrackOrOffset),
-            (offset, PreparationAxis::AudioTrackOrOffset),
-            (burn, PreparationAxis::SubtitleBurn),
+        for (candidate, grade, axis) in [
+            (&method, sdr(), PreparationAxis::DeliveryMethod),
+            (&playing(2160), hdr10(), PreparationAxis::DynamicRange),
+            (&playing(2160), preserve, PreparationAxis::DynamicRange),
+            (&playing(2160), convert, PreparationAxis::DynamicRange),
+            (&audio, sdr(), PreparationAxis::AudioTrackOrOffset),
+            (&offset, sdr(), PreparationAxis::AudioTrackOrOffset),
+            (&burn, sdr(), PreparationAxis::SubtitleBurn),
         ] {
             assert_eq!(
-                decide_preparation(&playing(2160), &candidate, Some(&caps), roomy()),
+                decide_preparation(
+                    view(&playing(2160)),
+                    view_at(candidate, grade),
+                    Some(&caps),
+                    roomy(),
+                ),
                 PreparationDecision::Fallback {
                     axis,
                     reason: FallbackReason::AxisNotProven,
@@ -15264,6 +15388,79 @@ mod tests {
                 axis.as_str(),
             );
         }
+    }
+
+    /// The grade intent is read off the request, and a transcode answers both
+    /// Dolby Vision questions `false` as a statement rather than a default:
+    /// a transcode never carries RPUs through.
+    #[test]
+    fn a_grade_intent_comes_off_the_request() {
+        use crate::transcode::SessionRequest;
+
+        fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
+            SessionRequest {
+                file_id: 1,
+                playback_id: "player-a".to_owned(),
+                request_id: None,
+                control_sequence: None,
+                automatic: false,
+                previous_session_id: None,
+                reopen_reason: None,
+                kind,
+                start_seconds: 0.0,
+                audio_index: None,
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                hdr10,
+                presentation: crate::transcode::Presentation::Vod,
+                block_budget_secs: None,
+            }
+        }
+
+        assert_eq!(
+            GradeIntent::from_request(&request(SessionKind::Transcode { height: 1080 }, true)),
+            GradeIntent {
+                hdr10: true,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+        );
+        assert_eq!(
+            GradeIntent::from_request(&request(
+                SessionKind::Copy {
+                    aac: true,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: true,
+                },
+                false,
+            )),
+            GradeIntent {
+                hdr10: false,
+                preserve_dolby_vision: true,
+                convert_dolby_vision: true,
+            },
+            "the AAC re-encode is an audio fact and is not a grade fact",
+        );
+        // Preserving without converting is a third answer, not a rounding of
+        // the other two: the RPUs survive but are not rewritten.
+        assert_ne!(
+            GradeIntent::from_request(&request(
+                SessionKind::Copy {
+                    aac: false,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: false,
+                },
+                false,
+            )),
+            GradeIntent::from_request(&request(
+                SessionKind::Copy {
+                    aac: false,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: true,
+                },
+                false,
+            )),
+        );
     }
 
     /// The wire vocabulary is the operator's, so it is pinned rather than
@@ -15306,23 +15503,26 @@ mod tests {
         let mut audio_and_burn = playing(2160);
         audio_and_burn.audio_track = Some(1);
         audio_and_burn.subtitle_burn = Some(3);
-        let mut burn_and_grade = playing(2160);
-        burn_and_grade.subtitle_burn = Some(3);
-        burn_and_grade.dynamic_range = Some("sdr".to_owned());
+        let mut burn = playing(2160);
+        burn.subtitle_burn = Some(3);
         let mut everything = playing(720);
         everything.codec = "source".to_owned();
-        everything.dynamic_range = Some("sdr".to_owned());
         everything.audio_track = Some(2);
         everything.subtitle_burn = Some(1);
 
-        for (candidate, axis) in [
-            (method_and_height, PreparationAxis::DeliveryMethod),
-            (audio_and_burn, PreparationAxis::SubtitleBurn),
-            (burn_and_grade, PreparationAxis::DynamicRange),
-            (everything, PreparationAxis::DynamicRange),
+        for (candidate, grade, axis) in [
+            (&method_and_height, sdr(), PreparationAxis::DeliveryMethod),
+            (&audio_and_burn, sdr(), PreparationAxis::SubtitleBurn),
+            (&burn, hdr10(), PreparationAxis::DynamicRange),
+            (&everything, hdr10(), PreparationAxis::DynamicRange),
         ] {
             assert_eq!(
-                decide_preparation(&playing(2160), &candidate, Some(&caps), roomy()),
+                decide_preparation(
+                    view(&playing(2160)),
+                    view_at(candidate, grade),
+                    Some(&caps),
+                    roomy(),
+                ),
                 PreparationDecision::Fallback {
                     axis,
                     reason: FallbackReason::MultipleAxes,
@@ -15374,7 +15574,12 @@ mod tests {
         ];
         for (case, conditions) in refusals {
             assert_eq!(
-                decide_preparation(&playing(2160), &playing(1080), Some(&caps), conditions),
+                decide_preparation(
+                    view(&playing(2160)),
+                    view(&playing(1080)),
+                    Some(&caps),
+                    conditions,
+                ),
                 PreparationDecision::Fallback {
                     axis: PreparationAxis::ResolutionOrBitrate,
                     reason: FallbackReason::ThroughputUnproven,
@@ -15385,8 +15590,8 @@ mod tests {
         // Exactly twice is the floor, and the floor passes.
         assert_eq!(
             decide_preparation(
-                &playing(2160),
-                &playing(1080),
+                view(&playing(2160)),
+                view(&playing(1080)),
                 Some(&caps),
                 PreparationConditions {
                     observed_download_bps: Some(24_000_000),
@@ -15399,29 +15604,48 @@ mod tests {
         );
     }
 
-    /// An unknown grade abstains rather than votes. `None` means the source
-    /// row could not be read, so a rescan that drops it must not read as a
-    /// grade change and cost a viewer an interruption.
+    /// The delivered grade never votes. It is the encoder's answer, and a
+    /// candidate has no encoder — so a session whose HDR10 rung the encoder
+    /// refused must not read as a grade crossing on every exchange for the
+    /// rest of its life.
     #[test]
-    fn an_unknown_grade_is_not_a_grade_change() {
-        let mut unknown = playing(1080);
-        unknown.dynamic_range = None;
+    fn the_encoders_answer_is_not_the_grade_the_decision_reads() {
+        let caps = can_prepare(true);
+        // The session asked for HDR10 and the encoder refused it: delivered
+        // says `sdr`, the request still says HDR10.
+        let mut refused = playing(2160);
+        refused.dynamic_range = Some("sdr".to_owned());
+        let mut lower = playing(1080);
+        lower.dynamic_range = Some("sdr".to_owned());
         assert_eq!(
-            decide_preparation(&playing(2160), &unknown, Some(&can_prepare(true)), roomy()),
+            decide_preparation(
+                view_at(&refused, hdr10()),
+                view_at(&lower, hdr10()),
+                Some(&caps),
+                roomy(),
+            ),
             PreparationDecision::Prepare {
                 axis: PreparationAxis::ResolutionOrBitrate,
             },
+            "a plain quality change on a refused-HDR10 session is still a plain \
+             quality change",
         );
-        let mut both_unknown = playing(2160);
-        both_unknown.dynamic_range = None;
+        // And the reverse: two sessions the encoder happened to deliver
+        // identically are still a grade change if their requests differ.
+        let mut delivered_alike = playing(2160);
+        delivered_alike.dynamic_range = Some("sdr".to_owned());
         assert_eq!(
             decide_preparation(
-                &both_unknown,
-                &both_unknown.clone(),
-                Some(&can_prepare(true)),
-                roomy()
+                view_at(&delivered_alike, sdr()),
+                view_at(&delivered_alike, hdr10()),
+                Some(&caps),
+                roomy(),
             ),
-            PreparationDecision::Unchanged,
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DynamicRange,
+                reason: FallbackReason::AxisNotProven,
+            },
+            "the encoder agreeing does not make two different asks the same ask",
         );
     }
 
@@ -15437,7 +15661,12 @@ mod tests {
         for caps in [Some(can_prepare(true)), Some(can_prepare(false)), None] {
             for conditions in [roomy(), starved] {
                 assert_eq!(
-                    decide_preparation(&playing(2160), &playing(2160), caps.as_ref(), conditions),
+                    decide_preparation(
+                        view(&playing(2160)),
+                        view(&playing(2160)),
+                        caps.as_ref(),
+                        conditions,
+                    ),
                     PreparationDecision::Unchanged,
                 );
             }
