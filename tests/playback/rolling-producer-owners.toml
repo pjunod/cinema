@@ -1128,7 +1128,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # published" from being true because nothing was ever let through — and one in
 # the latch tests that drive the owner registry directly. Both are awaited by
 # their test before its temporary media is released.
-expected_occurrences = 540
+# +1 for the storm's temp-file sweep: the survivor's publication answers
+# `read_cached_window` at the atomic write, one unlink before that producer is
+# finished, so sampling the directory on that edge measures the runner rather
+# than the contract. The wait is bounded and still fails on the defect it exists
+# for — a temp file nothing will ever unlink outlasts any timeout.
+expected_occurrences = 541
 
 [[module_structures]]
 id = "bare-time-constructor"
