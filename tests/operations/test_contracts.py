@@ -561,7 +561,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("scripts/validate run", fast_rust)
         self.assertNotIn("actions/setup-node", fast_rust)
         self.assertNotIn("./.github/actions/playwright", fast_rust)
-        self.assertNotIn("./.github/actions/ffmpeg", fast_rust)
+        self.assertIn("./.github/actions/ffmpeg", fast_rust)
         self.assertIn("if: needs.scope.outputs.apple == 'true'", workflow)
         web_layout = workflow.split("\n  web_layout:", 1)[1].split(
             "\n  android_jvm:", 1

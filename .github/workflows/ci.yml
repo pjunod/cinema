@@ -176,6 +176,9 @@ jobs:
         with:
           lane: rust-gate
           execution-mode: ${{ needs.scope.outputs.execution_mode }}
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "6"
       - name: Run format, Clippy, unit, and SQLite contracts
         run: make ci-rust-gate
       - name: Enforce persistent Cargo bounds
