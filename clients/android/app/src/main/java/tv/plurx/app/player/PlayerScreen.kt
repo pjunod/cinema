@@ -841,9 +841,9 @@ private fun PlayerContent(
             }
             PlayerInputOutcome.Skip -> {
                 val delta = if (input == PlayerContractInput.SkipBack || input == PlayerContractInput.Left) {
-                    -10_000L
+                    -PlayerInputPolicy.SKIP_STEP_MS
                 } else {
-                    10_000L
+                    PlayerInputPolicy.SKIP_STEP_MS
                 }
                 seekWithMarkerUndo(controller.realPosition() + delta)
                 poke()
@@ -1084,7 +1084,7 @@ private fun PlayerContent(
     LaunchedEffect(lastInteraction, isPlaying, panel, pendingMs, playFailure) {
         val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
         if (isPlaying && (panel == null || miniInfo) && pendingMs == null && playFailure == null) {
-            delay(4_000)
+            delay(PlayerInputPolicy.HIDE_AFTER_MS)
             applyOutcome(
                 PlayerInputPolicy.route(
                     playerSurface,

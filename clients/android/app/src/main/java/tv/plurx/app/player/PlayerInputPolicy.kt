@@ -236,6 +236,15 @@ internal object PlayerInputPolicy {
         }
     }
 
+    /**
+     * The contract's own numbers, in one place. Kotlin cannot read
+     * `tests/playback/player-input-contract.json` at runtime, so these are
+     * transcribed — and `PlayerInputPolicyTest` asserts every one of them
+     * against the fixture, which is the half that keeps them honest.
+     */
+    const val HIDE_AFTER_MS: Long = 4_000L
+    const val SKIP_STEP_MS: Long = 10_000L
+
     fun previewStepMs(repeatCount: Int): Long = when {
         repeatCount >= 10 -> 60_000L
         repeatCount >= 5 -> 30_000L

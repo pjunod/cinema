@@ -4,6 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -30,6 +31,24 @@ class PlayerInputPolicyTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun theContractsOwnNumbersAreTheOnesTheClientUses() {
+        // `hide_after_ms` and `skip_seconds` were prose in JSON clothing: no
+        // client read them, and the web's, Apple's and Android's constants
+        // happened to agree. The web reads them from the generated embed and
+        // Apple asserts them; this is Android's half.
+        assertEquals(
+            fixture.getValue("timings").jsonObject
+                .getValue("hide_after_ms").jsonPrimitive.long,
+            PlayerInputPolicy.HIDE_AFTER_MS,
+        )
+        assertEquals(
+            fixture.getValue("steps").jsonObject
+                .getValue("skip_seconds").jsonPrimitive.long * 1_000L,
+            PlayerInputPolicy.SKIP_STEP_MS,
+        )
     }
 
     @Test

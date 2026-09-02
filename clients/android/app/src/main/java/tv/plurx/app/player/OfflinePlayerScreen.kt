@@ -121,7 +121,11 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
                 true
             }
             PlayerInputOutcome.Skip -> {
-                val delta = if (input == PlayerContractInput.SkipBack || input == PlayerContractInput.Left) -10_000L else 10_000L
+                val delta = if (input == PlayerContractInput.SkipBack || input == PlayerContractInput.Left) {
+                    -PlayerInputPolicy.SKIP_STEP_MS
+                } else {
+                    PlayerInputPolicy.SKIP_STEP_MS
+                }
                 // `durationMs` is 0 until the player reports one, and a record
                 // may never carry it. Clamping to it then sent every skip to
                 // the start of the film.
@@ -262,7 +266,7 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
 
     LaunchedEffect(lastInteraction, isPlaying, infoOpen, pendingMs, failure) {
         if (isPlaying && (!infoOpen || infoMode == PlaybackStatsMode.Mini) && pendingMs == null && failure == null) {
-            delay(4_000)
+            delay(PlayerInputPolicy.HIDE_AFTER_MS)
             applyOutcome(
                 PlayerInputPolicy.route(playerSurface, inputState(), PlayerContractInput.Idle),
                 PlayerContractInput.Idle,
@@ -328,8 +332,8 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
                     applyOutcome(PlayerInputPolicy.route(playerSurface, inputState(), input), input)
                 },
                 onPlayPause = { if (player.isPlaying) player.pause() else player.play(); poke() },
-                onSeekBack = { player.seekTo((player.currentPosition - 10_000).coerceAtLeast(0)); poke() },
-                onSeekForward = { player.seekTo(clampToKnownDuration(player.currentPosition + 10_000, durationMs)); poke() },
+                onSeekBack = { player.seekTo((player.currentPosition - PlayerInputPolicy.SKIP_STEP_MS).coerceAtLeast(0)); poke() },
+                onSeekForward = { player.seekTo(clampToKnownDuration(player.currentPosition + PlayerInputPolicy.SKIP_STEP_MS, durationMs)); poke() },
                 onScrub = { pendingMs = it },
                 onScrubEnd = { pendingMs?.let(player::seekTo); pendingMs = null; poke() },
                 onTracks = null,
