@@ -27,6 +27,12 @@ const BEGIN = "<!-- contract:routing:begin -->";
 const END = "<!-- contract:routing:end -->";
 const INFO_BEGIN = "<!-- contract:info:begin -->";
 const INFO_END = "<!-- contract:info:end -->";
+const OUTCOMES_BEGIN = "<!-- contract:outcomes:begin -->";
+const OUTCOMES_END = "<!-- contract:outcomes:end -->";
+const ROWS_BEGIN = "<!-- contract:rows:begin -->";
+const ROWS_END = "<!-- contract:rows:end -->";
+const TIMINGS_BEGIN = "<!-- contract:timings:begin -->";
+const TIMINGS_END = "<!-- contract:timings:end -->";
 const EMBED_BEGIN = "  // ---- generated from tests/playback/player-input-contract.json by\n  // scripts/player-contract-table --embed; do not edit by hand ----";
 const EMBED_END = "  // ---- end generated ----";
 const FIELDS_EMBED_BEGIN = "// ---- generated from tests/playback/playback-info-fields.json by\n// scripts/player-contract-table --embed; do not edit by hand ----";
@@ -54,6 +60,74 @@ function renderBlock(contract) {
   }
   out.push("");
   out.push(END);
+  return out.join("\n");
+}
+
+function renderOutcomesBlock(contract) {
+  const out = [OUTCOMES_BEGIN, ""];
+  out.push(
+    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+  );
+  out.push("");
+  out.push("| Outcome | What the client does |");
+  out.push("|---|---|");
+  for (const [name, meaning] of Object.entries(contract.outcomes)) {
+    out.push(`| \`${name}\` | ${meaning} |`);
+  }
+  out.push("");
+  out.push(OUTCOMES_END);
+  return out.join("\n");
+}
+
+function renderRowsBlock(contract) {
+  const out = [ROWS_BEGIN, ""];
+  out.push(
+    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+  );
+  out.push("");
+  out.push("| Row | Items in order | Focusable | Notes |");
+  out.push("|---|---|---|---|");
+  for (const row of contract.controls.rows) {
+    const focusable = row.focusable ? row.focusable.map((i) => `\`${i}\``).join(" · ") : "all";
+    const conditions = row.conditional
+      ? Object.entries(row.conditional).map(([item, when]) => `\`${item}\` when ${when}`).join(" · ")
+      : "";
+    const notes = [row.notes, conditions].filter(Boolean).join(" ");
+    out.push(
+      `| \`${row.id}\` | ${row.items.map((i) => (i === "spacer" ? "spacer" : `\`${i}\``)).join(" · ")} | ${focusable} | ${notes} |`,
+    );
+  }
+  out.push("");
+  out.push(`**\`settings\` holds:** ${contract.controls.settings_contains.map((i) => `\`${i}\``).join(" · ")}.`);
+  out.push("");
+  out.push(ROWS_END);
+  return out.join("\n");
+}
+
+function renderTimingsBlock(contract) {
+  const out = [TIMINGS_BEGIN, ""];
+  out.push(
+    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+  );
+  out.push("");
+  out.push("| Name | Value |");
+  out.push("|---|---|");
+  const show = (value) => (value === null ? "none" : String(value));
+  for (const [name, value] of Object.entries(contract.timings)) {
+    if (name === "notes") continue;
+    out.push(`| \`${name}\` | ${show(value)} |`);
+  }
+  out.push(`| \`steps.skip_seconds\` | ${show(contract.steps.skip_seconds)} |`);
+  out.push(
+    `| \`steps.preview_acceleration\` | ${contract.steps.preview_acceleration
+      .map((step) => `${step.step_seconds} s from repeat ${step.from_repeat}`)
+      .join(" · ")} |`,
+  );
+  out.push(`| \`steps.vertical_seek_seconds\` | ${show(contract.steps.vertical_seek_seconds)} |`);
+  out.push("");
+  for (const note of contract.timings.notes || []) out.push(`- ${note}`);
+  out.push("");
+  out.push(TIMINGS_END);
   return out.join("\n");
 }
 
@@ -96,7 +170,13 @@ function replaceBlock(doc, begin, end, block, label) {
 }
 
 function renderEmbedBlock(contract) {
-  return `${EMBED_BEGIN}\n  const INPUT_ROUTING = ${JSON.stringify(contract.routing)};\n${EMBED_END}`;
+  return [
+    EMBED_BEGIN,
+    `  const INPUT_ROUTING = ${JSON.stringify(contract.routing)};`,
+    `  const CONTRACT_TIMINGS = ${JSON.stringify(contract.timings)};`,
+    `  const CONTRACT_STEPS = ${JSON.stringify(contract.steps)};`,
+    EMBED_END,
+  ].join("\n");
 }
 
 function renderFieldsEmbedBlock(fields) {
@@ -118,19 +198,28 @@ function main() {
     process.stdout.write(`rewrote the routing table in ${path.relative(ROOT, POLICY)} and playback-info fields in ${path.relative(ROOT, WEB)}\n`);
     return;
   }
+  const outcomes = renderOutcomesBlock(contract);
+  const rows = renderRowsBlock(contract);
+  const timings = renderTimingsBlock(contract);
   if (process.argv.includes("--write")) {
     let doc = fs.readFileSync(DOC, "utf8");
     doc = replaceBlock(doc, BEGIN, END, block, "routing");
+    doc = replaceBlock(doc, OUTCOMES_BEGIN, OUTCOMES_END, outcomes, "outcomes");
+    doc = replaceBlock(doc, ROWS_BEGIN, ROWS_END, rows, "rows");
+    doc = replaceBlock(doc, TIMINGS_BEGIN, TIMINGS_END, timings, "timings");
     doc = replaceBlock(doc, INFO_BEGIN, INFO_END, info, "info");
     fs.writeFileSync(DOC, doc);
-    process.stdout.write(`rewrote the routing and info blocks in ${path.relative(ROOT, DOC)}\n`);
+    process.stdout.write(`rewrote the routing, outcome, row, timing and info blocks in ${path.relative(ROOT, DOC)}\n`);
     return;
   }
-  process.stdout.write(block + "\n\n" + info + "\n");
+  process.stdout.write([block, outcomes, rows, timings, info].join("\n\n") + "\n");
 }
 
 module.exports = {
   renderBlock,
+  renderOutcomesBlock,
+  renderRowsBlock,
+  renderTimingsBlock,
   renderInfoBlock,
   BEGIN,
   END,
@@ -138,6 +227,12 @@ module.exports = {
   INFO_END,
   EMBED_BEGIN,
   EMBED_END,
+  OUTCOMES_BEGIN,
+  OUTCOMES_END,
+  ROWS_BEGIN,
+  ROWS_END,
+  TIMINGS_BEGIN,
+  TIMINGS_END,
   FIELDS_EMBED_BEGIN,
   FIELDS_EMBED_END,
   FIXTURE,

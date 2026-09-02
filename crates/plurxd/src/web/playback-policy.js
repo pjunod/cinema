@@ -47,6 +47,8 @@
   // ---- generated from tests/playback/player-input-contract.json by
   // scripts/player-contract-table --embed; do not edit by hand ----
   const INPUT_ROUTING = {"ten-foot":{"hidden":{"left":"reveal","right":"reveal","up":"reveal","down":"reveal","select":"reveal","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"reveal","idle":"ignore"},"transport":{"left":"focus_row","right":"focus_row","up":"focus_row","down":"focus_row","select":"activate","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"ignore","idle":"hide"},"timeline":{"left":"preview","right":"preview","up":"focus_marker_or_ignore","down":"focus_transport","select":"toggle_play","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"ignore","idle":"hide"},"scrub":{"left":"preview","right":"preview","up":"cancel_then_focus_marker_or_ignore","down":"cancel_then_focus_transport","select":"commit","back":"cancel","play_pause":"commit_then_toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_menu","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_menu","idle":"ignore"},"info":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_info","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_info","idle":"ignore"},"failed":{"left":"focus_row","right":"focus_row","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"ignore","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"}},"desktop":{"hidden":{"left":"skip","right":"skip","up":"ignore","down":"ignore","select":"ignore","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_play","idle":"ignore"},"transport":{"left":"skip","right":"skip","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_play","idle":"hide"},"timeline":{"left":"preview","right":"preview","up":"ignore","down":"ignore","select":"toggle_play","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_play","idle":"hide"},"scrub":{"left":"preview","right":"preview","up":"ignore","down":"ignore","select":"commit","back":"cancel","play_pause":"commit_then_toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_menu","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_menu","idle":"ignore"},"info":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_info","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_info","idle":"ignore"},"failed":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"ignore","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"}},"touch":{"hidden":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_chrome","idle":"ignore"},"transport":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_chrome","idle":"hide"},"timeline":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_chrome","idle":"hide"},"scrub":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"commit","back":"cancel","play_pause":"commit_then_toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"close_menu","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_menu","idle":"ignore"},"info":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"close_info","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_info","idle":"ignore"},"failed":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"ignore","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"}}};
+  const CONTRACT_TIMINGS = {"hide_after_ms":4000,"hidden_only_while_playing":true,"preview_auto_commit_ms":null,"desktop_hotkey_coalesce_ms":350,"notes":["hide_after_ms: chrome hides this long after the last input while playing. Never while paused, failed, scrubbing, or with a menu or the info panel open.","preview_auto_commit_ms is null: a pending preview commits only on `select` (ten-foot) or pointer release (touch); it never commits on a timer.","desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base and issue one seek after this much quiet — the shipped web `nudge()` behaviour, kept."]};
+  const CONTRACT_STEPS = {"skip_seconds":10,"preview_step_seconds":10,"preview_acceleration":[{"from_repeat":0,"step_seconds":10},{"from_repeat":5,"step_seconds":30},{"from_repeat":10,"step_seconds":60}],"vertical_seek_seconds":null,"notes":["skip_seconds is the only immediate seek step: the two transport buttons and the FF/REW media keys.","preview_acceleration applies to a HELD direction while scrubbing: repeats 0–4 move 10 s, 5–9 move 30 s, 10+ move 60 s. A released key resets the ladder.","vertical_seek_seconds is null: Up/Down never seek. Vertical is navigation between rows on every surface."]};
   // ---- end generated ----
 
   function qualityForce(quality) {
@@ -749,12 +751,25 @@
       : "burn";
   }
 
+  // The contract's numbers, not a second copy of them: `hide_after_ms`,
+  // `skip_seconds` and the coalesce window were prose in the fixture until
+  // the shipped code started reading them.
+  function contractTiming(name) {
+    if (!(name in CONTRACT_TIMINGS)) throw new Error(`no contract timing ${name}`);
+    return CONTRACT_TIMINGS[name];
+  }
+
+  function contractStep(name) {
+    if (!(name in CONTRACT_STEPS)) throw new Error(`no contract step ${name}`);
+    return CONTRACT_STEPS[name];
+  }
+
   function seekDeltaSeconds(key) {
     switch (key) {
       case "ArrowLeft":
-        return -10;
+        return -contractStep("skip_seconds");
       case "ArrowRight":
-        return 10;
+        return contractStep("skip_seconds");
       default:
         return null;
     }
@@ -769,9 +784,11 @@
   }
 
   function previewStepSeconds(repeatCount) {
-    if (repeatCount >= 10) return 60;
-    if (repeatCount >= 5) return 30;
-    return 10;
+    let step = contractStep("preview_step_seconds");
+    for (const rung of contractStep("preview_acceleration")) {
+      if (repeatCount >= rung.from_repeat) step = rung.step_seconds;
+    }
+    return step;
   }
 
   function lostFrameRate(hitches, playedSeconds) {
@@ -1038,6 +1055,8 @@
     waitingOverlayAction,
     subtitleBurnAction,
     INPUT_ROUTING,
+    contractTiming,
+    contractStep,
     routeInput,
     seekDeltaSeconds,
     previewStepSeconds,
