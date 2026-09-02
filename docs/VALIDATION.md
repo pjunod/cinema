@@ -217,6 +217,42 @@ or failed hosted job on the other pool automatically. That is deliberate: an
 automatic fallback can run privileged repository code on a trust boundary you
 did not select.
 
+### The runner roster — a label is a claim about a machine
+
+[`validation/runner-fleet.toml`](../validation/runner-fleet.toml) lists every
+self-hosted runner registered to this repository, the physical host it sits on,
+and the labels it carries. It mirrors `pjunod/ansible`'s
+`github-runners/inventory/` plus the two hand-registered ARM64 laptop VMs, and
+it must be updated in the same change that changes the fleet — a roster that
+has drifted from reality proves nothing.
+
+It exists because a `runs-on` naming a label nothing carries is not an error
+GitHub reports. The job queues, indefinitely, and is eventually cancelled
+having never started. That failure has happened twice here: the required Store
+lane spent a day at 45 attempts, 15 started and 27 cancelled while queued with
+waits reaching 234 minutes, because exactly one runner carried `ci-store`; and
+`store-shards.yml` pinned a shard to `ci-store-shard-1`, a label the fleet has
+never had, which would have parked every pull request the moment the
+accelerated path became required.
+
+`make operations-check` now parses every `runs-on` in every file under
+`.github/workflows/` — new files included, automatically — and fails when a
+self-hosted label set no rostered runner can satisfy appears. So **adding a
+label to a workflow means adding it to a runner first**: change the ansible
+inventory, apply it, then add the runner to the roster in the change that
+teaches a workflow to ask for it.
+
+The roster also carries two invariants the same check enforces. `ci-store` and
+`ci-topology` each select a three-voter hiqlite test, so at most one runner per
+physical host may carry either, and neither may sit on a production plurx
+voter. Today that means three `ci-store` slots —
+`gha-nuc1-general-01`, `gha-nuc2-android-01`, `gha-rogg16-general-02`, one per
+non-voter host — and one `ci-topology` slot on `gha-rogg16-general-01`. Two
+heavy replicated-cluster runs on one loaded host is the quorum flake that
+produced the artwork-fence failures; the one-slot-per-host ceiling is what makes
+the Store shard count a statement about machines rather than about runner
+services.
+
 ### Execution mode — fail-safe rollout without renaming the gate
 
 `CI_EXECUTION_MODE` controls how eligible heavyweight lanes execute. It accepts
@@ -237,10 +273,28 @@ scripts/ci-execution-mode shadow
 scripts/ci-execution-mode accelerated
 ```
 
-Changing the mode affects only new runs. Do not enable shadow until both shard
-labels resolve to distinct non-production x86 hosts with verified identity and
-bounded persistent storage. The weekly `replicated Store backstop` workflow is
+Changing the mode affects only new runs. The Store lane fans out to three
+shards, one per `ci-store` slot, and every shard selects the same label set the
+legacy lane and the weekly backstop already use — so the sharded path schedules
+on the same three verified non-voter hosts rather than waiting on a label
+nobody has assigned. The weekly `replicated Store backstop` workflow is
 unsharded in every mode and remains the assignment-independent safety net.
+
+Prove the sharded path before flipping the variable, not after. `replicated
+Store shards` accepts `workflow_dispatch` with an `execution-mode` input that
+defaults to `shadow`, so a manual run exercises the same jobs on the same fleet
+while `continue-on-error` keeps the result advisory:
+
+```bash
+# from the Actions tab, or:
+gh workflow run store-shards.yml --ref main -f execution-mode=shadow
+```
+
+The dispatch entry point is only visible once the workflow is on the default
+branch. A rehearsal that schedules, shards, and produces an aggregate receipt
+is what earns `scripts/ci-execution-mode accelerated`; it is not a substitute
+for the shadow campaign, only the cheapest way to find out whether the graph
+can run at all.
 
 Eligible packaging changes require both rows of the `package_smoke` matrix.
 The arm64 row selects the self-hosted Linux/ARM64 `ci-arm64` VM pool, or
