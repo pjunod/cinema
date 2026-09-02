@@ -174,15 +174,54 @@ Its inputs are `req.height`, `source_height`, the ladder ceiling
 `hdr10_requested`. The network prior needs the request's identity, which the
 control exchange has: it is the same session.
 
-**The delivered grade is predictable without starting anything.**
-`session_delivered_dynamic_range(source, kind, grade)` (`hls.rs:1024`) is a
-pure function of the source file, the resolved `SessionKind` and the output
-grade — it reads nothing off a running session. So
-`EffectiveSelection::from_recipe(recipe, height, dynamic_range)`'s third
-argument is available to a candidate that will never be built, which is what
-makes this slice possible at all. If that stops being true, stop and say so:
-a candidate whose grade has to be guessed is a candidate that will be wrong on
-exactly the transitions the grade axis exists to refuse.
+**The delivered grade is _not_ predictable, and the first version of this
+section said it was.** Corrected 2026-09-02, before anything was built on it.
+
+`session_delivered_dynamic_range(source, kind, grade)` (`hls.rs:1024`) *is* a
+pure function of its three arguments — that much was right. The error was in
+the third: `grade` comes from `Pipeline::output_grade()`
+(`plurx-core/src/transcode/pipeline.rs:430`), and the pipeline is chosen from
+what the node proved and what the session is doing, at start. `create` reads it
+off the built session and its own comment says why:
+
+> The grade the session actually built, not the one the body asked for: the
+> server refuses the HDR10 rung for a source or a rung that cannot prove it,
+> and the badge has to follow the encoder.
+
+So a candidate that will never be built has no delivered grade, and the resolver
+cannot return one.
+
+**Do not paper over it by predicting.** Two shapes were considered and both are
+wrong:
+
+- *Abstain* — give the candidate `dynamic_range: None` and let
+  `decide_preparation`'s unknown-abstains rule handle it. This fails in the
+  unsafe direction: a transition that really is a grade change classifies as
+  resolution-only and gets **prepared**, which is the one outcome
+  `PREPARED_AXIS` exists to prevent.
+- *Predict optimistically* — give the candidate the grade its body asked for
+  after review. This fails in the safe direction (a spurious fallback) but
+  fails constantly: a session whose HDR10 rung the encoder refused reads
+  `delivered = sdr` against `candidate = hdr10` on every exchange, so a viewer
+  on that session never gets a prepared handoff for a plain quality change.
+  Both are comparing an encoder's answer against a request, which is comparing
+  unlike things.
+
+**Compare like with like instead.** The grade axis has to be read off the
+*request* on both sides, not off one request and one encoder. The exchange
+already holds the session's own `RemoteStartRequest` — `local_control_response`
+takes it as `recipe` — so both the delivered session's intent and the
+candidate's are available, and comparing them is a comparison of two of the same
+kind of thing.
+
+That is a change to what `decide_preparation` takes, not just to what the
+resolver returns, and it is the first thing slice 3.2 has to settle. Until it
+is settled, **do not construct a candidate `EffectiveSelection` at all** — one
+carrying a grade nobody can justify is worse than no candidate, because the
+decision it feeds looks correct.
+
+The rest of this section stands: the height resolution is the extraction, and
+the other three steps are already named functions.
 
 **Suggested shape**, so `create` and the exchange cannot drift:
 
