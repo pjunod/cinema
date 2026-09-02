@@ -5323,6 +5323,28 @@ struct RollingControlActor {
     last_renewal_kind: &'static str,
     mode: RollingLeaseMode,
     demand: Option<PlaybackDemandSnapshot>,
+    /// The capability document this session is holding, not this exchange's.
+    ///
+    /// `ControlRequestV1::validate` requires `capabilities` only on sequence 1
+    /// and permits every later exchange to omit them, so a consumer reading
+    /// the live snapshot sees `None` for the whole session after the first
+    /// message. For a field meaning *this device can hold two live pipelines*
+    /// that would refuse every transition a capable client ever makes — which
+    /// is every transition that will actually happen.
+    ///
+    /// Last write wins over `Some`. A client that changes its answer
+    /// mid-session is telling the truth about a device that changed — a
+    /// television that woke a second decoder, a phone that lost one — so the
+    /// newer document is the right one and no reconciliation is owed.
+    ///
+    /// **Nothing clears this on an owner-epoch advance, and it cannot go
+    /// stale anyway.** An advance resets `client_instance_id`, after which the
+    /// next accepted exchange must be sequence 1, and a sequence-1 exchange
+    /// that carries no capabilities fails twice over: `validate` rejects the
+    /// body, and the fence's `platform.ok_or(StaleClient)` rejects the accept.
+    /// So the exchange that could read a stale document is the exchange that
+    /// has just overwritten it.
+    retained_capabilities: Option<DynamicCapabilities>,
     settled_target: Option<SettledTarget>,
     /// This playback's single preparation slot. One per playback is already
     /// the store's invariant; holding it here makes the actor the only thing
@@ -5428,6 +5450,7 @@ impl RollingControlActor {
             last_renewal_kind: initial_kind,
             mode: RollingLeaseMode::Legacy,
             demand: None,
+            retained_capabilities: None,
             settled_target: None,
             preparation: PreparationSlot::Empty,
             delivery: RollingDeliverySnapshot::default(),
@@ -6032,6 +6055,17 @@ impl RollingControlActor {
         true
     }
 
+    /// The capability document this session is holding.
+    ///
+    /// Read this, never the live snapshot's — see the field's own doc. M6's
+    /// preparation decision takes exactly this value, because a capability
+    /// that reads `None` from sequence 2 onward is a capability that refuses
+    /// every transition a capable client ever makes.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn retained_capabilities(&self) -> Option<&DynamicCapabilities> {
+        self.retained_capabilities.as_ref()
+    }
+
     fn control_at(
         &mut self,
         now: Instant,
@@ -6080,6 +6114,12 @@ impl RollingControlActor {
                 sequence: accepted_sequence,
                 anchor_ms: request.snapshot.buffer_anchor_ms(),
             });
+            // Retained before the snapshot is moved, and only over `Some`:
+            // an exchange that omits capabilities is one that has already
+            // told us, not one that has changed its mind.
+            if let Some(capabilities) = &request.snapshot.capabilities {
+                self.retained_capabilities = Some(capabilities.clone());
+            }
             self.demand = Some(request.snapshot);
             if accepted_end {
                 self.last_renewal_kind = "control-end";
@@ -11268,6 +11308,79 @@ mod tests {
             sequence: request.sequence,
             snapshot: PlaybackDemandSnapshot::from(request),
         }
+    }
+
+    /// The wire lets a client send capabilities once. Anything that reads
+    /// the live snapshot therefore sees `None` from sequence 2 onward — and
+    /// for `dual_player_preparation` that means refusing every transition a
+    /// capable client ever makes, which is every transition that will
+    /// actually happen.
+    #[test]
+    fn the_capability_document_is_retained_across_exchanges_that_omit_it() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert!(
+            actor.retained_capabilities().is_none(),
+            "a session that has not been told holds nothing"
+        );
+
+        let base = request();
+        let mut first = base.clone();
+        first.sequence = 1;
+        first.capabilities = first.capabilities.map(|mut caps| {
+            caps.dual_player_preparation = true;
+            caps
+        });
+        actor
+            .control_at(started + Duration::from_secs(1), owned_control(&first))
+            .expect("sequence 1 accepted");
+        assert!(
+            actor
+                .retained_capabilities()
+                .expect("retained after sequence 1")
+                .dual_player_preparation
+        );
+
+        // Two exchanges that say nothing about capabilities, which is what
+        // the wire contract permits and what real clients do.
+        for (sequence, seconds) in [(2, 2), (3, 3)] {
+            let mut later = base.clone();
+            later.sequence = sequence;
+            later.capabilities = None;
+            actor
+                .control_at(
+                    started + Duration::from_secs(seconds),
+                    owned_control(&later),
+                )
+                .expect("later exchange accepted");
+            assert!(
+                actor
+                    .retained_capabilities()
+                    .expect("still retained")
+                    .dual_player_preparation,
+                "sequence {sequence} omitted capabilities; it did not withdraw them",
+            );
+        }
+
+        // A client that sends a new document has changed its answer about a
+        // device that changed, so the newer one wins.
+        let mut revised = base.clone();
+        revised.sequence = 4;
+        revised.capabilities = revised.capabilities.map(|mut caps| {
+            caps.dual_player_preparation = false;
+            caps
+        });
+        actor
+            .control_at(started + Duration::from_secs(4), owned_control(&revised))
+            .expect("revision accepted");
+        assert!(
+            !actor
+                .retained_capabilities()
+                .expect("retained after revision")
+                .dual_player_preparation,
+            "last write wins over Some",
+        );
     }
 
     #[test]

@@ -33,7 +33,7 @@ one is deleted.
 | 5 | delete detached recovery loops | — | merged as #663 |
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [execution](M5.5-SPIKE-EXECUTION-HANDOFF.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike **ran 2026-09-01 on all three platforms** and is complete: web and Android `false`, **Apple `true`** after a corrective instrument pass — see §"M5.5 ran, and two thirds of it settled" |
-| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) | **building.** The actor's slot merged as [#792](https://github.com/pjunod/plurx/pull/792) and the executor as [#793](https://github.com/pjunod/plurx/pull/793); its three durable outcomes are now pinned by tests. **No production caller yet** — see §"M6 is building, and what it does not yet reach" |
+| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) · [caller](M6-CALLER-HANDOFF.md) | **building — the server decides, but cannot yet notice.** Slot [#792](https://github.com/pjunod/plurx/pull/792) · executor [#793](https://github.com/pjunod/plurx/pull/793) · its outcomes pinned [#796](https://github.com/pjunod/plurx/pull/796) · the decision [#798](https://github.com/pjunod/plurx/pull/798) · where the caller goes [#800](https://github.com/pjunod/plurx/pull/800)/[#802](https://github.com/pjunod/plurx/pull/802). **Still no production caller** — see §"M6 is building, and what it does not yet reach" |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it". R-M1 closes the unknown-readiness contract and carries the dated [large-MKV observation](M7-M1-LARGE-MKV-OBSERVATION.md); it merged as [#775](https://github.com/pjunod/plurx/pull/775). R-M2's source acceptance is complete on top of that prerequisite; physical directed-retry evidence remains post-merge work. **M4 (burn-join) is a separate active effort**, not part of this remediation; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
@@ -125,8 +125,10 @@ merge target: two client PRs in flight means the second always fails.
 | M6 slot | the preparation slot, and that a disconnect is not a commit | [#792](https://github.com/pjunod/plurx/pull/792) | merged |
 | M6 executor | the executor, and three authorities in order | [#793](https://github.com/pjunod/plurx/pull/793) | merged |
 | M6 tests | the executor's three durable outcomes, pinned | [#796](https://github.com/pjunod/plurx/pull/796) | merged |
-| M6 decision | prepare or fall back, and why it is one axis | [#798](https://github.com/pjunod/plurx/pull/798) | open |
-| M6 caller | where the decision is made, and the four slices after it | — | this change |
+| M6 decision | prepare or fall back, and why it is one axis | [#798](https://github.com/pjunod/plurx/pull/798) | merged |
+| M6 caller | where the decision is made, and the five slices after it | [#800](https://github.com/pjunod/plurx/pull/800) · [#802](https://github.com/pjunod/plurx/pull/802) | merged |
+| M6 retention | the session keeps the capability it was told once | [#801](https://github.com/pjunod/plurx/pull/801) | open |
+| status | what M6 landed, and where it stops | — | this change |
 
 Status-only PRs are not listed: #746, #747, #751, #755, #759, #777, #781,
 #783 and #784 each updated this page and changed nothing else. Nor are the
@@ -541,7 +543,35 @@ against building a third of.
 Those are the first three of the roadmap's §3.1 phases, and they are the ones
 testable without hardware, which is why they came first.
 
-**What it does not reach.** There is **no production caller**. Nothing in the
+**What it now decides.** `decide_preparation`
+([#798](https://github.com/pjunod/plurx/pull/798)) takes the delivered
+selection, a candidate one, the client's *retained* capability and what the
+link has shown, and answers prepare or fall back. Four things about it are
+worth knowing, because three of them were wrong in the first draft and the
+review caught them:
+
+- **The prepared axis promises *same delivery method, same delivered grade* —
+  not "same codec".** `EffectiveSelection.codec` takes exactly two values,
+  `source` and `server_selected`, so H.264 against HEVC is invisible in it.
+  Today a real codec change drags the grade with it, because the SDR rungs are
+  H.264 and the HDR10 rung is HEVC Main10 — but that invariant lives in
+  `plurx_core::playback` and an AV1 or HEVC-SDR rung breaks it. Had the axis
+  been called "codec", a real codec change would eventually have classified as
+  a resolution change and been prepared.
+- **Throughput is a gate.** M6 handoff §8 asked for it by name, and the axis M6
+  prepares is the worst place to omit it: an Auto rung change is the one
+  transition a client reaches without a viewer touching anything, and the
+  reason it fires is usually that the link just degraded. The rule is a floor
+  rather than a model — observed at least twice what this session already
+  delivers — and either value missing is a refusal.
+- **The capability read is the retained one.** Clients must send
+  `capabilities` only on sequence 1, so anything reading the live snapshot sees
+  `None` from exchange two onward for the rest of the session.
+  [#801](https://github.com/pjunod/plurx/pull/801) retains it.
+- **An unknown grade abstains.** `None` means the source row could not be read,
+  not a grade; comparing it as a value turned a rescan into a grade change.
+
+**Where it stops.** There is **no production caller**. Nothing in the
 HTTP layer stages a successor, so on today's fleet the executor is exercised
 only by tests, and `#[cfg_attr(not(test), allow(dead_code))]` says so rather
 than an invented caller written to satisfy a lint. Two things gate the caller,
@@ -574,6 +604,17 @@ exchange deadline. What must not move does not move: `stage_preparation` still
 refuses an occupied slot and a terminal playback, `may_commit_preparation`
 still refuses a forgotten successor, and `terminate` still aborts what it
 holds. The exchange proposes; the actor disposes.
+
+**What is left, in order** ([M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3,
+with the extraction map in §3.2.1):
+
+1. candidate resolution becomes callable — one span of `create`, of which only
+   the height resolution is inline;
+2. shadow mode: decide, emit the metric, change nothing. This is what turns
+   `PREPARED_AXIS` from an argument into a measurement;
+3. stage on `Prepare` — the first behaviour change, which fires on nothing
+   until a client release flips Apple's literal;
+4. the commit trigger — blocked on the acknowledgements, and not on code.
 
 **The disconnect-does-not-imply-commit property is already covered**, in
 `plurx-core`'s own contract suite on three voters
