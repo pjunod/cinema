@@ -979,7 +979,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # aborted and awaited, its successor is joined after the preserved start floor,
 # and the hostile error-body HTTP fixture is aborted before its test returns.
 # All four are test-only owners; none detaches a producer, timer, or process.
-expected_occurrences = 375
+# 375 -> 378 with M6's preparation executor. The three additions are the
+# `oneshot::channel()` pairs behind `stage_preparation`,
+# `may_commit_preparation` and `settle_preparation` — bounded actor round
+# trips of the same shape as `snapshot` and `poll_producer_decision`, awaited
+# by the caller that opened them. Each owns no producer, no timer and no
+# process: the actor answers on its own mailbox and the sender is dropped when
+# that arm returns, so a retired actor closes the channel rather than leaving a
+# waiter detached. Reviewed as part of the M6 preparation slot's executor.
+expected_occurrences = 378
 
 [[module_structures]]
 id = "method-spawn"
