@@ -9167,7 +9167,8 @@ function nudge(d){
   let t=Math.max(0,base+d); if(total>0) t=Math.min(total,t);
   me._seekPending=t; pbTick(); playerActivity();
   clearTimeout(NUDGE_T);
-  NUDGE_T=setTimeout(()=>{ if(PLAYER!==me) return; commitPendingSeek(); }, 350);
+  NUDGE_T=setTimeout(()=>{ if(PLAYER!==me) return; commitPendingSeek(); },
+    PlaybackPolicy.contractTiming("desktop_hotkey_coalesce_ms"));
 }
 async function togglePip(){ const v=document.getElementById("video"); try{ if(document.pictureInPictureElement) await document.exitPictureInPicture(); else if(v) await v.requestPictureInPicture(); }catch(e){} }
 // Is the player fullscreen by any of the three routes into it? The document
