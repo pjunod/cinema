@@ -29,7 +29,7 @@ one is deleted.
 | 1-4 | protocol, transport, hold/resume barriers | — | merged |
 | 5 | delete detached recovery loops | — | merged as #663 |
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
-| — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [execution](M5.5-SPIKE-EXECUTION-HANDOFF.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike **ran 2026-09-01 on web and Android and did not run on Apple** — see §"M5.5 ran, and two thirds of it settled" |
+| — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [execution](M5.5-SPIKE-EXECUTION-HANDOFF.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike **ran 2026-09-01 on all three platforms** and is complete: web and Android `false`, **Apple `true`** after a corrective instrument pass — see §"M5.5 ran, and two thirds of it settled" |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 | **design unblocked, acknowledgements not** — the fallback path is measured on two platforms; `first_frame_ready` cannot be frozen while Apple is unmeasured |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it" — and **M4 (burn-join) is the next buildable milestone**; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
@@ -466,7 +466,7 @@ that path seamless. It is not a failure.
 |---|---|---|
 | web | `false` | Safari same-codec reached 20 consecutive; codec/HDR only 13/20 |
 | Android | `false` platform-wide | both phones passed both cases; the tunneled Google TV passed codec/HDR and failed same-codec 0/3 |
-| Apple | unproven | iPhone blocked on local-network consent; Apple TV had no tvOS development profile |
+| Apple | **`true`** | iPhone 17 Pro Max and Bedroom Apple TV 4K each 20/20 on both cases; a first instrument set was rejected and a corrective pass repaired it — see below |
 
 ### The result is conditional, and the capability cannot say so
 
@@ -506,10 +506,62 @@ wrong in a way nobody can see later), and the prime-window duration — network
 duplication is reported as volume, so the rate cannot be derived, and rate is
 the only reason that field exists.
 
-Apple is a re-run rather than a dead end. Neither blocker is a property of the
-platform: the iPhone needs one consent tap, and the Apple TV needs a tvOS
-development provisioning profile for the throwaway bundle. It is the platform
-this matters most for — the Apple TV is where the 2160p pressure lives.
+### Apple is `true`, and the first instrument set was rejected to get there
+
+Both required devices completed 20/20 on both cases with zero predecessor or
+post-commit stalls. **The first instrument set was not accepted** — four of the
+seven fields did not behave like measurements, and the asymmetry was
+deliberate: web and Android's `false` is what the literals already say, so
+accepting it costs nothing, while Apple's `true` authorises the server to prime
+a second pipeline on a viewer's Apple TV.
+
+What was wrong, and what the corrective pass did about it:
+
+| defect | corrective |
+|---|---|
+| `buffered through` flat at exactly 12,000 / 12,010 ms across eighty acknowledgements on two devices — twice the successor origin offset, i.e. the successor buffering the whole fixture | 132-second fixtures; runway now varies 16,607–17,835 ms and reads `full at ack: false` |
+| first-frame 1–4 ms, with the TV's two case means identical to two decimal places — no resolution at the scale measured, and `hasNewPixelBuffer` can be satisfied by a pre-commit frame | the copied pixel buffer's PTS is required to map to film time at or beyond the commit boundary, and is reported beside the latency |
+| network duplication byte-identical across two different devices (575.96 Mbit each) — derived from access-log bytes, not counted | response-body bytes counted by the 80 Mbit/s proxy under unique device/trial/pipeline URLs; values now vary per trial and per device |
+| peak memory measured the app while AVFoundation decodes in `mediaserverd` | declared **unanswered**, with the reason — the available tooling exposes no resident memory for `mediaplaybackd` / `videocodecd` |
+
+**The repair is verifiable in the numbers rather than asserted.** First-frame
+now *separates the two cases* in the direction physics requires — Apple TV
+same-codec 21–239 ms against codec/HDR 230–327 ms; iPhone 24–160 ms against
+163–279 ms. The old instrument returned the same value for both, which is what
+proved it was not measuring the switch.
+
+Three corrective pilots were rejected before the accepted rows and their
+receipts retained: an exactly tight predecessor-boundary timeout, a run where
+the original low-bitrate fixture still hit **AVPlayer's 53.889-second
+full-buffer cap**, and a 30 Mbit/s H.264 pilot that failed item admission. That
+cap is what the flat 12,000 ms was hiding.
+
+**Two things stay unanswered on Apple, by the platform rather than by the run.**
+Hardware decoder instances: AVFoundation exposes no public identity, so the
+reported `2` is a logical `AVPlayer` pipeline count and **plan §5.3's
+one-encoder-slot question remains open exactly where the 2160p pressure lives**.
+And system-wide memory, per the table above.
+
+**One residual worth carrying into M6.** The 20/20 commit proof ran on the
+short fixture; the validated instruments ran on the 132-second one. Nobody has
+twenty consecutive commits *on the corrected fixture* — the corrective pass is
+four trials per device and says so. Memory is the field that would catch
+accumulation across twenty trials, and it is unanswered at both fixture sizes.
+Neither blocks the capability, which M6 must read rather than assume, but M6
+should re-confirm on a realistic runway before it ships a behaviour change to
+viewers.
+
+Two disclosed compromises, weighed: the tvOS harness ran under the production
+bundle `tv.plurx.app` because the profile was exact-bundle only — deliberate,
+with an exact build-105 restore artifact secured first and build 105 restored
+and verified after, and bundle identity does not change decode behaviour. And
+the original tvOS receipt is reconstructed from console output; the corrective
+receipt was written directly by the metering server and is not.
+
+The hold was worth running and the fix was real. A first physical measurement
+that needs four instruments tightened on the hardest platform, finds a
+53.889-second buffer cap while doing it, and retains its rejected pilots is a
+good run, not a poor one.
 
 ## Open decisions
 
