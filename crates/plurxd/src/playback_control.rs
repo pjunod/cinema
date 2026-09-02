@@ -1727,6 +1727,13 @@ pub(crate) struct LocalControlResult {
     pub terminal_handoff: Option<TerminalResponseHandoff>,
     /// Shared result of the one session-owned durable terminal continuation.
     pub terminal_commit: Option<TerminalCommitReceipt>,
+    /// This accepted exchange's selection differs from the last one's.
+    ///
+    /// What the viewer changed and what the device can do about it, answered
+    /// by whichever engine served the exchange. `ControlState::observe` is the
+    /// one implementation, and it is on `ControlState` precisely so both
+    /// engines can answer it.
+    pub selection: SelectionObservation,
 }
 
 #[derive(Clone)]
@@ -2210,6 +2217,16 @@ impl PlaybackDemandSnapshot {
     }
 }
 
+/// What one accepted exchange said about the viewer's intent and the device.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SelectionObservation {
+    /// The selection differs from the last accepted one. `false` on a replay
+    /// and on the first accepted exchange.
+    pub changed: bool,
+    /// The document the **session** is holding, not this exchange's.
+    pub capabilities: Option<DynamicCapabilities>,
+}
+
 #[derive(Debug)]
 pub(crate) struct ControlState {
     generation: Option<String>,
@@ -2219,6 +2236,39 @@ pub(crate) struct ControlState {
     last_sequence: u64,
     last_accepted_at: Option<Instant>,
     prior_action: ControlAction,
+    /// The selection the last accepted exchange carried.
+    ///
+    /// Here rather than on the rolling actor because **both delivery engines
+    /// hold a `ControlState` and only one of them has an actor**. A session is
+    /// served by the VOD engine whenever `try_vod_session` admits it, which it
+    /// does for every `Presentation::Vod` request — and `into_request` sets
+    /// that for every create, since the growing live presentation was removed.
+    /// So a gate that lived on the rolling actor alone would see the minority
+    /// of exchanges and report a confidently undercounted picture, which is
+    /// worse than reporting none.
+    ///
+    /// Cleared with the client identity on an owner-epoch advance: the
+    /// sequence space restarts, and a selection from before the advance is not
+    /// something this client has since departed from.
+    last_selection: Option<ClientSelection>,
+    /// The capability document this session was told, on any exchange.
+    ///
+    /// Here for the same reason as `last_selection`: the rolling actor has its
+    /// own copy, and the VOD engine — which serves most sessions — has no
+    /// actor at all. A consumer reading only the actor's would see nothing on
+    /// the majority path.
+    ///
+    /// **Reading this exchange's document instead is not a workable
+    /// substitute**, and the shipped clients are why: both strip
+    /// `capabilities` on every sequence after the first when the document has
+    /// not changed, exactly as the wire contract permits. So any consumer that
+    /// fires on a *later* exchange — which is every consumer worth having —
+    /// would see `None` every time.
+    ///
+    /// Last write wins over `Some`, and cleared with the client identity on an
+    /// owner-epoch advance: the next accepted exchange must then be sequence 1,
+    /// which the fence requires to carry a document.
+    last_capabilities: Option<DynamicCapabilities>,
 }
 
 impl Default for ControlState {
@@ -2231,6 +2281,8 @@ impl Default for ControlState {
             last_sequence: 0,
             last_accepted_at: None,
             prior_action: ControlAction::None,
+            last_selection: None,
+            last_capabilities: None,
         }
     }
 }
@@ -2285,6 +2337,8 @@ impl ControlState {
             self.last_sequence = 0;
             self.last_accepted_at = None;
             self.prior_action = ControlAction::None;
+            self.last_selection = None;
+            self.last_capabilities = None;
         }
         match self.client_instance_id {
             None => {
@@ -2335,6 +2389,46 @@ impl ControlState {
             self.prior_action.clone(),
             client_platform,
         ))
+    }
+
+    /// Take this exchange's selection and say whether it moved.
+    ///
+    /// M6's gate. Building a candidate recipe costs two store reads — the
+    /// source file and the network prior — the exchange runs about once a
+    /// second per client under an absolute deadline, and the answer is almost
+    /// always *nothing changed*.
+    ///
+    /// **Against the previous selection, never against what is delivered.** A
+    /// client's ask and the height it gets are not the same number: an
+    /// explicit rung snaps onto the ladder, so a client asking 1079 is served
+    /// 1080 and goes on asking 1079. A gate comparing the two would read
+    /// *changed* on every exchange for the rest of that session, spending the
+    /// reads it exists to save on a candidate identical to what is playing.
+    ///
+    /// Called by both delivery engines on acceptance, and only on acceptance:
+    /// a replay is the same exchange arriving twice and changed the selection
+    /// the first time or not at all. `false` on the first accepted exchange —
+    /// a session just created from an intent has not since departed from it.
+    /// Both answers together, because a consumer that wants to know what the
+    /// viewer changed also wants to know what the device can do about it —
+    /// and reading either off the live exchange is wrong for the same reason.
+    pub(crate) fn observe(
+        &mut self,
+        selection: &ClientSelection,
+        capabilities: Option<&DynamicCapabilities>,
+    ) -> SelectionObservation {
+        let changed = self
+            .last_selection
+            .as_ref()
+            .is_some_and(|previous| previous != selection);
+        self.last_selection = Some(selection.clone());
+        if let Some(capabilities) = capabilities {
+            self.last_capabilities = Some(capabilities.clone());
+        }
+        SelectionObservation {
+            changed,
+            capabilities: self.last_capabilities.clone(),
+        }
     }
 
     /// Recover the immutable result for the exact accepted identity/sequence
@@ -3945,7 +4039,7 @@ pub(crate) struct RollingControlOutcome {
     pub platform: ClientPlatform,
     pub lease: RollingLeaseSnapshot,
     pub flow_ticket: u64,
-    /// This exchange's selection differs from the last accepted one.
+    /// What the viewer changed and what the device can do about it.
     ///
     /// M6's gate, and the reason it lives here: building a candidate recipe
     /// costs two store reads (the source file and the network prior), the
@@ -3961,7 +4055,7 @@ pub(crate) struct RollingControlOutcome {
     /// session and spend the reads it exists to save. `false` on a replay and
     /// on the first accepted exchange: a session that has just been created
     /// from an intent has not since departed from it.
-    pub selection_changed: bool,
+    pub selection: SelectionObservation,
 }
 
 /// A session-owned continuation installed synchronously by the rolling actor
@@ -5528,27 +5622,10 @@ struct RollingControlActor {
     last_renewal_kind: &'static str,
     mode: RollingLeaseMode,
     demand: Option<PlaybackDemandSnapshot>,
-    /// The capability document this session is holding, not this exchange's.
-    ///
-    /// `ControlRequestV1::validate` requires `capabilities` only on sequence 1
-    /// and permits every later exchange to omit them, so a consumer reading
-    /// the live snapshot sees `None` for the whole session after the first
-    /// message. For a field meaning *this device can hold two live pipelines*
-    /// that would refuse every transition a capable client ever makes — which
-    /// is every transition that will actually happen.
-    ///
-    /// Last write wins over `Some`. A client that changes its answer
-    /// mid-session is telling the truth about a device that changed — a
-    /// television that woke a second decoder, a phone that lost one — so the
-    /// newer document is the right one and no reconciliation is owed.
-    ///
-    /// **Nothing clears this on an owner-epoch advance, and it cannot go
-    /// stale anyway.** An advance resets `client_instance_id`, after which the
-    /// next accepted exchange must be sequence 1, and a sequence-1 exchange
-    /// that carries no capabilities fails twice over: `validate` rejects the
-    /// body, and the fence's `platform.ok_or(StaleClient)` rejects the accept.
-    /// So the exchange that could read a stale document is the exchange that
-    /// has just overwritten it.
+    /// Superseded by `ControlState::last_capabilities`, which both delivery
+    /// engines can reach; this copy is the rolling actor's own and is kept
+    /// only for the tests that pin the retention property.
+    #[cfg_attr(not(test), allow(dead_code))]
     retained_capabilities: Option<DynamicCapabilities>,
     settled_target: Option<SettledTarget>,
     /// This playback's single preparation slot. One per playback is already
@@ -6302,7 +6379,7 @@ impl RollingControlActor {
                 lease: self.snapshot_at(now),
                 flow_ticket: self.last_flow_ticket,
                 // A terminal replay is not a transition by construction.
-                selection_changed: false,
+                selection: SelectionObservation::default(),
             });
         }
         let (disposition, accepted_sequence, action, platform) = self.control.accept_at(
@@ -6315,14 +6392,19 @@ impl RollingControlActor {
         )?;
         let accepted_end = disposition == ControlDisposition::Accepted
             && request.snapshot.demand == PlaybackDemand::End;
-        // Taken before the snapshot is moved, and only for an accepted
-        // exchange: a replay is the same exchange arriving twice, and it
-        // changed the selection the first time or not at all.
-        let selection_changed = disposition == ControlDisposition::Accepted
-            && self
-                .demand
-                .as_ref()
-                .is_some_and(|previous| previous.selection != request.snapshot.selection);
+        // Delegated to `ControlState` rather than compared against
+        // `self.demand`, because both delivery engines hold a `ControlState`
+        // and only this one has an actor — see `ControlState::last_selection`.
+        // Only for an accepted exchange: a replay is the same exchange
+        // arriving twice.
+        let selection = if disposition == ControlDisposition::Accepted {
+            self.control.observe(
+                &request.snapshot.selection,
+                request.snapshot.capabilities.as_ref(),
+            )
+        } else {
+            SelectionObservation::default()
+        };
         if disposition == ControlDisposition::Accepted {
             self.mode = RollingLeaseMode::Explicit;
             self.settled_target = Some(SettledTarget {
@@ -6370,7 +6452,7 @@ impl RollingControlActor {
             platform,
             lease: self.snapshot_at(now),
             flow_ticket,
-            selection_changed,
+            selection,
         })
     }
 
@@ -11620,7 +11702,7 @@ mod tests {
             .control_at(started + Duration::from_secs(1), owned_control(&first))
             .expect("sequence 1 accepted");
         assert!(
-            !outcome.selection_changed,
+            !outcome.selection.changed,
             "a session that has just been created from an intent has not since \
              departed from it",
         );
@@ -11635,7 +11717,7 @@ mod tests {
             .control_at(started + Duration::from_secs(2), owned_control(&same))
             .expect("sequence 2 accepted");
         assert!(
-            !outcome.selection_changed,
+            !outcome.selection.changed,
             "an ordinary exchange must not spend the reads the gate exists to save",
         );
 
@@ -11645,7 +11727,7 @@ mod tests {
         let outcome = actor
             .control_at(started + Duration::from_secs(3), owned_control(&moved))
             .expect("sequence 3 accepted");
-        assert!(outcome.selection_changed, "the viewer picked another track");
+        assert!(outcome.selection.changed, "the viewer picked another track");
 
         // And it is a comparison against the *previous* selection, not a
         // latch: holding the new selection is not a fresh change.
@@ -11655,7 +11737,7 @@ mod tests {
             .control_at(started + Duration::from_secs(4), owned_control(&held))
             .expect("sequence 4 accepted");
         assert!(
-            !outcome.selection_changed,
+            !outcome.selection.changed,
             "the selection is now the previous one",
         );
     }
@@ -11693,7 +11775,7 @@ mod tests {
                 )
                 .expect("accepted");
             assert!(
-                !outcome.selection_changed,
+                !outcome.selection.changed,
                 "sequence {sequence}: an unchanged ask is unchanged however it \
                  was served",
             );
@@ -11721,15 +11803,65 @@ mod tests {
         let accepted = actor
             .control_at(started + Duration::from_secs(2), owned_control(&moved))
             .expect("sequence 2 accepted");
-        assert!(accepted.selection_changed);
+        assert!(accepted.selection.changed);
 
         let replayed = actor
             .control_at(started + Duration::from_secs(3), owned_control(&moved))
             .expect("sequence 2 replayed");
         assert_eq!(replayed.disposition, ControlDisposition::Replay);
         assert!(
-            !replayed.selection_changed,
+            !replayed.selection.changed,
             "one viewer action, one resolution",
+        );
+        assert!(
+            replayed.selection.capabilities.is_none(),
+            "and a replay reports no observation at all, not a stale one",
+        );
+    }
+
+    /// The capability document travels with the observation, and it is the
+    /// **retained** one.
+    ///
+    /// This is the property that decides whether the shadow measures anything
+    /// at all. Both shipped clients strip `capabilities` on every exchange
+    /// after the first when the document has not changed — exactly as the wire
+    /// permits — and the gate never fires on the first. So a consumer reading
+    /// this exchange's document would see `None` every single time it was
+    /// asked, and the metric would read zero forever while looking healthy.
+    #[test]
+    fn the_observation_carries_the_retained_capability_document() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let base = request();
+
+        let mut first = base.clone();
+        first.sequence = 1;
+        first.capabilities = first.capabilities.map(|mut caps| {
+            caps.dual_player_preparation = true;
+            caps
+        });
+        actor
+            .control_at(started + Duration::from_secs(1), owned_control(&first))
+            .expect("sequence 1 accepted");
+
+        // The exchange that actually changes something is a later one, and it
+        // carries no capabilities — which is what the clients send.
+        let mut moved = base.clone();
+        moved.sequence = 2;
+        moved.capabilities = None;
+        moved.selection.audio_track = Some(base.selection.audio_track.unwrap_or(0) + 1);
+        let outcome = actor
+            .control_at(started + Duration::from_secs(2), owned_control(&moved))
+            .expect("sequence 2 accepted");
+        assert!(outcome.selection.changed);
+        assert!(
+            outcome
+                .selection
+                .capabilities
+                .expect("the session was told once")
+                .dual_player_preparation,
+            "the retained document, not this exchange's absent one",
         );
     }
 
