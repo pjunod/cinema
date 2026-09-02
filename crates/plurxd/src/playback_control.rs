@@ -10023,6 +10023,18 @@ static ROLLING_LEASE_RENEWALS: [AtomicU64; 3] =
 static CONTROL_ACTIONS: [[AtomicU64; 3]; 4] = [const { [const { AtomicU64::new(0) }; 3] }; 4];
 /// Holds actually sent, by reason.
 static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+/// What M6 *would* do about a selection change, by axis and outcome.
+///
+/// Shadow: nothing is staged and no behaviour depends on this. The point is
+/// that `PREPARED_AXIS` and the throughput floor are currently arguments, and
+/// this is what turns them into measurements on real traffic before anything
+/// acts on them. In particular it is the only way to learn whether
+/// `throughput_unproven` refuses so often that the prepared path would never
+/// fire at all — a possibility the rule's own doc names and cannot settle.
+///
+/// Indexed `[axis][outcome]`. Axis order is `PreparationAxis`'s own; outcome
+/// is prepare, then the four `FallbackReason`s in declaration order.
+static PREPARATION_DECISIONS: [[AtomicU64; 5]; 5] = [const { [const { AtomicU64::new(0) }; 5] }; 5];
 /// Exchanges where production was held and the client had not declared the
 /// action, so it was told nothing. Watch this fall as clients roll out.
 static CONTROL_ACTIONS_SUPPRESSED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
@@ -10127,6 +10139,38 @@ fn platform_index(platform: ClientPlatform) -> usize {
     }
 }
 
+/// Record what M6 would have done, without doing it.
+///
+/// Called only when the actor says the selection moved, so the denominator is
+/// *viewer actions*, not exchanges. An `Unchanged` decision is not recorded at
+/// all: it means the selection moved on an axis this type cannot see —
+/// a seek, a different file — and counting it would put a bar labelled
+/// "nothing to do" beside four that mean something.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_preparation_decision(decision: PreparationDecision) {
+    let (axis, outcome) = match decision {
+        PreparationDecision::Unchanged => return,
+        PreparationDecision::Prepare { axis } => (axis, 0),
+        PreparationDecision::Fallback { axis, reason } => (
+            axis,
+            1 + match reason {
+                FallbackReason::ClientCannotPrepare => 0,
+                FallbackReason::AxisNotProven => 1,
+                FallbackReason::MultipleAxes => 2,
+                FallbackReason::ThroughputUnproven => 3,
+            },
+        ),
+    };
+    let axis = match axis {
+        PreparationAxis::ResolutionOrBitrate => 0,
+        PreparationAxis::AudioTrackOrOffset => 1,
+        PreparationAxis::SubtitleBurn => 2,
+        PreparationAxis::DeliveryMethod => 3,
+        PreparationAxis::DynamicRange => 4,
+    };
+    PREPARATION_DECISIONS[axis][outcome].fetch_add(1, Ordering::Relaxed);
+}
+
 /// Record what one accepted exchange's action was, and what it could not be.
 pub(crate) fn record_action(
     action: &ControlAction,
@@ -10208,6 +10252,37 @@ pub(crate) fn prometheus() -> String {
             output.push_str(&format!(
                 "plurx_playback_control_actions_total{{action=\"{action}\",platform=\"{platform}\"}} {}\n",
                 CONTROL_ACTIONS[action_index][platform_index].load(Ordering::Relaxed)
+            ));
+        }
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_decisions_total What M6 would do about a selection change, by axis and outcome. Shadow: nothing is staged.\n\
+         # TYPE plurx_playback_preparation_decisions_total counter\n",
+    );
+    for (axis_index, axis) in [
+        PreparationAxis::ResolutionOrBitrate,
+        PreparationAxis::AudioTrackOrOffset,
+        PreparationAxis::SubtitleBurn,
+        PreparationAxis::DeliveryMethod,
+        PreparationAxis::DynamicRange,
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (outcome_index, outcome) in [
+            "prepare",
+            FallbackReason::ClientCannotPrepare.as_str(),
+            FallbackReason::AxisNotProven.as_str(),
+            FallbackReason::MultipleAxes.as_str(),
+            FallbackReason::ThroughputUnproven.as_str(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            output.push_str(&format!(
+                "plurx_playback_preparation_decisions_total{{axis=\"{}\",outcome=\"{outcome}\"}} {}\n",
+                axis.as_str(),
+                PREPARATION_DECISIONS[axis_index][outcome_index].load(Ordering::Relaxed)
             ));
         }
     }
@@ -15299,6 +15374,78 @@ mod tests {
         };
         assert!(unavailable.is_valid_for_status(503));
         assert!(!unavailable.is_valid_for_status(409));
+    }
+
+    /// The shadow metric's full cross product is published from boot, and its
+    /// labels are the decision's own vocabulary.
+    ///
+    /// Published at zero rather than on first observation, because the useful
+    /// reading is a *ratio* — how much of the fallback volume is
+    /// `client_cannot_prepare` against `throughput_unproven` — and a series
+    /// that appears only once it is nonzero cannot be divided by one that has
+    /// not appeared yet.
+    #[test]
+    fn the_shadow_decision_metric_publishes_every_axis_and_outcome() {
+        let metrics = prometheus();
+        for axis in [
+            PreparationAxis::ResolutionOrBitrate,
+            PreparationAxis::AudioTrackOrOffset,
+            PreparationAxis::SubtitleBurn,
+            PreparationAxis::DeliveryMethod,
+            PreparationAxis::DynamicRange,
+        ] {
+            for outcome in [
+                "prepare",
+                FallbackReason::ClientCannotPrepare.as_str(),
+                FallbackReason::AxisNotProven.as_str(),
+                FallbackReason::MultipleAxes.as_str(),
+                FallbackReason::ThroughputUnproven.as_str(),
+            ] {
+                let series = format!(
+                    "plurx_playback_preparation_decisions_total{{axis=\"{}\",outcome=\"{outcome}\"}}",
+                    axis.as_str()
+                );
+                assert!(metrics.contains(&series), "missing {series}");
+            }
+        }
+    }
+
+    /// `Unchanged` is not an outcome, and recording it would put a bar
+    /// labelled "nothing to do" beside four that mean something.
+    ///
+    /// It is reachable: the actor gates on the *selection*, and a selection
+    /// can move on an axis `EffectiveSelection` cannot see — a seek, a
+    /// different file. The decision then correctly answers `Unchanged`, and
+    /// the right thing to do with that is nothing.
+    #[test]
+    fn an_unchanged_decision_is_not_recorded() {
+        let before = prometheus();
+        record_preparation_decision(PreparationDecision::Unchanged);
+        assert_eq!(
+            preparation_series_total(&before),
+            preparation_series_total(&prometheus()),
+        );
+
+        record_preparation_decision(PreparationDecision::Fallback {
+            axis: PreparationAxis::DynamicRange,
+            reason: FallbackReason::ThroughputUnproven,
+        });
+        assert_eq!(
+            preparation_series_total(&prometheus()),
+            preparation_series_total(&before) + 1,
+            "and a real decision is",
+        );
+    }
+
+    /// Sum every `plurx_playback_preparation_decisions_total` series. The
+    /// counters are process-global, so a test that asserted an absolute value
+    /// would depend on which other tests had run.
+    fn preparation_series_total(metrics: &str) -> u64 {
+        metrics
+            .lines()
+            .filter(|line| line.starts_with("plurx_playback_preparation_decisions_total{"))
+            .filter_map(|line| line.rsplit(' ').next()?.parse::<u64>().ok())
+            .sum()
     }
 
     #[test]
