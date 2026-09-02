@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["c6c35700", "43116bcd"]
+commits = ["01739b3a", "3b1d94e7"]
 points = ["cluster.auth", "core.media", "validation.framework"]
 checks = ["cluster-auth", "history-regressions"]
 reason = "The real three-voter Store regression commits a media-activation confirmation and then deliberately loses its acknowledgement, proving that the bounded idempotent transaction retry returns the already-committed route instead of surfacing a replicated-store timeout. The retry is restricted to the exact sentinel-to-final confirmation transaction, accepts both first-write and replay row counts only after validating the committed incarnation and route, and preserves failed-attempt plus successful-recovery metrics. The original user-cap replacement contract and the complete serial Store inventory remain retained by the cluster-auth gate."
