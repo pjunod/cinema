@@ -48,6 +48,7 @@ class SettingsStore(private val context: Context) {
         val PLAYBACK_QUALITY = stringPreferencesKey("playback_quality")
         val AUTO_SKIP = booleanPreferencesKey("auto_skip")
         val AUTOPLAY_NEXT = booleanPreferencesKey("autoplay_next")
+        val PLAYBACK_INFO_MODE = stringPreferencesKey("playback_info_mode")
         val OFFLINE_QUALITY = stringPreferencesKey("offline_quality")
         val OFFLINE_NETWORK = stringPreferencesKey("offline_network")
     }
@@ -69,6 +70,7 @@ class SettingsStore(private val context: Context) {
                 playbackQuality = PlaybackQuality.fromStorage(p[Keys.PLAYBACK_QUALITY]),
                 autoSkip = p[Keys.AUTO_SKIP] ?: false,
                 autoplayNext = p[Keys.AUTOPLAY_NEXT] ?: true,
+                playbackInfoMode = p[Keys.PLAYBACK_INFO_MODE] ?: "standard",
                 offlineQuality = OfflineQuality.fromStorage(p[Keys.OFFLINE_QUALITY]),
                 offlineNetwork = OfflineNetwork.fromStorage(p[Keys.OFFLINE_NETWORK]),
             ),
@@ -151,6 +153,7 @@ class SettingsStore(private val context: Context) {
             p[Keys.PLAYBACK_QUALITY] = value.playbackQuality.storageValue
             p[Keys.AUTO_SKIP] = value.autoSkip
             p[Keys.AUTOPLAY_NEXT] = value.autoplayNext
+            p[Keys.PLAYBACK_INFO_MODE] = value.playbackInfoMode
             p[Keys.OFFLINE_QUALITY] = value.offlineQuality.storageValue
             p[Keys.OFFLINE_NETWORK] = value.offlineNetwork.storageValue
         }

@@ -420,6 +420,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setAutoplayNext(enabled: Boolean) = updatePreferences { copy(autoplayNext = enabled) }
 
+    fun setPlaybackInfoMode(mode: String) = updatePreferences { copy(playbackInfoMode = mode) }
+
     fun setOfflineQuality(quality: OfflineQuality) =
         updatePreferences { copy(offlineQuality = quality) }
 

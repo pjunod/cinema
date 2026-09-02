@@ -1,4 +1,5 @@
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@file:kotlin.OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 
 package tv.plurx.app.player
 
@@ -8,6 +9,7 @@ import android.net.Uri
 import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -125,6 +128,7 @@ class Controller(
     val player: ExoPlayer = builtPlayer.player
 
     private val progressiveMediaOrigin = builtPlayer.progressiveMediaOrigin
+    val observedBitsPerSecond: Long? get() = progressiveMediaOrigin.currentObservedBitsPerSecond()
 
     var audioOffsetMs: Long = initialAudioOffsetMs.coerceIn(-15_000, 15_000)
         private set
@@ -338,6 +342,10 @@ class Controller(
     )
     private val stallWatchdogJob: Job
     private var statusPollingJob: Job? = null
+    var playbackStallCount by mutableIntStateOf(0)
+        private set
+    var lastTimeToFirstFrameMs by mutableStateOf<Long?>(null)
+        private set
 
     /** Stable for this player instance — the server's supersession key. */
     private val playbackId = UUID.randomUUID().toString()
@@ -550,7 +558,7 @@ class Controller(
 
         override fun onRenderedFirstFrame() {
             establishedPlayback = true
-            playbackTelemetry.firstFrame(monotonicNowMs())
+            lastTimeToFirstFrameMs = playbackTelemetry.firstFrame(monotonicNowMs())?.elapsedMs
         }
 
         override fun onTracksChanged(tracks: Tracks) {
@@ -581,6 +589,7 @@ class Controller(
                 playbackControlPlayerChanged()
                 val measurement = playbackTelemetry.sampleStall(establishedPlayback, monotonicNowMs())
                 if (measurement != null) {
+                    playbackStallCount += 1
                     onStall(measurement.positionMs)
                 }
                 delay(1_000)
@@ -1681,6 +1690,8 @@ fun TrackMenu(
                 .fillMaxWidth(0.92f)
                 .background(Color(0xFF141418))
                 .verticalScroll(rememberScrollState())
+                .focusGroup()
+                .focusProperties { onExit = { cancelFocusChange() } }
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
