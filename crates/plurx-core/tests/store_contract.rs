@@ -450,6 +450,11 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
     "put_fragment_index",
     "fragment_index",
     "forget_fragment_index",
+    // Why a pipeline has NO index — the other half of the same question, and
+    // what stops the background pass spending the same whole-file read every
+    // wrap of the library on a file that has already answered.
+    "record_fragment_index_outcome",
+    "fragment_index_outcome",
     // The orphan sweep's two halves. Node-local on one side and replicated on
     // the other, which is the reason the sweep exists rather than a hook in
     // `delete_files`.
@@ -12226,7 +12231,9 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
-             -- v44's permanent recovery-guard ledger, then v43's conversion ledger.
+             -- v45's negative fragment index, then v44's permanent
+             -- recovery-guard ledger, then v43's conversion ledger.
+             DROP TABLE fragment_index_outcomes;
              DROP TABLE dv_recovery_guards;
              DROP TABLE dv_conversions;
              -- v38's Dolby Vision columns. A fixture that stamps user_version
@@ -13983,7 +13990,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 288, "review the Store method count");
+    assert_eq!(declared.len(), 290, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -17509,6 +17516,209 @@ async fn fragment_index_contract_runs_through_dyn_store() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: forget it twice: {error}")),
             "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fragment_index_outcome_contract_runs_through_dyn_store() {
+    use plurx_core::segplan::IndexRefusal;
+
+    for_each_backend(|store, backend| async move {
+        let identity = SourceIdentity::new(4_096, 1_700_000_000_000, "stripped");
+        assert_eq!(
+            store
+                .fragment_index_outcome(42, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a missing outcome: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        // Unsupported is terminal: nothing but the file changing can alter the
+        // answer, so the indexer must never be told to try again.
+        let refused = store
+            .record_fragment_index_outcome(
+                42,
+                &identity,
+                IndexRefusal::Unsupported,
+                "no parseable keyframes",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record a refusal: {error}"));
+        assert_eq!(refused.next_attempt_at_ms, i64::MAX, "backend {backend}");
+        assert_eq!(refused.attempts, 1, "backend {backend}");
+        let read = store
+            .fragment_index_outcome(42, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read the refusal: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the refusal it just recorded"));
+        assert_eq!(read.reason, "no parseable keyframes", "backend {backend}");
+        assert!(
+            !read.is_due(i64::MAX),
+            "backend {backend}: an unsupported source is never due again"
+        );
+
+        // Truncated is a property of the attempt, so it backs off rather than
+        // stopping — and the attempt count belongs to the identity, which is
+        // what makes the backoff grow instead of resetting every pass.
+        let first = store
+            .record_fragment_index_outcome(
+                43,
+                &identity,
+                IndexRefusal::Truncated { rows: 412 },
+                "budget expired",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record a truncation: {error}"));
+        let second = store
+            .record_fragment_index_outcome(
+                43,
+                &identity,
+                IndexRefusal::Truncated { rows: 900 },
+                "budget expired",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record it again: {error}"));
+        assert_eq!(
+            (first.attempts, second.attempts),
+            (1, 2),
+            "backend {backend}"
+        );
+        assert!(
+            second.next_attempt_at_ms > first.next_attempt_at_ms,
+            "backend {backend}: the wait has to grow, or one slow mount retries forever"
+        );
+        assert!(
+            second.is_due(i64::MAX) && !second.is_due(0),
+            "backend {backend}: due later, not now"
+        );
+        assert_eq!(
+            store
+                .fragment_index_outcome(43, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reread the truncation: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: the truncation"))
+                .refusal,
+            IndexRefusal::Truncated { rows: 900 },
+            "backend {backend}: the row count is the finding, so it is kept"
+        );
+
+        // Invalidated by mismatch, exactly like the index itself: a replaced
+        // file is a new question, not a repeat of the old answer.
+        let replaced = SourceIdentity::new(8_192, 1_700_000_000_000, "stripped");
+        assert_eq!(
+            store
+                .fragment_index_outcome(43, &replaced)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a replaced source: {error}")),
+            None,
+            "backend {backend}"
+        );
+        assert_eq!(
+            store
+                .record_fragment_index_outcome(
+                    43,
+                    &replaced,
+                    IndexRefusal::Truncated { rows: 1 },
+                    "budget expired",
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: record against the new bytes: {error}"))
+                .attempts,
+            1,
+            "backend {backend}: the replacement does not inherit its predecessor's attempts"
+        );
+
+        // A build that succeeds retracts its own refusal. Both tables
+        // answering for one identity is what would keep a playable title
+        // badged as refused.
+        let index = FragmentIndex::new(
+            16_000,
+            vec![IndexRow {
+                dts: 0,
+                duration: 28_016,
+                bytes: 104_452,
+                video_bytes: 103_836,
+                class: CutClass::CleanIdr,
+            }],
+            "abc123",
+            replaced.clone(),
+        );
+        store
+            .put_fragment_index(43, &index)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: store the index: {error}"));
+        assert_eq!(
+            store
+                .fragment_index_outcome(43, &replaced)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: outcome after a build: {error}")),
+            None,
+            "backend {backend}: a successful build retracts the refusal it recorded"
+        );
+
+        // The orphan sweep has to see a file that holds nothing BUT a refusal
+        // — it is exactly the row nothing else would ever collect.
+        let held = store
+            .vod_row_file_ids(512)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list held rows: {error}"));
+        assert!(
+            held.contains(&42),
+            "backend {backend}: a refusal-only file must be sweepable, got {held:?}"
+        );
+        assert!(
+            store
+                .forget_fragment_index(42)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget the refusal: {error}")),
+            "backend {backend}: forgetting a file takes its refusals too"
+        );
+        assert_eq!(
+            store
+                .fragment_index_outcome(42, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: outcome after forget: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        // The deadline is in the same unit the indexer compares it against.
+        //
+        // Both backends reach this table through the same SQL, but not through
+        // the same clock: the hiqlite store's injected `Clock` answers in unix
+        // *seconds* (it exists for the auth-activity refresh), and passing it
+        // as a `now_ms` produced a deadline a thousand times too small — always
+        // in the past, so the backoff was inert on exactly the deployment
+        // shape where the queue matters. A relative assertion cannot see that;
+        // this one is absolute.
+        let wall_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("a clock after 1970")
+                .as_millis(),
+        )
+        .expect("unix milliseconds fit i64");
+        let scaled = store
+            .record_fragment_index_outcome(
+                99,
+                &identity,
+                IndexRefusal::Truncated { rows: 7 },
+                "budget expired",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record for the clock check: {error}"));
+        assert!(
+            (scaled.updated_at_ms - wall_ms).abs() < 60_000,
+            "backend {backend}: stamped {} against a wall clock of {wall_ms} —              a store whose clock is in the wrong unit produces a deadline the              indexer reads as always due",
+            scaled.updated_at_ms
+        );
+        assert!(
+            scaled.next_attempt_at_ms - scaled.updated_at_ms >= 25 * 60 * 1_000,
+            "backend {backend}: the first truncated retry waits about half an              hour, not {} ms",
+            scaled.next_attempt_at_ms - scaled.updated_at_ms
         );
     })
     .await;

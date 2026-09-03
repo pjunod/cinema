@@ -53,12 +53,16 @@ type SharedIndexProgress = Arc<IndexProgress>;
 pub enum IndexOutcome {
     /// A complete pass over the file.
     Built(Box<FragmentIndex>),
-    /// The pipe ended before the file did. Not persisted, not an error the
-    /// operator needs to see — a NAS read that went wrong, and the next scan
-    /// tries again.
+    /// The pipe ended before the file did — a NAS read that went wrong, or a
+    /// per-file budget too optimistic for this disk on this day. Recorded as a
+    /// [`plurx_core::segplan::FragmentIndexOutcome`] with how far it got and a
+    /// backoff, because a pass that repeats a thirty-minute whole-file read
+    /// every wrap of the library is how one slow mount starves every other
+    /// title in it.
     Truncated { reason: String, rows: usize },
     /// This file cannot be indexed by this path at all, and retrying will not
-    /// change that. The caller records it so the background job stops asking.
+    /// change that. Recorded as terminal until the file's own identity
+    /// changes, so the background job stops asking.
     Unsupported(String),
 }
 

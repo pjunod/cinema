@@ -941,8 +941,11 @@ impl EffectiveSelection {
 ///   come from the caps document through `review_client_plan`, which a
 ///   selection does not carry, so they are carried through untouched. A
 ///   selection change on those axes means *re-review*, which nothing does yet
-///   — and nothing is lost today, because `decide_preparation` refuses both
-///   axes anyway. It will matter the moment the capability is narrowed.
+///   — and nothing is lost today, because `decide_preparation` still refuses
+///   every set containing `DynamicRange`, and admits `DeliveryMethod` only
+///   alongside a resolution change toward a server-selected successor. It
+///   will matter the moment either the capability is narrowed or a grade row
+///   earns a receipt.
 /// * **Only `SubtitleMode::Burn` is a burn.** Off, Native and Overlay are not
 ///   video replacements at all (plan §5.2). Mapping a track into
 ///   `subtitle_burn` for any of them would turn every native-subtitle change
@@ -951,9 +954,12 @@ impl EffectiveSelection {
 ///   height.** A copy has no rung — asking for one is asking for something a
 ///   copy cannot be. The source height is the exception because that *is* what
 ///   a copy delivers: asking for it is asking for what you already have. The
-///   resulting `DeliveryMethod` crossing is then refused by the decision,
-///   which is the point: the candidate says what was asked for, and the
-///   decision says no.
+///   resulting `DeliveryMethod` crossing is then the decision's to rule on,
+///   which is the point: the candidate says what was asked for, and
+///   `PREPARED_AXIS_SETS` says whether that transition has a receipt. Since
+///   2026-09-03 it does, in this direction — a copy dropping to a transcoded
+///   rung crosses `{ResolutionOrBitrate, DeliveryMethod}`, which is the
+///   measured pair.
 ///
 ///   The comparison is against `source_height`, **never** against the resolved
 ///   `height`. A 1080 ask on a 2160 source resolves to 1080 — it is already a
@@ -1177,7 +1183,7 @@ impl PreparationConditions {
 /// Comparing an encoder's answer against a request would fail in one of two
 /// ways, both bad: a candidate given no grade lets a real grade change
 /// classify as resolution-only and be **prepared**, which is exactly what
-/// `PREPARED_AXIS` exists to prevent; a candidate given the grade its body
+/// `PREPARED_AXIS_SETS` exists to prevent; a candidate given the grade its body
 /// asked for reads as a crossing on *every* exchange of a session whose HDR10
 /// rung the encoder refused, so that viewer never gets a prepared handoff at
 /// all.
@@ -1235,8 +1241,55 @@ pub(crate) struct RecipeView<'a> {
     pub grade: GradeIntent,
 }
 
-/// The only axis M6 prepares across, and the reason it is one rather than a
-/// set.
+/// A set of axes a transition crosses, as a bitmask over `PreparationAxis`.
+///
+/// Small and `Copy` because it is built inside `decide_preparation`'s closure
+/// and compared against a fixed table; five axes never need more.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreparationAxisSet(u8);
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl PreparationAxisSet {
+    const EMPTY: Self = Self(0);
+
+    const fn bit(axis: PreparationAxis) -> u8 {
+        1 << (axis as u8)
+    }
+
+    const fn of(axes: &[PreparationAxis]) -> Self {
+        let mut mask = 0;
+        let mut index = 0;
+        while index < axes.len() {
+            mask |= Self::bit(axes[index]);
+            index += 1;
+        }
+        Self(mask)
+    }
+
+    fn with(self, axis: PreparationAxis) -> Self {
+        Self(self.0 | Self::bit(axis))
+    }
+
+    fn holds(self, axis: PreparationAxis) -> bool {
+        self.0 & Self::bit(axis) != 0
+    }
+}
+
+/// A `u8` holds eight axes and `PreparationAxis` has five, but a ninth variant
+/// would be a *silent* defect rather than a loud one: `of` is `const` and would
+/// fail to compile, while `with` shifts at runtime — a panic under
+/// debug assertions, and in release Rust masks the shift amount, so axis 8
+/// would alias `ResolutionOrBitrate` and a single crossing on the new axis
+/// would compare equal to the first row and be **prepared**. So assert the
+/// ceiling here, where adding the variant is what breaks the build.
+const _: () = assert!(
+    (PreparationAxis::DynamicRange as u8) < 8,
+    "PreparationAxisSet is a u8 bitmask; the hardest axis must fit in it"
+);
+
+/// Why M6 prepares across a fixed table of axis *combinations* rather than a
+/// rule, and why the table is short.
 ///
 /// M5.5 measured every platform **recipe- and device-dependent**, and in both
 /// directions: Safari passes same-codec and fails codec/HDR, while the
@@ -1269,11 +1322,80 @@ pub(crate) struct RecipeView<'a> {
 /// Android's platform-wide `false` is what holds that device back today. The
 /// capability keyed by axis **and device class** is therefore not a nice-to-
 /// have for unlocking Android's two phones; it is what has to exist before
-/// this constant is safe for the television class. Recorded here rather than
-/// argued around, because this constant is the entire server-side expression
+/// this table is safe for the television class. Recorded here rather than
+/// argued around, because this table is the entire server-side expression
 /// of the restriction and whoever narrows the capability will read it.
-#[cfg_attr(not(test), allow(dead_code))]
-const PREPARED_AXIS: PreparationAxis = PreparationAxis::ResolutionOrBitrate;
+///
+/// **The table itself.** Each row is a measurement, not a rule.
+///
+/// **`{ResolutionOrBitrate}`** — M5.5's same-codec, same-grade case, "a
+/// resolution/bitrate change only". Apple 20/20 on both required devices,
+/// 2026-09-01.
+///
+/// **`{ResolutionOrBitrate, DeliveryMethod}`** — the product the fleet
+/// actually produces, measured 2026-09-03 on the Apple TV 4K (3rd generation):
+/// a 2160p direct-play source against a 1080p server-selected transcode, so
+/// height and delivery method move together. 20/20 clean commits, zero failed
+/// admissions, zero predecessor and post-commit stalls, on a 40 Mbit/s link —
+/// 2.20× the predecessor's 18.183 Mbit/s, above the floor
+/// `headroom_refusal` enforces. See
+/// [`M6-AXIS-CASE-HANDOFF.md`](../../../docs/M6-AXIS-CASE-HANDOFF.md).
+///
+/// **Why this list and not a rule.** Shadow mode measured that a pure
+/// resolution change does not occur on a real library at all — the top rung
+/// direct-plays and the lower rungs transcode, so the delivery method moves
+/// with the height every time. Widening on that observation *alone* would have
+/// been the reasoning shadow mode exists to replace; the entry above exists
+/// because someone ran the case on hardware and it passed.
+///
+/// **What is deliberately absent.** The grade axis: the 2026-09-03 run was SDR
+/// H.264 throughout, so `{ResolutionOrBitrate, DeliveryMethod, DynamicRange}`
+/// — which is what an HDR or Dolby Vision title's quality change actually
+/// crosses — remains unmeasured and stays under `multiple_axes`. Audio and
+/// burned subtitles were never measured in combination with anything. Add a
+/// row here only with a receipt, and say which run.
+///
+/// The device cohort is a second, unexpressed restriction: both entries were
+/// proven on Apple only, and the capability document cannot yet say *yes for
+/// this recipe on this device class* — M6 handoff §3. Android's platform-wide
+/// `false` is what holds that device back today, and narrowing the capability
+/// by axis and device class is what has to exist before this table is safe for
+/// the television class generally.
+const PREPARED_AXIS_SETS: [PreparationAxisSet; 2] = [
+    PreparationAxisSet::of(&[PreparationAxis::ResolutionOrBitrate]),
+    PreparationAxisSet::of(&[
+        PreparationAxis::ResolutionOrBitrate,
+        PreparationAxis::DeliveryMethod,
+    ]),
+];
+
+/// A set has no direction, and the delivery-method row was measured in one.
+///
+/// [`PreparationConditions::headroom_refusal`] computes its floor entirely
+/// from the **predecessor's** delivered rate, because the successor's rate is
+/// not knowable from an [`EffectiveSelection`] — it carries a height and no
+/// bitrate. That concession was written when the only admitted axis was
+/// resolution/bitrate, where both sides are ladder rungs and the successor is
+/// bounded by the encoder's own target. Admitting `DeliveryMethod` breaks it
+/// in one direction: a successor that **direct-plays** carries the source
+/// file's bitrate, which nothing bounds. A 1080p transcode delivering
+/// 4 Mbit/s clears a 8 Mbit/s floor and then asks a 10 Mbit/s link to carry a
+/// 40 Mbit/s remux beside it — the stall this feature exists to prevent.
+///
+/// The 2026-09-03 run measured the other direction: a 2160p direct play
+/// (18.183 Mbit/s, the predecessor) against a 1080p server-selected transcode.
+/// There the successor is a rung the server chose, so the predecessor's rate
+/// is the conservative side of the comparison.
+///
+/// So the pair is admitted **toward** a server-selected successor and refused
+/// away from one, which is the direction that was run. The reverse — a viewer
+/// raising quality back to a direct-playing source — books `axis_not_proven`
+/// until either someone runs it or the floor learns the successor's rate.
+/// Pure `{ResolutionOrBitrate}` is unaffected: it never changes the method, so
+/// whatever the successor is, the predecessor already is.
+fn successor_rate_is_bounded(crossed: PreparationAxisSet, candidate: &EffectiveSelection) -> bool {
+    !crossed.holds(PreparationAxis::DeliveryMethod) || candidate.codec == "server_selected"
+}
 
 /// Decide, from the delivered selection and a candidate one, whether M6
 /// prepares.
@@ -1341,6 +1463,9 @@ fn decide_preparation_given_client(
     let (delivered, candidate) = (delivered.selection, candidate.selection);
     let mut crossed: Option<PreparationAxis> = None;
     let mut multiple = false;
+    // The *set* that moved, not only the hardest member. A combination is
+    // admitted or refused as a whole, because that is how it was measured.
+    let mut crossed_set = PreparationAxisSet::EMPTY;
     // The hardest axis wins, by the enum's own ordering rather than by the
     // order these happen to be written. Both plan §5.2 and roadmap §3.3 rank
     // resolution/bitrate most transparent, then audio and burned subtitles,
@@ -1348,6 +1473,7 @@ fn decide_preparation_given_client(
     // regrouping these statements cannot silently change an operator metric.
     let mut cross = |axis: PreparationAxis| {
         multiple |= crossed.is_some();
+        crossed_set = crossed_set.with(axis);
         crossed = Some(crossed.map_or(axis, |held: PreparationAxis| held.max(axis)));
     };
 
@@ -1376,11 +1502,13 @@ fn decide_preparation_given_client(
     let Some(axis) = crossed else {
         return PreparationDecision::Unchanged;
     };
-    if multiple {
-        // Each axis is separately measured and a combination is measured by
-        // nothing. M5.5 ran two cases, not their product, and the Google TV's
-        // inversion is exactly the evidence that axes do not compose the way
-        // reasoning would predict.
+    let admitted = PREPARED_AXIS_SETS.contains(&crossed_set)
+        && successor_rate_is_bounded(crossed_set, candidate);
+    if multiple && !admitted {
+        // A combination nobody measured is measured by nothing. M5.5 ran two
+        // single-axis cases, not their product, and the Google TV's inversion
+        // is exactly the evidence that axes do not compose the way reasoning
+        // would predict.
         //
         // Ranked above the capability deliberately: this is the fact that
         // would still be true after a coordinated client release flipped the
@@ -1399,7 +1527,7 @@ fn decide_preparation_given_client(
             reason: FallbackReason::ClientCannotPrepare,
         };
     }
-    if axis != PREPARED_AXIS {
+    if !admitted {
         return PreparationDecision::Fallback {
             axis,
             reason: FallbackReason::AxisNotProven,
@@ -10422,7 +10550,7 @@ static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// What M6 *would* do about a selection change, by platform, axis and outcome.
 ///
 /// Shadow: nothing is staged and no behaviour depends on this. The point is
-/// that `PREPARED_AXIS` and the throughput floor are currently arguments, and
+/// that `PREPARED_AXIS_SETS` and the throughput floor are currently arguments, and
 /// this is what turns them into measurements on real traffic before anything
 /// acts on them.
 ///
@@ -16664,7 +16792,7 @@ mod tests {
     /// Both shipped clients hardcode `dual_player_preparation` false, so on
     /// today's fleet every single-axis transition books
     /// `client_cannot_prepare` — which is true, and says nothing about whether
-    /// `PREPARED_AXIS` and the throughput floor would then refuse anyway. The
+    /// `PREPARED_AXIS_SETS` and the throughput floor would then refuse anyway. The
     /// first production datapoint (m6, 2026-09-02) read exactly that.
     #[test]
     fn the_counterfactual_reaches_the_rules_the_client_gate_hides() {
@@ -17150,6 +17278,226 @@ mod tests {
         );
     }
 
+    /// The measured product: height and delivery method moving together.
+    ///
+    /// This is the transition a viewer's quality change actually makes — the
+    /// top rung direct-plays and the lower rungs transcode, so the delivery
+    /// method moves with the height every time, and shadow mode measured that
+    /// a pure resolution change does not occur on a real library at all.
+    ///
+    /// Admitted because it was **run**, not because that observation made it
+    /// look necessary: Apple TV 4K (3rd generation), 2026-09-03, 20/20 clean
+    /// commits with zero failed admissions and zero predecessor or
+    /// post-commit stalls, on a 40 Mbit/s link against an 18.183 Mbit/s
+    /// predecessor — 2.20×, above the floor `headroom_refusal` enforces. An
+    /// earlier attempt at 30 Mbit/s (1.65×) failed eight of twenty and was
+    /// discarded as measuring a transition the server would itself refuse.
+    #[test]
+    fn resolution_together_with_delivery_method_is_prepared() {
+        let caps = can_prepare(true);
+        let mut transcoded = playing(1080);
+        transcoded.codec = "server_selected".to_owned();
+        let mut direct = playing(2160);
+        direct.codec = "source".to_owned();
+
+        assert_eq!(
+            decide_preparation(view(&direct), view(&transcoded), Some(&caps), roomy()),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::DeliveryMethod,
+            },
+            "the axis label stays the hardest member, so the metric is comparable",
+        );
+        // Not back, though — `raising_quality_back_to_a_direct_playing_source`
+        // owns that case, and it is refused.
+        // The throughput floor still governs it: admitted is not exempt.
+        assert_eq!(
+            decide_preparation(
+                view(&direct),
+                view(&transcoded),
+                Some(&caps),
+                PreparationConditions {
+                    observed_download_bps: Some(12_000_000),
+                    delivered_bps: Some(12_000_000),
+                },
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DeliveryMethod,
+                reason: FallbackReason::ThroughputInsufficient,
+            },
+            "the 30 Mbit run failed here, and that is the rule working",
+        );
+        // So does the capability — and this is the one transition where the
+        // two counters now disagree, which is the whole reason the
+        // counterfactual exists. Before the pair was admitted both read
+        // `multiple_axes`; now the production decision reads
+        // `client_cannot_prepare` and the counterfactual reads `prepare`, and
+        // that difference is the volume a client release would unlock.
+        assert_eq!(
+            decide_preparation(
+                view(&direct),
+                view(&transcoded),
+                Some(&can_prepare(false)),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DeliveryMethod,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+        );
+        assert_eq!(
+            decide_preparation_after_client_release(view(&direct), view(&transcoded), roomy()),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::DeliveryMethod,
+            },
+            "the counterfactual is what reports the unlocked volume",
+        );
+    }
+
+    /// A set has no direction; the run did, and the floor is blind to the
+    /// successor's rate.
+    ///
+    /// `headroom_refusal` doubles the **predecessor's** delivered rate,
+    /// because an `EffectiveSelection` carries no bitrate. Toward a
+    /// server-selected successor that is conservative — the server picked the
+    /// rung. Away from one it is not: a direct-playing successor carries the
+    /// source file's own bitrate, which nothing bounds, so a 4 Mbit/s
+    /// transcode can clear the floor and then ask the link for a 40 Mbit/s
+    /// remux beside it. Only the measured direction is admitted.
+    #[test]
+    fn raising_quality_back_to_a_direct_playing_source_is_not_admitted() {
+        let caps = can_prepare(true);
+        let mut direct = playing(2160);
+        direct.codec = "source".to_owned();
+        let mut transcoded = playing(1080);
+        transcoded.codec = "server_selected".to_owned();
+
+        assert_eq!(
+            decide_preparation(view(&transcoded), view(&direct), Some(&caps), roomy()),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DeliveryMethod,
+                reason: FallbackReason::MultipleAxes,
+            },
+            "the successor's rate is unbounded in this direction and nobody ran it",
+        );
+        // The rule is about the successor's method, not about going up: a
+        // higher rung that is still server-selected stays admitted.
+        let mut higher_rung = playing(1440);
+        higher_rung.codec = "server_selected".to_owned();
+        assert_eq!(
+            decide_preparation(view(&direct), view(&higher_rung), Some(&caps), roomy()),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::DeliveryMethod,
+            },
+        );
+        // And a pure resolution change never touches the method, so the
+        // direction rule cannot reach it in either direction.
+        assert_eq!(
+            decide_preparation(
+                view(&playing(1080)),
+                view(&playing(2160)),
+                Some(&caps),
+                roomy()
+            ),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::ResolutionOrBitrate,
+            },
+        );
+    }
+
+    /// The bitmask is exact-match, and order-independent.
+    ///
+    /// `decide_preparation` builds the set in the order its comparisons happen
+    /// to be written — `DeliveryMethod` first, `ResolutionOrBitrate` last —
+    /// while the table is written the other way round. If `of` and `with` were
+    /// not order-independent the admitted pair would never match, and the
+    /// widening would be a no-op that every test above still passed.
+    #[test]
+    fn the_axis_set_is_an_exact_order_independent_match() {
+        use PreparationAxis::{
+            AudioTrackOrOffset, DeliveryMethod, DynamicRange, ResolutionOrBitrate, SubtitleBurn,
+        };
+
+        assert_eq!(
+            PreparationAxisSet::of(&[ResolutionOrBitrate, DeliveryMethod]),
+            PreparationAxisSet::EMPTY
+                .with(DeliveryMethod)
+                .with(ResolutionOrBitrate),
+        );
+        assert_eq!(
+            PreparationAxisSet::EMPTY
+                .with(ResolutionOrBitrate)
+                .with(ResolutionOrBitrate),
+            PreparationAxisSet::of(&[ResolutionOrBitrate]),
+            "crossing one axis twice is still one axis",
+        );
+        // A superset of an admitted row is not admitted: `contains` compares
+        // whole masks, which is what keeps the HDR triple out.
+        assert!(!PREPARED_AXIS_SETS.contains(&PreparationAxisSet::of(&[
+            ResolutionOrBitrate,
+            DeliveryMethod,
+            DynamicRange
+        ])));
+        assert!(!PREPARED_AXIS_SETS.contains(&PreparationAxisSet::EMPTY));
+        for axis in [
+            AudioTrackOrOffset,
+            SubtitleBurn,
+            DeliveryMethod,
+            DynamicRange,
+        ] {
+            assert!(
+                !PREPARED_AXIS_SETS.contains(&PreparationAxisSet::of(&[axis])),
+                "{} alone has no receipt",
+                axis.as_str(),
+            );
+        }
+        assert!(
+            PreparationAxisSet::of(&[ResolutionOrBitrate, DeliveryMethod]).holds(DeliveryMethod)
+        );
+        assert!(!PreparationAxisSet::of(&[ResolutionOrBitrate]).holds(DeliveryMethod));
+    }
+
+    /// The grade was not in the measured product, and adding it is not implied.
+    ///
+    /// The 2026-09-03 run was SDR H.264 throughout. An HDR or Dolby Vision
+    /// title's quality change crosses resolution, delivery method **and**
+    /// grade, and nobody has run that. It stays `multiple_axes`, which is what
+    /// stops a passing SDR receipt from being read as permission for the
+    /// harder case.
+    #[test]
+    fn adding_the_grade_to_the_measured_product_is_not_admitted() {
+        let caps = can_prepare(true);
+        let mut direct = playing(2160);
+        direct.codec = "source".to_owned();
+        let mut transcoded = playing(1080);
+        transcoded.codec = "server_selected".to_owned();
+
+        assert_eq!(
+            decide_preparation(
+                view(&direct),
+                view_at(&transcoded, hdr10()),
+                Some(&caps),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DynamicRange,
+                reason: FallbackReason::MultipleAxes,
+            },
+            "resolution + delivery + grade is the HDR case, and it is unmeasured",
+        );
+        // Nor does the pair admit some *other* pair that happens to be two.
+        let mut audio = playing(1080);
+        audio.codec = "server_selected".to_owned();
+        audio.audio_track = Some(1);
+        assert_eq!(
+            decide_preparation(view(&direct), view(&audio), Some(&caps), roomy()),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DeliveryMethod,
+                reason: FallbackReason::MultipleAxes,
+            },
+            "delivery + audio + resolution was never run either",
+        );
+    }
+
     /// Every other axis falls back even on a capable client, and names itself.
     #[test]
     fn the_unproven_axes_fall_back_and_name_themselves() {
@@ -17336,8 +17684,9 @@ mod tests {
             },
             "method, height and grade all move; the hardest names it",
         );
-        // A copy with no Dolby Vision to lose crosses method and height only,
-        // and then the delivery method is the hardest axis moving.
+        // A copy with no Dolby Vision to lose crosses method and height only.
+        // That pair is the set the 2026-09-03 hardware run admitted, so it
+        // prepares, and the delivery method is the hardest axis moving.
         let plain = session_request(SessionKind::Copy {
             aac: false,
             preserve_dolby_vision: false,
@@ -17364,9 +17713,8 @@ mod tests {
                 Some(&can_prepare(true)),
                 roomy(),
             ),
-            PreparationDecision::Fallback {
+            PreparationDecision::Prepare {
                 axis: PreparationAxis::DeliveryMethod,
-                reason: FallbackReason::MultipleAxes,
             },
         );
     }
@@ -17578,11 +17926,15 @@ mod tests {
     /// The hardest axis names the transition, by the enum's ordering rather
     /// than by which comparison happens to be written first — so regrouping
     /// those statements cannot silently change what an operator reads.
+    ///
+    /// Resolution together with delivery method is deliberately absent here:
+    /// that pair is an admitted set (`PREPARED_AXIS_SETS`), and
+    /// `resolution_together_with_delivery_method_is_prepared` owns it.
     #[test]
-    fn two_axes_at_once_are_never_prepared_and_the_hardest_names_them() {
+    fn an_unadmitted_pair_is_never_prepared_and_the_hardest_names_it() {
         let caps = can_prepare(true);
-        let mut method_and_height = playing(1080);
-        method_and_height.codec = "source".to_owned();
+        let mut audio_and_height = playing(1080);
+        audio_and_height.audio_track = Some(1);
         let mut audio_and_burn = playing(2160);
         audio_and_burn.audio_track = Some(1);
         audio_and_burn.subtitle_burn = Some(3);
@@ -17594,7 +17946,11 @@ mod tests {
         everything.subtitle_burn = Some(1);
 
         for (candidate, grade, axis) in [
-            (&method_and_height, sdr(), PreparationAxis::DeliveryMethod),
+            (
+                &audio_and_height,
+                sdr(),
+                PreparationAxis::AudioTrackOrOffset,
+            ),
             (&audio_and_burn, sdr(), PreparationAxis::SubtitleBurn),
             (&burn, hdr10(), PreparationAxis::DynamicRange),
             (&everything, hdr10(), PreparationAxis::DynamicRange),

@@ -110,6 +110,69 @@ impl SourceIdentity {
     }
 }
 
+/// Why one (file, pipeline) has no fragment index.
+///
+/// The two outcomes an index build can reach short of success, and they mean
+/// opposite things about trying again. `Unsupported` is a property of the
+/// bytes: this file cannot be indexed by this pipeline, and nothing short of
+/// the file changing will alter that. `Truncated` is a property of the
+/// *attempt* — the per-file budget is a wall-clock guess and a slow mount can
+/// pass on a quiet day — so it is worth another try later, and worth recording
+/// how far it got, because "truncated at 3,900 rows" and "truncated at 12" are
+/// different findings about the same file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexRefusal {
+    /// The build ran out of budget with this many rows in hand.
+    Truncated { rows: u32 },
+    /// The build cannot succeed for this source.
+    Unsupported,
+}
+
+impl IndexRefusal {
+    /// The stored spelling, shared with the cluster queue's `last_error_code`
+    /// so an operator greps one word across both layers.
+    pub const fn code(self) -> &'static str {
+        match self {
+            IndexRefusal::Truncated { .. } => "truncated",
+            IndexRefusal::Unsupported => "unsupported",
+        }
+    }
+
+    /// Whether another attempt can ever change the answer.
+    pub const fn is_retryable(self) -> bool {
+        matches!(self, IndexRefusal::Truncated { .. })
+    }
+}
+
+/// One recorded refusal, and when the indexer may try again.
+///
+/// Kept for the same reason an index is: so the next pass does not repeat a
+/// whole-file read that has already answered. Invalidated the same way too —
+/// by identity mismatch, never by deletion — so a file the operator replaces,
+/// or a pipeline whose argv changes, is simply eligible again with nothing
+/// having to notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FragmentIndexOutcome {
+    pub source: SourceIdentity,
+    pub refusal: IndexRefusal,
+    /// The builder's own words, for the operator surface.
+    pub reason: String,
+    /// How many times this identity has been refused, including this one.
+    pub attempts: u32,
+    /// Unix ms before which the indexer must not spend another whole-file read
+    /// on this identity. [`i64::MAX`] for a terminal refusal.
+    pub next_attempt_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+impl FragmentIndexOutcome {
+    /// Whether the indexer may spend another pass on this identity.
+    pub fn is_due(&self, now_ms: i64) -> bool {
+        self.refusal.is_retryable() && now_ms >= self.next_attempt_at_ms
+    }
+}
+
 // ---------------------------------------------------------------------------
 // timeline annotations
 // ---------------------------------------------------------------------------

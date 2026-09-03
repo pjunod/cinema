@@ -608,6 +608,23 @@ pub struct ClientLog {
     pub control: Option<ClientControlSnapshot>,
     /// Current trigger state sampled immediately before legacy recovery.
     pub control_trigger: Option<ClientControlSnapshot>,
+    // -- what the client was handed, and what it had claimed -----------------
+    // A `stream_rejected` report used to say only that the browser refused the
+    // stream. These three are what separate a decoder that could not keep up
+    // from a server that sent a profile the client never claimed — which is
+    // the failure the 2026-09-02 Profile 7 observation actually was, reported
+    // for two days as a browser fault.
+    /// `delivered_dynamic_range` from the create response this session came
+    /// back with — the server's own answer, relayed.
+    pub delivered_range: Option<String>,
+    /// `delivered_dolby_vision_profile` from the same response: the profile
+    /// the served bytes carry, which for a converted stream is not the
+    /// source's.
+    pub delivered_dv_profile: Option<i64>,
+    /// The Dolby Vision profiles this client enumerated, as the CSV its caps
+    /// document is built from (`"5,8"`). Split here rather than on the wire so
+    /// a client that grows a profile does not need a new field.
+    pub declared_dv_profiles: Option<String>,
 }
 
 /// Sustained rate and burst allowance for `/client-log`, in reports per minute.
@@ -1066,6 +1083,24 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
     if let Some(value) = ev.decode_smooth {
         extra.insert("decode_smooth".into(), value.into());
     }
+    // The durable half of the rejection report. `PlaybackEventsQuery` filters
+    // on `since`/`event`/`limit` only, so reading these back is `jq` over the
+    // event's `extra` until someone needs more — which is the right trade for
+    // three fields that appear on one event type.
+    if let Some(range) = clipped(&ev.delivered_range, 16) {
+        extra.insert("delivered_range".into(), range.into());
+    }
+    if let Some(profile) = ev.delivered_dv_profile.filter(|p| *p > 0) {
+        extra.insert("delivered_dv_profile".into(), profile.into());
+    }
+    if let Some(declared) = printable_declared_dv_profiles(ev.declared_dv_profiles.as_deref()) {
+        extra.insert("declared_dv_profiles".into(), declared.into());
+    }
+    if let Some(mismatch) =
+        client_caps_mismatch(ev.delivered_dv_profile, ev.declared_dv_profiles.as_deref())
+    {
+        extra.insert("caps_mismatch".into(), mismatch.into());
+    }
     let snapshot = ev.snapshot.as_ref();
     let server = snapshot.and_then(|snapshot| snapshot.server.as_ref());
     if let Some(snapshot) = snapshot {
@@ -1250,6 +1285,25 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
             .filter(|s| !s.is_empty())
             .map(|s| clip(s, n))
     }
+    /// The same, minus anything that would end this line and start another.
+    ///
+    /// A newline inside a client-supplied field is how one log line becomes two
+    /// forged ones, and an operator reading the ring has no way to tell. The
+    /// older fields on this line predate the concern and are a separate sweep;
+    /// the ones added here do not get to inherit it.
+    fn one_line_field(v: &Option<String>, n: usize) -> Option<String> {
+        v.as_deref()
+            .map(|value| {
+                value
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .collect::<String>()
+            })
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| clip(s, n))
+    }
 
     let event = {
         let e = clip(&ev.event, 40);
@@ -1277,6 +1331,24 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
     }
     if let Some(e) = field(&ev.encoder, 32) {
         line.push_str(&format!(" encoder={e}"));
+    }
+    // What the stream was, before what went wrong with it. A rejection line
+    // that names the delivered profile and the declared set beside each other
+    // is readable without opening the create response it came from.
+    if let Some(range) = one_line_field(&ev.delivered_range, 16) {
+        line.push_str(&format!(" delivered_range={range}"));
+    }
+    if let Some(profile) = ev.delivered_dv_profile.filter(|p| *p > 0) {
+        line.push_str(&format!(" delivered_dv_profile={profile}"));
+    }
+    if let Some(declared) = printable_declared_dv_profiles(ev.declared_dv_profiles.as_deref()) {
+        line.push_str(&format!(" declared_dv_profiles={declared}"));
+    }
+    if client_caps_mismatch(ev.delivered_dv_profile, ev.declared_dv_profiles.as_deref())
+        == Some(true)
+        && DELIVERY_FAILURE_EVENTS.contains(&ev.event.as_str())
+    {
+        line.push_str(" caps_mismatch=true");
     }
     // Printed before the message so it sits with the other facts about the
     // client rather than in the trailing measurements: it describes the
@@ -1350,6 +1422,68 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
     }
     line
 }
+
+/// Whether the profile the server handed this client is one the client's own
+/// capabilities document enumerated.
+///
+/// `None` when either side said nothing: a stripped stream carries no profile
+/// to compare, and a build that sends no `dvprofile` has made no claim to
+/// contradict. Only a real disagreement is worth a field, because a field
+/// present on every line is a field nobody reads.
+///
+/// A non-positive profile is *nothing said*, not profile zero. There is no
+/// Dolby Vision profile 0, and a client that defaults an integer field rather
+/// than omitting it would otherwise turn every one of its rejections into
+/// `caps_mismatch=true` with no delivered profile printed beside it — a
+/// fleet-wide server fault that is not happening, which is this field's own
+/// failure mode pointing the other way. The two print sites already apply the
+/// same `> 0` test.
+///
+/// Recomputed here rather than believed from the client: the client is the
+/// party being exonerated.
+fn client_caps_mismatch(delivered: Option<i64>, declared: Option<&str>) -> Option<bool> {
+    let delivered = delivered.filter(|profile| *profile > 0)?;
+    let declared: Vec<i64> = printable_declared_dv_profiles(declared)?
+        .split(',')
+        .filter_map(|part| part.trim().parse::<i64>().ok())
+        .collect();
+    (!declared.is_empty()).then(|| !declared.contains(&delivered))
+}
+
+/// How wide a declared set may be — for the verdict and for the printed line,
+/// which is the point of it being one function.
+///
+/// Six one- or two-digit profiles and their separators fit with room to spare.
+const DECLARED_DV_PROFILES_MAX: usize = 32;
+
+/// The declared set as the log line will show it, or `None` when it cannot be
+/// shown honestly.
+///
+/// The two used to disagree: the line clipped at 32 characters and the verdict
+/// parsed the whole string, so a set longer than that with its matching
+/// profile in the tail printed `declared_dv_profiles=9,9,9,9,…` and no
+/// `caps_mismatch` — or, one profile the other way, a mismatch the visible set
+/// contradicts. Either way the operator reads a verdict they cannot check
+/// against the evidence beside it, which is the one thing this line exists to
+/// let them do.
+///
+/// Over-long is refused rather than truncated, for the same reason: a verdict
+/// computed from a prefix is a verdict about a set nobody sent.
+fn printable_declared_dv_profiles(declared: Option<&str>) -> Option<String> {
+    let cleaned: String = declared?.chars().filter(|c| !c.is_control()).collect();
+    let cleaned = cleaned.trim();
+    (!cleaned.is_empty() && cleaned.len() <= DECLARED_DV_PROFILES_MAX).then(|| cleaned.to_owned())
+}
+
+/// The `ClientLog::event` tags that report a delivery the client could not
+/// use.
+///
+/// `caps_mismatch` names a *server* defect, and `playbackContext()` is spread
+/// by sixteen beacons — so without this the field rides `ttff` and `stall`
+/// lines, and `grep caps_mismatch` over an operator's log returns successful
+/// playbacks. The three facts still ride everything, because they are facts
+/// about the delivery whatever became of it; only the accusation is scoped.
+const DELIVERY_FAILURE_EVENTS: [&str; 3] = ["stream_rejected", "playback_failed", "hls_fatal"];
 
 #[derive(Serialize)]
 pub struct SettingsDto {
@@ -4346,7 +4480,178 @@ mod tests {
             snapshot: None,
             control: None,
             control_trigger: None,
+            delivered_range: None,
+            delivered_dv_profile: None,
+            declared_dv_profiles: None,
         }
+    }
+
+    /// The accusation is printed where a delivery actually failed, and the
+    /// facts are printed everywhere.
+    ///
+    /// `playbackContext()` is spread by sixteen beacons, so without the scope
+    /// `caps_mismatch=true` rides `ttff` and `stall` lines — and a `grep
+    /// caps_mismatch` over an operator's log returns successful playbacks,
+    /// which is the opposite of what the field is for. The three facts still
+    /// ride everything: they describe the delivery whatever became of it.
+    #[test]
+    fn the_caps_accusation_is_scoped_to_a_delivery_that_failed() {
+        let facts = |event: &str| {
+            let mut ev = beacon(event, 0);
+            ev.delivered_range = Some("dolby_vision".into());
+            ev.delivered_dv_profile = Some(7);
+            ev.declared_dv_profiles = Some("5,8".into());
+            client_log_line(&ev, 0)
+        };
+
+        for failed in DELIVERY_FAILURE_EVENTS {
+            let line = facts(failed);
+            assert!(line.contains(" caps_mismatch=true"), "{line}");
+        }
+        for served in ["ttff", "stall", "stall_recovery"] {
+            let line = facts(served);
+            assert!(
+                !line.contains("caps_mismatch"),
+                "a playback that worked is not a server defect: {line}"
+            );
+            assert!(
+                line.contains(" delivered_dv_profile=7")
+                    && line.contains(" declared_dv_profiles=5,8"),
+                "but the facts still ride it: {line}"
+            );
+        }
+    }
+
+    /// The verdict reads exactly the set the line prints, and no further.
+    ///
+    /// They used to disagree: the line clipped at 32 characters and the
+    /// verdict parsed the whole string. A declared set longer than that with
+    /// its matching profile in the tail printed a set the operator can see
+    /// contains no match, beside a verdict that silently found one — a
+    /// contradiction with nothing on the line to explain it.
+    #[test]
+    fn the_declared_set_the_verdict_reads_is_the_one_the_line_prints() {
+        let mut ev = beacon("stream_rejected", 0);
+        ev.delivered_range = Some("dolby_vision".into());
+        ev.delivered_dv_profile = Some(7);
+
+        // Longer than the bound, and the match is in the tail.
+        let long = format!("{},7", "9,".repeat(20));
+        assert!(long.len() > DECLARED_DV_PROFILES_MAX);
+        ev.declared_dv_profiles = Some(long.clone());
+        let line = client_log_line(&ev, 0);
+        assert!(!line.contains(" declared_dv_profiles="), "{line}");
+        assert!(
+            !line.contains("caps_mismatch"),
+            "a set nobody can read convicts nobody: {line}"
+        );
+        assert_eq!(client_caps_mismatch(Some(7), Some(&long)), None);
+
+        // At the bound it is printed and read, both.
+        let fits = "5,8";
+        ev.declared_dv_profiles = Some(fits.into());
+        let readable = client_log_line(&ev, 0);
+        assert!(readable.contains(" declared_dv_profiles=5,8"), "{readable}");
+        assert!(readable.contains(" caps_mismatch=true"), "{readable}");
+
+        // Control characters are stripped before either reads it, so a
+        // forged second line cannot ride the field the verdict parses.
+        ev.declared_dv_profiles = Some("5,8\nclient[x] admin login ok".into());
+        let forged = client_log_line(&ev, 0);
+        assert!(!forged.contains('\n'), "{forged}");
+    }
+
+    /// The rejection report names what was handed over and what was claimed,
+    /// and says when they disagree.
+    ///
+    /// The 2026-09-02 observation was logged as "browser refused the remux
+    /// stream", which is the browser doing exactly what its own capabilities
+    /// document promised. The line has to carry the other party's half.
+    #[test]
+    fn a_stream_rejection_names_the_profile_it_was_handed() {
+        let mut ev = beacon("stream_rejected", 0);
+        ev.ua = Some("Safari".into());
+        ev.message = "the server handed this browser a Dolby Vision Profile 7 stream \
+                      it did not declare"
+            .into();
+        ev.delivered_range = Some("dolby_vision".into());
+        ev.delivered_dv_profile = Some(7);
+        ev.declared_dv_profiles = Some("5,8".into());
+
+        let line = client_log_line(&ev, 0);
+        assert!(line.contains(" delivered_range=dolby_vision"), "{line}");
+        assert!(line.contains(" delivered_dv_profile=7"), "{line}");
+        assert!(line.contains(" declared_dv_profiles=5,8"), "{line}");
+        assert!(
+            line.contains(" caps_mismatch=true"),
+            "7 is not in {{5,8}}: {line}"
+        );
+
+        // The ordinary case — the client got what it asked for and could not
+        // decode it anyway — leaves the field off. A flag on every line is a
+        // flag nobody reads.
+        ev.delivered_dv_profile = Some(8);
+        let agreed = client_log_line(&ev, 0);
+        assert!(agreed.contains(" delivered_dv_profile=8"), "{agreed}");
+        assert!(!agreed.contains("caps_mismatch"), "{agreed}");
+
+        // And silence on either side is silence, not a verdict: a stripped
+        // stream carries no profile, and a build that declares none has made
+        // no claim to contradict.
+        assert_eq!(client_caps_mismatch(None, Some("5,8")), None);
+        assert_eq!(client_caps_mismatch(Some(7), None), None);
+        assert_eq!(client_caps_mismatch(Some(7), Some("")), None);
+        assert_eq!(client_caps_mismatch(Some(7), Some(" 5 , 7 ")), Some(false));
+        // A non-positive profile is nothing said, not profile zero. A client
+        // that defaults the field rather than omitting it would otherwise
+        // report a fleet-wide server fault that is not happening — and with no
+        // delivered profile on the line to disprove it, because both print
+        // sites drop a non-positive one.
+        assert_eq!(client_caps_mismatch(Some(0), Some("5,8")), None);
+        assert_eq!(client_caps_mismatch(Some(-1), Some("5,8")), None);
+        let mut defaulted = beacon("stream_rejected", 0);
+        defaulted.delivered_dv_profile = Some(0);
+        defaulted.declared_dv_profiles = Some("5,8".into());
+        assert!(
+            !client_log_line(&defaulted, 0).contains("caps_mismatch"),
+            "{}",
+            client_log_line(&defaulted, 0)
+        );
+
+        // A newline inside a client-supplied field is how one log line becomes
+        // two forged ones.
+        let mut forged = beacon("stream_rejected", 0);
+        forged.delivered_dv_profile = Some(7);
+        forged.declared_dv_profiles = Some("5\nERROR plurxd: forged".into());
+        let one_line = client_log_line(&forged, 0);
+        assert!(!one_line.contains('\n'), "{one_line}");
+        assert!(
+            one_line.contains("declared_dv_profiles=5ERROR"),
+            "{one_line}"
+        );
+    }
+
+    /// The same three facts survive into the stored event, because the log
+    /// ring is 2000 lines and a defect that takes a week to reproduce is not
+    /// in it by the time anyone looks.
+    #[test]
+    fn a_stored_rejection_keeps_what_the_line_printed() {
+        let mut ev = beacon("stream_rejected", 0);
+        ev.detail = Some("bufferAppendError".into());
+        ev.delivered_range = Some("dolby_vision".into());
+        ev.delivered_dv_profile = Some(7);
+        ev.declared_dv_profiles = Some("5,8".into());
+        let event = client_playback_event(&ev, 1);
+        let extra: serde_json::Value =
+            serde_json::from_str(&event.extra.expect("extra")).expect("extra parses");
+        assert_eq!(extra["delivered_range"], "dolby_vision");
+        assert_eq!(extra["delivered_dv_profile"], 7);
+        assert_eq!(extra["declared_dv_profiles"], "5,8");
+        assert_eq!(extra["caps_mismatch"], true);
+        // `detail` is the hls.js error type on that path and is not this
+        // event's to overwrite. Set on the way in, so the assertion is about
+        // what survives rather than about the default it was given.
+        assert_eq!(event.detail.as_deref(), Some("bufferAppendError"));
     }
 
     /// The decoder verdict rides with the client facts, and says which one it

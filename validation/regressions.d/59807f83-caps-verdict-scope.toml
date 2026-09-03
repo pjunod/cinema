@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["59807f83"]
+points = ["cluster.page-reads", "server.api"]
+checks = ["rust-gate"]
+reason = "Two defects in the rejection report's verdict, both about the accusation rather than the facts. `caps_mismatch=true` was printed on every beacon that carries the three delivery facts, and `playbackContext()` is spread by sixteen of them — so the field that names a server defect appeared on successful `ttff` and `stall` lines, and a `grep caps_mismatch` returned playbacks that worked. And `client_caps_mismatch` parsed the whole `declared_dv_profiles` string while `one_line_field(…, 32)` clipped what it printed, so a set longer than the bound with its matching profile in the tail printed a set the operator can see contains no match beside a verdict that silently found one — a contradiction with nothing on the line to explain it. `printable_declared_dv_profiles` now answers for both and refuses an over-long set rather than truncating it, because a verdict computed from a prefix is a verdict about a set nobody sent. `the_caps_accusation_is_scoped_to_a_delivery_that_failed` and `the_declared_set_the_verdict_reads_is_the_one_the_line_prints` fail under either reversion, under `cargo test -p plurxd`, which `rust-gate` runs."

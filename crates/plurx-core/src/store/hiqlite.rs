@@ -2510,6 +2510,47 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
         self.telemetry.forget_fragment_index(file_id).await
     }
 
+    async fn record_fragment_index_outcome(
+        &self,
+        file_id: i64,
+        source: &crate::segplan::SourceIdentity,
+        refusal: crate::segplan::IndexRefusal,
+        reason: &str,
+    ) -> Result<crate::segplan::FragmentIndexOutcome, StoreError> {
+        // NOT `self.clock` — that one answers in unix *seconds* (see
+        // `SystemClock`, and `auth.rs`'s `ACTIVITY_REFRESH_SECS` beside it).
+        // The three sidecar writers around this one have quietly passed it as
+        // a `now_ms` for as long as they have existed, which is harmless while
+        // every row in a table shares the scale and only orders against its
+        // own siblings. It stops being harmless here: `next_attempt_at_ms` is
+        // read back by the indexer and compared against `state.rs`'s
+        // `clock_ms()`, which is genuine milliseconds. A thousand-fold smaller
+        // deadline is always in the past, so the whole backoff this milestone
+        // exists to add would be inert on every clustered voter — the one
+        // deployment shape where the queue matters most. The others are worth
+        // a sweep of their own; this one cannot wait for it.
+        let now_ms = sidecar_unix_ms()?;
+        self.telemetry
+            .record_fragment_index_outcome(
+                file_id,
+                source.clone(),
+                refusal,
+                reason.to_owned(),
+                now_ms,
+            )
+            .await
+    }
+
+    async fn fragment_index_outcome(
+        &self,
+        file_id: i64,
+        identity: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::FragmentIndexOutcome>, StoreError> {
+        self.telemetry
+            .fragment_index_outcome(file_id, identity.clone())
+            .await
+    }
+
     async fn vod_row_file_ids(&self, limit: i64) -> Result<Vec<i64>, StoreError> {
         // The sidecar's own rows -- this node's, which is the whole point.
         self.telemetry.vod_row_file_ids(limit).await
@@ -3166,6 +3207,21 @@ impl Clock for FixedClock {
     fn now(&self) -> Result<i64, StoreError> {
         Ok(self.0)
     }
+}
+
+/// Unix milliseconds, for the node-local sidecar rows that are compared
+/// against a millisecond deadline computed somewhere else.
+///
+/// Deliberately not a `Clock`: that trait answers in seconds and is injected
+/// with a fixed *seconds* value at bootstrap, so widening it would silently
+/// rescale the auth-activity refresh it exists for.
+fn sidecar_unix_ms() -> Result<i64, StoreError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| StoreError::Task(format!("system clock before unix epoch: {error}")))?
+        .as_millis();
+    i64::try_from(millis)
+        .map_err(|_| StoreError::Task("system clock exceeds i64 unix milliseconds".to_owned()))
 }
 
 struct SystemClock;

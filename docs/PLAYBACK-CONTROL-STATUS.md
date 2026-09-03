@@ -713,8 +713,9 @@ and neither is a code problem:
    one. Narrowing it is a v1 protocol change and M6's to decide deliberately —
    handoff §3. **Apple is the platform where it does not bite**: both recipes
    passed on both devices, so there is no failing case to carve out, and the
-   narrower bound today is the server's own `PREPARED_AXIS`, which prepares
-   only a resolution change.
+   narrower bound today is the server's own `PREPARED_AXIS_SETS`, which
+   prepares only a resolution change and the resolution/delivery-method pair
+   the 2026-09-03 hardware run measured.
 
 3. **The throughput input did not exist.** The floor wants the client's
    observed rate at twice what the session delivers, and the native clients
@@ -829,6 +830,69 @@ to prepare for. If it fails, M6's honest scope is the one-player
 release-and-replace it already has, and that is worth knowing before the
 executor gets a caller.
 
+### The axis case ran, and it passed — 2026-09-03
+
+**Apple TV 4K (3rd generation), build 114**: a 2160p direct-play source against
+a 1080p server-selected transcode, so height and delivery method move together.
+**20/20 clean commits · zero failed admissions · zero predecessor stalls · zero
+post-commit stalls.**
+
+| Control | Reading |
+|---|---|
+| Link rate | 40 Mbit/s against an 18.183 Mbit/s predecessor — **2.20×** |
+| Group shape | Fixed boundaries with ack jitter |
+| Runway | 16 distinct values, 5/5 distinct inside every group |
+| Wire counts | Both pipelines, 20/20 distinct |
+| Position error | Varying −8.58 to −0.44 ms, not repeating |
+
+**The first attempt failed, and the reason is worth keeping.** It ran at
+30 Mbit/s against the same 18.183 Mbit/s predecessor — **1.65×**, below the 2×
+floor `headroom_refusal` itself enforces — and failed eight of twenty. That was
+not a measurement of the transition; it was a measurement of a link the server
+would have declined to prepare on in the first place. The handoff's link spec
+had omitted the floor. **A hardware run below the server's own gate measures
+nothing**, and the spec now says the floor out loud.
+
+**So the rule widened, into a table rather than a constant.** `PREPARED_AXIS`
+became `PREPARED_AXIS_SETS`, holding exactly the two axis *sets* that have a
+receipt:
+
+| Set | Receipt |
+|---|---|
+| `{ResolutionOrBitrate}` | M5.5 §3 same-codec same-grade · Apple 20/20 both devices · 2026-09-01 |
+| `{ResolutionOrBitrate, DeliveryMethod}` | This run · Apple TV 4K 20/20 · 2026-09-03 |
+
+A transition is admitted or refused **as a whole set**, because that is how it
+was measured. The axis *label* on a decision is unchanged — still the hardest
+member — so `plurxd_playback_preparation_decisions_total` stays comparable
+across the change on that dimension. The `outcome` dimension is not: the
+admitted pair moved from `multiple_axes` to `client_cannot_prepare`, and to
+`prepare` counterfactually. The counters are in-memory and reset per deploy, so
+no series spans it, but two status-page readings taken either side of the
+change are not comparable on outcome.
+
+**A set has no direction, and the run did.** `headroom_refusal` computes its
+floor from the *predecessor's* delivered rate, because an `EffectiveSelection`
+carries a height and no bitrate. Toward a server-selected successor that is
+conservative — the server picked the rung. Away from one it is not: a
+direct-playing successor carries the source file's own bitrate, which nothing
+bounds, so a 1080p transcode delivering 4 Mbit/s clears an 8 Mbit/s floor and
+then asks a 10 Mbit/s link to carry a 40 Mbit/s remux beside it — the stall
+this feature exists to prevent. So the pair is admitted **toward** a
+server-selected successor, which is the direction that ran; a viewer raising
+quality back to a direct-playing source books `axis_not_proven` until either
+someone runs it or the floor learns the successor's rate.
+
+**What is still refused, deliberately.** The grade axis. This run was SDR H.264
+throughout, so `{ResolutionOrBitrate, DeliveryMethod, DynamicRange}` — the set
+an HDR or Dolby Vision quality change actually crosses, and exactly what the
+Avatar 2160 → 1080 row above booked — remains unmeasured and still falls back
+to `multiple_axes`. Audio and burned subtitles were never measured in
+combination with anything at all. A row joins that table only with a hardware
+receipt, and the receipt has to name its run.
+
+**M6 §3.4 is therefore unblocked**, and so is M8 §10.2 behind it.
+
 ## Shadow mode ran, and the axis rule is what limits M6
 
 **Read 2026-09-03 on m6**, on `v0.3.0-449-gd1a56d01`, from three deliberate
@@ -921,9 +985,9 @@ against M6: it is `PreparationExecutor` — stage, commit, abort against a
 predecessor CAS — with the successor placed on a **different node**.
 
 **So M8 §10.2 sits on top of M6 §3.4**, and the roadmap's numbering hides it.
-§3.4 is blocked on the axis case in
-[M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.3.3, so planned drain is
-blocked behind the same hardware run. Building a cross-node placer first would
+§3.4 was blocked on the axis case in
+[M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.3.3; **that case passed
+2026-09-03**, so both §3.4 and planned drain behind it are unblocked. Building a cross-node placer first would
 mean building the harder half of a mechanism whose local half does not exist.
 
 ### What is genuinely available in M8 now

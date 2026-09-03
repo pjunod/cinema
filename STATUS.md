@@ -73,6 +73,90 @@ pass on the default fifteen-minute `vod_index_mins` is roughly **two weeks**,
 not hours — lower `vod_index_mins` on the fleet if that is too slow to watch,
 and read the queue verdict rather than the artifact count while it runs.
 
+## Dolby Vision Profile 7 on the web — what was actually left
+
+**Effort `effort/dv-p7-web-delivery`, merged as `206ab3c3` (#869) on
+2026-09-03.** An adversarial
+review of the 2026-09-03 remux-refusal diagnosis found its mechanism right and
+its fix already merged: #842 (`60e1be68`) closed the no-caps arm's silent
+downgrade, and the argv in the diagnosis is from a build the fleet no longer
+runs. What is left is four smaller things, one milestone each.
+
+**M0 — correct the record, pin the call sites.** The #840 entry below called
+the refused stream a 7→8.1 conversion; it was the *raw* Profile 7 remux from a
+pre-#842 build, and no converted stream has ever reached a browser. Two
+regressions added, each mutation-checked: the create arm that gives a no-caps
+build a review at all (restore the pre-#842 `None` and the session serves raw
+Profile 7 again — every review-level test stays green), and the
+`served_copy_options` *call* in the live-recovery copy (delete it and the
+spawned argv gains `-strict unofficial` and keeps NAL 62/63, which is exactly
+the argv the production log carried). The second reads the argv out of a
+scoped `tracing` subscriber, because nothing in the crate captured a spawned
+command line before. Paul's R3 ruling — leave the preserved-Profile-7
+`dvh1.07`-over-`hvc1` inconsistency — recorded in `docs/PLAYBACK.md`, with the
+correction the review forced: Android *does* enumerate Profile 7
+(`CapsPolicy.kt` maps `DVHE_DTB -> 7`), so the state is reachable from a
+dual-layer box. The delivery plays; what it cannot rely on is the master
+playlist and the init segment agreeing about the fourcc.
+
+**M2 — the rejection report names both parties.** `stream_rejected` said
+"browser refused the remux stream", which is the browser doing exactly what
+its own capabilities document promised, and it carried no `session`, so the
+server could not join it to the session it superseded. Both rejection paths
+now send the join and three facts: the range and Dolby Vision profile the
+create response said this session carries, and the profiles this browser
+declared. The server prints them, recomputes `caps_mismatch` rather than
+believing the client's copy, and keeps them in the stored event's `extra`.
+
+**M3 — the indexer remembers what it could not do.** A `Truncated` or
+`Unsupported` build was a log line: the cursor moved on, and the next wrap of
+the library spent the same whole-file read — up to thirty minutes of one
+node's disk — while `vodserve` answered `vod_index_pending` for a title that
+may never have an index. A node-local `fragment_index_outcomes` table now
+records the refusal, keyed and invalidated exactly like `fragment_indexes`, so
+a replaced file is eligible again with nothing having to notice. Truncated
+backs off (30 min doubling to a day) because the per-file budget is a
+wall-clock guess; unsupported is terminal because it is a property of the
+bytes. The cluster worker records the same row so a clustered node's badge and
+background pass know what it found, but its *queue* policy is left alone —
+that is `effort/fragment-index-queue-repair`'s, and it is rewriting the lease
+and attempt budget this call feeds. The admin badge gained `refused` and
+carries the builder's own reason. A review caught the backoff being inert on
+every clustered voter: the hiqlite store's injected clock answers in unix
+seconds and the deadline is compared against milliseconds.
+
+**What merging main cost, and what it found.** Adding a v45 migration broke
+three fixtures that describe an older schema relative to the newest one
+rather than by name. Two `sqlite_v43_guard_migration_*` cases called v43
+`SQLITE_SCHEMA_VERSION - 1` and downgraded a current database by undoing v44
+alone; `populated_v14_import_fixture` builds a current database and walks it
+back by hand, and its list stopped at v44. The third one is the interesting
+one: it left `fragment_index_outcomes` in place under a `user_version` of
+14, so activation replayed the CREATE onto a database that already had the
+table, the voter process died inside `select_daemon_store`, and the one-voter
+contract reported it as *activation voter exited before ready* — a failure
+whose message names neither the migration nor the table. All three now name
+the version they mean and drop everything above it. The whole replicated
+Store lane passes locally: 120 of 120.
+
+**The deployed-build re-test, as far as it goes.** The fleet was read over
+SSH on 2026-09-03. The handoff's premise holds: #842 (`60e1be68`) is an
+ancestor of every binary now running, so the arm it closed is closed in
+production. Three nodes run `v0.3.0-515-gc2702f61`, matching their
+checkouts; **nuc4 runs `v0.3.0-487-gd7194b05`** while its own checkout sits
+at 515 — twenty-eight commits of drift, and nuc4 is the node the M5
+verification document names. That has to be redeployed before any play
+against it means anything. nuc4's `plurxd` logged no plan-derivation traffic
+at all in twelve hours, which is the honest reason the `plan_derivation`
+counters cannot be re-tested from the outside: they only move when someone
+plays something. The live store is hiqlite; `/var/lib/plurx/plurx.db` was
+last written 2026-08-26 and reading it would answer a stale question.
+
+**Not verified on hardware.** Nothing here has been played from a browser
+against the fleet. `docs/M5-VERIFICATION-PROMPT.md` is the hand-off, and it
+is gated on ops: raft membership, then the analysis queue draining, then
+file 70's converting identity being built.
+
 ## The ✕ on an iPhone could not leave a film
 
 **PR [#853](https://github.com/pjunod/plurx/pull/853) — MERGED to main as `e31a6cb4`, 2026-09-03, branch `fix/close-control-exits`, fix commit `0f904213`.** Paul: "the x to
@@ -163,9 +247,13 @@ the grant renewing on every retry, and the `Time` relabelling above. Full
 qualification green; 1601 unit tests.
 
 **Not fixed here, and still open:** the truncated first segment that caused
-the escalation — a DV Profile 7→8.1 remux the browser refused with
-`MEDIA_ERR_DECODE` after 12 KB of a 12.5 MB segment. Real, separate, and now
-costs a fallback rather than a failure. `vod_index_pending` and
+the escalation — the **raw Profile 7** remux a pre-#842 build served through
+live-HLS recovery, which the browser refused with `MEDIA_ERR_DECODE` after
+12 KB of a 12.5 MB segment. Not a 7→8.1 conversion: the conversion exists only
+on the VOD path, file 70 has never had its converting fragment index built,
+and no converted stream has yet been served to a browser at all. Real,
+separate, and now costs a fallback rather than a failure. `vod_index_pending`
+and
 `vod_transcode_unavailable` both fell through to live-HLS recovery on this
 file. And the web client reporting `hold` from a player that has never
 started is honest to fix at the client too, though the server invariant has to

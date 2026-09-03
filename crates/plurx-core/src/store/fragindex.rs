@@ -18,7 +18,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::StoreError;
 use crate::fmp4::CutClass;
-use crate::segplan::{FragmentIndex, IndexRow, SourceIdentity, SEGPLAN_VERSION};
+use crate::segplan::{
+    FragmentIndex, FragmentIndexOutcome, IndexRefusal, IndexRow, SourceIdentity, SEGPLAN_VERSION,
+};
 
 pub(crate) const FRAGMENT_INDEXES_SCHEMA: &str = "
 CREATE TABLE fragment_indexes (
@@ -97,6 +99,59 @@ INSERT INTO fragment_indexes_identity_keyed (
   FROM fragment_indexes;
 DROP TABLE fragment_indexes;
 ALTER TABLE fragment_indexes_identity_keyed RENAME TO fragment_indexes;";
+
+/// What the indexer learned when it could *not* build an index.
+///
+/// The reason this table exists at all: without it a `Truncated` or
+/// `Unsupported` outcome was a log line, the cursor moved on, and the next
+/// wrap of the library tried the same file again — a whole-file read per pass,
+/// forever, while `vodserve` answered `vod_index_pending` for a title that was
+/// never going to have one. Nothing durable said so, on this layer or to the
+/// operator.
+///
+/// Keyed and invalidated exactly like `fragment_indexes`, because it answers
+/// the same question with the opposite sign: `(file_id, argv_fingerprint)`
+/// selects the row and the size/mtime columns decide whether it still
+/// describes this source. A replaced file, or a pipeline whose argv changes,
+/// stops matching and is simply eligible again.
+pub(crate) const FRAGMENT_INDEX_OUTCOMES_SCHEMA: &str = "
+CREATE TABLE fragment_index_outcomes (
+    file_id            INTEGER NOT NULL,
+    argv_fingerprint   TEXT NOT NULL,
+    source_size        INTEGER NOT NULL,
+    source_mtime       INTEGER NOT NULL,
+    outcome            TEXT NOT NULL CHECK (outcome IN ('truncated', 'unsupported')),
+    reason             TEXT NOT NULL,
+    rows_built         INTEGER NOT NULL DEFAULT 0,
+    attempts           INTEGER NOT NULL DEFAULT 1,
+    next_attempt_at_ms INTEGER NOT NULL,
+    updated_at_ms      INTEGER NOT NULL,
+    PRIMARY KEY (file_id, argv_fingerprint)
+) STRICT;";
+
+/// How long a truncated build waits before the indexer spends another
+/// whole-file read on it, and the ceiling that wait doubles toward.
+///
+/// A truncated build has already cost the per-file budget — up to thirty
+/// minutes of one node's disk — so retrying it on the next two-minute pass is
+/// how one slow mount starves every other title in the library. Thirty minutes
+/// doubling to a day is slow enough that a genuinely unindexable file costs
+/// almost nothing, and fast enough that a file truncated by a busy afternoon
+/// is indexed by the evening.
+const TRUNCATED_RETRY_BASE_MS: i64 = 30 * 60 * 1_000;
+const TRUNCATED_RETRY_MAX_MS: i64 = 24 * 60 * 60 * 1_000;
+
+/// When a refusal at `attempts` may be tried again. `i64::MAX` is terminal.
+pub(crate) fn next_attempt_at_ms(refusal: IndexRefusal, attempts: u32, now_ms: i64) -> i64 {
+    if !refusal.is_retryable() {
+        return i64::MAX;
+    }
+    let shift = attempts.saturating_sub(1).min(16);
+    let delay = TRUNCATED_RETRY_BASE_MS
+        .saturating_mul(1_i64 << shift)
+        .min(TRUNCATED_RETRY_MAX_MS);
+    now_ms.saturating_add(delay)
+}
 
 /// How many pipeline identities one file may hold an index for at once.
 ///
@@ -221,6 +276,21 @@ pub(crate) fn put(
         "DELETE FROM fragment_indexes
           WHERE file_id = ?1 AND (source_size <> ?2 OR source_mtime <> ?3)",
         params![file_id, index.source.size as i64, index.source.mtime_ms],
+    )?;
+    // A build that succeeded retracts the refusal it may have recorded on an
+    // earlier pass. The two tables must never both answer for one identity: a
+    // stale `truncated` row beside a real index would keep the badge saying
+    // "partial" for a title that plays.
+    conn.execute(
+        "DELETE FROM fragment_index_outcomes
+          WHERE file_id = ?1
+            AND (argv_fingerprint = ?2 OR source_size <> ?3 OR source_mtime <> ?4)",
+        params![
+            file_id,
+            index.source.argv_fingerprint,
+            index.source.size as i64,
+            index.source.mtime_ms
+        ],
     )?;
     conn.execute(
         "INSERT INTO fragment_indexes (
@@ -357,16 +427,155 @@ pub(crate) fn get(
     Ok(Some(index))
 }
 
-/// File ids this node holds an index or a plan for, lowest first.
+/// Record that this identity could not be indexed, and answer when it may be
+/// tried again.
 ///
-/// Both tables in one answer because the sweep that consumes it forgets from
-/// both, and asking twice would sweep two different bounded windows.
+/// The attempt counter belongs to the *identity*, not the file: a refusal
+/// recorded against different source bytes describes a file that no longer
+/// exists in that form, so the count restarts rather than punishing the
+/// replacement for its predecessor. That is the same rule `put` applies when
+/// it drops stale rows, for the same reason.
+pub(crate) fn record_outcome(
+    conn: &Connection,
+    file_id: i64,
+    source: &SourceIdentity,
+    refusal: IndexRefusal,
+    reason: &str,
+    now_ms: i64,
+) -> Result<FragmentIndexOutcome, StoreError> {
+    // A build that succeeds retracts its own refusal (see `put`), and a build
+    // that refuses retracts any index that used to be here for the same
+    // reason: the two tables must never both answer for one identity.
+    conn.execute(
+        "DELETE FROM fragment_index_outcomes
+          WHERE file_id = ?1 AND (source_size <> ?2 OR source_mtime <> ?3)",
+        params![file_id, source.size as i64, source.mtime_ms],
+    )?;
+    let previous: Option<u32> = conn
+        .query_row(
+            "SELECT attempts FROM fragment_index_outcomes
+              WHERE file_id = ?1 AND argv_fingerprint = ?2",
+            params![file_id, source.argv_fingerprint],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .map(|attempts| u32::try_from(attempts).unwrap_or(u32::MAX));
+    let attempts = previous.unwrap_or(0).saturating_add(1);
+    let next_attempt_at_ms = next_attempt_at_ms(refusal, attempts, now_ms);
+    let rows_built = match refusal {
+        IndexRefusal::Truncated { rows } => i64::from(rows),
+        IndexRefusal::Unsupported => 0,
+    };
+    conn.execute(
+        "INSERT INTO fragment_index_outcomes (
+             file_id, argv_fingerprint, source_size, source_mtime, outcome,
+             reason, rows_built, attempts, next_attempt_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(file_id, argv_fingerprint) DO UPDATE SET
+             source_size = excluded.source_size,
+             source_mtime = excluded.source_mtime,
+             outcome = excluded.outcome,
+             reason = excluded.reason,
+             rows_built = excluded.rows_built,
+             attempts = excluded.attempts,
+             next_attempt_at_ms = excluded.next_attempt_at_ms,
+             updated_at_ms = excluded.updated_at_ms",
+        params![
+            file_id,
+            source.argv_fingerprint,
+            source.size as i64,
+            source.mtime_ms,
+            refusal.code(),
+            reason,
+            rows_built,
+            i64::from(attempts),
+            next_attempt_at_ms,
+            now_ms,
+        ],
+    )?;
+    Ok(FragmentIndexOutcome {
+        source: source.clone(),
+        refusal,
+        reason: reason.to_owned(),
+        attempts,
+        next_attempt_at_ms,
+        updated_at_ms: now_ms,
+    })
+}
+
+/// The recorded refusal for this identity, if it still describes this source.
+pub(crate) fn outcome(
+    conn: &Connection,
+    file_id: i64,
+    identity: &SourceIdentity,
+) -> Result<Option<FragmentIndexOutcome>, StoreError> {
+    let row = conn
+        .query_row(
+            "SELECT source_size, source_mtime, outcome, reason, rows_built,
+                    attempts, next_attempt_at_ms, updated_at_ms
+               FROM fragment_index_outcomes
+              WHERE file_id = ?1 AND argv_fingerprint = ?2",
+            params![file_id, identity.argv_fingerprint],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((size, mtime, outcome, reason, rows_built, attempts, next_attempt, updated)) = row
+    else {
+        return Ok(None);
+    };
+    let stored = SourceIdentity::new(size.max(0) as u64, mtime, &identity.argv_fingerprint);
+    if !stored.matches(identity) {
+        return Ok(None);
+    }
+    let refusal = match outcome.as_str() {
+        "truncated" => IndexRefusal::Truncated {
+            rows: u32::try_from(rows_built.max(0)).unwrap_or(u32::MAX),
+        },
+        "unsupported" => IndexRefusal::Unsupported,
+        // The CHECK constraint makes this unreachable, and a row that reached
+        // it anyway must not be read as "try again forever".
+        other => {
+            return Err(StoreError::Migration(format!(
+                "a stored fragment-index outcome says {other:?}"
+            )))
+        }
+    };
+    Ok(Some(FragmentIndexOutcome {
+        source: stored,
+        refusal,
+        reason,
+        attempts: u32::try_from(attempts.max(0)).unwrap_or(u32::MAX),
+        next_attempt_at_ms: next_attempt,
+        updated_at_ms: updated,
+    }))
+}
+
+/// File ids this node holds an index, a plan, or a recorded refusal for,
+/// lowest first.
+///
+/// All three tables in one answer because the sweep that consumes it forgets
+/// from all three, and asking separately would sweep different bounded
+/// windows. A refusal for a deleted file is exactly the row nothing else would
+/// ever collect.
 pub(crate) fn vod_row_file_ids(conn: &Connection, limit: i64) -> Result<Vec<i64>, StoreError> {
     let mut statement = conn.prepare(
         "SELECT file_id FROM (
              SELECT file_id FROM fragment_indexes
              UNION
              SELECT file_id FROM rendition_plans
+             UNION
+             SELECT file_id FROM fragment_index_outcomes
          ) ORDER BY file_id LIMIT ?1",
     )?;
     let rows = statement.query_map(params![limit.max(0)], |row| row.get::<_, i64>(0))?;
@@ -376,6 +585,9 @@ pub(crate) fn vod_row_file_ids(conn: &Connection, limit: i64) -> Result<Vec<i64>
 pub(crate) fn forget(conn: &Connection, file_id: i64) -> Result<bool, StoreError> {
     let affected = conn.execute(
         "DELETE FROM fragment_indexes WHERE file_id = ?1",
+        params![file_id],
+    )? + conn.execute(
+        "DELETE FROM fragment_index_outcomes WHERE file_id = ?1",
         params![file_id],
     )?;
     Ok(affected > 0)
@@ -425,6 +637,11 @@ mod tests {
             .expect("promotion columns");
         conn.execute_batch(FRAGMENT_INDEXES_IDENTITY_KEY)
             .expect("identity key");
+        // Both real backends carry this beside the index table, and `put`
+        // retracts a refusal through it — a fixture with only one of the pair
+        // is a fixture no deployment matches.
+        conn.execute_batch(FRAGMENT_INDEX_OUTCOMES_SCHEMA)
+            .expect("outcomes");
         conn
     }
 
