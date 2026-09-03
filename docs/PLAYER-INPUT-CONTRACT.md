@@ -141,8 +141,8 @@ _Generated from [`tests/playback/player-input-contract.json`](../tests/playback/
 
 ### 2.2 Precedence of `back`
 
-`back` (Menu · BACK · Escape · the ✕ on touch) resolves by state, so it is
-never ambiguous which thing closes:
+`back` (Menu · BACK · Escape — a key, never the ✕) resolves by state, so it
+is never ambiguous which thing closes:
 
 ```
  scrub?  ── yes ──▶ cancel (stay on the timeline)
@@ -161,6 +161,30 @@ Desktop exits instead of hiding because a pointer user has no Menu-hide
 idiom and the chrome hides itself; a keyboard user who wants the chrome
 gone waits 4 s. A failed player exits on the first `back` on every surface
 — today tvOS needs two.
+
+**The ✕ is `close`, not `back`.** The iOS ✕, the Android phone's back arrow
+and the web's `✕ Close` are the `close` control of the `bar` row, and a
+button whose only purpose is to leave cannot share a table with a key that
+hides. Routed through `back`, the iOS ✕ answered `hide` in `transport` — the
+state it is tapped from — `close_info` in `info` and `cancel` in `scrub`, and
+exited in no state a viewer could reach it in, so the only way out of a film
+was to force-quit the app (Paul, 2026-09-03). `close_control` in the fixture
+gives it its own rows: close whatever is open, then `exit`, in every state.
+
+```
+ scrub → cancel, exit · menu → close_menu, exit · info → close_info, exit
+ hidden · transport · timeline · failed → exit
+```
+
+Each native reducer transcribes it (`PlayerInputRouting.closeSteps`,
+`PlayerInputPolicy.closeSteps`), each client suite checks the transcription
+against the fixture, and each suite pins its call site: the iOS ✕ and the
+failure view's Close run `closePlayer()`, the Android arrow walks
+`closeSteps`, and neither manufactures a `back` press. The `menu` and `info`
+rows say what `close` does when it is reached; a client's own modal may
+take the tap first — on iOS the info panel's backdrop lies over the ✕, so
+that tap is `info × tap_surface` (`close_info`) and the ✕ exits on the next
+one, and Android composes no arrow while a panel is open.
 
 ---
 
@@ -292,7 +316,8 @@ Per-surface adapters map inputs as follows; anything not listed is
 |---|---|---|---|---|
 | `left`/`right`/`up`/`down` | `onMoveCommand` directions | `KEYCODE_DPAD_*` | — | Arrow keys |
 | `select` | Select (`onTapGesture` on the focused view) | `DPAD_CENTER`/`ENTER` | tap on a control | Enter; Space when the timeline is focused |
-| `back` | Menu (`onExitCommand`) | `BACK` | ✕ / system back | Escape |
+| `back` | Menu (`onExitCommand`) | `BACK` | system back (Android); iOS has no producer | Escape |
+| `close` (`close_control`, not a table input) | — | — | ✕ (iOS) / back arrow (Android phone) | `✕ Close` |
 | `play_pause` | Play/Pause (`onPlayPauseCommand`, **on every state's root**, not only the hidden surface) | `MEDIA_PLAY_PAUSE` | lock-screen / headset commands | Space or K when the timeline is not focused |
 | `skip_back`/`skip_forward` | — (no producer) | `MEDIA_REWIND`/`MEDIA_FAST_FORWARD` | remote-command skips | J / L |
 | `tap_surface` | — | — | tap on the video | click on the video |

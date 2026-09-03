@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["eb8c195b"]
+reason = "This commit corrects a coverage claim in the M8 scoping section after running the shared-cache suite that actually holds it; it changes no runtime behavior and adds no code path to regress."
+ignore = true
