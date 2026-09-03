@@ -811,7 +811,8 @@ So each axis is individually proven on Apple. What the spike never ran is
 "M5.5 ran two cases, not their product." Tonight's measurement is that the
 product is the only thing that actually happens.
 
-**The gap is now exactly one hardware case**, and it is smaller than the
+**The gap is now exactly one hardware case** — spec'd to run in
+[M6-AXIS-CASE-HANDOFF.md](M6-AXIS-CASE-HANDOFF.md), and it is smaller than the
 original arm: 20 consecutive commits on a recipe pair that changes resolution
 *and* delivery method together — a real 2160 → 1080 on a direct-playing source,
 which is the transition the fleet actually produces. The harness exists, the
