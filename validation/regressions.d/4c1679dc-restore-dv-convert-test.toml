@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["4c1679dc"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Test-only. It restores `a_build_with_no_caps_document_still_converts_profile_7`, which #850 removed without replacement while leaving the derivation it guards intact — so `legacy_trusted_review` was left called once in the handler and nowhere in a test. The correction that test proves is the one already mapped by c6892bf5-dv-convert-legacy-caps.toml: a client's silence on `convert_dolby_vision`, a field `CreateSession` gives it no way to speak about, overriding the server's own decision, which shipped and left `dv_conversions` empty on all four nodes with CI green throughout. Reverting the one-line derivation to `false` fails this test under `cargo test -p plurxd`, which `rust-gate` runs; with the test absent that same revert is green and nothing else in the tree notices. This commit changes no runtime behavior."

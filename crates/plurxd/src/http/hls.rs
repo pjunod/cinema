@@ -14956,6 +14956,11 @@ mod tests {
     /// Safari answered `stream_rejected ... browser refused the remux
     /// stream`; the fallback tonemapped the title to SDR. Nothing in the
     /// cluster had ever run a conversion.
+    ///
+    /// Restored on `main` after #850 removed it. The derivation it guards
+    /// survived that PR; only the proof went, and without the proof reverting
+    /// the one-line derivation to `false` goes green again. This effort's line
+    /// kept its copy throughout, so the merge has one test and one history.
     #[test]
     fn a_build_with_no_caps_document_still_converts_profile_7() {
         let mut p7 = dolby_vision_p8_file();
