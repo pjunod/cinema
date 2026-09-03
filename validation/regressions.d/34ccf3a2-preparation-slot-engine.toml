@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["34ccf3a2"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "M6's preparation slot lived on RollingControlActor, and hls_session_control_with_terminal offers every exchange to the VOD engine first while into_request sets Presentation::Vod for every create — so the slot existed on the path viewers do not take, and PreparationExecutor could only ever have staged successors for the minority. a_vod_session_holds_a_preparation_slot reproduces it directly: reverting the move leaves VodServe::preparation_gate with nothing to hand out and that test cannot be written at all, while an_ended_vod_session_takes_no_successor pins the liveness half each engine still owns. The existing executor suite continues to prove the rolling side through the same trait, so the one-per-playback rule is now asserted once and applied by both engines rather than duplicated on one."
