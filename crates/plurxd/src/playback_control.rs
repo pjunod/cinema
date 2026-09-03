@@ -1235,8 +1235,39 @@ pub(crate) struct RecipeView<'a> {
     pub grade: GradeIntent,
 }
 
-/// The only axis M6 prepares across, and the reason it is one rather than a
-/// set.
+/// A set of axes a transition crosses, as a bitmask over `PreparationAxis`.
+///
+/// Small and `Copy` because it is built inside `decide_preparation`'s closure
+/// and compared against a fixed table; five axes never need more.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreparationAxisSet(u8);
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl PreparationAxisSet {
+    const EMPTY: Self = Self(0);
+
+    const fn bit(axis: PreparationAxis) -> u8 {
+        1 << (axis as u8)
+    }
+
+    const fn of(axes: &[PreparationAxis]) -> Self {
+        let mut mask = 0;
+        let mut index = 0;
+        while index < axes.len() {
+            mask |= Self::bit(axes[index]);
+            index += 1;
+        }
+        Self(mask)
+    }
+
+    fn with(self, axis: PreparationAxis) -> Self {
+        Self(self.0 | Self::bit(axis))
+    }
+}
+
+/// Why M6 prepares across a fixed table of axis *combinations* rather than a
+/// rule, and why the table is short.
 ///
 /// M5.5 measured every platform **recipe- and device-dependent**, and in both
 /// directions: Safari passes same-codec and fails codec/HDR, while the
@@ -1269,11 +1300,53 @@ pub(crate) struct RecipeView<'a> {
 /// Android's platform-wide `false` is what holds that device back today. The
 /// capability keyed by axis **and device class** is therefore not a nice-to-
 /// have for unlocking Android's two phones; it is what has to exist before
-/// this constant is safe for the television class. Recorded here rather than
-/// argued around, because this constant is the entire server-side expression
+/// this table is safe for the television class. Recorded here rather than
+/// argued around, because this table is the entire server-side expression
 /// of the restriction and whoever narrows the capability will read it.
+///
+/// **The table itself.** Each row is a measurement, not a rule.
+///
+/// **`{ResolutionOrBitrate}`** — M5.5's same-codec, same-grade case, "a
+/// resolution/bitrate change only". Apple 20/20 on both required devices,
+/// 2026-09-01.
+///
+/// **`{ResolutionOrBitrate, DeliveryMethod}`** — the product the fleet
+/// actually produces, measured 2026-09-03 on the Apple TV 4K (3rd generation):
+/// a 2160p direct-play source against a 1080p server-selected transcode, so
+/// height and delivery method move together. 20/20 clean commits, zero failed
+/// admissions, zero predecessor and post-commit stalls, on a 40 Mbit/s link —
+/// 2.20× the predecessor's 18.183 Mbit/s, above the floor
+/// `headroom_refusal` enforces. See
+/// [`M6-AXIS-CASE-HANDOFF.md`](../../../docs/M6-AXIS-CASE-HANDOFF.md).
+///
+/// **Why this list and not a rule.** Shadow mode measured that a pure
+/// resolution change does not occur on a real library at all — the top rung
+/// direct-plays and the lower rungs transcode, so the delivery method moves
+/// with the height every time. Widening on that observation *alone* would have
+/// been the reasoning shadow mode exists to replace; the entry above exists
+/// because someone ran the case on hardware and it passed.
+///
+/// **What is deliberately absent.** The grade axis: the 2026-09-03 run was SDR
+/// H.264 throughout, so `{ResolutionOrBitrate, DeliveryMethod, DynamicRange}`
+/// — which is what an HDR or Dolby Vision title's quality change actually
+/// crosses — remains unmeasured and stays under `multiple_axes`. Audio and
+/// burned subtitles were never measured in combination with anything. Add a
+/// row here only with a receipt, and say which run.
+///
+/// The device cohort is a second, unexpressed restriction: both entries were
+/// proven on Apple only, and the capability document cannot yet say *yes for
+/// this recipe on this device class* — M6 handoff §3. Android's platform-wide
+/// `false` is what holds that device back today, and narrowing the capability
+/// by axis and device class is what has to exist before this table is safe for
+/// the television class generally.
 #[cfg_attr(not(test), allow(dead_code))]
-const PREPARED_AXIS: PreparationAxis = PreparationAxis::ResolutionOrBitrate;
+const PREPARED_AXIS_SETS: [PreparationAxisSet; 2] = [
+    PreparationAxisSet::of(&[PreparationAxis::ResolutionOrBitrate]),
+    PreparationAxisSet::of(&[
+        PreparationAxis::ResolutionOrBitrate,
+        PreparationAxis::DeliveryMethod,
+    ]),
+];
 
 /// Decide, from the delivered selection and a candidate one, whether M6
 /// prepares.
@@ -1341,6 +1414,9 @@ fn decide_preparation_given_client(
     let (delivered, candidate) = (delivered.selection, candidate.selection);
     let mut crossed: Option<PreparationAxis> = None;
     let mut multiple = false;
+    // The *set* that moved, not only the hardest member. A combination is
+    // admitted or refused as a whole, because that is how it was measured.
+    let mut crossed_set = PreparationAxisSet::EMPTY;
     // The hardest axis wins, by the enum's own ordering rather than by the
     // order these happen to be written. Both plan §5.2 and roadmap §3.3 rank
     // resolution/bitrate most transparent, then audio and burned subtitles,
@@ -1348,6 +1424,7 @@ fn decide_preparation_given_client(
     // regrouping these statements cannot silently change an operator metric.
     let mut cross = |axis: PreparationAxis| {
         multiple |= crossed.is_some();
+        crossed_set = crossed_set.with(axis);
         crossed = Some(crossed.map_or(axis, |held: PreparationAxis| held.max(axis)));
     };
 
@@ -1376,11 +1453,12 @@ fn decide_preparation_given_client(
     let Some(axis) = crossed else {
         return PreparationDecision::Unchanged;
     };
-    if multiple {
-        // Each axis is separately measured and a combination is measured by
-        // nothing. M5.5 ran two cases, not their product, and the Google TV's
-        // inversion is exactly the evidence that axes do not compose the way
-        // reasoning would predict.
+    let admitted = PREPARED_AXIS_SETS.contains(&crossed_set);
+    if multiple && !admitted {
+        // A combination nobody measured is measured by nothing. M5.5 ran two
+        // single-axis cases, not their product, and the Google TV's inversion
+        // is exactly the evidence that axes do not compose the way reasoning
+        // would predict.
         //
         // Ranked above the capability deliberately: this is the fact that
         // would still be true after a coordinated client release flipped the
@@ -1399,7 +1477,7 @@ fn decide_preparation_given_client(
             reason: FallbackReason::ClientCannotPrepare,
         };
     }
-    if axis != PREPARED_AXIS {
+    if !admitted {
         return PreparationDecision::Fallback {
             axis,
             reason: FallbackReason::AxisNotProven,
@@ -17150,6 +17228,116 @@ mod tests {
         );
     }
 
+    /// The measured product: height and delivery method moving together.
+    ///
+    /// This is the transition a viewer's quality change actually makes — the
+    /// top rung direct-plays and the lower rungs transcode, so the delivery
+    /// method moves with the height every time, and shadow mode measured that
+    /// a pure resolution change does not occur on a real library at all.
+    ///
+    /// Admitted because it was **run**, not because that observation made it
+    /// look necessary: Apple TV 4K (3rd generation), 2026-09-03, 20/20 clean
+    /// commits with zero failed admissions and zero predecessor or
+    /// post-commit stalls, on a 40 Mbit/s link against an 18.183 Mbit/s
+    /// predecessor — 2.20×, above the floor `headroom_refusal` enforces. An
+    /// earlier attempt at 30 Mbit/s (1.65×) failed eight of twenty and was
+    /// discarded as measuring a transition the server would itself refuse.
+    #[test]
+    fn resolution_together_with_delivery_method_is_prepared() {
+        let caps = can_prepare(true);
+        let mut transcoded = playing(1080);
+        transcoded.codec = "server_selected".to_owned();
+        let mut direct = playing(2160);
+        direct.codec = "source".to_owned();
+
+        assert_eq!(
+            decide_preparation(view(&direct), view(&transcoded), Some(&caps), roomy()),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::DeliveryMethod,
+            },
+            "the axis label stays the hardest member, so the metric is comparable",
+        );
+        // And back, because a viewer who lowers quality also raises it again.
+        assert_eq!(
+            decide_preparation(view(&transcoded), view(&direct), Some(&caps), roomy()),
+            PreparationDecision::Prepare {
+                axis: PreparationAxis::DeliveryMethod,
+            },
+        );
+        // The throughput floor still governs it: admitted is not exempt.
+        assert_eq!(
+            decide_preparation(
+                view(&direct),
+                view(&transcoded),
+                Some(&caps),
+                PreparationConditions {
+                    observed_download_bps: Some(12_000_000),
+                    delivered_bps: Some(12_000_000),
+                },
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DeliveryMethod,
+                reason: FallbackReason::ThroughputInsufficient,
+            },
+            "the 30 Mbit run failed here, and that is the rule working",
+        );
+        // So does the capability.
+        assert_eq!(
+            decide_preparation(
+                view(&direct),
+                view(&transcoded),
+                Some(&can_prepare(false)),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DeliveryMethod,
+                reason: FallbackReason::ClientCannotPrepare,
+            },
+        );
+    }
+
+    /// The grade was not in the measured product, and adding it is not implied.
+    ///
+    /// The 2026-09-03 run was SDR H.264 throughout. An HDR or Dolby Vision
+    /// title's quality change crosses resolution, delivery method **and**
+    /// grade, and nobody has run that. It stays `multiple_axes`, which is what
+    /// stops a passing SDR receipt from being read as permission for the
+    /// harder case.
+    #[test]
+    fn adding_the_grade_to_the_measured_product_is_not_admitted() {
+        let caps = can_prepare(true);
+        let mut direct = playing(2160);
+        direct.codec = "source".to_owned();
+        let mut transcoded = playing(1080);
+        transcoded.codec = "server_selected".to_owned();
+
+        assert_eq!(
+            decide_preparation(
+                view(&direct),
+                view_at(&transcoded, hdr10()),
+                Some(&caps),
+                roomy(),
+            ),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DynamicRange,
+                reason: FallbackReason::MultipleAxes,
+            },
+            "resolution + delivery + grade is the HDR case, and it is unmeasured",
+        );
+        // Nor does the pair admit some *other* pair that happens to be two.
+        let mut audio = playing(1080);
+        audio.codec = "server_selected".to_owned();
+        audio.audio_track = Some(1);
+        assert_eq!(
+            decide_preparation(view(&direct), view(&audio), Some(&caps), roomy()),
+            PreparationDecision::Fallback {
+                axis: PreparationAxis::DeliveryMethod,
+                reason: FallbackReason::MultipleAxes,
+            },
+            "delivery + audio + resolution was never run either",
+        );
+    }
+
     /// Every other axis falls back even on a capable client, and names itself.
     #[test]
     fn the_unproven_axes_fall_back_and_name_themselves() {
@@ -17336,8 +17524,9 @@ mod tests {
             },
             "method, height and grade all move; the hardest names it",
         );
-        // A copy with no Dolby Vision to lose crosses method and height only,
-        // and then the delivery method is the hardest axis moving.
+        // A copy with no Dolby Vision to lose crosses method and height only.
+        // That pair is the set the 2026-09-03 hardware run admitted, so it
+        // prepares, and the delivery method is the hardest axis moving.
         let plain = session_request(SessionKind::Copy {
             aac: false,
             preserve_dolby_vision: false,
@@ -17364,9 +17553,8 @@ mod tests {
                 Some(&can_prepare(true)),
                 roomy(),
             ),
-            PreparationDecision::Fallback {
+            PreparationDecision::Prepare {
                 axis: PreparationAxis::DeliveryMethod,
-                reason: FallbackReason::MultipleAxes,
             },
         );
     }
@@ -17578,11 +17766,15 @@ mod tests {
     /// The hardest axis names the transition, by the enum's ordering rather
     /// than by which comparison happens to be written first — so regrouping
     /// those statements cannot silently change what an operator reads.
+    ///
+    /// Resolution together with delivery method is deliberately absent here:
+    /// that pair is an admitted set (`PREPARED_AXIS_SETS`), and
+    /// `resolution_together_with_delivery_method_is_prepared` owns it.
     #[test]
     fn two_axes_at_once_are_never_prepared_and_the_hardest_names_them() {
         let caps = can_prepare(true);
-        let mut method_and_height = playing(1080);
-        method_and_height.codec = "source".to_owned();
+        let mut audio_and_height = playing(1080);
+        audio_and_height.audio_track = Some(1);
         let mut audio_and_burn = playing(2160);
         audio_and_burn.audio_track = Some(1);
         audio_and_burn.subtitle_burn = Some(3);
@@ -17594,7 +17786,11 @@ mod tests {
         everything.subtitle_burn = Some(1);
 
         for (candidate, grade, axis) in [
-            (&method_and_height, sdr(), PreparationAxis::DeliveryMethod),
+            (
+                &audio_and_height,
+                sdr(),
+                PreparationAxis::AudioTrackOrOffset,
+            ),
             (&audio_and_burn, sdr(), PreparationAxis::SubtitleBurn),
             (&burn, hdr10(), PreparationAxis::DynamicRange),
             (&everything, hdr10(), PreparationAxis::DynamicRange),
