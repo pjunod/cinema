@@ -1800,6 +1800,76 @@ fn lease_time_remaining(expires_at_unix_ms: i64) -> std::time::Duration {
     std::time::Duration::from_millis(expires_at_unix_ms.saturating_sub(now_unix_ms).max(0) as u64)
 }
 
+/// Proof that a job's lease heartbeat has been retired.
+///
+/// Every fragment-index outcome write takes one, so a path that settles a row
+/// while its heartbeat is still beating does not compile. The ordering matters
+/// because a tick landing between the write and the cancel renews a row the
+/// write has already settled, reads back `Ok(false)`, and reports a lease loss
+/// that never happened.
+#[must_use]
+pub(crate) struct HeartbeatRetired;
+
+/// Retire a spawned heartbeat and hand back the proof.
+async fn retire_heartbeat(
+    stop: tokio_util::sync::CancellationToken,
+    heartbeat: tokio::task::JoinHandle<()>,
+) -> HeartbeatRetired {
+    stop.cancel();
+    let _ = heartbeat.await;
+    HeartbeatRetired
+}
+
+/// Report a terminal fragment-index write that did not land.
+///
+/// `fail`, `yield` and `complete` all answer `Ok(false)` when the row moved
+/// under the worker, and `Err` when the store refused the statement outright.
+/// Eighteen call sites discarded both with `let _ = …`, which is most of why a
+/// queue that failed every job it claimed for seventy-two hours produced no log
+/// line saying so. The row is not repaired here — the sweep owns that — but the
+/// loss is visible.
+fn record_analysis_outcome(
+    metrics: &AnalysisRuntimeMetrics,
+    job: &plurx_core::store::ClusterFragmentIndexJob,
+    action: &str,
+    code: &str,
+    result: Result<bool, StoreError>,
+) -> bool {
+    let code = if code.is_empty() { "-" } else { code };
+    match result {
+        Ok(true) => true,
+        Ok(false) => {
+            metrics.lease_event(LeaseEvent::OutcomeWriteLost);
+            tracing::warn!(
+                cache_key = job.cache_key,
+                target_node_id = job.target_node_id,
+                file_id = job.file_id,
+                fence = job.fence,
+                attempts = job.attempts,
+                action,
+                code,
+                "fragment-index outcome matched no row; the claim was already gone"
+            );
+            false
+        }
+        Err(error) => {
+            metrics.lease_event(LeaseEvent::OutcomeWriteLost);
+            tracing::warn!(
+                cache_key = job.cache_key,
+                target_node_id = job.target_node_id,
+                file_id = job.file_id,
+                fence = job.fence,
+                attempts = job.attempts,
+                action,
+                code,
+                %error,
+                "fragment-index outcome could not be written"
+            );
+            false
+        }
+    }
+}
+
 /// One queue row's lease: what it names in a log line, and its terms.
 pub(crate) struct LeaseHeartbeat {
     /// `fragment-index` or `analysis-request`.
@@ -1884,12 +1954,16 @@ impl LeaseHeartbeat {
                 _ = ticker.tick() => {}
             }
             let now = clock_ms();
+            let issued_at = tokio::time::Instant::now();
             let requested_expiry_ms = now.saturating_add(lease_ms);
             let renewal = renew(now, requested_expiry_ms);
             tokio::pin!(renewal);
             let renewed = tokio::select! {
-                // The outcome write is next and carries the same fence, so a
-                // renewal still in flight at retirement is not worth draining.
+                // A renewal still in flight at retirement is dropped rather
+                // than drained. What makes that safe is not the fence — `fail`
+                // and `yield` leave it unchanged — but `AND state = 'running'`
+                // in both renew statements: a late renewal cannot move a row
+                // the outcome write has already settled.
                 () = stop.cancelled() => break,
                 () = &mut deadline => {
                     metrics.lease_event(LeaseEvent::Expired);
@@ -1905,13 +1979,23 @@ impl LeaseHeartbeat {
             match renewed {
                 Ok(true) => {
                     metrics.lease_event(LeaseEvent::Renewed);
-                    // Conservative on purpose: the store granted `lease_ms` from
-                    // the moment the renewal was issued, and this is measured from
-                    // the moment it was acknowledged.
-                    expires_at =
-                        tokio::time::Instant::now() + Duration::from_millis(lease_ms.max(0) as u64);
+                    // Anchored to the moment the renewal was *issued*, not the
+                    // moment it was acknowledged. The row now reads
+                    // `now + lease_ms` for the `now` sampled above; anchoring
+                    // to the acknowledgement would put this fence a whole
+                    // store round-trip past the expiry every other node is
+                    // counting down — the overrun this deadline exists to
+                    // prevent.
+                    expires_at = issued_at + Duration::from_millis(lease_ms.max(0) as u64);
                 }
                 Ok(false) => {
+                    // Retirement races the renewal it interrupted. A row that
+                    // stopped being ours *because this worker settled it* is
+                    // not a lost lease, and reporting it as one is how a
+                    // signal that exists to be trusted becomes noise.
+                    if stop.is_cancelled() {
+                        break;
+                    }
                     metrics.lease_event(LeaseEvent::Lost);
                     lost.cancel();
                     tracing::warn!(
@@ -1924,6 +2008,9 @@ impl LeaseHeartbeat {
                     break;
                 }
                 Err(error) => {
+                    if stop.is_cancelled() {
+                        break;
+                    }
                     metrics.lease_event(LeaseEvent::RenewFailed);
                     tracing::warn!(
                         queue, row, fence, attempts, %error,
@@ -6077,10 +6164,16 @@ impl JobManager {
                     &engine_sha256,
                     have_dovi,
                     transcode.as_ref(),
+                    &stop,
                     &lost,
                     ATTEST_TIMEOUT,
                 )
                 .await;
+            // Before the outcome write, for the same reason the job runner
+            // retires first: a tick landing between the write and the cancel
+            // renews a row the write has already settled.
+            stop.cancel();
+            let _ = heartbeat.await;
             if let Err(resolution_error) = outcome {
                 let now = clock_ms();
                 match resolution_error {
@@ -6154,8 +6247,6 @@ impl JobManager {
                     }
                 }
             }
-            stop.cancel();
-            let _ = heartbeat.await;
         }
     }
 
@@ -6167,6 +6258,7 @@ impl JobManager {
         engine_sha256: &str,
         have_dovi: bool,
         transcode: &TranscodeManager,
+        stop: &tokio_util::sync::CancellationToken,
         lost: &tokio_util::sync::CancellationToken,
         attest_timeout: Duration,
     ) -> Result<(), AnalysisResolutionError> {
@@ -6279,6 +6371,9 @@ impl JobManager {
             {
                 return Err(AnalysisResolutionError::ClaimLost);
             }
+            // The publish is what takes this request out of `running`, so the
+            // heartbeat retires here rather than back in the worker loop.
+            stop.cancel();
             let published = self
                 .store
                 .publish_timeline_annotation_set_for_request(request, duration_ms, &set, clock_ms())
@@ -6455,6 +6550,8 @@ impl JobManager {
             return Err(AnalysisResolutionError::ClaimLost);
         }
 
+        // The handoff is what takes this request out of `running`.
+        stop.cancel();
         let accepted = self
             .store
             .submit_fragment_index_analysis(request, &job, now)
@@ -6603,47 +6700,19 @@ impl JobManager {
     /// the sweep owns that — but the loss is now visible.
     fn record_job_outcome(
         &self,
+        _retired: &HeartbeatRetired,
         job: &plurx_core::store::ClusterFragmentIndexJob,
         action: &str,
         code: &str,
         result: Result<bool, StoreError>,
     ) -> bool {
-        match result {
-            Ok(true) => true,
-            Ok(false) => {
-                self.analysis_metrics
-                    .lease_event(LeaseEvent::OutcomeWriteLost);
-                tracing::warn!(
-                    cache_key = job.cache_key,
-                    target_node_id = job.target_node_id,
-                    fence = job.fence,
-                    attempts = job.attempts,
-                    action,
-                    code,
-                    "fragment-index outcome matched no row; the claim was already gone"
-                );
-                false
-            }
-            Err(error) => {
-                self.analysis_metrics
-                    .lease_event(LeaseEvent::OutcomeWriteLost);
-                tracing::warn!(
-                    cache_key = job.cache_key,
-                    target_node_id = job.target_node_id,
-                    fence = job.fence,
-                    attempts = job.attempts,
-                    action,
-                    code,
-                    %error,
-                    "fragment-index outcome could not be written"
-                );
-                false
-            }
-        }
+        record_analysis_outcome(&self.analysis_metrics, job, action, code, result)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fail_fragment_index_job(
         &self,
+        retired: &HeartbeatRetired,
         job: &plurx_core::store::ClusterFragmentIndexJob,
         node_id: &str,
         code: &str,
@@ -6664,11 +6733,12 @@ impl JobManager {
                 retry_at_ms,
             )
             .await;
-        self.record_job_outcome(job, "fail", code, written)
+        self.record_job_outcome(retired, job, "fail", code, written)
     }
 
     async fn yield_fragment_index_job(
         &self,
+        retired: &HeartbeatRetired,
         job: &plurx_core::store::ClusterFragmentIndexJob,
         node_id: &str,
         now_ms: i64,
@@ -6685,7 +6755,7 @@ impl JobManager {
                 retry_at_ms,
             )
             .await;
-        self.record_job_outcome(job, "yield", "node_local_refusal", written)
+        self.record_job_outcome(retired, job, "yield", "node_local_refusal", written)
     }
 
     async fn run_cluster_fragment_index_job(
@@ -6765,11 +6835,7 @@ impl JobManager {
         // that lands between the write and the cancel renews a row the write
         // has already settled, and reads back `Ok(false)` — a lost lease that
         // never happened.
-        let finish_heartbeat =
-            |stop: tokio_util::sync::CancellationToken, heartbeat: tokio::task::JoinHandle<()>| async move {
-                stop.cancel();
-                let _ = heartbeat.await;
-            };
+
         let file = match classify_fragment_source_read(
             self.store.get_file(job.file_id).await,
             job.source_size,
@@ -6777,13 +6843,14 @@ impl JobManager {
         ) {
             Ok(file) => file,
             Err(failure) => {
-                finish_heartbeat(stop, heartbeat).await;
+                let retired = retire_heartbeat(stop, heartbeat).await;
                 let now = clock_ms();
                 let (code, retryable) = match failure {
                     FragmentSourceReadFailure::Stale => ("source_superseded", false),
                     FragmentSourceReadFailure::Transient => ("source_catalog_read_failed", true),
                 };
                 self.fail_fragment_index_job(
+                    &retired,
                     &job,
                     &node_id,
                     code,
@@ -6812,9 +6879,10 @@ impl JobManager {
             Ok(videos) => videos,
             Err(error) => {
                 tracing::warn!(file_id = file.id, %error, "reading probe for claimed fragment index");
-                finish_heartbeat(stop, heartbeat).await;
+                let retired = retire_heartbeat(stop, heartbeat).await;
                 let now = clock_ms();
                 self.fail_fragment_index_job(
+                    &retired,
                     &job,
                     &node_id,
                     "source_catalog_read_failed",
@@ -6830,7 +6898,7 @@ impl JobManager {
             Ok(version) => version,
             Err(error) => {
                 tracing::debug!(file_id = file.id, %error, "claimed index source is not local");
-                finish_heartbeat(stop, heartbeat).await;
+                let retired = retire_heartbeat(stop, heartbeat).await;
                 let now = clock_ms();
                 if job.target_node_id.is_empty() {
                     self.remember_fragment_index_refusal(
@@ -6838,10 +6906,11 @@ impl JobManager {
                         now.saturating_add(LOCAL_REFUSAL_MS),
                     )
                     .await;
-                    self.yield_fragment_index_job(&job, &node_id, now, now)
+                    self.yield_fragment_index_job(&retired, &job, &node_id, now, now)
                         .await;
                 } else {
                     self.fail_fragment_index_job(
+                        &retired,
                         &job,
                         &node_id,
                         "source_unavailable",
@@ -6875,16 +6944,22 @@ impl JobManager {
             }
         };
         let Some(attestation) = attestation else {
-            finish_heartbeat(stop, heartbeat).await;
+            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
-            self.yield_fragment_index_job(&job, &node_id, now, now.saturating_add(retry_ms))
-                .await;
+            self.yield_fragment_index_job(
+                &retired,
+                &job,
+                &node_id,
+                now,
+                now.saturating_add(retry_ms),
+            )
+            .await;
             return false;
         };
         let attested = match attestation {
             Ok(attested) if attested.observation.source_sha256 == job.source_sha256 => attested,
             Ok(_) | Err(_) => {
-                finish_heartbeat(stop, heartbeat).await;
+                let retired = retire_heartbeat(stop, heartbeat).await;
                 let now = clock_ms();
                 if job.target_node_id.is_empty() {
                     self.remember_fragment_index_refusal(
@@ -6892,10 +6967,11 @@ impl JobManager {
                         now.saturating_add(LOCAL_REFUSAL_MS),
                     )
                     .await;
-                    self.yield_fragment_index_job(&job, &node_id, now, now)
+                    self.yield_fragment_index_job(&retired, &job, &node_id, now, now)
                         .await;
                 } else {
                     self.fail_fragment_index_job(
+                        &retired,
                         &job,
                         &node_id,
                         "source_attestation_failed",
@@ -6921,9 +6997,10 @@ impl JobManager {
             crate::fragment_index_cluster::pipeline_digest(&file, &worker.engine_sha256, *video)
                 == job.pipeline_sha256
         }) else {
-            finish_heartbeat(stop, heartbeat).await;
+            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.fail_fragment_index_job(
+                &retired,
                 &job,
                 &node_id,
                 "pipeline_superseded",
@@ -6963,23 +7040,33 @@ impl JobManager {
             ) => (None, true),
         };
         if preempted {
-            finish_heartbeat(stop, heartbeat).await;
+            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
-            self.yield_fragment_index_job(&job, &node_id, now, now.saturating_add(retry_ms))
-                .await;
+            self.yield_fragment_index_job(
+                &retired,
+                &job,
+                &node_id,
+                now,
+                now.saturating_add(retry_ms),
+            )
+            .await;
             return false;
         }
         let Some(outcome) = outcome else {
-            finish_heartbeat(stop, heartbeat).await;
+            // The lease was lost mid-build. The row stays `running` until a
+            // sweep reclaims it; writing an outcome on a claim we no longer
+            // hold is exactly what the fence forbids.
+            let _retired = retire_heartbeat(stop, heartbeat).await;
             return false;
         };
         let index = match outcome {
             crate::fragindex::IndexOutcome::Built(index) => index,
             crate::fragindex::IndexOutcome::Truncated { reason, .. } => {
                 tracing::warn!(file_id = file.id, %reason, "cluster fragment index incomplete");
-                finish_heartbeat(stop, heartbeat).await;
+                let retired = retire_heartbeat(stop, heartbeat).await;
                 let now = clock_ms();
                 self.fail_fragment_index_job(
+                    &retired,
                     &job,
                     &node_id,
                     "truncated",
@@ -6992,9 +7079,10 @@ impl JobManager {
             }
             crate::fragindex::IndexOutcome::Unsupported(reason) => {
                 tracing::warn!(file_id = file.id, %reason, "cluster fragment index unsupported");
-                finish_heartbeat(stop, heartbeat).await;
+                let retired = retire_heartbeat(stop, heartbeat).await;
                 let now = clock_ms();
                 self.fail_fragment_index_job(
+                    &retired,
                     &job,
                     &node_id,
                     "unsupported",
@@ -7020,9 +7108,10 @@ impl JobManager {
         )
         .unwrap_or(false)
         {
-            finish_heartbeat(stop, heartbeat).await;
+            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.fail_fragment_index_job(
+                &retired,
                 &job,
                 &node_id,
                 "source_changed",
@@ -7041,9 +7130,10 @@ impl JobManager {
             .flatten()
             .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
         if !still_current {
-            finish_heartbeat(stop, heartbeat).await;
+            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.fail_fragment_index_job(
+                &retired,
                 &job,
                 &node_id,
                 "source_superseded",
@@ -7062,9 +7152,10 @@ impl JobManager {
             Ok(blob) => blob,
             Err(error) => {
                 tracing::warn!(file_id = file.id, %error, "encoding cluster fragment index");
-                finish_heartbeat(stop, heartbeat).await;
+                let retired = retire_heartbeat(stop, heartbeat).await;
                 let now = clock_ms();
                 self.fail_fragment_index_job(
+                    &retired,
                     &job,
                     &node_id,
                     "encode_failed",
@@ -7095,10 +7186,16 @@ impl JobManager {
             || !self.cluster_fragment_index_enabled().await
             || !crate::ffmpeg::fragment_index_engine_is_current().await
         {
-            finish_heartbeat(stop, heartbeat).await;
+            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
-            self.yield_fragment_index_job(&job, &node_id, now, now.saturating_add(retry_ms))
-                .await;
+            self.yield_fragment_index_job(
+                &retired,
+                &job,
+                &node_id,
+                now,
+                now.saturating_add(retry_ms),
+            )
+            .await;
             return false;
         }
         if let Err(error) =
@@ -7106,9 +7203,10 @@ impl JobManager {
                 .await
         {
             tracing::warn!(file_id = file.id, %error, "publishing local fragment-index blob");
-            finish_heartbeat(stop, heartbeat).await;
+            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.fail_fragment_index_job(
+                &retired,
                 &job,
                 &node_id,
                 "local_publish_failed",
@@ -7125,10 +7223,16 @@ impl JobManager {
             || !self.cluster_fragment_index_enabled().await
             || !crate::ffmpeg::fragment_index_engine_is_current().await
         {
-            finish_heartbeat(stop, heartbeat).await;
+            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
-            self.yield_fragment_index_job(&job, &node_id, now, now.saturating_add(retry_ms))
-                .await;
+            self.yield_fragment_index_job(
+                &retired,
+                &job,
+                &node_id,
+                now,
+                now.saturating_add(retry_ms),
+            )
+            .await;
             return false;
         }
         let completed_at_ms = clock_ms();
@@ -7139,12 +7243,12 @@ impl JobManager {
             verified_at_ms: completed_at_ms,
             last_seen_at_ms: completed_at_ms,
         };
-        finish_heartbeat(stop, heartbeat).await;
+        let retired = retire_heartbeat(stop, heartbeat).await;
         let settled = self
             .store
             .complete_cluster_fragment_index(&job, &artifact, &location, completed_at_ms)
             .await;
-        let completed = self.record_job_outcome(&job, "complete", "", settled);
+        let completed = self.record_job_outcome(&retired, &job, "complete", "", settled);
         if completed {
             if let Err(error) = self.store.put_fragment_index(file.id, &index).await {
                 tracing::warn!(file_id = file.id, %error, "installing built fragment index");
@@ -7892,6 +7996,93 @@ mod tests {
         assert_eq!(metrics.lease_count(LeaseEvent::Lost), 0);
         assert_eq!(metrics.lease_count(LeaseEvent::Expired), 0);
         assert_eq!(metrics.lease_count(LeaseEvent::Renewed), 2);
+    }
+
+    /// Retirement is not a lost lease.
+    ///
+    /// The worker settles the row and *then* the heartbeat's interrupted
+    /// renewal resolves `Ok(false)`, because the row is no longer `running`.
+    /// Reporting that as a loss is how the signal this milestone exists to
+    /// create becomes noise nobody reads.
+    #[tokio::test(start_paused = true)]
+    async fn a_renewal_that_loses_to_retirement_is_not_reported_as_a_loss() {
+        let metrics = Arc::new(AnalysisRuntimeMetrics::default());
+        let stop = tokio_util::sync::CancellationToken::new();
+        let lost = tokio_util::sync::CancellationToken::new();
+        let settling = stop.clone();
+        let heartbeat = tokio::spawn(lease_heartbeat(20_000, &metrics, &stop, &lost).run(
+            move |_now, _expires| {
+                let settling = settling.clone();
+                async move {
+                    // The outcome write lands while this renewal is in flight.
+                    settling.cancel();
+                    Ok(false)
+                }
+            },
+        ));
+        tokio::time::sleep(Duration::from_millis(25_000)).await;
+        heartbeat.await.expect("heartbeat retires");
+        assert!(
+            !lost.is_cancelled(),
+            "a row settled by this worker is not a lease it lost"
+        );
+        assert_eq!(metrics.lease_count(LeaseEvent::Lost), 0);
+    }
+
+    fn outcome_job() -> plurx_core::store::ClusterFragmentIndexJob {
+        plurx_core::store::ClusterFragmentIndexJob {
+            cache_key: "cache-key".to_owned(),
+            file_id: 42,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: "a".repeat(64),
+            pipeline_sha256: "b".repeat(64),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: "node-a".to_owned(),
+            state: "running".to_owned(),
+            owner_node_id: "node-a".to_owned(),
+            fence: 7,
+            lease_expires_ms: 1_000,
+            attempts: 3,
+            not_before_ms: 0,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            last_error_code: String::new(),
+        }
+    }
+
+    /// An outcome write that matched no row, or that the store refused, is
+    /// counted rather than discarded. Eighteen call sites used to write
+    /// `let _ = …`, so a queue failing every job it claimed said nothing.
+    #[test]
+    fn an_outcome_write_that_does_not_land_is_counted() {
+        let metrics = AnalysisRuntimeMetrics::default();
+        let job = outcome_job();
+        assert!(record_analysis_outcome(
+            &metrics,
+            &job,
+            "fail",
+            "source_unavailable",
+            Ok(true)
+        ));
+        assert_eq!(metrics.lease_count(LeaseEvent::OutcomeWriteLost), 0);
+
+        assert!(!record_analysis_outcome(
+            &metrics,
+            &job,
+            "fail",
+            "source_unavailable",
+            Ok(false)
+        ));
+        assert!(!record_analysis_outcome(
+            &metrics,
+            &job,
+            "complete",
+            "",
+            Err(StoreError::Database("refused".to_owned()))
+        ));
+        assert_eq!(metrics.lease_count(LeaseEvent::OutcomeWriteLost), 2);
     }
 
     #[test]
