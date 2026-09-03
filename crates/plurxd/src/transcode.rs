@@ -26728,6 +26728,128 @@ pub(crate) mod tests {
         );
     }
 
+    /// And the call site, which the function above cannot speak for.
+    ///
+    /// `a_copy_that_cannot_convert_serves_and_describes_the_hdr10_base` pins
+    /// `served_copy_options`; deleting the *call* to it in
+    /// `start_copy_with_audio_offset` leaves that test green and puts raw
+    /// Profile 7 back on the wire — `-strict unofficial`, RPUs and the
+    /// enhancement layer all retained — which is the exact argv the
+    /// 2026-09-02 production observation carried. So this one reads the argv
+    /// the process is actually given.
+    ///
+    /// It asserts the invariant rather than one string, because
+    /// `copy_video_args` has three strip shapes: the plain filter, the same
+    /// filter behind `dovi_rpu=strip=1` when the build has the bitstream
+    /// filter, and the parameter-set-promotion chain for a source whose
+    /// `hvcC` is a 23-byte stub. All three drop NAL types 62 and 63, and none
+    /// of them asks the muxer for `unofficial`; a preserving argv does the
+    /// opposite on both counts.
+    #[tokio::test]
+    async fn a_copy_that_cannot_convert_strips_the_argv_it_spawns() {
+        use plurx_core::store::SqliteStore;
+        use tracing_subscriber::prelude::*;
+
+        super::require_ffmpeg();
+        let media = crate::test_tempdir().expect("media dir");
+        let src = media.path().join("profile7.mp4");
+        write_real_hevc_video(&src, 4);
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(
+            &store,
+            &src.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(4_000),
+                container: Some("mp4".into()),
+                video_codec: Some("hevc".into()),
+                width: Some(160),
+                height: Some(120),
+                bit_depth: Some(10),
+                hdr: Some("dolby_vision".into()),
+                hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let work = crate::test_tempdir().expect("work");
+        let mgr = Arc::new(
+            TranscodeManager::new(
+                Arc::clone(&store),
+                work.path().to_path_buf(),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            // Pinned rather than probed: the two strip shapes differ only in
+            // whether this build has the `dovi_rpu` bitstream filter, and a
+            // test whose argv depends on the host's ffmpeg asserts something
+            // different on every machine.
+            .with_dv_strippable(false),
+        );
+
+        let logs = Arc::new(crate::logbuf::LogBuffer::new(256));
+        let subscriber =
+            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs)));
+        let guard = tracing::subscriber::set_default(subscriber);
+        let started = mgr
+            .start_copy(
+                file_id,
+                0.0,
+                None,
+                // What live-HLS recovery builds from a converting session's
+                // `SessionKind::Copy`: `start_live_recovery_session` copies
+                // both flags straight off `req.kind`.
+                CopySessionOptions {
+                    transcode_audio: false,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: true,
+                },
+                "paul",
+                "pb-strip",
+            )
+            .await;
+        drop(guard);
+
+        let argv = logs
+            .tail("trace", 256)
+            .into_iter()
+            .map(|entry| entry.message)
+            .find(|message| message.contains("copy-video HLS ffmpeg args"))
+            .expect("the copy path logs the argv it is about to spawn");
+
+        assert!(
+            !argv.contains("-strict unofficial"),
+            "`-strict unofficial` is emitted only for preserved Dolby Vision; \
+             its presence means this copy kept the RPUs it cannot rewrite: {argv}"
+        );
+        assert!(
+            argv.contains("62-63"),
+            "the strip has to drop the RPU (62) and the enhancement layer (63); \
+             a filter that names neither is the preserving argv: {argv}"
+        );
+        assert!(
+            argv.contains("-tag:v hvc1"),
+            "the served stream is the HDR10 base, so the sample entry is the \
+             compatible one: {argv}"
+        );
+
+        let info = started.expect("the copy session starts");
+        assert!(
+            matches!(
+                info.kind,
+                SessionKind::Copy {
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                    ..
+                }
+            ),
+            "the badge the create response is computed from has to describe the \
+             same stream the argv produces: {:?}",
+            info.kind
+        );
+    }
+
     /// The playlist for a converting session describes what the conversion
     /// produces, not what the source is.
     ///
@@ -28791,6 +28913,45 @@ pub(crate) mod tests {
         assert!(
             status.map(|s| s.success()).unwrap_or(false),
             "fixture encode failed — this test needs a working ffmpeg"
+        );
+    }
+
+    /// The same, in HEVC.
+    ///
+    /// The copy path's Dolby Vision branch is inside `copy_video_args`'s
+    /// `hevc | h265` arm, so an H.264 fixture never reaches the argv this
+    /// exists to read — and a probe row that merely *claims* `hevc` over
+    /// H.264 bytes produces an ffmpeg that fails for the wrong reason. 10-bit,
+    /// because every Dolby Vision base layer is.
+    fn write_real_hevc_video(path: &std::path::Path, seconds: u32) {
+        let status = std::process::Command::new(
+            std::env::var("PLURX_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
+        )
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size=160x120:rate=15:duration={seconds}"),
+            "-pix_fmt",
+            "yuv420p10le",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-x265-params",
+            "log-level=none:keyint=15:min-keyint=15",
+            "-tag:v",
+            "hvc1",
+            "-y",
+        ])
+        .arg(path)
+        .status();
+        assert!(
+            status.map(|s| s.success()).unwrap_or(false),
+            "HEVC fixture encode failed — this test needs an ffmpeg with libx265"
         );
     }
 

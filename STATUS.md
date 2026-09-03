@@ -4,6 +4,31 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Dolby Vision Profile 7 on the web — what was actually left
+
+**Effort `effort/dv-p7-web-delivery`, started 2026-09-03.** An adversarial
+review of the 2026-09-03 remux-refusal diagnosis found its mechanism right and
+its fix already merged: #842 (`60e1be68`) closed the no-caps arm's silent
+downgrade, and the argv in the diagnosis is from a build the fleet no longer
+runs. What is left is four smaller things, one milestone each.
+
+**M0 — correct the record, pin the call sites.** The #840 entry below called
+the refused stream a 7→8.1 conversion; it was the *raw* Profile 7 remux from a
+pre-#842 build, and no converted stream has ever reached a browser. Two
+regressions added, each mutation-checked: the create arm that gives a no-caps
+build a review at all (restore the pre-#842 `None` and the session serves raw
+Profile 7 again — every review-level test stays green), and the
+`served_copy_options` *call* in the live-recovery copy (delete it and the
+spawned argv gains `-strict unofficial` and keeps NAL 62/63, which is exactly
+the argv the production log carried). The second reads the argv out of a
+scoped `tracing` subscriber, because nothing in the crate captured a spawned
+command line before. Paul's R3 ruling — leave the preserved-Profile-7
+`dvh1.07`-over-`hvc1` inconsistency, which no client can reach — recorded in
+`docs/PLAYBACK.md`.
+
+**Not verified on hardware.** Nothing here has been played from a browser
+against the fleet; the deployed-build re-test is a separate hand-off.
+
 ## Activity's Now playing row, read as a card
 
 **PR [#849](https://github.com/pjunod/plurx/pull/849) — open, 2026-09-03,
@@ -62,9 +87,13 @@ the grant renewing on every retry, and the `Time` relabelling above. Full
 qualification green; 1601 unit tests.
 
 **Not fixed here, and still open:** the truncated first segment that caused
-the escalation — a DV Profile 7→8.1 remux the browser refused with
-`MEDIA_ERR_DECODE` after 12 KB of a 12.5 MB segment. Real, separate, and now
-costs a fallback rather than a failure. `vod_index_pending` and
+the escalation — the **raw Profile 7** remux a pre-#842 build served through
+live-HLS recovery, which the browser refused with `MEDIA_ERR_DECODE` after
+12 KB of a 12.5 MB segment. Not a 7→8.1 conversion: the conversion exists only
+on the VOD path, file 70 has never had its converting fragment index built,
+and no converted stream has yet been served to a browser at all. Real,
+separate, and now costs a fallback rather than a failure. `vod_index_pending`
+and
 `vod_transcode_unavailable` both fell through to live-HLS recovery on this
 file. And the web client reporting `hold` from a player that has never
 started is honest to fix at the client too, though the server invariant has to
