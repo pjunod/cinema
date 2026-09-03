@@ -1093,7 +1093,7 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
     if let Some(profile) = ev.delivered_dv_profile.filter(|p| *p > 0) {
         extra.insert("delivered_dv_profile".into(), profile.into());
     }
-    if let Some(declared) = clipped(&ev.declared_dv_profiles, 32) {
+    if let Some(declared) = printable_declared_dv_profiles(ev.declared_dv_profiles.as_deref()) {
         extra.insert("declared_dv_profiles".into(), declared.into());
     }
     if let Some(mismatch) =
@@ -1341,11 +1341,12 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
     if let Some(profile) = ev.delivered_dv_profile.filter(|p| *p > 0) {
         line.push_str(&format!(" delivered_dv_profile={profile}"));
     }
-    if let Some(declared) = one_line_field(&ev.declared_dv_profiles, 32) {
+    if let Some(declared) = printable_declared_dv_profiles(ev.declared_dv_profiles.as_deref()) {
         line.push_str(&format!(" declared_dv_profiles={declared}"));
     }
     if client_caps_mismatch(ev.delivered_dv_profile, ev.declared_dv_profiles.as_deref())
         == Some(true)
+        && DELIVERY_FAILURE_EVENTS.contains(&ev.event.as_str())
     {
         line.push_str(" caps_mismatch=true");
     }
@@ -1442,12 +1443,47 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
 /// party being exonerated.
 fn client_caps_mismatch(delivered: Option<i64>, declared: Option<&str>) -> Option<bool> {
     let delivered = delivered.filter(|profile| *profile > 0)?;
-    let declared: Vec<i64> = declared?
+    let declared: Vec<i64> = printable_declared_dv_profiles(declared)?
         .split(',')
         .filter_map(|part| part.trim().parse::<i64>().ok())
         .collect();
     (!declared.is_empty()).then(|| !declared.contains(&delivered))
 }
+
+/// How wide a declared set may be — for the verdict and for the printed line,
+/// which is the point of it being one function.
+///
+/// Six one- or two-digit profiles and their separators fit with room to spare.
+const DECLARED_DV_PROFILES_MAX: usize = 32;
+
+/// The declared set as the log line will show it, or `None` when it cannot be
+/// shown honestly.
+///
+/// The two used to disagree: the line clipped at 32 characters and the verdict
+/// parsed the whole string, so a set longer than that with its matching
+/// profile in the tail printed `declared_dv_profiles=9,9,9,9,…` and no
+/// `caps_mismatch` — or, one profile the other way, a mismatch the visible set
+/// contradicts. Either way the operator reads a verdict they cannot check
+/// against the evidence beside it, which is the one thing this line exists to
+/// let them do.
+///
+/// Over-long is refused rather than truncated, for the same reason: a verdict
+/// computed from a prefix is a verdict about a set nobody sent.
+fn printable_declared_dv_profiles(declared: Option<&str>) -> Option<String> {
+    let cleaned: String = declared?.chars().filter(|c| !c.is_control()).collect();
+    let cleaned = cleaned.trim();
+    (!cleaned.is_empty() && cleaned.len() <= DECLARED_DV_PROFILES_MAX).then(|| cleaned.to_owned())
+}
+
+/// The `ClientLog::event` tags that report a delivery the client could not
+/// use.
+///
+/// `caps_mismatch` names a *server* defect, and `playbackContext()` is spread
+/// by sixteen beacons — so without this the field rides `ttff` and `stall`
+/// lines, and `grep caps_mismatch` over an operator's log returns successful
+/// playbacks. The three facts still ride everything, because they are facts
+/// about the delivery whatever became of it; only the accusation is scoped.
+const DELIVERY_FAILURE_EVENTS: [&str; 3] = ["stream_rejected", "playback_failed", "hls_fatal"];
 
 #[derive(Serialize)]
 pub struct SettingsDto {
@@ -4448,6 +4484,81 @@ mod tests {
             delivered_dv_profile: None,
             declared_dv_profiles: None,
         }
+    }
+
+    /// The accusation is printed where a delivery actually failed, and the
+    /// facts are printed everywhere.
+    ///
+    /// `playbackContext()` is spread by sixteen beacons, so without the scope
+    /// `caps_mismatch=true` rides `ttff` and `stall` lines — and a `grep
+    /// caps_mismatch` over an operator's log returns successful playbacks,
+    /// which is the opposite of what the field is for. The three facts still
+    /// ride everything: they describe the delivery whatever became of it.
+    #[test]
+    fn the_caps_accusation_is_scoped_to_a_delivery_that_failed() {
+        let facts = |event: &str| {
+            let mut ev = beacon(event, 0);
+            ev.delivered_range = Some("dolby_vision".into());
+            ev.delivered_dv_profile = Some(7);
+            ev.declared_dv_profiles = Some("5,8".into());
+            client_log_line(&ev, 0)
+        };
+
+        for failed in DELIVERY_FAILURE_EVENTS {
+            let line = facts(failed);
+            assert!(line.contains(" caps_mismatch=true"), "{line}");
+        }
+        for served in ["ttff", "stall", "stall_recovery"] {
+            let line = facts(served);
+            assert!(
+                !line.contains("caps_mismatch"),
+                "a playback that worked is not a server defect: {line}"
+            );
+            assert!(
+                line.contains(" delivered_dv_profile=7")
+                    && line.contains(" declared_dv_profiles=5,8"),
+                "but the facts still ride it: {line}"
+            );
+        }
+    }
+
+    /// The verdict reads exactly the set the line prints, and no further.
+    ///
+    /// They used to disagree: the line clipped at 32 characters and the
+    /// verdict parsed the whole string. A declared set longer than that with
+    /// its matching profile in the tail printed a set the operator can see
+    /// contains no match, beside a verdict that silently found one — a
+    /// contradiction with nothing on the line to explain it.
+    #[test]
+    fn the_declared_set_the_verdict_reads_is_the_one_the_line_prints() {
+        let mut ev = beacon("stream_rejected", 0);
+        ev.delivered_range = Some("dolby_vision".into());
+        ev.delivered_dv_profile = Some(7);
+
+        // Longer than the bound, and the match is in the tail.
+        let long = format!("{},7", "9,".repeat(20));
+        assert!(long.len() > DECLARED_DV_PROFILES_MAX);
+        ev.declared_dv_profiles = Some(long.clone());
+        let line = client_log_line(&ev, 0);
+        assert!(!line.contains(" declared_dv_profiles="), "{line}");
+        assert!(
+            !line.contains("caps_mismatch"),
+            "a set nobody can read convicts nobody: {line}"
+        );
+        assert_eq!(client_caps_mismatch(Some(7), Some(&long)), None);
+
+        // At the bound it is printed and read, both.
+        let fits = "5,8";
+        ev.declared_dv_profiles = Some(fits.into());
+        let readable = client_log_line(&ev, 0);
+        assert!(readable.contains(" declared_dv_profiles=5,8"), "{readable}");
+        assert!(readable.contains(" caps_mismatch=true"), "{readable}");
+
+        // Control characters are stripped before either reads it, so a
+        // forged second line cannot ride the field the verdict parses.
+        ev.declared_dv_profiles = Some("5,8\nclient[x] admin login ok".into());
+        let forged = client_log_line(&ev, 0);
+        assert!(!forged.contains('\n'), "{forged}");
     }
 
     /// The rejection report names what was handed over and what was claimed,
