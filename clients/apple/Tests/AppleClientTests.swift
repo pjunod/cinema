@@ -5234,6 +5234,43 @@ final class AppleClientTests: XCTestCase {
     /// platform where both recipes passed on both devices, so there is no
     /// failing case to carve out. The narrower bound today is the server's
     /// own `PREPARED_AXIS`, which prepares only a resolution change.
+    /// One unreliable field must not cost the exchange.
+    ///
+    /// Two hazards from the same place — a near-instantaneous response makes
+    /// AVFoundation's bytes-over-duration blow up. `Int64(_: Double)` **traps**
+    /// above `Int64.max`, so an absurd rate would crash the app. One order down
+    /// is worse because it is silent: the protocol caps `observedDownloadBps`
+    /// at 1e13 and `PlaybackControlSnapshot.isValid` rejects the *whole
+    /// snapshot*, so an over-cap rate stops the reporter sending anything and
+    /// the session's control plane goes quiet until its lease expires.
+    func testObservedDownloadBpsIsClampedRatherThanTrapping() {
+        let ceiling: Int64 = 10_000_000_000_000
+        XCTAssertEqual(
+            PlayerController.observedDownloadBps(fromObservedBitrate: 8_000_000),
+            8_000_000
+        )
+        XCTAssertEqual(
+            PlayerController.observedDownloadBps(fromObservedBitrate: 1.5),
+            2,
+            "rounded, not truncated"
+        )
+        for absurd in [Double(Int64.max), .greatestFiniteMagnitude, 1e300, 2e13] {
+            XCTAssertEqual(
+                PlayerController.observedDownloadBps(fromObservedBitrate: absurd),
+                ceiling,
+                "\(absurd) must clamp rather than trap or invalidate the snapshot"
+            )
+        }
+        // AVFoundation reports -1 for "no observation yet", and appends a fresh
+        // event on every variant switch that reads -1 until data flows through
+        // it. Absent is the honest answer: the server treats a missing value as
+        // a refusal, and inventing one would let a prepared handoff fire on a
+        // link nobody measured.
+        for absent in [-1.0, 0.0, Double.nan, -.infinity, .infinity] {
+            XCTAssertNil(PlayerController.observedDownloadBps(fromObservedBitrate: absent))
+        }
+    }
+
     func testDualPlayerPreparationIsDeclaredOnEveryAppleDevice() {
         for hevc in [true, false] {
             for av1 in [true, false] {

@@ -2334,10 +2334,36 @@ final class PlayerController: ObservableObject {
     /// thing the floor exists to prevent.
     private func observedDownloadBitsPerSecond(_ item: AVPlayerItem) -> Int64? {
         guard let event = item.accessLog()?.events.last else { return nil }
-        let observed = event.observedBitrate
-        guard observed.isFinite, observed > 0 else { return nil }
-        return Int64(observed.rounded())
+        return Self.observedDownloadBps(fromObservedBitrate: event.observedBitrate)
     }
+
+    /// The reportable form of one `observedBitrate` reading.
+    ///
+    /// Split from the access-log lookup so the clamp is testable without an
+    /// `AVPlayerItem`: the lookup is AVFoundation's, the arithmetic is ours,
+    /// and it is the arithmetic that can crash or silence the reporter.
+    /// `nonisolated` because it is arithmetic, not state: `PlayerController`
+    /// is `@MainActor`, so a plain static would inherit that isolation and be
+    /// unreachable from a synchronous test — which is the whole reason it was
+    /// split out.
+    nonisolated static func observedDownloadBps(fromObservedBitrate observed: Double) -> Int64? {
+        guard observed.isFinite, observed > 0 else { return nil }
+        // Clamped, for two reasons that both start in the same place: a
+        // near-instantaneous response — a cached segment, a local proxy —
+        // makes AVFoundation's bytes-over-duration blow up.
+        //
+        // `Int64(_: Double)` **traps** above `Int64.max`, so an absurd rate
+        // would crash the app rather than being ignored. One order down is
+        // worse because it is silent: the protocol caps this field at 1e13 and
+        // `PlaybackControlSnapshot.isValid` rejects the *whole snapshot*, so
+        // an over-cap rate stops the reporter sending anything and the
+        // session's control plane goes quiet until its lease expires. One
+        // unreliable field must not cost the exchange.
+        return Int64(min(observed.rounded(), maximumObservedDownloadBps))
+    }
+
+    /// The protocol's own ceiling for `observed_download_bps`.
+    nonisolated private static let maximumObservedDownloadBps: Double = 10_000_000_000_000
 
     /// Film position that a new viewer command should build on. Between
     /// commands the live AVPlayer clock is most precise; during a seek or

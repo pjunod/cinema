@@ -51,12 +51,11 @@ const RETRY_RESOURCE_ACTION: &str = "retry_resource";
 /// declared it is never sent one, which is what makes shipping the server half
 /// ahead of the client half safe.
 const PREPARE_REPLACEMENT_ACTION: &str = "prepare_replacement";
-/// A session id is a UUID here, and a bound is what keeps a relayed action
-/// from carrying an arbitrary string into a client's URL.
-const MAX_SESSION_ID_LEN: usize = 64;
 /// An `action_id` is minted by this server as a UUID; the bound exists for the
 /// relayed case, where it arrives from a peer.
 const MAX_ACTION_ID_LEN: usize = 64;
+/// A playlist URL has no natural bound and this one arrives from a peer.
+const MAX_PLAYLIST_URL_LEN: usize = 512;
 /// The longest explanation a terminal action carries, matching the error
 /// body's bound: it is operator-facing text on a client-visible path.
 const MAX_TERMINAL_MESSAGE_BYTES: usize = 512;
@@ -651,12 +650,21 @@ impl ControlResponseV1 {
                         && *after_ms <= 60_000
                 }
                 // A relayed preparation is the one action that hands the
-                // client a **URL**, so the check that matters is not whether
-                // the peer is telling the truth about production — it is that
-                // the peer cannot steer a viewer's second player anywhere it
-                // likes. The playlist must address the session the same action
-                // names, which turns "here is your successor" into a statement
-                // about one session rather than an open redirect.
+                // client a **URL**, so the check is not whether the peer is
+                // telling the truth about production — it is that the peer
+                // cannot steer a viewer's second player anywhere it likes.
+                //
+                // The first version of this asked that `playlist_url` contain
+                // `session_id`, which was no check at all: the peer supplies
+                // both, so it chose the needle as well as the haystack.
+                // `{"session_id":"a","playlist_url":"//attacker/a"}` satisfied
+                // it, and `//host` is protocol-relative — it resolves against
+                // the attacker's host from any base.
+                //
+                // So the successor is pinned to the session this relay is
+                // *about*. The relaying node already knows that id; it is the
+                // one it used to route the exchange, and a successor for some
+                // other session is not something this response may carry.
                 //
                 // The staging itself is durable and this node cannot verify it
                 // without a store read it has no budget for; that is fine,
@@ -672,10 +680,8 @@ impl ControlResponseV1 {
                 } => {
                     !action_id.is_empty()
                         && action_id.len() <= MAX_ACTION_ID_LEN
-                        && !session_id.is_empty()
-                        && session_id.len() <= MAX_SESSION_ID_LEN
-                        && playlist_url.starts_with('/')
-                        && playlist_url.contains(session_id.as_str())
+                        && uuid::Uuid::parse_str(session_id).is_ok()
+                        && is_node_relative_playlist(playlist_url, session_id)
                         && *media_origin_ms >= 0
                 }
             }
@@ -1564,6 +1570,51 @@ impl ControlAction {
 /// does the advisory hold get derived from the delivery the response is
 /// already carrying, so the action and `delivery.hold_reason` can never
 /// disagree — they are the same fact read once.
+/// Whether a relayed playlist URL addresses this node and this session.
+///
+/// Three separate things, and each has a way to be wrong on its own:
+///
+/// * **This node.** A leading `/` is not enough — `//host/x` and `/\host/x`
+///   are protocol-relative and resolve against another origin, and browsers
+///   and AVFoundation both honour them. So the second character must be a
+///   normal path character.
+/// * **This session.** The id must appear as a whole path segment, not
+///   anywhere in the string: `/x?s=<id>` and `/legit#<id>` both contain it
+///   while pointing elsewhere, and a query or fragment cannot be part of the
+///   identity that makes a URL safe.
+/// * **No traversal.** A `..` segment climbs out of the session's own path,
+///   which is the same escape by another spelling.
+///
+/// Bounded, because unlike `action_id` and `session_id` a URL has no natural
+/// length and this one arrives from a peer.
+fn is_node_relative_playlist(playlist_url: &str, session_id: &str) -> bool {
+    if playlist_url.len() > MAX_PLAYLIST_URL_LEN {
+        return false;
+    }
+    // A query or fragment cannot carry identity, so the check is made against
+    // the path alone and anything after it is ignored for identity purposes.
+    let path = playlist_url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(playlist_url);
+    let Some(rest) = path.strip_prefix('/') else {
+        return false;
+    };
+    if rest.starts_with('/') || rest.starts_with('\\') {
+        return false;
+    }
+    let mut names_the_session = false;
+    for segment in rest.split('/') {
+        if segment == ".." {
+            return false;
+        }
+        if segment == session_id {
+            names_the_session = true;
+        }
+    }
+    names_the_session
+}
+
 /// Which metric slots one resolved response occupies.
 ///
 /// Separated from the counters so the classification can be tested. The
@@ -12091,11 +12142,11 @@ mod tests {
         };
         for (case, action) in [
             (
-                "a playlist that names a different session",
+                "a protocol-relative URL onto another host",
                 ControlAction::Prepare {
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
-                    playlist_url: "/api/v1/hls/somewhere-else/master.m3u8".to_owned(),
+                    playlist_url: format!("//attacker.invalid/{session_id}/master.m3u8"),
                     media_origin_ms,
                     effective_selection: effective_selection.clone(),
                 },
@@ -12126,6 +12177,56 @@ mod tests {
                     action_id: String::new(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
+                "a backslash-relative URL, which browsers treat as //",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: session_id.clone(),
+                    playlist_url: format!("/\\attacker.invalid/{session_id}/master.m3u8"),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
+                "the session named only in a query parameter",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: session_id.clone(),
+                    playlist_url: format!("/anything/at/all.m3u8?session={session_id}"),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
+                "the session named only in a fragment",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: session_id.clone(),
+                    playlist_url: format!("/anything/at/all.m3u8#{session_id}"),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
+                "a path that climbs out of the session's own",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: session_id.clone(),
+                    playlist_url: format!("/api/v1/hls/{session_id}/../../../etc/master.m3u8"),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
+                "a session id that is not one",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: "a".to_owned(),
+                    playlist_url: "//attacker.invalid/a/master.m3u8".to_owned(),
                     media_origin_ms,
                     effective_selection: effective_selection.clone(),
                 },
