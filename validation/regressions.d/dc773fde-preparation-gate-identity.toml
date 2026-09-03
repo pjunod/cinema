@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["dc773fde"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "VodPreparationGate bound only by session_id, and a VOD idle reap removes a session deliberately without a tombstone while the lifecycle gate stays stable across the resurrection — so a gate held across a successor's warm-up would take the replacement's slot for a successor whose predecessor no longer held the pointer, leaving the store CAS as the only thing between that and a wrong commit. a_gate_does_not_follow_its_session_id_to_a_new_incarnation reproduces it: reverting the incarnation pin turns that refusal into a successful stage against a foreign attachment. Separately the gate refused may_commit on a tombstone while ControlState still answered true, two authorities over one slot; ending_a_vod_session_ends_its_staged_successor pins that every tombstone-writing path now aborts the slot under the same registry lock, which is the rolling actor terminate shape. an_abandoned_successor_frees_the_vod_slot covers the settle-on-abort pair, the only VOD-specific logic in the implementation."
