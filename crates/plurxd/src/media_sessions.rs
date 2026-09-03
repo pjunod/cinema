@@ -2517,11 +2517,22 @@ pub(crate) struct OwnerLossResume {
 }
 
 /// Decide whether an owner transition can still be answered by a successor.
-pub(crate) fn classify_owner_loss(route: &MediaSessionRoute) -> OwnerLoss {
+///
+/// `now_unix_ms` reads the lease, and only the lease — this is not a deadline
+/// and nothing is timed from it. [`classify_durable_route`] raises
+/// `OwnerTransition` for two different situations, and **a live lease is a
+/// live owner**: a committed replacement holds one for the whole of its
+/// publication window while it owns and renews but may not yet publish. Only
+/// a lease that has actually stopped being renewed can be loss, and no
+/// recipe makes a renewing owner dead.
+pub(crate) fn classify_owner_loss(route: &MediaSessionRoute, now_unix_ms: i64) -> OwnerLoss {
     let envelope = serde_json::from_str::<RemoteStartRequest>(&route.recipe_json)
         .ok()
         .filter(|envelope| takeover_recipe_matches_route(envelope, route));
     let resume = owner_loss_resume(route, envelope.as_ref().map(|e| &e.request.kind));
+    if route.lease_expires_at_ms > now_unix_ms {
+        return OwnerLoss::Transitioning(resume);
+    }
     let eligible = envelope.is_some_and(|envelope| {
         // The same three row-readable refusals `attempt_takeover` applies.
         // The source-revision check is left out on purpose: it needs a Store
@@ -5692,13 +5703,16 @@ mod tests {
         let mut route = eligible_route("session-transition");
 
         assert!(matches!(
-            classify_owner_loss(&route),
+            classify_owner_loss(&route, EXPIRED_NOW_MS),
             OwnerLoss::Transitioning(_)
         ));
 
         route.lease_expires_at_ms = 1;
         assert!(
-            matches!(classify_owner_loss(&route), OwnerLoss::Transitioning(_)),
+            matches!(
+                classify_owner_loss(&route, EXPIRED_NOW_MS),
+                OwnerLoss::Transitioning(_)
+            ),
             "a lease dead since the epoch still says nothing about whether a successor is coming"
         );
     }
@@ -5722,7 +5736,10 @@ mod tests {
         })
         .expect("serialize vod recipe");
         assert!(
-            matches!(classify_owner_loss(&vod), OwnerLoss::Unrecoverable(_)),
+            matches!(
+                classify_owner_loss(&vod, EXPIRED_NOW_MS),
+                OwnerLoss::Unrecoverable(_)
+            ),
             "an immutable VOD handle is never replaced by a renumbered successor"
         );
 
@@ -5733,7 +5750,10 @@ mod tests {
         })
         .expect("serialize event recipe");
         assert!(
-            matches!(classify_owner_loss(&event), OwnerLoss::Unrecoverable(_)),
+            matches!(
+                classify_owner_loss(&event, EXPIRED_NOW_MS),
+                OwnerLoss::Unrecoverable(_)
+            ),
             "an EVENT playlist cannot be renumbered, so nothing will take it over"
         );
 
@@ -5742,7 +5762,10 @@ mod tests {
         exhausted.recipe_json = serde_json::to_string(&eligible).expect("serialize");
         exhausted.owner_epoch = i64::MAX;
         assert!(
-            matches!(classify_owner_loss(&exhausted), OwnerLoss::Unrecoverable(_)),
+            matches!(
+                classify_owner_loss(&exhausted, EXPIRED_NOW_MS),
+                OwnerLoss::Unrecoverable(_)
+            ),
             "an exhausted epoch space is permanent too"
         );
 
@@ -5750,7 +5773,7 @@ mod tests {
         unreadable.recipe_json = "{}".to_owned();
         assert!(
             matches!(
-                classify_owner_loss(&unreadable),
+                classify_owner_loss(&unreadable, EXPIRED_NOW_MS),
                 OwnerLoss::Unrecoverable(_)
             ),
             "a recipe no successor could act on is refused rather than waited on"
@@ -5763,7 +5786,10 @@ mod tests {
         })
         .expect("serialize foreign recipe");
         assert!(
-            matches!(classify_owner_loss(&foreign), OwnerLoss::Unrecoverable(_)),
+            matches!(
+                classify_owner_loss(&foreign, EXPIRED_NOW_MS),
+                OwnerLoss::Unrecoverable(_)
+            ),
             "a recipe that no longer describes its route is stale, and staleness does not heal"
         );
     }
@@ -5781,7 +5807,7 @@ mod tests {
         route.produced_playable_through_ms = 61_000;
         let recipe = eligible_recipe(&route);
 
-        let resume = classify_owner_loss(&route).resume();
+        let resume = classify_owner_loss(&route, EXPIRED_NOW_MS).resume();
         let (_, successor_restart_ms) = takeover_resume(&route, &recipe.request.kind);
         assert_eq!(
             resume.film_position_ms, successor_restart_ms,
@@ -5808,7 +5834,7 @@ mod tests {
         route.fetched_through_ms = 300_000;
         route.produced_playable_through_ms = 300_000;
 
-        let resume = classify_owner_loss(&route).resume();
+        let resume = classify_owner_loss(&route, EXPIRED_NOW_MS).resume();
         assert_eq!(
             resume.film_position_ms,
             10_000 + 300_000 - resume_overlap_ms(None),
@@ -5829,7 +5855,7 @@ mod tests {
         route.fetched_through_ms = 0;
         route.produced_playable_through_ms = 0;
 
-        let resume = classify_owner_loss(&route).resume();
+        let resume = classify_owner_loss(&route, EXPIRED_NOW_MS).resume();
         assert_eq!(resume.film_position_ms, 90_000);
         assert_eq!(resume.film_frontier_ms, 90_000);
     }
@@ -5872,9 +5898,51 @@ mod tests {
     }
 
     const ELIGIBLE_INCARNATION: &str = "00000000-0000-4000-8000-0000000000f1";
+    /// Later than any fixture lease, so the route's owner has stopped
+    /// renewing and the recipe is what decides the answer.
+    const EXPIRED_NOW_MS: i64 = i64::MAX / 2;
 
     fn eligible_route(session_id: &str) -> MediaSessionRoute {
         super::takeover_eligible_route(session_id, ELIGIBLE_INCARNATION)
+    }
+
+    /// The regression that shipped in the first version of this: a committed
+    /// replacement holds a live lease for the whole of its publication
+    /// window while it owns and renews. Its recipe is often ineligible — every
+    /// VOD handle's is, by design — so a classifier that reads only the recipe
+    /// tells a viewer their session is gone for the 372 seconds of an entirely
+    /// ordinary handoff.
+    #[test]
+    fn a_renewing_successor_awaiting_publication_is_never_owner_loss() {
+        let now_ms: i64 = 5_000_000;
+        let mut route = media_route("session-publishing");
+        // A VOD recipe: nothing will ever take this over, and nothing needs to.
+        route.recipe_json = serde_json::to_string(&valid_start_request()).expect("serialize");
+        route.publication_ready_at_ms =
+            now_ms.saturating_add(plurx_core::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS);
+        route.lease_expires_at_ms = now_ms.saturating_add(1);
+
+        assert!(
+            matches!(
+                classify_durable_route(Some(route.clone()), "node-other", now_ms),
+                DurableRouteResolution::OwnerTransition(_)
+            ),
+            "the publication fence is the other producer of this classification"
+        );
+        assert!(
+            matches!(
+                classify_owner_loss(&route, now_ms),
+                OwnerLoss::Transitioning(_)
+            ),
+            "a live lease is a live owner whatever its recipe says"
+        );
+        assert!(
+            matches!(
+                classify_owner_loss(&route, route.lease_expires_at_ms),
+                OwnerLoss::Unrecoverable(_)
+            ),
+            "and once that lease stops being renewed, the recipe decides"
+        );
     }
 
     fn eligible_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
