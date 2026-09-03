@@ -6,7 +6,7 @@ first.
 
 ## The Profile 7 diagnosis was right, and already merged
 
-**[`docs/dv-p7-web-delivery-handoff`](https://github.com/pjunod/plurx/pull/PRNUM),
+**[`docs/dv-p7-web-delivery-handoff`](https://github.com/pjunod/plurx/pull/851),
 open into main, 2026-09-03.** The kit-2 diagnosis of the browser refusing the
 Dolby Vision Profile 7 remux describes #842's defect with the right mechanism
 — and #842 is an ancestor of the SHA it names, so its root cause was closed
