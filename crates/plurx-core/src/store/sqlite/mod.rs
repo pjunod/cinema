@@ -1564,6 +1564,15 @@ impl MetricsStore for SqliteStore {
                     (SELECT COUNT(*) FROM cluster_fragment_index_jobs
                       WHERE state = 'failed' AND last_error_code = 'attempt_limit'
                         AND updated_at_ms >= (?2 - 86400) * 1000),
+                    -- `attempts` is charged on claim, so any row with one was
+                    -- picked up. Scoped to this table on purpose: the shared
+                    -- `('claim','all')` counter also carries skip-marker work.
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE attempts > 0
+                        AND updated_at_ms >= (?2 - 86400) * 1000),
+                    -- Work the queue could claim right now and has not.
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'queued' AND not_before_ms <= ?2 * 1000),
                     (SELECT COUNT(*) FROM cluster_fragment_index_jobs
                       WHERE state = 'running'
                         AND COALESCE(lease_expires_ms, 0) < ?2 * 1000),
@@ -1595,8 +1604,10 @@ impl MetricsStore for SqliteStore {
                             super::AnalysisQueueHealth {
                                 ready_24h: row.get(18)?,
                                 attempt_limit_24h: row.get(19)?,
-                                running_past_lease: row.get(20)?,
-                                last_ready_at_ms: row.get(21)?,
+                                claimed_24h: row.get(20)?,
+                                claimable: row.get(21)?,
+                                running_past_lease: row.get(22)?,
+                                last_ready_at_ms: row.get(23)?,
                             },
                         ),
                     })

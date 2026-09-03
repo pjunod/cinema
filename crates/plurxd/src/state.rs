@@ -174,6 +174,8 @@ struct StoreMetricsAtomics {
     analysis_marker_counts: [AtomicI64; plurx_core::store::ANALYSIS_MARKER_METRIC_SLOTS],
     analysis_ready_24h: AtomicI64,
     analysis_attempt_limit_24h: AtomicI64,
+    analysis_claimed_24h: AtomicI64,
+    analysis_claimable: AtomicI64,
     analysis_running_past_lease: AtomicI64,
     analysis_last_ready_at_ms: AtomicI64,
     /// The cumulative counters as this process first saw them. The store's own
@@ -216,6 +218,8 @@ impl Default for StoreMetricsAtomics {
             analysis_marker_counts: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_ready_24h: AtomicI64::new(0),
             analysis_attempt_limit_24h: AtomicI64::new(0),
+            analysis_claimed_24h: AtomicI64::new(0),
+            analysis_claimable: AtomicI64::new(0),
             analysis_running_past_lease: AtomicI64::new(0),
             analysis_last_ready_at_ms: AtomicI64::new(0),
             analysis_baseline_claims: AtomicI64::new(0),
@@ -248,6 +252,43 @@ pub struct AnalysisQueueHealthReport {
     pub claims_since_start: i64,
     pub lease_losses_since_start: i64,
     pub verdict: plurx_core::store::AnalysisQueueVerdict,
+}
+
+/// Rate limit for the "queue is not producing" warning.
+///
+/// An hourly limit is only a limit while it is armed. Re-arming the moment one
+/// sample comes back clean turns a verdict that flaps — a queue degraded by a
+/// sweep that keeps almost catching up — into a warning on every bad sample,
+/// which is how an hourly warning becomes a per-minute one. Recovery has to
+/// hold for a few samples before the next outage is allowed to speak again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct QueueWarnState {
+    last_warned_at_ms: i64,
+    good_samples: u32,
+}
+
+impl QueueWarnState {
+    /// Roughly two minutes of quiet at the sampler's 30-45s cadence.
+    const GOOD_SAMPLES_BEFORE_REARM: u32 = 4;
+    const AN_HOUR_MS: i64 = 60 * 60 * 1_000;
+
+    fn record_good_sample(&mut self) {
+        self.good_samples = self.good_samples.saturating_add(1);
+        if self.good_samples >= Self::GOOD_SAMPLES_BEFORE_REARM {
+            self.last_warned_at_ms = 0;
+        }
+    }
+
+    fn should_warn(&mut self, now: i64) -> bool {
+        self.good_samples = 0;
+        if self.last_warned_at_ms != 0
+            && now.saturating_sub(self.last_warned_at_ms) < Self::AN_HOUR_MS
+        {
+            return false;
+        }
+        self.last_warned_at_ms = now;
+        true
+    }
 }
 
 /// Lock-free view consumed by the Prometheus handler.
@@ -337,6 +378,8 @@ impl StoreMetricsCache {
                             .inner
                             .analysis_attempt_limit_24h
                             .load(Ordering::Relaxed),
+                        claimed_24h: self.inner.analysis_claimed_24h.load(Ordering::Relaxed),
+                        claimable: self.inner.analysis_claimable.load(Ordering::Relaxed),
                         running_past_lease: self
                             .inner
                             .analysis_running_past_lease
@@ -348,18 +391,27 @@ impl StoreMetricsCache {
                     },
                 },
             };
+            // Every input the verdict rules on is read before the sequence is
+            // re-checked. A baseline or a streak sampled after the check could
+            // belong to the next publication and disagree with the counters it
+            // is subtracted from.
+            let baseline_claims = self.inner.analysis_baseline_claims.load(Ordering::Relaxed);
+            let baseline_losses = self
+                .inner
+                .analysis_baseline_lease_losses
+                .load(Ordering::Relaxed);
+            let running_past_lease_samples = self
+                .inner
+                .analysis_running_past_lease_samples
+                .load(Ordering::Relaxed);
             let after = self.inner.sequence.load(Ordering::Acquire);
             if before == after {
                 let age_seconds = published.then(|| elapsed.saturating_sub(sampled_elapsed));
                 let claims_since_start = lifecycle_total(&sample.analysis, "claim")
-                    .saturating_sub(self.inner.analysis_baseline_claims.load(Ordering::Relaxed))
+                    .saturating_sub(baseline_claims)
                     .max(0);
                 let lease_losses_since_start = lifecycle_total(&sample.analysis, "lease_loss")
-                    .saturating_sub(
-                        self.inner
-                            .analysis_baseline_lease_losses
-                            .load(Ordering::Relaxed),
-                    )
+                    .saturating_sub(baseline_losses)
                     .max(0);
                 let queue_health = published.then(|| AnalysisQueueHealthReport {
                     health: sample.analysis.health,
@@ -369,9 +421,7 @@ impl StoreMetricsCache {
                         sample.analysis.health,
                         claims_since_start,
                         lease_losses_since_start,
-                        self.inner
-                            .analysis_running_past_lease_samples
-                            .load(Ordering::Relaxed),
+                        running_past_lease_samples,
                     ),
                 });
                 return StoreMetricsView {
@@ -491,6 +541,12 @@ impl StoreMetricsCache {
             .analysis_attempt_limit_24h
             .store(health.attempt_limit_24h, Ordering::Relaxed);
         self.inner
+            .analysis_claimed_24h
+            .store(health.claimed_24h, Ordering::Relaxed);
+        self.inner
+            .analysis_claimable
+            .store(health.claimable, Ordering::Relaxed);
+        self.inner
             .analysis_running_past_lease
             .store(health.running_past_lease, Ordering::Relaxed);
         self.inner
@@ -498,10 +554,24 @@ impl StoreMetricsCache {
             .store(health.last_ready_at_ms, Ordering::Relaxed);
         let claims = lifecycle_total(&sample.analysis, "claim");
         let losses = lifecycle_total(&sample.analysis, "lease_loss");
+        // Re-anchor when a counter has gone backwards as well as on the first
+        // sample. These are monotonic in the store, so a decrease means the
+        // term under us changed — a restored backup, a rebuilt node, a
+        // leadership change onto a lagging log. Keeping the old baseline would
+        // pin the delta at zero from then on, and a permanent zero reads as
+        // `idle`: the one verdict that never asks anyone to look.
+        let baseline_ran_backwards = claims
+            < self.inner.analysis_baseline_claims.load(Ordering::Relaxed)
+            || losses
+                < self
+                    .inner
+                    .analysis_baseline_lease_losses
+                    .load(Ordering::Relaxed);
         if !self
             .inner
             .analysis_baseline_seen
             .swap(true, Ordering::Relaxed)
+            || baseline_ran_backwards
         {
             self.inner
                 .analysis_baseline_claims
@@ -861,8 +931,7 @@ impl AppState {
     /// seventy-two hour outage. What did not exist was anything that turned
     /// them into a sentence, so a queue failing every job it claimed looked
     /// like a queue with a lot of history.
-    fn warn_if_the_queue_is_not_producing(&self, last_warned_at_ms: &mut i64) {
-        const AN_HOUR_MS: i64 = 60 * 60 * 1_000;
+    fn warn_if_the_queue_is_not_producing(&self, warn_state: &mut QueueWarnState) {
         let Some(report) = self.store_metrics.snapshot().queue_health else {
             return;
         };
@@ -871,25 +940,27 @@ impl AppState {
             plurx_core::store::AnalysisQueueVerdict::Dead
                 | plurx_core::store::AnalysisQueueVerdict::Degraded
         ) {
-            *last_warned_at_ms = 0;
+            warn_state.record_good_sample();
             return;
         }
         let now = clock_ms();
-        if now.saturating_sub(*last_warned_at_ms) < AN_HOUR_MS {
+        if !warn_state.should_warn(now) {
             return;
         }
-        *last_warned_at_ms = now;
         tracing::warn!(
             verdict = report.verdict.as_str(),
             claims_since_start = report.claims_since_start,
             lease_losses_since_start = report.lease_losses_since_start,
             ready_24h = report.health.ready_24h,
             attempt_limit_24h = report.health.attempt_limit_24h,
+            claimed_24h = report.health.claimed_24h,
+            claimable = report.health.claimable,
             running_past_lease = report.health.running_past_lease,
-            "fragment-index queue is {}: {} claims and {} ready in 24h",
+            "fragment-index queue is {}: {} claimed and {} ready in 24h, {} waiting",
             report.verdict.as_str(),
-            report.claims_since_start,
-            report.health.ready_24h
+            report.health.claimed_24h,
+            report.health.ready_24h,
+            report.health.claimable
         );
     }
 
@@ -902,14 +973,14 @@ impl AppState {
         }) % 15;
         let base_interval = Duration::from_secs(30 + stagger);
         let mut consecutive_errors = 0_u32;
-        let mut last_warned_at_ms = 0_i64;
+        let mut warn_state = QueueWarnState::default();
         loop {
             if let Err(error) = self.refresh_store_metrics().await {
                 consecutive_errors = consecutive_errors.saturating_add(1);
                 tracing::debug!(%error, "refreshing Store-backed metrics snapshot failed");
             } else {
                 consecutive_errors = 0;
-                self.warn_if_the_queue_is_not_producing(&mut last_warned_at_ms);
+                self.warn_if_the_queue_is_not_producing(&mut warn_state);
             }
             let backoff = 1_u32 << consecutive_errors.min(3);
             let interval = base_interval.saturating_mul(backoff);
@@ -8316,6 +8387,8 @@ mod tests {
                 health: plurx_core::store::AnalysisQueueHealth {
                     ready_24h: value,
                     attempt_limit_24h: value,
+                    claimed_24h: value,
+                    claimable: value,
                     running_past_lease: value,
                     last_ready_at_ms: value,
                 },
@@ -8350,9 +8423,10 @@ mod tests {
                 age_seconds: Some(1),
                 valid: true,
                 errors: 1,
-                // The first sample is this process's own baseline, so it has
-                // watched no claims yet: something is failing and nothing has
-                // finished, which is not provably dead and is not fine.
+                // Every figure is the same number here, so as many jobs
+                // exhausted their retry budget as were claimed at all: over
+                // budget by any reading, and `degraded` says so without
+                // needing a single claim watched from this process.
                 queue_health: Some(AnalysisQueueHealthReport {
                     health: complete.analysis.health,
                     claims_since_start: 0,

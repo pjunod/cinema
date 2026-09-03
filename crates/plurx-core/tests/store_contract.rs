@@ -16840,6 +16840,168 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
     .await;
 }
 
+/// The four figures the verdict divides by, read off a queue driven through
+/// the states they describe.
+///
+/// Without this the verdict is a pure function tested against numbers a human
+/// typed. The regression it guards is the one that made the milestone
+/// necessary in the first place: a count that looks right in Rust and asks the
+/// wrong question of the table.
+#[tokio::test]
+async fn the_prometheus_snapshot_answers_what_the_queue_verdict_asks() {
+    for_each_backend(|store, backend| async move {
+        const NOW_MS: i64 = 1_700_000_000_000;
+        const NOW_SECS: i64 = NOW_MS / 1_000;
+        let (_, file_id) = seed_file(&store, "queue-health").await;
+        let source_sha256 = "d".repeat(64);
+        let pipeline_sha256 = "e".repeat(64);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("queue health cache key");
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: "health-node".to_owned(),
+            not_before_ms: NOW_MS - 60_000,
+            created_at_ms: NOW_MS - 60_000,
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&job)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue health job: {error}")));
+
+        // Queued and past its wait: work the queue could take right now, and
+        // nothing it has taken. This is the shape that used to read `idle`.
+        let waiting = store
+            .prometheus_store_snapshot("health-node", NOW_SECS)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: waiting snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(waiting.claimable, 1, "{backend}: a queued job is claimable");
+        assert_eq!(waiting.claimed_24h, 0, "{backend}: nothing claimed yet");
+        assert_eq!(waiting.ready_24h, 0, "{backend}");
+        assert_eq!(waiting.running_past_lease, 0, "{backend}");
+        assert_eq!(waiting.last_ready_at_ms, 0, "{backend}");
+
+        // A job whose retry wait has not elapsed is not claimable, because an
+        // operator asking "is anything waiting" means anything the queue is
+        // allowed to pick up.
+        let too_early = store
+            .prometheus_store_snapshot("health-node", NOW_SECS - 120)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: pre-wait snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(
+            too_early.claimable, 0,
+            "{backend}: a job inside its retry wait is not work the queue is refusing"
+        );
+
+        let claim = store
+            .claim_cluster_fragment_index("health-node", &[], NOW_MS, NOW_MS + 60_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim health job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: health job claim"));
+        let running = store
+            .prometheus_store_snapshot("health-node", NOW_SECS)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: running snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(
+            running.claimed_24h, 1,
+            "{backend}: a claim charges an attempt, and an attempt is what `claimed_24h` counts"
+        );
+        assert_eq!(
+            running.claimable, 0,
+            "{backend}: a running job is not waiting"
+        );
+        assert_eq!(
+            running.running_past_lease, 0,
+            "{backend}: a live lease is not a lapsed one"
+        );
+
+        // Same row, read past the lease it holds.
+        let lapsed = store
+            .prometheus_store_snapshot("health-node", NOW_SECS + 120)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: lapsed snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(
+            lapsed.running_past_lease, 1,
+            "{backend}: a lease nobody renewed is the outage's own signature"
+        );
+
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            blob_sha256: "f".repeat(64),
+            bytes: 128,
+            built_by_node_id: "health-node".to_owned(),
+            built_at_ms: NOW_MS + 1_000,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key,
+            node_id: "health-node".to_owned(),
+            bytes: 128,
+            verified_at_ms: NOW_MS + 1_000,
+            last_seen_at_ms: NOW_MS + 1_000,
+        };
+        assert!(store
+            .complete_cluster_fragment_index(&claim, &artifact, &location, NOW_MS + 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete health job: {error}")));
+        let produced = store
+            .prometheus_store_snapshot("health-node", NOW_SECS + 2)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: produced snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(produced.ready_24h, 1, "{backend}");
+        assert_eq!(
+            produced.claimed_24h, 1,
+            "{backend}: finishing does not un-claim the job it finished"
+        );
+        assert_eq!(produced.claimable, 0, "{backend}");
+        assert_eq!(produced.running_past_lease, 0, "{backend}");
+        assert_eq!(
+            produced.last_ready_at_ms,
+            NOW_MS + 1_000,
+            "{backend}: the age an operator reads is the row's own timestamp"
+        );
+
+        // Every window figure is a window figure: read a day and a half later,
+        // the same rows say nothing was produced.
+        let stale_window = store
+            .prometheus_store_snapshot("health-node", NOW_SECS + 130_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale window snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(
+            stale_window.ready_24h, 0,
+            "{backend}: ready_24h is 24 hours"
+        );
+        assert_eq!(
+            stale_window.claimed_24h, 0,
+            "{backend}: claimed_24h shares the window it is divided against"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store() {
     for_each_backend(|store, backend| async move {

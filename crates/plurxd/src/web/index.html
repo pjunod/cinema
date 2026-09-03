@@ -839,7 +839,7 @@
   .analysis-error p{margin:4px 0 0;color:var(--prose);font-size:12px;line-height:1.48}
   .analysis-error code{display:inline-block;margin-top:6px;color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}
   .analysis-verdict{margin-bottom:10px;border-left:3px solid var(--muted);padding:2px 0 2px 10px}
-  .analysis-verdict b{display:block;font-size:13px;line-height:1.35;color:var(--ink)}
+  .analysis-verdict b{display:block;font-size:13px;line-height:1.35;color:var(--text)}
   .analysis-verdict p{margin:2px 0 0;color:var(--prose);font-size:12px;line-height:1.45}
   .analysis-verdict.bad{border-left-color:var(--bad)} .analysis-verdict.bad b{color:var(--bad)}
   .analysis-verdict.warn{border-left-color:var(--warn)} .analysis-verdict.warn b{color:var(--warn)}
@@ -11192,20 +11192,30 @@ function analysisCounts(value){
 // "12,193 claims, 9,915 lost leases, nothing built in three days" into a
 // sentence somebody reads: a queue that fails every job it claims looks, in a
 // list of jobs, exactly like a queue with a lot of history.
+// Every figure here is fleet-wide: the jobs table is replicated and carries
+// no record of which node watched a transition, so every node renders the same
+// sentence. Saying "this node" would send an operator to restart the one
+// machine they happen to be looking at.
 function analysisVerdictLine(value){
   const health=value&&value.health;
   if(!health||!health.verdict) return "";
-  const ready=health.ready_24h||0, claims=health.claims_since_start||0;
+  const ready=health.ready_24h||0, claimed=health.claimed_24h||0, waiting=health.claimable||0;
   const age=health.last_ready_at_ms?fmtAgo(Math.floor(health.last_ready_at_ms/1000)):"never";
+  const plural=(n,word)=>`${n} ${word}${n===1?'':'s'}`;
+  // A queue that never got as far as a claim and a queue that claims and
+  // fails are the same outage wearing different faces. Name whichever one the
+  // numbers actually show, because they point at different first moves.
+  const deadDetail=claimed===0&&waiting>0
+    ? `${plural(waiting,'job')} waiting and nothing picked up in 24 hours. Last index built ${age}.`
+    : `${plural(claimed,'job')} picked up in 24 hours and nothing finished. Last index built ${age}.`;
   const said={
-    dead:["bad","The index queue is not producing",
-      `${claims} claim${claims===1?'':'s'} since this node started and nothing finished. Last index built ${age}.`],
+    dead:["bad","The index queue is not producing",deadDetail],
     degraded:["warn","The index queue is struggling",
-      `${ready} built in the last 24 hours against ${claims} claim${claims===1?'':'s'}, with ${health.lease_losses_since_start||0} lost lease${(health.lease_losses_since_start||0)===1?'':'s'} and ${health.attempt_limit_24h||0} out of retries. Last index built ${age}.`],
+      `${ready} built in the last 24 hours against ${plural(claimed,'job')} picked up, with ${plural(health.lease_losses_since_start||0,'lost lease')} and ${health.attempt_limit_24h||0} out of retries. Last index built ${age}.`],
     healthy:["ready","The index queue is producing",
       `${ready} built in the last 24 hours. Last index built ${age}.`],
     idle:["cancelled","The index queue is idle",
-      "Nothing claimed and nothing built since this node started — either the library is fully indexed or discovery is turned off."],
+      "Nothing waiting, nothing picked up and nothing built in 24 hours — either the library is fully indexed or discovery is turned off."],
   }[health.verdict];
   if(!said) return "";
   const [tone,title,detail]=said;

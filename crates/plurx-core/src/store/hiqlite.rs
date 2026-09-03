@@ -2762,6 +2762,12 @@ impl MetricsStore for HiqliteAuthStore {
                       WHERE state = 'failed' AND last_error_code = 'attempt_limit' \
                         AND updated_at_ms >= ($2 - 86400) * 1000) AS analysis_attempt_limit_24h, \
                     (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE attempts > 0 \
+                        AND updated_at_ms >= ($2 - 86400) * 1000) AS analysis_claimed_24h, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE state = 'queued' \
+                        AND not_before_ms <= $2 * 1000) AS analysis_claimable, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
                       WHERE state = 'running' \
                         AND COALESCE(lease_expires_ms, 0) < $2 * 1000) AS analysis_running_past_lease, \
                     (SELECT COALESCE(MAX(updated_at_ms), 0) FROM cluster_fragment_index_jobs \
@@ -3504,6 +3510,8 @@ struct PrometheusStoreRow {
     analysis_lifecycle_json: String,
     analysis_ready_24h: i64,
     analysis_attempt_limit_24h: i64,
+    analysis_claimed_24h: i64,
+    analysis_claimable: i64,
     analysis_running_past_lease: i64,
     analysis_last_ready_at_ms: i64,
 }
@@ -3531,6 +3539,8 @@ impl From<&mut Row<'_>> for PrometheusStoreRow {
             analysis_lifecycle_json: row.get("analysis_lifecycle_json"),
             analysis_ready_24h: row.get("analysis_ready_24h"),
             analysis_attempt_limit_24h: row.get("analysis_attempt_limit_24h"),
+            analysis_claimed_24h: row.get("analysis_claimed_24h"),
+            analysis_claimable: row.get("analysis_claimable"),
             analysis_running_past_lease: row.get("analysis_running_past_lease"),
             analysis_last_ready_at_ms: row.get("analysis_last_ready_at_ms"),
         }
@@ -3562,6 +3572,8 @@ impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
                 super::AnalysisQueueHealth {
                     ready_24h: row.analysis_ready_24h,
                     attempt_limit_24h: row.analysis_attempt_limit_24h,
+                    claimed_24h: row.analysis_claimed_24h,
+                    claimable: row.analysis_claimable,
                     running_past_lease: row.analysis_running_past_lease,
                     last_ready_at_ms: row.analysis_last_ready_at_ms,
                 },

@@ -3677,7 +3677,7 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
     }
     if let Some(report) = view.queue_health {
         out.push_str(
-            "# HELP plurx_analysis_queue_health Whether the fragment-index queue is producing: one series is 1, the rest 0.\n\
+            "# HELP plurx_analysis_queue_health Whether the fragment-index queue is producing, fleet-wide: one series is 1, the rest 0.\n\
              # TYPE plurx_analysis_queue_health gauge\n",
         );
         for verdict in plurx_core::store::ANALYSIS_QUEUE_VERDICTS {
@@ -3687,13 +3687,17 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
             ));
         }
         out.push_str(
-            "# HELP plurx_analysis_queue_ready_24h Fragment-index jobs that reached ready in the last 24 hours.\n\
+            "# HELP plurx_analysis_queue_ready_24h Fragment-index jobs that reached ready in the last 24 hours, fleet-wide.\n\
              # TYPE plurx_analysis_queue_ready_24h gauge\n\
-             # HELP plurx_analysis_queue_attempt_limit_24h Fragment-index jobs that exhausted their retry budget in the last 24 hours.\n\
+             # HELP plurx_analysis_queue_attempt_limit_24h Fragment-index jobs that exhausted their retry budget in the last 24 hours, fleet-wide.\n\
              # TYPE plurx_analysis_queue_attempt_limit_24h gauge\n\
+             # HELP plurx_analysis_queue_claimed_24h Fragment-index jobs the queue picked up in the last 24 hours, fleet-wide.\n\
+             # TYPE plurx_analysis_queue_claimed_24h gauge\n\
+             # HELP plurx_analysis_queue_claimable Fragment-index jobs queued and past their retry wait: work the queue could take right now.\n\
+             # TYPE plurx_analysis_queue_claimable gauge\n\
              # HELP plurx_analysis_queue_running_past_lease Fragment-index jobs sitting running past a lease nobody renewed.\n\
              # TYPE plurx_analysis_queue_running_past_lease gauge\n\
-             # HELP plurx_analysis_queue_claims_since_start Claims this process has watched, since it started.\n\
+             # HELP plurx_analysis_queue_claims_since_start Claims this process has watched, since it started. Shared with skip-marker work.\n\
              # TYPE plurx_analysis_queue_claims_since_start gauge\n\
              # HELP plurx_analysis_queue_lease_losses_since_start Lost leases this process has watched, since it started.\n\
              # TYPE plurx_analysis_queue_lease_losses_since_start gauge\n",
@@ -3701,11 +3705,15 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         out.push_str(&format!(
             "plurx_analysis_queue_ready_24h {}\n\
              plurx_analysis_queue_attempt_limit_24h {}\n\
+             plurx_analysis_queue_claimed_24h {}\n\
+             plurx_analysis_queue_claimable {}\n\
              plurx_analysis_queue_running_past_lease {}\n\
              plurx_analysis_queue_claims_since_start {}\n\
              plurx_analysis_queue_lease_losses_since_start {}\n",
             report.health.ready_24h,
             report.health.attempt_limit_24h,
+            report.health.claimed_24h,
+            report.health.claimable,
             report.health.running_past_lease,
             report.claims_since_start,
             report.lease_losses_since_start,
@@ -4186,6 +4194,70 @@ mod tests {
         assert!(stale.contains("plurx_store_metrics_sample_age_seconds 121"));
         assert!(stale.contains("plurx_libraries_total 3"));
         assert!(stale.contains("plurx_users_total 4"));
+        // The whole verdict family is absent, not zero, until a sample lands.
+        // A dashboard has to reach for `absent()` to tell those apart, which
+        // is why the runbook says so.
+        assert!(!absent.contains("plurx_analysis_queue_health"));
+        assert!(!stale.contains("plurx_analysis_queue_health"));
+        assert!(!stale.contains("plurx_analysis_queue_ready_24h"));
+    }
+
+    #[test]
+    fn the_queue_verdict_is_exposed_as_one_series_per_verdict_with_its_evidence() {
+        let health = plurx_core::store::AnalysisQueueHealth {
+            ready_24h: 0,
+            attempt_limit_24h: 84,
+            claimed_24h: 396,
+            claimable: 1_118,
+            running_past_lease: 11,
+            last_ready_at_ms: 1_700_000_000_000,
+        };
+        let rendered = render_store_metrics(StoreMetricsView {
+            sample: Some(plurx_core::store::PrometheusStoreSnapshot::default()),
+            age_seconds: Some(4),
+            valid: true,
+            errors: 0,
+            queue_health: Some(crate::state::AnalysisQueueHealthReport {
+                health,
+                claims_since_start: 412,
+                lease_losses_since_start: 398,
+                verdict: plurx_core::store::analysis_queue_verdict(health, 412, 398, 3),
+            }),
+        });
+        // Exactly one verdict is 1 and the rest are 0, so a dashboard can sum
+        // the family and get 1 rather than having to know which label to ask
+        // for.
+        assert!(rendered.contains("plurx_analysis_queue_health{verdict=\"dead\"} 1\n"));
+        for quiet in ["idle", "healthy", "degraded"] {
+            assert!(
+                rendered.contains(&format!(
+                    "plurx_analysis_queue_health{{verdict=\"{quiet}\"}} 0\n"
+                )),
+                "{quiet} should be published as 0"
+            );
+        }
+        // Every figure the verdict ruled on is published beside it, so the
+        // one-word answer can be checked rather than trusted.
+        for line in [
+            "plurx_analysis_queue_ready_24h 0\n",
+            "plurx_analysis_queue_attempt_limit_24h 84\n",
+            "plurx_analysis_queue_claimed_24h 396\n",
+            "plurx_analysis_queue_claimable 1118\n",
+            "plurx_analysis_queue_running_past_lease 11\n",
+            "plurx_analysis_queue_claims_since_start 412\n",
+            "plurx_analysis_queue_lease_losses_since_start 398\n",
+        ] {
+            assert!(rendered.contains(line), "missing {line:?}");
+        }
+        for family in [
+            "plurx_analysis_queue_claimed_24h",
+            "plurx_analysis_queue_claimable",
+        ] {
+            assert!(
+                rendered.contains(&format!("# TYPE {family} gauge\n")),
+                "{family} needs a TYPE line"
+            );
+        }
     }
 
     #[test]

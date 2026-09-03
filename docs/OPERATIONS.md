@@ -3694,19 +3694,43 @@ analysis** and the `health` block of `GET /api/v1/analysis/summary`, and a
 | Verdict | What it means | What to do |
 |---|---|---|
 | `healthy` | Indexes were built in the last 24 hours and most claims finished. | Nothing. |
-| `idle` | Nothing claimed and nothing built since this node started. | Nothing, unless you expected work: check that `vod_index_mins` is not `0` and that the library is not already fully indexed. |
-| `degraded` | Producing, but losing a quarter of its claims, or a tenth of them are exhausting their retry budget, or a row has sat `running` past its lease across two samples. | Read `attempt_errors` on the failing rows in the workspace — it names what each attempt actually hit. A standing `running_past_lease` means the claim sweep is not running: check that a node is draining the queue at all. |
-| `dead` | Twenty or more claims since this node started and **nothing** finished. | This is the shape of the 2026-08-31 outage. Check the daemon log for `analysis lease` warnings, then `plurx_analysis_lease_total{event="renew_failed"}`: a renewal that always errors is a store or statement fault, not a source fault. |
+| `idle` | Nothing waiting, nothing picked up, nothing built, no lapsed lease. There is genuinely nothing to judge. | Nothing, unless you expected work: check that `vod_index_mins` is not `0` and that the library is not already fully indexed. |
+| `degraded` | Producing, but losing a quarter of the claims this process watched, or a tenth of the jobs it picked up are exhausting their retry budget, or a row has sat `running` past its lease across two samples. | Read `attempt_errors` on the failing rows in the workspace — it names what each attempt actually hit. A standing `running_past_lease` means the claim sweep is not running: check that a node is draining the queue at all. |
+| `dead` | Nothing built in 24 hours, and either twenty or more jobs were picked up in that window, or twenty or more are sitting claimable and **none** were picked up at all. | This is the shape of the 2026-08-31 outage. The two halves point different ways: jobs picked up and none finished is a worker or source fault — check the daemon log for `analysis lease` warnings, then `plurx_analysis_lease_total{event="renew_failed"}`, since a renewal that always errors is a store or statement fault. A backlog nobody touched means no node is claiming: check that a daemon is running the queue at all. |
+
+`plurx_analysis_queue_claimed_24h` and `plurx_analysis_queue_claimable` are the
+two figures the verdict actually divides by, and both come from
+`cluster_fragment_index_jobs` over the same 24 hours as
+`plurx_analysis_queue_ready_24h`. Read those before the `_since_start` pair.
 
 The two `_since_start` figures — `plurx_analysis_queue_claims_since_start` and
 `plurx_analysis_queue_lease_losses_since_start` — are deltas taken against this
-process's first sample, so they reset when the daemon restarts. That is
-deliberate: the store's own lifecycle counters are cumulative since the schema
-landed, and a queue that built twelve thousand artifacts last month and nothing
-since reads as perfectly healthy through those.
+process's first sample, so they reset when the daemon restarts, and they count
+`skip_markers` work alongside fragment-index work because the store keeps one
+lifecycle counter for both. Only the lease-loss ratio uses them, and only once
+there are at least eight claims to divide, because the jobs table cannot say how
+many leases were lost. Treat them as this process's own observation, not as a
+fleet total.
 
-A verdict is per node and describes what *that* node has watched. On a healthy
-fleet where one node holds the mounts, the others can legitimately read `idle`.
+**The verdict is fleet-wide, not per node.** `cluster_fragment_index_jobs` is
+replicated and has no column recording which node watched a transition, so every
+node in a cluster computes the same verdict from the same rows. A node reading
+`dead` is not a claim about that node; do not restart the machine you happen to
+be looking at on the strength of it.
+
+The whole `plurx_analysis_queue_*` family is **absent**, not zero, until the
+daemon has taken its first store sample — a verdict with nothing behind it would
+publish as `idle`, which is an assertion. Alert on
+`absent(plurx_analysis_queue_health)` separately from
+`plurx_analysis_queue_health{verdict="dead"} == 1`; a scrape that returns no
+verdict at all means the store sampler is not completing, which
+`plurx_store_metrics_sample_valid` and `plurx_store_metrics_sample_errors_total`
+will confirm.
+
+A `dead` or `degraded` verdict warns at most once an hour, and the hour only
+re-arms after the verdict has been clean for several consecutive samples — a
+queue that flaps between `degraded` and `healthy` logs on the hour, not on every
+sample.
 
 ## Hardware transcode & recent Intel GPUs
 

@@ -42,6 +42,8 @@ fn summary_value(
             "verdict": report.verdict.as_str(),
             "ready_24h": report.health.ready_24h,
             "attempt_limit_24h": report.health.attempt_limit_24h,
+            "claimed_24h": report.health.claimed_24h,
+            "claimable": report.health.claimable,
             "running_past_lease": report.health.running_past_lease,
             "last_ready_at_ms": report.health.last_ready_at_ms,
             "claims_since_start": report.claims_since_start,
