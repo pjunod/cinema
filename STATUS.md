@@ -23,8 +23,8 @@ nothing deployed.
 
 ## Activity's Now playing row, read as a card
 
-**PR [#849](https://github.com/pjunod/plurx/pull/849) — open, 2026-09-03,
-branch `web/activity-stream-card`.** Paul asked for the activity status display to be "a
+**[`web/activity-stream-card`](https://github.com/pjunod/plurx/pull/849),
+merged to main as `a94a32cb`, 2026-09-03.** Paul asked for the activity status display to be "a
 lot nicer": the Stream cell was one " · "-joined sentence of every session
 fact, with the three things an operator brings to the page — is it playing,
 is the server keeping up, is it held and why — buried among sequence
