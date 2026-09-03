@@ -6,7 +6,8 @@ first.
 
 ## Dolby Vision Profile 7 on the web — what was actually left
 
-**Effort `effort/dv-p7-web-delivery`, started 2026-09-03.** An adversarial
+**Effort `effort/dv-p7-web-delivery`, merged as `206ab3c3` (#869) on
+2026-09-03.** An adversarial
 review of the 2026-09-03 remux-refusal diagnosis found its mechanism right and
 its fix already merged: #842 (`60e1be68`) closed the no-caps arm's silent
 downgrade, and the argv in the diagnosis is from a build the fleet no longer
