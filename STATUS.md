@@ -6,7 +6,7 @@ first.
 
 ## The ✕ on an iPhone could not leave a film
 
-**PR [#853](https://github.com/pjunod/plurx/pull/853) — open, 2026-09-03, branch `fix/close-control-exits`, fix commit `0f904213`.** Paul: "the x to
+**PR [#853](https://github.com/pjunod/plurx/pull/853) — MERGED to main as `e31a6cb4`, 2026-09-03, branch `fix/close-control-exits`, fix commit `0f904213`.** Paul: "the x to
 close out media playback does not work on apple devices. There's no way to
 get out of the movie except force close." Confirmed at source, not on a
 device: the iOS ✕ fed `back` to the touch routing table, and `back` while
