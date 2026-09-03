@@ -327,9 +327,10 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
                 lastFocusedControl = lastFocusedControl,
                 onControlFocused = { lastFocusedControl = it; lastInteraction += 1 },
                 onTimelineFocused = { timelineFocused = it },
-                onBack = {
-                    val input = PlayerContractInput.Back
-                    applyOutcome(PlayerInputPolicy.route(playerSurface, inputState(), input), input)
+                onClose = {
+                    PlayerInputPolicy.closeSteps(inputState()).forEach { outcome ->
+                        applyOutcome(outcome, PlayerContractInput.Select)
+                    }
                 },
                 onPlayPause = { if (player.isPlaying) player.pause() else player.play(); poke() },
                 onSeekBack = { player.seekTo((player.currentPosition - PlayerInputPolicy.SKIP_STEP_MS).coerceAtLeast(0)); poke() },
