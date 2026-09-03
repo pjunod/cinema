@@ -32,14 +32,18 @@ cache keys, blob headers and every `source_sha256` column are untouched. About
 two seconds per file, per node, at any size.
 
 Three consequences shipped with it. The ten-minute deadline now means a hung
-mount rather than a large file, so the analysis path stopped charging an
-attempt for it — the retry is refunded and still takes its backoff, so an
-unreachable mount backs off instead of spending its way to a permanent
-`attempt_limit`. The cluster path reports `source_attestation_timeout` instead
-of folding a deadline into `source_attestation_failed`; the code already
-existed everywhere and that path simply never emitted it. And attestation now
-reports bytes read, so the `verifying` stage shows progress instead of three
-zeros — the daemon's real hash rate had never been measured because nothing
+mount rather than a large file, and stays charged on both paths — the plan
+called for making it uncharged, and an adversarial review showed that an
+uncharged retry is *refunded*, which pins `attempts` at one, flattens the
+backoff to its base delay forever, and lets never-terminal rows fill the
+4,096-row active-request budget every other file needs. The cluster path
+reports `source_attestation_timeout` instead of folding a deadline into
+`source_attestation_failed`; the code already existed everywhere and that path
+simply never emitted it, and an untargeted job that times out is now yielded
+*without* the day-long node-local exclusion a genuine refusal earns. And
+attestation reports bytes read against the sample it will actually read, so
+the `verifying` stage shows real progress instead of three zeros against the
+whole file — the daemon's hash rate had never been measured because nothing
 ever published it.
 
 The 1,939 rows already stranded at `attempt_limit` are the #700 placeholder
@@ -51,15 +55,23 @@ and lets background discovery re-request the library over successive passes.
 Nothing deletes or edits a row; the tombstones stay as history beside their
 successors.
 
-Existing observations are grandfathered — the memo predicate compares
-`object_version`, size and mtime, not how the digest was computed — so the 851
-already-indexed files are not rebuilt.
+Existing observations are invalidated once, deliberately. `object_version`
+carries a regime prefix, so every pre-change memo misses and is replaced. The
+plan's default was to grandfather them; review showed that is the more
+dangerous option, not the safer one — the memo table records no digest regime,
+so a node keeping a whole-file digest keeps a *different cache key* from every
+node that attested afresh, neither can hydrate the other's artifact, and
+because `object_version` never moves on a stable library nothing would ever
+heal it. Re-attesting is what sampling made cheap. The 851 already-indexed
+artifacts are re-derived under the new keys as discovery reaches them.
 
 **Wants deploying.** After deploy, `MAX(built_at_ms)` in
 `cluster_fragment_index_artifacts` should advance within the hour; a second
 `pipeline_sha256` appearing there is the converting pipeline being built for
-the first time. Re-requesting 5,847 files at four per discovery pass is hours,
-not minutes.
+the first time. Working through 5,847 files at `INDEX_MAX_PER_PASS = 4` per
+pass on the default fifteen-minute `vod_index_mins` is roughly **two weeks**,
+not hours — lower `vod_index_mins` on the fleet if that is too slow to watch,
+and read the queue verdict rather than the artifact count while it runs.
 
 ## The ✕ on an iPhone could not leave a film
 

@@ -33,10 +33,29 @@ pub(crate) const SAMPLE_WHOLE_FILE_LIMIT: u64 = SAMPLE_EXTENTS * SAMPLE_EXTENT_B
 /// Interior offsets land on filesystem block boundaries; NFS and SMB both
 /// prefer it. The tail is exact and unaligned on purpose.
 const SAMPLE_ALIGN: u64 = 4096;
-/// Domain separation. A sampled digest can never equal a whole-file SHA-256
-/// of the same bytes, nor a sampled digest taken under a different layout.
-/// Changing the layout means changing this token and re-attesting.
+/// Domain separation inside the digest. A sampled digest can never equal a
+/// whole-file SHA-256 of the same bytes, nor a sampled digest taken under a
+/// different layout.
 const SAMPLE_DOMAIN: &[u8] = b"plurx/source-attestation/sampled-v1\0";
+
+/// The attestation regime, stamped onto every `object_version` this build
+/// records and compares.
+///
+/// This is what actually makes a layout change migrate. A memo is matched by
+/// `object_version` alone — the table has no column saying how its digest was
+/// computed — so without this prefix, changing [`SAMPLE_DOMAIN`] would rehash
+/// nothing on any node that already holds an observation, and two nodes could
+/// hold different digests for the same file indefinitely. Different digests
+/// mean different `cluster_fragment_index_key`s, which means the same file
+/// gets built and stored twice and neither node can hydrate the other's
+/// artifact. `object_version` never changes on a stable library, so nothing
+/// would ever heal it.
+///
+/// Prefixing instead makes every pre-existing memo miss exactly once. The
+/// node re-attests — two seconds now, rather than the forty-three minutes
+/// that made this change necessary — and the upsert replaces the row. Move
+/// this token whenever [`SAMPLE_DOMAIN`] or the extent layout moves.
+const ATTESTATION_REGIME: &str = "s1";
 
 /// The byte ranges a sampled digest covers, ascending, as `(offset, len)`.
 ///
@@ -65,6 +84,17 @@ pub(crate) fn sampled_extents(size: u64) -> Vec<(u64, u64)> {
             (offset, SAMPLE_EXTENT_BYTES)
         })
         .collect()
+}
+
+/// How many bytes attesting a source of this size will actually read.
+///
+/// The verify stage's progress bar and ETA are denominated in this rather
+/// than the file's own size: a 43 GB source reads 64 MiB, and a bar against
+/// the file would sit at a tenth of a percent while quoting twenty minutes
+/// for an operation that finishes in two seconds.
+#[must_use]
+pub(crate) fn attestation_read_bytes(size: u64) -> u64 {
+    sampled_extents(size).iter().map(|(_, len)| len).sum()
 }
 
 /// Hash a bounded sample of a source rather than every byte of it.
@@ -545,7 +575,7 @@ fn scanner_identity_matches(metadata: &std::fs::Metadata, file: &MediaFile) -> R
 fn object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
     use std::os::unix::fs::MetadataExt;
     Ok(format!(
-        "{}:{}:{}:{}:{}:{}:{}",
+        "{ATTESTATION_REGIME}:{}:{}:{}:{}:{}:{}:{}",
         metadata.dev(),
         metadata.ino(),
         metadata.size(),
@@ -563,7 +593,11 @@ fn object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
         .map_err(|error| format!("reading source modification time: {error}"))?
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| format!("source modification time precedes unix epoch: {error}"))?;
-    Ok(format!("{}:{}", metadata.len(), modified.as_nanos()))
+    Ok(format!(
+        "{ATTESTATION_REGIME}:{}:{}",
+        metadata.len(),
+        modified.as_nanos()
+    ))
 }
 
 pub(crate) fn pipeline_digest(
@@ -845,6 +879,41 @@ mod tests {
         // magnitude larger costs the same read.
         let total: u64 = extents.iter().map(|(_, len)| len).sum();
         assert_eq!(total, SAMPLE_WHOLE_FILE_LIMIT);
+        assert_eq!(attestation_read_bytes(size), SAMPLE_WHOLE_FILE_LIMIT);
+        assert_eq!(attestation_read_bytes(0), 0);
+        assert_eq!(attestation_read_bytes(4_096), 4_096);
+        assert_eq!(
+            attestation_read_bytes(SAMPLE_WHOLE_FILE_LIMIT),
+            SAMPLE_WHOLE_FILE_LIMIT
+        );
+
+        // Exhaustive over the awkward band, where `step` is closest to one
+        // extent width and a rounded-down offset is most likely to collide
+        // with its predecessor.
+        for size in (SAMPLE_WHOLE_FILE_LIMIT + 1)..(SAMPLE_WHOLE_FILE_LIMIT + 8_192) {
+            let extents = sampled_extents(size);
+            assert_eq!(extents.len() as u64, SAMPLE_EXTENTS, "size {size}");
+            for pair in extents.windows(2) {
+                assert!(
+                    pair[1].0 >= pair[0].0 + pair[0].1,
+                    "size {size}: {:?} overlaps {:?}",
+                    pair[1],
+                    pair[0]
+                );
+            }
+            let (offset, len) = extents[extents.len() - 1];
+            assert_eq!(offset + len, size, "size {size}: the tail must end at EOF");
+        }
+        // And at the far end, where the arithmetic is widest.
+        for size in [u64::MAX, u64::MAX - 1, 1 << 47, (1 << 47) + 4_097] {
+            let extents = sampled_extents(size);
+            assert_eq!(extents.len() as u64, SAMPLE_EXTENTS, "size {size}");
+            assert!(extents
+                .windows(2)
+                .all(|pair| pair[1].0 >= pair[0].0 + pair[0].1));
+            let (offset, len) = extents[extents.len() - 1];
+            assert_eq!(offset + len, size, "size {size}");
+        }
     }
 
     #[tokio::test]
@@ -980,9 +1049,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attest_source_refuses_a_short_source() {
+    async fn a_short_source_is_an_error_and_never_a_shorter_digest() {
+        // The guard this covers is the one inside the digest: asked to cover
+        // a size the file does not have, it must refuse rather than record a
+        // digest over fewer bytes than it claims. Reached directly, because
+        // `attest_source`'s own identity checks would refuse a truncated file
+        // long before the read — which is right, and is why they cannot be
+        // the coverage for this.
         let dir = tempfile::tempdir().expect("sample dir");
         let path = dir.path().join("short.bin");
+        let real = 4 * 1024 * 1024;
+        tokio::fs::write(&path, filler(real))
+            .await
+            .expect("write sample");
+        let mut source = tokio::fs::File::open(&path).await.expect("open short");
+        let claimed = 70 * 1024 * 1024;
+        let error = sampled_source_digest(&mut source, claimed, &path, &|_| {})
+            .await
+            .expect_err("a source shorter than its claimed size cannot be digested");
+        assert_eq!(error, "source ended before its attested size");
+    }
+
+    #[tokio::test]
+    async fn attest_source_refuses_a_source_that_shrank_under_it() {
+        let dir = tempfile::tempdir().expect("sample dir");
+        let path = dir.path().join("shrank.bin");
         let size = 70 * 1024 * 1024;
         tokio::fs::write(&path, filler(size))
             .await
@@ -1001,9 +1092,28 @@ mod tests {
             .await
             .err()
             .expect("a truncated source cannot be attested");
-        assert!(
-            !error.is_empty(),
-            "the refusal has to say something an operator can read"
+        assert_eq!(
+            error,
+            "source no longer matches the scanner's size/mtime identity"
         );
+    }
+
+    #[test]
+    fn every_object_version_carries_the_attestation_regime() {
+        // The memo table has no column saying how a digest was computed, so
+        // the regime has to live in the key the memo is matched by. Without
+        // it, a node holding a pre-sampling observation keeps a whole-file
+        // digest forever, gets a different cache key from every other node,
+        // and neither can hydrate the other's artifact.
+        let dir = tempfile::tempdir().expect("version dir");
+        let path = dir.path().join("versioned.bin");
+        std::fs::write(&path, b"versioned").expect("write");
+        let version =
+            object_version(&std::fs::metadata(&path).expect("stat")).expect("object version");
+        assert!(
+            version.starts_with(&format!("{ATTESTATION_REGIME}:")),
+            "object_version must be regime-scoped, got {version}"
+        );
+        assert_eq!(ATTESTATION_REGIME, "s1");
     }
 }

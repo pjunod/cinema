@@ -346,33 +346,52 @@ already refuses.
 `ATTEST_TIMEOUT` stays at **ten minutes on both paths, and now means a hung
 mount** rather than a bound on file size: the read it bounds is at most 64
 MiB, so ten minutes is reached only when the filesystem has stopped answering.
-For that reason the analysis path's timeout is **uncharged** — the retry is
-refunded by `retry_analysis_request` and still takes its backoff, so an
-unreachable mount backs off instead of spending five attempts on its way to a
-terminal `attempt_limit` the file can never leave. The cluster-job path
-reports `source_attestation_timeout` rather than folding a deadline into
-`source_attestation_failed`, because those two send an operator to different
-places.
+It stays **charged**, on both paths. That is the opposite of what a naive
+reading suggests, and the reason is mechanical: an uncharged retry is not
+merely un-incremented, it is *refunded* (`attempts = attempts - 1`), which
+pins `attempts` at one — and the retry backoff shifts by `attempts - 1`. A
+refunded timeout would therefore re-queue at the base delay forever, never
+escalate, never reach a terminal state, and steadily fill the 4,096-row
+active-request budget that `enqueue_analysis_request` requires headroom in
+before it will accept *any* new request, on any mount. Charging keeps the
+backoff escalating and lets a genuinely unreachable mount settle; the bulk
+reopen (`POST /api/v1/analysis/reopen`) is how its files come back once the
+storage does. The cluster-job path reports `source_attestation_timeout` rather
+than folding a deadline into `source_attestation_failed`, because those two
+send an operator to different places — and an *untargeted* job that times out
+is yielded without a node-local exclusion, because a ten-minute unreachable
+mount proves nothing about whether this node can serve that source.
 
-**Existing observations are grandfathered.** The memo predicate compares
-`object_version`, size and mtime — not how the digest was computed — so a node
-that already holds a whole-file observation for a file keeps it, keeps its
-cache key, and keeps its artifact; nothing already indexed is rebuilt. A node
-that has *not* attested that file computes a sampled digest and therefore a
-different cache key, and the two nodes each serve their own artifact. That is
-the independence the design already has (every node attests for itself;
-artifacts are shared by key), and it costs at most one extra build per file
-where nodes disagree, converging as memos age out on the next
-`object_version` change.
+**Existing observations are invalidated exactly once, on purpose.**
+`object_version` carries an `ATTESTATION_REGIME` prefix, so every memo taken
+before this change misses and is replaced by the upsert. The alternative —
+matching old memos and grandfathering their whole-file digests — reads as the
+conservative choice and is not: the memo table has no column recording how a
+digest was computed, so a node holding a pre-change observation would keep a
+whole-file digest, and therefore a different `cluster_fragment_index_key`,
+from every node that attested afresh. Different keys mean the same file is
+built and stored twice and neither node can hydrate the other's artifact, and
+because `object_version` never changes on a stable library, nothing would ever
+heal it. Re-attesting is what the sampling made cheap: two seconds a file.
+The already-indexed artifacts are re-derived under the new keys as discovery
+reaches them.
 
-Non-forced analysis requests carry the regime in their generation fingerprint
-(`ANALYSIS_ATTESTATION_GENERATION`). `enqueue_analysis_request` refuses a
-generation that already exists in **any** state, terminal included, so rows
-stranded terminal by a queue fault block every later request for those files.
-Moving the token moves every non-forced generation exactly once, which lets
-background discovery re-request the library over successive passes without a
-single row being deleted or edited — the tombstones stay as history beside
-their successors.
+Non-forced **fragment-index** requests carry the regime in their generation
+fingerprint (`ANALYSIS_ATTESTATION_GENERATION`); `skip_markers` requests do
+not, because they never attest a source and re-requesting them would republish
+their annotation sets under new generation ids for a change that has nothing
+to do with them. `enqueue_analysis_request` refuses a generation that already
+exists in **any** state, terminal included, so rows stranded terminal by a
+queue fault block every later request for those files. Moving the token moves
+every non-forced fragment-index generation exactly once, which lets background
+discovery re-request the library over successive passes without a single row
+being deleted or edited — the tombstones stay as history beside their
+successors.
+
+The three tokens move together. `ANALYSIS_ATTESTATION_GENERATION` reopens the
+*request*; `ATTESTATION_REGIME` invalidates the *memo* the reopened request
+would otherwise short-circuit to; `SAMPLE_DOMAIN` separates the *digest*.
+Changing the layout while moving only one of them is a silent no-op.
 
 ## 6. Non-goals and guardrails
 

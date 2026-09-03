@@ -1479,8 +1479,10 @@ impl AnalysisRetryPolicy {
 /// discovery re-request a library whose rows are stranded — without deleting
 /// or editing a single row, so the tombstones stay as history.
 ///
-/// Change it only when the attestation itself changes meaning. It travels
-/// with `SAMPLE_DOMAIN` in `fragment_index_cluster`.
+/// Change it only when the attestation itself changes meaning, and change it
+/// alongside `ATTESTATION_REGIME` and `SAMPLE_DOMAIN` in
+/// `fragment_index_cluster`: this token reopens the request, and that one
+/// invalidates the memo the reopened request would otherwise short-circuit to.
 const ANALYSIS_ATTESTATION_GENERATION: &str = "source-attestation/sampled-v1";
 
 /// Why a cluster-job attestation did not produce a usable source.
@@ -3167,7 +3169,16 @@ impl JobManager {
                 file.mtime.to_string(),
                 component.to_owned(),
                 pipeline_version.clone(),
-                ANALYSIS_ATTESTATION_GENERATION.to_owned(),
+                // Only fragment-index work attests a source, so only its
+                // generations belong to an attestation regime. Stamping this
+                // on `skip_markers` as well would re-request every semantic
+                // pass and republish its annotations under a new generation
+                // id, for a change that has nothing to do with them.
+                if component == "fragment_index" {
+                    ANALYSIS_ATTESTATION_GENERATION.to_owned()
+                } else {
+                    String::new()
+                },
             ])
         };
         let request = self
@@ -6189,6 +6200,17 @@ impl JobManager {
             0,
             0,
         );
+        // Verification reads a bounded sample, not the file, so the bar and
+        // the ETA have to be denominated in what it will actually read.
+        // Otherwise a 43 GB source shows a tenth of a percent and a
+        // twenty-minute estimate for an operation that finishes in two
+        // seconds. The build stage sets the totals back to the whole file.
+        self.set_analysis_progress_totals(
+            &request.request_id,
+            &request.target_node_id,
+            crate::fragment_index_cluster::attestation_read_bytes(file.size.max(0) as u64),
+            file.duration_ms.unwrap_or_default(),
+        );
         // Bound to a local rather than passed inline: the callback outlives
         // the argument expression for as long as the `select!` arm runs.
         let report_progress = |bytes: u64| {
@@ -6223,14 +6245,20 @@ impl JobManager {
                 });
             }
             () = wait_analysis_deadline(attest_timeout) => {
-                // A timeout here is a hung mount, not the file's fault: the
-                // read it bounds is 64 MiB. `retry_analysis_request` refunds
-                // an uncharged retry and still applies the backoff, so an
-                // unreachable source backs off instead of spending its way to
-                // a terminal `attempt_limit` it can never leave.
+                // Charged, and deliberately so. Before sampling, this deadline
+                // measured file size and turned large-but-healthy sources into
+                // permanent failures; now the read it bounds is 64 MiB, so
+                // reaching it means the mount has stopped answering, which is
+                // a real fault worth an attempt. Charging is also what bounds
+                // the retry: an uncharged retry is *refunded* (`attempts - 1`),
+                // which pins `attempts` at one, and the backoff shifts by
+                // `attempts - 1` — so a refunded timeout would re-queue at the
+                // base delay forever, never escalate, never go terminal, and
+                // quietly fill the 4,096-row active-request budget that every
+                // other file needs in order to be enqueued at all.
                 return Err(AnalysisResolutionError::Retry {
                     code: "source_attestation_timeout",
-                    charge_attempt: false,
+                    charge_attempt: true,
                 });
             }
         };
@@ -6638,6 +6666,14 @@ impl JobManager {
             .await
             .ok()
             .flatten();
+        // See the analysis path: the verify stage is denominated in the
+        // sample it reads, and the build below restores the file's own size.
+        self.set_analysis_progress_totals(
+            &job.cache_key,
+            &job.target_node_id,
+            crate::fragment_index_cluster::attestation_read_bytes(file.size.max(0) as u64),
+            file.duration_ms.unwrap_or_default(),
+        );
         let report_progress = |bytes: u64| {
             self.update_analysis_progress(
                 &job.cache_key,
@@ -6687,6 +6723,7 @@ impl JobManager {
                 // changing. The queue shows this code, so it has to be the
                 // right one.
                 let code = attestation_failure_code(&outcome);
+                let timed_out = matches!(outcome, Err(AttestationFailure::TimedOut));
                 if let Err(AttestationFailure::Refused(reason)) = &outcome {
                     // The code is the durable answer; this is the sentence
                     // that says which of the identity checks refused, which
@@ -6699,11 +6736,26 @@ impl JobManager {
                 }
                 let now = clock_ms();
                 if job.target_node_id.is_empty() {
-                    self.remember_fragment_index_refusal(
-                        &job.cache_key,
-                        now.saturating_add(LOCAL_REFUSAL_MS),
-                    )
-                    .await;
+                    // An untargeted job is yielded back to the cluster rather
+                    // than failed, so its code has nowhere durable to go. A
+                    // refusal earns a day-long local exclusion: this node has
+                    // proved it cannot serve that source. A timeout has proved
+                    // nothing of the kind — the mount was unreachable for ten
+                    // minutes, which is a condition and not a verdict, and
+                    // excluding the key for a day would keep the node off its
+                    // own files long after the storage recovered.
+                    if timed_out {
+                        tracing::warn!(
+                            cache_key = %job.cache_key,
+                            "fragment-index source attestation timed out; yielding without excluding this node"
+                        );
+                    } else {
+                        self.remember_fragment_index_refusal(
+                            &job.cache_key,
+                            now.saturating_add(LOCAL_REFUSAL_MS),
+                        )
+                        .await;
+                    }
                     let _ = self
                         .store
                         .yield_cluster_fragment_index(
@@ -6712,7 +6764,11 @@ impl JobManager {
                             &node_id,
                             job.fence,
                             now,
-                            now,
+                            if timed_out {
+                                now.saturating_add(retry_ms)
+                            } else {
+                                now
+                            },
                         )
                         .await;
                 } else {
