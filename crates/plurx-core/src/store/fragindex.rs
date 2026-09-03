@@ -637,6 +637,11 @@ mod tests {
             .expect("promotion columns");
         conn.execute_batch(FRAGMENT_INDEXES_IDENTITY_KEY)
             .expect("identity key");
+        // Both real backends carry this beside the index table, and `put`
+        // retracts a refusal through it — a fixture with only one of the pair
+        // is a fixture no deployment matches.
+        conn.execute_batch(FRAGMENT_INDEX_OUTCOMES_SCHEMA)
+            .expect("outcomes");
         conn
     }
 

@@ -1032,7 +1032,7 @@ mod tests {
         // `SIDECAR_SCHEMA_VERSION`, so an assertion built from the same
         // constant can never fail on a bump. Update it by hand, deliberately,
         // exactly as the single-node backend's `assert_eq!(version, 37)` is.
-        assert!(error.to_string().contains("only knows v7"), "{error}");
+        assert!(error.to_string().contains("only knows v8"), "{error}");
     }
 
     #[tokio::test]
