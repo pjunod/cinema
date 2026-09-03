@@ -261,7 +261,38 @@ enum Caps {
             maxHeight: PlaybackControl.maximumHeight,
             codecs: codecs,
             dynamicRanges: ranges,
-            dualPlayerPreparation: false
+            // Measured, not assumed. M5.5 ran on hardware on 2026-09-01: both
+            // required devices — iPhone 17 Pro Max and Apple TV 4K (3rd
+            // generation) — completed 20/20 clean commits in *both* the
+            // same-codec and the codec/HDR case, with zero predecessor and
+            // zero post-commit stalls across eighty acknowledgements, each
+            // holding two live `AVPlayer` pipelines with both outputs
+            // producing frames.
+            //
+            // The first instrument set was rejected and the corrective pass
+            // repaired it: 132-second fixtures so the runway varies and is
+            // never full at acknowledgement, a copied pixel buffer whose
+            // presentation timestamp is required to fall at or beyond the
+            // commit boundary, and per-trial wire counts off the shaping
+            // proxy. First-frame latency then separated the two cases —
+            // 24-160 ms same-codec against 163-279 ms codec/HDR — where the
+            // original instrument had returned an identical 1-4 ms for both.
+            //
+            // Declared for every Apple device rather than narrowed, and that
+            // is a decision: M6's handoff §3 says a bare boolean cannot say
+            // "yes for this recipe on this device", but Apple is the platform
+            // where that does not bite — both recipes passed on both devices,
+            // so there is no failing case to carve out. Two device classes is
+            // still the whole cohort, and the honest bound on that is the
+            // server's, not this literal's: `PREPARED_AXIS` prepares only a
+            // resolution change today, which is *narrower* than what Apple
+            // proved. Widen this only alongside evidence from more hardware.
+            //
+            // System-wide memory and hardware decoder-slot count are recorded
+            // unanswered, which the instrument review explicitly allowed: this
+            // says two logical pipelines coexist, not that a second hardware
+            // decoder slot exists.
+            dualPlayerPreparation: true
         )
     }
 
