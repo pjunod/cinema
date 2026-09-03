@@ -1164,7 +1164,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # capability failure prevents admission and conversion children are cancellable,
 # kill-on-drop, output-capped, and reaped.
 # +1 with the bounded subtitle window: the window extractor.
-expected_occurrences = 66
+# +1 for M0's `write_real_hevc_video` test fixture. It is `#[cfg(test)]`-only,
+# encodes two seconds of lavfi testsrc into a temp file with libx265, and its
+# `.status()` is awaited to completion on the calling thread before the fixture
+# returns. It owns no rolling producer, outlives no await, and never runs in a
+# shipped binary — it exists so the argv pin has a real Dolby-Vision-shaped
+# HEVC source to copy.
+expected_occurrences = 67
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1211,7 +1217,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # an in-process subtitle response, this time to prove that retiring a playback
 # releases the window it owned. The two counts above are independent and add:
 # the pacing-hold work and R-M3 landed against the same base.
-expected_occurrences = 210
+# +1 for M0's `write_real_hevc_video`: the `.status()` on the fixture encoder
+# inventoried under `process-command-construction` above. Same child, counted
+# once in each sentinel.
+expected_occurrences = 211
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
