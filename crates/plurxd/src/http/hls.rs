@@ -4875,10 +4875,10 @@ async fn control_local_inner(
     // §3.3's own rule is that M6 prepares for a change the *client asked for*.
     let replaced = if recipe.request.reopen_reason.is_none() {
         remember_delivered_selection(
+            &recipe.request.playback_id,
             &route.session_id,
             &response.effective_selection,
             crate::playback_control::GradeIntent::from_request(&recipe.request),
-            recipe.request.previous_session_id.as_deref(),
         )
     } else {
         None
@@ -4973,7 +4973,7 @@ static PREPARATION_SHADOWS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
 /// and far below the point where the store notices.
 const MAX_PREPARATION_SHADOWS: usize = 32;
 
-/// Last delivered selection of each session, so a session that *replaces*
+/// Last delivered selection of each *playback*, so a session that replaces
 /// another can be measured against the one it replaced.
 ///
 /// This exists because of what m6 measured on 2026-09-02: 949 accepted
@@ -4987,10 +4987,18 @@ const MAX_PREPARATION_SHADOWS: usize = 32;
 /// The seam M6 is actually about is therefore the replacement, not the
 /// exchange — which is the whole point of the milestone: today a quality
 /// change tears the session down, and M6 exists so that it does not.
+///
+/// **Keyed by playback id, not by `previous_session_id`.** That field is set
+/// only on a stall reopen — `PlayerController.swift` builds it exclusively
+/// from a `StallReopenTicket` — so a viewer's quality change carries none, and
+/// a gate that required one alongside "not a stall" could never fire at all.
+/// The playback id is what actually survives the replacement: the reopen
+/// comment says the two sessions "share a playback ID".
 static DELIVERED_SELECTIONS: std::sync::Mutex<Option<DeliveredSelections>> =
     std::sync::Mutex::new(None);
 
-/// Bounded FIFO of `session id -> what it was last delivering`.
+/// Bounded FIFO of `playback id -> the session serving it and what it was last
+/// delivering`.
 ///
 /// Process-local and best-effort by construction: a replacement served by a
 /// different node measures nothing, which understates the count and never
@@ -4998,30 +5006,35 @@ static DELIVERED_SELECTIONS: std::sync::Mutex<Option<DeliveredSelections>> =
 /// sessions; the oldest is dropped, and dropping one costs a measurement.
 #[derive(Default)]
 struct DeliveredSelections {
-    by_session: std::collections::HashMap<
-        String,
-        (
-            crate::playback_control::EffectiveSelection,
-            crate::playback_control::GradeIntent,
-        ),
-    >,
+    by_playback: std::collections::HashMap<String, RememberedDelivery>,
     order: std::collections::VecDeque<String>,
 }
 
-/// Enough for every session a node serves in the window a viewer might change
+/// What one playback was last seen delivering, and by which session.
+#[derive(Clone)]
+struct RememberedDelivery {
+    session: String,
+    selection: crate::playback_control::EffectiveSelection,
+    grade: crate::playback_control::GradeIntent,
+}
+
+/// Enough for every playback a node serves in the window a viewer might change
 /// quality in, and small enough to be invisible.
 const MAX_REMEMBERED_SELECTIONS: usize = 512;
 
-/// Remember what this session is delivering; answer what its predecessor was.
+/// Remember what this playback is delivering; answer what it was delivering
+/// under the session this one replaced.
 ///
-/// One lock, one pass, on the first accepted exchange of a session only —
-/// later exchanges of the same session re-record and answer `None`, so a
-/// replacement is measured once rather than on every exchange after it.
+/// One lock, one pass. Answers `Some` exactly when the playback is already
+/// known **and a different session is now serving it** — which is a
+/// replacement, and is the only shape a viewer's quality change takes. Later
+/// exchanges of the same session re-record and answer `None`, so one change is
+/// counted once rather than for the life of the session.
 fn remember_delivered_selection(
+    playback: &str,
     session: &str,
     delivered: &crate::playback_control::EffectiveSelection,
     grade: crate::playback_control::GradeIntent,
-    predecessor: Option<&str>,
 ) -> Option<(
     crate::playback_control::EffectiveSelection,
     crate::playback_control::GradeIntent,
@@ -5031,24 +5044,28 @@ fn remember_delivered_selection(
         return None;
     };
     let table = guard.get_or_insert_with(DeliveredSelections::default);
-    let first_sighting = !table.by_session.contains_key(session);
-    if first_sighting {
-        table.order.push_back(session.to_owned());
-        while table.order.len() > MAX_REMEMBERED_SELECTIONS {
-            if let Some(evicted) = table.order.pop_front() {
-                table.by_session.remove(&evicted);
+    let replaced = match table.by_playback.get(playback) {
+        Some(held) if held.session != session => Some((held.selection.clone(), held.grade)),
+        Some(_) => None,
+        None => {
+            table.order.push_back(playback.to_owned());
+            while table.order.len() > MAX_REMEMBERED_SELECTIONS {
+                if let Some(evicted) = table.order.pop_front() {
+                    table.by_playback.remove(&evicted);
+                }
             }
+            None
         }
-    }
-    table
-        .by_session
-        .insert(session.to_owned(), (delivered.clone(), grade));
-    // Only the first sighting can be a replacement: after that this session is
-    // its own predecessor and the transition has already been counted.
-    if !first_sighting {
-        return None;
-    }
-    table.by_session.get(predecessor?).cloned()
+    };
+    table.by_playback.insert(
+        playback.to_owned(),
+        RememberedDelivery {
+            session: session.to_owned(),
+            selection: delivered.clone(),
+            grade,
+        },
+    );
+    replaced
 }
 
 /// Everything one exchange said, gathered for the shadow measurement.
@@ -9563,9 +9580,11 @@ mod tests {
     ///
     /// m6 recorded one decision against 949 accepted exchanges because
     /// `ControlState::last_selection` only sees a change *within* a session,
-    /// and Apple's `selectQuality` replaces the session instead. This is the
-    /// table that lets the replacement be measured, and these are the three
-    /// things it has to get right.
+    /// and Apple's `selectQuality` replaces the session instead. Keyed by
+    /// playback id rather than by `previous_session_id`, which the Apple
+    /// client sets only on a stall reopen — a gate needing that field on a
+    /// non-stall reopen matches nothing, which is exactly what the first
+    /// attempt at this measured.
     #[test]
     fn a_replacement_is_measured_against_the_session_it_replaced() {
         let selection = |height: i64| crate::playback_control::EffectiveSelection {
@@ -9577,46 +9596,56 @@ mod tests {
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
         };
-        let old = format!("seam-old-{}", std::process::id());
-        let new = format!("seam-new-{}", std::process::id());
+        let playback = format!("seam-playback-{}", std::process::id());
+        let first = format!("{playback}-session-1");
+        let second = format!("{playback}-session-2");
 
-        // The predecessor's first exchange has no predecessor of its own.
+        // The playback's first session has nothing to be measured against.
         assert_eq!(
-            remember_delivered_selection(&old, &selection(2160), grade, None),
+            remember_delivered_selection(&playback, &first, &selection(2160), grade),
             None,
         );
         // Its later exchanges answer nothing, so a session is never measured
         // against itself.
         assert_eq!(
-            remember_delivered_selection(&old, &selection(2160), grade, None),
+            remember_delivered_selection(&playback, &first, &selection(2160), grade),
             None,
         );
-        // The replacement's first exchange answers what the old one was
-        // delivering — the transition the viewer actually made.
+        // A new session for the same playback is the viewer's quality change,
+        // and it is measured against what the old session was delivering.
         let (previous, previous_grade) =
-            remember_delivered_selection(&new, &selection(1080), grade, Some(&old))
-                .expect("the predecessor is remembered");
+            remember_delivered_selection(&playback, &second, &selection(1080), grade)
+                .expect("the replaced session is remembered");
         assert_eq!(previous.height, 2160);
         assert_eq!(previous_grade, grade);
-        // And exactly once: every exchange after the first answers nothing, or
-        // one quality change would be counted for the life of the session.
+        // Exactly once: the replacement's later exchanges answer nothing, or
+        // one change would be counted for the life of the session.
         assert_eq!(
-            remember_delivered_selection(&new, &selection(1080), grade, Some(&old)),
+            remember_delivered_selection(&playback, &second, &selection(1080), grade),
             None,
         );
-        // A predecessor this node never served is not a measurement.
+        // And a change back is its own transition.
+        let (back, _) = remember_delivered_selection(
+            &playback,
+            &format!("{playback}-session-3"),
+            &selection(2160),
+            grade,
+        )
+        .expect("the second session is remembered too");
+        assert_eq!(back.height, 1080);
+        // A playback this node has never served is not a measurement.
         assert_eq!(
             remember_delivered_selection(
-                &format!("seam-third-{}", std::process::id()),
+                &format!("seam-other-{}", std::process::id()),
+                "some-session",
                 &selection(720),
                 grade,
-                Some("a-session-served-elsewhere"),
             ),
             None,
         );
     }
 
-    /// The table is bounded, because a node serves unboundedly many sessions.
+    /// The table is bounded, because a node serves unboundedly many playbacks.
     #[test]
     fn the_remembered_selections_are_bounded() {
         let grade = crate::playback_control::GradeIntent {
@@ -9626,21 +9655,21 @@ mod tests {
         };
         let tag = format!("bound-{}", std::process::id());
         let first = format!("{tag}-0");
-        remember_delivered_selection(&first, &sample_effective_selection(), grade, None);
+        remember_delivered_selection(&first, "s", &sample_effective_selection(), grade);
         for index in 1..=MAX_REMEMBERED_SELECTIONS {
             remember_delivered_selection(
                 &format!("{tag}-{index}"),
+                "s",
                 &sample_effective_selection(),
                 grade,
-                None,
             );
         }
         let guard = DELIVERED_SELECTIONS.lock().expect("lock");
         let table = guard.as_ref().expect("table");
-        assert!(table.by_session.len() <= MAX_REMEMBERED_SELECTIONS);
-        assert_eq!(table.by_session.len(), table.order.len());
+        assert!(table.by_playback.len() <= MAX_REMEMBERED_SELECTIONS);
+        assert_eq!(table.by_playback.len(), table.order.len());
         assert!(
-            !table.by_session.contains_key(&first),
+            !table.by_playback.contains_key(&first),
             "the oldest entry is evicted, not the newest",
         );
     }
