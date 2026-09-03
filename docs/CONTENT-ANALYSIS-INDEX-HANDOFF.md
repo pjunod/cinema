@@ -304,6 +304,76 @@ Semantic annotations replicate after validation. Fragment bytes and
 pipe-specific indexes stay node-local and publish an explicit coverage row for
 the node and pipeline version that produced them.
 
+### 5.8 Source attestation — what is hashed, and what it is for
+
+Before a node builds or serves a fragment index it attests the source: it
+opens the file, takes `object_version` — device, inode, size, mtime and ctime
+to the nanosecond — checks the scanner's own size and mtime against it, reads,
+and then takes `object_version` again and requires it to be unchanged. That
+identity check, twice, is what actually guarantees the bytes the indexer read
+are the bytes the catalog names. The digest sits on top of it and answers a
+narrower question: has this file been rewritten in a way that preserved
+device, inode, size, mtime *and* ctime to the nanosecond? Userspace cannot
+produce that, so the digest is a belt beside a brace.
+
+Which is why it does not read the whole file. **A source above 64 MiB is
+hashed over 64 one-megabyte extents** — the head, the tail, and 62 interior
+extents at deterministic, 4 KiB-aligned offsets; **a source at or below 64 MiB
+is read whole**, because sampling a file smaller than the sample buys nothing.
+The digest's preamble carries the domain token, the file's size, the extent
+width and count, and each extent's offset and length ahead of its bytes, so a
+sampled digest can never collide with a whole-file SHA-256 of the same file,
+two layouts cannot collide with each other, and a file that grew changes
+digest even when every extent it kept is identical. The result is still 64
+lowercase hex characters, so cache keys, the blob header and every
+`source_sha256` column are untouched.
+
+What this buys: attestation costs about 64 MiB of reads no matter how large
+the source is — roughly two seconds, against forty-three minutes for a 43 GB
+title. That matters twice over. Attestation shares the node with playback, and
+`wait_for_cluster_fragment_index_stop` cancels it the moment a foreground
+session is admitted; a forty-three-minute hash needs a forty-three-minute idle
+window, and a two-second one does not. And every node attests for itself —
+`vodserve` refuses to serve a fixed-timeline index until *this* node holds an
+observation for the current `object_version` — so the whole-file cost was
+being paid once per node per file.
+
+What it gives up, deliberately: a change confined strictly to the gaps between
+sampled extents does not move the digest. A test pins that so nobody "fixes"
+it by accident. Any such write moves mtime and ctime, which the identity check
+already refuses.
+
+`ATTEST_TIMEOUT` stays at **ten minutes on both paths, and now means a hung
+mount** rather than a bound on file size: the read it bounds is at most 64
+MiB, so ten minutes is reached only when the filesystem has stopped answering.
+For that reason the analysis path's timeout is **uncharged** — the retry is
+refunded by `retry_analysis_request` and still takes its backoff, so an
+unreachable mount backs off instead of spending five attempts on its way to a
+terminal `attempt_limit` the file can never leave. The cluster-job path
+reports `source_attestation_timeout` rather than folding a deadline into
+`source_attestation_failed`, because those two send an operator to different
+places.
+
+**Existing observations are grandfathered.** The memo predicate compares
+`object_version`, size and mtime — not how the digest was computed — so a node
+that already holds a whole-file observation for a file keeps it, keeps its
+cache key, and keeps its artifact; nothing already indexed is rebuilt. A node
+that has *not* attested that file computes a sampled digest and therefore a
+different cache key, and the two nodes each serve their own artifact. That is
+the independence the design already has (every node attests for itself;
+artifacts are shared by key), and it costs at most one extra build per file
+where nodes disagree, converging as memos age out on the next
+`object_version` change.
+
+Non-forced analysis requests carry the regime in their generation fingerprint
+(`ANALYSIS_ATTESTATION_GENERATION`). `enqueue_analysis_request` refuses a
+generation that already exists in **any** state, terminal included, so rows
+stranded terminal by a queue fault block every later request for those files.
+Moving the token moves every non-forced generation exactly once, which lets
+background discovery re-request the library over successive passes without a
+single row being deleted or edited — the tombstones stay as history beside
+their successors.
+
 ## 6. Non-goals and guardrails
 
 Each of these has cost someone something, or is load-bearing for work in flight.

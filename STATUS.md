@@ -4,6 +4,63 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Source attestation was hashing whole films to answer a question about their inode
+
+**Branch `agent/sampled-source-attestation` — in review.** Executes Paul's
+2026-09-03 ruling on `DV-P7-ATTESTATION-TIMEOUT-FINDINGS.md` §9. Every
+fragment-index build attested its source by reading every byte of it into a
+SHA-256. On a 43 GB Dolby Vision title at the fleet's measured 27 MB/s that
+is forty-three minutes, and it had to survive both a bare ten-minute deadline
+*and* `wait_for_cluster_fragment_index_stop`, which cancels on any playback
+admission. Nothing partial is kept when either arm wins — `tokio::select!`
+drops the future — so the next attempt started from zero, and five attempts
+later the row was terminal on a node it could never leave. No converting
+fragment index, so every P7 title fell back to live HLS and HDR10, on every
+node, forever.
+
+The digest was never the thing guaranteeing the bytes. `object_version` —
+device, inode, size, mtime and ctime to the nanosecond — is taken before the
+read and checked again after it, and the scanner's size and mtime are checked
+against both. A whole-file hash on top of that only catches a rewrite that
+preserved all of it, which userspace cannot produce. So attestation now reads
+a bounded sample: 64 one-megabyte extents at deterministic, 4 KiB-aligned
+offsets, the whole file below 64 MiB, with the layout — domain token, size,
+extent width and count, each extent's offset and length — hashed ahead of the
+bytes so no sampled digest can collide with a whole-file one, with another
+layout, or with the same file grown by a byte. Still 64 hex characters, so
+cache keys, blob headers and every `source_sha256` column are untouched. About
+two seconds per file, per node, at any size.
+
+Three consequences shipped with it. The ten-minute deadline now means a hung
+mount rather than a large file, so the analysis path stopped charging an
+attempt for it — the retry is refunded and still takes its backoff, so an
+unreachable mount backs off instead of spending its way to a permanent
+`attempt_limit`. The cluster path reports `source_attestation_timeout` instead
+of folding a deadline into `source_attestation_failed`; the code already
+existed everywhere and that path simply never emitted it. And attestation now
+reports bytes read, so the `verifying` stage shows progress instead of three
+zeros — the daemon's real hash rate had never been measured because nothing
+ever published it.
+
+The 1,939 rows already stranded at `attempt_limit` are the #700 placeholder
+bug's legacy, not the timeout's, and they are terminal in a way that blocks
+their own files: `enqueue_analysis_request` refuses a generation that already
+exists in **any** state. Non-forced requests now carry the attestation regime
+in their generation fingerprint, which moves every non-forced generation once
+and lets background discovery re-request the library over successive passes.
+Nothing deletes or edits a row; the tombstones stay as history beside their
+successors.
+
+Existing observations are grandfathered — the memo predicate compares
+`object_version`, size and mtime, not how the digest was computed — so the 851
+already-indexed files are not rebuilt.
+
+**Wants deploying.** After deploy, `MAX(built_at_ms)` in
+`cluster_fragment_index_artifacts` should advance within the hour; a second
+`pipeline_sha256` appearing there is the converting pipeline being built for
+the first time. Re-requesting 5,847 files at four per discovery pass is hours,
+not minutes.
+
 ## The ✕ on an iPhone could not leave a film
 
 **PR [#853](https://github.com/pjunod/plurx/pull/853) — MERGED to main as `e31a6cb4`, 2026-09-03, branch `fix/close-control-exits`, fix commit `0f904213`.** Paul: "the x to
