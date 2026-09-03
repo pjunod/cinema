@@ -1,8 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["d90ca299"]
-points = []
-checks = []
-reason = "Squash merge of PR #873 into the effort branch. Every runtime change it carries is already mapped by the ledger rows the branch itself added: the M0 review fixes, the attempt-history rows, c30a7754-analysis-queue-verdict (M3 and its adversarial review), d30fcdcc-analysis-bulk-reopen (M4 and its rework), and ebe775ad-fragment-index-hydration (M5.1). The merge commit introduces no behavior of its own."
-ignore = true

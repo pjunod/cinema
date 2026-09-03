@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["d30fcdcc", "e07d2105"]
-points = ["server.api", "web.experience"]
-checks = ["rust-gate", "rust-gate-ci", "web-static"]
-reason = "seeded_write_surface drives POST /api/v1/analysis/reopen end to end and asserts the property the endpoint exists for and the one that makes it safe: a terminal row whose successor is still queued is NOT reopenable, retiring that successor makes it reopenable, a dry run creates nothing and returns the same answer twice, a commit creates a successor that is queued while its tombstone stays terminal, and a second press reopens nothing. Without that last assertion the endpoint re-forces every already-repaired file on every press, which is a full fragment-index and marker rebuild of a library that is already indexed. It also covers the auth gate, both ends of the file-limit range, an invalid component, deny_unknown_fields, and a component filter that matches nothing returning nothing rather than whatever sorted first. The reopenable predicate itself lives in the store as reopenable_analysis_requests on both backends, so the successor rule is one statement rather than a filter the HTTP layer reconstructs. Removing the successor predicate turns the button into a library-wide re-force; removing the headroom check lets one bulk reopen fill the 4,096-row active-request ceiling and start refusing discovery, playback's foreground enqueue and the single-row Retry; removing the paused-queue refusal piles up work nothing will claim."

@@ -1,8 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["2973456d", "c92b2173", "c2af7b38"]
-points = []
-checks = []
-reason = "Documentation and ledger only. 2973456d and c92b2173 describe work that already landed on this branch (STATUS.md and the handoff's account of where one-build-per-identity stands, including why M5.2 needs a schema ruling rather than an implementation); c2af7b38 records the coverage row for the hydration commit. None of the three changes runtime behavior."
-ignore = true
