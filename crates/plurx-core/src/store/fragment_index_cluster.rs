@@ -517,6 +517,24 @@ BEGIN
 END;
 "#;
 
+/// SQLite v45 / replicated v26: the code each *charged* attempt ended with.
+///
+/// A job row keeps one `last_error_code`, wiped on every claim and overwritten
+/// by the terminal `attempt_limit`, so the row that dies carries no trace of
+/// why. 1,933 rows died that way in three days and the cause had to be
+/// recovered from the aggregate lifecycle counters. This is a column rather
+/// than rows in `analysis_attempts` because a job can exist without a request
+/// — playback's foreground enqueue makes one — and that table is keyed by
+/// request fence.
+///
+/// Bounded by `MAX_ANALYSIS_MAX_ATTEMPTS` entries of `MAX_ERROR_CODE_BYTES`:
+/// only charged attempts append, so an uncharged yield cannot grow it without
+/// limit, and every reopen that resets `attempts` resets the history with it.
+pub const ANALYSIS_ATTEMPT_ERRORS_SCHEMA: &str = r#"
+ALTER TABLE cluster_fragment_index_jobs
+    ADD COLUMN attempt_errors TEXT NOT NULL DEFAULT '';
+"#;
+
 pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_ANALYSIS_MAX_ATTEMPTS: i64 = 5;
 pub const MAX_ANALYSIS_MAX_ATTEMPTS: i64 = 20;
@@ -663,6 +681,7 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
               THEN job.not_before_ms ELSE request.not_before_ms END AS not_before_ms,
          COALESCE(request.last_error_code, '') AS request_error_code,
          CASE WHEN request.cache_rank = 1 THEN COALESCE(job.last_error_code, '') ELSE '' END AS job_error_code,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.attempt_errors, '') ELSE '' END AS job_attempt_errors,
          request.created_at_ms AS created_at_ms,
          CASE WHEN request.cache_rank = 1 AND COALESCE(job.updated_at_ms, 0) > request.updated_at_ms
               THEN job.updated_at_ms ELSE request.updated_at_ms END AS updated_at_ms,
@@ -699,6 +718,7 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
          COALESCE(job.lease_expires_ms, 0) AS lease_expires_ms,
          job.attempts AS attempts, job.not_before_ms AS not_before_ms,
          '' AS request_error_code, COALESCE(job.last_error_code, '') AS job_error_code,
+         COALESCE(job.attempt_errors, '') AS job_attempt_errors,
          job.created_at_ms AS created_at_ms, job.updated_at_ms AS updated_at_ms,
          SUBSTR(job.pipeline_sha256, 1, 12) AS pipeline_version,
          job.cache_key AS requested_generation,
@@ -874,6 +894,11 @@ pub struct ClusterFragmentIndexJob {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub last_error_code: String,
+    /// The code each *charged* attempt ended with, oldest first, comma
+    /// separated. Never cleared by a claim; reset only where the retry budget
+    /// itself resets. `last_error_code` is the terminal code the UI and the
+    /// lifecycle triggers key on — this is the history behind it.
+    pub attempt_errors: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1002,6 +1027,10 @@ pub struct AnalysisHistoryRow {
     pub cancel_requested: bool,
     pub phase: String,
     pub source_size: i64,
+    /// The code each charged attempt of the joined job ended with, oldest
+    /// first. Empty for a request with no job, and for the non-current
+    /// generations of one.
+    pub job_attempt_errors: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

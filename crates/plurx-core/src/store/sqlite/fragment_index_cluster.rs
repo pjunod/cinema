@@ -63,7 +63,7 @@ const JOB_COLS: &str = "cache_key, file_id, source_size, source_mtime, source_sh
     pipeline_sha256, priority, trigger, target_node_id,
     state, COALESCE(owner_node_id, ''), fence,
     COALESCE(lease_expires_ms, 0), attempts, not_before_ms, created_at_ms, updated_at_ms,
-    COALESCE(last_error_code, '')";
+    COALESCE(last_error_code, ''), attempt_errors";
 
 fn job_from_row(row: &Row<'_>) -> rusqlite::Result<ClusterFragmentIndexJob> {
     Ok(ClusterFragmentIndexJob {
@@ -85,6 +85,7 @@ fn job_from_row(row: &Row<'_>) -> rusqlite::Result<ClusterFragmentIndexJob> {
         created_at_ms: row.get(15)?,
         updated_at_ms: row.get(16)?,
         last_error_code: row.get(17)?,
+        attempt_errors: row.get(18)?,
     })
 }
 
@@ -100,7 +101,7 @@ const HISTORY_COLS: &str = "row_key, request_id, job_id, file_id, item_id, title
     component, force_rebuild, target_node_id, request_state, job_state, state, disposition,
     action, owner_node_id, claim_epoch, lease_expires_ms, attempts, not_before_ms, request_error_code,
     job_error_code, created_at_ms, updated_at_ms, pipeline_version, requested_generation,
-    priority, trigger, cancel_requested, phase, source_size";
+    priority, trigger, cancel_requested, phase, source_size, job_attempt_errors";
 
 const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.request_id, '') AS request_id, COALESCE(page.job_id, '') AS job_id,
@@ -124,7 +125,8 @@ const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.priority, '') AS priority, COALESCE(page.trigger, '') AS trigger,
     COALESCE(page.cancel_requested, 0) AS cancel_requested,
     COALESCE(page.phase, '') AS phase,
-    COALESCE(page.source_size, 0) AS source_size";
+    COALESCE(page.source_size, 0) AS source_size,
+    COALESCE(page.job_attempt_errors, '') AS job_attempt_errors";
 
 fn request_from_row(row: &Row<'_>) -> rusqlite::Result<AnalysisRequest> {
     Ok(AnalysisRequest {
@@ -218,13 +220,14 @@ fn history_from_row(
         cancel_requested: row.get::<_, i64>(27)? != 0,
         phase: row.get(28)?,
         source_size: row.get(29)?,
+        job_attempt_errors: row.get(30)?,
     };
     let cursor = AnalysisHistoryCursor {
-        sort_rank: row.get(30)?,
+        sort_rank: row.get(31)?,
         updated_at_ms: history.updated_at_ms,
         row_key: history.row_key.clone(),
     };
-    Ok((history, cursor, row.get(31)?))
+    Ok((history, cursor, row.get(32)?))
 }
 
 fn analysis_filter_code(filter: AnalysisHistoryFilter) -> i64 {
@@ -862,6 +865,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                       ELSE cluster_fragment_index_jobs.attempts END,
+                    attempt_errors = CASE WHEN ?12 = 1 THEN ''
+                      WHEN cluster_fragment_index_jobs.state = 'cancelled'
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                        OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
+                      ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = excluded.not_before_ms,
                     created_at_ms = excluded.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms, last_error_code = NULL
@@ -1826,7 +1834,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
                         last_error_code = CASE WHEN state = 'running'
-                          THEN 'attempt_limit' ELSE 'queue_expired' END
+                          THEN 'attempt_limit' ELSE 'queue_expired' END,
+                            attempt_errors = CASE WHEN state = 'running'
+                              THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
+                                    ELSE attempt_errors || ',lease_expired' END)
+                              ELSE attempt_errors END
                   WHERE (state = 'queued' AND created_at_ms < ?2)
                      OR (state = 'running' AND attempts >= ?3
                        AND COALESCE(lease_expires_ms, 0) <= ?1)",
@@ -1864,6 +1876,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                           OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                           OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                         ELSE cluster_fragment_index_jobs.attempts END,
+                    attempt_errors = CASE
+                        WHEN cluster_fragment_index_jobs.state = 'cancelled'
+                          OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                          OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
+                        ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = CASE
                         WHEN cluster_fragment_index_jobs.state = 'queued'
                         THEN MIN(cluster_fragment_index_jobs.not_before_ms, excluded.not_before_ms)
@@ -1934,7 +1951,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
                         last_error_code = CASE WHEN state = 'running'
-                          THEN 'attempt_limit' ELSE 'queue_expired' END
+                          THEN 'attempt_limit' ELSE 'queue_expired' END,
+                            attempt_errors = CASE WHEN state = 'running'
+                              THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
+                                    ELSE attempt_errors || ',lease_expired' END)
+                              ELSE attempt_errors END
                   WHERE (state = 'queued' AND created_at_ms < ?2)
                      OR (state = 'running' AND attempts >= ?3
                        AND COALESCE(lease_expires_ms, 0) <= ?1)",
@@ -1953,7 +1974,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                              + unicode(substr(cache_key || ':' || target_node_id, 1, 1)) * 31
                              + unicode(substr(cache_key || ':' || target_node_id, -1, 1)) * 13
                              + attempts * 7) % 51))) / 100), ?3),
-                        last_error_code = 'lease_expired', updated_at_ms = ?1
+                        last_error_code = 'lease_expired',
+                            attempt_errors = CASE WHEN attempt_errors = ''
+                              THEN 'lease_expired'
+                              ELSE attempt_errors || ',lease_expired' END,
+                            updated_at_ms = ?1
                   WHERE state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1
                     AND attempts < ?4",
                 params![now_ms, backoff_base_ms, backoff_max_ms, max_attempts],
@@ -2040,7 +2065,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
                         last_error_code = CASE WHEN state = 'running'
-                          THEN 'attempt_limit' ELSE 'queue_expired' END
+                          THEN 'attempt_limit' ELSE 'queue_expired' END,
+                            attempt_errors = CASE WHEN state = 'running'
+                              THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
+                                    ELSE attempt_errors || ',lease_expired' END)
+                              ELSE attempt_errors END
                   WHERE (state = 'queued' AND created_at_ms < ?2)
                      OR (state = 'running' AND attempts >= ?3
                        AND COALESCE(lease_expires_ms, 0) <= ?1)",
@@ -2073,6 +2102,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                       ELSE cluster_fragment_index_jobs.attempts END,
+                    attempt_errors = CASE
+                      WHEN cluster_fragment_index_jobs.state = 'ready'
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                        OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
+                      ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = excluded.not_before_ms,
                     created_at_ms = excluded.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms,
@@ -2383,6 +2417,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         owner_node_id = NULL, lease_expires_ms = NULL,
                         last_error_code = CASE WHEN ?7 = 1 AND attempts >= ?8
                               THEN 'attempt_limit' ELSE ?1 END,
+                        attempt_errors = CASE WHEN attempt_errors = ''
+                              THEN ?1 ELSE attempt_errors || ',' || ?1 END,
                         not_before_ms = ?2, updated_at_ms = ?3
                   WHERE cache_key = ?4 AND target_node_id = ?9
                     AND state = 'running' AND owner_node_id = ?5

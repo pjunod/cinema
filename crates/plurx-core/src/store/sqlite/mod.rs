@@ -945,6 +945,13 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX dv_recovery_guards_file
         ON dv_recovery_guards(file_id, guard_id);",
+    // v45: the code each charged fragment-index attempt ended with, oldest
+    // first. `last_error_code` is wiped on every claim and overwritten by the
+    // terminal `attempt_limit`, so a row that exhausts its budget says only
+    // that it did. The operator text in the Analysis view already promised a
+    // history — "resolve the underlying error shown in earlier attempts" —
+    // that the row did not keep.
+    crate::store::fragment_index_cluster::ANALYSIS_ATTEMPT_ERRORS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2005,7 +2012,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 44,
+            version, 45,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

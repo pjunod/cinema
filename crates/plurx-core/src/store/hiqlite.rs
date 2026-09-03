@@ -71,7 +71,8 @@ const ANALYSIS_COMPONENT_SCHEMA_VERSION: i64 = 22;
 const STAGED_GENERATION_SCHEMA_VERSION: i64 = 23;
 const DV_CONVERSIONS_SCHEMA_VERSION: i64 = 24;
 const DV_RECOVERY_GUARDS_SCHEMA_VERSION: i64 = 25;
-pub const AUTH_SCHEMA_VERSION: i64 = DV_RECOVERY_GUARDS_SCHEMA_VERSION;
+const ATTEMPT_ERRORS_SCHEMA_VERSION: i64 = 26;
+pub const AUTH_SCHEMA_VERSION: i64 = ATTEMPT_ERRORS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -94,6 +95,7 @@ const ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE: i64 = TIMELINE_MANUAL_OVERRIDE
 const STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_COMPONENT_SCHEMA_VERSION;
 const DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE: i64 = STAGED_GENERATION_SCHEMA_VERSION;
 const DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE: i64 = DV_CONVERSIONS_SCHEMA_VERSION;
+const ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE: i64 = DV_RECOVERY_GUARDS_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1982,6 +1984,29 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements =
+                        super::hiqlite_fragment_index_cluster::analysis_attempt_errors_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            ATTEMPT_ERRORS_SCHEMA_VERSION,
+                            now,
+                            ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    // `ADD COLUMN` is not idempotent, and two voters can
+                    // observe the same predecessor before either transaction
+                    // commits. `settle_migration_attempt` is what turns the
+                    // loser's duplicate-column failure into an observation
+                    // that the step is already done.
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3347,7 +3372,8 @@ fn schema_migration_action(
         | ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE
         | STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE
         | DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE
-        | DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE => {
+        | DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE
+        | ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -5055,9 +5081,18 @@ mod tests {
             "v24 must advance exactly one step to the recovery-guard schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 20,
+            ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE, DV_RECOVERY_GUARDS_SCHEMA_VERSION,
+            "the attempt-history migration must start from the exact v25 shape"
+        );
+        assert_eq!(
+            ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE + 1,
+            ATTEMPT_ERRORS_SCHEMA_VERSION,
+            "v25 must advance exactly one step to the attempt-history schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 21,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v25 step"
+            "this implementation contains every additive v5→v26 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

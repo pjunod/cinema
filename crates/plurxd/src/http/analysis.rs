@@ -446,6 +446,14 @@ fn history_row_value(row: plurx_core::store::AnalysisHistoryRow) -> serde_json::
         "not_before_ms": row.not_before_ms,
         "request_error_code": row.request_error_code,
         "job_error_code": row.job_error_code,
+        // The code each charged attempt ended with, oldest first. The row's
+        // own `job_error_code` is the terminal one, which for an exhausted
+        // budget is always `attempt_limit` and says nothing.
+        "job_attempt_errors": row
+            .job_attempt_errors
+            .split(',')
+            .filter(|code| !code.is_empty())
+            .collect::<Vec<_>>(),
         "created_at_ms": row.created_at_ms,
         "updated_at_ms": row.updated_at_ms,
         "pipeline_version": row.pipeline_version,
@@ -751,6 +759,7 @@ mod tests {
             not_before_ms: 0,
             request_error_code: String::new(),
             job_error_code: "source_superseded".to_owned(),
+            job_attempt_errors: String::new(),
             created_at_ms: 1,
             updated_at_ms: 1,
             pipeline_version: "v1".to_owned(),
