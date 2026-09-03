@@ -10,14 +10,24 @@ and docs/STATUS.html, and a reader planning the next milestone acted on it.
 The check deliberately does NOT ask GitHub. A test that needs the network and
 a credential cannot run in the gate that matters, and a status page's honesty
 is not a fact about a remote service. It asks the repository's own history
-instead: a merge commit for `#N` is proof that `#N` merged, and `main` is the
+instead: a commit that landed `#N` is proof that `#N` merged, and `main` is the
 only place that proof needs to come from.
 
-So the rule is one-directional and cheap. If the history contains
-`Merge pull request #N`, then no status page may pair `#N` with a word that
-claims it is still in flight. The reverse -- a pull request with no merge
-commit -- is not an error here: it may be genuinely open, it may have been
-squashed, and this test refuses to guess.
+Two commit shapes count, because this repository has both. 490 subjects read
+`Merge pull request #N` and 68 read `title (#N)` from the period when work was
+squashed -- reading only the first shape would leave 68 merged pull requests
+invisible to the check, which is the quiet way a guard becomes decoration.
+
+So the rule is one-directional and cheap. If the history says `#N` landed, then
+no status page may pair `#N` with a phrase claiming it is still in flight. The
+reverse -- a pull request with no landing commit -- is not an error here: it may
+be genuinely open, and this test refuses to guess.
+
+Claims are matched against joined paragraphs rather than single lines. These
+pages wrap prose at about 80 columns, and both real defects that prompted this
+check were wrapped: `-- OPEN, awaiting Paul's` ended one line and `merge` began
+the next. A line-by-line scan happened to catch those on the shouted `OPEN`
+alone, which is luck rather than a check.
 """
 
 from __future__ import annotations
@@ -44,10 +54,17 @@ IN_FLIGHT = re.compile(
     r"\bOPEN\b"  # shouted, which on these pages is always a status
     r"|(?:is|still|remains|currently)\s+open\b"
     r"|\bopen\s*(?:,|--|—|\.|$)"
-    r"|\bawaiting\s+(?:\w+\s+){0,3}merge\b"
+    # `[^.]` rather than `\w+` between the two words: the sentence this check
+    # exists for was "awaiting Paul's merge", and an apostrophe is not `\w`.
+    r"|\bawaiting\b[^.]{0,40}?\bmerge\b"
+    r"|\bawaiting\s+review\b"
     r"|\bunder\s+review\b"
-    r"|\bnot\s+yet\s+merged\b"
+    r"|\bnot\s+(?:yet\s+)?merged\b"
     r"|\bunmerged\b"
+    r"|\bstill\s+to\s+merge\b"
+    r"|\bto\s+be\s+merged\b"
+    r"|\bready\s+to\s+merge\b"
+    r"|\bmerge\s+pending\b|\bpending\s+merge\b"
 )
 
 PR_REFERENCE = re.compile(r"(?:pull/|PR\s+#|#)(\d{2,5})\b")
@@ -59,8 +76,27 @@ PR_REFERENCE = re.compile(r"(?:pull/|PR\s+#|#)(\d{2,5})\b")
 CLAIM_DISTANCE = 60
 
 
-def merged_pull_requests() -> frozenset[int]:
-    """Every pull request `main` carries a merge commit for."""
+LANDED = (
+    re.compile(r"^Merge pull request #(\d+)", re.MULTILINE),
+    re.compile(r"\(#(\d+)\)$", re.MULTILINE),
+)
+
+
+def history_is_shallow() -> bool:
+    return (
+        subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        == "true"
+    )
+
+
+def landed_pull_requests() -> frozenset[int]:
+    """Every pull request this history carries a landing commit for."""
     subjects = subprocess.run(
         ["git", "log", "--format=%s", "HEAD"],
         cwd=ROOT,
@@ -70,17 +106,47 @@ def merged_pull_requests() -> frozenset[int]:
     ).stdout
     return frozenset(
         int(number)
-        for number in re.findall(r"^Merge pull request #(\d+)", subjects, re.MULTILINE)
+        for pattern in LANDED
+        for number in pattern.findall(subjects)
     )
+
+
+def paragraphs(text: str) -> list[tuple[int, str]]:
+    """Consecutive non-blank lines joined, each tagged with its first line.
+
+    A claim and the pull request it is about routinely sit on either side of a
+    wrap, so the unit of matching has to be the paragraph the author wrote
+    rather than the line the formatter produced.
+    """
+    joined: list[tuple[int, str]] = []
+    start = 0
+    buffer: list[str] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if line.strip():
+            if not buffer:
+                start = number
+            buffer.append(line.strip())
+            continue
+        if buffer:
+            joined.append((start, " ".join(buffer)))
+            buffer = []
+    if buffer:
+        joined.append((start, " ".join(buffer)))
+    return joined
 
 
 class StatusPullRequestClaimCase(unittest.TestCase):
     def test_no_status_page_calls_a_merged_pull_request_open(self) -> None:
-        merged = merged_pull_requests()
-        # A repository with no merge commits at all would pass this vacuously,
-        # which would be the check quietly doing nothing.
+        # A clone without history cannot answer the question. Skipping says so;
+        # failing would blame the page for the checkout, and passing would be
+        # the check quietly doing nothing.
+        if history_is_shallow():
+            self.skipTest("shallow clone: no landing commits to compare against")
+        merged = landed_pull_requests()
         self.assertGreater(
-            len(merged), 50, "history should carry many merge commits to compare against"
+            len(merged),
+            50,
+            "history should carry many landing commits to compare against",
         )
 
         stale: list[str] = []
@@ -88,9 +154,7 @@ class StatusPullRequestClaimCase(unittest.TestCase):
             path = ROOT / page
             if not path.exists():
                 continue
-            for number, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), start=1
-            ):
+            for number, line in paragraphs(path.read_text(encoding="utf-8")):
                 claims = list(IN_FLIGHT.finditer(line))
                 if not claims:
                     continue
