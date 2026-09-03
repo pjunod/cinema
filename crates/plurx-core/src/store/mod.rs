@@ -189,9 +189,9 @@ pub use fragment_index_cluster::{
     ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
     NewClusterFragmentIndexJob, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
     DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
-    DEFAULT_SUBTITLE_WINDOW_SECS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
-    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
-    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
+    DEFAULT_SUBTITLE_WINDOW_SECS, MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS,
+    MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS,
+    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -303,6 +303,7 @@ pub struct AnalysisStoreMetrics {
     pub queue_oldest_age_seconds: [i64; ANALYSIS_QUEUE_METRIC_SLOTS],
     pub lifecycle_counts: [i64; ANALYSIS_LIFECYCLE_METRIC_SLOTS],
     pub marker_counts: [i64; ANALYSIS_MARKER_METRIC_SLOTS],
+    pub health: AnalysisQueueHealth,
 }
 
 impl Default for AnalysisStoreMetrics {
@@ -312,8 +313,140 @@ impl Default for AnalysisStoreMetrics {
             queue_oldest_age_seconds: [0; ANALYSIS_QUEUE_METRIC_SLOTS],
             lifecycle_counts: [0; ANALYSIS_LIFECYCLE_METRIC_SLOTS],
             marker_counts: [0; ANALYSIS_MARKER_METRIC_SLOTS],
+            health: AnalysisQueueHealth::default(),
         }
     }
+}
+
+/// What the fragment-index queue has actually produced lately.
+///
+/// The jobs table cannot answer "how many claims in 24 hours": a row keeps
+/// only its latest transition, so a row claimed five times is one row. These
+/// are the questions it *can* answer cheaply, and the cumulative lifecycle
+/// counters supply the rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AnalysisQueueHealth {
+    /// Jobs that reached `ready` inside the window. `ready` rather than
+    /// artifact rows, because a hydrated completion produces a job and a
+    /// location but no new artifact, and a healthy hydrating fleet must not
+    /// read as dead.
+    pub ready_24h: i64,
+    pub attempt_limit_24h: i64,
+    /// Jobs the queue has actually picked up inside the window — `attempts`
+    /// is charged on claim, so a row with any attempt was claimed at least
+    /// once. This is the denominator the failure ratio needs: the cumulative
+    /// `('claim','all')` lifecycle counter is shared with `skip_markers`,
+    /// so a busy marker pipeline would otherwise vouch for a dead index.
+    pub claimed_24h: i64,
+    /// Fragment-index rows that are `queued` and past `not_before_ms`: work
+    /// the queue could claim right now and has not. A standing backlog with
+    /// no claims is the silent stall this verdict exists to name, and it is
+    /// the one shape a claim-counting rule alone reads as `idle`.
+    pub claimable: i64,
+    /// Rows sitting `running` past a lease nobody renewed. One is a sweep
+    /// that has not run yet; a standing count is the outage's own signature.
+    pub running_past_lease: i64,
+    pub last_ready_at_ms: i64,
+}
+
+/// The one-word answer an operator needs before reading anything else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnalysisQueueVerdict {
+    /// Nothing to judge: nothing has been claimed and nothing has finished.
+    /// A fully indexed library and a paused one look the same from here, and
+    /// neither is a fault.
+    Idle,
+    Healthy,
+    Degraded,
+    /// Claimed enough to be sure, produced nothing.
+    Dead,
+}
+
+impl AnalysisQueueVerdict {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Dead => "dead",
+        }
+    }
+}
+
+pub const ANALYSIS_QUEUE_VERDICTS: [&str; 4] = ["idle", "healthy", "degraded", "dead"];
+
+/// Twenty claims is enough that "no successes" is not a small sample. On the
+/// fleet that produced this rule it was reached inside the first hour of a
+/// seventy-two hour outage.
+pub const ANALYSIS_DEAD_CLAIM_FLOOR: i64 = 20;
+
+/// The same floor for the other shape of the same outage: work waiting and
+/// nobody picking it up. Twenty claimable rows is past any rounding — the
+/// stalled fleet stood at four figures.
+pub const ANALYSIS_DEAD_BACKLOG_FLOOR: i64 = 20;
+
+/// Minimum observed claims before the lease-loss *ratio* is allowed to speak.
+/// That ratio's denominator is a per-process delta, so on a young daemon four
+/// claims and one preemption would otherwise read as a quarter lost.
+pub const ANALYSIS_RATIO_CLAIM_FLOOR: i64 = 8;
+
+/// Read the queue's verdict.
+///
+/// Everything the verdict *rules on* comes from `health`, which is
+/// fragment-index-scoped and window-scoped on both sides of every ratio. The
+/// two `since_start` figures are per-process deltas over a counter shared with
+/// `skip_markers`, so they only feed the lease-loss ratio — the one question
+/// the jobs table cannot answer — and only once there are enough of them.
+///
+/// Every input is fleet-wide: `cluster_fragment_index_jobs` is replicated and
+/// carries no "which node observed this" column, so two nodes reading the same
+/// term return the same verdict. It says whether *the queue* is producing, not
+/// whether this node is.
+#[must_use]
+pub fn analysis_queue_verdict(
+    health: AnalysisQueueHealth,
+    claims_since_start: i64,
+    lease_losses_since_start: i64,
+    running_past_lease_samples: u32,
+) -> AnalysisQueueVerdict {
+    let nothing_happening = health.ready_24h == 0
+        && health.claimed_24h == 0
+        && health.claimable == 0
+        && health.running_past_lease == 0;
+    if nothing_happening {
+        return AnalysisQueueVerdict::Idle;
+    }
+    if health.ready_24h == 0 {
+        // Two ways to be sure, and a wedged queue only ever shows one of
+        // them: it either claimed plenty and produced nothing, or it never
+        // claimed at all while work piled up in front of it.
+        let claimed_enough_to_be_sure = health.claimed_24h >= ANALYSIS_DEAD_CLAIM_FLOOR;
+        let backlog_nobody_touched =
+            health.claimed_24h == 0 && health.claimable >= ANALYSIS_DEAD_BACKLOG_FLOOR;
+        return if claimed_enough_to_be_sure || backlog_nobody_touched {
+            AnalysisQueueVerdict::Dead
+        } else {
+            // Something is in front of the queue and nothing has come out of
+            // it, but not enough of either to call it. Not healthy, and not
+            // yet provable.
+            AnalysisQueueVerdict::Degraded
+        };
+    }
+    // A quarter is generous on purpose: preemption by foreground playback is a
+    // legitimate way to lose a lease.
+    let losses_over_budget = lease_losses_since_start > 0
+        && claims_since_start >= ANALYSIS_RATIO_CLAIM_FLOOR
+        && lease_losses_since_start * 4 >= claims_since_start;
+    // A tenth of what the queue picked up exhausting its retry budget. Both
+    // sides are the same 24 hours over the same table, so a restart moves
+    // neither and a quiet night shrinks both together.
+    let failures_over_budget =
+        health.attempt_limit_24h > 0 && health.attempt_limit_24h * 10 >= health.claimed_24h;
+    if losses_over_budget || failures_over_budget || running_past_lease_samples >= 2 {
+        return AnalysisQueueVerdict::Degraded;
+    }
+    AnalysisQueueVerdict::Healthy
 }
 
 #[derive(serde::Deserialize)]
@@ -341,12 +474,194 @@ struct AnalysisLifecycleMetricRow {
     count: i64,
 }
 
+#[cfg(test)]
+mod queue_verdict_tests {
+    use super::{
+        analysis_queue_verdict, AnalysisQueueHealth, AnalysisQueueVerdict,
+        ANALYSIS_DEAD_BACKLOG_FLOOR, ANALYSIS_DEAD_CLAIM_FLOOR, ANALYSIS_RATIO_CLAIM_FLOOR,
+    };
+
+    /// `ready`, `attempt_limit`, `claimed`, `claimable`, `running_past_lease`
+    /// — the whole store side of the verdict, in the order the runbook's
+    /// table reads them.
+    fn health(
+        ready_24h: i64,
+        attempt_limit_24h: i64,
+        claimed_24h: i64,
+        claimable: i64,
+        running_past_lease: i64,
+    ) -> AnalysisQueueHealth {
+        AnalysisQueueHealth {
+            ready_24h,
+            attempt_limit_24h,
+            claimed_24h,
+            claimable,
+            running_past_lease,
+            last_ready_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn a_queue_that_claims_and_never_finishes_is_dead() {
+        assert_eq!(
+            analysis_queue_verdict(health(0, 0, 25, 0, 0), 25, 25, 0),
+            AnalysisQueueVerdict::Dead
+        );
+        // The fleet numbers that named the outage.
+        assert_eq!(
+            analysis_queue_verdict(health(0, 84, 396, 1_118, 11), 412, 398, 3),
+            AnalysisQueueVerdict::Dead
+        );
+    }
+
+    #[test]
+    fn the_dead_claim_floor_is_the_boundary_it_says_it_is() {
+        let just_under = ANALYSIS_DEAD_CLAIM_FLOOR - 1;
+        assert_eq!(
+            analysis_queue_verdict(health(0, 0, just_under, 0, 0), just_under, 0, 0),
+            AnalysisQueueVerdict::Degraded
+        );
+        assert_eq!(
+            analysis_queue_verdict(
+                health(0, 0, ANALYSIS_DEAD_CLAIM_FLOOR, 0, 0),
+                ANALYSIS_DEAD_CLAIM_FLOOR,
+                0,
+                0
+            ),
+            AnalysisQueueVerdict::Dead
+        );
+    }
+
+    #[test]
+    fn a_backlog_nobody_claims_is_dead_rather_than_idle() {
+        // The shape a claim-counting rule alone misses: the queue never got
+        // as far as a claim, so every counter that counts claims reads zero
+        // while the work sits in front of it. Calling this `idle` is exactly
+        // the silence this verdict exists to break.
+        assert_eq!(
+            analysis_queue_verdict(health(0, 0, 0, ANALYSIS_DEAD_BACKLOG_FLOOR, 0), 0, 0, 0),
+            AnalysisQueueVerdict::Dead
+        );
+        assert_eq!(
+            analysis_queue_verdict(health(0, 0, 0, ANALYSIS_DEAD_BACKLOG_FLOOR - 1, 0), 0, 0, 0),
+            AnalysisQueueVerdict::Degraded
+        );
+    }
+
+    #[test]
+    fn a_queue_that_finishes_most_of_what_it_claims_is_healthy() {
+        assert_eq!(
+            analysis_queue_verdict(health(20, 0, 22, 4, 0), 25, 2, 0),
+            AnalysisQueueVerdict::Healthy
+        );
+    }
+
+    #[test]
+    fn nothing_claimed_and_nothing_built_is_not_a_fault() {
+        // A fully indexed library and `vod_index_mins = 0` look the same here,
+        // and calling either one dead would be a false alarm every night.
+        assert_eq!(
+            analysis_queue_verdict(health(0, 0, 0, 0, 0), 0, 0, 0),
+            AnalysisQueueVerdict::Idle
+        );
+        // Still idle when another pipeline is busy: `skip_markers` claims move
+        // the shared lifecycle counter, and they are not evidence about this
+        // queue in either direction.
+        assert_eq!(
+            analysis_queue_verdict(health(0, 0, 0, 0, 0), 900, 40, 0),
+            AnalysisQueueVerdict::Idle
+        );
+    }
+
+    #[test]
+    fn a_restart_does_not_invent_a_failure_ratio() {
+        // The regression this guard exists for: `attempt_limit_24h` outlives
+        // the process and the old denominator did not, so any hard failure in
+        // the last day made a fresh daemon report `degraded` on its first
+        // sample. Both sides are the same window now.
+        assert_eq!(
+            analysis_queue_verdict(health(60, 1, 61, 0, 0), 0, 0, 0),
+            AnalysisQueueVerdict::Healthy
+        );
+    }
+
+    #[test]
+    fn losing_a_quarter_of_its_claims_is_degraded_even_while_producing() {
+        assert_eq!(
+            analysis_queue_verdict(health(3, 0, 25, 0, 0), 25, 12, 0),
+            AnalysisQueueVerdict::Degraded
+        );
+    }
+
+    #[test]
+    fn the_lease_loss_ratio_waits_for_a_sample_worth_dividing() {
+        let under = ANALYSIS_RATIO_CLAIM_FLOOR - 1;
+        // One preemption out of a handful of claims is a Tuesday, not a fault.
+        assert_eq!(
+            analysis_queue_verdict(health(5, 0, 6, 0, 0), under, under / 4 + 1, 0),
+            AnalysisQueueVerdict::Healthy
+        );
+        // At the floor the same proportion is worth reporting.
+        assert_eq!(
+            analysis_queue_verdict(
+                health(5, 0, 6, 0, 0),
+                ANALYSIS_RATIO_CLAIM_FLOOR,
+                ANALYSIS_RATIO_CLAIM_FLOOR / 4,
+                0
+            ),
+            AnalysisQueueVerdict::Degraded
+        );
+    }
+
+    #[test]
+    fn failures_and_a_standing_stale_row_each_degrade_on_their_own() {
+        // A tenth of what was claimed exhausting its budget.
+        assert_eq!(
+            analysis_queue_verdict(health(30, 4, 40, 0, 0), 0, 0, 0),
+            AnalysisQueueVerdict::Degraded
+        );
+        // Just under a tenth is not.
+        assert_eq!(
+            analysis_queue_verdict(health(30, 4, 41, 0, 0), 0, 0, 0),
+            AnalysisQueueVerdict::Healthy
+        );
+        // One sample with a lapsed row is a sweep that has not run yet.
+        assert_eq!(
+            analysis_queue_verdict(health(30, 0, 40, 0, 1), 40, 0, 1),
+            AnalysisQueueVerdict::Healthy
+        );
+        // Two in a row is a queue that is not sweeping.
+        assert_eq!(
+            analysis_queue_verdict(health(30, 0, 40, 0, 1), 40, 0, 2),
+            AnalysisQueueVerdict::Degraded
+        );
+    }
+
+    #[test]
+    fn too_few_claims_to_be_sure_is_not_healthy_either() {
+        // Something was claimed and nothing finished. Not provable, not fine.
+        assert_eq!(
+            analysis_queue_verdict(health(0, 0, 3, 0, 0), 3, 3, 0),
+            AnalysisQueueVerdict::Degraded
+        );
+        // And a lapsed row on its own is enough to keep it out of `idle`.
+        assert_eq!(
+            analysis_queue_verdict(health(0, 0, 0, 0, 1), 0, 0, 0),
+            AnalysisQueueVerdict::Degraded
+        );
+    }
+}
+
 pub(crate) fn analysis_store_metrics(
     queue_json: &str,
     marker_json: &str,
     lifecycle_json: &str,
+    health: AnalysisQueueHealth,
 ) -> AnalysisStoreMetrics {
-    let mut metrics = AnalysisStoreMetrics::default();
+    let mut metrics = AnalysisStoreMetrics {
+        health,
+        ..AnalysisStoreMetrics::default()
+    };
     for row in serde_json::from_str::<Vec<AnalysisQueueMetricRow>>(queue_json).unwrap_or_default() {
         let Some(component) = ANALYSIS_METRIC_COMPONENTS
             .iter()

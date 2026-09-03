@@ -9092,11 +9092,15 @@ async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {
 ///
 /// A schema bump is a stop-the-fleet event here: `schema_migration_action`
 /// refuses any version but the binary's own, so a voter that restarts on an
-/// older binary after this commits will not open. The step itself has to be
-/// exactly one `ADD COLUMN`, and it has to be safe for two voters to attempt
-/// at once — `ADD COLUMN` is not idempotent, and `settle_migration_attempt`
-/// is what turns the loser's duplicate-column failure into an observation
-/// that the step is already done.
+/// older binary after this commits will not open.
+///
+/// `ADD COLUMN` is not idempotent and two voters can observe the same
+/// predecessor, so the step goes through `settle_migration_attempt`. What
+/// that does is narrower than "make it idempotent": it forgives a failed
+/// attempt *only* when the marker has moved, meaning another voter finished
+/// the step. A tree where the column exists and the marker has not moved is
+/// not a race — it is an inconsistent tree, and it is refused, which this
+/// test asserts rather than assuming.
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
@@ -9189,10 +9193,43 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
         assert_eq!(rows[0].value, expected, "{sql}");
     }
 
-    // A second open is a no-op rather than a duplicate-column failure.
+    // A second open is a no-op: the marker is current, so the step does not
+    // run at all.
     HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("re-opening an already migrated v26 store");
+
+    // The column present with the marker behind is not a race that
+    // `settle_migration_attempt` should forgive: no other voter finished the
+    // step, so the tree is inconsistent and the daemon must refuse rather
+    // than carry on against a schema it cannot account for.
+    client
+        .execute(
+            "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+            hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+        )
+        .await
+        .expect("rewind the marker under an already-migrated shape");
+    let inconsistent = match HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await {
+        Ok(_) => panic!("a column that already exists under a stale marker must refuse"),
+        Err(error) => error,
+    };
+    assert!(
+        inconsistent.to_string().contains("duplicate column"),
+        "{inconsistent}"
+    );
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("inspect the refused marker");
+    assert_eq!(
+        rows[0].value,
+        AUTH_SCHEMA_VERSION - 1,
+        "a refused migration leaves the marker exactly where it was"
+    );
 }
 
 /// The schema this fixture rewinds to. Named rather than derived from
@@ -14601,6 +14638,33 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         );
         now += 10_000;
 
+        // The third charged attempt is a lease that lapses while the budget
+        // still has room: the claim sweep reclaims it back to `queued` and
+        // appends `lease_expired`. That is the branch the outage produced
+        // 9,915 times, so it is the one most worth pinning.
+        let lapsing = store
+            .claim_cluster_fragment_index("history-node", &[], now, now + 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim for reclaim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the job is claimable for reclaim"));
+        assert_eq!(lapsing.attempts, 3, "backend {backend}");
+        now += 10_000;
+        let _ = store
+            .claim_cluster_fragment_index("sweeping-node", &[], now, now + 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reclaim sweep: {error}"));
+        let reclaimed = store
+            .cluster_fragment_index_job(&cache_key, &target)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read reclaimed job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the reclaimed row exists"));
+        assert_eq!(reclaimed.state, "queued", "backend {backend}");
+        assert_eq!(
+            reclaimed.attempt_errors, "source_unavailable,source_attestation_failed,lease_expired",
+            "backend {backend}: a reclaimed lease appends its own code"
+        );
+        now = reclaimed.not_before_ms.max(now) + 10_000;
+
         charge(
             &store,
             backend,
@@ -14611,19 +14675,10 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         )
         .await;
         now += 10_000;
-        charge(
-            &store,
-            backend,
-            &cache_key,
-            &target,
-            now,
-            "local_publish_failed",
-        )
-        .await;
-        now += 10_000;
 
-        // The fifth charged attempt is a lapsed lease the claim sweep
-        // reclaims, which is the only writer of `lease_expired`.
+        // The fifth attempt lapses too, and this time the budget is spent, so
+        // the sweep retires the row instead of reclaiming it — a different
+        // branch of the same statement, appending the same code.
         let lapsed = store
             .claim_cluster_fragment_index("history-node", &[], now, now + 1)
             .await
@@ -14649,8 +14704,8 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         );
         assert_eq!(
             dead.attempt_errors,
-            "source_unavailable,source_attestation_failed,\
-             source_catalog_read_failed,local_publish_failed,lease_expired",
+            "source_unavailable,source_attestation_failed,lease_expired,\
+             source_catalog_read_failed,lease_expired",
             "backend {backend}: every charged attempt, in order, and no yield"
         );
 
@@ -14762,6 +14817,139 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         assert_eq!(
             fresh.attempt_errors, "",
             "backend {backend}: a fresh budget starts a fresh history"
+        );
+    })
+    .await;
+}
+
+/// Every reopen that resets the retry budget resets the history with it.
+///
+/// Three statements reset `attempts`, and each one had to learn about the
+/// history separately: the request hand-off (a forced rebuild), the ordinary
+/// enqueue, and the artifact requeue. A reset that misses one leaves a job
+/// carrying the codes of a budget it no longer has, which is worse than no
+/// history at all — it is a history that disagrees with the count beside it.
+#[tokio::test]
+async fn fragment_index_attempt_history_resets_wherever_the_budget_does() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "history-reset").await;
+        let source_sha256 = "a".repeat(64);
+
+        // The forced hand-off's reset is not reachable from here: it only
+        // applies to a *generation* cache key, which only
+        // `submit_fragment_index_analysis` can create, and reaching it twice
+        // needs two forced requests for one identity — which
+        // `analysis_requests_one_active_forced_successor` exists to forbid.
+        // `every_attempts_reset_resets_the_attempt_history` pins that
+        // statement's shape instead.
+
+        // 2. The artifact requeue. It reopens a `ready` row whose holders
+        //    could not supply the blob, and that is a fresh budget too.
+        let ready_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, "c".repeat(64).as_str())
+                .expect("ready cache key");
+        let ready_job = NewClusterFragmentIndexJob {
+            cache_key: ready_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: "c".repeat(64),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: "reset-node".to_owned(),
+            not_before_ms: 40,
+            created_at_ms: 40,
+        };
+        assert!(
+            store
+                .enqueue_cluster_fragment_index(&ready_job)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue ready job: {error}")),
+            "backend {backend}"
+        );
+        let first = store
+            .claim_cluster_fragment_index("reset-node", &[], 40, 1_040)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim ready job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the ready job is claimable"));
+        assert!(
+            store
+                .fail_cluster_fragment_index(
+                    &ready_key,
+                    "reset-node",
+                    &first.owner_node_id,
+                    first.fence,
+                    "local_publish_failed",
+                    true,
+                    42,
+                    43,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: charge ready job: {error}")),
+            "backend {backend}"
+        );
+        let second = store
+            .claim_cluster_fragment_index("reset-node", &[], 50, 1_050)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reclaim ready job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the ready job is claimable again"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: ready_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: "c".repeat(64),
+            blob_sha256: "d".repeat(64),
+            bytes: 128,
+            built_by_node_id: "reset-node".to_owned(),
+            built_at_ms: 51,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key: ready_key.clone(),
+            node_id: "reset-node".to_owned(),
+            bytes: 128,
+            verified_at_ms: 51,
+            last_seen_at_ms: 51,
+        };
+        assert!(
+            store
+                .complete_cluster_fragment_index(&second, &artifact, &location, 51)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: complete ready job: {error}")),
+            "backend {backend}"
+        );
+        let published = store
+            .cluster_fragment_index_job(&ready_key, "reset-node")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read completed job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the completed row exists"));
+        assert_eq!(published.state, "ready", "backend {backend}");
+        assert_eq!(
+            published.attempt_errors, "local_publish_failed",
+            "backend {backend}: success does not erase what it took to get there"
+        );
+
+        let mut repair = ready_job.clone();
+        repair.not_before_ms = 60;
+        repair.created_at_ms = 60;
+        assert!(
+            store
+                .requeue_cluster_fragment_index(&repair)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: requeue ready job: {error}")),
+            "backend {backend}"
+        );
+        let reopened = store
+            .cluster_fragment_index_job(&ready_key, "reset-node")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read requeued job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the requeued row exists"));
+        assert_eq!(reopened.attempts, 0, "backend {backend}");
+        assert_eq!(
+            reopened.attempt_errors, "",
+            "backend {backend}: a requeue is a fresh budget and a fresh history"
         );
     })
     .await;
@@ -16647,6 +16835,384 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
                 [analysis_lifecycle_slot("retry", "source_unavailable")],
             2,
             "{backend}: publication cannot erase prior retries"
+        );
+    })
+    .await;
+}
+
+/// A second node settles a job from the artifact the first one built, without
+/// building anything and without rewriting whose build it was.
+///
+/// Discovery on each voter targets itself, so N voters queue N jobs for one
+/// `cache_key` and, on a healthy queue, N full passes over the same file
+/// produce one artifact. This is the store half of not doing that.
+#[tokio::test]
+async fn a_hydrated_job_settles_from_another_nodes_artifact_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "hydration").await;
+        let source_sha256 = "a1".repeat(32);
+        let pipeline_sha256 = "b2".repeat(32);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("hydration cache key");
+
+        // Two voters, each with its own targeted job for the same key.
+        for target in ["node-a", "node-b"] {
+            assert!(store
+                .enqueue_cluster_fragment_index(&NewClusterFragmentIndexJob {
+                    cache_key: cache_key.clone(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    source_sha256: source_sha256.clone(),
+                    pipeline_sha256: pipeline_sha256.clone(),
+                    priority: "normal".to_owned(),
+                    trigger: "background".to_owned(),
+                    target_node_id: target.to_owned(),
+                    not_before_ms: 10,
+                    created_at_ms: 10,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {target}: {error}")));
+        }
+
+        // Node A builds it.
+        let built = store
+            .claim_cluster_fragment_index("node-a", &[], 20, 1_020)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim for node-a: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a queued job for node-a"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            blob_sha256: "c3".repeat(32),
+            bytes: 4_096,
+            built_by_node_id: "node-a".to_owned(),
+            built_at_ms: 30,
+        };
+        assert!(store
+            .complete_cluster_fragment_index(
+                &built,
+                &artifact,
+                &ClusterFragmentIndexLocation {
+                    cache_key: cache_key.clone(),
+                    node_id: "node-a".to_owned(),
+                    bytes: 4_096,
+                    verified_at_ms: 30,
+                    last_seen_at_ms: 30,
+                },
+                30,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: node-a completes its build: {error}")));
+
+        // Node B claims its own job and settles from A's artifact.
+        let hydrating = store
+            .claim_cluster_fragment_index("node-b", &[], 40, 1_040)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim for node-b: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a queued job for node-b"));
+        assert_eq!(hydrating.target_node_id, "node-b", "{backend}");
+        assert!(store
+            .complete_cluster_fragment_index_by_hydration(
+                &hydrating,
+                &artifact,
+                &ClusterFragmentIndexLocation {
+                    cache_key: cache_key.clone(),
+                    node_id: "node-b".to_owned(),
+                    bytes: 4_096,
+                    verified_at_ms: 50,
+                    last_seen_at_ms: 50,
+                },
+                50,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: node-b settles by hydration: {error}")));
+
+        let settled = store
+            .cluster_fragment_index_job(&cache_key, "node-b")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read node-b's job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: node-b's job still exists"));
+        assert_eq!(settled.state, "ready", "{backend}");
+
+        // The artifact still says who actually built it. Relabelling it to
+        // get past `complete`'s builder check would have appeared to work,
+        // because the artifact insert is `ON CONFLICT DO NOTHING`.
+        let stored = store
+            .cluster_fragment_index_artifact(&cache_key)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read artifact: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the artifact exists"));
+        assert_eq!(
+            stored.built_by_node_id, "node-a",
+            "{backend}: hydration must not claim somebody else's build"
+        );
+        assert_eq!(stored.blob_sha256, artifact.blob_sha256, "{backend}");
+
+        // Both nodes now hold it.
+        let mut holders = store
+            .cluster_fragment_index_locations(&cache_key)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read locations: {error}"))
+            .into_iter()
+            .map(|location| location.node_id)
+            .collect::<Vec<_>>();
+        holders.sort();
+        assert_eq!(
+            holders,
+            vec!["node-a".to_owned(), "node-b".to_owned()],
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+/// Hydration is still a claimed write: a stale fence settles nothing, and a
+/// blob that is not the published artifact settles nothing either.
+#[tokio::test]
+async fn hydration_refuses_a_stale_claim_and_a_mismatched_blob() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "hydration-guards").await;
+        let source_sha256 = "d4".repeat(32);
+        let pipeline_sha256 = "e5".repeat(32);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("guard cache key");
+        assert!(store
+            .enqueue_cluster_fragment_index(&NewClusterFragmentIndexJob {
+                cache_key: cache_key.clone(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                source_sha256: source_sha256.clone(),
+                pipeline_sha256: pipeline_sha256.clone(),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                target_node_id: "node-b".to_owned(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}")));
+        let claim = store
+            .claim_cluster_fragment_index("node-b", &[], 20, 1_020)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a queued job"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            blob_sha256: "f6".repeat(32),
+            bytes: 2_048,
+            built_by_node_id: "node-a".to_owned(),
+            built_at_ms: 30,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key: cache_key.clone(),
+            node_id: "node-b".to_owned(),
+            bytes: 2_048,
+            verified_at_ms: 40,
+            last_seen_at_ms: 40,
+        };
+
+        // Nothing published yet: there is no artifact to hydrate from, so the
+        // job must not settle. Hydration never writes an artifact row.
+        let unpublished = store
+            .complete_cluster_fragment_index_by_hydration(&claim, &artifact, &location, 40)
+            .await;
+        assert!(
+            !matches!(unpublished, Ok(true)),
+            "{backend}: hydration settled without a published artifact"
+        );
+        assert!(
+            store
+                .cluster_fragment_index_artifact(&cache_key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read artifact: {error}"))
+                .is_none(),
+            "{backend}: hydration must never publish an artifact of its own"
+        );
+
+        // A stale fence settles nothing even once the artifact is real.
+        let mut stale = claim.clone();
+        stale.fence -= 1;
+        assert!(
+            !store
+                .complete_cluster_fragment_index_by_hydration(&stale, &artifact, &location, 45)
+                .await
+                .unwrap_or(false),
+            "{backend}: a stale fence must not settle a job"
+        );
+    })
+    .await;
+}
+
+/// The four figures the verdict divides by, read off a queue driven through
+/// the states they describe.
+///
+/// Without this the verdict is a pure function tested against numbers a human
+/// typed. The regression it guards is the one that made the milestone
+/// necessary in the first place: a count that looks right in Rust and asks the
+/// wrong question of the table.
+#[tokio::test]
+async fn the_prometheus_snapshot_answers_what_the_queue_verdict_asks() {
+    for_each_backend(|store, backend| async move {
+        const NOW_MS: i64 = 1_700_000_000_000;
+        const NOW_SECS: i64 = NOW_MS / 1_000;
+        let (_, file_id) = seed_file(&store, "queue-health").await;
+        let source_sha256 = "d".repeat(64);
+        let pipeline_sha256 = "e".repeat(64);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("queue health cache key");
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: "health-node".to_owned(),
+            not_before_ms: NOW_MS - 60_000,
+            created_at_ms: NOW_MS - 60_000,
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&job)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue health job: {error}")));
+
+        // Queued and past its wait: work the queue could take right now, and
+        // nothing it has taken. This is the shape that used to read `idle`.
+        let waiting = store
+            .prometheus_store_snapshot("health-node", NOW_SECS)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: waiting snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(waiting.claimable, 1, "{backend}: a queued job is claimable");
+        assert_eq!(waiting.claimed_24h, 0, "{backend}: nothing claimed yet");
+        assert_eq!(waiting.ready_24h, 0, "{backend}");
+        assert_eq!(waiting.running_past_lease, 0, "{backend}");
+        assert_eq!(waiting.last_ready_at_ms, 0, "{backend}");
+
+        // A job whose retry wait has not elapsed is not claimable, because an
+        // operator asking "is anything waiting" means anything the queue is
+        // allowed to pick up.
+        let too_early = store
+            .prometheus_store_snapshot("health-node", NOW_SECS - 120)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: pre-wait snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(
+            too_early.claimable, 0,
+            "{backend}: a job inside its retry wait is not work the queue is refusing"
+        );
+
+        let claim = store
+            .claim_cluster_fragment_index("health-node", &[], NOW_MS, NOW_MS + 60_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim health job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: health job claim"));
+        let running = store
+            .prometheus_store_snapshot("health-node", NOW_SECS)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: running snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(
+            running.claimed_24h, 1,
+            "{backend}: a claim charges an attempt, and an attempt is what `claimed_24h` counts"
+        );
+        assert_eq!(
+            running.claimable, 0,
+            "{backend}: a running job is not waiting"
+        );
+        assert_eq!(
+            running.running_past_lease, 0,
+            "{backend}: a live lease is not a lapsed one"
+        );
+
+        // Same row, read past the lease it holds.
+        let lapsed = store
+            .prometheus_store_snapshot("health-node", NOW_SECS + 120)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: lapsed snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(
+            lapsed.running_past_lease, 1,
+            "{backend}: a lease nobody renewed is the outage's own signature"
+        );
+
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            blob_sha256: "f".repeat(64),
+            bytes: 128,
+            built_by_node_id: "health-node".to_owned(),
+            built_at_ms: NOW_MS + 1_000,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key,
+            node_id: "health-node".to_owned(),
+            bytes: 128,
+            verified_at_ms: NOW_MS + 1_000,
+            last_seen_at_ms: NOW_MS + 1_000,
+        };
+        assert!(store
+            .complete_cluster_fragment_index(&claim, &artifact, &location, NOW_MS + 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete health job: {error}")));
+        let produced = store
+            .prometheus_store_snapshot("health-node", NOW_SECS + 2)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: produced snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(produced.ready_24h, 1, "{backend}");
+        assert_eq!(
+            produced.claimed_24h, 1,
+            "{backend}: finishing does not un-claim the job it finished"
+        );
+        assert_eq!(produced.claimable, 0, "{backend}");
+        assert_eq!(produced.running_past_lease, 0, "{backend}");
+        assert_eq!(
+            produced.last_ready_at_ms,
+            NOW_MS + 1_000,
+            "{backend}: the age an operator reads is the row's own timestamp"
+        );
+
+        // Every window figure is a window figure: read a day and a half later,
+        // the same rows say nothing was produced.
+        let stale_window = store
+            .prometheus_store_snapshot("health-node", NOW_SECS + 130_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale window snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(
+            stale_window.ready_24h, 0,
+            "{backend}: ready_24h is 24 hours"
+        );
+        assert_eq!(
+            stale_window.claimed_24h, 0,
+            "{backend}: claimed_24h shares the window it is divided against"
         );
     })
     .await;

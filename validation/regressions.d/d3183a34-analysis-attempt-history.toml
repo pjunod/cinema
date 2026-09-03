@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["d3183a34"]
-points = ["core.media", "cluster.auth", "server.api", "web.experience"]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "web-static"]
+commits = ["d3183a34", "17bb5775"]
+points = ["core.media", "persistence.upgrades", "cluster.auth", "server.api", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth", "web-static"]
 reason = "A backend-neutral Store contract drives one job through five charged attempts — four failures and a lease the claim sweep reclaims — with an uncharged yield in the middle, and asserts that attempt_errors lists exactly the five in order while last_error_code stays attempt_limit and the yield left no entry. It then asserts the two halves of the reset rule: an ordinary re-enqueue of an exhausted row keeps its history, and a row the sweep expires reopens with both the budget and the history empty, with queue_expired itself appending nothing. The same scenario reads the history back through analysis_history, which is the page the Analysis view renders. A replicated contract test rewinds a cluster to v25, opens it, and asserts the column arrives, that a row predating it reads an empty history rather than NULL, and that a second open is a no-op rather than a duplicate-column failure. The schema parity test now executes the component rebuild and the new column on both backends and compares objects and columns. A web test asserts the row renders every charged code and renders no list when nothing was charged. Reverting any writer drops its code from the contract's expected list; reverting the reset drops the empty-history assertion; reverting the probe count makes a fresh replicated cluster skip the step, which the v26 contract catches."

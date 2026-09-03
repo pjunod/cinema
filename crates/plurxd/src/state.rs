@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -172,6 +172,22 @@ struct StoreMetricsAtomics {
     analysis_queue_oldest_age_seconds: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
     analysis_lifecycle_counts: [AtomicI64; plurx_core::store::ANALYSIS_LIFECYCLE_METRIC_SLOTS],
     analysis_marker_counts: [AtomicI64; plurx_core::store::ANALYSIS_MARKER_METRIC_SLOTS],
+    analysis_ready_24h: AtomicI64,
+    analysis_attempt_limit_24h: AtomicI64,
+    analysis_claimed_24h: AtomicI64,
+    analysis_claimable: AtomicI64,
+    analysis_running_past_lease: AtomicI64,
+    analysis_last_ready_at_ms: AtomicI64,
+    /// The cumulative counters as this process first saw them. The store's own
+    /// are cumulative since the schema landed, and a queue that built 12,000
+    /// artifacts last month and nothing since looks identical to a healthy one
+    /// through those. The delta is what says whether it works now.
+    analysis_baseline_claims: AtomicI64,
+    analysis_baseline_lease_losses: AtomicI64,
+    analysis_baseline_seen: AtomicBool,
+    /// Consecutive samples with a row `running` past its lease. One is a sweep
+    /// that has not run yet; two is a queue that is not sweeping.
+    analysis_running_past_lease_samples: AtomicU32,
 }
 
 impl Default for StoreMetricsAtomics {
@@ -200,7 +216,78 @@ impl Default for StoreMetricsAtomics {
             analysis_queue_oldest_age_seconds: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_lifecycle_counts: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_marker_counts: std::array::from_fn(|_| AtomicI64::new(0)),
+            analysis_ready_24h: AtomicI64::new(0),
+            analysis_attempt_limit_24h: AtomicI64::new(0),
+            analysis_claimed_24h: AtomicI64::new(0),
+            analysis_claimable: AtomicI64::new(0),
+            analysis_running_past_lease: AtomicI64::new(0),
+            analysis_last_ready_at_ms: AtomicI64::new(0),
+            analysis_baseline_claims: AtomicI64::new(0),
+            analysis_baseline_lease_losses: AtomicI64::new(0),
+            analysis_baseline_seen: AtomicBool::new(false),
+            analysis_running_past_lease_samples: AtomicU32::new(0),
         }
+    }
+}
+
+/// Sum every lifecycle counter for one event, across its typed reasons.
+fn lifecycle_total(analysis: &plurx_core::store::AnalysisStoreMetrics, event: &str) -> i64 {
+    plurx_core::store::ANALYSIS_LIFECYCLE_METRICS
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| *name == event)
+        .map(|(slot, _)| analysis.lifecycle_counts[slot])
+        .sum()
+}
+
+/// What the queue has produced, and what this process has watched it do.
+///
+/// The two `since_start` figures are deltas against the first sample this
+/// process took, so they reset on restart — which the field names say, because
+/// an operator reading "0 claims" needs to know whether that means the queue
+/// is quiet or the daemon is new.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnalysisQueueHealthReport {
+    pub health: plurx_core::store::AnalysisQueueHealth,
+    pub claims_since_start: i64,
+    pub lease_losses_since_start: i64,
+    pub verdict: plurx_core::store::AnalysisQueueVerdict,
+}
+
+/// Rate limit for the "queue is not producing" warning.
+///
+/// An hourly limit is only a limit while it is armed. Re-arming the moment one
+/// sample comes back clean turns a verdict that flaps — a queue degraded by a
+/// sweep that keeps almost catching up — into a warning on every bad sample,
+/// which is how an hourly warning becomes a per-minute one. Recovery has to
+/// hold for a few samples before the next outage is allowed to speak again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct QueueWarnState {
+    last_warned_at_ms: i64,
+    good_samples: u32,
+}
+
+impl QueueWarnState {
+    /// Roughly two minutes of quiet at the sampler's 30-45s cadence.
+    const GOOD_SAMPLES_BEFORE_REARM: u32 = 4;
+    const AN_HOUR_MS: i64 = 60 * 60 * 1_000;
+
+    fn record_good_sample(&mut self) {
+        self.good_samples = self.good_samples.saturating_add(1);
+        if self.good_samples >= Self::GOOD_SAMPLES_BEFORE_REARM {
+            self.last_warned_at_ms = 0;
+        }
+    }
+
+    fn should_warn(&mut self, now: i64) -> bool {
+        self.good_samples = 0;
+        if self.last_warned_at_ms != 0
+            && now.saturating_sub(self.last_warned_at_ms) < Self::AN_HOUR_MS
+        {
+            return false;
+        }
+        self.last_warned_at_ms = now;
+        true
     }
 }
 
@@ -211,6 +298,9 @@ pub struct StoreMetricsView {
     pub age_seconds: Option<u64>,
     pub valid: bool,
     pub errors: u64,
+    /// Absent until the first sample lands: a verdict with nothing behind it
+    /// would read as `idle`, which is a claim, not an absence.
+    pub queue_health: Option<AnalysisQueueHealthReport>,
 }
 
 /// Last complete Store-backed sample used by the Prometheus handler.
@@ -282,16 +372,64 @@ impl StoreMetricsCache {
                     marker_counts: std::array::from_fn(|slot| {
                         self.inner.analysis_marker_counts[slot].load(Ordering::Relaxed)
                     }),
+                    health: plurx_core::store::AnalysisQueueHealth {
+                        ready_24h: self.inner.analysis_ready_24h.load(Ordering::Relaxed),
+                        attempt_limit_24h: self
+                            .inner
+                            .analysis_attempt_limit_24h
+                            .load(Ordering::Relaxed),
+                        claimed_24h: self.inner.analysis_claimed_24h.load(Ordering::Relaxed),
+                        claimable: self.inner.analysis_claimable.load(Ordering::Relaxed),
+                        running_past_lease: self
+                            .inner
+                            .analysis_running_past_lease
+                            .load(Ordering::Relaxed),
+                        last_ready_at_ms: self
+                            .inner
+                            .analysis_last_ready_at_ms
+                            .load(Ordering::Relaxed),
+                    },
                 },
             };
+            // Every input the verdict rules on is read before the sequence is
+            // re-checked. A baseline or a streak sampled after the check could
+            // belong to the next publication and disagree with the counters it
+            // is subtracted from.
+            let baseline_claims = self.inner.analysis_baseline_claims.load(Ordering::Relaxed);
+            let baseline_losses = self
+                .inner
+                .analysis_baseline_lease_losses
+                .load(Ordering::Relaxed);
+            let running_past_lease_samples = self
+                .inner
+                .analysis_running_past_lease_samples
+                .load(Ordering::Relaxed);
             let after = self.inner.sequence.load(Ordering::Acquire);
             if before == after {
                 let age_seconds = published.then(|| elapsed.saturating_sub(sampled_elapsed));
+                let claims_since_start = lifecycle_total(&sample.analysis, "claim")
+                    .saturating_sub(baseline_claims)
+                    .max(0);
+                let lease_losses_since_start = lifecycle_total(&sample.analysis, "lease_loss")
+                    .saturating_sub(baseline_losses)
+                    .max(0);
+                let queue_health = published.then(|| AnalysisQueueHealthReport {
+                    health: sample.analysis.health,
+                    claims_since_start,
+                    lease_losses_since_start,
+                    verdict: plurx_core::store::analysis_queue_verdict(
+                        sample.analysis.health,
+                        claims_since_start,
+                        lease_losses_since_start,
+                        running_past_lease_samples,
+                    ),
+                });
                 return StoreMetricsView {
                     sample: published.then_some(sample),
                     age_seconds,
                     valid: age_seconds.is_some_and(|age| age <= STORE_METRICS_FRESHNESS_SECS),
                     errors,
+                    queue_health,
                 };
             }
         }
@@ -394,6 +532,62 @@ impl StoreMetricsCache {
             .zip(sample.analysis.marker_counts)
         {
             target.store(value, Ordering::Relaxed);
+        }
+        let health = sample.analysis.health;
+        self.inner
+            .analysis_ready_24h
+            .store(health.ready_24h, Ordering::Relaxed);
+        self.inner
+            .analysis_attempt_limit_24h
+            .store(health.attempt_limit_24h, Ordering::Relaxed);
+        self.inner
+            .analysis_claimed_24h
+            .store(health.claimed_24h, Ordering::Relaxed);
+        self.inner
+            .analysis_claimable
+            .store(health.claimable, Ordering::Relaxed);
+        self.inner
+            .analysis_running_past_lease
+            .store(health.running_past_lease, Ordering::Relaxed);
+        self.inner
+            .analysis_last_ready_at_ms
+            .store(health.last_ready_at_ms, Ordering::Relaxed);
+        let claims = lifecycle_total(&sample.analysis, "claim");
+        let losses = lifecycle_total(&sample.analysis, "lease_loss");
+        // Re-anchor when a counter has gone backwards as well as on the first
+        // sample. These are monotonic in the store, so a decrease means the
+        // term under us changed — a restored backup, a rebuilt node, a
+        // leadership change onto a lagging log. Keeping the old baseline would
+        // pin the delta at zero from then on, and a permanent zero reads as
+        // `idle`: the one verdict that never asks anyone to look.
+        let baseline_ran_backwards = claims
+            < self.inner.analysis_baseline_claims.load(Ordering::Relaxed)
+            || losses
+                < self
+                    .inner
+                    .analysis_baseline_lease_losses
+                    .load(Ordering::Relaxed);
+        if !self
+            .inner
+            .analysis_baseline_seen
+            .swap(true, Ordering::Relaxed)
+            || baseline_ran_backwards
+        {
+            self.inner
+                .analysis_baseline_claims
+                .store(claims, Ordering::Relaxed);
+            self.inner
+                .analysis_baseline_lease_losses
+                .store(losses, Ordering::Relaxed);
+        }
+        if health.running_past_lease > 0 {
+            self.inner
+                .analysis_running_past_lease_samples
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.inner
+                .analysis_running_past_lease_samples
+                .store(0, Ordering::Relaxed);
         }
         self.inner.sampled_elapsed.store(elapsed, Ordering::Relaxed);
         self.inner.published.store(true, Ordering::Relaxed);
@@ -730,6 +924,46 @@ impl AppState {
         }
     }
 
+    /// Say out loud, once an hour per node, that the queue is not working.
+    ///
+    /// The numbers existed before this: `plurx_analysis_queue_depth` and the
+    /// lifecycle counters were the evidence that eventually named a
+    /// seventy-two hour outage. What did not exist was anything that turned
+    /// them into a sentence, so a queue failing every job it claimed looked
+    /// like a queue with a lot of history.
+    fn warn_if_the_queue_is_not_producing(&self, warn_state: &mut QueueWarnState) {
+        let Some(report) = self.store_metrics.snapshot().queue_health else {
+            return;
+        };
+        if !matches!(
+            report.verdict,
+            plurx_core::store::AnalysisQueueVerdict::Dead
+                | plurx_core::store::AnalysisQueueVerdict::Degraded
+        ) {
+            warn_state.record_good_sample();
+            return;
+        }
+        let now = clock_ms();
+        if !warn_state.should_warn(now) {
+            return;
+        }
+        tracing::warn!(
+            verdict = report.verdict.as_str(),
+            claims_since_start = report.claims_since_start,
+            lease_losses_since_start = report.lease_losses_since_start,
+            ready_24h = report.health.ready_24h,
+            attempt_limit_24h = report.health.attempt_limit_24h,
+            claimed_24h = report.health.claimed_24h,
+            claimable = report.health.claimable,
+            running_past_lease = report.health.running_past_lease,
+            "fragment-index queue is {}: {} claimed and {} ready in 24h, {} waiting",
+            report.verdict.as_str(),
+            report.health.claimed_24h,
+            report.health.ready_24h,
+            report.health.claimable
+        );
+    }
+
     /// Keep the scrape snapshot fresh without coupling availability to a
     /// Store or leader round trip. The first sample starts immediately.
     pub async fn store_metrics_loop(self) {
@@ -739,12 +973,14 @@ impl AppState {
         }) % 15;
         let base_interval = Duration::from_secs(30 + stagger);
         let mut consecutive_errors = 0_u32;
+        let mut warn_state = QueueWarnState::default();
         loop {
             if let Err(error) = self.refresh_store_metrics().await {
                 consecutive_errors = consecutive_errors.saturating_add(1);
                 tracing::debug!(%error, "refreshing Store-backed metrics snapshot failed");
             } else {
                 consecutive_errors = 0;
+                self.warn_if_the_queue_is_not_producing(&mut warn_state);
             }
             let backoff = 1_u32 << consecutive_errors.min(3);
             let interval = base_interval.saturating_mul(backoff);
@@ -6564,6 +6800,23 @@ impl JobManager {
             if lost.is_cancelled() {
                 return Err(AnalysisResolutionError::ClaimLost);
             }
+            // `submit` refuses for two unrelated reasons and this used to map
+            // both to a busy queue with an *uncharged* retry — which is an
+            // infinite loop, two claims per tick per node, whenever the
+            // refusal is the permanent one. A `(cache_key, target)` job that
+            // is already terminal will still be terminal on the next tick and
+            // on every tick after it: the request cannot make progress and
+            // saying so is the only way it stops. The bulk reopen is how an
+            // operator revisits that decision.
+            if let Ok(Some(existing)) = self
+                .store
+                .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
+                .await
+            {
+                if matches!(existing.state.as_str(), "failed" | "cancelled") {
+                    return Err(AnalysisResolutionError::Terminal("job_terminal"));
+                }
+            }
             return Err(AnalysisResolutionError::Retry {
                 code: "queue_full_or_busy",
                 charge_attempt: false,
@@ -7011,6 +7264,84 @@ impl JobManager {
             .await;
             return false;
         };
+
+        // Before building: has anybody already built exactly this?
+        //
+        // Discovery on each voter targets itself, so four voters queue four
+        // jobs for one `cache_key`, and on a healthy queue that is four full
+        // passes over the same file to produce one artifact. Once any of them
+        // has published it, the rest need the bytes and a location row, not a
+        // decode. `hydrate` reads the local cache first and then asks holders
+        // over the peer transport; a miss just falls through to the build.
+        //
+        // Settling from inside the claimed job is what makes this safe, and is
+        // what the older comment above `submit_fragment_index_analysis` could
+        // not do from the request side: the fence, the lease and the source
+        // identity are all still checked by the store, and the artifact row
+        // itself is never rewritten.
+        if let Ok(Some(published)) = self
+            .store
+            .cluster_fragment_index_artifact(&job.cache_key)
+            .await
+        {
+            let hydrated = crate::fragment_index_cluster::hydrate(
+                self.store.as_ref(),
+                self.membership.as_ref(),
+                &node_id,
+                &worker.cache_root,
+                &published,
+            )
+            .await;
+            if matches!(hydrated, Ok(Some(_))) {
+                let now = clock_ms();
+                let location = plurx_core::store::ClusterFragmentIndexLocation {
+                    cache_key: job.cache_key.clone(),
+                    node_id: node_id.clone(),
+                    bytes: published.bytes,
+                    verified_at_ms: now,
+                    last_seen_at_ms: now,
+                };
+                match self
+                    .store
+                    .complete_cluster_fragment_index_by_hydration(&job, &published, &location, now)
+                    .await
+                {
+                    Ok(true) => {
+                        let _ = self.store.settle_analysis_requests(now).await;
+                        tracing::info!(
+                            cache_key = %job.cache_key,
+                            built_by = %published.built_by_node_id,
+                            "settled a fragment-index job from an artifact another node built"
+                        );
+                        let _ = retire_heartbeat(stop, heartbeat).await;
+                        return true;
+                    }
+                    // The claim moved, or the source did. Either way this is
+                    // not a build worth starting, and the sweep will requeue.
+                    Ok(false) => {
+                        let retired = retire_heartbeat(stop, heartbeat).await;
+                        self.yield_fragment_index_job(
+                            &retired,
+                            &job,
+                            &node_id,
+                            now,
+                            now.saturating_add(retry_ms),
+                        )
+                        .await;
+                        return false;
+                    }
+                    Err(error) => {
+                        // The bytes on disk are not the published artifact.
+                        // Build rather than settle a lie.
+                        tracing::warn!(
+                            cache_key = %job.cache_key,
+                            %error,
+                            "hydrated fragment index did not settle; building instead"
+                        );
+                    }
+                }
+            }
+        }
 
         let progress_jobs = Arc::clone(&self);
         let progress_key = job.cache_key.clone();
@@ -8148,6 +8479,14 @@ mod tests {
                 queue_oldest_age_seconds: [value; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
                 lifecycle_counts: [value; plurx_core::store::ANALYSIS_LIFECYCLE_METRIC_SLOTS],
                 marker_counts: [value; plurx_core::store::ANALYSIS_MARKER_METRIC_SLOTS],
+                health: plurx_core::store::AnalysisQueueHealth {
+                    ready_24h: value,
+                    attempt_limit_24h: value,
+                    claimed_24h: value,
+                    claimable: value,
+                    running_past_lease: value,
+                    last_ready_at_ms: value,
+                },
             },
         }
     }
@@ -8162,6 +8501,7 @@ mod tests {
                 age_seconds: None,
                 valid: false,
                 errors: 0,
+                queue_health: None,
             }
         );
 
@@ -8178,6 +8518,16 @@ mod tests {
                 age_seconds: Some(1),
                 valid: true,
                 errors: 1,
+                // Every figure is the same number here, so as many jobs
+                // exhausted their retry budget as were claimed at all: over
+                // budget by any reading, and `degraded` says so without
+                // needing a single claim watched from this process.
+                queue_health: Some(AnalysisQueueHealthReport {
+                    health: complete.analysis.health,
+                    claims_since_start: 0,
+                    lease_losses_since_start: 0,
+                    verdict: plurx_core::store::AnalysisQueueVerdict::Degraded,
+                }),
             }
         );
 

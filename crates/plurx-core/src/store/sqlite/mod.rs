@@ -1233,6 +1233,17 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Whether v45's attempt-history column is already installed.
+    fn attempt_errors_column_exists(conn: &Connection) -> Result<bool, StoreError> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+              WHERE name = 'attempt_errors'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count == 1)
+    }
+
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let target = SQLITE_SCHEMA_VERSION;
@@ -1251,7 +1262,14 @@ impl SqliteStore {
             // out here. Integrity is re-checked below instead of enforced
             // statement by statement.
             conn.pragma_update(None, "foreign_keys", "OFF")?;
-            let applied = if version == 41 && Self::analysis_component_schema_is_current(conn)? {
+            // A migration commits its own transaction and only then bumps
+            // `user_version`, so a crash in that window leaves the shape
+            // applied and the version behind. `ADD COLUMN` is not idempotent,
+            // so the replay would fail on a column that is already there —
+            // permanently. v41 has carried this guard since it landed.
+            let applied = if (version == 41 && Self::analysis_component_schema_is_current(conn)?)
+                || (version == 45 && Self::attempt_errors_column_exists(conn)?)
+            {
                 Ok(())
             } else {
                 conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
@@ -1538,7 +1556,28 @@ impl MetricsStore for SqliteStore {
                     (SELECT COALESCE(json_group_array(json_object(
                         'event', counter.event, 'reason', counter.reason,
                         'count', counter.count)), '[]')
-                       FROM analysis_lifecycle_counters counter)
+                       FROM analysis_lifecycle_counters counter),
+                    -- What the queue has actually produced lately. `?2` is
+                    -- Unix seconds here; the jobs table keeps milliseconds.
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'ready' AND updated_at_ms >= (?2 - 86400) * 1000),
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'failed' AND last_error_code = 'attempt_limit'
+                        AND updated_at_ms >= (?2 - 86400) * 1000),
+                    -- `attempts` is charged on claim, so any row with one was
+                    -- picked up. Scoped to this table on purpose: the shared
+                    -- `('claim','all')` counter also carries skip-marker work.
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE attempts > 0
+                        AND updated_at_ms >= (?2 - 86400) * 1000),
+                    -- Work the queue could claim right now and has not.
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'queued' AND not_before_ms <= ?2 * 1000),
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'running'
+                        AND COALESCE(lease_expires_ms, 0) < ?2 * 1000),
+                    (SELECT COALESCE(MAX(updated_at_ms), 0)
+                       FROM cluster_fragment_index_jobs WHERE state = 'ready')
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],
                 |row| {
@@ -1562,6 +1601,14 @@ impl MetricsStore for SqliteStore {
                             &row.get::<_, String>(15)?,
                             &row.get::<_, String>(16)?,
                             &row.get::<_, String>(17)?,
+                            super::AnalysisQueueHealth {
+                                ready_24h: row.get(18)?,
+                                attempt_limit_24h: row.get(19)?,
+                                claimed_24h: row.get(20)?,
+                                claimable: row.get(21)?,
+                                running_past_lease: row.get(22)?,
+                                last_ready_at_ms: row.get(23)?,
+                            },
                         ),
                     })
                 },

@@ -1129,7 +1129,10 @@ mod tests {
         let connection = rusqlite::Connection::open(&path).expect("fixture");
         SqliteStore::apply_migrations_for_test(
             &connection,
-            crate::store::SQLITE_SCHEMA_VERSION - 2,
+            // v42 exactly. Derived from head, this silently became v43 the
+            // moment another migration landed, and the step the test is named
+            // for stopped being covered.
+            42,
         )
         .expect("v42 schema");
         drop(connection);

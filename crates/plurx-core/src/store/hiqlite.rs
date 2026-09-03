@@ -1419,7 +1419,9 @@ impl HiqliteAuthStore {
             .client()
             .query_consistent_map::<CountRow, _>(sql, params!())
             .await?;
-        Ok(rows.len() == 1 && rows[0].count == 15)
+        Ok(rows.len() == 1
+            && rows[0].count
+                == super::hiqlite_fragment_index_cluster::ANALYSIS_COMPONENT_SCHEMA_OBJECTS)
     }
 
     async fn migrate_schema(&self) -> Result<(), StoreError> {
@@ -2752,7 +2754,24 @@ impl MetricsStore for HiqliteAuthStore {
                     (SELECT COALESCE(json_group_array(json_object( \
                         'event', counter.event, 'reason', counter.reason, \
                         'count', counter.count)), '[]') \
-                       FROM analysis_lifecycle_counters counter) AS analysis_lifecycle_json \
+                       FROM analysis_lifecycle_counters counter) AS analysis_lifecycle_json, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE state = 'ready' \
+                        AND updated_at_ms >= ($2 - 86400) * 1000) AS analysis_ready_24h, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE state = 'failed' AND last_error_code = 'attempt_limit' \
+                        AND updated_at_ms >= ($2 - 86400) * 1000) AS analysis_attempt_limit_24h, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE attempts > 0 \
+                        AND updated_at_ms >= ($2 - 86400) * 1000) AS analysis_claimed_24h, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE state = 'queued' \
+                        AND not_before_ms <= $2 * 1000) AS analysis_claimable, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE state = 'running' \
+                        AND COALESCE(lease_expires_ms, 0) < $2 * 1000) AS analysis_running_past_lease, \
+                    (SELECT COALESCE(MAX(updated_at_ms), 0) FROM cluster_fragment_index_jobs \
+                      WHERE state = 'ready') AS analysis_last_ready_at_ms \
                  FROM offline_packages WHERE node_id = $1",
                 params!(node_id, now),
             )
@@ -3489,6 +3508,12 @@ struct PrometheusStoreRow {
     analysis_queue_json: String,
     analysis_marker_json: String,
     analysis_lifecycle_json: String,
+    analysis_ready_24h: i64,
+    analysis_attempt_limit_24h: i64,
+    analysis_claimed_24h: i64,
+    analysis_claimable: i64,
+    analysis_running_past_lease: i64,
+    analysis_last_ready_at_ms: i64,
 }
 
 impl From<&mut Row<'_>> for PrometheusStoreRow {
@@ -3512,6 +3537,12 @@ impl From<&mut Row<'_>> for PrometheusStoreRow {
             analysis_queue_json: row.get("analysis_queue_json"),
             analysis_marker_json: row.get("analysis_marker_json"),
             analysis_lifecycle_json: row.get("analysis_lifecycle_json"),
+            analysis_ready_24h: row.get("analysis_ready_24h"),
+            analysis_attempt_limit_24h: row.get("analysis_attempt_limit_24h"),
+            analysis_claimed_24h: row.get("analysis_claimed_24h"),
+            analysis_claimable: row.get("analysis_claimable"),
+            analysis_running_past_lease: row.get("analysis_running_past_lease"),
+            analysis_last_ready_at_ms: row.get("analysis_last_ready_at_ms"),
         }
     }
 }
@@ -3538,6 +3569,14 @@ impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
                 &row.analysis_queue_json,
                 &row.analysis_marker_json,
                 &row.analysis_lifecycle_json,
+                super::AnalysisQueueHealth {
+                    ready_24h: row.analysis_ready_24h,
+                    attempt_limit_24h: row.analysis_attempt_limit_24h,
+                    claimed_24h: row.analysis_claimed_24h,
+                    claimable: row.analysis_claimable,
+                    running_past_lease: row.analysis_running_past_lease,
+                    last_ready_at_ms: row.analysis_last_ready_at_ms,
+                },
             ),
         }
     }

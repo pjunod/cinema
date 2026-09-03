@@ -1813,3 +1813,61 @@ test("A failed row lists the code every charged attempt ended with", () => {
   harness({...snapshot,rows:[{...base,job_attempt_errors:[]}]});
   assert.ok(!/analysis-attempts/.test(main.innerHTML));
 });
+
+test("Each queue verdict gets its own sentence before the counts", () => {
+  // A verdict that renders the same sentence for two states is a verdict
+  // nobody can act on, so each one is pinned by wording, not by tone alone.
+  const line=new Function("esc","fmtAgo",
+    `${shippedSource("analysisVerdictLine")}\nreturn analysisVerdictLine;`)(String,()=>"2 days ago");
+  const base={ready_24h:0,attempt_limit_24h:0,claimed_24h:0,claimable:0,
+    running_past_lease:0,last_ready_at_ms:0,
+    claims_since_start:0,lease_losses_since_start:0};
+  const seen=new Set();
+  for(const [verdict,pattern] of [
+    ["dead",/is not producing/],
+    ["degraded",/is struggling/],
+    ["healthy",/is producing/],
+    ["idle",/is idle/],
+  ]){
+    const html=line({health:{...base,verdict,claimed_24h:25,ready_24h:verdict==="dead"?0:5}});
+    assert.match(html,pattern,verdict);
+    assert.ok(!seen.has(html),`${verdict} repeats another verdict's sentence`);
+    seen.add(html);
+  }
+  // A node that has not sampled yet says nothing rather than "idle".
+  assert.equal(line({}),"");
+  assert.equal(line({health:{...base}}),"");
+  // The dead line names the age of the last index, which is the number an
+  // operator acts on.
+  assert.match(line({health:{...base,verdict:"dead",claimed_24h:412,last_ready_at_ms:1}}),
+    /2 days ago/);
+});
+
+test("A dead queue says which half of the outage it is in", () => {
+  // Jobs picked up and none finished sends you to the worker; a backlog
+  // nobody touched sends you to whether a worker is running at all. One
+  // sentence for both would send everyone to the wrong place half the time.
+  const line=new Function("esc","fmtAgo",
+    `${shippedSource("analysisVerdictLine")}\nreturn analysisVerdictLine;`)(String,()=>"2 days ago");
+  const base={verdict:"dead",ready_24h:0,attempt_limit_24h:0,claimed_24h:0,claimable:0,
+    running_past_lease:0,last_ready_at_ms:1,claims_since_start:0,lease_losses_since_start:0};
+  const untouched=line({health:{...base,claimable:1118}});
+  assert.match(untouched,/1118 jobs waiting and nothing picked up/);
+  const claimed=line({health:{...base,claimed_24h:396,claimable:1118}});
+  assert.match(claimed,/396 jobs picked up in 24 hours and nothing finished/);
+  assert.notEqual(untouched,claimed);
+  // Singulars read as English, because an operator reads this sentence and
+  // not the JSON behind it.
+  assert.match(line({health:{...base,claimable:1}}),/1 job waiting/);
+  assert.match(line({health:{...base,claimed_24h:1}}),/1 job picked up/);
+});
+
+test("No queue verdict claims to describe one node", () => {
+  // The jobs table is replicated and records no observer, so every node
+  // renders the same sentence. Saying "this node" would send an operator to
+  // restart whichever machine they happened to open.
+  const source=shippedSource("analysisVerdictLine");
+  const sentences=source.split("\n").filter(row=>!row.trim().startsWith("//"));
+  assert.ok(!/this node/.test(sentences.join("\n")),
+    "a verdict sentence attributes the fleet's queue to one node");
+});
