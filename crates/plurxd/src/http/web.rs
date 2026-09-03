@@ -302,7 +302,20 @@ mod tests {
 
     #[test]
     fn activity_stream_rows_render_control_and_production_facts() {
-        assert!(INDEX_HTML.contains("function activitySessionControlText"));
+        // The Stream cell is a state pill, a meter strip and a details
+        // disclosure, each its own painter; the sentence-joiner is gone.
+        for helper in [
+            "function activityStreamState",
+            "function activityStreamMeters",
+            "function activityStreamDetails",
+            "function activityStreamCell",
+        ] {
+            assert!(
+                INDEX_HTML.contains(helper),
+                "missing Activity painter {helper}"
+            );
+        }
+        assert!(!INDEX_HTML.contains("function activitySessionControlText"));
         for label in [
             "lease_timeout_ms",
             "control_demand",

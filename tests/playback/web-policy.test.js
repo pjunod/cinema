@@ -106,23 +106,43 @@ test("playback info exposes and remembers the shared three-mode contract", () =>
 });
 
 test("Activity renders explicit lease and demand-window instrumentation", () => {
-  const source = shippedSource("activitySessionControlText");
-  const render = new Function(`${source}; return activitySessionControlText;`)();
-  assert.equal(
-    render({
-      lease_mode: "explicit",
-      lease_state: "active",
-      lease_timeout_ms: 30_000,
-      control_demand: "active",
-      reported_position_ms: 12_000,
-      client_runway_ms: 8_000,
-      production_policy: "explicit_demand",
-      production_ahead_seconds: -3,
-      production_target_seconds: 18,
-    }),
-    "explicit lease 30s · demand active · position 12s · client runway 8s · " +
-      "production explicit_demand · production deficit 3s · target 18s",
-  );
+  // The Stream cell reads the lease and the demand window off the session and
+  // paints them as a state pill, a Server ahead meter against its target, and
+  // a Lease/Demand/Policy row set behind the disclosure — the run-on sentence
+  // is gone, the facts are not.
+  const helpers = new Function(
+    `${shippedSource("esc")}\n${shippedSource("clockFromSec")}\n${shippedSource("fmtBytes")}\n${shippedSource("fmtMbps")}\n` +
+      `${shippedSource("activityMethodLabel")}\n${shippedSource("activityStreamState")}\n${shippedSource("activityStreamMeters")}\n` +
+      `${shippedSource("activityStreamDetails")}\n${shippedSource("activityStreamCell")}\n` +
+      "return {activityStreamState,activityStreamMeters,activityStreamDetails,activityStreamCell};",
+  )();
+  const session = {
+    lease_mode: "explicit",
+    lease_state: "active",
+    lease_timeout_ms: 30_000,
+    control_demand: "active",
+    reported_position_ms: 12_000,
+    client_runway_ms: 8_000,
+    production_policy: "explicit_demand",
+    production_ahead_seconds: -3,
+    production_target_seconds: 18,
+  };
+  assert.deepEqual(helpers.activityStreamState(session), { cls: "bad", label: "Behind", why: "3 s deficit" });
+  assert.deepEqual(helpers.activityStreamMeters({ method: "transcode" }, session), [
+    { k: "Position", v: "0:12" },
+    { k: "Demand window", v: "−3 s", of: "of 18 s", tone: "bad", bar: 0 },
+    { k: "Client runway", v: "8 s", tone: "warn" },
+  ]);
+  assert.deepEqual(helpers.activityStreamDetails(session).slice(0, 4), [
+    ["Lease", "explicit · 30 s · active"],
+    ["Demand", "active"],
+    ["Policy", "explicit demand"],
+    ["Target", "18 s"],
+  ]);
+  const cell = helpers.activityStreamCell({ method: "transcode", presentation: "live-recovery", session_id: "s1" }, session, new Set());
+  assert.match(cell, /<span class="stream-state bad">Behind <span class="why">· 3 s deficit<\/span><\/span>/);
+  assert.match(cell, /<span class="k">Demand window<\/span><span class="v">−3 s<span class="of">of 18 s<\/span>/);
+  assert.doesNotMatch(cell, /production deficit 3s|explicit lease 30s/);
 });
 
 test("playback info explicitly separates playback mode from delivery method", () => {

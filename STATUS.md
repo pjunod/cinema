@@ -4,6 +4,29 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Activity's Now playing row, read as a card
+
+**PR [#849](https://github.com/pjunod/plurx/pull/849) — open, 2026-09-03,
+branch `web/activity-stream-card`.** Paul asked for the activity status display to be "a
+lot nicer": the Stream cell was one " · "-joined sentence of every session
+fact, with the three things an operator brings to the page — is it playing,
+is the server keeping up, is it held and why — buried among sequence
+numbers. The cell now leads with a state pill, then named meters under the
+player info panel's own labels (Position, Server ahead, Demand window
+against target with a fill bar, Client runway, Suspends, Delivery rate),
+then a "Technical details" disclosure carrying everything the sentence used
+to say, which stays open and keeps keyboard focus across the repaint. One
+adversarial review, nine findings, all implemented — the two that mattered:
+"Server ahead" was about to show the demand window under the player's
+label for the physical reserve (now two meters, matching the player), and a
+failed producer would have worn a green Active pill (failures now outrank
+everything but a dead lease). Also found in passing: the rung and encoder
+were read off `deliveries[]`, which never carries them, so "1080p · vaapi"
+had never rendered against a real server. `make web-check`'s node suites,
+`js-check` and `contrast-check` all green in the clone; 27 painter tests.
+Web-only — nothing to deploy to the nodes beyond the next server image;
+the Activity golden has no live streams so `ui-check` is unaffected.
+
 ## Nothing played on the web, and every fallback was terminal
 
 **[`agent/hls-startup-demand-deadlock`](https://github.com/pjunod/plurx/pull/840),

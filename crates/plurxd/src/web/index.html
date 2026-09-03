@@ -854,6 +854,54 @@
   .mode-chip.vod{color:var(--good);border-color:color-mix(in srgb,var(--good) 55%,var(--line));background:color-mix(in srgb,var(--good) 8%,transparent)}
   .mode-chip.live{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line));background:color-mix(in srgb,var(--warn) 8%,transparent)}
   .mode-detail{display:block;margin-top:5px;color:var(--muted);font-size:12px;line-height:1.45}
+  /* Now playing — the Stream cell. A state pill, a strip of named meters and a
+     disclosure for the sequence numbers, in place of one " · "-joined sentence.
+     Tones reuse the page's own tokens so every theme paints them. The table
+     aligns its cells to the top because the Stream cell is now taller than a
+     line and the title should sit on the pill's row, not float mid-cell. */
+  table.np td{vertical-align:top}
+  table.np td.stream-cell{min-width:300px}
+  .stream-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
+  .stream-method{font-size:13px;font-weight:600;color:var(--text)}
+  .stream-method .sub{color:var(--muted);font-weight:500}
+  .stream-state{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 9px;font-size:11.5px;font-weight:650;line-height:1.2;background:var(--panel2);white-space:nowrap}
+  .stream-state::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:var(--muted)}
+  .stream-state.active::before{background:var(--good);box-shadow:0 0 0 3px color-mix(in srgb,var(--good) 18%,transparent)}
+  .stream-state.hold::before{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 18%,transparent)}
+  .stream-state.wait::before{background:var(--accent)}
+  .stream-state.bad::before{background:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 18%,transparent)}
+  .stream-state.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
+  .stream-state.hold{border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+  .stream-state .why{color:var(--muted);font-weight:500;white-space:normal}
+  .stream-meters{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:9px}
+  .stream-meter{min-width:76px}
+  .stream-meter .k{display:block;color:var(--muted);font-size:10.5px;font-weight:650;text-transform:uppercase;letter-spacing:.055em;white-space:nowrap}
+  .stream-meter .v{display:block;margin-top:2px;font:600 14px/1.2 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;color:var(--text);white-space:nowrap}
+  .stream-meter .of{margin-left:5px;color:var(--muted);font-size:11px;font-weight:500}
+  .stream-meter.good .v{color:var(--good)}
+  .stream-meter.warn .v{color:var(--warn)}
+  .stream-meter.bad .v{color:var(--bad)}
+  .stream-bar{display:block;width:104px;height:3px;margin-top:5px;border-radius:2px;background:var(--line);overflow:hidden}
+  .stream-bar i{display:block;height:100%;border-radius:2px;background:var(--muted)}
+  .stream-meter.good .stream-bar i{background:var(--good)}
+  .stream-meter.warn .stream-bar i{background:var(--warn)}
+  .stream-meter.bad .stream-bar i{background:var(--bad)}
+  .stream-diag{margin-top:8px;color:var(--muted);font-size:11.5px}
+  .stream-diag summary{cursor:pointer;list-style:none;color:var(--accent);font-weight:600;width:max-content}
+  .stream-diag summary::-webkit-details-marker{display:none}
+  .stream-diag summary::after{content:" ›"}
+  .stream-diag[open] summary::after{content:" ⌄"}
+  .stream-diag-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:3px 18px;margin-top:7px;padding:8px 10px;background:var(--panel2);border-radius:7px;line-height:1.45}
+  .stream-diag-grid>div{display:flex;justify-content:space-between;gap:10px;min-width:0}
+  .stream-diag-grid b{font-weight:600;color:var(--muted);white-space:nowrap}
+  .stream-diag-grid span{color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere;text-align:right}
+  @media(max-width:760px){
+    table.np td.stream-cell{min-width:0}
+    .stream-meters{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px 12px}
+    .stream-meter .k{white-space:normal}
+    .stream-bar{width:100%;max-width:104px}
+    .stream-diag-grid{grid-template-columns:minmax(0,1fr)}
+  }
   @media(max-width:760px){
     .analysis-head,.analysis-brief-head{display:grid}
     .analysis-actions{justify-content:flex-start}
@@ -11409,39 +11457,154 @@ function detailActivitySummary(d,deliveries){
   if(d.trakt&&d.trakt.syncing) acts.push({label:"Syncing Trakt"});
   return acts;
 }
-function activitySessionControlText(session){
-  if(!session) return "";
-  const facts=[];
-  if(session.lease_mode){
-    const timeout=Number.isSafeInteger(session.lease_timeout_ms)
-      ?` ${Math.round(session.lease_timeout_ms/1000)}s`:"";
-    const state=session.lease_state&&session.lease_state!=="active"
-      ?` (${session.lease_state})`:"";
-    facts.push(`${session.lease_mode} lease${timeout}${state}`);
+// ---- Now playing: the Stream cell -----------------------------------------
+// One delivery, read as a card rather than as a " · "-joined run-on. The old
+// cell printed every session fact it had in the order the code happened to
+// test them — "explicit lease 30s · demand active · position 1693s · client
+// runway 43s · production explicit_demand · producer attempt 1 · playlist
+// ready · published segment 114 · next sequence 115 · produced ahead 59s ·
+// target 73s · active · held (time) · 6 suspends" — so the three questions an
+// operator actually brings to this page (is it playing, is the server keeping
+// up, is it held and why) were answered somewhere in the middle of a sentence
+// of sequence numbers. Now: a state pill answers the first, a strip of named
+// meters answers the second (the same labels the player's info panel uses —
+// Position, Server ahead, Client runway, Delivery rate, Suspends), the pill's
+// clause answers the third, and every sequence number keeps its place behind
+// a "Technical details" disclosure that stays open across the 4 s repaint.
+//
+// A direct play or a progressive remux has no session behind it and renders
+// only the headline and whatever delivery numbers it has; nothing here
+// invents a state for a stream that never reported one.
+function activityMethodLabel(method,encoder){
+  const name=({direct:"Direct play",remux:"Remux","hls-copy":"HLS copy",transcode:"Transcode"})[method]||method||"";
+  return encoder==="cached"?`${name} · cached`:name;
+}
+function activityStreamState(session){
+  if(!session) return null;
+  // `lease_state` is "active" for a live lease and "unavailable" for a legacy
+  // viewer with no actor at all; only the three terminal verdicts are news.
+  const terminal=({ended:"ended",expired:"expired",authority_fenced:"authority fenced"})[session.lease_state];
+  if(terminal) return {cls:"bad",label:`Lease ${terminal}`};
+  const hold=!session.suspended?""
+    :({demand:"viewer has enough",time:"reserve full",bytes:"per-stream byte limit",
+       global:"global scratch limit"})[session.hold_reason]||session.hold_reason||"limit";
+  // Failures outrank everything but a dead lease: the old sentence never
+  // claimed a verdict, the pill does, so it must not say Active over a
+  // producer that has already died.
+  if(session.producer_state==="failed") return {cls:"bad",label:"Producer failed"};
+  if(session.render_state==="failed") return {cls:"bad",label:"Client failed",why:hold?`held · ${hold}`:""};
+  // A stalled client under a server hold is the freeze signature; the pill
+  // leads with the client and carries the hold as its clause.
+  if(session.render_state==="stalled") return {cls:"bad",label:"Client stalled",why:hold?`held · ${hold}`:""};
+  // A viewer's own hold becomes a `demand` suspension on the server, so the
+  // viewer's intent is read before the suspension it caused.
+  if(session.control_demand==="hold") return {cls:"idle",label:"Paused",why:"viewer asked to hold"};
+  if(session.control_demand==="end"||session.render_state==="ended") return {cls:"idle",label:"Ending"};
+  if(hold) return {cls:"hold",label:"Holding",why:hold};
+  if(session.playlist_ready===false) return {cls:"wait",label:"Starting",why:"playlist not published yet"};
+  if(Number.isSafeInteger(session.production_ahead_seconds)&&session.production_ahead_seconds<0)
+    return {cls:"bad",label:"Behind",why:`${Math.abs(session.production_ahead_seconds)} s deficit`};
+  return {cls:"active",label:"Active"};
+}
+// The meters. Each is {k,v,of?,tone?,bar?}: a label, a tabular value, an
+// optional "of N" clause, a tone for the value, and an optional 0..1 fill.
+function activityStreamMeters(de,session){
+  const out=[];
+  const secs=ms=>`${Math.max(0,Math.round(ms/1000))} s`;
+  if(session){
+    if(Number.isSafeInteger(session.reported_position_ms))
+      out.push({k:"Position",v:clockFromSec(session.reported_position_ms/1000)});
+    // Two reserves, under the two labels the player's info panel uses for
+    // them, so the pages never disagree about a number. Server ahead is the
+    // physical published media beyond the client's download frontier; the
+    // Demand window is the explicit policy's production against its target,
+    // measured from the viewer's reported playhead, and can run negative.
+    if(Number.isSafeInteger(session.ahead_seconds))
+      out.push({k:"Server ahead",v:`${Math.max(0,session.ahead_seconds)} s`,
+        tone:session.ahead_seconds<=0&&!session.suspended?"warn":""});
+    if(session.production_policy==="explicit_demand"){
+      const ahead=session.production_ahead_seconds;
+      const target=Number.isSafeInteger(session.production_target_seconds)&&session.production_target_seconds>0
+        ?session.production_target_seconds:null;
+      if(Number.isSafeInteger(ahead)){
+        const ratio=target?Math.max(0,ahead)/target:null;
+        const tone=ahead<0?"bad":session.suspended||ratio==null?"":ratio<0.25?"warn":"good";
+        out.push({k:"Demand window",v:ahead<0?`−${Math.abs(ahead)} s`:`${ahead} s`,
+          of:target?`of ${target} s`:"",tone,bar:ratio==null?null:Math.min(1,ratio)});
+      }else out.push({k:"Demand window",v:"—",of:"waiting for publication",tone:"warn"});
+    }
+    if(Number.isSafeInteger(session.client_runway_ms)){
+      const runway=session.client_runway_ms;
+      out.push({k:"Client runway",v:secs(runway),tone:runway<5000?"bad":runway<12000?"warn":""});
+    }
+    if(session.suspend_count)
+      out.push({k:"Suspends",v:String(session.suspend_count),tone:session.suspended?"warn":""});
   }
-  if(session.control_demand) facts.push(`demand ${session.control_demand}`);
-  if(Number.isSafeInteger(session.reported_position_ms))
-    facts.push(`position ${Math.round(session.reported_position_ms/1000)}s`);
-  if(Number.isSafeInteger(session.client_runway_ms))
-    facts.push(`client runway ${Math.round(session.client_runway_ms/1000)}s`);
-  if(session.production_policy) facts.push(`production ${session.production_policy}`);
-  if(Number.isSafeInteger(session.producer_attempt))
-    facts.push(`producer attempt ${session.producer_attempt}`);
-  if(session.playlist_ready===true) facts.push("playlist ready");
-  else if(session.playlist_ready===false) facts.push("playlist waiting");
-  if(Number.isSafeInteger(session.published_segment))
-    facts.push(`published segment ${session.published_segment}`);
-  if(Number.isSafeInteger(session.next_media_sequence))
-    facts.push(`next sequence ${session.next_media_sequence}`);
-  if(Number.isSafeInteger(session.pending_fetched_segment))
-    facts.push(`fetched timing pending ${session.pending_fetched_segment}`);
-  if(Number.isSafeInteger(session.production_ahead_seconds))
-    facts.push(session.production_ahead_seconds<0
-      ?`production deficit ${Math.abs(session.production_ahead_seconds)}s`
-      :`produced ahead ${session.production_ahead_seconds}s`);
-  if(Number.isSafeInteger(session.production_target_seconds))
-    facts.push(`target ${session.production_target_seconds}s`);
-  return facts.join(" · ");
+  const bps=de.delivered_bps!=null?de.delivered_bps:session&&session.delivered_bps;
+  const bytes=de.delivered_bytes!=null?de.delivered_bytes:session&&session.delivered_bytes;
+  if(bps||bytes){
+    const idle=session&&session.delivered_idle_ms>15000;
+    out.push({k:"Delivery rate",v:bps?fmtMbps(bps):"—",of:[bytes?fmtBytes(bytes):"",idle?"idle":""].filter(Boolean).join(" · ")});
+  }
+  return out;
+}
+// Everything the run-on used to say, as label/value pairs. Sequence numbers,
+// attempts and lease mechanics are what a bug report wants and what a glance
+// does not, so they live behind the disclosure — none of them are lost.
+function activityStreamDetails(session){
+  if(!session) return [];
+  const rows=[];
+  if(session.lease_mode){
+    const timeout=Number.isSafeInteger(session.lease_timeout_ms)?` · ${Math.round(session.lease_timeout_ms/1000)} s`:"";
+    rows.push(["Lease",`${session.lease_mode}${timeout}${session.lease_state?` · ${session.lease_state}`:""}`]);
+  }
+  if(session.control_demand) rows.push(["Demand",session.control_demand]);
+  if(session.production_policy) rows.push(["Policy",String(session.production_policy).replace(/_/g," ")]);
+  if(Number.isSafeInteger(session.production_target_seconds)&&session.production_target_seconds>0) rows.push(["Target",`${session.production_target_seconds} s`]);
+  if(session.suspended){
+    const release=session.hold_reason==="time"&&session.resume_below_seconds!=null?`resumes below ${session.resume_below_seconds} s`
+      :session.resume_below_bytes!=null?`resumes below ${fmtBytes(session.resume_below_bytes)||"0 B"}`:"";
+    rows.push(["Hold reason",`${session.hold_reason||"limit"}${release?` · ${release}`:""}`]);
+  }
+  if(session.render_state) rows.push(["Render state",String(session.render_state).replace(/_/g," ")]);
+  if(typeof session.recent_speed==="number") rows.push(["Encode speed",`${session.recent_speed.toFixed(2)}×`]);
+  else if(typeof session.speed==="number") rows.push(["Encode speed",`${session.speed.toFixed(2)}× (avg)`]);
+  if(Number.isSafeInteger(session.producer_attempt)) rows.push(["Producer attempt",String(session.producer_attempt)]);
+  if(session.producer_state) rows.push(["Producer",String(session.producer_state).replace(/_/g," ")]);
+  if(session.playlist_ready===true) rows.push(["Playlist","ready"]);
+  else if(session.playlist_ready===false) rows.push(["Playlist","waiting"]);
+  if(session.playlist_shape) rows.push(["Playlist shape",session.playlist_shape]);
+  if(Number.isSafeInteger(session.published_segment)) rows.push(["Published segment",String(session.published_segment)]);
+  if(Number.isSafeInteger(session.next_media_sequence)) rows.push(["Next sequence",String(session.next_media_sequence)]);
+  if(Number.isSafeInteger(session.fetched_segment)) rows.push(["Fetched segment",String(session.fetched_segment)]);
+  if(Number.isSafeInteger(session.pending_fetched_segment)) rows.push(["Fetched timing pending",String(session.pending_fetched_segment)]);
+  if(Number.isSafeInteger(session.ahead_bytes)&&session.ahead_bytes>0) rows.push(["Ahead bytes",fmtBytes(session.ahead_bytes)]);
+  if(session.last_request) rows.push(["Last request",session.last_request]);
+  if(session.readrate) rows.push(["Pacing",`${Number(session.readrate).toFixed(2)}×`]);
+  return rows;
+}
+// The cell. `open` is the set of disclosure keys that were open before this
+// repaint, so a reader halfway through a sequence number is not snapped shut
+// by the next poll — the same courtesy the analysis table extends.
+function activityStreamCell(de,session,open){
+  const presentation=de.presentation==="vod"?"VOD HLS":de.presentation==="live-recovery"?"Live HLS":"";
+  const state=activityStreamState(session);
+  // `deliveries[]` names the method; the rung and the encoder ride on the
+  // session row beside it, so a stream with a session reads them from there.
+  const height=session&&session.target_height||de.target_height;
+  const encoder=session&&session.encoder||de.encoder;
+  const sub=[de.session_id&&height?`${height}p`:"",de.session_id&&encoder&&encoder!=="cached"?encoder:""]
+    .filter(Boolean).join(" · ");
+  const head=`<div class="stream-head">${presentation?`<span class="mode-chip ${de.presentation==="vod"?'vod':'live'}">${esc(presentation)}</span>`:""}${
+    state?`<span class="stream-state ${state.cls}">${esc(state.label)}${state.why?` <span class="why">· ${esc(state.why)}</span>`:""}</span>`:""}<span class="stream-method">${esc(activityMethodLabel(de.method,encoder))}${sub?` <span class="sub">· ${esc(sub)}</span>`:""}</span></div>`;
+  const meters=activityStreamMeters(de,session);
+  const strip=meters.length?`<div class="stream-meters">${meters.map(meter=>`<div class="stream-meter ${meter.tone||""}"><span class="k">${esc(meter.k)}</span><span class="v">${esc(meter.v)}${meter.of?`<span class="of">${esc(meter.of)}</span>`:""}</span>${
+    meter.bar!=null?`<span class="stream-bar" aria-hidden="true"><i style="width:${Math.round(meter.bar*100)}%"></i></span>`:""}</div>`).join("")}</div>`:"";
+  const details=activityStreamDetails(session);
+  const key=de.session_id?String(de.session_id):"";
+  const diag=details.length?`<details class="stream-diag" data-stream="${esc(key)}"${open&&open.has(key)?" open":""}><summary>Technical details</summary><div class="stream-diag-grid">${
+    details.map(([label,value])=>`<div><b>${esc(label)}</b><span>${esc(value)}</span></div>`).join("")}</div></details>`:"";
+  return head+strip+diag;
 }
 async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity"||document.visibilityState==="hidden"||ACTIVITY_DETAIL_BUSY===generation) return;
@@ -11489,19 +11652,23 @@ function paintActivityBody(d){
   const nodeNames=d.node_hostnames||{};
   const attributed=dels.some(de=>de.node_id);
   const sessionsById=Object.fromEntries((d.sessions||[]).map(se=>[se.id,se]));
+  // Disclosures the reader opened survive the repaint. `#main` is read here,
+  // before the new markup replaces it, and nothing else on this page is.
+  const m=document.getElementById("main"); if(!m) return;
+  const open=new Set([...m.querySelectorAll("details.stream-diag[open]")].map(el=>el.dataset.stream));
+  // And the disclosure a keyboard reader is standing on: `innerHTML=` below
+  // destroys the focused summary, so it is found again after the paint.
+  const focusedDiag=document.activeElement&&document.activeElement.closest
+    ?document.activeElement.closest("details.stream-diag"):null;
+  const focusKey=focusedDiag?focusedDiag.dataset.stream:null;
   const rows=dels.map(de=>{
     const se=de.session_id?sessionsById[de.session_id]:null;
-    const control=activitySessionControlText(se);
-    const flow=!se?'':se.suspended
-      ?` · ${se.control_demand?`${esc(se.control_demand)} · `:''}held (${esc(se.hold_reason||'limit')}) · ${se.suspend_count||1} suspend${(se.suspend_count||1)===1?'':'s'}`
-      :se.suspend_count?` · ${se.suspend_count} suspend${se.suspend_count===1?'':'s'} · running`:'';
-    const presentation=de.presentation==="vod"?"VOD HLS":de.presentation==="live-recovery"?"Live HLS":"";
     return `<tr>
       <td><b><a href="#/item/${de.item_id}">${esc(de.title)}</a></b></td>
       <td>${esc(de.user)}</td>
       ${attributed?`<td>${activityNodeCell(nodeNames,de.node_id)}</td>`:""}
-      <td>${presentation?`<span class="mode-chip ${de.presentation==="vod"?'vod':'live'}">${esc(presentation)}</span> `:""}${esc(de.method)}${de.session_id&&de.target_height?` · ${de.target_height}p`:''}${de.session_id&&de.encoder?` · ${esc(de.encoder)}`:''}${control?` · ${esc(control)}`:""}${flow}</td>
-      <td class="muted">${fmtAgo(de.started_unix)}${de.idle_seconds>30?` · idle ${Math.round(de.idle_seconds)}s`:''}</td>
+      <td class="stream-cell">${activityStreamCell(de,se,open)}</td>
+      <td class="muted">${fmtAgo(de.started_unix)}${de.idle_seconds>30?`<div>idle ${Math.round(de.idle_seconds)}s</div>`:''}</td>
       <td style="text-align:right">${(ME&&ME.is_admin&&de.session_id)?`<button class="ghost sm" onclick="stopSession(${esc(JSON.stringify(de.session_id))})">Stop</button>`:''}</td></tr>`;
   }).join("");
   const scans=d.scans.map(sc=>`<tr><td style="width:200px"><b>${esc(sc.library)}</b></td><td class="muted">${statusText(sc.status)}</td></tr>`).join("");
@@ -11539,13 +11706,12 @@ function paintActivityBody(d){
       <td>${progress}</td><td class="muted">${fmtAgo(ow.started_unix)}</td>
       <td style="text-align:right">${ME&&ME.is_admin?`<button class="ghost sm" onclick="stopOfflinePackage(${esc(JSON.stringify(ow.id))})">Stop</button>`:''}</td></tr>`;
   }).join("");
-  const m=document.getElementById("main"); if(!m) return;
   m.innerHTML=`
     <h2 class="section" style="margin-top:6px">Now playing</h2>
     ${missing.length?`<div class="clrefusal" role="status" aria-live="polite"><b>Activity is incomplete</b>
       ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Streams on those nodes may be missing from this page.</div>`:""}
     ${dels.length
-      ? `<table><thead><tr><th>Title</th><th>User</th>${attributed?"<th>Node</th>":""}<th>Stream</th><th>Started</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+      ? `<table class="np"><thead><tr><th>Title</th><th>User</th>${attributed?"<th>Node</th>":""}<th>Stream</th><th>Started</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="empty">Nothing streaming right now. Every delivery is listed here — direct play, remux and both HLS kinds.</div>`}
     ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}${analysisLiveProgress(d.analysis,nodeNames)}`:""}
     <h2 class="section">Pre-transcoding</h2>
@@ -11558,6 +11724,11 @@ function paintActivityBody(d){
     ${d.scans.length? `<table><tbody>${scans}</tbody></table>` : `<div class="empty">No libraries yet.</div>`}
     <h2 class="section">Trakt</h2>
     <div class="card">${trakt}</div>`;
+  if(focusKey!=null){
+    const again=[...m.querySelectorAll("details.stream-diag")].find(el=>el.dataset.stream===focusKey);
+    const summary=again&&again.querySelector("summary");
+    if(summary&&summary.focus) summary.focus();
+  }
 }
 async function stopSession(id){
   try{ await api(`/activity/sessions/${id}`,{method:"DELETE"}); toast("Stream stopped"); renderActivityBody(); }

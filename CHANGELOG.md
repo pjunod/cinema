@@ -58,6 +58,24 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- **Activity's Now playing row reads as a card, not a sentence.** The Stream
+  cell used to print every session fact it had as one " · "-joined run-on —
+  lease, demand, position in raw seconds, sequence numbers, produced-ahead,
+  target, then "held (time) · 6 suspends" somewhere near the end. It now
+  leads with a state pill (Active · Holding with its reason · Behind with the
+  deficit · Starting · Paused · Client stalled · Producer failed · Lease
+  expired), then a strip of named meters under the labels the player's own
+  info panel uses — Position as a clock, Server ahead, Demand window against
+  its target with a fill bar, Client runway, Suspends, Delivery rate with the
+  bytes so far — and puts the lease mechanics and every sequence number
+  behind a "Technical details" disclosure that stays open, and keeps its
+  keyboard focus, across the 4-second repaint. Direct plays and remuxes show
+  their headline and delivery rate and invent no state. The rung and encoder
+  now come from the session row, which is where the server actually puts
+  them; the old cell read them off the delivery, which carries neither.
+  `tests/web/activity-node-names.test.js` paints every state through the
+  shipped painter.
+
 - **Settings is reorganised: one route per section, a grouped rail, one Save
   per card.** Every section is addressable (`#/settings/playback`; the bare
   `#/settings` and the older `#/admin` land on the last section visited), so
