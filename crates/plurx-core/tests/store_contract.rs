@@ -56,12 +56,13 @@ use plurx_core::segplan::{
 use plurx_core::store::{
     analysis_backoff_ms, cluster_fragment_index_generation_key, cluster_fragment_index_key,
     AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery, ArtworkRepairFence,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation, DvConversionMode,
-    DvConversionState, DvRecoveryGuardState, LibraryStore, MediaStore, NewAnalysisRequest,
-    NewClusterFragmentIndexJob, OutboxEntry, PublicationStore, QueueDvConversionOutcome,
-    ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store, ANALYSIS_LIFECYCLE_METRICS,
-    ANALYSIS_METRIC_COMPONENTS, ANALYSIS_METRIC_PRIORITIES, ANALYSIS_METRIC_STATES,
-    ANALYSIS_METRIC_TRIGGERS, DV_CONVERSION_LEDGER_READ_MAX, DV_RECOVERY_GUARD_READ_MAX,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
+    DvConversionMode, DvConversionState, DvRecoveryGuardState, LibraryStore, MediaStore,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
+    QueueDvConversionOutcome, ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store,
+    ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS, ANALYSIS_METRIC_PRIORITIES,
+    ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS, DV_CONVERSION_LEDGER_READ_MAX,
+    DV_RECOVERY_GUARD_READ_MAX,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
@@ -14350,6 +14351,229 @@ async fn rendition_plan_contract_runs_through_dyn_store() {
         );
     })
     .await;
+}
+
+/// The lease a fragment-index worker holds must be renewable, yieldable, and
+/// re-claimable through `dyn Store` on every backend.
+///
+/// This scenario exists because `renew_cluster_fragment_index` and
+/// `yield_cluster_fragment_index` shipped for three days with their `WHERE`
+/// clause introducing `$6` before `$4`. `hiqlite::validate_sql` refuses that
+/// before any I/O, so on the replicated backend *every* heartbeat errored on
+/// its first tick and every build was abandoned without a write — while the
+/// embedded backend, which binds `?N` by number rather than by first
+/// appearance, stayed green. No test in the tree called either method through
+/// any backend, so nothing failed.
+///
+/// Testing the SQL text alone would not have caught it either: the defect is
+/// only visible when the statement the daemon actually sends reaches a real
+/// replicated store. Run this with `--features hiqlite-contract-tests` and
+/// revert the reorder to see the asymmetry — the hiqlite run fails on the
+/// renew assertion while the SQLite run stays green.
+#[tokio::test]
+async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "fragment-index-lease").await;
+        let source_sha256 = "a".repeat(64);
+        let pipeline_sha256 = "b".repeat(64);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("fragment index lease cache key");
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: "lease-node".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        assert!(
+            store
+                .enqueue_cluster_fragment_index(&job)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue job: {error}")),
+            "backend {backend}"
+        );
+
+        let claimed = store
+            .claim_cluster_fragment_index("lease-node", &[], 10, 1_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the queued job is claimable"));
+        assert_eq!(claimed.attempts, 1, "backend {backend}");
+        assert_eq!(claimed.state, "running", "backend {backend}");
+
+        // The renewal the heartbeat sends on its very first tick.
+        assert!(
+            store
+                .renew_cluster_fragment_index(
+                    &cache_key,
+                    &claimed.target_node_id,
+                    &claimed.owner_node_id,
+                    claimed.fence,
+                    20,
+                    2_020,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew the lease: {error}")),
+            "backend {backend}: the owner's renewal must move the lease"
+        );
+        let renewed = read_lease_job(&store, &cache_key, &job.target_node_id, backend).await;
+        assert_eq!(renewed.lease_expires_ms, 2_020, "backend {backend}");
+        assert_eq!(renewed.state, "running", "backend {backend}");
+        assert_eq!(renewed.attempts, 1, "backend {backend}");
+
+        // The reorder must not have loosened any predicate: a stale fence, a
+        // different owner, a different target and an expired lease each still
+        // refuse.
+        for (label, target, owner, fence, now) in [
+            (
+                "stale fence",
+                claimed.target_node_id.as_str(),
+                claimed.owner_node_id.as_str(),
+                claimed.fence - 1,
+                21,
+            ),
+            (
+                "other owner",
+                claimed.target_node_id.as_str(),
+                "other-node",
+                claimed.fence,
+                21,
+            ),
+            (
+                "other target",
+                "other-target",
+                claimed.owner_node_id.as_str(),
+                claimed.fence,
+                21,
+            ),
+            (
+                "expired lease",
+                claimed.target_node_id.as_str(),
+                claimed.owner_node_id.as_str(),
+                claimed.fence,
+                3_000,
+            ),
+        ] {
+            assert!(
+                !store
+                    .renew_cluster_fragment_index(
+                        &cache_key,
+                        target,
+                        owner,
+                        fence,
+                        now,
+                        now + 1_000
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: renew with {label}: {error}")),
+                "backend {backend}: renewing with {label} must not match a row"
+            );
+        }
+
+        // A node-local refusal returns the claim and refunds its attempt.
+        assert!(
+            store
+                .yield_cluster_fragment_index(
+                    &cache_key,
+                    &claimed.target_node_id,
+                    &claimed.owner_node_id,
+                    claimed.fence,
+                    30,
+                    40,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: yield the claim: {error}")),
+            "backend {backend}: the owner's yield must return the row"
+        );
+        let yielded = read_lease_job(&store, &cache_key, &job.target_node_id, backend).await;
+        assert_eq!(yielded.state, "queued", "backend {backend}");
+        assert_eq!(yielded.attempts, 0, "backend {backend}");
+        assert_eq!(yielded.owner_node_id, "", "backend {backend}");
+        assert_eq!(
+            yielded.last_error_code, "node_local_refusal",
+            "backend {backend}"
+        );
+        assert_eq!(yielded.not_before_ms, 40, "backend {backend}");
+
+        let reclaimed = store
+            .claim_cluster_fragment_index("lease-node", &[], 40, 1_040)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reclaim job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the yielded job is claimable again"));
+        assert!(
+            reclaimed.fence > claimed.fence,
+            "backend {backend}: a reclaim advances the fence"
+        );
+        assert!(
+            store
+                .renew_cluster_fragment_index(
+                    &cache_key,
+                    &reclaimed.target_node_id,
+                    &reclaimed.owner_node_id,
+                    reclaimed.fence,
+                    50,
+                    2_050,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew the second lease: {error}")),
+            "backend {backend}"
+        );
+
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            blob_sha256: "c".repeat(64),
+            bytes: 128,
+            built_by_node_id: "lease-node".to_owned(),
+            built_at_ms: 60,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key: cache_key.clone(),
+            node_id: "lease-node".to_owned(),
+            bytes: 128,
+            verified_at_ms: 60,
+            last_seen_at_ms: 60,
+        };
+        assert!(
+            store
+                .complete_cluster_fragment_index(&reclaimed, &artifact, &location, 60)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: complete the job: {error}")),
+            "backend {backend}: a renewed lease can still complete"
+        );
+        assert_eq!(
+            read_lease_job(&store, &cache_key, &job.target_node_id, backend)
+                .await
+                .state,
+            "ready",
+            "backend {backend}"
+        );
+    })
+    .await;
+}
+
+async fn read_lease_job(
+    store: &Arc<dyn Store>,
+    cache_key: &str,
+    target_node_id: &str,
+    backend: &'static str,
+) -> ClusterFragmentIndexJob {
+    store
+        .cluster_fragment_index_job(cache_key, target_node_id)
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: read job: {error}"))
+        .unwrap_or_else(|| panic!("{backend}: the job row exists"))
 }
 
 #[tokio::test]

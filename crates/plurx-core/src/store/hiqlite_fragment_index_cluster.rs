@@ -2878,9 +2878,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .execute(
                 "UPDATE cluster_fragment_index_jobs
                     SET lease_expires_ms = $1, updated_at_ms = $2
-                  WHERE cache_key = $3 AND target_node_id = $6
-                    AND state = 'running' AND owner_node_id = $4
-                    AND fence = $5 AND lease_expires_ms > $2 AND $1 > $2",
+                  WHERE cache_key = $3 AND owner_node_id = $4 AND fence = $5
+                    AND target_node_id = $6
+                    AND state = 'running' AND lease_expires_ms > $2 AND $1 > $2",
                 params!(
                     lease_expires_ms,
                     now_ms,
@@ -2909,9 +2909,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                         attempts = MAX(attempts - 1, 0), not_before_ms = $1,
                         last_error_code = 'node_local_refusal', updated_at_ms = $2
-                  WHERE cache_key = $3 AND target_node_id = $6
-                    AND state = 'running' AND owner_node_id = $4
-                    AND fence = $5 AND lease_expires_ms > $2",
+                  WHERE cache_key = $3 AND owner_node_id = $4 AND fence = $5
+                    AND target_node_id = $6
+                    AND state = 'running' AND lease_expires_ms > $2",
                 params!(
                     retry_at_ms,
                     now_ms,
