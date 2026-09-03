@@ -880,6 +880,64 @@ one platform. Whether multi-axis dominance is a property of HDR sources, of
 this ladder, or of quality changes generally needs more titles and the other
 two platforms.
 
+## M8 is not independent of M6, and three of its five cases are already proven
+
+**Scoped 2026-09-03** against the store contract suite, which was run rather
+than read: 23 media-session tests pass on **both** backends.
+
+M8's acceptance (remaining-roadmap §4) names five fault cases. Mapping them to
+what exists:
+
+| case | state | evidence |
+|---|---|---|
+| duplicate commit | **covered** | `media_session_commit_advances_the_exact_expected_pointer_once`, `media_session_commit_replay_survives_a_later_preparation` |
+| stale owner | **covered** | `media_session_commit_against_a_moved_pointer_aborts_the_successor`, `media_session_a_removed_owner_cannot_prepare`, `media_session_rejoin_cannot_retarget_an_occupied_preparation_after_pointer_advance` |
+| hard kill during a phase | **covered at the store** | `media_session_maintenance_reaps_an_abandoned_preparation`, and the three `hiqlite_media_session_rejoin_*` post-proposal cases — resurrect-an-aborted, survive-a-post-proposal-commit, classify-a-post-proposal-abort |
+| planned drain | **not built** | see below |
+| shared-store loss | **no coverage** | nothing in the contract suite exercises it |
+
+**Split-brain (§10.4) is already answered, by a stronger fence than the one the
+plan names.** The plan asks that only the owner holding the current replicated
+`owner_epoch` may issue a mutating action. `MediaSessionPreparation` carries no
+epoch at all — it is fenced on `expected_predecessor_incarnation_id`, so a
+second owner whose pointer has moved loses the compare-and-swap on identity
+rather than on a counter. The whole `media_session_rejoin_*` family is that
+race, and it passes on both backends. An epoch field would add nothing the
+predecessor CAS does not already enforce.
+
+### The drain that exists is attrition, not handoff
+
+`RestartDrainStatus` blocks new admissions, counts admissions in flight, and
+reports `drained` once `local_active_sessions` reaches zero
+(`serving_fence.rs`, surfaced by `media_drain_status`). That is drain by
+**waiting for viewers to stop**, which is the right primitive for a supervisor
+restart and is not what §10.2 asks for.
+
+§10.2 asks that "the draining node proposes a node-replacement action. The
+placer reserves the target; VOD attaches the same immutable recipe/store where
+possible; rolling primes a new generation at a future film boundary." Read that
+against M6: it is `PreparationExecutor` — stage, commit, abort against a
+predecessor CAS — with the successor placed on a **different node**.
+
+**So M8 §10.2 sits on top of M6 §3.4**, and the roadmap's numbering hides it.
+§3.4 is blocked on the axis case in
+[M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.3.3, so planned drain is
+blocked behind the same hardware run. Building a cross-node placer first would
+mean building the harder half of a mechanism whose local half does not exist.
+
+### What is genuinely available in M8 now
+
+- **§10.3 hard owner loss**, which needs no staging: resurrect the immutable
+  VOD handle or redirect to an equivalent successor (segment identity is
+  film-addressed); for rolling, refuse to splice an unrelated producer into an
+  EVENT URL and return a successor at an aligned boundary through the current
+  control exchange; with no control snapshot, fall back to persisted watch
+  position and fetched frontier and require a normal reopen.
+- **Shared-store loss**, which has no coverage at all and is a contract-suite
+  gap rather than a new mechanism.
+
+Neither depends on the axis case.
+
 ## M5.5 ran, and two thirds of it settled
 
 **Run 2026-09-01** on web and Android; **Apple produced nothing**. The full
