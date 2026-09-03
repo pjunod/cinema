@@ -38,6 +38,23 @@ create response said this session carries, and the profiles this browser
 declared. The server prints them, recomputes `caps_mismatch` rather than
 believing the client's copy, and keeps them in the stored event's `extra`.
 
+**M3 — the indexer remembers what it could not do.** A `Truncated` or
+`Unsupported` build was a log line: the cursor moved on, and the next wrap of
+the library spent the same whole-file read — up to thirty minutes of one
+node's disk — while `vodserve` answered `vod_index_pending` for a title that
+may never have an index. A node-local `fragment_index_outcomes` table now
+records the refusal, keyed and invalidated exactly like `fragment_indexes`, so
+a replaced file is eligible again with nothing having to notice. Truncated
+backs off (30 min doubling to a day) because the per-file budget is a
+wall-clock guess; unsupported is terminal because it is a property of the
+bytes. The cluster worker records the same row so a clustered node's badge and
+background pass know what it found, but its *queue* policy is left alone —
+that is `effort/fragment-index-queue-repair`'s, and it is rewriting the lease
+and attempt budget this call feeds. The admin badge gained `refused` and
+carries the builder's own reason. A review caught the backoff being inert on
+every clustered voter: the hiqlite store's injected clock answers in unix
+seconds and the deadline is compared against milliseconds.
+
 **Not verified on hardware.** Nothing here has been played from a browser
 against the fleet; the deployed-build re-test is a separate hand-off.
 

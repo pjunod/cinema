@@ -5499,8 +5499,26 @@ impl JobManager {
                         break;
                     }
                 }
+                // What the last attempt learned. Without this the pass spends
+                // the same whole-file read — up to thirty minutes of this
+                // node's disk — on every wrap of the library, for a file that
+                // already answered, while `vodserve` says `vod_index_pending`
+                // for a title that may never have an index at all.
+                //
+                // Checked per identity rather than per file: a Dolby Vision
+                // title holds up to three, and one refusing is not the others
+                // refusing. It costs a cheap keyed read per identity examined,
+                // which is what `ordered_index_paths`' own bound is for.
+                match self.store.fragment_index_outcome(file_id, &identity).await {
+                    Ok(Some(outcome)) if !outcome.is_due(clock_ms()) => continue,
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(file_id, error = %error, "reading a fragment index outcome");
+                        break;
+                    }
+                }
                 attempted += 1;
-                match crate::fragindex::build(
+                let refusal = match crate::fragindex::build(
                     &file,
                     video,
                     &runtime_cache,
@@ -5517,16 +5535,47 @@ impl JobManager {
                                 built_file_ids.push(file_id);
                             }
                         }
+                        continue;
                     }
-                    // These now make an HLS title unavailable, so keep the
-                    // reason in the ordinary operator log and move the cursor
-                    // forward.
+                    // These make an HLS title unavailable, so the reason stays
+                    // in the ordinary operator log — and is now also recorded,
+                    // so the next pass knows what this one found out.
                     crate::fragindex::IndexOutcome::Truncated { reason, rows } => {
                         tracing::warn!(file_id, rows, "fragment index incomplete: {reason}");
+                        (
+                            plurx_core::segplan::IndexRefusal::Truncated {
+                                rows: u32::try_from(rows).unwrap_or(u32::MAX),
+                            },
+                            reason,
+                        )
                     }
                     crate::fragindex::IndexOutcome::Unsupported(reason) => {
                         tracing::warn!(file_id, "file cannot be indexed: {reason}");
+                        (plurx_core::segplan::IndexRefusal::Unsupported, reason)
                     }
+                };
+                match self
+                    .store
+                    .record_fragment_index_outcome(file_id, &identity, refusal.0, &refusal.1)
+                    .await
+                {
+                    Ok(recorded) => tracing::info!(
+                        file_id,
+                        outcome = refusal.0.code(),
+                        attempts = recorded.attempts,
+                        retry_in_s = recorded
+                            .next_attempt_at_ms
+                            .saturating_sub(clock_ms())
+                            .max(0)
+                            / 1_000,
+                        terminal = !refusal.0.is_retryable(),
+                        "recorded why this pipeline has no fragment index"
+                    ),
+                    Err(error) => tracing::warn!(
+                        file_id,
+                        error = %error,
+                        "recording a fragment index outcome"
+                    ),
                 }
             }
         }
@@ -6390,6 +6439,34 @@ impl JobManager {
         refusals.insert(cache_key.to_owned(), retry_at_ms);
     }
 
+    /// Record a cluster worker's refusal in this node's own outcome table too.
+    ///
+    /// The queue row explains the *job*; this row explains the *file*, which
+    /// is what the admin badge and the background pass read. Without it a
+    /// clustered node's own indexer would happily spend the same whole-file
+    /// read the worker just spent, and the operator surface would still say
+    /// "pending" for a title the cluster already gave up on.
+    async fn record_local_index_refusal(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        video: plurx_core::transcode::CopyVideoOptions,
+        refusal: plurx_core::segplan::IndexRefusal,
+        reason: &str,
+    ) {
+        let identity = crate::fragindex::identity_for(file, video);
+        if let Err(error) = self
+            .store
+            .record_fragment_index_outcome(file.id, &identity, refusal, reason)
+            .await
+        {
+            tracing::warn!(
+                file_id = file.id,
+                error = %error,
+                "recording a cluster fragment index outcome locally"
+            );
+        }
+    }
+
     async fn run_cluster_fragment_index_job(
         self: Arc<Self>,
         transcode: Arc<TranscodeManager>,
@@ -6719,9 +6796,30 @@ impl JobManager {
         };
         let index = match outcome {
             crate::fragindex::IndexOutcome::Built(index) => index,
-            crate::fragindex::IndexOutcome::Truncated { reason, .. } => {
-                tracing::warn!(file_id = file.id, %reason, "cluster fragment index incomplete");
+            // The node-local row is recorded here too, so a clustered node's
+            // own operator surface and its background pass both know what this
+            // worker found out.
+            //
+            // The queue row's own policy is deliberately UNCHANGED. Making a
+            // truncated job retryable belongs with the attempt accounting, and
+            // that is `effort/fragment-index-queue-repair`'s to change — it
+            // holds the fleet evidence for why 1,933 jobs died at
+            // `attempt_limit`, and it is rewriting the lease and attempt
+            // budget this call feeds. Two efforts editing
+            // `fail_cluster_fragment_index` in the same week is how a policy
+            // ends up half-applied.
+            crate::fragindex::IndexOutcome::Truncated { reason, rows } => {
+                tracing::warn!(file_id = file.id, rows, %reason, "cluster fragment index incomplete");
                 let now = clock_ms();
+                self.record_local_index_refusal(
+                    &file,
+                    video,
+                    plurx_core::segplan::IndexRefusal::Truncated {
+                        rows: u32::try_from(rows).unwrap_or(u32::MAX),
+                    },
+                    &reason,
+                )
+                .await;
                 let _ = self
                     .store
                     .fail_cluster_fragment_index(
@@ -6741,6 +6839,13 @@ impl JobManager {
             crate::fragindex::IndexOutcome::Unsupported(reason) => {
                 tracing::warn!(file_id = file.id, %reason, "cluster fragment index unsupported");
                 let now = clock_ms();
+                self.record_local_index_refusal(
+                    &file,
+                    video,
+                    plurx_core::segplan::IndexRefusal::Unsupported,
+                    &reason,
+                )
+                .await;
                 let _ = self
                     .store
                     .fail_cluster_fragment_index(
@@ -8980,6 +9085,135 @@ mod tests {
             "a boot tick before library creation must stay due for the first scan"
         );
         assert!(!jobs.indexing.load(Ordering::Relaxed));
+    }
+
+    /// A file the indexer cannot index is asked once, not once per pass.
+    ///
+    /// Before this, `Truncated` and `Unsupported` were a `tracing::warn!` and
+    /// nothing else: the cursor moved on, the next wrap of the library found
+    /// the same file with no index, and spent the whole-file read again — up
+    /// to thirty minutes of one node's disk, forever, for a title `vodserve`
+    /// would go on answering `vod_index_pending` for. Nothing durable said the
+    /// question had already been asked.
+    ///
+    /// The fixture is a file whose probe row says HEVC over bytes that are not
+    /// video, which is the cheapest reachable `Unsupported`: `copyseg::supports`
+    /// lets it through on the codec, and the index pipe then produces no
+    /// fragments. Deleting the outcome check in the identity loop makes the
+    /// second pass record a second attempt, which is what this fails on.
+    #[tokio::test]
+    async fn a_file_that_cannot_be_indexed_is_asked_once_per_identity() {
+        use plurx_core::domain::{ItemKind, NewItem, ProbeResult};
+        use plurx_core::store::FragmentIndexStore as _;
+
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let transcode_dir = tempfile::tempdir().expect("transcode");
+        let media = tempfile::tempdir().expect("media");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Unindexable".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let path = media.path().join("unindexable.mkv");
+        std::fs::write(&path, b"not video, but the probe row says otherwise").expect("fixture");
+        let probe = ProbeResult {
+            duration_ms: Some(60_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            width: Some(1920),
+            height: Some(1080),
+            ..Default::default()
+        };
+        let file_id = store
+            .upsert_file(item, &path.to_string_lossy(), 43, 1, &probe)
+            .await
+            .expect("file");
+        let identity = {
+            let file = store.get_file(file_id).await.expect("read").expect("file");
+            let videos = fragment_index_video_identities(store.as_ref(), &file, false, false)
+                .await
+                .expect("identities");
+            crate::fragindex::identity_for(&file, videos[0])
+        };
+
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            transcode_dir.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+
+        Arc::clone(&jobs)
+            .build_fragment_indexes(Arc::clone(&transcode))
+            .await;
+        let first = store
+            .fragment_index_outcome(file_id, &identity)
+            .await
+            .expect("read the outcome")
+            .expect("the pass records why it could not index this file");
+        assert_eq!(first.attempts, 1);
+        assert!(
+            !first.refusal.is_retryable(),
+            "an unsupported source is terminal, not a wait: {first:?}"
+        );
+        assert!(!first.reason.is_empty(), "the builder's own words are kept");
+
+        // The pass that follows must not spend the read again.
+        Arc::clone(&jobs)
+            .build_fragment_indexes(Arc::clone(&transcode))
+            .await;
+        assert_eq!(
+            store
+                .fragment_index_outcome(file_id, &identity)
+                .await
+                .expect("reread the outcome")
+                .expect("the outcome survives the next pass")
+                .attempts,
+            1,
+            "the second pass re-attempted a file that had already answered"
+        );
+
+        // …until the file itself changes, at which point it is a new question
+        // and the old answer stops matching. Nothing has to notice: the
+        // identity simply differs.
+        store
+            .upsert_file(item, &path.to_string_lossy(), 44, 2, &probe)
+            .await
+            .expect("replace the file");
+        let replaced = {
+            let file = store.get_file(file_id).await.expect("read").expect("file");
+            let videos = fragment_index_video_identities(store.as_ref(), &file, false, false)
+                .await
+                .expect("identities");
+            crate::fragindex::identity_for(&file, videos[0])
+        };
+        assert_ne!(replaced, identity, "the fixture must change the identity");
+        assert_eq!(
+            store
+                .fragment_index_outcome(file_id, &replaced)
+                .await
+                .expect("read the replacement's outcome"),
+            None,
+            "a replaced file does not inherit its predecessor's refusal"
+        );
     }
 
     #[tokio::test]

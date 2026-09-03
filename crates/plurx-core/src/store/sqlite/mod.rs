@@ -945,6 +945,14 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX dv_recovery_guards_file
         ON dv_recovery_guards(file_id, guard_id);",
+    // v45: what the indexer learned when it could NOT build a fragment index.
+    // Node-local for `fragment_indexes`' reason, keyed the same way, and
+    // invalidated by the same mismatch — the two tables answer one question
+    // with opposite signs. Without it a truncated or unsupported build was a
+    // log line the next library wrap discarded, so the same whole-file read
+    // was spent every pass while `vodserve` answered `vod_index_pending`
+    // forever for a title that was never going to have an index.
+    crate::store::fragindex::FRAGMENT_INDEX_OUTCOMES_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
