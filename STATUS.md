@@ -1,8 +1,51 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-02 · Kept current by the working agent in the same
+**Updated:** 2026-09-03 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Nothing played on the web, and every fallback was terminal
+
+**[`agent/hls-startup-demand-deadlock`](https://github.com/pjunod/plurx/pull/840),
+merged to main as `9646f99f`, 2026-09-03.** Web playback failed on every title
+tried, in three separate browsers, while the TV played the same library —
+which is what proved it was the server rather than one browser profile.
+
+Every player reports demand `hold` before it has started, because its
+`<video>` has never received a byte and is therefore paused. Explicit flow
+control obeyed that hold, so a fresh session's producer was suspended at a
+target of zero one second after ffmpeg started. No playlist was ever written;
+the playlist request the same client was blocked on spent the whole
+`PLAYLIST_WAIT_BUDGET` and returned 503; the client reported
+`manifestLoadTimeOut` and the viewer was told the server couldn't build the
+stream. The client could not say `active` until it played and could not play
+until production ran.
+
+The blast radius was every *fallback*: a session that escalates from a refused
+remux to a transcode is a fresh session, so a delivery fault that the fallback
+exists to recover became a dead player instead. Observed on nuc4, file 70.
+
+A session below `EXPLICIT_STARTUP_FLOOR_SECS` of published media is *starting*,
+and starting suspends the demand hold and the time limiter both — exempting the
+hold alone leaves the same deadlock reported as `Time`, because
+`time_release_threshold` releases below the floor it would be guarding. The
+byte limits are never suspended. The grant is latched per session on
+publication, so a producer retry cannot renew it.
+
+Two adversarial reviews, five defects found in the fix itself and all fixed:
+a vacuous-and-failing new test, two existing tests silently borrowing the
+startup exemption, the disk caps not consulted at all inside the publish gate,
+the grant renewing on every retry, and the `Time` relabelling above. Full
+qualification green; 1601 unit tests.
+
+**Not fixed here, and still open:** the truncated first segment that caused
+the escalation — a DV Profile 7→8.1 remux the browser refused with
+`MEDIA_ERR_DECODE` after 12 KB of a 12.5 MB segment. Real, separate, and now
+costs a fallback rather than a failure. `vod_index_pending` and
+`vod_transcode_unavailable` both fell through to live-HLS recovery on this
+file. And the web client reporting `hold` from a player that has never
+started is honest to fix at the client too, though the server invariant has to
+hold for every client regardless.
 
 ## The picker says which machine again
 
