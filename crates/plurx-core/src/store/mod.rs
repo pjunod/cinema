@@ -2808,6 +2808,31 @@ pub trait FragmentIndexStore: Send + Sync + 'static {
     /// Drop one file's index. `true` when a row was there.
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError>;
 
+    /// Record that this identity could not be indexed, and answer when it may
+    /// be attempted again.
+    ///
+    /// The counterpart of [`FragmentIndexStore::put_fragment_index`], and the
+    /// reason it exists is that a refusal used to be a log line: the
+    /// background pass logged "fragment index incomplete", moved its cursor
+    /// on, and spent the same whole-file read again on the next wrap of the
+    /// library — while every session for that title answered
+    /// `vod_index_pending` with nothing anywhere saying why.
+    async fn record_fragment_index_outcome(
+        &self,
+        file_id: i64,
+        source: &crate::segplan::SourceIdentity,
+        refusal: crate::segplan::IndexRefusal,
+        reason: &str,
+    ) -> Result<crate::segplan::FragmentIndexOutcome, StoreError>;
+
+    /// The recorded refusal for this identity, if it still describes this
+    /// source. Invalidated by mismatch, exactly like the index itself.
+    async fn fragment_index_outcome(
+        &self,
+        file_id: i64,
+        identity: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::FragmentIndexOutcome>, StoreError>;
+
     /// File ids this node holds node-local VOD rows for — indexes, plans, or
     /// both. Bounded, and ordered so a sweep makes progress across ticks.
     ///

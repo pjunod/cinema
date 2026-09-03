@@ -21,6 +21,36 @@ use crate::state::AppState;
 const DEFAULT_LIMIT: i64 = 60;
 const MAX_LIMIT: i64 = 200;
 
+/// One sentence for why a file has no fragment index, and whether waiting will
+/// change it.
+///
+/// The newest recorded refusal wins, and a terminal one outranks a retryable
+/// one at the same instant: a file with one pipeline refused for good and
+/// another merely truncated is a file an operator has to act on, and the badge
+/// that says "pending" for it is the one that never resolves. `None` when the
+/// indexer has not tried yet, which is the honest reading of `pending`.
+fn index_refusal_summary(
+    outcomes: &[plurx_core::segplan::FragmentIndexOutcome],
+) -> Option<(bool, String)> {
+    use plurx_core::segplan::IndexRefusal;
+    let worst = outcomes.iter().max_by_key(|outcome| {
+        (
+            u8::from(!outcome.refusal.is_retryable()),
+            outcome.updated_at_ms,
+        )
+    })?;
+    let detail = match worst.refusal {
+        IndexRefusal::Unsupported => format!("cannot be indexed: {}", worst.reason),
+        IndexRefusal::Truncated { rows } => format!(
+            "incomplete after {rows} fragment{} on attempt {}: {}",
+            if rows == 1 { "" } else { "s" },
+            worst.attempts,
+            worst.reason
+        ),
+    };
+    Some((!worst.refusal.is_retryable(), detail))
+}
+
 /// Compare paths the way a listener reads numbered parts: Part 2 precedes
 /// Part 10 even though lexical ordering puts `10` first. Non-numeric runs are
 /// compared case-insensitively, with the original spelling as a stable tie.
@@ -349,6 +379,7 @@ pub async fn item_detail(
         let available = tokio::fs::metadata(&path).await.is_ok();
         let raw_probe = state.catalogue.get_file_probe_json(f.id).await?;
         let duration_ms = f.duration_ms.unwrap_or(0).max(0);
+        let mut vod_index_refusal = None;
         let vod_index_status = if f.video_codec.is_none() {
             None
         } else if !crate::copyseg::supports(f.video_codec.as_deref()) {
@@ -367,16 +398,40 @@ pub async fn item_detail(
                 state.system.dolby_vision_convert,
             );
             let mut present = 0_usize;
+            // Why the rest are missing, when the indexer has already found
+            // out. `pending` used to cover three states an operator acts on
+            // differently: never tried, tried and truncated at N rows, and
+            // tried and refused for good. The first is a wait; the last never
+            // ends, and nothing on this page said so.
+            //
+            // Asked per identity, in the loop that was already reading them,
+            // and through the same match rule the index itself uses — so a
+            // file the operator has since replaced stops answering with its
+            // predecessor's refusal. A per-file read would have kept showing
+            // "cannot be indexed" for a title that now plays, which is the
+            // false-permanent-state failure this whole milestone exists to
+            // remove, inverted.
+            let mut refusals = Vec::new();
             for video in &videos {
                 let identity = crate::fragindex::identity_for(&f, *video);
                 if state.store.fragment_index(f.id, &identity).await?.is_some() {
                     present += 1;
+                } else if let Some(outcome) =
+                    state.store.fragment_index_outcome(f.id, &identity).await?
+                {
+                    refusals.push(outcome);
                 }
             }
+            vod_index_refusal = index_refusal_summary(&refusals);
             Some(if present == videos.len() {
                 "indexed"
             } else if present > 0 {
                 "partial"
+            } else if vod_index_refusal
+                .as_ref()
+                .is_some_and(|(terminal, _)| *terminal)
+            {
+                "refused"
             } else {
                 "pending"
             })
@@ -384,6 +439,7 @@ pub async fn item_detail(
         let mut dto = FileDto::from_media_file(f, &playback_prefs);
         dto.available = available;
         dto.vod_index_status = vod_index_status;
+        dto.vod_index_refusal = vod_index_refusal.map(|(_, detail)| detail);
         dto.part_offset_ms = part_offset_ms;
         dto.chapters = chapters_from_probe_json(raw_probe.as_deref());
         if item.kind == ItemKind::Audiobook {
@@ -658,4 +714,66 @@ pub async fn search(
         })
         .collect();
     Ok(Json(SearchResponse { results }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_refusal_summary;
+    use plurx_core::segplan::{FragmentIndexOutcome, IndexRefusal, SourceIdentity};
+
+    fn outcome(refusal: IndexRefusal, reason: &str, at_ms: i64) -> FragmentIndexOutcome {
+        FragmentIndexOutcome {
+            source: SourceIdentity::new(4_096, 1_700_000_000_000, "pipeline"),
+            refusal,
+            reason: reason.to_owned(),
+            attempts: 2,
+            next_attempt_at_ms: at_ms + 1_800_000,
+            updated_at_ms: at_ms,
+        }
+    }
+
+    /// The badge has to separate three states an operator acts on differently,
+    /// and `pending` used to be all three at once: never tried, tried and
+    /// truncated, tried and refused for good. Only the last needs anyone to do
+    /// something, and it was the one that looked like a wait.
+    #[test]
+    fn the_index_badge_says_whether_waiting_will_help() {
+        assert_eq!(index_refusal_summary(&[]), None, "not tried is not refused");
+
+        let (terminal, detail) = index_refusal_summary(&[outcome(
+            IndexRefusal::Truncated { rows: 412 },
+            "budget expired",
+            10,
+        )])
+        .expect("a truncated attempt is worth reporting");
+        assert!(!terminal);
+        assert_eq!(
+            detail,
+            "incomplete after 412 fragments on attempt 2: budget expired"
+        );
+
+        // A terminal refusal outranks a retryable one even when it is older:
+        // a file with one pipeline that can never be indexed is a file
+        // somebody has to look at, and "pending" for it never resolves.
+        let (terminal, detail) = index_refusal_summary(&[
+            outcome(IndexRefusal::Truncated { rows: 1 }, "budget expired", 99),
+            outcome(
+                IndexRefusal::Unsupported,
+                "the moov lost its video track",
+                10,
+            ),
+        ])
+        .expect("a refusal is worth reporting");
+        assert!(terminal);
+        assert_eq!(detail, "cannot be indexed: the moov lost its video track");
+
+        // Singular reads as English, because this string is shown to a person.
+        let (_, one) = index_refusal_summary(&[outcome(
+            IndexRefusal::Truncated { rows: 1 },
+            "budget expired",
+            10,
+        )])
+        .expect("one row is still a finding");
+        assert!(one.contains("after 1 fragment on"), "{one}");
+    }
 }
