@@ -852,19 +852,60 @@ fn apply_plan_review(
 /// The conversion still follows the preservation, for the same reason
 /// [`review_client_plan`] ends by clamping it: a client that declined Dolby
 /// Vision must not be handed a converted stream by a flag nobody looked at.
+///
+/// **And the preservation is not trusted all the way either.** Everything
+/// above is about the conversion, which the echo cannot carry. This is about
+/// the one thing the echo *does* carry that must still not be taken at face
+/// value.
+///
+/// `preserve_dolby_vision: true` means "send me the Dolby Vision", and for
+/// every single-layer profile that is a claim the client is entitled to make.
+/// For a dual-layer source it is not a claim the client ever made: it echoed
+/// a `true` the *server* produced, and the server produced it expecting to
+/// convert. When the conversion then does not happen — an operator turned it
+/// off, or the row is label-only and
+/// [`plurx_core::playback::file_can_convert_to_p81`] refuses it for want of
+/// the columns to build a record from — trusting the echo delivers raw
+/// dual-layer to a build that enumerated nothing.
+///
+/// So the echo is clamped by the same rule
+/// `DeviceProfile::decodes_dolby_vision_as_copied` applies to a document that
+/// *did* enumerate: dual-layer needs either a conversion or an enumeration,
+/// and a build sending no readable capabilities has neither.
+///
+/// Not counted as a `plan_mismatch`. That counter measures a client claiming
+/// more than its own document supports, and there is no document here to
+/// exceed; the note carries the explanation instead.
 fn legacy_trusted_review(
     file: &MediaFile,
     node: &plurx_core::playback::RenderCaps,
     asked_preserve_dolby_vision: bool,
     asked_hdr10: bool,
 ) -> PlanReview {
+    let convert_dolby_vision = asked_preserve_dolby_vision
+        && node.dolby_vision_convert
+        && plurx_core::playback::file_can_convert_to_p81(file);
+    let dual_layer_stays_dual_layer =
+        !convert_dolby_vision && plurx_core::playback::dolby_vision_is_dual_layer(file);
+    let preserve_dolby_vision = asked_preserve_dolby_vision && !dual_layer_stays_dual_layer;
+    let mut notes = Vec::new();
+    if asked_preserve_dolby_vision && !preserve_dolby_vision {
+        // Says what was *decided*, not what will be delivered. Whether the
+        // base layer survives as HDR10, as HLG, or not at all is
+        // `dv_handling`'s answer a layer down, and a note that guessed it
+        // would be wrong for a Profile 7 over an SDR base.
+        notes.push(
+            "Dolby Vision declined: this build sent no capability document, and its \
+             dual-layer stream is not one this copy can convert or any client that did \
+             not name the profile can decode"
+                .to_owned(),
+        );
+    }
     PlanReview {
-        preserve_dolby_vision: asked_preserve_dolby_vision,
-        convert_dolby_vision: asked_preserve_dolby_vision
-            && node.dolby_vision_convert
-            && plurx_core::playback::file_can_convert_to_p81(file),
+        preserve_dolby_vision,
+        convert_dolby_vision,
         hdr10: asked_hdr10,
-        notes: Vec::new(),
+        notes,
         mismatched: false,
     }
 }
@@ -1074,12 +1115,27 @@ fn plan_review_for(
         // predates caps v2 and it must not pollute the number that says the
         // migration is finished.
         //
-        // It returns no review for the same reason: an unreadable document
-        // cannot be re-derived from, and the conversion the legacy arm derives
-        // below is derived for a build that enumerated *nothing*. A build that
-        // sent something this server could not parse may well have enumerated
-        // Profile 7, and handing it a converted stream on that guess is the
-        // one answer its own document might have refused.
+        // "The trust path" is `legacy_trusted_review`, not the absence of a
+        // review — and getting that wrong left this arm as the only create
+        // path that could still build the delivery this milestone exists to
+        // stop. `None` skips `apply_plan_review` entirely: the session keeps
+        // the `convert_dolby_vision: false` `into_request` built it with *and*
+        // the client's echoed `preserve_dolby_vision`, unclamped. For a
+        // dual-layer source that is raw Profile 7 on the wire, reachable from
+        // any client that posts a document this build cannot read beside
+        // `preserve_dolby_vision: true` — a v1 body, an empty one, or every
+        // client in the fleet at once on the day `DeviceCaps::VERSION` moves
+        // to 3.
+        //
+        // The earlier reasoning for `None` was that an unreadable document
+        // "may well have enumerated Profile 7", so deriving a conversion for
+        // it overrides an answer its own document might have given. That reads
+        // the risk backwards. A document that cannot be parsed enumerated
+        // nothing *this server can act on*, which is the same position a build
+        // sending no document at all is in; and the two outcomes are not
+        // symmetric. Guessing "convert" costs a client that really did declare
+        // 7 its enhancement layer, and it still plays. Guessing "preserve"
+        // hands dual-layer to everyone else, and that does not.
         Some(caps) => {
             plan_derivation::count_unusable_caps();
             tracing::warn!(
@@ -1089,7 +1145,12 @@ fn plan_review_for(
                 caps_empty = caps.is_empty(),
                 "create could not read the caps document; trusting the client's echo"
             );
-            None
+            Some(legacy_trusted_review(
+                file,
+                node,
+                asked_preserve_dolby_vision,
+                asked_hdr10,
+            ))
         }
         None => {
             plan_derivation::count_legacy_trusted();
@@ -14667,6 +14728,71 @@ mod tests {
         assert!(review.notes.is_empty(), "{:?}", review.notes);
     }
 
+    /// And when the conversion does *not* happen, the echo is not trusted
+    /// either.
+    ///
+    /// This is the half the test below does not reach. Deriving the conversion
+    /// fixed the case where it could be derived; it left the cases where it
+    /// comes back `false` delivering exactly what the original regression
+    /// delivered — raw dual-layer to a build that enumerated nothing. There
+    /// are two of them and both are ordinary: an operator who turned the
+    /// conversion off, and a row the M2 backfill has not reached, which has a
+    /// Profile 7 label and no columns to build a record from.
+    ///
+    /// `preserve_dolby_vision: true` from such a build is not a claim about
+    /// dual-layer. It is the server's own answer, echoed back — and the server
+    /// only answered `true` because it expected to convert.
+    #[test]
+    fn a_build_with_no_caps_document_is_never_handed_unconverted_dual_layer() {
+        let p7 = dolby_vision_p7_file();
+
+        let mut off = capable_node();
+        off.dolby_vision_convert = false;
+        let refused = legacy_trusted_review(&p7, &off, true, false);
+        assert!(!refused.convert_dolby_vision);
+        assert!(
+            !refused.preserve_dolby_vision,
+            "keeping Profile 7 for a build that enumerated nothing is the black \
+             screen this milestone exists to stop delivering"
+        );
+        assert!(
+            refused
+                .notes
+                .iter()
+                .any(|note| note.contains("Dolby Vision declined")),
+            "and the session says why: {:?}",
+            refused.notes
+        );
+        assert!(
+            !refused.mismatched,
+            "not a mismatch: there is no document here for the client to have \
+             exceeded, and the counter that measures that must stay meaningful"
+        );
+
+        // A row with a Profile 7 label and no columns is the same answer by a
+        // different route: it cannot convert, so it cannot preserve.
+        let mut label_only = p7.clone();
+        label_only.dolby_vision = Default::default();
+        let node = capable_node();
+        assert!(!legacy_trusted_review(&label_only, &node, true, false).preserve_dolby_vision);
+
+        // Everything else is unchanged. A converting create still preserves,
+        // because the conversion needs the RPUs to survive the filter…
+        let converting = legacy_trusted_review(&p7, &node, true, false);
+        assert!(converting.convert_dolby_vision && converting.preserve_dolby_vision);
+        assert!(converting.notes.is_empty(), "{:?}", converting.notes);
+
+        // …and a single-layer source is trusted exactly as it always was, on
+        // the same node that refused the dual-layer one.
+        let p8 = dolby_vision_p8_file();
+        let single_layer = legacy_trusted_review(&p8, &off, true, false);
+        assert!(
+            single_layer.preserve_dolby_vision,
+            "the rule is about dual-layer, not about Dolby Vision"
+        );
+        assert!(single_layer.notes.is_empty(), "{:?}", single_layer.notes);
+    }
+
     /// A build that sends no caps document still gets the conversion.
     ///
     /// The regression this exists for shipped and reached production: the
@@ -14798,24 +14924,30 @@ mod tests {
         assert!(rederived.convert_dolby_vision);
         assert!(!rederived.mismatched);
 
-        // A document this build cannot read is not a document. It gets no
-        // review — deliberately, because an unreadable body may have
-        // enumerated Profile 7 and the legacy derivation would override that
-        // with a guess.
+        // A document this build cannot read is not a document, and it lands on
+        // the same trust path a build sending none takes. Not `None`: that
+        // skips `apply_plan_review` altogether, which leaves the echoed
+        // `preserve_dolby_vision` unclamped beside a `convert_dolby_vision`
+        // nobody set — raw Profile 7, from any client that can post a `"v":1`
+        // body.
         let unusable = caps_v2(r#"{"v":1,"video":[],"audio":[],"containers":[]}"#);
+        let unreadable = plan_review_for(
+            Some(&unusable),
+            None,
+            &p7,
+            &node,
+            true,
+            false,
+            NOW_MS,
+            &review_log(),
+        )
+        .expect(
+            "an unreadable caps document falls through to the client's echo, which is a review",
+        );
         assert!(
-            plan_review_for(
-                Some(&unusable),
-                None,
-                &p7,
-                &node,
-                true,
-                false,
-                NOW_MS,
-                &review_log(),
-            )
-            .is_none(),
-            "an unreadable caps document falls through to the client's echo"
+            unreadable.convert_dolby_vision,
+            "and the echo it falls through to derives the conversion, exactly as \
+             the no-caps arm does"
         );
 
         // One create, one counter — asserted as a lower bound, because the
