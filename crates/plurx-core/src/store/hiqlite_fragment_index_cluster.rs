@@ -2017,10 +2017,17 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .client()
             .query_consistent_map::<RequestRow, _>(
                 format!(
+                    // `$1` before `$2`: hiqlite binds by rusqlite's numeric
+                    // index while SQLite indexes `$N` by first appearance, so
+                    // a statement whose placeholders first appear out of order
+                    // is refused by `validate_parameter_order` before any I/O.
+                    // That is the shape of the outage this whole effort exists
+                    // to repair; it is not going to be reintroduced by the
+                    // endpoint that repairs it.
                     "SELECT {REQUEST_COLS} FROM analysis_requests terminal
                       WHERE terminal.state IN ('failed', 'cancelled')
                         AND terminal.force_rebuild = 0
-                        AND ($2 IS NULL OR terminal.component = $2)
+                        AND ($1 IS NULL OR terminal.component = $1)
                         AND NOT EXISTS (
                           SELECT 1 FROM analysis_requests successor
                            WHERE successor.file_id = terminal.file_id
@@ -2029,9 +2036,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                              AND successor.component = terminal.component
                              AND successor.target_node_id = terminal.target_node_id
                              AND successor.state IN ('queued','running','submitted','ready'))
-                      ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT $1"
+                      ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT $2"
                 ),
-                params!(limit, component),
+                params!(component, limit),
             )
             .await?
             .into_iter()
@@ -3896,7 +3903,7 @@ mod tests {
             .expect("SQLite v41 analysis-component schema");
         sqlite
             .execute_batch(ANALYSIS_ATTEMPT_ERRORS_SCHEMA)
-            .expect("SQLite v45 attempt-history column");
+            .expect("SQLite v46 attempt-history column");
 
         let replicated = fixture();
         for sql in FRAGMENT_INDEX_SCHEMA_STATEMENTS

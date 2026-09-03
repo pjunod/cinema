@@ -517,7 +517,7 @@ BEGIN
 END;
 "#;
 
-/// SQLite v45 / replicated v26: the code each *charged* attempt ended with.
+/// SQLite v46 / replicated v26: the code each *charged* attempt ended with.
 ///
 /// A job row keeps one `last_error_code`, wiped on every claim and overwritten
 /// by the terminal `attempt_limit`, so the row that dies carries no trace of

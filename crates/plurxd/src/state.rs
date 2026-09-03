@@ -7130,11 +7130,20 @@ impl JobManager {
         self.record_job_outcome(retired, job, "fail", code, written)
     }
 
+    /// Hand an untargeted job back to the cluster.
+    ///
+    /// A yield writes no durable code — the row goes back to `queued` and
+    /// keeps whatever it had — so `code` here is only ever *reported*: it is
+    /// what the lost-write log says this yield was for. That still matters,
+    /// because "this node refused the source" and "the mount stopped
+    /// answering" are the two reasons a yield happens and they send an
+    /// operator to different places.
     async fn yield_fragment_index_job(
         &self,
         retired: &HeartbeatRetired,
         job: &plurx_core::store::ClusterFragmentIndexJob,
         node_id: &str,
+        code: &str,
         now_ms: i64,
         retry_at_ms: i64,
     ) -> bool {
@@ -7149,7 +7158,7 @@ impl JobManager {
                 retry_at_ms,
             )
             .await;
-        self.record_job_outcome(retired, job, "yield", "node_local_refusal", written)
+        self.record_job_outcome(retired, job, "yield", code, written)
     }
 
     /// Record a cluster worker's refusal in this node's own outcome table too.
@@ -7331,8 +7340,15 @@ impl JobManager {
                         now.saturating_add(LOCAL_REFUSAL_MS),
                     )
                     .await;
-                    self.yield_fragment_index_job(&retired, &job, &node_id, now, now)
-                        .await;
+                    self.yield_fragment_index_job(
+                        &retired,
+                        &job,
+                        &node_id,
+                        "node_local_refusal",
+                        now,
+                        now,
+                    )
+                    .await;
                 } else {
                     self.fail_fragment_index_job(
                         &retired,
@@ -7394,6 +7410,7 @@ impl JobManager {
                 &retired,
                 &job,
                 &node_id,
+                "node_local_refusal",
                 now,
                 now.saturating_add(retry_ms),
             )
@@ -7446,6 +7463,11 @@ impl JobManager {
                         &retired,
                         &job,
                         &node_id,
+                        // A yield writes no durable code, but the lost-write
+                        // log is the one place this distinction can still be
+                        // read, and it is the distinction the code above
+                        // exists to make.
+                        code,
                         now,
                         if timed_out {
                             now.saturating_add(retry_ms)
@@ -7511,66 +7533,97 @@ impl JobManager {
         // not do from the request side: the fence, the lease and the source
         // identity are all still checked by the store, and the artifact row
         // itself is never rewritten.
-        if let Ok(Some(published)) = self
+        //
+        // The hydrate itself runs with the heartbeat still beating, because a
+        // peer fetch takes seconds and the lease has to survive it. Retiring
+        // comes first only for the *write*, which is the invariant every other
+        // terminal path in this function keeps.
+        let hydrated = match self
             .store
             .cluster_fragment_index_artifact(&job.cache_key)
             .await
         {
-            let hydrated = crate::fragment_index_cluster::hydrate(
-                self.store.as_ref(),
-                self.membership.as_ref(),
-                &node_id,
-                &worker.cache_root,
-                &published,
+            Ok(Some(published)) => matches!(
+                crate::fragment_index_cluster::hydrate(
+                    self.store.as_ref(),
+                    self.membership.as_ref(),
+                    &node_id,
+                    &worker.cache_root,
+                    &published,
+                )
+                .await,
+                Ok(Some(_))
             )
-            .await;
-            if matches!(hydrated, Ok(Some(_))) {
-                let now = clock_ms();
-                let location = plurx_core::store::ClusterFragmentIndexLocation {
-                    cache_key: job.cache_key.clone(),
-                    node_id: node_id.clone(),
-                    bytes: published.bytes,
-                    verified_at_ms: now,
-                    last_seen_at_ms: now,
-                };
-                match self
-                    .store
-                    .complete_cluster_fragment_index_by_hydration(&job, &published, &location, now)
-                    .await
-                {
-                    Ok(true) => {
-                        let _ = self.store.settle_analysis_requests(now).await;
-                        tracing::info!(
-                            cache_key = %job.cache_key,
-                            built_by = %published.built_by_node_id,
-                            "settled a fragment-index job from an artifact another node built"
-                        );
-                        let _ = retire_heartbeat(stop, heartbeat).await;
-                        return true;
-                    }
-                    // The claim moved, or the source did. Either way this is
-                    // not a build worth starting, and the sweep will requeue.
-                    Ok(false) => {
-                        let retired = retire_heartbeat(stop, heartbeat).await;
-                        self.yield_fragment_index_job(
-                            &retired,
-                            &job,
-                            &node_id,
-                            now,
-                            now.saturating_add(retry_ms),
-                        )
-                        .await;
-                        return false;
-                    }
-                    Err(error) => {
-                        // The bytes on disk are not the published artifact.
-                        // Build rather than settle a lie.
-                        tracing::warn!(
-                            cache_key = %job.cache_key,
-                            %error,
-                            "hydrated fragment index did not settle; building instead"
-                        );
-                    }
+            .then_some(published),
+            _ => None,
+        };
+        if let Some(published) = hydrated {
+            let retired = retire_heartbeat(stop, heartbeat).await;
+            let now = clock_ms();
+            let location = plurx_core::store::ClusterFragmentIndexLocation {
+                cache_key: job.cache_key.clone(),
+                node_id: node_id.clone(),
+                bytes: published.bytes,
+                verified_at_ms: now,
+                last_seen_at_ms: now,
+            };
+            match self
+                .store
+                .complete_cluster_fragment_index_by_hydration(&job, &published, &location, now)
+                .await
+            {
+                Ok(true) => {
+                    let _ = self.store.settle_analysis_requests(now).await;
+                    tracing::info!(
+                        cache_key = %job.cache_key,
+                        built_by = %published.built_by_node_id,
+                        "settled a fragment-index job from an artifact another node built"
+                    );
+                    return true;
+                }
+                // The claim moved, or the source did. Not a build worth
+                // starting on a lease this node no longer holds.
+                Ok(false) => {
+                    self.yield_fragment_index_job(
+                        &retired,
+                        &job,
+                        &node_id,
+                        "lease_expired",
+                        now,
+                        now.saturating_add(retry_ms),
+                    )
+                    .await;
+                    return false;
+                }
+                Err(error) => {
+                    // The bytes on disk are not the artifact they claim to be.
+                    // Keeping them would fail every later hydration of this
+                    // key the same way, and keeping the location row would
+                    // send peers here for them, so drop both and hand the job
+                    // back. The next claim hydrates from a real holder or
+                    // builds.
+                    tracing::warn!(
+                        cache_key = %job.cache_key,
+                        %error,
+                        "hydrated fragment index did not match its artifact; discarding the local copy"
+                    );
+                    crate::fragment_index_cluster::discard_local_blob(
+                        self.store.as_ref(),
+                        &node_id,
+                        &worker.cache_root,
+                        &job.cache_key,
+                    )
+                    .await;
+                    self.yield_fragment_index_job(
+                        &retired,
+                        &job,
+                        &node_id,
+                        "queue_write_failed",
+                        now,
+                        now.saturating_add(retry_ms),
+                    )
+                    .await;
+                    return false;
                 }
             }
         }
@@ -7609,6 +7662,7 @@ impl JobManager {
                 &retired,
                 &job,
                 &node_id,
+                "foreground_preempted",
                 now,
                 now.saturating_add(retry_ms),
             )
@@ -7781,6 +7835,7 @@ impl JobManager {
                 &retired,
                 &job,
                 &node_id,
+                "foreground_preempted",
                 now,
                 now.saturating_add(retry_ms),
             )
@@ -7818,6 +7873,7 @@ impl JobManager {
                 &retired,
                 &job,
                 &node_id,
+                "foreground_preempted",
                 now,
                 now.saturating_add(retry_ms),
             )

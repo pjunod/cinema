@@ -1219,10 +1219,12 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let component = component.map(str::to_owned);
         self.with_read(move |conn| {
             let mut statement = conn.prepare(&format!(
+                // Numbered to match the replicated twin, which must bind
+                // `$1` before `$2` or `validate_parameter_order` refuses it.
                 "SELECT {REQUEST_COLS} FROM analysis_requests terminal
                   WHERE terminal.state IN ('failed', 'cancelled')
                     AND terminal.force_rebuild = 0
-                    AND (?2 IS NULL OR terminal.component = ?2)
+                    AND (?1 IS NULL OR terminal.component = ?1)
                     AND NOT EXISTS (
                       SELECT 1 FROM analysis_requests successor
                        WHERE successor.file_id = terminal.file_id
@@ -1231,9 +1233,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
                          AND successor.component = terminal.component
                          AND successor.target_node_id = terminal.target_node_id
                          AND successor.state IN ('queued','running','submitted','ready'))
-                  ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT ?1"
+                  ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT ?2"
             ))?;
-            let rows = statement.query_map(params![limit, component], request_from_row)?;
+            let rows = statement.query_map(params![component, limit], request_from_row)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
         .await

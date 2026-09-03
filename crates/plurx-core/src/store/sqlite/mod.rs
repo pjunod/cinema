@@ -1246,11 +1246,34 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Whether v45's attempt-history column is already installed.
+    /// Whether v46's attempt-history column is already installed.
     fn attempt_errors_column_exists(conn: &Connection) -> Result<bool, StoreError> {
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
               WHERE name = 'attempt_errors'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count == 1)
+    }
+
+    /// Whether v45's negative fragment index is already installed.
+    ///
+    /// A replay guard is normally about a crash between a migration's commit
+    /// and its `user_version` bump. This one is also about a renumbering: the
+    /// attempt-history column shipped as v45 on an effort branch and became
+    /// v46 when the negative index reached `main` first. A database written
+    /// by one of those pre-merge builds sits at v45 with the *column* and
+    /// without the *table*, so a guard keyed only on `current` would skip
+    /// straight to v46 and leave `fragment_index_outcomes` missing forever —
+    /// and every outcome read then errors, which the background pass treats
+    /// as a reason to stop building fragment indexes at all. Guarding on the
+    /// object rather than on the counter is what makes the version number a
+    /// hint instead of a promise.
+    fn fragment_index_outcomes_table_exists(conn: &Connection) -> Result<bool, StoreError> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+              WHERE type = 'table' AND name = 'fragment_index_outcomes'",
             [],
             |row| row.get(0),
         )?;
@@ -1266,6 +1289,17 @@ impl SqliteStore {
                  refusing to open a database from a newer plurx"
             )));
         }
+        // A database written by a pre-merge effort build sits at v45 with the
+        // attempt-history column and without the negative fragment index,
+        // because those two migrations swapped numbers when they met. Rewind
+        // the counter to just below v45 so the loop offers that migration
+        // again; its own guard below makes the replay a no-op wherever the
+        // table is genuinely there.
+        let current = if current == 45 && !Self::fragment_index_outcomes_table_exists(conn)? {
+            44
+        } else {
+            current
+        };
         for (index, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
             let version = index as i64 + 1;
             // Foreign keys are off for the duration of a migration. A table
@@ -1281,6 +1315,7 @@ impl SqliteStore {
             // so the replay would fail on a column that is already there —
             // permanently. v41 has carried this guard since it landed.
             let applied = if (version == 41 && Self::analysis_component_schema_is_current(conn)?)
+                || (version == 45 && Self::fragment_index_outcomes_table_exists(conn)?)
                 || (version == 46 && Self::attempt_errors_column_exists(conn)?)
             {
                 Ok(())
