@@ -1329,16 +1329,16 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 replacement,
                 vec![(
                     "UPDATE dv_conversions
-                        SET state = 'running', bytes_before = $2, bytes_after = NULL,
+                        SET state = 'running', bytes_before = $1, bytes_after = NULL,
                             error = NULL, finished_at_ms = NULL
-                      WHERE file_id = $1 AND state IN ('queued', 'running')
+                      WHERE file_id = $2 AND state IN ('queued', 'running')
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = $3 AND owner_node_id = $4
                             AND fence = $5 AND revision = $6 AND expires_at_ms = $7)"
                         .to_owned(),
                     params!(
-                        file_id,
                         bytes_before,
+                        file_id,
                         lease.resource.as_str(),
                         lease.owner_node_id.as_str(),
                         lease_i64("fence", lease.fence)?,
@@ -1370,16 +1370,16 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 replacement,
                 vec![(
                     "UPDATE dv_conversions
-                        SET state = 'verified', el_type = $2, bytes_after = $3, error = NULL
-                      WHERE file_id = $1 AND state = 'running'
+                        SET state = 'verified', el_type = $1, bytes_after = $2, error = NULL
+                      WHERE file_id = $3 AND state = 'running'
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = $4 AND owner_node_id = $5
                             AND fence = $6 AND revision = $7 AND expires_at_ms = $8)"
                         .to_owned(),
                     params!(
-                        file_id,
                         el_type,
                         bytes_after,
+                        file_id,
                         lease.resource.as_str(),
                         lease.owner_node_id.as_str(),
                         lease_i64("fence", lease.fence)?,
@@ -1512,19 +1512,19 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 replacement,
                 vec![(
                     "UPDATE dv_conversions
-                        SET state = 'committed', original_path = $2, bytes_after = $3,
-                            error = NULL, finished_at_ms = $4
-                      WHERE file_id = $1 AND state = 'verified'
+                        SET state = 'committed', original_path = $1, bytes_after = $2,
+                            error = NULL, finished_at_ms = $3
+                      WHERE file_id = $4 AND state = 'verified'
                         AND recovery_guard_id IS NULL
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = $5 AND owner_node_id = $6
                             AND fence = $7 AND revision = $8 AND expires_at_ms = $9)"
                         .to_owned(),
                     params!(
-                        file_id,
                         original_path,
                         bytes_after,
                         finished_at_ms,
+                        file_id,
                         lease.resource.as_str(),
                         lease.owner_node_id.as_str(),
                         lease_i64("fence", lease.fence)?,
@@ -1764,17 +1764,17 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 replacement,
                 vec![(
                     "UPDATE dv_conversions
-                        SET state = 'failed', error = $2, finished_at_ms = $3,
+                        SET state = 'failed', error = $1, finished_at_ms = $2,
                             recovery_guard_id = NULL
-                      WHERE file_id = $1 AND state != 'committed'
+                      WHERE file_id = $3 AND state != 'committed'
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = $4 AND owner_node_id = $5
                             AND fence = $6 AND revision = $7 AND expires_at_ms = $8)"
                         .to_owned(),
                     params!(
-                        file_id,
                         error,
                         finished_at_ms,
+                        file_id,
                         lease.resource.as_str(),
                         lease.owner_node_id.as_str(),
                         lease_i64("fence", lease.fence)?,

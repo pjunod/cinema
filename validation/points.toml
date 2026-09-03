@@ -327,6 +327,7 @@ paths = [
   "crates/plurx-core/src/store/mod.rs",
   "crates/plurx-core/src/store/dv_conversion.rs",
   "crates/plurx-core/src/store/hiqlite_dv_conversion.rs",
+  "crates/plurx-core/src/store/placeholder_census.rs",
   "crates/plurx-core/src/store/replicated.rs",
   "crates/plurx-core/src/store/sqlite/dv_conversion.rs",
   "crates/plurx-core/src/store/sqlite/{cache,pretranscode}.rs",

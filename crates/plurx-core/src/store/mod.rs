@@ -54,6 +54,12 @@ mod hiqlite_shared_cache;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_timeline_annotations;
 
+/// The placeholder-order census over every replicated slice above. It is a
+/// test module rather than a lint because the rule it enforces is the one
+/// `hiqlite::validate_sql` applies at runtime, and the two must not drift.
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod placeholder_census;
+
 pub mod replicated;
 
 pub use dv_conversion::{

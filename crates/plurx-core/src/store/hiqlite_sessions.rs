@@ -3624,84 +3624,11 @@ mod tests {
         }
     }
 
-    /// Every `$N` placeholder in a replicated statement must be introduced in
-    /// numeric order.
-    ///
-    /// SQLite resolves `$N` as a *named* parameter and assigns its index by
-    /// first appearance, not by the number after the sigil, while `params!`
-    /// binds positionally. A statement that introduces `$7` before `$3`
-    /// therefore compiles, runs, affects rows, and writes every value into
-    /// the wrong column — silently. This is a whole-file scan rather than a
-    /// per-statement one because the failure mode is invisible at the call
-    /// site and cost this module four statements at once.
-    #[test]
-    fn every_replicated_placeholder_is_introduced_in_order() {
-        let production_source = SOURCE
-            .split_once("\n#[cfg(test)]")
-            .map_or(SOURCE, |(source, _)| source);
-        let mut statement = String::new();
-        let mut in_statement = false;
-        let mut offenders = Vec::new();
-        for (number, line) in production_source.lines().enumerate() {
-            let quotes = line.matches('"').count();
-            if !in_statement && quotes == 1 {
-                in_statement = true;
-                statement.clear();
-                statement.push_str(line);
-                statement.push(' ');
-                continue;
-            }
-            if in_statement {
-                statement.push_str(line);
-                statement.push(' ');
-                if quotes >= 1 {
-                    in_statement = false;
-                    if let Some(first) = first_out_of_order(&statement) {
-                        offenders.push(format!("line {}: introduces {first} early", number + 1));
-                    }
-                }
-                continue;
-            }
-            if quotes >= 2 {
-                if let Some(first) = first_out_of_order(line) {
-                    offenders.push(format!("line {}: introduces {first} early", number + 1));
-                }
-            }
-        }
-        assert!(
-            offenders.is_empty(),
-            "replicated statements bind by first appearance: {offenders:?}"
-        );
-    }
-
-    fn first_out_of_order(text: &str) -> Option<String> {
-        let mut seen: Vec<u32> = Vec::new();
-        let bytes = text.as_bytes();
-        let mut index = 0;
-        while index < bytes.len() {
-            if bytes[index] != b'$' {
-                index += 1;
-                continue;
-            }
-            let mut end = index + 1;
-            while end < bytes.len() && bytes[end].is_ascii_digit() {
-                end += 1;
-            }
-            if end == index + 1 {
-                index += 1;
-                continue;
-            }
-            let ordinal: u32 = text[index + 1..end].parse().unwrap_or(0);
-            if !seen.contains(&ordinal) {
-                if ordinal as usize != seen.len() + 1 {
-                    return Some(format!("${ordinal}"));
-                }
-                seen.push(ordinal);
-            }
-            index = end;
-        }
-        None
-    }
+    // The placeholder-order census this module used to carry alone now runs
+    // over every replicated slice: `store::placeholder_census`. Scoping it to
+    // one file is what let the same mistake land in
+    // `hiqlite_fragment_index_cluster.rs` and `hiqlite_publication.rs` six
+    // weeks later.
 
     /// Ending a session must act on the owner the row has at commit time, not
     /// on the snapshot the pre-transaction read returned.
