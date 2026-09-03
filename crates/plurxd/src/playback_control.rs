@@ -43,6 +43,20 @@ const MAX_ACTION_NAME_LEN: usize = 32;
 const HOLD_ACTION: &str = "hold";
 const TERMINAL_ACTION: &str = "terminal";
 const RETRY_RESOURCE_ACTION: &str = "retry_resource";
+/// The name a client declares to be offered a staged successor.
+///
+/// Named for the transaction rather than for the moment — roadmap §3.1 calls
+/// the three fenced actions `prepare_replacement`, `commit_replacement` and
+/// `abort_replacement`, and this is the first of them. A client that has not
+/// declared it is never sent one, which is what makes shipping the server half
+/// ahead of the client half safe.
+const PREPARE_REPLACEMENT_ACTION: &str = "prepare_replacement";
+/// A session id is a UUID here, and a bound is what keeps a relayed action
+/// from carrying an arbitrary string into a client's URL.
+const MAX_SESSION_ID_LEN: usize = 64;
+/// An `action_id` is minted by this server as a UUID; the bound exists for the
+/// relayed case, where it arrives from a peer.
+const MAX_ACTION_ID_LEN: usize = 64;
 /// The longest explanation a terminal action carries, matching the error
 /// body's bound: it is operator-facing text on a client-visible path.
 const MAX_TERMINAL_MESSAGE_BYTES: usize = 512;
@@ -635,6 +649,34 @@ impl ControlResponseV1 {
                         && !reason.is_permanent()
                         && *after_ms > 0
                         && *after_ms <= 60_000
+                }
+                // A relayed preparation is the one action that hands the
+                // client a **URL**, so the check that matters is not whether
+                // the peer is telling the truth about production — it is that
+                // the peer cannot steer a viewer's second player anywhere it
+                // likes. The playlist must address the session the same action
+                // names, which turns "here is your successor" into a statement
+                // about one session rather than an open redirect.
+                //
+                // The staging itself is durable and this node cannot verify it
+                // without a store read it has no budget for; that is fine,
+                // because an unstaged successor costs the client a failed
+                // prime and nothing else, while an arbitrary URL costs it the
+                // playback.
+                ControlAction::Prepare {
+                    action_id,
+                    session_id,
+                    playlist_url,
+                    media_origin_ms,
+                    ..
+                } => {
+                    !action_id.is_empty()
+                        && action_id.len() <= MAX_ACTION_ID_LEN
+                        && !session_id.is_empty()
+                        && session_id.len() <= MAX_SESSION_ID_LEN
+                        && playlist_url.starts_with('/')
+                        && playlist_url.contains(session_id.as_str())
+                        && *media_origin_ms >= 0
                 }
             }
     }
@@ -1461,6 +1503,39 @@ pub(crate) enum ControlAction {
         after_ms: u32,
         reason: ProducerDecisionReason,
     },
+    /// A successor is staged and priming; hold a second pipeline on it.
+    ///
+    /// **The first action that is a transaction rather than a report.** Hold,
+    /// terminal and retry describe what production is already doing, so a
+    /// replay recomputes them from current delivery — a hold that has since
+    /// lifted must not be replayed as though it were still in force. This one
+    /// describes something the server *did*: a durable row exists, the actor's
+    /// slot is taken, and a second pipeline is being primed against a real
+    /// session. Recomputing that on a replay would either stage it twice or
+    /// silently drop the one already staged, so it is recorded on
+    /// `ControlState::prior_action` and replayed exactly.
+    ///
+    /// `action_id` is what the client echoes in `prior_action`, so the
+    /// acknowledgement that eventually commits this preparation names *this*
+    /// staging rather than whichever one is current when it arrives.
+    ///
+    /// The successor is addressed the same way its own create response would
+    /// address it — session, playlist and origin — because a client priming a
+    /// second player needs exactly what it needs to open the first, and an
+    /// abbreviated form would be a second vocabulary for one fact.
+    Prepare {
+        action_id: String,
+        session_id: String,
+        playlist_url: String,
+        /// Exact source position the successor's session-relative zero maps
+        /// to. Without it a client cannot align the second timeline with the
+        /// first, and the commit boundary is expressed in film time.
+        media_origin_ms: i64,
+        /// What the successor will deliver. The client asked for a selection;
+        /// this is the server's answer, and a client that no longer wants it
+        /// can decline by simply not acknowledging.
+        effective_selection: EffectiveSelection,
+    },
 }
 
 impl ControlAction {
@@ -1476,6 +1551,7 @@ impl ControlAction {
             Self::Hold { .. } => Some(HOLD_ACTION),
             Self::Terminal { .. } => Some(TERMINAL_ACTION),
             Self::RetryResource { .. } => Some(RETRY_RESOURCE_ACTION),
+            Self::Prepare { .. } => Some(PREPARE_REPLACEMENT_ACTION),
         }
     }
 }
@@ -1517,6 +1593,7 @@ pub(crate) enum ActionKind {
     Hold = 1,
     Terminal = 2,
     RetryResource = 3,
+    Prepare = 4,
 }
 
 /// What this response's action says about the exchange, for metrics only.
@@ -1540,6 +1617,12 @@ pub(crate) fn action_metrics(
         },
         ControlAction::RetryResource { .. } => ActionMetrics {
             action: ActionKind::RetryResource,
+            hold_reason: None,
+            suppressed: false,
+            recovery_withheld: false,
+        },
+        ControlAction::Prepare { .. } => ActionMetrics {
+            action: ActionKind::Prepare,
             hold_reason: None,
             suppressed: false,
             recovery_withheld: false,
@@ -10282,7 +10365,7 @@ static CONTROL_RELAY_DURATION_MICROS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_LEASE_RENEWALS: [AtomicU64; 3] =
     [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 /// Resolved actions by kind and client platform.
-static CONTROL_ACTIONS: [[AtomicU64; 3]; 4] = [const { [const { AtomicU64::new(0) }; 3] }; 4];
+static CONTROL_ACTIONS: [[AtomicU64; 3]; 5] = [const { [const { AtomicU64::new(0) }; 3] }; 5];
 /// Holds actually sent, by reason.
 static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// What M6 *would* do about a selection change, by platform, axis and outcome.
@@ -10591,7 +10674,7 @@ pub(crate) fn prometheus() -> String {
         "# HELP plurx_playback_control_actions_total Resolved playback-control actions by kind and client platform.\n\
          # TYPE plurx_playback_control_actions_total counter\n",
     );
-    for (action_index, action) in ["none", "hold", "terminal", "retry_resource"]
+    for (action_index, action) in ["none", "hold", "terminal", "retry_resource", "prepare"]
         .iter()
         .enumerate()
     {
@@ -11936,6 +12019,239 @@ mod tests {
             serde_json::to_value(ControlAction::None).expect("action json"),
             serde_json::json!({"type": "none"}),
         );
+    }
+
+    /// The preparation action names itself, and is not passive.
+    ///
+    /// It is the first action that is a *transaction* — a durable row exists
+    /// and the actor's slot is taken — so `resolve_action` must let it through
+    /// unchanged rather than recomputing it from delivery the way it does the
+    /// advisory hold. `is_passive` is what decides that, and a `Prepare` that
+    /// answered `true` would be silently replaced by whatever production
+    /// happened to be doing.
+    #[test]
+    fn the_preparation_action_is_a_transaction_not_a_report() {
+        let prepare = prepare_action();
+        assert_eq!(
+            prepare.vocabulary_name(),
+            Some("prepare_replacement"),
+            "roadmap §3.1 names the three fenced actions; this is the first",
+        );
+        assert!(!prepare.is_passive());
+
+        let delivery = delivery_view();
+        let mut asking = request();
+        asking.supported_actions = Some(vec![
+            HOLD_ACTION.to_owned(),
+            PREPARE_REPLACEMENT_ACTION.to_owned(),
+        ]);
+        assert_eq!(
+            resolve_action(&prepare, &delivery, &asking),
+            prepare,
+            "a decided preparation is returned exactly, not recomputed",
+        );
+        assert_eq!(
+            action_metrics(&prepare, &delivery, &asking).action,
+            ActionKind::Prepare,
+            "and it occupies its own metric slot rather than another's",
+        );
+    }
+
+    /// A relayed preparation is the one action that hands a client a URL, and
+    /// a peer must not be able to point it anywhere.
+    ///
+    /// The other believability checks ask whether the peer is telling the
+    /// truth about production. This one asks something sharper: an arbitrary
+    /// `playlist_url` is an open redirect into a viewer's second player, so
+    /// the URL must address the session the same action names. An unstaged
+    /// successor costs a failed prime; an arbitrary URL costs the playback.
+    #[test]
+    fn a_relayed_preparation_cannot_point_a_client_anywhere() {
+        let session = uuid::Uuid::new_v4().to_string();
+        let honest = ControlAction::Prepare {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            session_id: session.clone(),
+            playlist_url: format!("/api/v1/hls/{session}/master.m3u8"),
+            media_origin_ms: 0,
+            effective_selection: prepared_selection(),
+        };
+        assert!(believable(&honest), "a successor addressed by its own id");
+
+        // Each rejection is spelled out in full rather than by struct update,
+        // so the field under test is visible at the assertion.
+        let ControlAction::Prepare {
+            action_id,
+            session_id,
+            media_origin_ms,
+            effective_selection,
+            ..
+        } = honest.clone()
+        else {
+            unreachable!("constructed as Prepare")
+        };
+        for (case, action) in [
+            (
+                "a playlist that names a different session",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: session_id.clone(),
+                    playlist_url: "/api/v1/hls/somewhere-else/master.m3u8".to_owned(),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
+                "an absolute URL onto another host",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: session_id.clone(),
+                    playlist_url: format!("https://example.invalid/{session_id}/master.m3u8"),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
+                "no session at all",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: String::new(),
+                    playlist_url: "/api/v1/hls//master.m3u8".to_owned(),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
+                "no action id to fence the acknowledgement with",
+                ControlAction::Prepare {
+                    action_id: String::new(),
+                    session_id: session_id.clone(),
+                    playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
+                "an origin before the start of the film",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: session_id.clone(),
+                    playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
+                    media_origin_ms: -1,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+        ] {
+            assert!(!believable(&action), "{case}");
+        }
+    }
+
+    /// A client that never declared the vocabulary is never handed one.
+    ///
+    /// This is what makes shipping the server half ahead of the client half
+    /// safe: an older client sees the action it has always seen.
+    #[test]
+    fn a_relayed_preparation_needs_the_declared_vocabulary() {
+        let session = uuid::Uuid::new_v4().to_string();
+        let action = ControlAction::Prepare {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            session_id: session.clone(),
+            playlist_url: format!("/api/v1/hls/{session}/master.m3u8"),
+            media_origin_ms: 0,
+            effective_selection: prepared_selection(),
+        };
+        assert!(believable(&action));
+        assert!(
+            !believable_to(&action, &[HOLD_ACTION]),
+            "a client that declared only hold",
+        );
+        assert!(
+            !believable_to(&action, &[]),
+            "and one that declared nothing"
+        );
+    }
+
+    fn prepare_action() -> ControlAction {
+        let session = uuid::Uuid::new_v4().to_string();
+        ControlAction::Prepare {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            session_id: session.clone(),
+            playlist_url: format!("/api/v1/hls/{session}/master.m3u8"),
+            media_origin_ms: 6_000,
+            effective_selection: prepared_selection(),
+        }
+    }
+
+    fn believable(action: &ControlAction) -> bool {
+        believable_to(action, &[HOLD_ACTION, PREPARE_REPLACEMENT_ACTION])
+    }
+
+    /// Whether a peer's response carrying `action` would be forwarded to a
+    /// client that declared `declared`.
+    fn believable_to(action: &ControlAction, declared: &[&str]) -> bool {
+        let mut control = request();
+        control.supported_actions = Some(declared.iter().map(|name| (*name).to_owned()).collect());
+        let response = ControlResponseV1 {
+            protocol: PROTOCOL_V1.to_owned(),
+            generation: control.generation.clone(),
+            control_epoch: 1,
+            accepted_sequence: 1,
+            server_time_unix_ms: 1,
+            lease: PlaybackLeaseView {
+                state: "active".to_owned(),
+                renew_after_ms: NEXT_EXCHANGE_MS,
+                expires_at_unix_ms: 1,
+            },
+            delivery: delivery_view(),
+            effective_selection: prepared_selection(),
+            action: action.clone(),
+        };
+        let relay = ControlRelayRequest {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            generation: control.generation.clone(),
+            expected_owner_node_id: "n-test".to_owned(),
+            expected_owner_epoch: 1,
+            deadline_unix_ms: 1,
+            control,
+        };
+        response.action_is_believable(&relay)
+    }
+
+    fn delivery_view() -> DeliveryView {
+        DeliveryView {
+            presentation: "vod".to_owned(),
+            producer_state: "vod".to_owned(),
+            produced_through_ms: None,
+            fetched_through_ms: 0,
+            delivered_bps: None,
+            delivered_idle_ms: None,
+            recent_producer_speed: None,
+            client_runway_ms: 0,
+            admitted: None,
+            producer_decision: None,
+            hold_reason: None,
+            subtitle_readiness: None,
+            owner_node_hash: "n-test".to_owned(),
+            owner_epoch: 1,
+        }
+    }
+
+    fn prepared_selection() -> EffectiveSelection {
+        EffectiveSelection {
+            quality_auto: false,
+            height: 1080,
+            audio_track: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            codec: "server_selected".to_owned(),
+            dynamic_range: Some("sdr".to_owned()),
+        }
+    }
+
+    #[test]
+    fn the_preparation_metric_publishes_its_own_action_slot() {
+        assert!(prometheus().contains(
+            "plurx_playback_control_actions_total{action=\"prepare\",platform=\"apple\"}"
+        ));
     }
 
     #[test]
