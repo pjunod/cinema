@@ -371,6 +371,170 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
   assert.equal("overrides" in requests[0].options.body, false);
 });
 
+test("a stream rejection reports what the server handed over, not just that it failed", () => {
+  const build = (PLAYER, PLAY_CAPS) =>
+    new Function(
+      "PLAYER",
+      "PLAY_CAPS",
+      [
+        shippedSource("streamRejectionFacts"),
+        shippedSource("rejectionBlamesTheProfile"),
+        shippedSource("streamRejectionMessage"),
+        shippedSource("streamRejectionNote"),
+        "return {streamRejectionFacts,streamRejectionMessage,streamRejectionNote};",
+      ].join("\n"),
+    )(PLAYER, PLAY_CAPS);
+
+  // The 2026-09-02 case: Safari declared {5,8}; the server served Profile 7.
+  const refused = build(
+    { method: "copy_hls", deliveredRange: "dolby_vision", deliveredDvProfile: 7 },
+    { dvprofile: "5,8" },
+  );
+  const facts = refused.streamRejectionFacts();
+  assert.deepEqual(facts, {
+    delivered_range: "dolby_vision",
+    delivered_dv_profile: 7,
+    declared_dv_profiles: "5,8",
+    caps_mismatch: true,
+  });
+  const blamed = refused.streamRejectionMessage(
+    facts,
+    "remux",
+    "code 3: the browser's decoder failed",
+    true,
+  );
+  assert.match(
+    blamed,
+    /the server handed this browser a Dolby Vision Profile 7 stream it did not declare/,
+  );
+  assert.match(blamed, /declared: 5,8/);
+  assert.match(blamed, /code 3: the browser's decoder failed/);
+  assert.doesNotMatch(
+    blamed,
+    /browser refused/,
+    "the browser did exactly what its own capabilities document said it would",
+  );
+  // …and the viewer is told the same thing, in their own sentence. Fixing the
+  // log line and leaving "the browser refused" on screen would have been the
+  // wrong half: the viewer is the one who thinks their machine is broken.
+  const note = refused.streamRejectionNote(facts, "remux", "code 3", true);
+  assert.match(note, /the server sent a Dolby Vision Profile 7 stream this browser never claimed/);
+  assert.doesNotMatch(note, /browser refused/);
+
+  // A mismatch is a standing property of the SESSION, not of this error. A
+  // dropped link on a Dolby Vision session is still a mismatch and still worth
+  // recording — but it is not what failed, and a report that says so sends an
+  // operator after a capabilities bug that did not happen.
+  for (const said of [
+    refused.streamRejectionMessage(facts, "remux", "code 2: network error", false),
+    refused.streamRejectionNote(facts, "remux", "code 2: network error", false),
+  ]) {
+    assert.doesNotMatch(
+      said,
+      /Dolby Vision Profile/,
+      `a network failure must not be blamed on the profile: ${said}`,
+    );
+  }
+
+  // The ordinary decode failure: the client got a profile it claimed and still
+  // could not play it. That one really is about this browser — but it is the
+  // server's stream, not the browser's refusal.
+  const honest = build(
+    { method: "remux", deliveredRange: "dolby_vision", deliveredDvProfile: 8 },
+    { dvprofile: "5,8" },
+  );
+  const agreed = honest.streamRejectionFacts();
+  assert.equal(agreed.caps_mismatch, false);
+  assert.equal(
+    honest.streamRejectionMessage(agreed, "remux", "bufferAppendError", true),
+    "this browser could not decode the server's remux stream (bufferAppendError) — re-encoding",
+  );
+
+  // A stripped stream carries no profile, and a browser that declares none has
+  // made no claim to contradict. Neither is a mismatch.
+  assert.equal(
+    build({ method: "remux", deliveredRange: "hdr10" }, { dvprofile: "5,8" })
+      .streamRejectionFacts().caps_mismatch,
+    false,
+  );
+  assert.equal(
+    build({ method: "remux", deliveredDvProfile: 7 }, {})
+      .streamRejectionFacts().caps_mismatch,
+    false,
+  );
+  // The two sides compare profiles the same way. The server parses each
+  // declared element as an integer, so a client comparing strings would send
+  // the accusing sentence on a line the server marks as agreeing.
+  assert.equal(
+    build({ method: "remux", deliveredDvProfile: 8 }, { dvprofile: "05,08" })
+      .streamRejectionFacts().caps_mismatch,
+    false,
+  );
+  // And a defaulted-to-zero profile is nothing said, not profile zero.
+  assert.equal(
+    build({ method: "remux", deliveredDvProfile: 0 }, { dvprofile: "5,8" })
+      .streamRejectionFacts().caps_mismatch,
+    false,
+  );
+});
+
+test("the rejection report carries the join, whatever the path built it", () => {
+  // `session` is what lets the server tie a report to the session it
+  // superseded — `system.rs` joins only when it is present — and the `<video>`
+  // path had never sent one, so every element-level rejection was unjoinable.
+  //
+  // Run, not grepped. The previous version of this case asserted that the
+  // three field names appeared as source text near `event:"stream_rejected"`,
+  // which passed against a build whose `clientLog(...)` had been replaced by
+  // `void (...)` — the report never sent at all — and failed on a reformat
+  // that added a space after a colon. Both were checked.
+  const report = new Function(
+    "playbackContext",
+    `${shippedSource("streamRejectionReport")}\nreturn streamRejectionReport;`,
+  )(() => ({ session: "s-abc", height: 2160, encoder: "copy", runway: 4.5 }));
+
+  const built = report(
+    {
+      delivered_range: "dolby_vision",
+      delivered_dv_profile: 7,
+      declared_dv_profiles: "5,8",
+      caps_mismatch: true,
+    },
+    { code: 3, src: "/api/v1/hls/x/master.m3u8", message: "…", control_trigger: null },
+  );
+  assert.equal(built.event, "stream_rejected");
+  assert.equal(built.level, "warn");
+  assert.equal(built.session, "s-abc", "the join the server needs");
+  assert.equal(built.delivered_range, "dolby_vision");
+  assert.equal(built.delivered_dv_profile, 7);
+  assert.equal(built.declared_dv_profiles, "5,8");
+  // The path's own fields survive the merge. `playbackContext()` is applied
+  // last and its keys are disjoint; a future key of the same name would take
+  // one of these out silently, which is what this pins.
+  assert.equal(built.code, 3);
+  assert.equal(built.message, "…");
+  assert.equal(built.src, "/api/v1/hls/x/master.m3u8");
+  assert.equal(built.height, 2160);
+  // `caps_mismatch` is deliberately NOT sent: the server recomputes it,
+  // because the client is the party being exonerated.
+  assert.equal("caps_mismatch" in built, false);
+
+  // And both call sites go through it, so neither can drift back to spelling
+  // the fields out — which is what made the old test a grep in the first place.
+  const wire = SHIPPED_UI.slice(
+    SHIPPED_UI.indexOf('v.addEventListener("error"'),
+  ).slice(0, 4000);
+  for (const [name, source] of [
+    ["hls.js", shippedSource("attachHls")],
+    ["<video>", wire],
+  ]) {
+    assert.ok(
+      source.includes("clientLog(streamRejectionReport(rejection,"),
+      `the ${name} rejection must build its report through the shared helper`,
+    );
+  }
+});
+
 asyncTest("a create never sends an empty capabilities document", async () => {
   const requests = [];
   const { openSession } = buildOpenSession({
