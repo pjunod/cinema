@@ -13,6 +13,7 @@ fn summary_value(
     summary: plurx_core::store::AnalysisStatusSummary,
     enabled: bool,
     now_ms: i64,
+    queue_health: Option<crate::state::AnalysisQueueHealthReport>,
 ) -> serde_json::Value {
     serde_json::json!({
         "available": true,
@@ -35,6 +36,17 @@ fn summary_value(
             "file_id": summary.latest_error_file_id.to_string(),
             "updated_at_ms": summary.latest_error_updated_at_ms,
         })),
+        // Absent until this node has taken its first Store sample. A verdict
+        // with nothing behind it would read as `idle`, which is a claim.
+        "health": queue_health.map(|report| serde_json::json!({
+            "verdict": report.verdict.as_str(),
+            "ready_24h": report.health.ready_24h,
+            "attempt_limit_24h": report.health.attempt_limit_24h,
+            "running_past_lease": report.health.running_past_lease,
+            "last_ready_at_ms": report.health.last_ready_at_ms,
+            "claims_since_start": report.claims_since_start,
+            "lease_losses_since_start": report.lease_losses_since_start,
+        })),
     })
 }
 
@@ -48,6 +60,7 @@ pub(crate) async fn activity_summary(state: &AppState) -> Result<serde_json::Val
         summary,
         state.jobs.analysis_queue_enabled().await,
         now_ms,
+        state.store_metrics.snapshot().queue_health,
     ))
 }
 

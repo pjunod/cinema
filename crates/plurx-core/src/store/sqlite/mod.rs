@@ -1556,7 +1556,19 @@ impl MetricsStore for SqliteStore {
                     (SELECT COALESCE(json_group_array(json_object(
                         'event', counter.event, 'reason', counter.reason,
                         'count', counter.count)), '[]')
-                       FROM analysis_lifecycle_counters counter)
+                       FROM analysis_lifecycle_counters counter),
+                    -- What the queue has actually produced lately. `?2` is
+                    -- Unix seconds here; the jobs table keeps milliseconds.
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'ready' AND updated_at_ms >= (?2 - 86400) * 1000),
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'failed' AND last_error_code = 'attempt_limit'
+                        AND updated_at_ms >= (?2 - 86400) * 1000),
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'running'
+                        AND COALESCE(lease_expires_ms, 0) < ?2 * 1000),
+                    (SELECT COALESCE(MAX(updated_at_ms), 0)
+                       FROM cluster_fragment_index_jobs WHERE state = 'ready')
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],
                 |row| {
@@ -1580,6 +1592,12 @@ impl MetricsStore for SqliteStore {
                             &row.get::<_, String>(15)?,
                             &row.get::<_, String>(16)?,
                             &row.get::<_, String>(17)?,
+                            super::AnalysisQueueHealth {
+                                ready_24h: row.get(18)?,
+                                attempt_limit_24h: row.get(19)?,
+                                running_past_lease: row.get(20)?,
+                                last_ready_at_ms: row.get(21)?,
+                            },
                         ),
                     })
                 },

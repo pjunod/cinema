@@ -1813,3 +1813,31 @@ test("A failed row lists the code every charged attempt ended with", () => {
   harness({...snapshot,rows:[{...base,job_attempt_errors:[]}]});
   assert.ok(!/analysis-attempts/.test(main.innerHTML));
 });
+
+test("Each queue verdict gets its own sentence before the counts", () => {
+  // A verdict that renders the same sentence for two states is a verdict
+  // nobody can act on, so each one is pinned by wording, not by tone alone.
+  const line=new Function("esc","fmtAgo",
+    `${shippedSource("analysisVerdictLine")}\nreturn analysisVerdictLine;`)(String,()=>"2 days ago");
+  const base={ready_24h:0,attempt_limit_24h:0,running_past_lease:0,last_ready_at_ms:0,
+    claims_since_start:0,lease_losses_since_start:0};
+  const seen=new Set();
+  for(const [verdict,pattern] of [
+    ["dead",/is not producing/],
+    ["degraded",/is struggling/],
+    ["healthy",/is producing/],
+    ["idle",/is idle/],
+  ]){
+    const html=line({health:{...base,verdict,claims_since_start:25,ready_24h:verdict==="dead"?0:5}});
+    assert.match(html,pattern,verdict);
+    assert.ok(!seen.has(html),`${verdict} repeats another verdict's sentence`);
+    seen.add(html);
+  }
+  // A node that has not sampled yet says nothing rather than "idle".
+  assert.equal(line({}),"");
+  assert.equal(line({health:{...base}}),"");
+  // The dead line names the age of the last index, which is the number an
+  // operator acts on.
+  assert.match(line({health:{...base,verdict:"dead",claims_since_start:412,last_ready_at_ms:1}}),
+    /2 days ago/);
+});

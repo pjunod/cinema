@@ -3675,6 +3675,42 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
             analysis.lifecycle_counts[slot]
         ));
     }
+    if let Some(report) = view.queue_health {
+        out.push_str(
+            "# HELP plurx_analysis_queue_health Whether the fragment-index queue is producing: one series is 1, the rest 0.\n\
+             # TYPE plurx_analysis_queue_health gauge\n",
+        );
+        for verdict in plurx_core::store::ANALYSIS_QUEUE_VERDICTS {
+            out.push_str(&format!(
+                "plurx_analysis_queue_health{{verdict=\"{verdict}\"}} {}\n",
+                u8::from(verdict == report.verdict.as_str())
+            ));
+        }
+        out.push_str(
+            "# HELP plurx_analysis_queue_ready_24h Fragment-index jobs that reached ready in the last 24 hours.\n\
+             # TYPE plurx_analysis_queue_ready_24h gauge\n\
+             # HELP plurx_analysis_queue_attempt_limit_24h Fragment-index jobs that exhausted their retry budget in the last 24 hours.\n\
+             # TYPE plurx_analysis_queue_attempt_limit_24h gauge\n\
+             # HELP plurx_analysis_queue_running_past_lease Fragment-index jobs sitting running past a lease nobody renewed.\n\
+             # TYPE plurx_analysis_queue_running_past_lease gauge\n\
+             # HELP plurx_analysis_queue_claims_since_start Claims this process has watched, since it started.\n\
+             # TYPE plurx_analysis_queue_claims_since_start gauge\n\
+             # HELP plurx_analysis_queue_lease_losses_since_start Lost leases this process has watched, since it started.\n\
+             # TYPE plurx_analysis_queue_lease_losses_since_start gauge\n",
+        );
+        out.push_str(&format!(
+            "plurx_analysis_queue_ready_24h {}\n\
+             plurx_analysis_queue_attempt_limit_24h {}\n\
+             plurx_analysis_queue_running_past_lease {}\n\
+             plurx_analysis_queue_claims_since_start {}\n\
+             plurx_analysis_queue_lease_losses_since_start {}\n",
+            report.health.ready_24h,
+            report.health.attempt_limit_24h,
+            report.health.running_past_lease,
+            report.claims_since_start,
+            report.lease_losses_since_start,
+        ));
+    }
     out.push_str(
         "# HELP plurx_analysis_markers Current persisted marker count by semantic evidence.\n\
          # TYPE plurx_analysis_markers gauge\n",
@@ -4128,6 +4164,7 @@ mod tests {
             age_seconds: None,
             valid: false,
             errors: 2,
+            queue_health: None,
         });
         assert!(absent.contains("plurx_store_metrics_sample_valid 0"));
         assert!(absent.contains("plurx_store_metrics_sample_errors_total 2"));
@@ -4143,6 +4180,7 @@ mod tests {
             age_seconds: Some(121),
             valid: false,
             errors: 3,
+            queue_health: None,
         });
         assert!(stale.contains("plurx_store_metrics_sample_valid 0"));
         assert!(stale.contains("plurx_store_metrics_sample_age_seconds 121"));

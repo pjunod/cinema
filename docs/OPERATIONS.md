@@ -3684,6 +3684,30 @@ The compact Prometheus alert shape is: membership sample valid · leader known �
 heartbeat quorum available · apply lag zero. `/readyz` remains the final active
 serving check because the metrics are deliberately passive and cached.
 
+### Reading the index queue's verdict
+
+`plurx_analysis_queue_health{verdict="…"}` is one series set to `1` and the
+rest to `0`. The same answer is the first line of **Settings → Content
+analysis** and the `health` block of `GET /api/v1/analysis/summary`, and a
+`dead` or `degraded` node repeats it as a `WARN` once an hour.
+
+| Verdict | What it means | What to do |
+|---|---|---|
+| `healthy` | Indexes were built in the last 24 hours and most claims finished. | Nothing. |
+| `idle` | Nothing claimed and nothing built since this node started. | Nothing, unless you expected work: check that `vod_index_mins` is not `0` and that the library is not already fully indexed. |
+| `degraded` | Producing, but losing a quarter of its claims, or a tenth of them are exhausting their retry budget, or a row has sat `running` past its lease across two samples. | Read `attempt_errors` on the failing rows in the workspace — it names what each attempt actually hit. A standing `running_past_lease` means the claim sweep is not running: check that a node is draining the queue at all. |
+| `dead` | Twenty or more claims since this node started and **nothing** finished. | This is the shape of the 2026-08-31 outage. Check the daemon log for `analysis lease` warnings, then `plurx_analysis_lease_total{event="renew_failed"}`: a renewal that always errors is a store or statement fault, not a source fault. |
+
+The two `_since_start` figures — `plurx_analysis_queue_claims_since_start` and
+`plurx_analysis_queue_lease_losses_since_start` — are deltas taken against this
+process's first sample, so they reset when the daemon restarts. That is
+deliberate: the store's own lifecycle counters are cumulative since the schema
+landed, and a queue that built twelve thousand artifacts last month and nothing
+since reads as perfectly healthy through those.
+
+A verdict is per node and describes what *that* node has watched. On a healthy
+fleet where one node holds the mounts, the others can legitimately read `idle`.
+
 ## Hardware transcode & recent Intel GPUs
 
 The Docker image defaults to **jellyfin-ffmpeg**, which bundles a current Intel

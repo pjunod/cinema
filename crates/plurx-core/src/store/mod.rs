@@ -303,6 +303,7 @@ pub struct AnalysisStoreMetrics {
     pub queue_oldest_age_seconds: [i64; ANALYSIS_QUEUE_METRIC_SLOTS],
     pub lifecycle_counts: [i64; ANALYSIS_LIFECYCLE_METRIC_SLOTS],
     pub marker_counts: [i64; ANALYSIS_MARKER_METRIC_SLOTS],
+    pub health: AnalysisQueueHealth,
 }
 
 impl Default for AnalysisStoreMetrics {
@@ -312,8 +313,99 @@ impl Default for AnalysisStoreMetrics {
             queue_oldest_age_seconds: [0; ANALYSIS_QUEUE_METRIC_SLOTS],
             lifecycle_counts: [0; ANALYSIS_LIFECYCLE_METRIC_SLOTS],
             marker_counts: [0; ANALYSIS_MARKER_METRIC_SLOTS],
+            health: AnalysisQueueHealth::default(),
         }
     }
+}
+
+/// What the fragment-index queue has actually produced lately.
+///
+/// The jobs table cannot answer "how many claims in 24 hours": a row keeps
+/// only its latest transition, so a row claimed five times is one row. These
+/// are the questions it *can* answer cheaply, and the cumulative lifecycle
+/// counters supply the rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AnalysisQueueHealth {
+    /// Jobs that reached `ready` inside the window. `ready` rather than
+    /// artifact rows, because a hydrated completion produces a job and a
+    /// location but no new artifact, and a healthy hydrating fleet must not
+    /// read as dead.
+    pub ready_24h: i64,
+    pub attempt_limit_24h: i64,
+    /// Rows sitting `running` past a lease nobody renewed. One is a sweep
+    /// that has not run yet; a standing count is the outage's own signature.
+    pub running_past_lease: i64,
+    pub last_ready_at_ms: i64,
+}
+
+/// The one-word answer an operator needs before reading anything else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnalysisQueueVerdict {
+    /// Nothing to judge: nothing has been claimed and nothing has finished.
+    /// A fully indexed library and a paused one look the same from here, and
+    /// neither is a fault.
+    Idle,
+    Healthy,
+    Degraded,
+    /// Claimed enough to be sure, produced nothing.
+    Dead,
+}
+
+impl AnalysisQueueVerdict {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Dead => "dead",
+        }
+    }
+}
+
+pub const ANALYSIS_QUEUE_VERDICTS: [&str; 4] = ["idle", "healthy", "degraded", "dead"];
+
+/// Twenty claims is enough that "no successes" is not a small sample. On the
+/// fleet that produced this rule it was reached inside the first hour of a
+/// seventy-two hour outage.
+pub const ANALYSIS_DEAD_CLAIM_FLOOR: i64 = 20;
+
+/// Read the queue's verdict.
+///
+/// The claim and loss figures are per-process deltas, because the store's own
+/// counters are cumulative since the schema landed and a rate is what says
+/// whether the queue works *now*. They reset on restart, and the field names
+/// say so.
+#[must_use]
+pub fn analysis_queue_verdict(
+    health: AnalysisQueueHealth,
+    claims_since_start: i64,
+    lease_losses_since_start: i64,
+    running_past_lease_samples: u32,
+) -> AnalysisQueueVerdict {
+    if claims_since_start <= 0 && health.ready_24h == 0 {
+        return AnalysisQueueVerdict::Idle;
+    }
+    if health.ready_24h == 0 {
+        return if claims_since_start >= ANALYSIS_DEAD_CLAIM_FLOOR {
+            AnalysisQueueVerdict::Dead
+        } else {
+            // Something was claimed and nothing finished, but not enough of
+            // either to call it. Not healthy, and not yet provable.
+            AnalysisQueueVerdict::Degraded
+        };
+    }
+    // A quarter is generous on purpose: preemption by foreground playback is a
+    // legitimate way to lose a lease.
+    let losses_over_budget = lease_losses_since_start * 4 >= claims_since_start
+        && lease_losses_since_start > 0
+        && claims_since_start > 0;
+    let failures_over_budget =
+        health.attempt_limit_24h * 10 >= claims_since_start && health.attempt_limit_24h > 0;
+    if losses_over_budget || failures_over_budget || running_past_lease_samples >= 2 {
+        return AnalysisQueueVerdict::Degraded;
+    }
+    AnalysisQueueVerdict::Healthy
 }
 
 #[derive(serde::Deserialize)]
@@ -341,12 +433,101 @@ struct AnalysisLifecycleMetricRow {
     count: i64,
 }
 
+#[cfg(test)]
+mod queue_verdict_tests {
+    use super::{analysis_queue_verdict, AnalysisQueueHealth, AnalysisQueueVerdict};
+
+    fn health(
+        ready_24h: i64,
+        attempt_limit_24h: i64,
+        running_past_lease: i64,
+    ) -> AnalysisQueueHealth {
+        AnalysisQueueHealth {
+            ready_24h,
+            attempt_limit_24h,
+            running_past_lease,
+            last_ready_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn a_queue_that_claims_and_never_finishes_is_dead() {
+        assert_eq!(
+            analysis_queue_verdict(health(0, 0, 0), 25, 25, 0),
+            AnalysisQueueVerdict::Dead
+        );
+        // The fleet numbers that named the outage.
+        assert_eq!(
+            analysis_queue_verdict(health(0, 84, 11), 412, 398, 3),
+            AnalysisQueueVerdict::Dead
+        );
+    }
+
+    #[test]
+    fn a_queue_that_finishes_most_of_what_it_claims_is_healthy() {
+        assert_eq!(
+            analysis_queue_verdict(health(20, 0, 0), 25, 2, 0),
+            AnalysisQueueVerdict::Healthy
+        );
+    }
+
+    #[test]
+    fn nothing_claimed_and_nothing_built_is_not_a_fault() {
+        // A fully indexed library and `vod_index_mins = 0` look the same here,
+        // and calling either one dead would be a false alarm every night.
+        assert_eq!(
+            analysis_queue_verdict(health(0, 0, 0), 0, 0, 0),
+            AnalysisQueueVerdict::Idle
+        );
+    }
+
+    #[test]
+    fn losing_a_quarter_of_its_claims_is_degraded_even_while_producing() {
+        assert_eq!(
+            analysis_queue_verdict(health(3, 0, 0), 25, 12, 0),
+            AnalysisQueueVerdict::Degraded
+        );
+    }
+
+    #[test]
+    fn failures_and_a_standing_stale_row_each_degrade_on_their_own() {
+        // A tenth of claims exhausting their budget.
+        assert_eq!(
+            analysis_queue_verdict(health(30, 4, 0), 40, 0, 0),
+            AnalysisQueueVerdict::Degraded
+        );
+        // One sample with a lapsed row is a sweep that has not run yet.
+        assert_eq!(
+            analysis_queue_verdict(health(30, 0, 1), 40, 0, 1),
+            AnalysisQueueVerdict::Healthy
+        );
+        // Two in a row is a queue that is not sweeping.
+        assert_eq!(
+            analysis_queue_verdict(health(30, 0, 1), 40, 0, 2),
+            AnalysisQueueVerdict::Degraded
+        );
+    }
+
+    #[test]
+    fn too_few_claims_to_be_sure_is_not_healthy_either() {
+        // Something was claimed and nothing finished. Not provable, not fine.
+        assert_eq!(
+            analysis_queue_verdict(health(0, 0, 0), 3, 3, 0),
+            AnalysisQueueVerdict::Degraded
+        );
+    }
+}
+
 pub(crate) fn analysis_store_metrics(
     queue_json: &str,
     marker_json: &str,
     lifecycle_json: &str,
+    health: AnalysisQueueHealth,
 ) -> AnalysisStoreMetrics {
-    let mut metrics = AnalysisStoreMetrics::default();
+    let mut metrics = AnalysisStoreMetrics {
+        health,
+        ..AnalysisStoreMetrics::default()
+    };
     for row in serde_json::from_str::<Vec<AnalysisQueueMetricRow>>(queue_json).unwrap_or_default() {
         let Some(component) = ANALYSIS_METRIC_COMPONENTS
             .iter()
