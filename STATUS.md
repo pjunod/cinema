@@ -55,8 +55,23 @@ carries the builder's own reason. A review caught the backoff being inert on
 every clustered voter: the hiqlite store's injected clock answers in unix
 seconds and the deadline is compared against milliseconds.
 
+**The deployed-build re-test, as far as it goes.** The fleet was read over
+SSH on 2026-09-03. The handoff's premise holds: #842 (`60e1be68`) is an
+ancestor of every binary now running, so the arm it closed is closed in
+production. Three nodes run `v0.3.0-515-gc2702f61`, matching their
+checkouts; **nuc4 runs `v0.3.0-487-gd7194b05`** while its own checkout sits
+at 515 — twenty-eight commits of drift, and nuc4 is the node the M5
+verification document names. That has to be redeployed before any play
+against it means anything. nuc4's `plurxd` logged no plan-derivation traffic
+at all in twelve hours, which is the honest reason the `plan_derivation`
+counters cannot be re-tested from the outside: they only move when someone
+plays something. The live store is hiqlite; `/var/lib/plurx/plurx.db` was
+last written 2026-08-26 and reading it would answer a stale question.
+
 **Not verified on hardware.** Nothing here has been played from a browser
-against the fleet; the deployed-build re-test is a separate hand-off.
+against the fleet. `docs/M5-VERIFICATION-PROMPT.md` is the hand-off, and it
+is gated on ops: raft membership, then the analysis queue draining, then
+file 70's converting identity being built.
 
 ## The ✕ on an iPhone could not leave a film
 
