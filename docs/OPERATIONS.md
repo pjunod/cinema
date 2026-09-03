@@ -3408,6 +3408,16 @@ turned on are **not** covered: they were created serving EVENT, so a takeover
 refuses them and those viewers restart exactly as they would have before. None
 of the three indicates retention pressure or a renumbering bug.
 
+That third group now says so on the wire rather than making the viewer wait
+it out. A media request against a session whose owner is gone and whose
+recipe a takeover can never accept — an EVENT session, a VOD handle, or one
+created while this gate was off — answers **410 `media_owner_lost`** carrying
+the film position to reopen at, instead of a 503 `media_owner_transition` that
+would repeat forever. A session the takeover path *can* still claim keeps the
+503, now carrying the same position for a client that stops waiting. The
+control plane's own **425 `owner_transition`** is unchanged and still retries
+without bound; it is the same gap on the other plane and is not yet closed.
+
 Expect recovery on the order of **fifteen to twenty seconds**, not the ten the
 plan's acceptance names. Nothing contests a session until its lease expires,
 and the media-session lease is twelve seconds with a three-second renewal

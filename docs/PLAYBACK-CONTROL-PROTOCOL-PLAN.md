@@ -375,6 +375,12 @@ conflicts, not triggers for a new replacement.
 | 409 | `stale_control` | Generation, client instance, sequence, or action fence lost | Apply returned current state; do not retry stale state |
 | 410 | `session_ended` | Session deliberately ended or superseded | Stop renewing predecessor; follow successor if supplied |
 | 425 | `owner_transition` | Durable route exists but takeover is unresolved | Retry after the bounded response hint |
+
+The media plane answers the same durable state with 503 `media_owner_transition`
+or, when the route's own recipe can never be taken over, 410
+`media_owner_lost`; both carry `film_position_ms`, `film_frontier_ms` and
+`continuous:false`. The 425 above is the control plane's and is not yet split
+that way, so it still retries without bound against a dead owner.
 | 429 | `control_rate_limited` | Client exceeded the per-session control budget | Back off to the returned interval; media remains independent |
 | 503 | `control_unavailable` | No eligible owner can currently answer | Keep consuming buffer and retry through another ingress |
 

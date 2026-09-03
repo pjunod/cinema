@@ -728,6 +728,19 @@
     }
     const retryable =
       failure.code === "startup_timeout" || failure.status === 503;
+    // The node serving this session died and nothing can take it over. That
+    // is neither "still preparing" nor a startup failure — it happens to a
+    // viewer who was already watching, and the honest sentence says the
+    // stream stopped and has to be reopened. `media_owner_lost` carries the
+    // film position to reopen at; the player does not act on it yet, so the
+    // overlay does not promise that it will.
+    if (failure.code === "media_owner_lost") {
+      return {
+        title: "This stream stopped.",
+        detail: "The server that was playing it is gone. Start it again to keep watching.",
+        retryable: false,
+      };
+    }
     return {
       title: retryable
         ? "Still preparing this stream…"
