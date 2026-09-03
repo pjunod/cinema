@@ -550,20 +550,54 @@ change**, and Apple passed both 20/20 on both devices. It never ran their
 product — the `MultipleAxes` comment says exactly that — and the product is the
 only transition that occurs.
 
-**One hardware case now gates the milestone**, spec'd to run in
+**One hardware case gated the milestone**, spec'd in
 [M6-AXIS-CASE-HANDOFF.md](M6-AXIS-CASE-HANDOFF.md): 20 consecutive commits on a
 recipe pair that moves resolution *and* delivery method together, on a
-direct-playing source. Acceptance is the spike's own. §3.4 must not ship before
-it, and `PREPARED_AXIS` must not be widened on the strength of two separate
-single-axis proofs — that reasoning is what shadow mode replaced.
+direct-playing source. It has now run — §3.3.4.
+
+#### 3.3.4 The axis case passed, and the rule widened to a table
+
+**Ran 2026-09-03** on the Apple TV 4K (3rd generation), build 114: a 2160p
+direct-play source against a 1080p server-selected transcode, so height and
+delivery method move together. **20/20 clean commits**, zero failed admissions,
+zero predecessor stalls, zero post-commit stalls.
+
+The link mattered, and the first attempt is the reason this is worth writing
+down. It ran at 30 Mbit/s against an 18.183 Mbit/s predecessor — 1.65×, *below*
+the 2× floor `headroom_refusal` itself enforces — and failed eight of twenty.
+That was not a measurement of the transition; it was a measurement of a link
+the server would have refused to prepare on. Re-run at 40 Mbit/s (2.20×) it
+passed cleanly. **A hardware run below the server's own gate measures
+nothing**, and the handoff now says so in its link spec.
+
+The run's own controls held: fixed-boundary groups with ack jitter, 16 distinct
+runway values with 5/5 distinct inside every group, both pipelines showing
+20/20 distinct wire counts, and position error varying −8.58 to −0.44 ms rather
+than repeating.
+
+So `PREPARED_AXIS` became `PREPARED_AXIS_SETS`, a table of axis *sets* holding
+exactly the two combinations with a receipt: `{ResolutionOrBitrate}` from M5.5
+and `{ResolutionOrBitrate, DeliveryMethod}` from this run. A transition is
+admitted or refused as a whole set, because that is how it was measured. The
+axis *label* on a decision is unchanged — still the hardest member — so the
+metric stays comparable across the change.
+
+**What is still refused.** The grade axis: this run was SDR H.264 throughout,
+so `{ResolutionOrBitrate, DeliveryMethod, DynamicRange}` — what an HDR or Dolby
+Vision title's quality change actually crosses, and what Avatar 2160 → 1080
+booked in §3.3.3 — remains unmeasured and still books `multiple_axes`. Audio
+and burned subtitles were never measured in combination with anything. Add a
+row only with a receipt, and say which run.
 
 ### 3.4 Stage on `Prepare`
 
 The first behaviour change, and the first production caller — this is the slice
 that removes `allow(dead_code)` from `PreparationExecutor`.
 
-**Blocked on the axis case in §3.3.3** — the measurement says this slice would
-stage successors for transitions M6 then refuses. It fired on nothing while all
+**Unblocked 2026-09-03** by the axis case in §3.3.4. Until that run this slice
+would have staged successors for transitions M6 then refused; the admitted pair
+is the transition the fleet actually produces, so there is now something for the
+staged path to fire on. It fired on nothing while all
 three clients hardcoded
 `dual_player_preparation: false`. **Apple now declares `true`** — the measured
 answer from M5.5's 20/20 commit proof plus the accepted corrective
@@ -576,8 +610,8 @@ counter before shipping this slice: it is the only reading that says whether
 the staged path would fire at all once the literal flips.
 
 **Acceptance:** with a test client reporting `dual_player_preparation: true` on
-a resolution change with headroom, the ledger holds a staged successor and the
-pointer still names the predecessor.
+a resolution-and-delivery-method change with headroom, the ledger holds a
+staged successor and the pointer still names the predecessor.
 
 ### 3.5 The commit trigger
 
@@ -606,7 +640,8 @@ is worth re-confirming on a realistic runway before this ships to viewers.
 - **Do not move the slot or the commit gate out of the actor.** §2.3.
 - **Do not re-derive `dual_player_preparation`.** Read the retained field.
   Three literals were written by assumption once already.
-- **Do not widen `PREPARED_AXIS` without narrowing the capability first.** Its
+- **Do not add a row to `PREPARED_AXIS_SETS` without a hardware receipt, run
+  above the throughput floor.** The table's
   own doc carries the reason: the Google TV's only hard failure was on
   same-codec, so the restriction is not a safe default for the television
   class — it is a decision with a live residual.
