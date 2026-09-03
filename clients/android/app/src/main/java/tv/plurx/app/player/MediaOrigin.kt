@@ -80,6 +80,17 @@ internal class ProgressiveMediaOrigin : TransferListener {
         synchronized(this) {
             expectedUri = uri
             originMs = requestedOriginMs.coerceAtLeast(0L)
+            // The rate belongs to the stream that produced it. This object
+            // lives for the controller's life while `begin` runs on every
+            // stream change, so without this reset the first exchange of a
+            // replacement — the only exchange the server's replacement seam
+            // reads — reports the *predecessor's* rate, and the first window
+            // to close after the switch divides leftover old-stream bytes plus
+            // new-stream bytes by a span that includes the reconnect gap,
+            // producing a number belonging to neither.
+            observedBitsPerSecond = null
+            rateWindowStartedNanos = 0L
+            rateWindowBytes = 0L
         }
     }
 
