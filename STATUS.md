@@ -23,8 +23,20 @@ spawned argv gains `-strict unofficial` and keeps NAL 62/63, which is exactly
 the argv the production log carried). The second reads the argv out of a
 scoped `tracing` subscriber, because nothing in the crate captured a spawned
 command line before. Paul's R3 ruling — leave the preserved-Profile-7
-`dvh1.07`-over-`hvc1` inconsistency, which no client can reach — recorded in
-`docs/PLAYBACK.md`.
+`dvh1.07`-over-`hvc1` inconsistency — recorded in `docs/PLAYBACK.md`, with the
+correction the review forced: Android *does* enumerate Profile 7
+(`CapsPolicy.kt` maps `DVHE_DTB -> 7`), so the state is reachable from a
+dual-layer box. The delivery plays; what it cannot rely on is the master
+playlist and the init segment agreeing about the fourcc.
+
+**M2 — the rejection report names both parties.** `stream_rejected` said
+"browser refused the remux stream", which is the browser doing exactly what
+its own capabilities document promised, and it carried no `session`, so the
+server could not join it to the session it superseded. Both rejection paths
+now send the join and three facts: the range and Dolby Vision profile the
+create response said this session carries, and the profiles this browser
+declared. The server prints them, recomputes `caps_mismatch` rather than
+believing the client's copy, and keeps them in the stored event's `extra`.
 
 **Not verified on hardware.** Nothing here has been played from a browser
 against the fleet; the deployed-build re-test is a separate hand-off.

@@ -6521,14 +6521,16 @@ function attachHls(video, playlistUrl, startAt){
       });
       if(fallback==='transcode'){
         PLAYER.triedFallback=true;
-        clientLog(Object.assign({level:"warn",event:"stream_rejected",detail:d.type,
-          message:"hls.js could not decode the "+PLAYER.method.replace('_',' ')+" stream ("+d.details+") — re-encoding",
-          control_trigger:controlTrigger},
-          playbackContext()));
-        setLoading(true,"Stream rejected — switching to transcode…",
-          "this browser's decoder refused the copied stream ("+d.details+"); re-encoding instead");
-        startTranscodeFallback("stream-rejected",
-          "the browser refused the "+PLAYER.method.replace('_',' ')+" stream ("+d.details+") — re-encoded instead");
+        const rejection=streamRejectionFacts();
+        // `isMedia` is hls.js's own classification, and it is exactly the
+        // question the profile sentence needs: a network fatal is not the
+        // profile whatever the session was handed.
+        const note=streamRejectionNote(rejection,PLAYER.method,d.details,isMedia);
+        clientLog(streamRejectionReport(rejection,{detail:d.type,
+          message:streamRejectionMessage(rejection,PLAYER.method,d.details,isMedia),
+          control_trigger:controlTrigger}));
+        setLoading(true,"Stream rejected — switching to transcode…",note);
+        startTranscodeFallback("stream-rejected",note);
         return;
       }
       // Say what the server said. This used to be "the server couldn't build
@@ -7462,6 +7464,96 @@ function capsDocument(c, limits){
 //
 function currentCapsDocument(){
   return capsDocument(PLAY_CAPS, decodeLimits());
+}
+// What this browser was handed, and what it had said it could take.
+//
+// A stream rejection used to be reported as "browser refused the remux
+// stream", which names the wrong party and drops the only two facts that
+// separate a decoder that genuinely cannot keep up from a server that sent a
+// profile this client never claimed. `PLAYER.deliveredDvProfile` is the
+// server's own answer for what the session's bytes carry — it arrives on the
+// create response — and `PLAY_CAPS.dvprofile` is the CSV this browser
+// declared to `/decision`. When the first is not in the second, the browser
+// did exactly what its capabilities document said it would.
+//
+// `caps_mismatch` is derived here for the viewer's sentence only. The server
+// recomputes it from the two fields rather than believing this one, because a
+// client asserting its own correctness is not evidence.
+function streamRejectionFacts(){
+  const p=(typeof PLAYER!=="undefined"&&PLAYER)||{};
+  const declared=String((typeof PLAY_CAPS!=="undefined"&&PLAY_CAPS&&PLAY_CAPS.dvprofile)||"");
+  const delivered=Number(p.deliveredDvProfile)>0?Number(p.deliveredDvProfile):null;
+  // Compared as numbers, because the server does: it parses each element as an
+  // integer, so a client comparing `"08"` as a string would send an accusatory
+  // message on a line the server marks as agreeing.
+  const claimed=declared.split(",").map(s=>parseInt(s,10)).filter(n=>Number.isFinite(n));
+  return {
+    delivered_range:p.deliveredRange||null,
+    delivered_dv_profile:delivered,
+    declared_dv_profiles:declared||null,
+    caps_mismatch:!!(delivered&&claimed.length&&claimed.indexOf(delivered)===-1),
+  };
+}
+// Whether the profile can plausibly be what broke this playback.
+//
+// `streamRejectionFacts()` reports a standing property of the SESSION, not a
+// property of this error. A dropped link on a Dolby Vision session is still a
+// mismatch and is still worth recording — but it is not what failed, and a
+// report that says it is sends an operator after a capabilities bug that did
+// not happen. Only a decoder-class failure can be the profile: on the
+// `<video>` path that is `MEDIA_ERR_DECODE` (3) and `MEDIA_ERR_SRC_NOT_SUPPORTED`
+// (4), and nothing else — the element path classifies *every* error as a media
+// failure for the fallback decision, deliberately, which is a wider test than
+// this one needs.
+function rejectionBlamesTheProfile(facts, causeIsDecode){
+  return !!(facts.caps_mismatch && causeIsDecode);
+}
+// One sentence for the operator's log, from both rejection paths. `cause` is
+// whatever that path knows: the media element's error code and its name, or
+// hls.js's `details`.
+function streamRejectionMessage(facts, method, cause, causeIsDecode){
+  const m=String(method||"").replace('_',' ').trim()||"copied";
+  if(rejectionBlamesTheProfile(facts, causeIsDecode)){
+    return "the server handed this browser a Dolby Vision Profile "
+      +facts.delivered_dv_profile+" stream it did not declare (declared: "
+      +facts.declared_dv_profiles+"; "+cause+") — re-encoding";
+  }
+  return "this browser could not decode the server's "+m+" stream ("+cause+") — re-encoding";
+}
+// The same finding, in the sentence the VIEWER reads.
+//
+// Separate from the log line because they are read by different people for
+// different reasons, and identical in the one respect that matters: neither
+// may say "the browser refused" when the browser did exactly what its own
+// capabilities document promised. That wording is the whole complaint this
+// milestone exists to answer, and leaving it in the two strings on screen
+// while fixing the one nobody sees would have been the wrong half.
+function streamRejectionNote(facts, method, cause, causeIsDecode){
+  const m=String(method||"").replace('_',' ').trim()||"copied";
+  if(rejectionBlamesTheProfile(facts, causeIsDecode)){
+    return "the server sent a Dolby Vision Profile "+facts.delivered_dv_profile
+      +" stream this browser never claimed ("+cause+") — re-encoding instead";
+  }
+  return "this browser could not decode the "+m+" stream the server sent ("
+    +cause+") — re-encoding instead";
+}
+// One `stream_rejected` report, built the same way on both paths.
+//
+// Spelling the fields out at each call site is what left the only test of them
+// a source grep: there was nothing to call. `base` is what that path alone
+// knows — its own `code`/`src`/`detail` and the control trigger; the join and
+// the Dolby Vision facts are added here, for both.
+//
+// `playbackContext()` is applied last on purpose. Its keys are disjoint from
+// everything above, so nothing is overwritten — but `session` is the field the
+// server needs to tie this report to the session it superseded, and a merge
+// order that could drop it is the defect this whole report exists to fix.
+function streamRejectionReport(facts, base){
+  return Object.assign({level:"warn",event:"stream_rejected"}, base||{}, {
+    delivered_range:facts.delivered_range,
+    delivered_dv_profile:facts.delivered_dv_profile,
+    declared_dv_profiles:facts.declared_dv_profiles,
+  }, playbackContext());
 }
 // Whether a create should send it. An EMPTY document is worse than none at
 // all: the server counts one as `unusable_caps` and returns no review, which
@@ -9565,12 +9657,23 @@ function wirePlayer(){
     });
     if(fallback==='transcode'){
       PLAYER.triedFallback=true;
-      clientLog({level:"warn",event:"stream_rejected",code,src,
-        message:"browser refused the "+PLAYER.method.replace('_',' ')+" stream — re-encoding",
-        control_trigger:controlTrigger});
-      setLoading(true,"Stream rejected — switching to transcode…","the browser refused the "+PLAYER.method.replace('_',' ')+" stream (code "+code+"); re-encoding instead");
-      startTranscodeFallback("stream-rejected",
-        "the browser refused the "+PLAYER.method.replace('_',' ')+" stream ("+(names[code]||("error "+code))+(msg?": "+msg:"")+") — re-encoded instead");
+      const rejection=streamRejectionFacts();
+      // This path calls EVERY element error a media failure for the fallback
+      // decision, deliberately — but an abort or a dropped link is not the
+      // Dolby Vision profile, and a report that says it is sends someone after
+      // a capabilities bug that did not happen. Only the two decoder codes can
+      // be the profile.
+      const causeIsDecode=(code===3||code===4);
+      const cause="code "+code+": "+(names[code]||("error "+code));
+      const note=streamRejectionNote(rejection,PLAYER.method,cause+(msg?": "+msg:""),causeIsDecode);
+      // The join rides in `streamRejectionReport`. Without `session` the server
+      // cannot tie this report to the session it superseded, and this path had
+      // never sent one.
+      clientLog(streamRejectionReport(rejection,{code,src,
+        message:streamRejectionMessage(rejection,PLAYER.method,cause,causeIsDecode),
+        control_trigger:controlTrigger}));
+      setLoading(true,"Stream rejected — switching to transcode…",note);
+      startTranscodeFallback("stream-rejected",note);
       return;
     }
     clientLog({level:"error",event:"playback_failed",code,src,
