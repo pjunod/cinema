@@ -283,10 +283,50 @@ impl DeviceProfile {
         self.learned_limits.retain(|limit| limit.applies_at(now_ms));
     }
 
+    /// Does this client say it handles Dolby Vision for this source at all?
+    ///
+    /// A *claim*, and the wide reading is the right one for the two questions
+    /// that ask it: whether the client's HDR bit may be excused
+    /// (`dolby_vision_claimed` in `evaluate`) and whether Apple's
+    /// `remux_dolby_vision` normalization applies. Both are about the client
+    /// having a Dolby Vision pipeline at all, not about which profile comes out
+    /// of it, and narrowing them would re-introduce the SDR tone-map that the
+    /// comment on `dolby_vision_claimed` exists to record.
+    ///
+    /// What may actually be *delivered* is the narrower
+    /// [`DeviceProfile::decodes_dolby_vision_as_copied`].
     fn allows_dolby_vision(&self, file: &MediaFile) -> bool {
-        self.supports_dolby_vision
-            || dolby_vision_profile(file)
-                .is_some_and(|profile| self.dolby_vision_profiles.contains(&profile))
+        self.supports_dolby_vision || self.enumerates_dolby_vision_profile(file)
+    }
+
+    /// Has this client listed this source's own Dolby Vision profile by number?
+    fn enumerates_dolby_vision_profile(&self, file: &MediaFile) -> bool {
+        dolby_vision_profile(file)
+            .is_some_and(|profile| self.dolby_vision_profiles.contains(&profile))
+    }
+
+    /// Can this client decode this source's Dolby Vision **as an unconverted
+    /// copy would hand it over**?
+    ///
+    /// The blanket flag is a claim about the format, and it is honoured for
+    /// every profile but the dual-layer ones. [`dolby_vision_is_dual_layer`]
+    /// is the exception, and it has to be: a copy that does not convert hands
+    /// the client the source's own configuration record, its RPUs and its
+    /// type-63 enhancement layer, and no consumer decoder outside Blu-ray
+    /// hardware takes that. A client saying "I do Dolby Vision" is not saying
+    /// it takes dual-layer; every client that has ever said it meant
+    /// single-layer, and reading it the wide way is the delivery that comes
+    /// back `MEDIA_ERR_DECODE`.
+    ///
+    /// So dual-layer needs an *enumeration*. A client that lists 7 gets what it
+    /// asked for; everything else is routed by `dv_handling` to the conversion
+    /// where this node can build one, and to the compatible base layer or a
+    /// re-encode where it cannot — all of which decode.
+    fn decodes_dolby_vision_as_copied(&self, file: &MediaFile) -> bool {
+        if dolby_vision_is_dual_layer(file) {
+            return self.enumerates_dolby_vision_profile(file);
+        }
+        self.allows_dolby_vision(file)
     }
 }
 
@@ -940,6 +980,46 @@ pub fn dolby_vision_profile(file: &MediaFile) -> Option<u8> {
     digits.parse().ok()
 }
 
+/// Is this source **dual-layer** — a base layer plus a type-63 enhancement
+/// layer, which no consumer decoder outside Blu-ray hardware takes?
+///
+/// The dual-layer profiles are 7 (over an HDR10 or SDR base) and 4 (over an
+/// HLG base). Profile 4 is effectively extinct and is named here anyway,
+/// because it is exactly as undecodable and there is no reason for the rule to
+/// have a hole shaped like it.
+///
+/// The profile is asked first and answers on its own, in **both** directions.
+/// A record naming a single-layer profile is single-layer even if its
+/// `el_present_flag` says otherwise — muxers write that flag over streams that
+/// have no enhancement layer, and reading it the other way would strip Dolby
+/// Vision out of a Profile 5 delivery, which has no compatible base to fall
+/// back to and would tone-map to SDR. `el_present` is consulted only where
+/// there is no profile to ask, which is the one case where it is the only
+/// witness there is.
+///
+/// [`dolby_vision_profile`]'s label fallback is deliberate: a row scanned
+/// before the columns existed answers "Profile 7" from its prose, and that is
+/// the conservative answer — such a row also fails
+/// [`file_can_convert_to_p81`], so it can neither convert nor be preserved,
+/// and the base layer it falls back to is what it has always been served.
+///
+/// Three places ask this and must agree, or a stream describes itself honestly
+/// and decodes nowhere: which clients may be handed an unconverted copy
+/// ([`DeviceProfile::decodes_dolby_vision_as_copied`]), what a build that
+/// enumerated nothing may be trusted with (`legacy_trusted_review` in the
+/// daemon), and what a copy path with no RPU rewrite in it may serve
+/// (`served_copy_options`).
+pub fn dolby_vision_is_dual_layer(file: &MediaFile) -> bool {
+    if !is_dolby_vision(file) {
+        return false;
+    }
+    match dolby_vision_profile(file) {
+        Some(4 | 7) => true,
+        Some(_) => false,
+        None => file.dolby_vision.el_present == Some(true),
+    }
+}
+
 /// Does this Dolby Vision source have a base layer a non-DV client can watch?
 ///
 /// The compatibility id says what that client sees: 1 and 6 are HDR10, 4 is
@@ -1096,7 +1176,7 @@ fn dv_handling(
     node: &RenderCaps,
     target: OutputGrade,
 ) -> DvHandling {
-    if !is_dolby_vision(file) || profile.allows_dolby_vision(file) {
+    if !is_dolby_vision(file) || profile.decodes_dolby_vision_as_copied(file) {
         DvHandling::None
     } else if dolby_vision_converts_to_p81(file, profile, node) {
         DvHandling::Convert
@@ -1127,8 +1207,8 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
     // rewriting them would hand a Profile 7 stream to a decoder that asked for
     // 8; rewriting them without keeping them would rewrite nothing.
     let convert_dolby_vision = dolby_vision_converts_to_p81(file, profile, node);
-    let preserve_dolby_vision =
-        convert_dolby_vision || (is_dolby_vision(file) && profile.allows_dolby_vision(file));
+    let preserve_dolby_vision = convert_dolby_vision
+        || (is_dolby_vision(file) && profile.decodes_dolby_vision_as_copied(file));
     let (target, grade_reason) = target_grade(file, profile, node);
     // Whether the Dolby Vision branch below has already explained the grade in
     // its own words. It gets to speak first because its reason carries the
@@ -1421,7 +1501,7 @@ pub fn decide_forced(
             // above has already answered `Convert` for it.
             let convert_dolby_vision = dv == DvHandling::Convert;
             let preserve_dolby_vision = convert_dolby_vision
-                || (is_dolby_vision(file) && profile.allows_dolby_vision(file));
+                || (is_dolby_vision(file) && profile.decodes_dolby_vision_as_copied(file));
             Decision {
                 method,
                 reasons,
@@ -1765,15 +1845,24 @@ mod tests {
         let mut dv = file("mkv", "hevc", "aac");
         dv.hdr = Some("dolby_vision".to_owned());
         dv.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".to_owned());
+        // A client that takes this source's Dolby Vision names the profile it
+        // takes. The blanket flag is a claim about the format and does not
+        // cover dual-layer — see `decodes_dolby_vision_as_copied` — so a
+        // fixture that set only the flag would be testing that rule rather
+        // than the one this test is about.
         let hdr_client = |dolby: bool| {
-            caps_profile(
+            let mut profile = caps_profile(
                 vec!["mkv".into(), "mp4".into()],
                 vec!["hevc".into(), "h264".into()],
                 vec!["aac".into()],
                 None,
                 true,
                 dolby,
-            )
+            );
+            if dolby {
+                profile.dolby_vision_profiles = vec![7];
+            }
+            profile
         };
 
         // Safari: decodes DV, so nothing changes — the file direct-plays.
@@ -1820,6 +1909,148 @@ mod tests {
         );
     }
 
+    /// "I do Dolby Vision" is a claim about the format. Dual-layer needs a
+    /// claim about the *profile*.
+    ///
+    /// The two are the same sentence for every single-layer profile, and for a
+    /// dual-layer one they are the difference between a stream that plays and
+    /// one that does not: an unconverted copy hands over the source's own
+    /// configuration record, its RPUs and its type-63 enhancement layer, and no
+    /// consumer decoder outside Blu-ray hardware takes that. Every client that
+    /// has ever set the blanket flag meant single-layer.
+    ///
+    /// Read the wide way, this is how a Profile 7 remux reached Safari and came
+    /// back `MEDIA_ERR_DECODE` — the server having promised, in the same
+    /// breath, a conversion the delivery then did not perform.
+    #[test]
+    fn a_blanket_dolby_vision_claim_is_not_a_claim_about_dual_layer() {
+        let mut p7 = file("mkv", "hevc", "aac");
+        p7.hdr = Some("dolby_vision".to_owned());
+        p7.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".to_owned());
+        p7.dolby_vision = DolbyVisionFacts {
+            profile: Some(7),
+            level: Some(9),
+            bl_compat_id: Some(1),
+            el_present: Some(true),
+            rpu_present: Some(true),
+        };
+        let client = |dolby: bool| {
+            caps_profile(
+                vec!["mkv".into(), "mp4".into()],
+                vec!["hevc".into(), "h264".into()],
+                vec!["aac".into()],
+                None,
+                true,
+                dolby,
+            )
+        };
+
+        // The blanket flag, on a node whose conversion this client's silence
+        // does not reach: the base layer is what it gets, and that decodes.
+        let blanket = decide(&p7, &client(true), &RenderCaps::proven(true));
+        assert_eq!(
+            blanket.method,
+            PlaybackMethod::Remux,
+            "handing over the raw dual-layer file is the failure this closes"
+        );
+        assert!(
+            !blanket.preserve_dolby_vision,
+            "and keeping the RPUs in the copy is the same failure one layer down"
+        );
+        assert_eq!(blanket.delivered_dynamic_range, "hdr10");
+
+        // The blanket flag still excuses the client's HDR bit. Narrowing that
+        // too would tone-map this title to SDR, which is strictly worse than
+        // the base layer and is the regression the wide `allows_dolby_vision`
+        // exists to avoid.
+        let mut sdr_bit = client(true);
+        sdr_bit.supports_hdr = false;
+        let excused = decide(&p7, &sdr_bit, &RenderCaps::proven(true));
+        assert_eq!(excused.delivered_dynamic_range, "hdr10");
+        assert!(
+            !excused
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("tone-mapping to SDR")),
+            "{:?}",
+            excused.reasons
+        );
+
+        // The same client, enumerating the profile. It asked for dual-layer by
+        // number, so it gets it — the rule narrows a claim nobody made, not a
+        // claim somebody did.
+        let mut enumerating = client(false);
+        enumerating.dolby_vision_profiles = vec![7];
+        let asked_for_it = decide(&p7, &enumerating, &RenderCaps::proven(true));
+        assert_eq!(asked_for_it.method, PlaybackMethod::DirectPlay);
+        assert!(asked_for_it.preserve_dolby_vision);
+        assert!(
+            !asked_for_it.convert_dolby_vision,
+            "converting for a client that enumerated 7 would discard the layer it \
+             asked for"
+        );
+
+        // And a client that takes 8 and not 7 still gets the conversion, which
+        // is the branch this rule must not have swallowed.
+        let mut takes_eight = client(false);
+        takes_eight.dolby_vision_profiles = vec![8];
+        let converted = decide(
+            &p7,
+            &takes_eight,
+            &RenderCaps {
+                dolby_vision_convert: true,
+                ..RenderCaps::proven(true)
+            },
+        );
+        assert!(converted.convert_dolby_vision);
+        assert!(converted.preserve_dolby_vision);
+
+        // A row whose Dolby Vision columns were never backfilled answers from
+        // its label, and answers the same way. It cannot convert either
+        // (`file_can_convert_to_p81` needs the numbers), so preserving it would
+        // be the undecodable delivery with no conversion behind it.
+        let mut label_only = p7.clone();
+        label_only.dolby_vision = DolbyVisionFacts::default();
+        assert!(
+            !decide(&label_only, &client(true), &RenderCaps::proven(true)).preserve_dolby_vision,
+            "no columns, no conversion — and therefore no preservation either"
+        );
+
+        // Single-layer is untouched: the blanket flag means what it always
+        // meant for it. Profile 5 in particular has no compatible base to fall
+        // back to, so getting this wrong would tone-map rather than strip.
+        for (label, profile, compat) in [
+            ("Dolby Vision · Profile 8.1 (HDR10-compatible)", 8, Some(1)),
+            ("Dolby Vision · Profile 5", 5, None),
+        ] {
+            let mut single = p7.clone();
+            single.hdr_format = Some(label.to_owned());
+            single.dolby_vision = DolbyVisionFacts {
+                profile: Some(profile),
+                level: Some(9),
+                bl_compat_id: compat,
+                // The flag a muxer writes over a stream that has no
+                // enhancement layer. The profile is the answer, not this.
+                el_present: Some(true),
+                rpu_present: Some(true),
+            };
+            let decided = decide(&single, &client(true), &RenderCaps::proven(true));
+            assert_eq!(decided.method, PlaybackMethod::DirectPlay, "{label}");
+            assert!(decided.preserve_dolby_vision, "{label}");
+        }
+
+        // With no profile at all, the flag is the only witness there is, and
+        // the conservative reading is the right one.
+        let mut nameless = p7.clone();
+        nameless.hdr_format = Some("Dolby Vision".to_owned());
+        nameless.dolby_vision = DolbyVisionFacts {
+            el_present: Some(true),
+            ..DolbyVisionFacts::default()
+        };
+        assert!(dolby_vision_is_dual_layer(&nameless));
+        assert!(!decide(&nameless, &client(true), &RenderCaps::proven(true)).preserve_dolby_vision);
+    }
+
     /// Original means "no video re-encode", and a DV strip honours that — the
     /// base layer is copied. But it still cannot be direct play, because the
     /// raw file is what the browser refuses.
@@ -1847,7 +2078,9 @@ mod tests {
             "and the audio it can already play is copied"
         );
 
-        let safari = caps_profile(
+        // Names the profile, for the reason in
+        // `dolby_vision_is_not_handed_to_a_browser_that_cannot_decode_it`.
+        let mut safari = caps_profile(
             vec!["mp4".into()],
             vec!["hevc".into()],
             vec!["aac".into()],
@@ -1855,6 +2088,7 @@ mod tests {
             true,
             true,
         );
+        safari.dolby_vision_profiles = vec![7];
         assert_eq!(
             decide_forced(&dv, &safari, Force::Original, &RenderCaps::proven(true)).method,
             PlaybackMethod::DirectPlay
@@ -2245,7 +2479,7 @@ mod tests {
             label: "4K HEVC Main 10".to_owned(),
             lost: 41,
             secs: 60,
-            rate: 41,
+            rate: 41.0,
             at_ms: NOW_MS - age_ms,
         }
     }
@@ -2576,7 +2810,7 @@ mod tests {
             label: "   ".to_owned(),
             lost: 41,
             secs: 60,
-            rate: 41,
+            rate: 41.0,
             at_ms: NOW_MS,
         };
         assert_eq!(
@@ -2588,7 +2822,7 @@ mod tests {
         let zero_rate = caps::LearnedLimit {
             label: "HEVC Main 10".to_owned(),
             lost: 0,
-            rate: 0,
+            rate: 0.0,
             ..unlabelled.clone()
         };
         assert_eq!(
@@ -2609,6 +2843,47 @@ mod tests {
              lost 41 frames in 60s (41/min); Dolby Vision \u{2192} SDR",
             "no subject is still not a sentence with a hole in it"
         );
+    }
+
+    /// The document the browser actually sends must deserialize.
+    ///
+    /// This is the one that shipped broken. `capsDocument` puts the rate on
+    /// the wire exactly as `lostFrameRate` measured it — one decimal place —
+    /// and `serde_json` refuses a floating-point literal for an integer field,
+    /// `4.0` included. The refusal is not scoped to the field: it aborts the
+    /// whole `DeviceCaps`, and with it the `CreateSession` or decision body
+    /// carrying it. So one decode rescue recorded in a browser's local storage
+    /// was enough to make that browser's capabilities unreadable for thirty
+    /// days.
+    ///
+    /// It went unseen because `askDecision` catches the 400 and retries as the
+    /// flat query, so the viewer got a working, quietly less informed answer.
+    /// A create has no such fallback: once the web client sends its caps
+    /// there, this is a title that will not play.
+    #[test]
+    fn a_learned_limit_survives_the_rate_the_browser_measures() {
+        // Verbatim shape from `capsDocument`, fraction and all.
+        let document: caps::DeviceCaps = serde_json::from_str(
+            r#"{"v":2,"video":[{"codec":"hevc"}],
+                "learned_limits":[{"identity":"v1|hevc|main10|2160|b40","label":"4K HEVC Main 10",
+                                   "lost":13,"secs":19,"rate":41.1,"at":1788000000000}]}"#,
+        )
+        .expect("the document the browser sends has to deserialize");
+        let limit = &document.learned_limits[0];
+        assert!((limit.rate - 41.1).abs() < f64::EPSILON);
+        assert_eq!(limit.at_ms, 1_788_000_000_000, "`at` is the web's spelling");
+        assert!(
+            limit.reason(None).contains("41.1/min"),
+            "the fraction the client measured is what gets printed: {}",
+            limit.reason(None)
+        );
+
+        // A whole number is a float on this wire too — `+(4).toFixed(1)` is
+        // `4`, so both spellings reach the server from the same code path.
+        let whole: caps::DeviceCaps =
+            serde_json::from_str(r#"{"v":2,"audio":["aac"],"learned_limits":[{"rate":4}]}"#)
+                .expect("an integer rate is still a rate");
+        assert!((whole.learned_limits[0].rate - 4.0).abs() < f64::EPSILON);
     }
 
     /// The browser and the server must key a learned limit identically.
@@ -3710,15 +3985,24 @@ mod tests {
         let mut dv = file("mkv", "hevc", "aac");
         dv.hdr = Some("dolby_vision".to_owned());
         dv.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".to_owned());
+        // A client that takes this source's Dolby Vision names the profile it
+        // takes. The blanket flag is a claim about the format and does not
+        // cover dual-layer — see `decodes_dolby_vision_as_copied` — so a
+        // fixture that set only the flag would be testing that rule rather
+        // than the one this test is about.
         let hdr_client = |dolby: bool| {
-            caps_profile(
+            let mut profile = caps_profile(
                 vec!["mkv".into(), "mp4".into()],
                 vec!["hevc".into(), "h264".into()],
                 vec!["aac".into()],
                 None,
                 true,
                 dolby,
-            )
+            );
+            if dolby {
+                profile.dolby_vision_profiles = vec![7];
+            }
+            profile
         };
 
         // Safari decodes DV: the file goes over untouched, RPUs and all.
@@ -3828,7 +4112,9 @@ mod tests {
         assert_eq!(original.method, PlaybackMethod::Remux);
         assert_eq!(original.delivered_dynamic_range, "hdr10");
 
-        let safari = caps_profile(
+        // Names the profile, for the reason in
+        // `dolby_vision_is_not_handed_to_a_browser_that_cannot_decode_it`.
+        let mut safari = caps_profile(
             vec!["mp4".into()],
             vec!["hevc".into()],
             vec!["aac".into()],
@@ -3836,6 +4122,7 @@ mod tests {
             true,
             true,
         );
+        safari.dolby_vision_profiles = vec![7];
         assert_eq!(
             decide_forced(&dv, &safari, Force::Original, &RenderCaps::proven(true))
                 .delivered_dynamic_range,
