@@ -3760,6 +3760,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_terminal_generation_blocks_its_own_reuse_and_only_its_own() {
+        // The fleet shape this pins: 1,939 rows sat `attempt_limit` after a
+        // queue fault, and nothing could re-request those files, because
+        // `enqueue_analysis_request` refuses a generation that already exists
+        // in *any* state — terminal included. Moving the generation
+        // fingerprint is the only way to reopen them without editing history,
+        // and this is the assertion that says so.
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        store
+            .put_setting(crate::store::keys::ANALYSIS_MAX_ATTEMPTS, "1")
+            .await
+            .expect("configure attempt budget");
+        store
+            .enqueue_analysis_request(&request("stranded", false, 10))
+            .await
+            .expect("enqueue original");
+        let claimed = store
+            .claim_analysis_request("node-a", 10, 1_010)
+            .await
+            .expect("claim")
+            .expect("a queued request");
+        assert!(store
+            .retry_analysis_request(&claimed, "source_attestation_failed", 11, 12, true)
+            .await
+            .expect("charge the only attempt"));
+        assert!(store
+            .claim_analysis_request("node-a", 20, 1_020)
+            .await
+            .expect("settle attempt limit")
+            .is_none());
+        assert_eq!(
+            store.analysis_requests(10).await.expect("requests")[0].last_error_code,
+            "attempt_limit"
+        );
+
+        // Same generation: refused, however long ago it died. The refusal is
+        // returning the tombstone itself rather than a new row.
+        let mut same = request("stranded-again", false, 30);
+        assert_eq!(same.requested_generation, "test-generation");
+        let refused = store
+            .enqueue_analysis_request(&same)
+            .await
+            .expect("enqueue under the dead generation");
+        assert_eq!(
+            refused.request_id, "stranded",
+            "a terminal row blocks its own generation, which is what stranded the fleet"
+        );
+        assert_eq!(refused.state, "failed");
+
+        // A new regime token is a new generation, and the file is requestable
+        // again without a single row being deleted or edited.
+        same.request_id = "stranded-reopened".to_owned();
+        same.requested_generation = "test-generation/sampled-v1".to_owned();
+        let reopened = store
+            .enqueue_analysis_request(&same)
+            .await
+            .expect("enqueue under the new generation");
+        assert_eq!(reopened.request_id, "stranded-reopened");
+        assert_eq!(reopened.state, "queued");
+        assert_eq!(
+            store.analysis_requests(10).await.expect("requests").len(),
+            2,
+            "the tombstone stays as history beside its successor"
+        );
+    }
+
+    #[tokio::test]
     async fn terminal_analysis_history_is_age_and_generation_bounded() {
         let store = SqliteStore::open_in_memory().expect("store");
         seed_files(&store).await;
