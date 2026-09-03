@@ -3754,13 +3754,31 @@ is 500 files per call; a larger backlog is several calls, which is deliberate:
 read the verdict between them rather than putting the whole backlog back onto a
 queue that may still be broken.
 
-The response says what it skipped and why. `skipped_active` counts rows that
-were still working — reopening those would revoke a fence a live worker is
-holding, so they are left alone. `skipped_source_changed` counts rows whose file
-has changed underneath them; those cannot be retried into the same identity at
-all and are discovery's job, not this one's. `scan_truncated` means the call
-filled its own read ceiling, so the answer describes a page of the backlog
-rather than all of it — run it again.
+**It is safe to press twice.** A terminal row counts as reopenable only while
+no request for the same source, component and target is `queued`, `running`,
+`submitted` or `ready`. Reopening creates a *successor* and leaves the failed
+row in place as history, so without that rule the repaired file would still be
+offered tomorrow and every later press would re-force a library that is already
+indexed. "Nothing left to reopen" is the healthy answer, not an error.
+
+Two things it does not cover, on purpose. **Forced generations** are excluded:
+a forced request is somebody's deliberate one-off, not a queue fault to repair.
+**Standalone cluster jobs** with no operator request behind them — playback's
+foreground enqueue makes those — are outside this endpoint entirely and belong
+to discovery's own retry.
+
+The response says what stopped it. `skipped_unavailable` counts rows whose
+successor could not be created: the file changed underneath the request, so its
+identity is no longer reachable and discovery owns it now, or another actor
+inserted a successor between this call's read and its write.
+`stopped_at_headroom` means the active-request table was close enough to its
+4,096-row ceiling that continuing would have started refusing *every other*
+producer — discovery, playback's foreground enqueue, your own single-row Retry —
+so the call stopped early; run it again once the queue has drained.
+`scan_truncated` means more is reopenable than one call reads, so run it again.
+
+A reopen into a paused queue is refused (`409`) rather than silently piling up
+work nothing will claim.
 
 **Settings → Content analysis → Attention** exposes the same thing as *Reopen
 everything failed…*, which previews first and then asks. *Retry this page* beside

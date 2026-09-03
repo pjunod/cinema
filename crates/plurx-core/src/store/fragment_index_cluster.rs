@@ -1040,6 +1040,11 @@ pub struct AnalysisHistoryPage {
     pub next_cursor: Option<AnalysisHistoryCursor>,
 }
 
+/// The ceiling `enqueue_analysis_request` refuses at. Exposed so a bulk
+/// operator action can leave headroom rather than filling the table every
+/// other producer needs to be able to enqueue into at all.
+pub const MAX_ACTIVE_ANALYSIS_REQUESTS: i64 = 4_096;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalysisStatusSummary {
     pub total: i64,
@@ -1158,6 +1163,28 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ) -> Result<u64, StoreError>;
 
     async fn analysis_requests(&self, limit: i64) -> Result<Vec<AnalysisRequest>, StoreError>;
+
+    /// Terminal requests that a bulk reopen should actually act on.
+    ///
+    /// Narrower than "everything failed", and the difference is what makes a
+    /// bulk reopen safe to press twice. A row is reopenable only when no
+    /// other request for the same source identity, component and target is
+    /// `queued`, `running`, `submitted` or `ready` — so a file that a previous
+    /// reopen already repaired, or whose successor is still in flight, is not
+    /// offered again. Without that predicate the failed row stays in the
+    /// operator's attention list forever after its successor succeeds, and
+    /// every later press re-forces a library that is already indexed.
+    ///
+    /// Forced requests are excluded: a forced generation is somebody's
+    /// deliberate one-off, not a queue fault to repair.
+    ///
+    /// Rows are ordered oldest-terminal first, so paging through a backlog
+    /// makes progress rather than re-offering the same head.
+    async fn reopenable_analysis_requests(
+        &self,
+        component: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AnalysisRequest>, StoreError>;
 
     async fn analysis_request(
         &self,

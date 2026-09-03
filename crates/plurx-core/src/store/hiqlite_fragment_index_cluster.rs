@@ -25,7 +25,7 @@ const MAX_ERROR_CODE_BYTES: usize = 64;
 const MAX_LOCAL_EXCLUSIONS: usize = MAX_ACTIVE_JOBS as usize;
 const CLAIM_SCAN_LIMIT: i64 = MAX_ACTIVE_JOBS;
 const QUEUE_ELIGIBILITY_MS: i64 = 6 * 60 * 60 * 1_000;
-const MAX_ANALYSIS_REQUESTS: i64 = 4_096;
+use super::MAX_ACTIVE_ANALYSIS_REQUESTS as MAX_ANALYSIS_REQUESTS;
 const MAX_LIST_ROWS: i64 = 500;
 const MAX_ATTEMPT_HISTORY_PER_REQUEST: i64 = 64;
 
@@ -1999,6 +1999,39 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         updated_at_ms DESC, request_id LIMIT $1"
                 ),
                 params!(limit),
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.0)
+            .collect())
+    }
+
+    async fn reopenable_analysis_requests(
+        &self,
+        component: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AnalysisRequest>, StoreError> {
+        let limit = limit.clamp(1, MAX_LIST_ROWS);
+        let component = component.map(str::to_owned);
+        Ok(self
+            .client()
+            .query_consistent_map::<RequestRow, _>(
+                format!(
+                    "SELECT {REQUEST_COLS} FROM analysis_requests terminal
+                      WHERE terminal.state IN ('failed', 'cancelled')
+                        AND terminal.force_rebuild = 0
+                        AND ($2 IS NULL OR terminal.component = $2)
+                        AND NOT EXISTS (
+                          SELECT 1 FROM analysis_requests successor
+                           WHERE successor.file_id = terminal.file_id
+                             AND successor.source_size = terminal.source_size
+                             AND successor.source_mtime = terminal.source_mtime
+                             AND successor.component = terminal.component
+                             AND successor.target_node_id = terminal.target_node_id
+                             AND successor.state IN ('queued','running','submitted','ready'))
+                      ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT $1"
+                ),
+                params!(limit, component),
             )
             .await?
             .into_iter()

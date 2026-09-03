@@ -11395,14 +11395,17 @@ async function reopenFailedAnalysis(btn){
   try{
     const preview=await api("/analysis/reopen",{method:"POST",body:{dry_run:true,limit:500}});
     const files=preview.files||0, rows=preview.reopened||0;
-    if(!files){ toast("Nothing terminal to reopen"); return; }
-    const scope=preview.scan_truncated?` (the first ${preview.scan_limit} rows examined)`:"";
-    const skipped=preview.skipped_active?` ${preview.skipped_active} still working ${preview.skipped_active===1?'row is':'rows are'} left alone.`:"";
-    if(!confirm(`Reopen ${rows} analysis ${rows===1?'item':'items'} across ${files} ${files===1?'file':'files'}${scope}?${skipped}`)) return;
+    // Nothing reopenable is the normal answer once the queue has recovered:
+    // a file whose successor is queued or already built is not offered again,
+    // which is what makes this safe to press twice.
+    if(!files){ toast("Nothing left to reopen"); return; }
+    const more=preview.scan_truncated?" There is more waiting than one run can take; run it again afterwards.":"";
+    if(!confirm(`Reopen ${rows} analysis ${rows===1?'item':'items'} across ${files} ${files===1?'file':'files'}?${more}`)) return;
     if(btn) btn.textContent="Reopening…";
     const done=await api("/analysis/reopen",{method:"POST",body:{dry_run:false,limit:500}});
-    const changed=done.skipped_source_changed||0;
-    toast(`${done.reopened||0} reopened${changed?`, ${changed} skipped: source changed`:""}`);
+    const unavailable=done.skipped_unavailable||0;
+    const held=done.stopped_at_headroom?", stopped early to leave queue room":"";
+    toast(`${done.reopened||0} reopened${unavailable?`, ${unavailable} no longer requestable`:""}${held}`);
     await renderAnalysis(PAGE_RENDER_GENERATION,true);
   }catch(error){ toast(error.message||"Couldn’t reopen analysis"); }
   finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }

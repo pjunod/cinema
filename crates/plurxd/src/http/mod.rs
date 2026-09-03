@@ -9156,8 +9156,12 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{retried}");
         assert_eq!(retried["state"], "queued");
+        assert!(
+            retried["job_id"].is_string(),
+            "the retry response names its successor: {retried}"
+        );
         assert_ne!(
-            retried["request_id"], requested["request_id"],
+            retried["job_id"], requested["request_id"],
             "an explicit retry is a successor generation, not a mutation of its tombstone"
         );
 
@@ -9169,20 +9173,6 @@ mod tests {
                 .0,
             StatusCode::UNAUTHORIZED
         );
-        let (status, preview) = call(
-            &app,
-            post("/api/v1/analysis/reopen", Some(&admin), json!({})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{preview}");
-        assert_eq!(
-            preview["dry_run"], true,
-            "an empty reopen body must not requeue anything"
-        );
-        // The one live request above is `queued`, so it is left alone and
-        // said so rather than silently omitted.
-        assert_eq!(preview["reopened"], 0, "{preview}");
-        assert_eq!(preview["files"], 0, "{preview}");
         for bad in [json!({"limit": 0}), json!({"limit": 501})] {
             assert_eq!(
                 call(&app, post("/api/v1/analysis/reopen", Some(&admin), bad))
@@ -9218,6 +9208,138 @@ mod tests {
             .0,
             StatusCode::UNPROCESSABLE_ENTITY
         );
+
+        // The cancelled tombstone left by the DELETE above is terminal, and
+        // the successor `/retry` produced is `queued` — so nothing is
+        // reopenable while that successor is alive. This is the property that
+        // makes the button safe to press twice, and it is asserted before
+        // anything is reopened rather than after.
+        let (status, guarded) = call(
+            &app,
+            post("/api/v1/analysis/reopen", Some(&admin), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{guarded}");
+        assert_eq!(guarded["dry_run"], true, "an empty body must not requeue");
+        assert_eq!(
+            guarded["reopened"], 0,
+            "a terminal row with a live successor is not reopenable: {guarded}"
+        );
+
+        // Retire the successor, and the same file becomes reopenable.
+        let successor_url = format!(
+            "/api/v1/analysis/jobs/{}",
+            retried["job_id"].as_str().expect("successor id")
+        );
+        assert_eq!(
+            call(&app, delete(&successor_url, Some(&admin))).await.0,
+            StatusCode::OK
+        );
+        let (status, preview) = call(
+            &app,
+            post("/api/v1/analysis/reopen", Some(&admin), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(preview["dry_run"], true);
+        assert!(
+            preview["reopened"].as_u64().unwrap_or(0) >= 1,
+            "a terminal row with no live successor is reopenable: {preview}"
+        );
+        assert_eq!(preview["files"], 1, "{preview}");
+        assert_eq!(preview["scan_truncated"], false, "{preview}");
+        assert_eq!(preview["stopped_at_headroom"], false, "{preview}");
+        assert!(
+            preview["rows"][0]["successor_id"].is_null(),
+            "a preview has not created anything to name: {preview}"
+        );
+        let previewed_request = preview["rows"][0]["request_id"]
+            .as_str()
+            .expect("previewed request id")
+            .to_owned();
+
+        // A preview changes nothing, which is the whole promise of the
+        // default: run it twice and get the same answer.
+        let (_, again) = call(
+            &app,
+            post("/api/v1/analysis/reopen", Some(&admin), json!({})),
+        )
+        .await;
+        assert_eq!(again["reopened"], preview["reopened"], "{again}");
+
+        // Now actually reopen, and check a successor was created for the row
+        // the preview named.
+        let (status, done) = call(
+            &app,
+            post(
+                "/api/v1/analysis/reopen",
+                Some(&admin),
+                json!({"dry_run": false, "limit": 5}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{done}");
+        assert_eq!(done["dry_run"], false);
+        assert_eq!(done["reopened"], preview["reopened"], "{done}");
+        assert_eq!(done["skipped_unavailable"], 0, "{done}");
+        let successor = done["rows"][0]["successor_id"]
+            .as_str()
+            .expect("a reopen names the generation it created")
+            .to_owned();
+        assert_ne!(successor, previewed_request, "a successor is a new row");
+        let (status, reopened_job) = call(
+            &app,
+            get(&format!("/api/v1/analysis/jobs/{successor}"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reopened_job}");
+        assert_eq!(reopened_job["state"], "queued", "{reopened_job}");
+        // The tombstone is still there: reopening is a successor, not an edit.
+        let (status, tombstone) = call(
+            &app,
+            get(
+                &format!("/api/v1/analysis/jobs/{previewed_request}"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{tombstone}");
+        assert!(
+            matches!(tombstone["state"].as_str(), Some("failed" | "canceled")),
+            "{tombstone}"
+        );
+
+        // And pressing again is a no-op, because the successor it just made
+        // is alive. This is the regression that would otherwise re-force an
+        // already-indexed library on every press.
+        let (_, pressed_twice) = call(
+            &app,
+            post(
+                "/api/v1/analysis/reopen",
+                Some(&admin),
+                json!({"dry_run": false, "limit": 5}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            pressed_twice["reopened"], 0,
+            "a second press must not re-request work it already reopened: {pressed_twice}"
+        );
+        assert_eq!(pressed_twice["skipped_unavailable"], 0, "{pressed_twice}");
+
+        // A component filter that matches nothing returns nothing rather than
+        // whatever happened to be on the first page.
+        let (_, filtered) = call(
+            &app,
+            post(
+                "/api/v1/analysis/reopen",
+                Some(&admin),
+                json!({"component": "skip_markers"}),
+            ),
+        )
+        .await;
+        assert_eq!(filtered["reopened"], 0, "{filtered}");
+
         // Manual semantic boundaries are a separate, revision-fenced admin
         // action. A rebuild cannot implicitly opt into discarding one.
         let manual_url = format!("/api/v1/files/{}/timeline-annotations/credits", s.file);
