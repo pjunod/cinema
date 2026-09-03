@@ -550,7 +550,8 @@ change**, and Apple passed both 20/20 on both devices. It never ran their
 product — the `MultipleAxes` comment says exactly that — and the product is the
 only transition that occurs.
 
-**One hardware case now gates the milestone**: 20 consecutive commits on a
+**One hardware case now gates the milestone**, spec'd to run in
+[M6-AXIS-CASE-HANDOFF.md](M6-AXIS-CASE-HANDOFF.md): 20 consecutive commits on a
 recipe pair that moves resolution *and* delivery method together, on a
 direct-playing source. Acceptance is the spike's own. §3.4 must not ship before
 it, and `PREPARED_AXIS` must not be widened on the strength of two separate
