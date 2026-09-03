@@ -28,7 +28,7 @@ transcribed as `PlayerInputRouting.closeSteps` (Apple) and
 by its client suite; the JS contract test pins the fixture's shape, and the
 Apple suite pins the call site (the ✕ and the failure view's Close run
 `closePlayer()`, and nothing in `PlayerView` manufactures a `back` press).
-Apple build 114, Android versionCode 69. Swift and Kotlin compile only on
+Apple build 115, Android versionCode 70 (main took 114/69 while this was open). Swift and Kotlin compile only on
 CI; `make web-check`'s player suites and the input fence are green in the
 clone. **Not run on hardware** — the device pass is the iPhone/iPad ✕ from
 transport and mid-scrub (one tap exits), from info Standard and Debug (the
@@ -38,8 +38,8 @@ mid-scrub.
 
 ## Activity's Now playing row, read as a card
 
-**PR [#849](https://github.com/pjunod/plurx/pull/849) — open, 2026-09-03,
-branch `web/activity-stream-card`.** Paul asked for the activity status display to be "a
+**PR [#849](https://github.com/pjunod/plurx/pull/849) — merged to main as
+`a94a32cb`, 2026-09-03.** Paul asked for the activity status display to be "a
 lot nicer": the Stream cell was one " · "-joined sentence of every session
 fact, with the three things an operator brings to the page — is it playing,
 is the server keeping up, is it held and why — buried among sequence

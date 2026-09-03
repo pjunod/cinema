@@ -670,6 +670,14 @@ test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerContr
 test_anchor = "verticalDpadLeavesTheProgressSliderWithoutSeeking"
 
 [[fixes]]
+id = "apple.observed-download-clamp"
+commits = ["49b647f5"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "nonisolated static func observedDownloadBps(fromObservedBitrate observed: Double) -> Int64?"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testObservedDownloadBpsIsClampedRatherThanTrapping"
+
+[[fixes]]
 id = "apple.close-control-exits"
 commits = ["0f904213"]
 source = "clients/apple/Sources/PlayerInputRouting.swift"
