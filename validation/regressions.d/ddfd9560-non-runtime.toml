@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["ddfd9560"]
+points = []
+checks = []
+reason = "This commit records the diagnosis and the repair plan; the correction it describes and its evidence land in 120a3d29 (the statement reorder, the repo-wide placeholder census, and the backend-neutral renew/yield contract) and the milestones that follow it."
+ignore = true
