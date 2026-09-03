@@ -55,6 +55,20 @@ carries the builder's own reason. A review caught the backoff being inert on
 every clustered voter: the hiqlite store's injected clock answers in unix
 seconds and the deadline is compared against milliseconds.
 
+**What merging main cost, and what it found.** Adding a v45 migration broke
+three fixtures that describe an older schema relative to the newest one
+rather than by name. Two `sqlite_v43_guard_migration_*` cases called v43
+`SQLITE_SCHEMA_VERSION - 1` and downgraded a current database by undoing v44
+alone; `populated_v14_import_fixture` builds a current database and walks it
+back by hand, and its list stopped at v44. The third one is the interesting
+one: it left `fragment_index_outcomes` in place under a `user_version` of
+14, so activation replayed the CREATE onto a database that already had the
+table, the voter process died inside `select_daemon_store`, and the one-voter
+contract reported it as *activation voter exited before ready* — a failure
+whose message names neither the migration nor the table. All three now name
+the version they mean and drop everything above it. The whole replicated
+Store lane passes locally: 120 of 120.
+
 **The deployed-build re-test, as far as it goes.** The fleet was read over
 SSH on 2026-09-03. The handoff's premise holds: #842 (`60e1be68`) is an
 ancestor of every binary now running, so the arm it closed is closed in
