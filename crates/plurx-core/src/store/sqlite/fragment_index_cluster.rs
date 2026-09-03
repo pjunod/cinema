@@ -2414,6 +2414,176 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
+    async fn complete_cluster_fragment_index_by_hydration(
+        &self,
+        job: &ClusterFragmentIndexJob,
+        artifact: &ClusterFragmentIndexArtifact,
+        location: &ClusterFragmentIndexLocation,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if artifact.cache_key != job.cache_key
+            || artifact.file_id != job.file_id
+            || artifact.source_size != job.source_size
+            || artifact.source_mtime != job.source_mtime
+            || artifact.source_sha256 != job.source_sha256
+            || artifact.pipeline_sha256 != job.pipeline_sha256
+            || location.cache_key != job.cache_key
+            // Deliberately not `artifact.built_by_node_id == job.owner_node_id`:
+            // hydration settles from somebody else's build. The location row
+            // is still this node's own claim.
+            || location.node_id != job.owner_node_id
+            || artifact.bytes <= 0
+            || location.bytes != artifact.bytes
+            || !valid_hex_digest(&artifact.blob_sha256)
+        {
+            return Err(StoreError::Task(
+                "invalid cluster fragment-index hydration".to_owned(),
+            ));
+        }
+        let job = job.clone();
+        let artifact = artifact.clone();
+        let location = location.clone();
+        let logical_cache_key = cluster_fragment_index_key(
+            artifact.file_id,
+            artifact.source_size,
+            artifact.source_mtime,
+            &artifact.source_sha256,
+            &artifact.pipeline_sha256,
+        )
+        .ok_or_else(|| StoreError::Task("invalid fragment-index logical key".to_owned()))?;
+        self.with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let current: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cluster_fragment_index_jobs
+                  WHERE cache_key = ?1 AND target_node_id = ?11
+                    AND state = 'running' AND owner_node_id = ?2
+                    AND fence = ?3 AND lease_expires_ms > ?4
+                    AND file_id = ?5 AND source_size = ?6 AND source_mtime = ?7
+                    AND source_sha256 = ?8 AND pipeline_sha256 = ?9
+                    AND EXISTS (SELECT 1 FROM files current_file
+                      WHERE current_file.id = ?5 AND current_file.size = ?6
+                        AND current_file.mtime = ?7)
+                    AND (?10 = ?1 OR EXISTS (
+                      SELECT 1 FROM analysis_requests
+                       WHERE component = 'fragment_index' AND state = 'submitted'
+                         AND result_cache_key = ?1 AND target_node_id = ?11) OR EXISTS (
+                      SELECT 1 FROM cluster_fragment_index_heads
+                       WHERE logical_cache_key = ?10 AND generation_cache_key = ?1)))",
+                params![
+                    job.cache_key,
+                    job.owner_node_id,
+                    job.fence,
+                    now_ms,
+                    job.file_id,
+                    job.source_size,
+                    job.source_mtime,
+                    job.source_sha256,
+                    job.pipeline_sha256,
+                    logical_cache_key,
+                    job.target_node_id,
+                ],
+                |row| row.get(0),
+            )?;
+            if !current {
+                transaction.commit()?;
+                return Ok(false);
+            }
+            // The artifact is somebody else's and is never written here. It
+            // has to already be there, byte for byte, or this node has
+            // hydrated something that is not what the job asked for.
+            let matching: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cluster_fragment_index_artifacts
+                  WHERE cache_key = ?1 AND source_sha256 = ?2 AND pipeline_sha256 = ?3
+                    AND blob_sha256 = ?4 AND bytes = ?5)",
+                params![
+                    artifact.cache_key,
+                    artifact.source_sha256,
+                    artifact.pipeline_sha256,
+                    artifact.blob_sha256,
+                    artifact.bytes,
+                ],
+                |row| row.get(0),
+            )?;
+            if !matching {
+                return Err(StoreError::Database(
+                    "hydrated fragment index does not match the published artifact".to_owned(),
+                ));
+            }
+            transaction.execute(
+                "INSERT INTO cluster_fragment_index_locations
+                    (cache_key, node_id, bytes, verified_at_ms, last_seen_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(cache_key, node_id) DO UPDATE SET
+                    bytes = excluded.bytes, verified_at_ms = excluded.verified_at_ms,
+                    last_seen_at_ms = excluded.last_seen_at_ms",
+                params![
+                    location.cache_key,
+                    location.node_id,
+                    location.bytes,
+                    location.verified_at_ms,
+                    location.last_seen_at_ms,
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO cluster_fragment_index_heads
+                    (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+                 SELECT ?1, ?2, request_id, ?3 FROM analysis_requests
+                  WHERE component = 'fragment_index' AND state = 'submitted'
+                    AND result_cache_key = ?2
+                    AND target_node_id = ?4
+                    AND (force_rebuild = 1 OR expected_predecessor_generation = '')
+                    AND expected_predecessor_generation = COALESCE((
+                      SELECT generation_cache_key FROM cluster_fragment_index_heads
+                       WHERE logical_cache_key = ?1
+                    ), '')
+                    AND NOT EXISTS (
+                      SELECT 1 FROM analysis_requests newer
+                       WHERE newer.file_id = analysis_requests.file_id
+                         AND newer.source_size = analysis_requests.source_size
+                         AND newer.source_mtime = analysis_requests.source_mtime
+                         AND newer.component = 'fragment_index'
+                         AND newer.target_node_id = analysis_requests.target_node_id
+                         AND (newer.created_at_ms > analysis_requests.created_at_ms
+                           OR (newer.created_at_ms = analysis_requests.created_at_ms
+                             AND newer.request_id > analysis_requests.request_id))
+                         AND newer.state IN ('queued','running','submitted','ready'))
+                 ON CONFLICT(logical_cache_key) DO UPDATE SET
+                    generation_cache_key = excluded.generation_cache_key,
+                    request_id = excluded.request_id,
+                    updated_at_ms = excluded.updated_at_ms
+                  WHERE cluster_fragment_index_heads.generation_cache_key = (
+                    SELECT expected_predecessor_generation FROM analysis_requests
+                     WHERE request_id = excluded.request_id)",
+                params![logical_cache_key, job.cache_key, now_ms, job.target_node_id],
+            )?;
+            transaction.execute(
+                "INSERT INTO cluster_fragment_index_heads
+                    (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+                 SELECT ?1, ?2, '', ?3 WHERE ?1 = ?2
+                 ON CONFLICT(logical_cache_key) DO NOTHING",
+                params![logical_cache_key, job.cache_key, now_ms],
+            )?;
+            let changed = transaction.execute(
+                "UPDATE cluster_fragment_index_jobs
+                    SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
+                        last_error_code = NULL, updated_at_ms = ?1
+                  WHERE cache_key = ?2 AND target_node_id = ?5
+                    AND state = 'running' AND owner_node_id = ?3
+                    AND fence = ?4 AND lease_expires_ms > ?1",
+                params![
+                    now_ms,
+                    job.cache_key,
+                    job.owner_node_id,
+                    job.fence,
+                    job.target_node_id
+                ],
+            )?;
+            transaction.commit()?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
     async fn fail_cluster_fragment_index(
         &self,
         cache_key: &str,

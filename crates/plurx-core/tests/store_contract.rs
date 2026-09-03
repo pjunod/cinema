@@ -16840,6 +16840,222 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
     .await;
 }
 
+/// A second node settles a job from the artifact the first one built, without
+/// building anything and without rewriting whose build it was.
+///
+/// Discovery on each voter targets itself, so N voters queue N jobs for one
+/// `cache_key` and, on a healthy queue, N full passes over the same file
+/// produce one artifact. This is the store half of not doing that.
+#[tokio::test]
+async fn a_hydrated_job_settles_from_another_nodes_artifact_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "hydration").await;
+        let source_sha256 = "a1".repeat(32);
+        let pipeline_sha256 = "b2".repeat(32);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("hydration cache key");
+
+        // Two voters, each with its own targeted job for the same key.
+        for target in ["node-a", "node-b"] {
+            assert!(store
+                .enqueue_cluster_fragment_index(&NewClusterFragmentIndexJob {
+                    cache_key: cache_key.clone(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    source_sha256: source_sha256.clone(),
+                    pipeline_sha256: pipeline_sha256.clone(),
+                    priority: "normal".to_owned(),
+                    trigger: "background".to_owned(),
+                    target_node_id: target.to_owned(),
+                    not_before_ms: 10,
+                    created_at_ms: 10,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {target}: {error}")));
+        }
+
+        // Node A builds it.
+        let built = store
+            .claim_cluster_fragment_index("node-a", &[], 20, 1_020)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim for node-a: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a queued job for node-a"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            blob_sha256: "c3".repeat(32),
+            bytes: 4_096,
+            built_by_node_id: "node-a".to_owned(),
+            built_at_ms: 30,
+        };
+        assert!(store
+            .complete_cluster_fragment_index(
+                &built,
+                &artifact,
+                &ClusterFragmentIndexLocation {
+                    cache_key: cache_key.clone(),
+                    node_id: "node-a".to_owned(),
+                    bytes: 4_096,
+                    verified_at_ms: 30,
+                    last_seen_at_ms: 30,
+                },
+                30,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: node-a completes its build: {error}")));
+
+        // Node B claims its own job and settles from A's artifact.
+        let hydrating = store
+            .claim_cluster_fragment_index("node-b", &[], 40, 1_040)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim for node-b: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a queued job for node-b"));
+        assert_eq!(hydrating.target_node_id, "node-b", "{backend}");
+        assert!(store
+            .complete_cluster_fragment_index_by_hydration(
+                &hydrating,
+                &artifact,
+                &ClusterFragmentIndexLocation {
+                    cache_key: cache_key.clone(),
+                    node_id: "node-b".to_owned(),
+                    bytes: 4_096,
+                    verified_at_ms: 50,
+                    last_seen_at_ms: 50,
+                },
+                50,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: node-b settles by hydration: {error}")));
+
+        let settled = store
+            .cluster_fragment_index_job(&cache_key, "node-b")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read node-b's job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: node-b's job still exists"));
+        assert_eq!(settled.state, "ready", "{backend}");
+
+        // The artifact still says who actually built it. Relabelling it to
+        // get past `complete`'s builder check would have appeared to work,
+        // because the artifact insert is `ON CONFLICT DO NOTHING`.
+        let stored = store
+            .cluster_fragment_index_artifact(&cache_key)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read artifact: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the artifact exists"));
+        assert_eq!(
+            stored.built_by_node_id, "node-a",
+            "{backend}: hydration must not claim somebody else's build"
+        );
+        assert_eq!(stored.blob_sha256, artifact.blob_sha256, "{backend}");
+
+        // Both nodes now hold it.
+        let mut holders = store
+            .cluster_fragment_index_locations(&cache_key)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read locations: {error}"))
+            .into_iter()
+            .map(|location| location.node_id)
+            .collect::<Vec<_>>();
+        holders.sort();
+        assert_eq!(
+            holders,
+            vec!["node-a".to_owned(), "node-b".to_owned()],
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+/// Hydration is still a claimed write: a stale fence settles nothing, and a
+/// blob that is not the published artifact settles nothing either.
+#[tokio::test]
+async fn hydration_refuses_a_stale_claim_and_a_mismatched_blob() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "hydration-guards").await;
+        let source_sha256 = "d4".repeat(32);
+        let pipeline_sha256 = "e5".repeat(32);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("guard cache key");
+        assert!(store
+            .enqueue_cluster_fragment_index(&NewClusterFragmentIndexJob {
+                cache_key: cache_key.clone(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                source_sha256: source_sha256.clone(),
+                pipeline_sha256: pipeline_sha256.clone(),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                target_node_id: "node-b".to_owned(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}")));
+        let claim = store
+            .claim_cluster_fragment_index("node-b", &[], 20, 1_020)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a queued job"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            blob_sha256: "f6".repeat(32),
+            bytes: 2_048,
+            built_by_node_id: "node-a".to_owned(),
+            built_at_ms: 30,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key: cache_key.clone(),
+            node_id: "node-b".to_owned(),
+            bytes: 2_048,
+            verified_at_ms: 40,
+            last_seen_at_ms: 40,
+        };
+
+        // Nothing published yet: there is no artifact to hydrate from, so the
+        // job must not settle. Hydration never writes an artifact row.
+        let unpublished = store
+            .complete_cluster_fragment_index_by_hydration(&claim, &artifact, &location, 40)
+            .await;
+        assert!(
+            !matches!(unpublished, Ok(true)),
+            "{backend}: hydration settled without a published artifact"
+        );
+        assert!(
+            store
+                .cluster_fragment_index_artifact(&cache_key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read artifact: {error}"))
+                .is_none(),
+            "{backend}: hydration must never publish an artifact of its own"
+        );
+
+        // A stale fence settles nothing even once the artifact is real.
+        let mut stale = claim.clone();
+        stale.fence -= 1;
+        assert!(
+            !store
+                .complete_cluster_fragment_index_by_hydration(&stale, &artifact, &location, 45)
+                .await
+                .unwrap_or(false),
+            "{backend}: a stale fence must not settle a job"
+        );
+    })
+    .await;
+}
+
 /// The four figures the verdict divides by, read off a queue driven through
 /// the states they describe.
 ///

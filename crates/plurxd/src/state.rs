@@ -6800,6 +6800,23 @@ impl JobManager {
             if lost.is_cancelled() {
                 return Err(AnalysisResolutionError::ClaimLost);
             }
+            // `submit` refuses for two unrelated reasons and this used to map
+            // both to a busy queue with an *uncharged* retry — which is an
+            // infinite loop, two claims per tick per node, whenever the
+            // refusal is the permanent one. A `(cache_key, target)` job that
+            // is already terminal will still be terminal on the next tick and
+            // on every tick after it: the request cannot make progress and
+            // saying so is the only way it stops. The bulk reopen is how an
+            // operator revisits that decision.
+            if let Ok(Some(existing)) = self
+                .store
+                .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
+                .await
+            {
+                if matches!(existing.state.as_str(), "failed" | "cancelled") {
+                    return Err(AnalysisResolutionError::Terminal("job_terminal"));
+                }
+            }
             return Err(AnalysisResolutionError::Retry {
                 code: "queue_full_or_busy",
                 charge_attempt: false,
@@ -7247,6 +7264,84 @@ impl JobManager {
             .await;
             return false;
         };
+
+        // Before building: has anybody already built exactly this?
+        //
+        // Discovery on each voter targets itself, so four voters queue four
+        // jobs for one `cache_key`, and on a healthy queue that is four full
+        // passes over the same file to produce one artifact. Once any of them
+        // has published it, the rest need the bytes and a location row, not a
+        // decode. `hydrate` reads the local cache first and then asks holders
+        // over the peer transport; a miss just falls through to the build.
+        //
+        // Settling from inside the claimed job is what makes this safe, and is
+        // what the older comment above `submit_fragment_index_analysis` could
+        // not do from the request side: the fence, the lease and the source
+        // identity are all still checked by the store, and the artifact row
+        // itself is never rewritten.
+        if let Ok(Some(published)) = self
+            .store
+            .cluster_fragment_index_artifact(&job.cache_key)
+            .await
+        {
+            let hydrated = crate::fragment_index_cluster::hydrate(
+                self.store.as_ref(),
+                self.membership.as_ref(),
+                &node_id,
+                &worker.cache_root,
+                &published,
+            )
+            .await;
+            if matches!(hydrated, Ok(Some(_))) {
+                let now = clock_ms();
+                let location = plurx_core::store::ClusterFragmentIndexLocation {
+                    cache_key: job.cache_key.clone(),
+                    node_id: node_id.clone(),
+                    bytes: published.bytes,
+                    verified_at_ms: now,
+                    last_seen_at_ms: now,
+                };
+                match self
+                    .store
+                    .complete_cluster_fragment_index_by_hydration(&job, &published, &location, now)
+                    .await
+                {
+                    Ok(true) => {
+                        let _ = self.store.settle_analysis_requests(now).await;
+                        tracing::info!(
+                            cache_key = %job.cache_key,
+                            built_by = %published.built_by_node_id,
+                            "settled a fragment-index job from an artifact another node built"
+                        );
+                        let _ = retire_heartbeat(stop, heartbeat).await;
+                        return true;
+                    }
+                    // The claim moved, or the source did. Either way this is
+                    // not a build worth starting, and the sweep will requeue.
+                    Ok(false) => {
+                        let retired = retire_heartbeat(stop, heartbeat).await;
+                        self.yield_fragment_index_job(
+                            &retired,
+                            &job,
+                            &node_id,
+                            now,
+                            now.saturating_add(retry_ms),
+                        )
+                        .await;
+                        return false;
+                    }
+                    Err(error) => {
+                        // The bytes on disk are not the published artifact.
+                        // Build rather than settle a lie.
+                        tracing::warn!(
+                            cache_key = %job.cache_key,
+                            %error,
+                            "hydrated fragment index did not settle; building instead"
+                        );
+                    }
+                }
+            }
+        }
 
         let progress_jobs = Arc::clone(&self);
         let progress_key = job.cache_key.clone();

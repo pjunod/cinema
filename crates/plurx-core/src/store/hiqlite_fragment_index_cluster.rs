@@ -3270,6 +3270,226 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         Ok(results.last().copied() == Some(1))
     }
 
+    async fn complete_cluster_fragment_index_by_hydration(
+        &self,
+        job: &ClusterFragmentIndexJob,
+        artifact: &ClusterFragmentIndexArtifact,
+        location: &ClusterFragmentIndexLocation,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if artifact.cache_key != job.cache_key
+            || artifact.file_id != job.file_id
+            || artifact.source_size != job.source_size
+            || artifact.source_mtime != job.source_mtime
+            || artifact.source_sha256 != job.source_sha256
+            || artifact.pipeline_sha256 != job.pipeline_sha256
+            || location.cache_key != job.cache_key
+            // Deliberately not `artifact.built_by_node_id == job.owner_node_id`:
+            // hydration settles from somebody else's build. The location row
+            // is still this node's own claim.
+            || location.node_id != job.owner_node_id
+            || artifact.bytes <= 0
+            || location.bytes != artifact.bytes
+            || !valid_hex_digest(&artifact.blob_sha256)
+        {
+            return Err(StoreError::Task(
+                "invalid cluster fragment-index hydration".to_owned(),
+            ));
+        }
+        let logical_cache_key = cluster_fragment_index_key(
+            artifact.file_id,
+            artifact.source_size,
+            artifact.source_mtime,
+            &artifact.source_sha256,
+            &artifact.pipeline_sha256,
+        )
+        .ok_or_else(|| StoreError::Task("invalid fragment-index logical key".to_owned()))?;
+        let results = self
+            .client()
+            .txn(vec![
+                // The artifact is somebody else's and is never written here. The
+                // location statement below requires it to already exist, byte
+                // for byte, so a node that hydrated the wrong bytes settles
+                // nothing.
+                (
+                    "INSERT INTO cluster_fragment_index_locations
+                        (cache_key, node_id, bytes, verified_at_ms, last_seen_at_ms)
+                     SELECT $1, $2, $3, $4, $5
+                      WHERE EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
+                        WHERE cache_key = $1 AND target_node_id = $6
+                          AND state = 'running' AND owner_node_id = $2
+                          AND fence = $7 AND lease_expires_ms > $8)
+                        AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
+                          WHERE cache_key = $1 AND source_sha256 = $9
+                            AND pipeline_sha256 = $10 AND blob_sha256 = $11 AND bytes = $3)
+                     ON CONFLICT(cache_key, node_id) DO UPDATE SET
+                        bytes = excluded.bytes, verified_at_ms = excluded.verified_at_ms,
+                        last_seen_at_ms = excluded.last_seen_at_ms"
+                        .to_owned(),
+                    params!(
+                        &location.cache_key,
+                        &location.node_id,
+                        location.bytes,
+                        location.verified_at_ms,
+                        location.last_seen_at_ms,
+                        &job.target_node_id,
+                        job.fence,
+                        now_ms,
+                        &artifact.source_sha256,
+                        &artifact.pipeline_sha256,
+                        &artifact.blob_sha256
+                    ),
+                ),
+                (
+                    "INSERT INTO cluster_fragment_index_heads
+                        (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+                     SELECT $1, $2, request_id, $3 FROM analysis_requests
+                      WHERE component = 'fragment_index' AND state = 'submitted'
+                        AND result_cache_key = $2
+                        AND target_node_id = $4
+                        AND EXISTS (SELECT 1 FROM cluster_fragment_index_jobs current_job
+                          WHERE current_job.cache_key = $2
+                            AND current_job.target_node_id = $4
+                            AND current_job.state = 'running'
+                            AND current_job.owner_node_id = $5 AND current_job.fence = $6
+                            AND current_job.lease_expires_ms > $3
+                            AND current_job.file_id = $7
+                            AND current_job.source_size = $8
+                            AND current_job.source_mtime = $9
+                            AND current_job.source_sha256 = $10
+                            AND current_job.pipeline_sha256 = $11)
+                        AND EXISTS (SELECT 1 FROM files current_file
+                          WHERE current_file.id = $7 AND current_file.size = $8
+                            AND current_file.mtime = $9)
+                        AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts artifact
+                          WHERE artifact.cache_key = $2 AND artifact.file_id = $7
+                            AND artifact.source_size = $8 AND artifact.source_mtime = $9
+                            AND artifact.source_sha256 = $10
+                            AND artifact.pipeline_sha256 = $11
+                            AND artifact.blob_sha256 = $12 AND artifact.bytes = $13)
+                        AND EXISTS (SELECT 1 FROM cluster_fragment_index_locations location
+                          WHERE location.cache_key = $2 AND location.node_id = $5
+                            AND location.bytes = $13)
+                        AND (force_rebuild = 1 OR expected_predecessor_generation = '')
+                        AND expected_predecessor_generation = COALESCE((
+                          SELECT generation_cache_key FROM cluster_fragment_index_heads
+                           WHERE logical_cache_key = $1
+                        ), '')
+                        AND NOT EXISTS (
+                          SELECT 1 FROM analysis_requests newer
+                           WHERE newer.file_id = analysis_requests.file_id
+                             AND newer.source_size = analysis_requests.source_size
+                             AND newer.source_mtime = analysis_requests.source_mtime
+                             AND newer.component = 'fragment_index'
+                             AND newer.target_node_id = analysis_requests.target_node_id
+                             AND (newer.created_at_ms > analysis_requests.created_at_ms
+                               OR (newer.created_at_ms = analysis_requests.created_at_ms
+                                 AND newer.request_id > analysis_requests.request_id))
+                             AND newer.state IN ('queued','running','submitted','ready'))
+                     ON CONFLICT(logical_cache_key) DO UPDATE SET
+                        generation_cache_key = excluded.generation_cache_key,
+                        request_id = excluded.request_id,
+                        updated_at_ms = excluded.updated_at_ms
+                      WHERE cluster_fragment_index_heads.generation_cache_key = (
+                        SELECT expected_predecessor_generation FROM analysis_requests
+                         WHERE request_id = excluded.request_id)"
+                        .to_owned(),
+                    params!(
+                        &logical_cache_key,
+                        &job.cache_key,
+                        now_ms,
+                        &job.target_node_id,
+                        &job.owner_node_id,
+                        job.fence,
+                        job.file_id,
+                        job.source_size,
+                        job.source_mtime,
+                        &job.source_sha256,
+                        &job.pipeline_sha256,
+                        &artifact.blob_sha256,
+                        artifact.bytes
+                    ),
+                ),
+                (
+                    "INSERT INTO cluster_fragment_index_heads
+                        (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+                     SELECT $1, $2, '', $3 WHERE $1 = $2
+                       AND EXISTS (SELECT 1 FROM cluster_fragment_index_jobs current_job
+                         WHERE current_job.cache_key = $2
+                           AND current_job.target_node_id = $4
+                           AND current_job.state = 'running'
+                           AND current_job.owner_node_id = $5 AND current_job.fence = $6
+                           AND current_job.lease_expires_ms > $3
+                           AND current_job.file_id = $7
+                           AND current_job.source_size = $8
+                           AND current_job.source_mtime = $9
+                           AND current_job.source_sha256 = $10
+                           AND current_job.pipeline_sha256 = $11)
+                       AND EXISTS (SELECT 1 FROM files current_file
+                         WHERE current_file.id = $7 AND current_file.size = $8
+                           AND current_file.mtime = $9)
+                       AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts artifact
+                         WHERE artifact.cache_key = $2 AND artifact.file_id = $7
+                           AND artifact.source_size = $8 AND artifact.source_mtime = $9
+                           AND artifact.source_sha256 = $10
+                           AND artifact.pipeline_sha256 = $11
+                           AND artifact.blob_sha256 = $12 AND artifact.bytes = $13)
+                       AND EXISTS (SELECT 1 FROM cluster_fragment_index_locations location
+                         WHERE location.cache_key = $2 AND location.node_id = $5
+                           AND location.bytes = $13)
+                     ON CONFLICT(logical_cache_key) DO NOTHING"
+                        .to_owned(),
+                    params!(
+                        &logical_cache_key,
+                        &job.cache_key,
+                        now_ms,
+                        &job.target_node_id,
+                        &job.owner_node_id,
+                        job.fence,
+                        job.file_id,
+                        job.source_size,
+                        job.source_mtime,
+                        &job.source_sha256,
+                        &job.pipeline_sha256,
+                        &artifact.blob_sha256,
+                        artifact.bytes
+                    ),
+                ),
+                (
+                    "UPDATE cluster_fragment_index_jobs
+                        SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
+                            last_error_code = NULL, updated_at_ms = $1
+                      WHERE cache_key = $2 AND target_node_id = $3
+                        AND state = 'running' AND owner_node_id = $4
+                        AND fence = $5 AND lease_expires_ms > $1
+                        AND EXISTS (SELECT 1 FROM files current_file
+                          WHERE current_file.id = cluster_fragment_index_jobs.file_id
+                            AND current_file.size = cluster_fragment_index_jobs.source_size
+                            AND current_file.mtime = cluster_fragment_index_jobs.source_mtime)
+                        AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
+                          WHERE cache_key = $2 AND source_sha256 = $6
+                            AND pipeline_sha256 = $7 AND blob_sha256 = $8 AND bytes = $9)"
+                        .to_owned(),
+                    params!(
+                        now_ms,
+                        &job.cache_key,
+                        &job.target_node_id,
+                        &job.owner_node_id,
+                        job.fence,
+                        &artifact.source_sha256,
+                        &artifact.pipeline_sha256,
+                        &artifact.blob_sha256,
+                        artifact.bytes
+                    ),
+                ),
+            ])
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(results.last().copied() == Some(1))
+    }
+
     async fn fail_cluster_fragment_index(
         &self,
         cache_key: &str,

@@ -1328,6 +1328,34 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         now_ms: i64,
     ) -> Result<bool, StoreError>;
 
+    /// Settle a claimed job from an artifact another node already built.
+    ///
+    /// Discovery on each voter targets itself, so four voters queue four jobs
+    /// for one `cache_key` and, on a healthy queue, four full passes over the
+    /// same file produce one artifact. Once any of them has published it, the
+    /// rest need only the bytes and a location row.
+    ///
+    /// This exists rather than reusing [`ClusterFragmentIndexStore::complete_cluster_fragment_index`]
+    /// because that one requires `artifact.built_by_node_id == job.owner_node_id`
+    /// — correct, for a build. Relabelling a hydrated artifact to get past it
+    /// would appear to work only because the artifact insert is
+    /// `ON CONFLICT DO NOTHING`, which is a trick and not a contract: the
+    /// stored row would keep its real builder while the caller lied about it.
+    ///
+    /// So the artifact here is required to already exist, byte for byte, and
+    /// is never written. Every other guard is the build path's: the same
+    /// running/owner/fence/lease check, the same source-identity check, the
+    /// same head advance. Settling from inside the claimed job is what keeps
+    /// the request fence intact — the reason the older comment gave for
+    /// submitting an ordinary worker instead of hydrating.
+    async fn complete_cluster_fragment_index_by_hydration(
+        &self,
+        job: &ClusterFragmentIndexJob,
+        artifact: &ClusterFragmentIndexArtifact,
+        location: &ClusterFragmentIndexLocation,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
     #[allow(clippy::too_many_arguments)]
     async fn fail_cluster_fragment_index(
         &self,
