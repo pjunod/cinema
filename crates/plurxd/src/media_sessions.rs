@@ -2447,6 +2447,130 @@ fn classify_durable_route(
     }
 }
 
+/// What a surviving node can honestly say about a route classified as
+/// [`DurableRouteResolution::OwnerTransition`] (plan §10.3, hard owner loss).
+///
+/// **This is deliberately not a stopwatch.** The obvious design — answer
+/// "retry" for some grace period after the lease expires, then declare the
+/// owner lost — cannot be made correct here. `takeover_loop` is gated on
+/// `remote_rollout_ready`, which requires every voter reachable with a fresh
+/// snapshot, so the moment a node dies the gate that would replace its
+/// sessions *shuts*, and it stays shut until the dead node is removed from
+/// membership or comes back. A rebooting node's routes are adopted minutes
+/// later, long after any plausible grace, and any deadline chosen in advance
+/// would have told a viewer their session was over while a successor was on
+/// its way. The scan is paged (`TAKEOVER_BATCH` per `TAKEOVER_INTERVAL`,
+/// behind a semaphore of the same size), so a node dying with more sessions
+/// than one page also outlives any fixed bound.
+///
+/// What *is* decidable is whether this route can ever be taken over at all.
+/// The recipe is durable and immutable, and the refusals in
+/// [`takeover_recipe_matches_route`] and `attempt_takeover` read only it. A
+/// route those refuse is not waiting for anything, and that verdict does not
+/// change however long the client waits — which is the common case, not the
+/// exotic one: VOD and EVENT sessions are refused *by design* (§4 forbids
+/// expanding the compatibility path to them), and a session created while
+/// `cluster.session_takeover_enabled` was off recorded
+/// `typeless_playlist: false` and is refused too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnerLoss {
+    /// The route is eligible for takeover, so a successor may still arrive.
+    /// Retryable — for as long as the client is willing to wait, which is the
+    /// client's decision to make and not the server's to guess.
+    Transitioning(OwnerLossResume),
+    /// The route's own persisted recipe can never be taken over. No successor
+    /// is coming, and waiting cannot change that.
+    Unrecoverable(OwnerLossResume),
+}
+
+impl OwnerLoss {
+    /// Test convenience. Production always matches both arms, because the
+    /// answer differs by more than the resume it carries.
+    #[cfg(test)]
+    pub(crate) fn resume(self) -> OwnerLossResume {
+        match self {
+            OwnerLoss::Transitioning(resume) | OwnerLoss::Unrecoverable(resume) => resume,
+        }
+    }
+}
+
+/// Where a reopen of a lost session should land on the source timeline.
+///
+/// Deliberately *not* an offer of continuity. §10.3 requires the no-snapshot
+/// fallback to hand back the position and the fetched frontier and then
+/// require a normal reopen — "do not guess transparency". These numbers make
+/// the reopen land in the right place; nothing here claims the seam is
+/// invisible, and a recovered session carries a discontinuity either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OwnerLossResume {
+    /// Absolute source-timeline position to reopen at — the fetched frontier
+    /// pulled back by a whole segment of this session's shape, exactly as
+    /// [`takeover_resume`] pulls a successor back, and for the same reason:
+    /// `fetched_through_ms` advances to the *end* of a segment the moment the
+    /// client asks for it, so it is ahead of what the viewer actually saw.
+    /// Landing early repeats seen media; landing late skips media nobody ever
+    /// showed them.
+    pub film_position_ms: i64,
+    /// Absolute source-timeline position production had reached. Bounded
+    /// below by `film_position_ms`, which is where the resume is clamped.
+    pub film_frontier_ms: i64,
+}
+
+/// Decide whether an owner transition can still be answered by a successor.
+pub(crate) fn classify_owner_loss(route: &MediaSessionRoute) -> OwnerLoss {
+    let envelope = serde_json::from_str::<RemoteStartRequest>(&route.recipe_json)
+        .ok()
+        .filter(|envelope| takeover_recipe_matches_route(envelope, route));
+    let resume = owner_loss_resume(route, envelope.as_ref().map(|e| &e.request.kind));
+    let eligible = envelope.is_some_and(|envelope| {
+        // The same three row-readable refusals `attempt_takeover` applies.
+        // The source-revision check is left out on purpose: it needs a Store
+        // read, and every fact this function is allowed to be wrong about
+        // must fall toward "a successor may still arrive".
+        envelope.typeless_playlist
+            && route
+                .owner_epoch
+                .checked_add(1)
+                .and_then(|next_epoch| takeover_start_number(route.media_sequence, next_epoch))
+                .is_some()
+    });
+    if eligible {
+        OwnerLoss::Transitioning(resume)
+    } else {
+        OwnerLoss::Unrecoverable(resume)
+    }
+}
+
+/// How far behind the fetched frontier a resume lands, for a session of this
+/// shape. Shared with [`takeover_resume`] so the position offered to a client
+/// and the position a successor restarts from cannot drift apart.
+fn resume_overlap_ms(kind: Option<&SessionKind>) -> i64 {
+    let segment_ms = match kind {
+        Some(SessionKind::Transcode { .. }) => i64::from(plurx_core::transcode::SEGMENT_SECONDS),
+        // A copy session, or a recipe that would not parse: the wider of the
+        // two shapes, because being early is the recoverable mistake.
+        Some(SessionKind::Copy { .. }) | None => {
+            i64::from(plurx_core::transcode::COPY_SEGMENT_MAX_SECS)
+        }
+    };
+    segment_ms
+        .saturating_mul(1_000)
+        .saturating_add(TAKEOVER_OVERLAP_MARGIN_MS)
+}
+
+fn owner_loss_resume(route: &MediaSessionRoute, kind: Option<&SessionKind>) -> OwnerLossResume {
+    let frontier_offset_ms = route
+        .fetched_through_ms
+        .saturating_sub(resume_overlap_ms(kind))
+        .clamp(0, route.produced_playable_through_ms.max(0));
+    OwnerLossResume {
+        film_position_ms: route.media_origin_ms.saturating_add(frontier_offset_ms),
+        film_frontier_ms: route
+            .media_origin_ms
+            .saturating_add(route.produced_playable_through_ms.max(frontier_offset_ms)),
+    }
+}
+
 type LeaseSeed = (String, i64, i64, bool);
 
 fn validate_route_resolution(
@@ -4409,6 +4533,40 @@ async fn supervise_takeover_settlement(
     settle_initial_takeover_claim(&state, pending).await
 }
 
+/// A route whose durable recipe the takeover path accepts, for the tests in
+/// this module and the HTTP ones. Defined once so the two suites cannot
+/// disagree about what "eligible" means.
+#[cfg(test)]
+pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) -> MediaSessionRoute {
+    let mut route = tests::media_route(session_id);
+    route.incarnation_id = incarnation_id.to_owned();
+    let base = tests::valid_start_request();
+    let recipe = RemoteStartRequest {
+        incarnation_id: incarnation_id.to_owned(),
+        user_id: route.user_id,
+        typeless_playlist: true,
+        request: SessionRequest {
+            request_id: Some(incarnation_id.to_owned()),
+            presentation: crate::transcode::Presentation::Live,
+            ..base.request
+        },
+        ..base
+    };
+    debug_assert!(takeover_recipe_matches_route(&recipe, &route));
+    route.recipe_json = serde_json::to_string(&recipe).expect("serialize eligible recipe");
+    route
+}
+
+/// Drive the takeover attempt for the EVENT-refusal test, which needs an
+/// `AppState` fixture and so lives with the HTTP tests.
+#[cfg(test)]
+pub(crate) async fn attempt_takeover_for_test(
+    state: &AppState,
+    route: MediaSessionRoute,
+) -> Result<(), String> {
+    attempt_takeover(state, route).await
+}
+
 async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + TAKEOVER_DEADLINE;
     let mut metric = TakeoverMetricGuard::new();
@@ -4571,11 +4729,7 @@ fn takeover_start_number(media_sequence: i64, next_epoch: i64) -> Option<i64> {
 /// past what the client holds. Anything less than a full segment of overlap
 /// leaves media that no generation ever produces.
 fn takeover_resume(route: &MediaSessionRoute, kind: &SessionKind) -> (i64, i64) {
-    let segment_ms = match kind {
-        SessionKind::Copy { .. } => i64::from(plurx_core::transcode::COPY_SEGMENT_MAX_SECS) * 1_000,
-        SessionKind::Transcode { .. } => i64::from(plurx_core::transcode::SEGMENT_SECONDS) * 1_000,
-    };
-    let overlap_ms = segment_ms.saturating_add(TAKEOVER_OVERLAP_MARGIN_MS);
+    let overlap_ms = resume_overlap_ms(Some(kind));
     let frontier_offset_ms = route
         .fetched_through_ms
         .saturating_sub(overlap_ms)
@@ -4729,7 +4883,7 @@ mod tests {
 
     use crate::transcode::ReopenReason;
 
-    fn valid_start_request() -> RemoteStartRequest {
+    pub(super) fn valid_start_request() -> RemoteStartRequest {
         let incarnation_id = "00000000-0000-4000-8000-0000000000a1".to_owned();
         RemoteStartRequest {
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
@@ -4934,7 +5088,7 @@ mod tests {
         assert!(!far_future.is_valid());
     }
 
-    fn media_route(session_id: &str) -> MediaSessionRoute {
+    pub(super) fn media_route(session_id: &str) -> MediaSessionRoute {
         MediaSessionRoute {
             incarnation_id: format!("incarnation-{session_id}"),
             session_id: session_id.to_owned(),
@@ -5526,6 +5680,205 @@ mod tests {
         route.produced_playable_through_ms = 0;
         route.fetched_through_ms = 0;
         assert_eq!(takeover_resume(&route, &transcode).0, 0);
+    }
+
+    /// A rolling recipe the takeover path can act on is a transition, however
+    /// long its lease has been dead. There is no deadline here on purpose: the
+    /// gate that replaces a dead node's sessions is itself shut while that node
+    /// is unresolved, so a survivor cannot know when a successor stops being
+    /// possible — only whether it was ever possible at all.
+    #[test]
+    fn an_eligible_rolling_route_is_a_transition_however_long_it_has_been_dead() {
+        let mut route = eligible_route("session-transition");
+
+        assert!(matches!(
+            classify_owner_loss(&route),
+            OwnerLoss::Transitioning(_)
+        ));
+
+        route.lease_expires_at_ms = 1;
+        assert!(
+            matches!(classify_owner_loss(&route), OwnerLoss::Transitioning(_)),
+            "a lease dead since the epoch still says nothing about whether a successor is coming"
+        );
+    }
+
+    /// The refusals that decide it are the takeover path's own, read off the
+    /// durable recipe. Each is permanent: no amount of waiting turns a VOD
+    /// handle, an EVENT playlist, or an exhausted sequence space into
+    /// something a successor can replace.
+    #[test]
+    fn a_route_the_takeover_path_can_never_accept_is_unrecoverable() {
+        let base = eligible_route("session-lost");
+        let eligible = eligible_recipe(&base);
+
+        let mut vod = base.clone();
+        vod.recipe_json = serde_json::to_string(&RemoteStartRequest {
+            request: SessionRequest {
+                presentation: crate::transcode::Presentation::Vod,
+                ..eligible.request.clone()
+            },
+            ..eligible.clone()
+        })
+        .expect("serialize vod recipe");
+        assert!(
+            matches!(classify_owner_loss(&vod), OwnerLoss::Unrecoverable(_)),
+            "an immutable VOD handle is never replaced by a renumbered successor"
+        );
+
+        let mut event = base.clone();
+        event.recipe_json = serde_json::to_string(&RemoteStartRequest {
+            typeless_playlist: false,
+            ..eligible.clone()
+        })
+        .expect("serialize event recipe");
+        assert!(
+            matches!(classify_owner_loss(&event), OwnerLoss::Unrecoverable(_)),
+            "an EVENT playlist cannot be renumbered, so nothing will take it over"
+        );
+
+        let mut exhausted = base.clone();
+        exhausted.recipe_json = event.recipe_json.clone();
+        exhausted.recipe_json = serde_json::to_string(&eligible).expect("serialize");
+        exhausted.owner_epoch = i64::MAX;
+        assert!(
+            matches!(classify_owner_loss(&exhausted), OwnerLoss::Unrecoverable(_)),
+            "an exhausted epoch space is permanent too"
+        );
+
+        let mut unreadable = base.clone();
+        unreadable.recipe_json = "{}".to_owned();
+        assert!(
+            matches!(
+                classify_owner_loss(&unreadable),
+                OwnerLoss::Unrecoverable(_)
+            ),
+            "a recipe no successor could act on is refused rather than waited on"
+        );
+
+        let mut foreign = base.clone();
+        foreign.recipe_json = serde_json::to_string(&RemoteStartRequest {
+            user_id: eligible.user_id + 1,
+            ..eligible.clone()
+        })
+        .expect("serialize foreign recipe");
+        assert!(
+            matches!(classify_owner_loss(&foreign), OwnerLoss::Unrecoverable(_)),
+            "a recipe that no longer describes its route is stale, and staleness does not heal"
+        );
+    }
+
+    /// The position offered to a client is the one a successor would restart
+    /// from, computed by the same overlap. `fetched_through_ms` runs to the
+    /// *end* of a segment the moment the client asks for it, so handing it
+    /// back unadjusted would tell a viewer to reopen past media they never
+    /// saw — up to a whole copy segment of it.
+    #[test]
+    fn the_offered_resume_matches_what_a_successor_would_restart_from() {
+        let mut route = eligible_route("session-resume");
+        route.media_origin_ms = 90_000;
+        route.fetched_through_ms = 45_000;
+        route.produced_playable_through_ms = 61_000;
+        let recipe = eligible_recipe(&route);
+
+        let resume = classify_owner_loss(&route).resume();
+        let (_, successor_restart_ms) = takeover_resume(&route, &recipe.request.kind);
+        assert_eq!(
+            resume.film_position_ms, successor_restart_ms,
+            "the client is told to reopen exactly where a successor would have resumed"
+        );
+        assert!(
+            resume.film_position_ms
+                < route
+                    .media_origin_ms
+                    .saturating_add(route.fetched_through_ms),
+            "and that is behind the fetched frontier, which overshoots by a whole segment"
+        );
+        assert_eq!(resume.film_frontier_ms, 90_000 + 61_000);
+    }
+
+    /// A recipe that will not parse still has to produce a usable resume, and
+    /// the safe direction is early: repeating seen media is recoverable,
+    /// skipping unseen media is not.
+    #[test]
+    fn an_unreadable_recipe_still_resumes_and_errs_early() {
+        let mut route = media_route("session-unreadable");
+        route.recipe_json = "{}".to_owned();
+        route.media_origin_ms = 10_000;
+        route.fetched_through_ms = 300_000;
+        route.produced_playable_through_ms = 300_000;
+
+        let resume = classify_owner_loss(&route).resume();
+        assert_eq!(
+            resume.film_position_ms,
+            10_000 + 300_000 - resume_overlap_ms(None),
+            "an unknown shape gets the wider of the two overlaps"
+        );
+        assert!(
+            resume_overlap_ms(None)
+                >= resume_overlap_ms(Some(&SessionKind::Transcode { height: 720 }))
+        );
+    }
+
+    /// A session that served nothing, or whose frontier sits behind its own
+    /// fetch pointer, still resumes inside the film rather than before it.
+    #[test]
+    fn a_resume_never_lands_before_the_session_start() {
+        let mut route = media_route("session-empty");
+        route.media_origin_ms = 90_000;
+        route.fetched_through_ms = 0;
+        route.produced_playable_through_ms = 0;
+
+        let resume = classify_owner_loss(&route).resume();
+        assert_eq!(resume.film_position_ms, 90_000);
+        assert_eq!(resume.film_frontier_ms, 90_000);
+    }
+
+    /// The compatibility takeover path must not be expanded to VOD or EVENT
+    /// sessions (remaining-roadmap §4). The VOD refusal is the recipe
+    /// validator's; the EVENT refusal lives in `attempt_takeover` and is
+    /// driven there by `attempt_takeover_refuses_an_event_session` in the HTTP
+    /// tests, which is the only place an `AppState` fixture exists.
+    #[test]
+    fn the_takeover_recipe_validator_refuses_vod() {
+        let route = eligible_route("session-nonexpansion");
+        let eligible = eligible_recipe(&route);
+        assert!(takeover_recipe_matches_route(&eligible, &route));
+
+        let vod = RemoteStartRequest {
+            request: SessionRequest {
+                presentation: crate::transcode::Presentation::Vod,
+                ..eligible.request.clone()
+            },
+            ..eligible.clone()
+        };
+        assert!(
+            !takeover_recipe_matches_route(&vod, &route),
+            "an immutable VOD handle is never replaced by a renumbered successor"
+        );
+
+        // A recipe written before the `typeless_playlist` flag existed
+        // defaults to refusing rather than to guessing.
+        let legacy: RemoteStartRequest = serde_json::from_value(serde_json::json!({
+            "protocol_version": crate::media_pool::PROTOCOL_VERSION,
+            "incarnation_id": eligible.incarnation_id,
+            "user_id": eligible.user_id,
+            "source_size": eligible.source_size,
+            "source_mtime": eligible.source_mtime,
+            "request": serde_json::to_value(&eligible.request).expect("request"),
+        }))
+        .expect("a recipe predating the flag still parses");
+        assert!(!legacy.typeless_playlist);
+    }
+
+    const ELIGIBLE_INCARNATION: &str = "00000000-0000-4000-8000-0000000000f1";
+
+    fn eligible_route(session_id: &str) -> MediaSessionRoute {
+        super::takeover_eligible_route(session_id, ELIGIBLE_INCARNATION)
+    }
+
+    fn eligible_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
+        serde_json::from_str(&route.recipe_json).expect("the eligible fixture parses")
     }
 
     /// §7.3 requires a candidate to prove the source snapshot rather than

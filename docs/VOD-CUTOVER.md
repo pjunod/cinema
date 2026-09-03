@@ -55,6 +55,19 @@ status explicit:
 | Bitmap or styled subtitle burn | 501 `vod_subtitle_burn_unavailable` |
 | Missing duration, varying parameter sets, or empty plan | 422 `vod_source_unsupported` |
 | Owner takeover that needs a new immutable handle | 409 `vod_reopen_required` |
+| The owning node is gone and a successor may still claim the session | 503 `media_owner_transition`, carrying `film_position_ms` |
+| The owning node is gone and the session can never be taken over | 410 `media_owner_lost`, carrying `film_position_ms` |
+
+The last two are answers about a session that already exists, not refusals of a
+create, and they are decided from the durable route rather than from the
+request: `media_owner_transition` says a successor may still arrive and the
+client may keep waiting, `media_owner_lost` says none can. Both carry where to
+reopen and both set `continuous:false`; only the second sets
+`reopen_required:true`. `vod_reopen_required` is the different, adjacent case —
+a takeover *did* happen and produced a new immutable handle, so there is
+something to reopen onto. See
+[PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md) §"§10.3's third bullet
+is built".
 
 Those refusals are honest product boundaries, not invitations to use the old
 engine. Transcode-rung VOD still depends on the P2/D6 AVPlayer and Media3
