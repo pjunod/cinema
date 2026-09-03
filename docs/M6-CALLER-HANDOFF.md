@@ -633,6 +633,92 @@ the staged path would fire at all once the literal flips.
 a resolution-and-delivery-method change with headroom, the ledger holds a
 staged successor and the pointer still names the predecessor.
 
+#### 3.4.1 The contract, traced 2026-09-03
+
+Written down because tracing it is most of the work, and because two of these
+facts are the difference between a make-before-break and an outage.
+
+**The slot is reachable now.** `PreparationExecutor` takes an
+`Arc<dyn PreparationGate>` (PR #883), and the slot lives on `ControlState`,
+which both delivery engines hold. Route to the gate the way
+`hls_session_control_with_terminal` routes an exchange — **VOD first**, because
+`into_request` sets `Presentation::Vod` for every create, then the rolling
+`sessions` map. `VodServe::preparation_gate` answers for the first; the rolling
+handle is itself a gate. `None` from the VOD accessor does *not* mean "ask the
+rolling actor": that engine tracks in-flight creates separately and
+`owns_or_preparing` is the question a router must ask.
+
+**Starting the successor does not disturb the predecessor, and this is not an
+accident.** `TranscodeManager::reap_superseded_before`'s own doc says it:
+*"Cluster replacements skip this break-before-make path and keep their
+predecessor serving until the later durable activation CAS succeeds."* So
+`create_cluster_session` is the right primitive — it acquires the replacement
+gate and starts a worker, and the predecessor keeps serving. **Do not reach for
+`create_session` or anything that runs `own_supersession_convergence`**: that is
+the legacy process-local sweep, it ends the predecessor, and using it here would
+turn a prepared handoff into exactly the interruption M6 exists to remove.
+
+**Then `prepare_media_session` instead of `activate_media_session`.** The store's
+own doc is the spec, and three of its clauses are load-bearing:
+
+* `Ok(None)` is the CAS losing, three ways — the pointer no longer names
+  `expected_predecessor_incarnation_id`, a successor is already staged, or the
+  user is at an admission bound. Never a bool, never an error.
+* A staged successor counts against the admission cap **with nothing
+  discounted**, unlike an activation, because a preparation reaps nothing.
+  Preparing costs a saturated viewer real headroom; that is the honest price of
+  holding a second encoder slot.
+* It must not run the supersession reap and must not move
+  `media_playback_pointers.updated_at_ms` — which is why a preparation cannot
+  be built on `activate_media_session`.
+
+**Where each field comes from.** `control_local_inner` already holds a
+`&MediaSessionRoute`, and it has been fence-checked against the client's
+declared generation, so the predecessor is not a guess:
+
+| Field | Source |
+|---|---|
+| `expected_predecessor_incarnation_id` | `route.incarnation_id` |
+| `user_id` · `playback_id` | `route.user_id` · `route.playback_id` |
+| `request_fingerprint` · `owner_node_id` | `route.request_fingerprint` · `route.owner_node_id` |
+| `media_origin_ms` | the successor's own `StartInfo`, not the route's |
+| `incarnation_id` · `session_id` | freshly minted UUIDs; the store validates both, and rejects a successor equal to its predecessor |
+| `recipe_json` | the candidate `RemoteStartRequest` the shadow already builds |
+| `response_json` | built from the successor's `StartInfo`, exactly as `create` builds its `StartResponse` |
+| `now_ms` · `deadline_ms` | `unix_ms()`, and a deadline strictly greater — it is written to the staged row's `lease_expires_at_ms` *and* the ledger, deliberately one clock |
+
+**Two things that must not be skipped.**
+
+*The serving fence.* `create_cluster_session` requires an admitted generation
+(`state.serving.authority().admit()`) and re-checks it after the replacement
+gate. A start that ignores it can outlive the node's authority.
+
+*Teardown on a lost stage.* `PreparationExecutor::stage` writes the durable row
+first and takes the slot second, and aborts the row itself if the slot refuses.
+It knows nothing about the **worker process** this slice started before calling
+it. So a `false` from `stage` must also end the started session, or the node
+keeps an encoder nobody will ever commit until the preparation deadline reaps
+the row — and the process outlives even that. `StartedSessionGuard` does not fit
+unchanged: it is tied to a client request claim, and a preparation has none.
+
+**Gate the whole thing on `request.accepts(PREPARE_REPLACEMENT_ACTION)`**, not
+on the capability. The capability says the client can run two players; the
+action vocabulary says it will understand being handed a successor. No shipped
+client declares the action, so this slice is inert on the fleet until one does
+— which is what makes shipping the server half first safe, and is the reason
+that constant exists.
+
+**Not in this slice.** Emitting the `ControlAction::Prepare` itself, which needs
+the successor's playlist URL and belongs with §3.4c; and remote placement — the
+exchange runs on the predecessor's owner, so the successor starts locally.
+
+**One instrument this slice must add.** `ROLLING_CONTROL_COMMANDS`' stage,
+commit and settle counters tick only on the rolling mailbox path. Once this
+slice has a caller, the engine that serves nearly every session performs those
+transitions with no counter at all — the same "wired to the minority" shape this
+milestone has already been bitten by twice, inverted. An engine-labelled counter
+belongs in the same change as the caller, not after it.
+
 ### 3.5 The commit trigger
 
 The client acknowledges readiness and the exchange commits. **No longer

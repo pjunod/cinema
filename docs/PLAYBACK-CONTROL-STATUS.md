@@ -893,6 +893,40 @@ receipt, and the receipt has to name its run.
 
 **M6 §3.4 is therefore unblocked**, and so is M8 §10.2 behind it.
 
+### The slot was on the engine that serves almost nothing — fixed 2026-09-03
+
+Before writing §3.4 I checked what `PreparationExecutor` stages against, and
+the answer was a path viewers do not take. It gated its durable row on a
+`RollingControlHandle` — the slot on `RollingControlActor` — while
+`hls_session_control_with_terminal` offers every exchange to the VOD engine
+*first*, `into_request` sets `Presentation::Vod` for every create, and
+`vodserve.rs` had no reference to `RollingControlHandle` at all.
+
+The file already knew this and said so twice: on `ControlState::last_selection`
+(*"both delivery engines hold a `ControlState` and only one of them has an
+actor"*) and where `retained_capabilities` was superseded by
+`ControlState::last_capabilities` for the same reason. The preparation slot was
+the third field to need that move and had not had it. Left alone, §3.4's
+acceptance would have passed while the feature fired on nothing — the third
+time this milestone has produced a gate that reads correctly and matches close
+to the empty set.
+
+So the slot moved to `ControlState`, and the executor's gate became a
+`PreparationGate` trait with one implementation per engine, each owning only the
+liveness half it can answer. An adversarial review then found three real
+defects in that move, all fixed in the same PR: a gate bound by session id
+followed that id to a *different attachment* after an idle reap and
+resurrection; a live re-create replaced the session wholesale and dropped a
+staged slot while its durable row lived on; and the gate refused `may_commit` on
+a tombstone while `ControlState` still said the successor was committable.
+[#883](https://github.com/pjunod/plurx/pull/883).
+
+**§3.4's remaining contract is written down** in
+[M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.4.1, traced rather than guessed
+— including the one fact that decides whether this is a make-before-break at
+all: `create_cluster_session` keeps the predecessor serving, and the legacy
+supersession sweep does not.
+
 ## Shadow mode ran, and the axis rule is what limits M6
 
 **Read 2026-09-03 on m6**, on `v0.3.0-449-gd1a56d01`, from three deliberate
