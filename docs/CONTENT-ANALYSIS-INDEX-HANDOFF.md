@@ -304,6 +304,95 @@ Semantic annotations replicate after validation. Fragment bytes and
 pipe-specific indexes stay node-local and publish an explicit coverage row for
 the node and pipeline version that produced them.
 
+### 5.8 Source attestation — what is hashed, and what it is for
+
+Before a node builds or serves a fragment index it attests the source: it
+opens the file, takes `object_version` — device, inode, size, mtime and ctime
+to the nanosecond — checks the scanner's own size and mtime against it, reads,
+and then takes `object_version` again and requires it to be unchanged. That
+identity check, twice, is what actually guarantees the bytes the indexer read
+are the bytes the catalog names. The digest sits on top of it and answers a
+narrower question: has this file been rewritten in a way that preserved
+device, inode, size, mtime *and* ctime to the nanosecond? Userspace cannot
+produce that, so the digest is a belt beside a brace.
+
+Which is why it does not read the whole file. **A source above 64 MiB is
+hashed over 64 one-megabyte extents** — the head, the tail, and 62 interior
+extents at deterministic, 4 KiB-aligned offsets; **a source at or below 64 MiB
+is read whole**, because sampling a file smaller than the sample buys nothing.
+The digest's preamble carries the domain token, the file's size, the extent
+width and count, and each extent's offset and length ahead of its bytes, so a
+sampled digest can never collide with a whole-file SHA-256 of the same file,
+two layouts cannot collide with each other, and a file that grew changes
+digest even when every extent it kept is identical. The result is still 64
+lowercase hex characters, so cache keys, the blob header and every
+`source_sha256` column are untouched.
+
+What this buys: attestation costs about 64 MiB of reads no matter how large
+the source is — roughly two seconds, against forty-three minutes for a 43 GB
+title. That matters twice over. Attestation shares the node with playback, and
+`wait_for_cluster_fragment_index_stop` cancels it the moment a foreground
+session is admitted; a forty-three-minute hash needs a forty-three-minute idle
+window, and a two-second one does not. And every node attests for itself —
+`vodserve` refuses to serve a fixed-timeline index until *this* node holds an
+observation for the current `object_version` — so the whole-file cost was
+being paid once per node per file.
+
+What it gives up, deliberately: a change confined strictly to the gaps between
+sampled extents does not move the digest. A test pins that so nobody "fixes"
+it by accident. Any such write moves mtime and ctime, which the identity check
+already refuses.
+
+`ATTEST_TIMEOUT` stays at **ten minutes on both paths, and now means a hung
+mount** rather than a bound on file size: the read it bounds is at most 64
+MiB, so ten minutes is reached only when the filesystem has stopped answering.
+It stays **charged**, on both paths. That is the opposite of what a naive
+reading suggests, and the reason is mechanical: an uncharged retry is not
+merely un-incremented, it is *refunded* (`attempts = attempts - 1`), which
+pins `attempts` at one — and the retry backoff shifts by `attempts - 1`. A
+refunded timeout would therefore re-queue at the base delay forever, never
+escalate, never reach a terminal state, and steadily fill the 4,096-row
+active-request budget that `enqueue_analysis_request` requires headroom in
+before it will accept *any* new request, on any mount. Charging keeps the
+backoff escalating and lets a genuinely unreachable mount settle; the bulk
+reopen (`POST /api/v1/analysis/reopen`) is how its files come back once the
+storage does. The cluster-job path reports `source_attestation_timeout` rather
+than folding a deadline into `source_attestation_failed`, because those two
+send an operator to different places — and an *untargeted* job that times out
+is yielded without a node-local exclusion, because a ten-minute unreachable
+mount proves nothing about whether this node can serve that source.
+
+**Existing observations are invalidated exactly once, on purpose.**
+`object_version` carries an `ATTESTATION_REGIME` prefix, so every memo taken
+before this change misses and is replaced by the upsert. The alternative —
+matching old memos and grandfathering their whole-file digests — reads as the
+conservative choice and is not: the memo table has no column recording how a
+digest was computed, so a node holding a pre-change observation would keep a
+whole-file digest, and therefore a different `cluster_fragment_index_key`,
+from every node that attested afresh. Different keys mean the same file is
+built and stored twice and neither node can hydrate the other's artifact, and
+because `object_version` never changes on a stable library, nothing would ever
+heal it. Re-attesting is what the sampling made cheap: two seconds a file.
+The already-indexed artifacts are re-derived under the new keys as discovery
+reaches them.
+
+Non-forced **fragment-index** requests carry the regime in their generation
+fingerprint (`ANALYSIS_ATTESTATION_GENERATION`); `skip_markers` requests do
+not, because they never attest a source and re-requesting them would republish
+their annotation sets under new generation ids for a change that has nothing
+to do with them. `enqueue_analysis_request` refuses a generation that already
+exists in **any** state, terminal included, so rows stranded terminal by a
+queue fault block every later request for those files. Moving the token moves
+every non-forced fragment-index generation exactly once, which lets background
+discovery re-request the library over successive passes without a single row
+being deleted or edited — the tombstones stay as history beside their
+successors.
+
+The three tokens move together. `ANALYSIS_ATTESTATION_GENERATION` reopens the
+*request*; `ATTESTATION_REGIME` invalidates the *memo* the reopened request
+would otherwise short-circuit to; `SAMPLE_DOMAIN` separates the *digest*.
+Changing the layout while moving only one of them is a silent no-op.
+
 ## 6. Non-goals and guardrails
 
 Each of these has cost someone something, or is load-bearing for work in flight.

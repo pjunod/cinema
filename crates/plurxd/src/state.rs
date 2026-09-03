@@ -1470,6 +1470,46 @@ impl AnalysisRetryPolicy {
     }
 }
 
+/// The attestation regime a non-forced request belongs to.
+///
+/// `enqueue_analysis_request` refuses a request whose `requested_generation`
+/// already exists in **any** state, terminal included, so a row that failed
+/// under a broken queue blocks every later request for the same file forever.
+/// Moving this token moves every non-forced generation once, which lets
+/// discovery re-request a library whose rows are stranded — without deleting
+/// or editing a single row, so the tombstones stay as history.
+///
+/// Change it only when the attestation itself changes meaning, and change it
+/// alongside `ATTESTATION_REGIME` and `SAMPLE_DOMAIN` in
+/// `fragment_index_cluster`: this token reopens the request, and that one
+/// invalidates the memo the reopened request would otherwise short-circuit to.
+const ANALYSIS_ATTESTATION_GENERATION: &str = "source-attestation/sampled-v1";
+
+/// Why a cluster-job attestation did not produce a usable source.
+///
+/// The two are different faults and the queue row shows the difference: a
+/// refusal is the source disagreeing with what the job asked for, a timeout is
+/// a filesystem that stopped answering a 64 MiB read.
+#[derive(Debug)]
+enum AttestationFailure {
+    Refused(String),
+    TimedOut,
+}
+
+/// The durable `last_error_code` for one attestation outcome.
+///
+/// `Ok` reaches here only when the digest did not match the job's, which is
+/// the source having changed under a queued identity — a refusal, not a
+/// deadline.
+fn attestation_failure_code(
+    outcome: &Result<crate::fragment_index_cluster::AttestedSource, AttestationFailure>,
+) -> &'static str {
+    match outcome {
+        Err(AttestationFailure::TimedOut) => "source_attestation_timeout",
+        Ok(_) | Err(AttestationFailure::Refused(_)) => "source_attestation_failed",
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AnalysisResolutionError {
     /// Ownership already moved. A stale resolver deliberately writes nothing.
@@ -3129,6 +3169,16 @@ impl JobManager {
                 file.mtime.to_string(),
                 component.to_owned(),
                 pipeline_version.clone(),
+                // Only fragment-index work attests a source, so only its
+                // generations belong to an attestation regime. Stamping this
+                // on `skip_markers` as well would re-request every semantic
+                // pass and republish its annotations under a new generation
+                // id, for a change that has nothing to do with them.
+                if component == "fragment_index" {
+                    ANALYSIS_ATTESTATION_GENERATION.to_owned()
+                } else {
+                    String::new()
+                },
             ])
         };
         let request = self
@@ -5843,6 +5893,9 @@ impl JobManager {
 
     async fn resolve_analysis_requests(self: &Arc<Self>, transcode: Arc<TranscodeManager>) {
         const MAX_REQUESTS_PER_PASS: usize = 2;
+        /// A deadline on a hung mount, not a bound on file size. Attestation
+        /// samples at most 64 MiB whatever the source weighs, so ten minutes
+        /// is reached only when the filesystem has stopped answering.
         const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
         if !self.cluster_fragment_index_enabled().await || !transcode.pretranscode_worker_idle() {
@@ -6196,8 +6249,36 @@ impl JobManager {
             0,
             0,
         );
+        // Verification reads a bounded sample, not the file, so the bar and
+        // the ETA have to be denominated in what it will actually read.
+        // Otherwise a 43 GB source shows a tenth of a percent and a
+        // twenty-minute estimate for an operation that finishes in two
+        // seconds. The build stage sets the totals back to the whole file.
+        self.set_analysis_progress_totals(
+            &request.request_id,
+            &request.target_node_id,
+            crate::fragment_index_cluster::attestation_read_bytes(file.size.max(0) as u64),
+            file.duration_ms.unwrap_or_default(),
+        );
+        // Bound to a local rather than passed inline: the callback outlives
+        // the argument expression for as long as the `select!` arm runs.
+        let report_progress = |bytes: u64| {
+            self.update_analysis_progress(
+                &request.request_id,
+                &request.target_node_id,
+                "verifying",
+                bytes,
+                0,
+                0,
+            );
+        };
         let attested = tokio::select! {
-            result = crate::fragment_index_cluster::attest_source(node_id, &file, memo.as_ref()) => {
+            result = crate::fragment_index_cluster::attest_source(
+                node_id,
+                &file,
+                memo.as_ref(),
+                &report_progress,
+            ) => {
                 result.map_err(|_| AnalysisResolutionError::Retry {
                     code: "source_attestation_failed",
                     charge_attempt: true,
@@ -6213,6 +6294,17 @@ impl JobManager {
                 });
             }
             () = wait_analysis_deadline(attest_timeout) => {
+                // Charged, and deliberately so. Before sampling, this deadline
+                // measured file size and turned large-but-healthy sources into
+                // permanent failures; now the read it bounds is 64 MiB, so
+                // reaching it means the mount has stopped answering, which is
+                // a real fault worth an attempt. Charging is also what bounds
+                // the retry: an uncharged retry is *refunded* (`attempts - 1`),
+                // which pins `attempts` at one, and the backoff shifts by
+                // `attempts - 1` — so a refunded timeout would re-queue at the
+                // base delay forever, never escalate, never go terminal, and
+                // quietly fill the 4,096-row active-request budget that every
+                // other file needs in order to be enqueued at all.
                 return Err(AnalysisResolutionError::Retry {
                     code: "source_attestation_timeout",
                     charge_attempt: true,
@@ -6478,6 +6570,9 @@ impl JobManager {
         // queue at eight refusals per minute. Discovery removes an exclusion
         // immediately when the exact source becomes readable again.
         const LOCAL_REFUSAL_MS: i64 = 24 * 60 * 60_000;
+        /// A deadline on a hung mount, not a bound on file size. Attestation
+        /// samples at most 64 MiB whatever the source weighs, so ten minutes
+        /// is reached only when the filesystem has stopped answering.
         const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
         let _progress = self.start_analysis_progress(
@@ -6648,18 +6743,37 @@ impl JobManager {
             .await
             .ok()
             .flatten();
+        // See the analysis path: the verify stage is denominated in the
+        // sample it reads, and the build below restores the file's own size.
+        self.set_analysis_progress_totals(
+            &job.cache_key,
+            &job.target_node_id,
+            crate::fragment_index_cluster::attestation_read_bytes(file.size.max(0) as u64),
+            file.duration_ms.unwrap_or_default(),
+        );
+        let report_progress = |bytes: u64| {
+            self.update_analysis_progress(
+                &job.cache_key,
+                &job.target_node_id,
+                "verifying",
+                bytes,
+                0,
+                0,
+            );
+        };
         let attestation = tokio::select! {
             result = crate::fragment_index_cluster::attest_source(
                 &node_id,
                 &file,
                 memo.as_ref(),
-            ) => Some(result),
+                &report_progress,
+            ) => Some(result.map_err(AttestationFailure::Refused)),
             () = self.wait_for_cluster_fragment_index_stop(
                 transcode.as_ref(),
                 &permit_lost,
             ) => None,
             () = tokio::time::sleep(ATTEST_TIMEOUT) => {
-                Some(Err("source attestation timed out".to_owned()))
+                Some(Err(AttestationFailure::TimedOut))
             }
         };
         let Some(attestation) = attestation else {
@@ -6680,14 +6794,45 @@ impl JobManager {
         };
         let attested = match attestation {
             Ok(attested) if attested.observation.source_sha256 == job.source_sha256 => attested,
-            Ok(_) | Err(_) => {
+            outcome => {
+                // A ten-minute read of a 64 MiB sample is a mount that stopped
+                // answering; a digest that does not match is the source
+                // changing. The queue shows this code, so it has to be the
+                // right one.
+                let code = attestation_failure_code(&outcome);
+                let timed_out = matches!(outcome, Err(AttestationFailure::TimedOut));
+                if let Err(AttestationFailure::Refused(reason)) = &outcome {
+                    // The code is the durable answer; this is the sentence
+                    // that says which of the identity checks refused, which
+                    // the row has nowhere to keep.
+                    tracing::debug!(
+                        cache_key = %job.cache_key,
+                        %reason,
+                        "fragment-index source attestation refused"
+                    );
+                }
                 let now = clock_ms();
                 if job.target_node_id.is_empty() {
-                    self.remember_fragment_index_refusal(
-                        &job.cache_key,
-                        now.saturating_add(LOCAL_REFUSAL_MS),
-                    )
-                    .await;
+                    // An untargeted job is yielded back to the cluster rather
+                    // than failed, so its code has nowhere durable to go. A
+                    // refusal earns a day-long local exclusion: this node has
+                    // proved it cannot serve that source. A timeout has proved
+                    // nothing of the kind — the mount was unreachable for ten
+                    // minutes, which is a condition and not a verdict, and
+                    // excluding the key for a day would keep the node off its
+                    // own files long after the storage recovered.
+                    if timed_out {
+                        tracing::warn!(
+                            cache_key = %job.cache_key,
+                            "fragment-index source attestation timed out; yielding without excluding this node"
+                        );
+                    } else {
+                        self.remember_fragment_index_refusal(
+                            &job.cache_key,
+                            now.saturating_add(LOCAL_REFUSAL_MS),
+                        )
+                        .await;
+                    }
                     let _ = self
                         .store
                         .yield_cluster_fragment_index(
@@ -6696,7 +6841,11 @@ impl JobManager {
                             &node_id,
                             job.fence,
                             now,
-                            now,
+                            if timed_out {
+                                now.saturating_add(retry_ms)
+                            } else {
+                                now
+                            },
                         )
                         .await;
                 } else {
@@ -6707,7 +6856,7 @@ impl JobManager {
                             &job.target_node_id,
                             &node_id,
                             job.fence,
-                            "source_attestation_failed",
+                            code,
                             true,
                             now,
                             now.saturating_add(retry_ms),
@@ -7650,6 +7799,96 @@ mod tests {
     use plurx_core::domain::{
         DolbyVisionFacts, ItemKind, NewItem, NewLibrary, PlaybackEventQuery, ProbeResult,
     };
+
+    #[test]
+    fn a_timed_out_attestation_is_reported_as_a_timeout_not_a_refusal() {
+        // The queue row's `last_error_code` is what an operator reads, and
+        // these two send them to different places: a refusal is the source
+        // changing, a timeout is a mount that stopped answering a 64 MiB read.
+        assert_eq!(
+            attestation_failure_code(&Err(AttestationFailure::TimedOut)),
+            "source_attestation_timeout"
+        );
+        assert_eq!(
+            attestation_failure_code(&Err(AttestationFailure::Refused(
+                "source no longer matches the scanner's size/mtime identity".to_owned()
+            ))),
+            "source_attestation_failed"
+        );
+
+        // The helper is only worth anything if the call site uses it. Pin
+        // that the cluster path passes the helper's result to
+        // `fail_cluster_fragment_index` rather than a literal, and that both
+        // arms of the failure exist to be distinguished.
+        let source = include_str!("state.rs");
+        let handler = source
+            .split_once("let attestation = tokio::select! {")
+            .expect("the cluster-job attestation")
+            .1
+            .split_once("record_fragment_index_source")
+            .expect("the end of the attestation block")
+            .0;
+        assert!(
+            handler.contains("Some(Err(AttestationFailure::TimedOut))"),
+            "the timeout arm must carry its own failure value"
+        );
+        assert!(
+            handler.contains("let code = attestation_failure_code(&outcome);"),
+            "the failure code must come from the helper this test covers"
+        );
+        assert!(
+            !handler.contains("\"source_attestation_failed\""),
+            "a literal code at the call site would make the helper decorative"
+        );
+    }
+
+    #[test]
+    fn a_non_forced_generation_carries_the_attestation_regime() {
+        // `enqueue_analysis_request` refuses a generation that already exists
+        // in any state, so a library stranded on terminal rows can only be
+        // re-requested by moving this fingerprint. Pin the token literally:
+        // renaming it re-requests every file on the fleet, which is a
+        // decision and not a refactor.
+        assert_eq!(
+            ANALYSIS_ATTESTATION_GENERATION,
+            "source-attestation/sampled-v1"
+        );
+        let without = plurx_core::segplan::argv_fingerprint(&[
+            "analysis-request".to_owned(),
+            "41".to_owned(),
+            "10000".to_owned(),
+            "1700000000".to_owned(),
+            "fragment_index".to_owned(),
+            "pipeline-v3".to_owned(),
+        ]);
+        let with = plurx_core::segplan::argv_fingerprint(&[
+            "analysis-request".to_owned(),
+            "41".to_owned(),
+            "10000".to_owned(),
+            "1700000000".to_owned(),
+            "fragment_index".to_owned(),
+            "pipeline-v3".to_owned(),
+            ANALYSIS_ATTESTATION_GENERATION.to_owned(),
+        ]);
+        assert_ne!(
+            without, with,
+            "the regime has to change the generation or nothing is reopened"
+        );
+        // And it is still deterministic, so a restart does not re-request the
+        // library a second time.
+        assert_eq!(
+            with,
+            plurx_core::segplan::argv_fingerprint(&[
+                "analysis-request".to_owned(),
+                "41".to_owned(),
+                "10000".to_owned(),
+                "1700000000".to_owned(),
+                "fragment_index".to_owned(),
+                "pipeline-v3".to_owned(),
+                ANALYSIS_ATTESTATION_GENERATION.to_owned(),
+            ])
+        );
+    }
 
     #[test]
     fn transient_fragment_source_reads_are_retryable_not_stale() {
