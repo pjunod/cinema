@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from validation.release_artifact import BINARIES, create, verify
 from validation.release_aliases import alias_action
@@ -24,6 +26,33 @@ ELF_MACHINES = {
     "x86_64-unknown-linux-gnu": 62,
     "aarch64-unknown-linux-gnu": 183,
 }
+
+
+# Git exports its repository-local variables to hooks, and during a commit
+# GIT_INDEX_FILE names the index being committed. This suite runs from the
+# pre-commit hook, and the fixture below builds a repository of its own — an
+# inherited path answers for the wrong tree, and the packaging script's own git
+# calls inherit it too. The same eight names are scrubbed for the same reason in
+# `validation/ci_scope.py` and `validation/apple_build.py`.
+GIT_ENVIRONMENT_LEAKS = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+)
+
+
+def own_repository_environment() -> dict[str, str]:
+    """The caller's environment with every inherited git repository removed."""
+
+    environment = os.environ.copy()
+    for name in GIT_ENVIRONMENT_LEAKS:
+        environment.pop(name, None)
+    return environment
 
 
 def write_elf(path: Path, target: str, payload: bytes = b"fixture") -> None:
@@ -403,61 +432,89 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                     binary_names=BINARIES,
                 )
 
+    def package_a_candidate(self, fixture: Path) -> tuple[Path, Path, Path, str]:
+        """Build a source repository and package one candidate out of it."""
+
+        source = fixture / "source"
+        export = fixture / "export"
+        artifact = fixture / "artifact"
+        source.mkdir()
+        export.mkdir()
+        environment = own_repository_environment()
+        shutil.copy2(ROOT / "Dockerfile", source / "Dockerfile")
+        subprocess.run(
+            ["git", "init", "-q"], cwd=source, check=True, env=environment
+        )
+        subprocess.run(
+            ["git", "-c", "user.name=CI", "-c", "user.email=ci@example.test", "add", "Dockerfile"],
+            cwd=source,
+            check=True,
+            env=environment,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=CI",
+                "-c",
+                "user.email=ci@example.test",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            cwd=source,
+            check=True,
+            env=environment,
+        )
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=source,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        ).stdout.strip()
+        for name in BINARIES:
+            write_elf(export / name, "x86_64-unknown-linux-gnu", name.encode())
+        (export / "rustc-version").write_text(
+            "rustc 1.97.1 (fixture)\nbinary: rustc\n", encoding="utf-8"
+        )
+
+        subprocess.run(
+            [
+                str(ROOT / "scripts/release-package-candidate"),
+                str(source),
+                str(ROOT),
+                str(export),
+                str(artifact),
+                "x86_64-unknown-linux-gnu",
+                commit,
+                commit,
+            ],
+            check=True,
+            env=environment,
+        )
+        return source, export, artifact, commit
+
+    def test_an_outer_hook_index_cannot_leak_into_the_packaging_fixture(self):
+        """The suite runs from a hook, which exports the index being committed."""
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            fixture = Path(raw_directory)
+            foreign = fixture / "foreign-index"
+            with mock.patch.dict(
+                "os.environ",
+                {"GIT_INDEX_FILE": str(foreign), "GIT_DIR": str(ROOT / ".git")},
+            ):
+                _, _, artifact, _ = self.package_a_candidate(fixture)
+
+            self.assertIn("build-manifest.json", {p.name for p in artifact.iterdir()})
+            self.assertFalse(foreign.exists())
+
     def test_candidate_packager_binds_export_to_exact_source_tree(self):
         with tempfile.TemporaryDirectory() as raw_directory:
             fixture = Path(raw_directory)
-            source = fixture / "source"
-            export = fixture / "export"
-            artifact = fixture / "artifact"
-            source.mkdir()
-            export.mkdir()
-            shutil.copy2(ROOT / "Dockerfile", source / "Dockerfile")
-            subprocess.run(["git", "init", "-q"], cwd=source, check=True)
-            subprocess.run(
-                ["git", "-c", "user.name=CI", "-c", "user.email=ci@example.test", "add", "Dockerfile"],
-                cwd=source,
-                check=True,
-            )
-            subprocess.run(
-                [
-                    "git",
-                    "-c",
-                    "user.name=CI",
-                    "-c",
-                    "user.email=ci@example.test",
-                    "commit",
-                    "-qm",
-                    "fixture",
-                ],
-                cwd=source,
-                check=True,
-            )
-            commit = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=source,
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-            for name in BINARIES:
-                write_elf(export / name, "x86_64-unknown-linux-gnu", name.encode())
-            (export / "rustc-version").write_text(
-                "rustc 1.97.1 (fixture)\nbinary: rustc\n", encoding="utf-8"
-            )
-
-            subprocess.run(
-                [
-                    str(ROOT / "scripts/release-package-candidate"),
-                    str(source),
-                    str(ROOT),
-                    str(export),
-                    str(artifact),
-                    "x86_64-unknown-linux-gnu",
-                    commit,
-                    commit,
-                ],
-                check=True,
-            )
+            source, export, artifact, commit = self.package_a_candidate(fixture)
 
             self.assertEqual(
                 {path.name for path in artifact.iterdir()},
@@ -486,6 +543,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                 ],
                 capture_output=True,
                 text=True,
+                env=own_repository_environment(),
             )
             self.assertNotEqual(wrong_tree.returncode, 0)
             self.assertIn("does not match", wrong_tree.stderr)
