@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c6892bf5"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The correction and its evidence landed together in `crates/plurxd/src/http/hls.rs`. A client cannot ask for the Profile 7 to 8.1 conversion — `CreateSession` carries no such field — so `SessionKind::Copy` is built with `convert_dolby_vision: false` and `apply_plan_review` is the only assignment that ever sets it true. The legacy-trusted arm returned no review at all, so for any build sending no caps document that assignment never ran and the client's silence on a field it cannot speak about overrode the server's own decision: `/decision` answered \"Profile 7 converted to Profile 8.1 for this device\" and the session created a second later delivered raw Profile 7, the one shape no consumer decoder outside Blu-ray hardware takes. `legacy_trusted_review` was extracted so the derivation is assertable without an `AppState`, and `a_build_with_no_caps_document_still_converts_profile_7` pins all four directions on it — the conversion is derived, it still follows the preservation, the operator switch still wins, and a source whose columns cannot build a record is left with the delivery it already had. Reverting the derivation to `false`, which is exactly the shipped bug, fails that test under `cargo test -p plurxd`, which `rust-gate` runs."

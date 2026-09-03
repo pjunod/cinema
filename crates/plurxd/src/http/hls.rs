@@ -825,6 +825,50 @@ fn apply_plan_review(
     review.notes
 }
 
+/// The plan for a build that sends no caps document: its echo, plus the one
+/// field its echo cannot carry.
+///
+/// Everything a client can state, it states, and this trusts it — that is what
+/// the legacy path *is*, and there is no capability document here to re-derive
+/// from. The conversion is the exception, because no client has ever been able
+/// to ask for one: `CreateSession` has no such field, so the echo is silent
+/// and [`crate::transcode::SessionKind::Copy`] keeps the `false` it was built
+/// with. Silence then reads as "no", which quietly overrides the *server's*
+/// own answer — `/decision` says "Profile 7 converted to Profile 8.1 for this
+/// device" and the session a second later preserves raw Profile 7.
+///
+/// That is the one delivery nothing plays: a dual-layer stream no consumer
+/// decoder outside Blu-ray hardware takes. Observed in production as Safari
+/// answering `stream_rejected ... browser refused the remux stream`, followed
+/// by a fallback that tonemapped the title to SDR.
+///
+/// Only the file half of [`plurx_core::playback::dolby_vision_converts_to_p81`]
+/// is asked here. Its client half ("takes 8 but not 7") exists to keep an
+/// enhancement layer for a client that *enumerated* Profile 7, and it only
+/// ever narrows who converts — a build sending no caps document enumerated
+/// nothing, so there is no such claim to honor. Handing it the layer is not
+/// the more conservative answer; it is the unplayable one.
+///
+/// The conversion still follows the preservation, for the same reason
+/// [`review_client_plan`] ends by clamping it: a client that declined Dolby
+/// Vision must not be handed a converted stream by a flag nobody looked at.
+fn legacy_trusted_review(
+    file: &MediaFile,
+    node: &plurx_core::playback::RenderCaps,
+    asked_preserve_dolby_vision: bool,
+    asked_hdr10: bool,
+) -> PlanReview {
+    PlanReview {
+        preserve_dolby_vision: asked_preserve_dolby_vision,
+        convert_dolby_vision: asked_preserve_dolby_vision
+            && node.dolby_vision_convert
+            && plurx_core::playback::file_can_convert_to_p81(file),
+        hdr10: asked_hdr10,
+        notes: Vec::new(),
+        mismatched: false,
+    }
+}
+
 /// Re-derive the plan from the capabilities the client sent, and reconcile it
 /// with what the client asked for.
 ///
@@ -1423,14 +1467,33 @@ pub async fn create(
         // a plan for a file that is not there would say nothing, and counting
         // it would let any client hold the straggler metric off zero forever.
         (_, None) => None,
-        (None, Some(_)) => {
+        (None, Some(file)) => {
             plan_derivation::count_legacy_trusted();
             tracing::warn!(
                 file_id = id,
                 client_build = %client_build,
                 "create trusted the client's plan echo: this build sends no caps document"
             );
-            None
+            // Trusting the echo is right for everything the client can
+            // actually state. It is wrong for the conversion, which no client
+            // has ever been able to ask for: `CreateSession` carries no such
+            // field, so the echo says nothing and `SessionKind::Copy` keeps
+            // the `false` it was built with. That silently downgrades a
+            // *server* decision — `/decision` answers "Profile 7 converted to
+            // Profile 8.1 for this device" and the session one second later
+            // preserves raw Profile 7, which is the one delivery no consumer
+            // decoder outside Blu-ray hardware takes. Observed in production:
+            // Safari answered `stream_rejected ... browser refused the remux
+            // stream`, and the fallback tonemapped the title to SDR.
+            //
+            // So this arm derives the one field the echo cannot carry, and
+            // nothing else.
+            Some(legacy_trusted_review(
+                file,
+                &super::stream::render_caps(&state).await,
+                req.preserve_dolby_vision == Some(true),
+                req.hdr10 == Some(true),
+            ))
         }
     };
     let hdr10_requested = review
@@ -14534,6 +14597,67 @@ mod tests {
         assert!(review.hdr10, "the caps present PQ on hevc");
         assert!(!review.mismatched);
         assert!(review.notes.is_empty(), "{:?}", review.notes);
+    }
+
+    /// A build that sends no caps document still gets the conversion.
+    ///
+    /// The regression this exists for shipped and reached production: the
+    /// legacy-trusted arm returned no review at all, so `apply_plan_review`
+    /// never ran, so `convert_dolby_vision` kept the `false`
+    /// `SessionKind::Copy` was built with — and the client's *silence* on a
+    /// field it has no way to speak about outvoted the server's own decision.
+    /// `/decision` logged "Profile 7 converted to Profile 8.1 for this
+    /// device"; the session created a second later delivered raw Profile 7;
+    /// Safari answered `stream_rejected ... browser refused the remux
+    /// stream`; the fallback tonemapped the title to SDR. Nothing in the
+    /// cluster had ever run a conversion.
+    #[test]
+    fn a_build_with_no_caps_document_still_converts_profile_7() {
+        let mut p7 = dolby_vision_p8_file();
+        p7.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".into());
+        p7.dolby_vision.profile = Some(7);
+        p7.dolby_vision.level = Some(6);
+        p7.dolby_vision.bl_compat_id = Some(1);
+
+        let node = capable_node();
+        let review = legacy_trusted_review(&p7, &node, true, false);
+        assert!(
+            review.convert_dolby_vision,
+            "the echo cannot carry this field, so trusting it means deriving it"
+        );
+        assert!(
+            review.preserve_dolby_vision,
+            "and the echo is still trusted"
+        );
+        assert!(!review.hdr10, "for every field the echo *can* carry");
+
+        // The conversion follows the preservation, exactly as
+        // `review_client_plan` clamps it: a client that declined Dolby Vision
+        // is not handed a converted stream by a flag nobody looked at.
+        assert!(
+            !legacy_trusted_review(&p7, &node, false, false).convert_dolby_vision,
+            "declining Dolby Vision declines the conversion with it"
+        );
+
+        // An operator switch still wins.
+        let mut off = capable_node();
+        off.dolby_vision_convert = false;
+        assert!(!legacy_trusted_review(&p7, &off, true, false).convert_dolby_vision);
+
+        // And a source the conversion cannot be built for keeps the delivery
+        // it has always had, rather than being routed to an index that could
+        // never exist.
+        let p8 = dolby_vision_p8_file();
+        assert!(
+            !legacy_trusted_review(&p8, &node, true, false).convert_dolby_vision,
+            "there is nothing to convert a Profile 8 source into"
+        );
+        let mut label_only = p7.clone();
+        label_only.dolby_vision.level = None;
+        assert!(
+            !legacy_trusted_review(&label_only, &node, true, false).convert_dolby_vision,
+            "no columns, no conversion — the record could not be built"
+        );
     }
 
     /// The session's own answer for both badge fields, for every kind of
