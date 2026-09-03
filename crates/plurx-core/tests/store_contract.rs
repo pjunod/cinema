@@ -9087,6 +9087,120 @@ async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {
     assert_eq!(rows[0].value, 10);
 }
 
+/// A v25 store gains the attempt history on the next daemon open, and every
+/// row it already had reads back an empty one.
+///
+/// A schema bump is a stop-the-fleet event here: `schema_migration_action`
+/// refuses any version but the binary's own, so a voter that restarts on an
+/// older binary after this commits will not open. The step itself has to be
+/// exactly one `ADD COLUMN`, and it has to be safe for two voters to attempt
+/// at once — `ADD COLUMN` is not idempotent, and `settle_migration_attempt`
+/// is what turns the loser's duplicate-column failure into an observation
+/// that the step is already done.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect v26 attempt-history migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v26-attempt-errors-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current attempt-history schema");
+    current
+        .put_setting("migration.v26.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    // Rewind to v25: the column gone, a job row already in the table, and the
+    // meta version back one step.
+    client
+        .txn([
+            (
+                "INSERT INTO cluster_fragment_index_jobs
+                    (cache_key, file_id, source_size, source_mtime, source_sha256,
+                     pipeline_sha256, priority, trigger, target_node_id, state,
+                     fence, attempts, not_before_ms, created_at_ms, updated_at_ms)
+                 VALUES ($1, 1, 100, 10, $2, $3, 'normal', 'background', 'node-a',
+                         'queued', 0, 0, 0, 0, 0)",
+                hiqlite::params!("v25-row", "a".repeat(64), "b".repeat(64)),
+            ),
+            (
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+            ),
+        ])
+        .await
+        .expect("construct v25 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit v25 fixture");
+
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v25 through v26 attempt-history migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v26.proof")
+            .await
+            .expect("read v26 migration proof")
+            .as_deref(),
+        Some("survives")
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('cluster_fragment_index_jobs')
+              WHERE name = 'attempt_errors'",
+            1,
+        ),
+        // The row that predates the column reads back an empty history, not a
+        // NULL: the column is NOT NULL DEFAULT ''.
+        (
+            "SELECT COUNT(*) AS value FROM cluster_fragment_index_jobs
+              WHERE cache_key = 'v25-row' AND attempt_errors = ''",
+            1,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect migrated v26 attempt-history schema");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+
+    // A second open is a no-op rather than a duplicate-column failure.
+    HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("re-opening an already migrated v26 store");
+}
+
+/// The schema this fixture rewinds to. Named rather than derived from
+/// `AUTH_SCHEMA_VERSION`: the point of the test is the v24 → v25 step, and
+/// deriving it moved the fixture every time a later step landed.
+#[cfg(feature = "hiqlite-contract-tests")]
+const V24_SCHEMA_VERSION: i64 = 24;
+
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_shape() {
@@ -9137,9 +9251,17 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
                  ) STRICT",
                 hiqlite::params!(),
             ),
+            // A v24 tree predates the attempt history as well as the guards.
+            // Leaving it behind makes the replayed v26 step fail on a column
+            // that is already there, which is a fixture defect wearing the
+            // costume of a migration defect.
+            (
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
+                hiqlite::params!(),
+            ),
             (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-                hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+                hiqlite::params!(V24_SCHEMA_VERSION),
             ),
         ])
         .await
@@ -9160,7 +9282,7 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION - 1,
+            V24_SCHEMA_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
@@ -9202,7 +9324,7 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION - 1,
+            V24_SCHEMA_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
@@ -9259,6 +9381,13 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
         (
             "SELECT COUNT(*) AS value FROM sqlite_master
              WHERE type = 'trigger' AND name = 'dv_queue_admission_settings_ai'",
+            1,
+        ),
+        // The chain does not stop at v25: one `open_or_migrate` walks every
+        // remaining step, and v26 is the attempt history.
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('cluster_fragment_index_jobs')
+              WHERE name = 'attempt_errors'",
             1,
         ),
     ] {
@@ -9404,7 +9533,7 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION - 1,
+            V24_SCHEMA_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
@@ -14348,6 +14477,291 @@ async fn rendition_plan_contract_runs_through_dyn_store() {
         assert!(
             alive.is_empty(),
             "backend {backend}: no rows in `files`, so nothing survives, got {alive:?}"
+        );
+    })
+    .await;
+}
+
+/// A job that exhausts its retry budget must be able to say what actually
+/// went wrong, five attempts later.
+///
+/// `last_error_code` is wiped by every claim and overwritten by the terminal
+/// `attempt_limit`, so 1,933 rows died in three days carrying no trace of the
+/// cause; it had to be recovered from aggregate counters that no surface
+/// reads. `attempt_errors` is the history the Analysis view's operator text
+/// already promised — "resolve the underlying error shown in earlier
+/// attempts" — and the rules it has to keep are: every *charged* attempt
+/// appends, including the one that becomes `attempt_limit`; the claim sweep
+/// appends `lease_expired` when it reclaims a lapsed row; an uncharged yield
+/// appends nothing, because a job preempted on every tick would otherwise
+/// grow the column without bound; and a reopen that resets the budget resets
+/// the history with it.
+#[tokio::test]
+async fn fragment_index_attempt_history_survives_every_charged_attempt() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "attempt-history").await;
+        let source_sha256 = "a".repeat(64);
+        let pipeline_sha256 = "b".repeat(64);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("attempt history cache key");
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: "history-node".to_owned(),
+            not_before_ms: 0,
+            created_at_ms: 0,
+        };
+        assert!(
+            store
+                .enqueue_cluster_fragment_index(&job)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}")),
+            "backend {backend}"
+        );
+
+        async fn charge(
+            store: &Arc<dyn Store>,
+            backend: &'static str,
+            cache_key: &str,
+            target: &str,
+            at: i64,
+            code: &'static str,
+        ) {
+            let claimed = store
+                .claim_cluster_fragment_index("history-node", &[], at, at + 1_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim for {code}: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: the job is claimable for {code}"));
+            assert!(
+                store
+                    .fail_cluster_fragment_index(
+                        cache_key,
+                        target,
+                        &claimed.owner_node_id,
+                        claimed.fence,
+                        code,
+                        true,
+                        at + 1,
+                        at + 2,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: fail {code}: {error}")),
+                "backend {backend}: {code}"
+            );
+        }
+        let target = job.target_node_id.clone();
+        let mut now = 10_i64;
+        charge(
+            &store,
+            backend,
+            &cache_key,
+            &target,
+            now,
+            "source_unavailable",
+        )
+        .await;
+        now += 10_000;
+        charge(
+            &store,
+            backend,
+            &cache_key,
+            &target,
+            now,
+            "source_attestation_failed",
+        )
+        .await;
+        now += 10_000;
+
+        // An uncharged yield refunds its attempt, so it must not appear.
+        let preempted = store
+            .claim_cluster_fragment_index("history-node", &[], now, now + 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim for yield: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the job is claimable for yield"));
+        assert!(
+            store
+                .yield_cluster_fragment_index(
+                    &cache_key,
+                    &job.target_node_id,
+                    &preempted.owner_node_id,
+                    preempted.fence,
+                    now + 1,
+                    now + 2,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: yield: {error}")),
+            "backend {backend}"
+        );
+        now += 10_000;
+
+        charge(
+            &store,
+            backend,
+            &cache_key,
+            &target,
+            now,
+            "source_catalog_read_failed",
+        )
+        .await;
+        now += 10_000;
+        charge(
+            &store,
+            backend,
+            &cache_key,
+            &target,
+            now,
+            "local_publish_failed",
+        )
+        .await;
+        now += 10_000;
+
+        // The fifth charged attempt is a lapsed lease the claim sweep
+        // reclaims, which is the only writer of `lease_expired`.
+        let lapsed = store
+            .claim_cluster_fragment_index("history-node", &[], now, now + 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim for lapse: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the job is claimable for lapse"));
+        assert_eq!(lapsed.attempts, 5, "backend {backend}");
+        now += 10_000;
+        // Sweeping is a side effect of the next claim on any node.
+        let _ = store
+            .claim_cluster_fragment_index("sweeping-node", &[], now, now + 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: sweep claim: {error}"));
+
+        let dead = store
+            .cluster_fragment_index_job(&cache_key, &job.target_node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the job row exists"));
+        assert_eq!(dead.state, "failed", "backend {backend}");
+        assert_eq!(
+            dead.last_error_code, "attempt_limit",
+            "backend {backend}: the terminal code is unchanged"
+        );
+        assert_eq!(
+            dead.attempt_errors,
+            "source_unavailable,source_attestation_failed,\
+             source_catalog_read_failed,local_publish_failed,lease_expired",
+            "backend {backend}: every charged attempt, in order, and no yield"
+        );
+
+        // The history reaches the operator through the same page the Analysis
+        // view reads.
+        let page = store
+            .analysis_history(&AnalysisHistoryQuery {
+                limit: 50,
+                cursor: None,
+                filter: AnalysisHistoryFilter::All,
+                search: String::new(),
+                states: Vec::new(),
+                now_ms: now,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: history page: {error}"));
+        let row = page
+            .rows
+            .iter()
+            .find(|row| row.job_id == cache_key)
+            .unwrap_or_else(|| panic!("{backend}: the dead job is in the history page"));
+        assert_eq!(
+            row.job_attempt_errors, dead.attempt_errors,
+            "backend {backend}"
+        );
+
+        // An ordinary re-enqueue of a dead row is not a reopen: the budget
+        // stays exhausted, so the history that explains it stays too.
+        let mut re_enqueued = job.clone();
+        re_enqueued.not_before_ms = now;
+        re_enqueued.created_at_ms = now;
+        store
+            .enqueue_cluster_fragment_index(&re_enqueued)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: re-enqueue: {error}"));
+        let still_dead = store
+            .cluster_fragment_index_job(&cache_key, &job.target_node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read re-enqueued job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the row exists"));
+        assert_eq!(
+            still_dead.attempt_errors, dead.attempt_errors,
+            "backend {backend}: an exhausted budget keeps its history"
+        );
+
+        // A row the sweep expires *is* reopened, and a fresh budget starts a
+        // fresh history.
+        let expiring_pipeline = "c".repeat(64);
+        let expiring_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &expiring_pipeline)
+                .expect("expiring cache key");
+        let mut expiring = job.clone();
+        expiring.cache_key = expiring_key.clone();
+        expiring.pipeline_sha256 = expiring_pipeline.clone();
+        expiring.not_before_ms = now;
+        expiring.created_at_ms = now;
+        assert!(
+            store
+                .enqueue_cluster_fragment_index(&expiring)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue expiring: {error}")),
+            "backend {backend}"
+        );
+        charge(
+            &store,
+            backend,
+            &expiring_key,
+            &target,
+            now + 10,
+            "source_unavailable",
+        )
+        .await;
+        // Seven hours on, the claim sweep expires a row that never got a slot.
+        let expired_at = now + 7 * 60 * 60 * 1_000;
+        let _ = store
+            .claim_cluster_fragment_index("sweeping-node", &[], expired_at, expired_at + 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: expiry sweep: {error}"));
+        let expired = store
+            .cluster_fragment_index_job(&expiring_key, &job.target_node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read expired job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the expiring row exists"));
+        assert_eq!(
+            expired.last_error_code, "queue_expired",
+            "backend {backend}"
+        );
+        assert_eq!(
+            expired.attempt_errors, "source_unavailable",
+            "backend {backend}: expiry is not a charged attempt, so it appends nothing"
+        );
+
+        let mut reopened = expiring.clone();
+        reopened.not_before_ms = expired_at;
+        reopened.created_at_ms = expired_at;
+        assert!(
+            store
+                .enqueue_cluster_fragment_index(&reopened)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reopen expired: {error}")),
+            "backend {backend}"
+        );
+        let fresh = store
+            .cluster_fragment_index_job(&expiring_key, &job.target_node_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read reopened job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the reopened row exists"));
+        assert_eq!(fresh.attempts, 0, "backend {backend}");
+        assert_eq!(
+            fresh.attempt_errors, "",
+            "backend {backend}: a fresh budget starts a fresh history"
         );
     })
     .await;

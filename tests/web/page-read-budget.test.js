@@ -1210,6 +1210,8 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
      ${shippedSource("analysisRowKey")}
      ${shippedSource("analysisDisposition")}
      ${shippedSource("analysisErrors")}
+     ${shippedSource("analysisAttemptHistory")}
+     ${shippedSource("analysisAttemptHistoryHtml")}
      ${shippedSource("analysisAction")}
      ${shippedSource("analysisCanRetry")}
      ${shippedSource("analysisPageUrl")}
@@ -1425,6 +1427,8 @@ test("Analysis repaint restores row-link and disclosure focus with stable keys",
      ${shippedSource("analysisRowKey")}
      ${shippedSource("analysisDisposition")}
      ${shippedSource("analysisErrors")}
+     ${shippedSource("analysisAttemptHistory")}
+     ${shippedSource("analysisAttemptHistoryHtml")}
      ${shippedSource("analysisAction")}
      ${shippedSource("analysisCanRetry")}
      ${shippedSource("paintAnalysis")}
@@ -1443,6 +1447,7 @@ test("Analysis repaint restores row-link and disclosure focus with stable keys",
   assert.match(main.innerHTML,/data-analysis-focus="details:job:one"/);
   assert.match(main.innerHTML,/data-analysis-focus="paused-settings"/);
   assert.match(main.innerHTML,/data-analysis-key="job:one" open/);
+
 
   focusKey="details:job:one";
   active.dataset.analysisFocus=focusKey;
@@ -1755,4 +1760,56 @@ process.on("beforeExit", () => {
     process.stderr.write(`FAIL ${started - finished} test(s) never finished\n`);
   }
   if (failures) process.exitCode = 1;
+});
+
+test("A failed row lists the code every charged attempt ended with", () => {
+  // `job_error_code` on an exhausted budget is always `attempt_limit`, which
+  // names no cause. The row now carries the history the operator text has
+  // always promised.
+  const main={innerHTML:"",querySelectorAll:()=>[]};
+  const document={activeElement:null,body:{contains:()=>true},getElementById:(id)=>id==="main"?main:null};
+  const harness=new Function(
+    "document","esc","fmtAgo","fmtBytes",
+    `let ANALYSIS_SNAPSHOT=null,ANALYSIS_ROW_LOOKUP=new Map();
+     let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:false,cursors:[""]};
+     ${shippedSource("analysisStateLabel")}
+     ${shippedSource("analysisPhase")}
+     ${shippedSource("analysisErrorInfo")}
+     ${shippedSource("analysisErrorHtml")}
+     ${shippedSource("analysisRows")}
+     ${shippedSource("analysisCounts")}
+     ${shippedSource("nodeLabel")}
+     ${shippedSource("analysisNodeCell")}
+     ${shippedSource("analysisNodeDetail")}
+     ${shippedSource("analysisRowKey")}
+     ${shippedSource("analysisDisposition")}
+     ${shippedSource("analysisErrors")}
+     ${shippedSource("analysisAttemptHistory")}
+     ${shippedSource("analysisAttemptHistoryHtml")}
+     ${shippedSource("analysisAction")}
+     ${shippedSource("analysisCanRetry")}
+     ${shippedSource("paintAnalysis")}
+     return (snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);};`,
+  )(document,String,()=>"just now",value=>`${value} B`);
+  const base={
+    row_key:"job:one",request_id:"",job_id:"one",file_id:"1",item_id:"2",title:"Movie",
+    state:"failed",request_state:"",job_state:"failed",disposition:"attention",action:"retry",
+    updated_at_ms:100,attempts:5,owner_node_id:"node-a",target_node_id:"",
+    pipeline_version:"0123456789ab",source_size:123,request_error_code:"",
+    job_error_code:"attempt_limit",
+    job_attempt_errors:["source_unavailable","lease_expired","source_attestation_failed"],
+  };
+  const snapshot={enabled:false,now_ms:200,filtered_total:1,next_cursor:null,rows:[base],
+    summary:{available:true,total:1,ready:0}};
+  harness(snapshot);
+  assert.match(main.innerHTML,/analysis-attempts/);
+  assert.match(main.innerHTML,/source_unavailable/);
+  assert.match(main.innerHTML,/lease_expired/);
+  assert.match(main.innerHTML,/source_attestation_failed/);
+  // The terminal code alone is still shown, and still says nothing on its own.
+  assert.match(main.innerHTML,/attempt_limit/);
+
+  // A row that has charged nothing renders no list at all.
+  harness({...snapshot,rows:[{...base,job_attempt_errors:[]}]});
+  assert.ok(!/analysis-attempts/.test(main.innerHTML));
 });

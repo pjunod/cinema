@@ -1170,11 +1170,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("v43-malformed-guard.db");
         let connection = rusqlite::Connection::open(&path).expect("fixture");
-        SqliteStore::apply_migrations_for_test(
-            &connection,
-            crate::store::SQLITE_SCHEMA_VERSION - 1,
-        )
-        .expect("v43 schema");
+        // v43 exactly: the version before the guard ledger this test is about.
+        // Deriving it from the current head made it drift the moment another
+        // migration landed on top.
+        SqliteStore::apply_migrations_for_test(&connection, 43).expect("v43 schema");
         connection
             .execute_batch(
                 "CREATE TABLE dv_recovery_guards (
@@ -1194,7 +1193,8 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, crate::store::SQLITE_SCHEMA_VERSION - 1);
+        // The refusal leaves the database exactly where it was: still v43.
+        assert_eq!(version, 43);
         let columns: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('dv_conversions')",
@@ -1244,9 +1244,13 @@ mod tests {
         let connection = rusqlite::Connection::open(&path).expect("downgrade fixture");
         connection
             .execute_batch(
+                // A v43 database predates v44's recovery guards *and* v45's
+                // attempt history; leaving either behind makes the replayed
+                // migration fail on a column that is already there.
                 "DROP INDEX dv_conversions_recovery_guard;
                  DROP TABLE dv_recovery_guards;
                  ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
+                 ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors;
                  PRAGMA user_version = 43;",
             )
             .expect("construct unrecoverable v43 commit");

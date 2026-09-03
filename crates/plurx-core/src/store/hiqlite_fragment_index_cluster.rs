@@ -579,6 +579,13 @@ const ANALYSIS_COMPONENT_STATEMENTS: &[&str] = &[
     END"#,
 ];
 
+/// Replicated v26. One column, and nothing else — see
+/// `fragment_index_cluster::ANALYSIS_ATTEMPT_ERRORS_SCHEMA` for why it is a
+/// column rather than rows.
+const ANALYSIS_ATTEMPT_ERRORS_STATEMENTS: &[&str] = &[
+    "ALTER TABLE cluster_fragment_index_jobs ADD COLUMN attempt_errors TEXT NOT NULL DEFAULT ''",
+];
+
 fn migration_statements(
     statements: &'static [&'static str],
 ) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
@@ -611,6 +618,11 @@ pub(super) fn analysis_component_migration_statements(
     migration_statements(ANALYSIS_COMPONENT_STATEMENTS)
 }
 
+pub(super) fn analysis_attempt_errors_migration_statements(
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    migration_statements(ANALYSIS_ATTEMPT_ERRORS_STATEMENTS)
+}
+
 /// Whether the complete v22 analysis shape is already installed.
 ///
 /// The bootstrap schema transaction lands before `cluster_meta` is seeded. A
@@ -635,7 +647,9 @@ SELECT
   + (SELECT COUNT(*) FROM sqlite_master
       WHERE type = 'table' AND name IN
         ('analysis_attempts','cluster_fragment_index_heads',
-         'analysis_lifecycle_counters')) AS count
+         'analysis_lifecycle_counters'))
+  + (SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+      WHERE name = 'attempt_errors') AS count
 "#;
 
 pub(super) async fn analysis_component_schema_is_current(
@@ -646,7 +660,7 @@ pub(super) async fn analysis_component_schema_is_current(
         .query_consistent_map::<SchemaCountRow, _>(ANALYSIS_COMPONENT_SCHEMA_CURRENT_SQL, params!())
         .await
         .map_err(database_error)?;
-    Ok(rows.len() == 1 && rows[0].0 == 15)
+    Ok(rows.len() == 1 && rows[0].0 == 16)
 }
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
@@ -657,6 +671,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     statements.extend(analysis_request_schema_migration_statements()?);
     statements.extend(analysis_history_index_migration_statements()?);
     statements.extend(analysis_component_migration_statements()?);
+    statements.extend(analysis_attempt_errors_migration_statements()?);
     client
         .txn(statements)
         .await
@@ -671,7 +686,8 @@ const JOB_COLS: &str = "cache_key, file_id, source_size, source_mtime, source_sh
     pipeline_sha256, priority, trigger, target_node_id,
     state, COALESCE(owner_node_id, '') AS owner_node_id, fence,
     COALESCE(lease_expires_ms, 0) AS lease_expires_ms, attempts, not_before_ms,
-    created_at_ms, updated_at_ms, COALESCE(last_error_code, '') AS last_error_code";
+    created_at_ms, updated_at_ms, COALESCE(last_error_code, '') AS last_error_code,
+    attempt_errors";
 
 struct JobRow(ClusterFragmentIndexJob);
 
@@ -696,6 +712,7 @@ impl From<&mut Row<'_>> for JobRow {
             created_at_ms: row.get("created_at_ms"),
             updated_at_ms: row.get("updated_at_ms"),
             last_error_code: row.get("last_error_code"),
+            attempt_errors: row.get("attempt_errors"),
         })
     }
 }
@@ -791,7 +808,7 @@ const HISTORY_COLS: &str = "row_key, request_id, job_id, file_id, item_id, title
     component, force_rebuild, target_node_id, request_state, job_state, state, disposition,
     action, owner_node_id, claim_epoch, lease_expires_ms, attempts, not_before_ms, request_error_code,
     job_error_code, created_at_ms, updated_at_ms, pipeline_version, requested_generation,
-    priority, trigger, cancel_requested, phase, source_size";
+    priority, trigger, cancel_requested, phase, source_size, job_attempt_errors";
 
 const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.request_id, '') AS request_id, COALESCE(page.job_id, '') AS job_id,
@@ -815,7 +832,8 @@ const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.priority, '') AS priority, COALESCE(page.trigger, '') AS trigger,
     COALESCE(page.cancel_requested, 0) AS cancel_requested,
     COALESCE(page.phase, '') AS phase,
-    COALESCE(page.source_size, 0) AS source_size";
+    COALESCE(page.source_size, 0) AS source_size,
+    COALESCE(page.job_attempt_errors, '') AS job_attempt_errors";
 
 struct HistoryRow(AnalysisHistoryRow, AnalysisHistoryCursor, i64);
 
@@ -852,6 +870,7 @@ impl From<&mut Row<'_>> for HistoryRow {
             cancel_requested: row.get::<i64>("cancel_requested") != 0,
             phase: row.get("phase"),
             source_size: row.get("source_size"),
+            job_attempt_errors: row.get("job_attempt_errors"),
         };
         let cursor = AnalysisHistoryCursor {
             sort_rank: row.get("sort_rank"),
@@ -1590,6 +1609,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                             OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                           ELSE cluster_fragment_index_jobs.attempts END,
+                        attempt_errors = CASE WHEN $15 = 1 THEN ''
+                          WHEN cluster_fragment_index_jobs.state = 'cancelled'
+                            OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                            OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
+                          ELSE cluster_fragment_index_jobs.attempt_errors END,
                         not_before_ms = excluded.not_before_ms,
                         created_at_ms = excluded.created_at_ms,
                         updated_at_ms = excluded.updated_at_ms, last_error_code = NULL
@@ -2575,7 +2599,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                     not_before_ms = $1, updated_at_ms = $1,
                     last_error_code = CASE WHEN state = 'running'
-                      THEN 'attempt_limit' ELSE 'queue_expired' END
+                      THEN 'attempt_limit' ELSE 'queue_expired' END,
+                            attempt_errors = CASE WHEN state = 'running'
+                              THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
+                                    ELSE attempt_errors || ',lease_expired' END)
+                              ELSE attempt_errors END
               WHERE (state = 'queued' AND created_at_ms < $2)
                  OR (state = 'running' AND attempts >= $3
                    AND COALESCE(lease_expires_ms, 0) <= $1)",
@@ -2615,6 +2643,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                           OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                           OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                         ELSE cluster_fragment_index_jobs.attempts END,
+                    attempt_errors = CASE
+                        WHEN cluster_fragment_index_jobs.state = 'cancelled'
+                          OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                          OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
+                        ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = CASE
                         WHEN cluster_fragment_index_jobs.state = 'queued'
                         THEN MIN(cluster_fragment_index_jobs.not_before_ms, excluded.not_before_ms)
@@ -2683,7 +2716,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                             not_before_ms = $1, updated_at_ms = $1,
                             last_error_code = CASE WHEN state = 'running'
-                              THEN 'attempt_limit' ELSE 'queue_expired' END
+                              THEN 'attempt_limit' ELSE 'queue_expired' END,
+                            attempt_errors = CASE WHEN state = 'running'
+                              THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
+                                    ELSE attempt_errors || ',lease_expired' END)
+                              ELSE attempt_errors END
                       WHERE (state = 'queued' AND created_at_ms < $2)
                          OR (state = 'running' AND attempts >= $3
                            AND COALESCE(lease_expires_ms, 0) <= $1)"
@@ -2703,7 +2740,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                                  + unicode(substr(cache_key || ':' || target_node_id, 1, 1)) * 31
                                  + unicode(substr(cache_key || ':' || target_node_id, -1, 1)) * 13
                                  + attempts * 7) % 51))) / 100), $3),
-                            last_error_code = 'lease_expired', updated_at_ms = $1
+                            last_error_code = 'lease_expired',
+                            attempt_errors = CASE WHEN attempt_errors = ''
+                              THEN 'lease_expired'
+                              ELSE attempt_errors || ',lease_expired' END,
+                            updated_at_ms = $1
                       WHERE state = 'running' AND COALESCE(lease_expires_ms, 0) <= $1
                         AND attempts < $4"
                         .to_owned(),
@@ -2802,7 +2843,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                     not_before_ms = $1, updated_at_ms = $1,
                     last_error_code = CASE WHEN state = 'running'
-                      THEN 'attempt_limit' ELSE 'queue_expired' END
+                      THEN 'attempt_limit' ELSE 'queue_expired' END,
+                            attempt_errors = CASE WHEN state = 'running'
+                              THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
+                                    ELSE attempt_errors || ',lease_expired' END)
+                              ELSE attempt_errors END
               WHERE (state = 'queued' AND created_at_ms < $2)
                  OR (state = 'running' AND attempts >= $3
                    AND COALESCE(lease_expires_ms, 0) <= $1)",
@@ -2837,6 +2882,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                       ELSE cluster_fragment_index_jobs.attempts END,
+                    attempt_errors = CASE
+                      WHEN cluster_fragment_index_jobs.state = 'ready'
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                        OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
+                      ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = excluded.not_before_ms,
                     created_at_ms = excluded.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms,
@@ -3206,6 +3256,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         owner_node_id = NULL, lease_expires_ms = NULL,
                         last_error_code = CASE WHEN $1 = 1 AND attempts >= $2
                               THEN 'attempt_limit' ELSE $3 END,
+                        attempt_errors = CASE WHEN attempt_errors = ''
+                              THEN $3 ELSE attempt_errors || ',' || $3 END,
                         not_before_ms = $4, updated_at_ms = $5
                   WHERE cache_key = $6 AND target_node_id = $7
                     AND state = 'running' AND owner_node_id = $8
@@ -3446,11 +3498,13 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
+        ANALYSIS_ATTEMPT_ERRORS_STATEMENTS, ANALYSIS_COMPONENT_STATEMENTS,
         ANALYSIS_HISTORY_INDEX_STATEMENTS, ANALYSIS_REQUEST_SCHEMA_STATEMENTS,
         FRAGMENT_INDEX_SCHEMA_STATEMENTS,
     };
     use crate::store::fragment_index_cluster::{
-        ANALYSIS_HISTORY_INDEX_SCHEMA, ANALYSIS_REQUESTS_SCHEMA, CLUSTER_FRAGMENT_INDEX_SCHEMA,
+        ANALYSIS_ATTEMPT_ERRORS_SCHEMA, ANALYSIS_COMPONENTS_SCHEMA, ANALYSIS_HISTORY_INDEX_SCHEMA,
+        ANALYSIS_REQUESTS_SCHEMA, CLUSTER_FRAGMENT_INDEX_SCHEMA,
     };
 
     fn fixture() -> Connection {
@@ -3460,10 +3514,16 @@ mod tests {
                 "CREATE TABLE files (
                     id INTEGER PRIMARY KEY,
                     size INTEGER NOT NULL,
-                    mtime INTEGER NOT NULL
+                    mtime INTEGER NOT NULL,
+                    scanned_at INTEGER NOT NULL DEFAULT 0
                  ) STRICT;",
             )
             .expect("files prerequisite");
+        // The component step widens `timeline_annotation_sets` on its way
+        // past, so the comparison needs that table present on both sides.
+        connection
+            .execute_batch(crate::store::timeline_annotations::TIMELINE_ANNOTATIONS_SCHEMA)
+            .expect("timeline annotations prerequisite");
         connection
     }
 
@@ -3497,6 +3557,7 @@ mod tests {
         assert_eq!(FRAGMENT_INDEX_SCHEMA_STATEMENTS.len(), 8);
         assert_eq!(ANALYSIS_REQUEST_SCHEMA_STATEMENTS.len(), 7);
         assert_eq!(ANALYSIS_HISTORY_INDEX_STATEMENTS.len(), 2);
+        assert_eq!(ANALYSIS_ATTEMPT_ERRORS_STATEMENTS.len(), 1);
 
         let sqlite = fixture();
         sqlite
@@ -3508,12 +3569,23 @@ mod tests {
         sqlite
             .execute_batch(ANALYSIS_HISTORY_INDEX_SCHEMA)
             .expect("SQLite v33 analysis-history indexes");
+        // The component rebuild (v22 replicated / v41 embedded) was never in
+        // this comparison, so the two backends' largest divergence — a table
+        // rebuild with a data-carrying INSERT — went unchecked.
+        sqlite
+            .execute_batch(ANALYSIS_COMPONENTS_SCHEMA)
+            .expect("SQLite v41 analysis-component schema");
+        sqlite
+            .execute_batch(ANALYSIS_ATTEMPT_ERRORS_SCHEMA)
+            .expect("SQLite v45 attempt-history column");
 
         let replicated = fixture();
         for sql in FRAGMENT_INDEX_SCHEMA_STATEMENTS
             .iter()
             .chain(ANALYSIS_REQUEST_SCHEMA_STATEMENTS)
             .chain(ANALYSIS_HISTORY_INDEX_STATEMENTS)
+            .chain(ANALYSIS_COMPONENT_STATEMENTS)
+            .chain(ANALYSIS_ATTEMPT_ERRORS_STATEMENTS)
         {
             replicated
                 .execute_batch(sql)
@@ -3521,5 +3593,20 @@ mod tests {
         }
 
         assert_eq!(schema_objects(&replicated), schema_objects(&sqlite));
+        // Objects alone would not see a column, and a column is exactly what
+        // v26 adds.
+        for connection in [&sqlite, &replicated] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+                          WHERE name = 'attempt_errors'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .expect("attempt history column"),
+                1
+            );
+        }
     }
 }

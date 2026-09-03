@@ -838,6 +838,10 @@
   .analysis-error.warn b{color:var(--warn)}
   .analysis-error p{margin:4px 0 0;color:var(--prose);font-size:12px;line-height:1.48}
   .analysis-error code{display:inline-block;margin-top:6px;color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}
+  .analysis-attempts{margin:8px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:3px;max-width:580px;color:var(--prose);font-size:11.5px;line-height:1.45}
+  .analysis-attempts li{display:flex;align-items:baseline;gap:6px}
+  .analysis-attempts li span{flex:none;min-width:14px;color:var(--muted);font-variant-numeric:tabular-nums;text-align:right}
+  .analysis-attempts li code{color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}
   .analysis-diag{margin-top:8px;color:var(--muted);font-size:11.5px}
   .analysis-diag summary{cursor:pointer;list-style:none;color:var(--accent);font-weight:600}
   .analysis-diag summary::-webkit-details-marker{display:none}
@@ -11150,7 +11154,7 @@ function analysisErrorInfo(code){
     invalid_cache_identity:["Invalid cache identity","The server could not derive a safe content-addressed key for this source.","Inspect server logs; retry after correcting the source metadata.","bad"],
     queue_write_failed:["Queue update failed","The analysis request could not be handed to the shared index queue.","Check database or cluster health; the request will retry automatically.","bad"],
     queue_full_or_busy:["Analysis queue is busy","The shared index queue could not accept another handoff yet.","No action is needed; this request retries automatically.","warn"],
-    attempt_limit:["Retry limit reached","Repeated source or store failures exhausted the automatic retry budget.","Resolve the underlying error shown in earlier attempts, then retry manually.","bad"],
+    attempt_limit:["Retry limit reached","Repeated source or store failures exhausted the automatic retry budget.","Every attempt is listed below; resolve what those codes name, then retry manually.","bad"],
     unsupported:["VOD analysis is not supported","The file’s codec or fragment structure cannot produce a safe VOD HLS index.","Live HLS can be used only when live recovery is enabled in Playback settings; rebuilding will not help unless the source changes.","bad"],
     truncated:["Index output was incomplete","Analysis ended before it could describe the complete file timeline.","Check the source for damage or truncation, then retry after replacing it.","bad"],
     encode_failed:["Index encoding failed","The index was built but could not be serialized into the cache artifact.","Inspect server logs and retry; repeated failures need a server fix.","bad"],
@@ -11243,6 +11247,19 @@ function analysisDisposition(row){
   return "attention";
 }
 function analysisErrors(row){ return [row.request_error_code?{stage:"Request",code:row.request_error_code}:null,row.job_error_code?{stage:"Index build",code:row.job_error_code}:null].filter(Boolean); }
+// The code each charged attempt ended with, oldest first. `job_error_code` is
+// only the terminal one, and for an exhausted budget that is always
+// `attempt_limit`, which names no cause at all.
+function analysisAttemptHistory(row){
+  const history=row&&row.job_attempt_errors;
+  return Array.isArray(history)?history.filter(Boolean):[];
+}
+function analysisAttemptHistoryHtml(row){
+  const history=analysisAttemptHistory(row);
+  if(!history.length) return "";
+  const items=history.map((code,index)=>`<li><span>${index+1}</span><code>${esc(code)}</code> ${esc(analysisErrorInfo(code).title)}</li>`).join("");
+  return `<ol class="analysis-attempts">${items}</ol>`;
+}
 function analysisAction(row){
   if(row.action) return row.action;
   const code=row.job_error_code||row.request_error_code||"";
@@ -11289,6 +11306,7 @@ function analysisDiagnosticText(row,names){
     row.pipeline_version?`Pipeline: ${row.pipeline_version}`:null,
     `Attempts: ${row.attempts||0}`,
     ...analysisErrors(row).map(error=>`${error.stage} error: ${error.code}`),
+    analysisAttemptHistory(row).length?`Attempt history: ${analysisAttemptHistory(row).join(", ")}`:null,
   ].filter(Boolean).join("\n");
 }
 async function copyAnalysisDetails(key,btn){
@@ -11374,7 +11392,7 @@ function paintAnalysis(snapshot){
     const errorHtml=analysisErrors(row).map(error=>analysisErrorHtml(error.code,error.stage)).join("");
     return `<tr>
       <td><span class="analysis-file">${title}</span><div class="analysis-sub">File ${row.file_id} · Priority ${esc(priorityLabel)} · Trigger ${esc(triggerLabel)}${pipeline}</div></td>
-      <td><span class="analysis-state ${esc(displayState)}">${esc(analysisStateLabel(displayState))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}
+      <td><span class="analysis-state ${esc(displayState)}">${esc(analysisStateLabel(displayState))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}${analysisAttemptHistoryHtml(row)}
         <details class="analysis-diag" data-analysis-key="${esc(key)}"${open.has(key)?" open":""}><summary data-analysis-focus="details:${esc(key)}">Technical details</summary><div class="analysis-diag-grid">
           ${details.map(([label,value])=>`<b>${esc(label)}</b><span>${esc(value)}</span>`).join("")}
           <b>Disposition</b><span>${esc(analysisDisposition(row))}</span><b>Attempts</b><span>${attempt}</span><b>Updated</b><span>${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</span>

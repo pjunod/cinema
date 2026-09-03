@@ -8049,6 +8049,7 @@ mod tests {
             created_at_ms: 0,
             updated_at_ms: 0,
             last_error_code: String::new(),
+            attempt_errors: String::new(),
         }
     }
 
