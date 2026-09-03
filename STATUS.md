@@ -4,6 +4,35 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The fragment index has built nothing since 2026-08-31, and now we know why
+
+**PR [#852](https://github.com/pjunod/plurx/pull/852) — open, `docs/fragment-index-queue-repair`,
+diagnosis + implementation handoff, 2026-09-03.** Another session found
+2,152 dead fragment-index jobs and 15 % coverage and could not name the
+cause because the row keeps only `last_error_code`, which by the fifth
+attempt reads `attempt_limit`. The cause is one clause order: `ce253a55`
+(PR #700, 2026-08-31) appended `target_node_id = $6` to the replicated
+`renew_cluster_fragment_index` and `yield_cluster_fragment_index`
+statements *before* `$4`/`$5`, and `validate_parameter_order` refuses any
+statement whose placeholders do not first appear in order — so every
+heartbeat errors on its first tick, `lost` fires, the worker returns without
+writing, and the sweep charges the attempt as `lease_expired` five times.
+Execution-proven against the validator; the lifecycle counters agree
+(12,193 claims, 9,915 lease losses); the last artifact was built the hour
+the deploy landed; zero since. Same class as the `4da3bbde` ledger row —
+the census test that fixed it was scoped to one module. The four M5b
+`dv_conversions` writes have the same defect.
+
+[docs/FRAGMENT-INDEX-QUEUE-REPAIR-HANDOFF.md](docs/FRAGMENT-INDEX-QUEUE-REPAIR-HANDOFF.md):
+M0 is the two-statement fix plus a repo-wide placeholder census and a
+store-contract renew/yield round-trip on both backends; M1 makes a lost
+lease a logged, counted event; M2 keeps per-attempt codes on the row; M3 is
+a queue-health verdict that can say "dead"; M4 reopens the 617 dead keys
+through the successor-generation primitive; M5 is the coverage half
+(duplicate builds per voter, the second and third DV identity) and needs
+Paul's rulings. Two adversarial reviews, 21 corrections folded in. Nothing
+built, nothing deployed.
+
 ## Activity's Now playing row, read as a card
 
 **PR [#849](https://github.com/pjunod/plurx/pull/849) — open, 2026-09-03,
