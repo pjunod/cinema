@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["ec6207d4"]
+reason = "This commit narrows a handoff so it asks for the one new recipe pair and trial count rather than reading as a rebuild of instruments already accepted; it changes no runtime behavior and adds no code path to regress."
+ignore = true
