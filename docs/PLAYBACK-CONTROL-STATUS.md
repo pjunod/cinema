@@ -772,6 +772,63 @@ deadline, so it can never race a live preparation whose owner is still
 renewing. A duplicate of that test at the executor level was written and
 discarded as vacuous.
 
+## The axis rule refuses every real quality change, and M5.5 never ran the case
+
+**Read 2026-09-03 on m6**, on `v0.3.0-487-gd7194b05` — the build carrying the
+seam's file and ask gates, so unlike the first reading this one counts only
+transitions a viewer actually made. Apple TV on build 114, which declares
+`dual_player_preparation: true` and reports `observedDownloadBps`.
+
+Two deliberate quality changes, one HDR title and one SDR:
+
+| title | change | axis | outcome | counterfactual |
+|---|---|---|---|---|
+| Avatar (HDR/DV) | 2160 → 1080 | `dynamic_range` | `multiple_axes` | identical |
+| Dance Flick (SDR H.264) | 1080 → 720 | `delivery_method` | `multiple_axes` | identical |
+
+**Neither is a resolution change.** The top rung direct-plays and the lower
+rungs must transcode, so the delivery method moves with the height *every
+time*; on HDR content the delivered grade moves too. A pure
+`ResolutionOrBitrate` transition does not occur on this library at all.
+
+**So `PREPARED_AXIS` as written refuses everything, and no client release
+changes that.** `MultipleAxes` is ranked above the client gate deliberately —
+which is why the counterfactual is identical to the decision on both rows. The
+capability literal was never the blocker. The axis rule is.
+
+That is the finding shadow mode was built to produce, and it arrived before
+anything was staged on top of it.
+
+### What M5.5 supports, and the one case it never ran
+
+The spike's §3 defines its two cases exactly: **same-codec, same grade** — "a
+resolution/bitrate change only — the axis plan §5.2 expects to be genuinely
+transparent" — and **a codec or dynamic-range change**, expected to be worse.
+Apple passed **both, 20/20, on both required devices**.
+
+So each axis is individually proven on Apple. What the spike never ran is
+**their product**, and the `MultipleAxes` comment says so in as many words:
+"M5.5 ran two cases, not their product." Tonight's measurement is that the
+product is the only thing that actually happens.
+
+**The gap is now exactly one hardware case** — spec'd to run in
+[M6-AXIS-CASE-HANDOFF.md](M6-AXIS-CASE-HANDOFF.md), and it is smaller than the
+original arm: 20 consecutive commits on a recipe pair that changes resolution
+*and* delivery method together — a real 2160 → 1080 on a direct-playing source,
+which is the transition the fleet actually produces. The harness exists, the
+corrective instruments are accepted, and the acceptance is the spike's own:
+zero predecessor and zero post-commit stalls, boundary-qualified first frames,
+non-full varying runway, per-trial wire counts.
+
+**Until that case runs, §3.4 must not ship.** Staging a successor for a
+transition M6 then refuses is cost with no benefit, and widening
+`PREPARED_AXIS` to admit the product on the strength of two separate single-axis
+proofs is exactly the reasoning shadow mode exists to replace. If the case
+passes, `PREPARED_AXIS` widens to the measured combination and M6 has something
+to prepare for. If it fails, M6's honest scope is the one-player
+release-and-replace it already has, and that is worth knowing before the
+executor gets a caller.
+
 ## Shadow mode ran, and the axis rule is what limits M6
 
 **Read 2026-09-03 on m6**, on `v0.3.0-449-gd1a56d01`, from three deliberate
@@ -823,6 +880,78 @@ and did not before.
 one platform. Whether multi-axis dominance is a property of HDR sources, of
 this ladder, or of quality changes generally needs more titles and the other
 two platforms.
+
+## M8 is not independent of M6, and four of its five cases are already proven
+
+**Scoped 2026-09-03** against the store contract suite, which was run rather
+than read: 23 media-session tests pass on **both** backends.
+
+M8's acceptance (remaining-roadmap §4) names five fault cases. Mapping them to
+what exists:
+
+| case | state | evidence |
+|---|---|---|
+| duplicate commit | **covered** | `media_session_commit_advances_the_exact_expected_pointer_once`, `media_session_commit_replay_survives_a_later_preparation` |
+| stale owner | **covered** | `media_session_commit_against_a_moved_pointer_aborts_the_successor`, `media_session_a_removed_owner_cannot_prepare`, `media_session_rejoin_cannot_retarget_an_occupied_preparation_after_pointer_advance` |
+| hard kill during a phase | **covered at the store** | `media_session_maintenance_reaps_an_abandoned_preparation`, and the three `hiqlite_media_session_rejoin_*` post-proposal cases — resurrect-an-aborted, survive-a-post-proposal-commit, classify-a-post-proposal-abort |
+| planned drain | **not built** | see below |
+| shared-store loss | **covered** | `shared_cache.rs`: `mount_loss_during_publication_cannot_install_or_complete_generation`, `mount_loss_after_commit_begins_preserves_global_generation`, `runtime_failure_revokes_shared_classification_until_readmission`, `stale_canary_proof_cannot_reenable_a_failed_mount`, `gc_refuses_a_replaced_root_before_any_retirement_work` — 12 pass |
+
+**Split-brain (§10.4) is already answered, by a stronger fence than the one the
+plan names.** The plan asks that only the owner holding the current replicated
+`owner_epoch` may issue a mutating action. `MediaSessionPreparation` carries no
+epoch at all — it is fenced on `expected_predecessor_incarnation_id`, so a
+second owner whose pointer has moved loses the compare-and-swap on identity
+rather than on a counter. The whole `media_session_rejoin_*` family is that
+race, and it passes on both backends. An epoch field would add nothing the
+predecessor CAS does not already enforce.
+
+### The drain that exists is attrition, not handoff
+
+`RestartDrainStatus` blocks new admissions, counts admissions in flight, and
+reports `drained` once `local_active_sessions` reaches zero
+(`serving_fence.rs`, surfaced by `media_drain_status`). That is drain by
+**waiting for viewers to stop**, which is the right primitive for a supervisor
+restart and is not what §10.2 asks for.
+
+§10.2 asks that "the draining node proposes a node-replacement action. The
+placer reserves the target; VOD attaches the same immutable recipe/store where
+possible; rolling primes a new generation at a future film boundary." Read that
+against M6: it is `PreparationExecutor` — stage, commit, abort against a
+predecessor CAS — with the successor placed on a **different node**.
+
+**So M8 §10.2 sits on top of M6 §3.4**, and the roadmap's numbering hides it.
+§3.4 is blocked on the axis case in
+[M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.3.3, so planned drain is
+blocked behind the same hardware run. Building a cross-node placer first would
+mean building the harder half of a mechanism whose local half does not exist.
+
+### What is genuinely available in M8 now
+
+- **§10.3 hard owner loss**, which needs no staging: resurrect the immutable
+  VOD handle or redirect to an equivalent successor (segment identity is
+  film-addressed); for rolling, refuse to splice an unrelated producer into an
+  EVENT URL and return a successor at an aligned boundary through the current
+  control exchange; with no control snapshot, fall back to persisted watch
+  position and fetched frontier and require a normal reopen.
+**Correction, same day.** This section first said shared-store loss had no
+coverage. It does — the search was run against the *store contract* suite,
+where the term does not appear, and the mechanism lives in `shared_cache.rs`
+instead. A configured path is never treated as shared on its own: every voter
+proves it can read a peer-created canary and that the peer can read its own
+response back through the same mount, and a runtime failure revokes the
+classification immediately while node-local routing continues. The two cases
+M8 actually needs — mount loss *during* publication, and mount loss *after* a
+commit begins — each have their own test, and a stale canary proof cannot
+re-enable a failed mount.
+
+So §10.3's remaining work is the media-session half, not the storage half:
+resurrect the immutable VOD handle or redirect to an equivalent successor;
+for rolling, refuse to splice an unrelated producer into an EVENT URL and
+return a successor at an aligned boundary; with no control snapshot, fall back
+to persisted watch position and fetched frontier and require a normal reopen.
+
+That does not depend on the axis case.
 
 ## M5.5 ran, and two thirds of it settled
 

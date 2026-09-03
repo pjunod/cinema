@@ -668,3 +668,19 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/TvFocus.k
 source_anchor = "token: Any? = null,"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
 test_anchor = "verticalDpadLeavesTheProgressSliderWithoutSeeking"
+
+[[fixes]]
+id = "apple.observed-download-clamp"
+commits = ["49b647f5"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "nonisolated static func observedDownloadBps(fromObservedBitrate observed: Double) -> Int64?"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testObservedDownloadBpsIsClampedRatherThanTrapping"
+
+[[fixes]]
+id = "apple.close-control-exits"
+commits = ["0f904213"]
+source = "clients/apple/Sources/PlayerInputRouting.swift"
+source_anchor = "static func closeSteps(state: PlayerInputState) -> [PlayerInputOutcome]"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testTheCloseButtonsRunTheCloseControlAndNeverTheBackKey"

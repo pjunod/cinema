@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["a2335059"]
+reason = "This commit adds a handoff describing a hardware measurement and links it from two existing docs; it changes no runtime behavior and adds no code path to regress."
+ignore = true

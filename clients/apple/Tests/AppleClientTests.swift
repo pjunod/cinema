@@ -92,6 +92,37 @@ private struct PlayerInputContractFixture: Decodable {
     let routing: [String: [String: [String: String]]]
     let steps: Steps
     let timings: Timings
+    let closeControl: CloseControl
+
+    /// `close_control` is one `notes` string beside one outcome list per
+    /// state, so it is decoded by hand: every key that is not `notes` is a
+    /// state name.
+    struct CloseControl: Decodable {
+        let steps: [String: [String]]
+
+        private struct Key: CodingKey {
+            let stringValue: String
+            var intValue: Int? { nil }
+            init?(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { nil }
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: Key.self)
+            var steps: [String: [String]] = [:]
+            for key in container.allKeys where key.stringValue != "notes" {
+                steps[key.stringValue] = try container.decode([String].self, forKey: key)
+            }
+            self.steps = steps
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case routing
+        case steps
+        case timings
+        case closeControl = "close_control"
+    }
 }
 
 private struct PlaybackInfoFieldsFixture: Decodable {
@@ -2532,6 +2563,62 @@ final class AppleClientTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testTheCloseControlLeavesThePlayerFromEveryState() throws {
+        // The ✕ is `close`, not `back`. Routed through the touch table it
+        // answered `hide` in `transport` — the state it is tapped from — so
+        // the only way out of a film on an iPhone was to force-quit the app.
+        let fixture = try playerInputContractFixture()
+        XCTAssertEqual(
+            Set(fixture.closeControl.steps.keys),
+            Set(PlayerInputState.allCases.map(\.rawValue)),
+            "close_control names every state and nothing else"
+        )
+        for state in PlayerInputState.allCases {
+            let steps = PlayerInputRouting.closeSteps(state: state)
+            XCTAssertEqual(
+                steps.map(\.rawValue),
+                fixture.closeControl.steps[state.rawValue],
+                state.rawValue
+            )
+            XCTAssertEqual(steps.last, .exit, "\(state.rawValue) must end in exit")
+            XCTAssertFalse(steps.contains(.hide), "\(state.rawValue) hides — that is the defect")
+        }
+    }
+
+    func testTheCloseButtonsRunTheCloseControlAndNeverTheBackKey() throws {
+        // The call site, not just the table: the iOS ✕ and the failure
+        // view's Close both go through `closePlayer()`, which walks
+        // `closeSteps`; neither routes `PlayerContractInput.back`, which the
+        // touch table answers with `hide` while chrome is visible.
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let playerSource = try String(
+            contentsOf: testsDirectory
+                .appendingPathComponent("../Sources/PlayerView.swift")
+                .standardizedFileURL,
+            encoding: .utf8
+        )
+        // PlaybackStatsView has a `closeButton` of its own further down the
+        // file; anchor on the player's, which is the iOS-only one.
+        let closeButton = try XCTUnwrap(
+            playerSource.range(of: "#if os(iOS)\n    private var closeButton: some View {")
+        )
+        let closeButtonBody = playerSource[closeButton.upperBound...].prefix(250)
+        XCTAssertTrue(closeButtonBody.contains("closePlayer()"), "the ✕ must run the close control")
+        XCTAssertFalse(closeButtonBody.contains("PlayerInputRouting.route("), "the ✕ must not be routed as a key")
+        XCTAssertFalse(closeButtonBody.contains("ContractInput.back"), "the ✕ must not be the back key")
+        XCTAssertTrue(playerSource.contains("Button(\"Close\") { closePlayer() }"))
+        let closePlayer = try XCTUnwrap(
+            playerSource.range(of: "private func closePlayer() {")
+        )
+        let closePlayerBody = playerSource[closePlayer.upperBound...].prefix(300)
+        XCTAssertTrue(closePlayerBody.contains("PlayerInputRouting.closeSteps(state: inputState())"))
+        XCTAssertTrue(closePlayerBody.contains("applyPlayerInputOutcome(outcome"))
+        XCTAssertFalse(
+            playerSource.contains("let input = PlayerContractInput.back"),
+            "nothing in PlayerView manufactures a back key press"
+        )
     }
 
     func testAutoHideDelayMatchesTheContractTiming() throws {
@@ -5234,6 +5321,43 @@ final class AppleClientTests: XCTestCase {
     /// platform where both recipes passed on both devices, so there is no
     /// failing case to carve out. The narrower bound today is the server's
     /// own `PREPARED_AXIS`, which prepares only a resolution change.
+    /// One unreliable field must not cost the exchange.
+    ///
+    /// Two hazards from the same place — a near-instantaneous response makes
+    /// AVFoundation's bytes-over-duration blow up. `Int64(_: Double)` **traps**
+    /// above `Int64.max`, so an absurd rate would crash the app. One order down
+    /// is worse because it is silent: the protocol caps `observedDownloadBps`
+    /// at 1e13 and `PlaybackControlSnapshot.isValid` rejects the *whole
+    /// snapshot*, so an over-cap rate stops the reporter sending anything and
+    /// the session's control plane goes quiet until its lease expires.
+    func testObservedDownloadBpsIsClampedRatherThanTrapping() {
+        let ceiling: Int64 = 10_000_000_000_000
+        XCTAssertEqual(
+            PlayerController.observedDownloadBps(fromObservedBitrate: 8_000_000),
+            8_000_000
+        )
+        XCTAssertEqual(
+            PlayerController.observedDownloadBps(fromObservedBitrate: 1.5),
+            2,
+            "rounded, not truncated"
+        )
+        for absurd in [Double(Int64.max), .greatestFiniteMagnitude, 1e300, 2e13] {
+            XCTAssertEqual(
+                PlayerController.observedDownloadBps(fromObservedBitrate: absurd),
+                ceiling,
+                "\(absurd) must clamp rather than trap or invalidate the snapshot"
+            )
+        }
+        // AVFoundation reports -1 for "no observation yet", and appends a fresh
+        // event on every variant switch that reads -1 until data flows through
+        // it. Absent is the honest answer: the server treats a missing value as
+        // a refusal, and inventing one would let a prepared handoff fire on a
+        // link nobody measured.
+        for absent in [-1.0, 0.0, Double.nan, -.infinity, .infinity] {
+            XCTAssertNil(PlayerController.observedDownloadBps(fromObservedBitrate: absent))
+        }
+    }
+
     func testDualPlayerPreparationIsDeclaredOnEveryAppleDevice() {
         for hevc in [true, false] {
             for av1 in [true, false] {

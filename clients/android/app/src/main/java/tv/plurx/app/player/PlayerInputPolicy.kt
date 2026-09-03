@@ -253,4 +253,21 @@ internal object PlayerInputPolicy {
 
     fun backAction(state: PlayerInputState): PlayerInputOutcome =
         route(PlayerInputSurface.TenFoot, state, PlayerContractInput.Back)
+
+    /**
+     * `close_control` in the fixture: the phone's back arrow is a button, not
+     * the BACK key. Routed through `Back`, it answered `Hide` in `Transport` —
+     * the state it is tapped from — and exited in no state a viewer could tap
+     * it from. Every row closes what is open and then ends in `Exit`.
+     */
+    fun closeSteps(state: PlayerInputState): List<PlayerInputOutcome> = when (state) {
+        PlayerInputState.Hidden,
+        PlayerInputState.Transport,
+        PlayerInputState.Timeline,
+        PlayerInputState.Failed,
+        -> listOf(PlayerInputOutcome.Exit)
+        PlayerInputState.Scrub -> listOf(PlayerInputOutcome.Cancel, PlayerInputOutcome.Exit)
+        PlayerInputState.Menu -> listOf(PlayerInputOutcome.CloseMenu, PlayerInputOutcome.Exit)
+        PlayerInputState.Info -> listOf(PlayerInputOutcome.CloseInfo, PlayerInputOutcome.Exit)
+    }
 }
