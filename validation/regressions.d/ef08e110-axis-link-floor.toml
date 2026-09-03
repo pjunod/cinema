@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["ef08e110"]
+reason = "This commit corrects a hardware-run handoff so the shaped link clears the server own throughput floor and so two instrument checks reject deterministic values; it changes no runtime behavior and adds no code path to regress."
+ignore = true
