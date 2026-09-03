@@ -68,8 +68,47 @@ const STORE_SOURCES: &[(&str, &str)] = &[
     ),
 ];
 
-/// A statement literal only counts as one if it opens on a statement keyword.
+/// The shared store modules a replicated slice splices `const` SQL from.
+///
+/// `hiqlite_fragment_index_cluster.rs` builds its history statements around
+/// `ANALYSIS_CANONICAL_CTE`, which lives in `fragment_index_cluster.rs`. Without
+/// these, such a statement resolves to a neutral token, stops looking like a
+/// statement, and is never judged.
+const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
+    ("dv_conversion.rs", include_str!("dv_conversion.rs")),
+    ("fragindex.rs", include_str!("fragindex.rs")),
+    (
+        "fragment_index_cluster.rs",
+        include_str!("fragment_index_cluster.rs"),
+    ),
+    ("mod.rs", include_str!("mod.rs")),
+    ("publication.rs", include_str!("publication.rs")),
+    ("renditionplan.rs", include_str!("renditionplan.rs")),
+    ("telemetry.rs", include_str!("telemetry.rs")),
+    (
+        "timeline_annotations.rs",
+        include_str!("timeline_annotations.rs"),
+    ),
+];
+
+/// A statement literal only counts as one if it opens on a statement keyword —
+/// judged *after* its interpolations are resolved, because a template can open
+/// on one.
 const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "WITH"];
+
+/// How many `$`-bearing SQL-shaped literals the census reads as fragments
+/// rather than statements: predicate clauses that are only ever spliced into a
+/// host, and whose host is judged instead.
+///
+/// This is a census, so the number is asserted. A new fragment is not
+/// forbidden — it has to be looked at, and this number updated, which is what
+/// stops a whole statement from disappearing behind an interpolation.
+///
+/// The four today, each spliced into a host this census does judge:
+/// `hiqlite_media.rs`'s two `GENRE` predicates (into the item count and the
+/// item page), and `hiqlite_durable.rs`'s two membership tombstone arms (into
+/// the offline-package insert, once per arm).
+const EXPECTED_FRAGMENTS: usize = 4;
 
 /// One Rust string literal, with its escapes decoded.
 struct Literal {
@@ -253,13 +292,19 @@ fn utf8_width(byte: u8) -> usize {
     }
 }
 
-/// Byte ranges covered by `#[cfg(test)]` items, brace-matched over code only.
+/// Byte ranges covered by test-only items, brace-matched over code only.
 ///
-/// Splitting at the first `#[cfg(test)]` would be wrong: `hiqlite_media.rs`
+/// Splitting at the first attribute would be wrong: `hiqlite_media.rs`
 /// declares a test module part way through the file and carries thousands of
 /// production lines after it.
+///
+/// Any `#[cfg(…)]` whose predicate mentions `test` counts, not only the exact
+/// `#[cfg(test)]` spelling — `#[cfg(all(test, feature = "hiqlite-store"))]`
+/// guards a test module just as completely, and this tree already gates
+/// test-adjacent items on compound predicates.
 fn test_item_ranges(source: &str, is_code: &[bool]) -> Vec<(usize, usize)> {
-    const ATTRIBUTE: &str = "#[cfg(test)]";
+    const ATTRIBUTE: &str = "#[cfg(";
+    let bytes = source.as_bytes();
     let mut ranges = Vec::new();
     let mut search = 0;
     while let Some(offset) = source[search..].find(ATTRIBUTE) {
@@ -268,19 +313,36 @@ fn test_item_ranges(source: &str, is_code: &[bool]) -> Vec<(usize, usize)> {
         if !is_code.get(start).copied().unwrap_or(false) {
             continue;
         }
-        let mut index = search;
+        // The predicate, up to the attribute's closing bracket.
+        let Some(predicate_end) = source[start..].find(']').map(|end| start + end) else {
+            continue;
+        };
+        let predicate = &source[start + ATTRIBUTE.len()..predicate_end];
+        if predicate.contains("not(test") {
+            continue;
+        }
+        if !predicate
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .any(|token| token == "test")
+        {
+            continue;
+        }
+        let mut index = predicate_end + 1;
         let mut depth = 0_usize;
+        let mut parens = 0_usize;
         let mut opened = false;
-        let bytes = source.as_bytes();
         while index < bytes.len() {
             if !is_code[index] {
                 index += 1;
                 continue;
             }
             match bytes[index] {
-                // A `#[cfg(test)]` that guards a `use`, a struct field or an
-                // enum variant rather than a module ends before any brace.
-                b';' | b',' if !opened => {
+                b'(' | b'[' => parens += 1,
+                b')' | b']' => parens = parens.saturating_sub(1),
+                // A test-only `use`, struct field or enum variant ends before
+                // any brace — but a `;` or `,` inside a parameter list or an
+                // attribute does not end anything.
+                b';' | b',' if !opened && parens == 0 => {
                     index += 1;
                     break;
                 }
@@ -342,49 +404,175 @@ fn string_constants(source: &str, literals: &[Literal]) -> Vec<(String, String)>
     constants
 }
 
-/// Resolve `{…}` interpolations so a template can be validated as the
-/// statement it produces. Named interpolations that match a `const` in the
-/// same file take that text; everything else becomes the neutral token `1`,
-/// which keeps `LIMIT ${limit}` a well-formed `$N` and leaves a spliced
-/// predicate clause harmless.
-fn resolve_template(template: &str, constants: &[(String, String)]) -> String {
-    let mut resolved = String::with_capacity(template.len());
+/// `let name = "…"` bindings, with every arm a conditional can choose.
+///
+/// `hiqlite_durable.rs` splices a membership tombstone clause chosen at
+/// runtime, and two of its three arms carry their own `$N`. Resolving the name
+/// to a neutral token would leave both real statements unjudged, so each arm
+/// is validated as its own statement.
+fn string_bindings(
+    source: &str,
+    literals: &[Literal],
+    is_code: &[bool],
+) -> Vec<(String, Vec<String>)> {
+    let bytes = source.as_bytes();
+    let mut bindings: Vec<(String, Vec<String>)> = Vec::new();
+    let mut search = 0;
+    while let Some(offset) = source[search..].find("let ") {
+        let start = search + offset;
+        search = start + "let ".len();
+        if !is_code.get(start).copied().unwrap_or(false) {
+            continue;
+        }
+        let tail = &source[search..];
+        let name_end = tail
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .unwrap_or(tail.len());
+        let name = &tail[..name_end];
+        if name.is_empty() || !name.starts_with(|c: char| c.is_ascii_lowercase()) {
+            continue;
+        }
+        // Walk to the `;` that closes the binding, ignoring braces it opens.
+        let mut index = search + name_end;
+        let mut depth = 0_usize;
+        while index < bytes.len() {
+            if is_code[index] {
+                match bytes[index] {
+                    b'{' => depth += 1,
+                    b'}' => depth = depth.saturating_sub(1),
+                    b';' if depth == 0 => break,
+                    _ => {}
+                }
+            }
+            index += 1;
+        }
+        // Only SQL-shaped arms count. A binding's span also swallows literals
+        // belonging to nested calls — `hiqlite_import.rs` builds its cursor
+        // filter from a `format!("${index}")` inside the same `let` — and
+        // splicing one of those in produces a statement nobody writes.
+        let arms = literals
+            .iter()
+            .filter(|literal| literal.start > start && literal.start < index)
+            .filter(|literal| literal.text.trim().is_empty() || is_sql_shaped(&literal.text))
+            .map(|literal| literal.text.clone())
+            .take(MAX_BINDING_ARMS)
+            .collect::<Vec<_>>();
+        if !arms.is_empty() {
+            bindings.push((name.to_owned(), arms));
+        }
+    }
+    bindings
+}
+
+/// At most this many arms per binding, and this many assembled variants per
+/// template. A runtime-chosen fragment with more shapes than this is a
+/// statement that should be written out, not a combinatorial explosion.
+const MAX_BINDING_ARMS: usize = 4;
+const MAX_TEMPLATE_VARIANTS: usize = 16;
+
+/// Every statement a `format!` template can produce.
+///
+/// A named interpolation resolves to a `const` in the same file, then to one
+/// in a shared store module, then to each arm of a same-file `let` binding.
+/// Anything still unresolved becomes the neutral token `1`, which keeps
+/// `LIMIT ${limit}` a well-formed `$N` and leaves a spliced identifier inert.
+fn resolve_template(
+    template: &str,
+    constants: &[(String, String)],
+    bindings: &[(String, Vec<String>)],
+) -> Vec<String> {
+    let mut variants = vec![String::with_capacity(template.len())];
     let mut rest = template;
     while let Some(open) = rest.find('{') {
-        resolved.push_str(&rest[..open]);
+        for variant in &mut variants {
+            variant.push_str(&rest[..open]);
+        }
         rest = &rest[open..];
         if let Some(escaped) = rest.strip_prefix("{{") {
-            resolved.push_str("{{");
+            for variant in &mut variants {
+                variant.push_str("{{");
+            }
             rest = escaped;
             continue;
         }
         let Some(close) = rest.find('}') else {
-            resolved.push_str(rest);
-            return resolved;
+            for variant in &mut variants {
+                variant.push_str(rest);
+            }
+            return variants;
         };
         let name = rest[1..close].split(':').next().unwrap_or_default().trim();
-        match constants
+        let choices = constants
             .iter()
             .find(|(constant, _)| constant == name)
-            .map(|(_, value)| value)
-        {
-            Some(value) => resolved.push_str(value),
-            None => resolved.push('1'),
-        }
+            .map(|(_, value)| vec![value.clone()])
+            .or_else(|| {
+                bindings
+                    .iter()
+                    .find(|(binding, _)| binding == name)
+                    .map(|(_, arms)| arms.clone())
+            })
+            .unwrap_or_else(|| vec!["1".to_owned()]);
+        variants = variants
+            .iter()
+            .flat_map(|variant| {
+                choices.iter().map(move |choice| {
+                    let mut next = variant.clone();
+                    next.push_str(choice);
+                    next
+                })
+            })
+            .take(MAX_TEMPLATE_VARIANTS)
+            .collect();
         rest = &rest[close + 1..];
     }
-    resolved.push_str(rest);
-    resolved
+    for variant in &mut variants {
+        variant.push_str(rest);
+    }
+    variants
 }
 
+/// Does the text carry a statement keyword as a whole word anywhere in it?
+fn is_sql_shaped(text: &str) -> bool {
+    STATEMENT_KEYWORDS.iter().any(|keyword| {
+        text.match_indices(keyword).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + keyword.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    })
+}
+
+/// A literal worth judging at all: SQL-shaped, and parameterised.
+fn is_sql_candidate(text: &str) -> bool {
+    text.contains('$') && is_sql_shaped(text)
+}
+
+/// A resolved candidate is a statement when it opens on a statement keyword.
+/// Anything else is a fragment of one, and its host is judged instead.
 fn is_statement(text: &str) -> bool {
-    if !text.contains('$') {
-        return false;
-    }
     let trimmed = text.trim_start();
     STATEMENT_KEYWORDS
         .iter()
         .any(|keyword| trimmed.starts_with(keyword))
+}
+
+fn constants_for(name: &str, source: &str, literals: &[Literal]) -> Vec<(String, String)> {
+    // Same-file definitions win: two slices may both define `ITEM_COLS`.
+    let mut constants = string_constants(source, literals);
+    for (shared_name, shared) in SHARED_CONSTANT_SOURCES {
+        if *shared_name == name {
+            continue;
+        }
+        let (shared_literals, _) = literals_and_code_mask(shared);
+        for (constant, value) in string_constants(shared, &shared_literals) {
+            if !constants.iter().any(|(known, _)| *known == constant) {
+                constants.push((constant, value));
+            }
+        }
+    }
+    constants
 }
 
 /// Every replicated statement in the store must pass the validator the store
@@ -396,11 +584,13 @@ fn is_statement(text: &str) -> bool {
 #[test]
 fn every_replicated_placeholder_is_introduced_in_order() {
     let mut offenders = Vec::new();
+    let mut fragments = Vec::new();
     let mut scanned = 0_usize;
     for (name, source) in STORE_SOURCES {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
-        let constants = string_constants(source, &literals);
+        let constants = constants_for(name, source, &literals);
+        let bindings = string_bindings(source, &literals, &is_code);
         for literal in &literals {
             if test_ranges
                 .iter()
@@ -408,16 +598,33 @@ fn every_replicated_placeholder_is_introduced_in_order() {
             {
                 continue;
             }
-            if !is_statement(&literal.text) {
+            if !is_sql_candidate(&literal.text) {
                 continue;
             }
-            scanned += 1;
-            let statement = resolve_template(&literal.text, &constants);
-            if let Err(error) = validate_sql(&statement) {
-                offenders.push(format!(
-                    "{name}:{}: {error}\n    {}",
+            let mut judged = false;
+            for statement in resolve_template(&literal.text, &constants, &bindings) {
+                if !is_statement(&statement) {
+                    continue;
+                }
+                judged = true;
+                scanned += 1;
+                if let Err(error) = validate_sql(&statement) {
+                    offenders.push(format!(
+                        "{name}:{}: {error}\n    {}",
+                        literal.line,
+                        statement.split_whitespace().collect::<Vec<_>>().join(" ")
+                    ));
+                }
+            }
+            if !judged {
+                fragments.push(format!(
+                    "{name}:{}: {}",
                     literal.line,
-                    statement.split_whitespace().collect::<Vec<_>>().join(" ")
+                    literal
+                        .text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 ));
             }
         }
@@ -431,11 +638,23 @@ fn every_replicated_placeholder_is_introduced_in_order() {
         "replicated statements bind by first appearance, so these are refused before any I/O:\n{}",
         offenders.join("\n")
     );
+    assert_eq!(
+        fragments.len(),
+        EXPECTED_FRAGMENTS,
+        "a parameterised SQL literal that resolves to no statement is judged by nothing. \
+         Look at each of these, then update EXPECTED_FRAGMENTS:\n{}",
+        fragments.join("\n")
+    );
 }
 
-/// The census is only repo-wide if its module list is.
+/// The census is only repo-wide if its module list is, and only honest if each
+/// name is paired with its own file.
+///
+/// The name list alone is not enough: `("hiqlite_reading.rs",
+/// include_str!("hiqlite_sessions.rs"))` would still match the directory while
+/// leaving one slice uncensused and censusing another twice.
 #[test]
-fn module_list_matches_the_directory() {
+fn the_census_covers_every_slice_exactly_once() {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
     let mut present = std::fs::read_dir(&directory)
         .expect("the store module directory is readable from the source tree")
@@ -453,11 +672,21 @@ fn module_list_matches_the_directory() {
         present, censused,
         "every replicated store slice must be in STORE_SOURCES; a new one is not exempt"
     );
+    for (name, source) in STORE_SOURCES.iter().chain(SHARED_CONSTANT_SOURCES) {
+        let on_disk = std::fs::read_to_string(directory.join(name))
+            .unwrap_or_else(|error| panic!("{name} is readable: {error}"));
+        assert_eq!(
+            on_disk.len(),
+            source.len(),
+            "{name} is paired with another file's source"
+        );
+    }
 }
 
 mod scanner {
     use super::{
-        literals_and_code_mask, resolve_template, string_constants, test_item_ranges, validate_sql,
+        is_sql_candidate, is_statement, literals_and_code_mask, resolve_template, string_bindings,
+        string_constants, test_item_ranges, validate_sql,
     };
 
     /// A statement inside a `#[cfg(test)]` module is a fixture, not a
@@ -500,21 +729,134 @@ fn page() { let _ = format!("SELECT id FROM items WHERE library_id = $1 AND {GEN
             .iter()
             .find(|literal| literal.text.starts_with("SELECT"))
             .expect("the template literal is scanned");
-        let resolved = resolve_template(&template.text, &constants);
-        assert!(resolved.contains("($2 IS NULL OR items.genre = $2)"));
-        validate_sql(&resolved).expect("the assembled statement is in order");
+        let resolved = resolve_template(&template.text, &constants, &[]);
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved[0].contains("($2 IS NULL OR items.genre = $2)"));
+        validate_sql(&resolved[0]).expect("the assembled statement is in order");
         validate_sql(&template.text)
             .expect_err("the unassembled template is not a statement anyone runs");
+    }
+
+    /// A statement that *opens* on an interpolation must still be judged. This
+    /// is how `analysis_history` — eight placeholders, in the very file this
+    /// census was written for — escaped the first version of the scan.
+    #[test]
+    fn a_statement_that_opens_on_an_interpolation_is_still_judged() {
+        let source = r#"
+const CTE: &str = "WITH matching AS (SELECT id FROM jobs WHERE cache_key = $1)";
+fn history() { let _ = format!("{CTE} SELECT id FROM matching WHERE fence > $3 AND id > $2"); }
+"#;
+        let (literals, _) = literals_and_code_mask(source);
+        let constants = string_constants(source, &literals);
+        let template = literals
+            .iter()
+            .find(|literal| literal.text.starts_with("{CTE}"))
+            .expect("the template literal is scanned");
+        assert!(is_sql_candidate(&template.text));
+        let resolved = resolve_template(&template.text, &constants, &[]);
+        assert!(
+            is_statement(&resolved[0]),
+            "resolution has to happen before the statement test, not after"
+        );
+        validate_sql(&resolved[0])
+            .expect_err("the assembled statement introduces $3 before $2 and must be caught");
+    }
+
+    /// A fragment chosen at runtime is judged once per arm, so a conditional
+    /// clause carrying its own placeholders cannot hide behind a neutral token.
+    #[test]
+    fn every_arm_of_a_runtime_fragment_is_judged() {
+        let source = r#"
+fn insert() {
+    let clause = if wide {
+        "AND EXISTS (SELECT 1 FROM removals WHERE node_id = $5)"
+    } else {
+        "AND EXISTS (SELECT 1 FROM removals WHERE node_id = $9)"
+    };
+    let sql = format!("INSERT INTO packages SELECT $1, $2, $3, $4, $5, $6 WHERE TRUE {clause}");
+}
+"#;
+        let (literals, is_code) = literals_and_code_mask(source);
+        let bindings = string_bindings(source, &literals, &is_code);
+        assert_eq!(
+            bindings.len(),
+            2,
+            "one binding per `let` that names literals"
+        );
+        let template = literals
+            .iter()
+            .find(|literal| literal.text.starts_with("INSERT"))
+            .expect("the template literal is scanned");
+        let variants = resolve_template(&template.text, &[], &bindings);
+        assert_eq!(variants.len(), 2, "one statement per arm");
+        validate_sql(&variants[0]).expect("the in-order arm is fine");
+        validate_sql(&variants[1]).expect_err("the arm that skips to $9 must be caught");
     }
 
     /// An unresolved interpolation must leave a well-formed placeholder, or
     /// `LIMIT ${limit}` would read as a rejected non-canonical parameter.
     #[test]
     fn unresolved_interpolations_become_a_neutral_token() {
-        let resolved =
-            resolve_template("SELECT {projection} FROM t ORDER BY {} LIMIT ${limit}", &[]);
-        assert_eq!(resolved, "SELECT 1 FROM t ORDER BY 1 LIMIT $1");
-        validate_sql(&resolved).expect("the neutral token keeps the statement well formed");
+        let resolved = resolve_template(
+            "SELECT {projection} FROM t ORDER BY {} LIMIT ${limit}",
+            &[],
+            &[],
+        );
+        assert_eq!(
+            resolved,
+            vec!["SELECT 1 FROM t ORDER BY 1 LIMIT $1".to_owned()]
+        );
+        validate_sql(&resolved[0]).expect("the neutral token keeps the statement well formed");
+    }
+
+    /// A compound `cfg` guards a test module just as completely as the bare
+    /// spelling, and a test fixture is allowed to violate the rule.
+    #[test]
+    fn a_compound_test_cfg_is_stripped_too() {
+        let source = r#"
+fn production() { let _ = "SELECT $1 FROM a"; }
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod tests {
+    fn fixture(first: i64, second: i64) -> &'static str { "SELECT $2, $1 FROM a" }
+}
+#[cfg(not(test))]
+fn shipped() { let _ = "SELECT $1, $2 FROM b"; }
+"#;
+        let (literals, is_code) = literals_and_code_mask(source);
+        let ranges = test_item_ranges(source, &is_code);
+        let visible = literals
+            .iter()
+            .filter(|literal| {
+                !ranges
+                    .iter()
+                    .any(|(start, end)| literal.start >= *start && literal.start < *end)
+            })
+            .map(|literal| literal.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec!["SELECT $1 FROM a", "SELECT $1, $2 FROM b"]);
+    }
+
+    /// A `#[cfg(test)]` function with more than one parameter must not end at
+    /// the comma in its signature, or its body escapes the strip.
+    #[test]
+    fn a_test_function_signature_does_not_end_the_item() {
+        let source = r#"
+#[cfg(test)]
+fn fixture(first: i64, second: i64) -> &'static str { "SELECT $2, $1 FROM a" }
+fn production() { let _ = "SELECT $1 FROM b"; }
+"#;
+        let (literals, is_code) = literals_and_code_mask(source);
+        let ranges = test_item_ranges(source, &is_code);
+        let visible = literals
+            .iter()
+            .filter(|literal| {
+                !ranges
+                    .iter()
+                    .any(|(start, end)| literal.start >= *start && literal.start < *end)
+            })
+            .map(|literal| literal.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec!["SELECT $1 FROM b"]);
     }
 
     /// The mutation this census exists to catch: swapping the first
