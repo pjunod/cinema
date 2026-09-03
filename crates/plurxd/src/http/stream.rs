@@ -3211,6 +3211,84 @@ mod tests {
         }
     }
 
+    /// `/decision` must put the delivered Dolby Vision profile at the *top*
+    /// level of its body, because that is where both mobile clients read it
+    /// (`decision.delivered_dolby_vision_profile` in Android's `DecisionDto`
+    /// and Apple's `Decision`). It gets there only through the
+    /// `#[serde(flatten)]` on `DecisionResponse::decision`, and nothing else
+    /// in the tree asserts that flatten holds: the core crate proves the
+    /// field is *computed* and the client suites prove a body carrying it is
+    /// *decoded*, with the server's own serialization the untested seam
+    /// between them. Drop the flatten — or mark the field `#[serde(skip)]`,
+    /// as its neighbor `transcode_grade` already is — and every badge goes
+    /// quietly inert with no test to say so.
+    #[test]
+    fn decision_body_carries_the_delivered_dolby_vision_profile_at_top_level() {
+        fn body(decision: Decision) -> serde_json::Value {
+            let (play_url, delivery) = delivery_plan(42, &decision, None);
+            serde_json::to_value(DecisionResponse {
+                file_id: 42,
+                vod_indexed: false,
+                decision,
+                play_url,
+                delivery,
+                source: SourceSummary {
+                    container: None,
+                    video_codec: None,
+                    video_profile: None,
+                    width: None,
+                    height: None,
+                    bit_depth: None,
+                    hdr: None,
+                    hdr_format: None,
+                    dv_profile: None,
+                    dv_el_present: None,
+                    bitrate: None,
+                    duration_ms: None,
+                },
+                audio: Vec::new(),
+                subtitles: Vec::new(),
+                selection: None,
+                markers: Vec::new(),
+                audio_offset_ms: 0,
+                declared_offset_ms: None,
+                ladder: Vec::new(),
+                prior_kbps: None,
+                prefer_segmented: None,
+            })
+            .expect("serialize decision body")
+        }
+
+        let converted = body(planned(playback::PlaybackMethod::Remux));
+        assert_eq!(
+            converted.get("delivered_dolby_vision_profile"),
+            Some(&serde_json::json!(8)),
+            "clients read this key off the body root: {converted}"
+        );
+        assert!(
+            converted.get("decision").is_none(),
+            "the verdict is flattened, not nested — a nested `decision` object \
+             means every client stopped seeing all of it: {converted}"
+        );
+
+        // Absent means "this delivery carries no Dolby Vision", which is not
+        // the same as a serializer that dropped the field: the sibling range
+        // readout still has to be there to prove the difference.
+        let mut no_dv = planned(playback::PlaybackMethod::Remux);
+        no_dv.delivered_dolby_vision_profile = None;
+        no_dv.delivered_dynamic_range = "hdr10";
+        let stripped = body(no_dv);
+        assert!(
+            stripped.get("delivered_dolby_vision_profile").is_none(),
+            "{stripped}"
+        );
+        assert_eq!(
+            stripped.get("delivered_dynamic_range"),
+            Some(&serde_json::json!("hdr10")),
+            "{stripped}"
+        );
+    }
+
     #[test]
     fn every_verdict_has_one_server_owned_execution_plan() {
         let (legacy, direct) =
