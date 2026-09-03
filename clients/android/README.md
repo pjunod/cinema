@@ -20,8 +20,8 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `68` — native viewer parity across phone, foldable,
-> and TV. Build 68 gives the library, search and settings screens a starting
+> Status: **v0.3.0**, build `69` — native viewer parity across phone, foldable,
+> and TV. Build 69 gives the library, search and settings screens a starting
 > focus and puts every layout's cards and episode rows in the D-pad's reach.
 > Build 66 retries the selected native subtitle once when its demanded
 > cache window becomes ready, without replacing video. Build 57 skips the
