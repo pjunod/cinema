@@ -1,0 +1,40 @@
+version = 1
+
+[[coverage]]
+commits = ["3c7b4159", "1eafa64e", "f1d17e54"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = """
+One defect, corrected across three commits because two adversarial reviews each \
+found the correction incomplete; the evidence is one test and it grew with them. \
+Explicit flow control suspended the producer on any `hold`, and every client \
+reports `hold` before it has played — the web client sends it whenever \
+`video.paused` is true, and a `<video>` that has never received a byte is paused. \
+So production stopped at zero, no playlist was ever written, and the playlist \
+request the same client was blocked on spent `PLAYLIST_WAIT_BUDGET` and returned \
+503, which the client reported as `manifestLoadTimeOut`. Observed on nuc4 against \
+file 70: a refused remux escalated to a transcode and the fresh session was held \
+on `Demand` with `production_target_seconds` 0 one second after ffmpeg started. \
+Every fallback died this way, so a recoverable delivery fault became a terminal \
+one. \
+`a_starting_client_cannot_hold_a_session_that_has_published_nothing` in \
+`crates/plurxd/src/transcode.rs` is the whole proof and each assertion rejects a \
+different revert. Restoring the unconditional `Hold` arm in `evaluate_flow` fails \
+its first case; removing the `End` arm fails the case that pins a departed client \
+still suspending; moving the floor boundary fails the pair either side of it. \
+Deriving the startup grant from the segment index instead of latching it on the \
+session fails the `startup_grant_spent: true` case, which is the retry a wedged \
+producer would otherwise renew forever. Restoring the time limiter for a starting \
+session fails the suspended-while-starting loop: `time_release_threshold` releases \
+at half the target, below the floor, so a starting session suspended once could \
+never cross back — the same deadlock reported as `Time`. Suspending the byte \
+limits along with it fails the `Bytes` case, and dropping the zeroed `Ahead` for \
+an empty index fails the `Global` case, which is a box already over its scratch \
+ceiling refusing to start more sessions. The mid-film pair pins the fact the whole \
+predicate rests on, that `published_end_ms` is session-relative: were it absolute, \
+a `-ss 90` start would read as ninety published seconds and never be starting at \
+all, silently reinstating the deadlock for every resume. \
+`HlsDeliveryFixture::mark_started` carries the same rule into the two \
+control-signalling tests, which used an empty index — the shape of a session that \
+has not started — to obtain a suspend they were not about.
+"""
