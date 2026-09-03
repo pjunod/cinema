@@ -2995,6 +2995,12 @@ impl ControlState {
         true
     }
 
+    /// The successor this slot is holding, if any.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn staged_incarnation_id(&self) -> Option<&str> {
+        self.preparation.staged_incarnation_id()
+    }
+
     /// Whether this exact successor may still be committed.
     // Reached in production only through a `PreparationGate`, and the gate has
     // no caller until the HTTP layer stages a successor — the same state
