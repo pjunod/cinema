@@ -732,6 +732,27 @@ Three details, each load-bearing:
   them as `video/mp4`.
 - **`-tag:v hvc1`.** MKV HEVC is usually tagged `hev1`, which Safari renders as
   a black frame; the sample entry must be `hvc1`. Harmless if already hvc1.
+  A preserved Dolby Vision stream keeps `dvh1` instead, but only when its base
+  is *not* backward-compatible (Profile 5): 8.1 and 8.4 are HDR10 and HLG
+  enhancements, and Apple's contract requires those to keep the compatible
+  entry with the profile advertised separately in `SUPPLEMENTAL-CODECS`.
+  **One latent inconsistency, deliberately left:** a *preserved Profile 7*
+  stream over an HDR10-compatible base takes the same `hvc1` branch, while
+  `copied_hls_codecs` advertises `CODECS="dvh1.07.LL"` for it — the master
+  playlist and the sample entry disagree, and nothing defends `hvc1` for
+  Profile 7 the way `tag_for`'s doc comment defends it for 8.1 and 8.4.
+  Paul's ruling, 2026-09-03: leave it, and record it here.
+
+  It is **rare, not unreachable**, and the difference is worth stating
+  precisely because a ruling is only as good as its reachability premise.
+  Apple claims `{5,8}` and the web claims `{5,8}`; neither can reach it.
+  Android claims 7 whenever the device's HEVC decoder enumerates `DVHE_DTB`
+  (`CapsPolicy.kt`: `DolbyVisionCodecProfile.DVHE_DTB -> claimed.add(7)`,
+  pinned by `CapsPolicyTest`), so a box with a dual-layer decoder does reach
+  it. The delivery still plays — that client asked for the profile it is being
+  handed, which is the whole reason the preservation is allowed at all. What
+  it cannot rely on is the master playlist and the init segment agreeing about
+  the fourcc, which is the inconsistency and not a decode failure.
 - **Burst-then-hold pacing.** Copy runs as fast as the disk allows; without
   pacing, a 45 Mb/s 4K session would dump the whole file into the session dir
   at once. This was a bare `-re` — ~1× real time — until 2026-07-28, and that
