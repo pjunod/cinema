@@ -2378,49 +2378,72 @@ impl TerminalCommitReceipt {
 /// hold. What each engine keeps is the *liveness* question — retired, ended,
 /// tombstoned — which only it can answer, and which it answers before touching
 /// the slot.
-#[async_trait::async_trait]
+/// Boxed rather than `async fn`, and hand-written rather than `async_trait`.
+///
+/// The trait has to be object-safe — the whole point is that
+/// `PreparationExecutor` holds one without knowing which engine answers — and
+/// `async fn` in a trait is not. `async_trait` would generate exactly this,
+/// but it is a proc-macro dependency, and adding one to `plurxd` makes every
+/// lock-file-gated advisory lane run for the sake of eliding four lines of
+/// signature. Not worth it.
+pub(crate) type GateAnswer<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
+
 pub(crate) trait PreparationGate: Send + Sync {
     /// Take the slot for a successor whose durable row already exists.
     ///
     /// `false` when the slot is occupied or the playback is no longer live. In
     /// both cases the caller must abort the row it just created, because
     /// nothing else knows about it.
-    async fn stage_preparation(
-        &self,
+    fn stage_preparation<'a>(
+        &'a self,
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
-    ) -> bool;
+    ) -> GateAnswer<'a>;
 
     /// Whether this exact successor may still be committed. Asked immediately
     /// before the durable CAS, because the gate and the call cannot be one
     /// transaction.
-    async fn may_commit_preparation(&self, staged_incarnation_id: &str) -> bool;
+    fn may_commit_preparation<'a>(&'a self, staged_incarnation_id: &'a str) -> GateAnswer<'a>;
 
     /// Report a preparation's durable outcome and free the slot.
-    async fn settle_preparation(&self, staged_incarnation_id: &str, committed: bool) -> bool;
+    fn settle_preparation<'a>(
+        &'a self,
+        staged_incarnation_id: &'a str,
+        committed: bool,
+    ) -> GateAnswer<'a>;
 }
 
-#[async_trait::async_trait]
 impl PreparationGate for RollingControlHandle {
-    async fn stage_preparation(
-        &self,
+    fn stage_preparation<'a>(
+        &'a self,
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
-    ) -> bool {
-        RollingControlHandle::stage_preparation(
+    ) -> GateAnswer<'a> {
+        Box::pin(RollingControlHandle::stage_preparation(
             self,
             staged_incarnation_id,
             predecessor_incarnation_id,
-        )
-        .await
+        ))
     }
 
-    async fn may_commit_preparation(&self, staged_incarnation_id: &str) -> bool {
-        RollingControlHandle::may_commit_preparation(self, staged_incarnation_id).await
+    fn may_commit_preparation<'a>(&'a self, staged_incarnation_id: &'a str) -> GateAnswer<'a> {
+        Box::pin(RollingControlHandle::may_commit_preparation(
+            self,
+            staged_incarnation_id,
+        ))
     }
 
-    async fn settle_preparation(&self, staged_incarnation_id: &str, committed: bool) -> bool {
-        RollingControlHandle::settle_preparation(self, staged_incarnation_id, committed).await
+    fn settle_preparation<'a>(
+        &'a self,
+        staged_incarnation_id: &'a str,
+        committed: bool,
+    ) -> GateAnswer<'a> {
+        Box::pin(RollingControlHandle::settle_preparation(
+            self,
+            staged_incarnation_id,
+            committed,
+        ))
     }
 }
 

@@ -1521,68 +1521,80 @@ impl VodPreparationGate {
     }
 }
 
-#[async_trait::async_trait]
 impl crate::playback_control::PreparationGate for VodPreparationGate {
-    async fn stage_preparation(
-        &self,
+    fn stage_preparation<'a>(
+        &'a self,
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
-    ) -> bool {
-        let mut sessions = self.shared.sessions.lock().await;
-        let Some(session) = self.bound(&mut sessions) else {
-            return false;
-        };
-        // The liveness half, and the only place this engine asks it: a session
-        // that has ended takes no successor. Past this point the slot answers
-        // for itself, because `abort_staged_preparation` has already moved it
-        // wherever a tombstone put it.
-        if session.tombstone.is_some() {
-            return false;
-        }
-        let staged = session
-            .control
-            .lock()
-            .expect("control lock")
-            .stage_preparation(staged_incarnation_id, predecessor_incarnation_id);
-        staged
+    ) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                return false;
+            };
+            // The liveness half, and the only place this engine asks it: a session
+            // that has ended takes no successor. Past this point the slot answers
+            // for itself, because `abort_staged_preparation` has already moved it
+            // wherever a tombstone put it.
+            if session.tombstone.is_some() {
+                return false;
+            }
+            let staged = session
+                .control
+                .lock()
+                .expect("control lock")
+                .stage_preparation(staged_incarnation_id, predecessor_incarnation_id);
+            staged
+        })
     }
 
-    async fn may_commit_preparation(&self, staged_incarnation_id: &str) -> bool {
-        let mut sessions = self.shared.sessions.lock().await;
-        let Some(session) = self.bound(&mut sessions) else {
-            return false;
-        };
-        // Deliberately **not** a second tombstone check. The rolling actor
-        // enforces liveness here by mutating the slot at termination and then
-        // letting the slot answer, and layering a refusal on top of an
-        // untouched slot would leave the two disagreeing indefinitely — the
-        // gate saying no while `ControlState` still said the successor was
-        // committable. This engine terminalizes the same way: every path that
-        // writes a tombstone calls `abort_staged_preparation` under the same
-        // registry lock.
-        let may = session
-            .control
-            .lock()
-            .expect("control lock")
-            .may_commit_preparation(staged_incarnation_id);
-        may
+    fn may_commit_preparation<'a>(
+        &'a self,
+        staged_incarnation_id: &'a str,
+    ) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                return false;
+            };
+            // Deliberately **not** a second tombstone check. The rolling actor
+            // enforces liveness here by mutating the slot at termination and then
+            // letting the slot answer, and layering a refusal on top of an
+            // untouched slot would leave the two disagreeing indefinitely — the
+            // gate saying no while `ControlState` still said the successor was
+            // committable. This engine terminalizes the same way: every path that
+            // writes a tombstone calls `abort_staged_preparation` under the same
+            // registry lock.
+            let may = session
+                .control
+                .lock()
+                .expect("control lock")
+                .may_commit_preparation(staged_incarnation_id);
+            may
+        })
     }
 
-    async fn settle_preparation(&self, staged_incarnation_id: &str, committed: bool) -> bool {
-        let mut sessions = self.shared.sessions.lock().await;
-        let Some(session) = self.bound(&mut sessions) else {
-            // A settle nobody can hear is not a failure. The session is gone,
-            // so its slot is gone with it, and the durable outcome the caller
-            // is reporting has already been written either way.
-            return false;
-        };
-        let mut control = session.control.lock().expect("control lock");
-        if !committed {
-            control.abort_preparation(staged_incarnation_id);
-        }
-        let settled = control.settle_preparation(staged_incarnation_id);
-        drop(control);
-        settled
+    fn settle_preparation<'a>(
+        &'a self,
+        staged_incarnation_id: &'a str,
+        committed: bool,
+    ) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                // A settle nobody can hear is not a failure. The session is gone,
+                // so its slot is gone with it, and the durable outcome the caller
+                // is reporting has already been written either way.
+                return false;
+            };
+            let mut control = session.control.lock().expect("control lock");
+            if !committed {
+                control.abort_preparation(staged_incarnation_id);
+            }
+            let settled = control.settle_preparation(staged_incarnation_id);
+            drop(control);
+            settled
+        })
     }
 }
 
