@@ -14750,6 +14750,71 @@ mod tests {
         assert!(review.notes.is_empty(), "{:?}", review.notes);
     }
 
+    /// A build that sends no caps document still gets the conversion.
+    ///
+    /// The regression this exists for shipped and reached production: the
+    /// legacy-trusted arm returned no review at all, so `apply_plan_review`
+    /// never ran, so `convert_dolby_vision` kept the `false`
+    /// `SessionKind::Copy` was built with — and the client's *silence* on a
+    /// field it has no way to speak about outvoted the server's own decision.
+    /// `/decision` logged "Profile 7 converted to Profile 8.1 for this
+    /// device"; the session created a second later delivered raw Profile 7;
+    /// Safari answered `stream_rejected ... browser refused the remux
+    /// stream`; the fallback tonemapped the title to SDR. Nothing in the
+    /// cluster had ever run a conversion.
+    ///
+    /// Restored after #850 removed it. The derivation it guards survived that
+    /// PR; only the proof went, and without the proof reverting the one-line
+    /// derivation to `false` goes green again.
+    #[test]
+    fn a_build_with_no_caps_document_still_converts_profile_7() {
+        let mut p7 = dolby_vision_p8_file();
+        p7.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".into());
+        p7.dolby_vision.profile = Some(7);
+        p7.dolby_vision.level = Some(6);
+        p7.dolby_vision.bl_compat_id = Some(1);
+
+        let node = capable_node();
+        let review = legacy_trusted_review(&p7, &node, true, false);
+        assert!(
+            review.convert_dolby_vision,
+            "the echo cannot carry this field, so trusting it means deriving it"
+        );
+        assert!(
+            review.preserve_dolby_vision,
+            "and the echo is still trusted"
+        );
+        assert!(!review.hdr10, "for every field the echo *can* carry");
+
+        // The conversion follows the preservation, exactly as
+        // `review_client_plan` clamps it: a client that declined Dolby Vision
+        // is not handed a converted stream by a flag nobody looked at.
+        assert!(
+            !legacy_trusted_review(&p7, &node, false, false).convert_dolby_vision,
+            "declining Dolby Vision declines the conversion with it"
+        );
+
+        // An operator switch still wins.
+        let mut off = capable_node();
+        off.dolby_vision_convert = false;
+        assert!(!legacy_trusted_review(&p7, &off, true, false).convert_dolby_vision);
+
+        // And a source the conversion cannot be built for keeps the delivery
+        // it has always had, rather than being routed to an index that could
+        // never exist.
+        let p8 = dolby_vision_p8_file();
+        assert!(
+            !legacy_trusted_review(&p8, &node, true, false).convert_dolby_vision,
+            "there is nothing to convert a Profile 8 source into"
+        );
+        let mut label_only = p7.clone();
+        label_only.dolby_vision.level = None;
+        assert!(
+            !legacy_trusted_review(&label_only, &node, true, false).convert_dolby_vision,
+            "no columns, no conversion — the record could not be built"
+        );
+    }
+
     /// The session's own answer for both badge fields, for every kind of
     /// session that can carry Dolby Vision.
     ///
