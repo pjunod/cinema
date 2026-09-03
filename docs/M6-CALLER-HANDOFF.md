@@ -503,21 +503,32 @@ actually unlock. Read the refusals in this order:
 1. `throughput_unreported` dominant → **nothing has been measured yet.** Fix
    the inputs (client-side estimate, VOD delivered rate) before drawing any
    conclusion about the floor. This is the expected reading today.
-2. `axis_not_proven` dominant → viewers mostly cross axes M6 does not prepare,
-   and `PREPARED_AXIS` — not the client release — is what limits the feature.
+2. `axis_not_proven` dominant → viewers mostly cross axis *combinations* M6
+   does not prepare, and `PREPARED_AXIS_SETS` — not the client release — is
+   what limits the feature. Read it as a statement about the **set**, not the
+   axis: since 2026-09-03 the gate is a table of combinations, so the `axis`
+   label on such a row names the hardest member of a set that has no receipt,
+   not an axis that is individually unproven.
 3. `throughput_insufficient` dominant, on `platform="web"` where the inputs
    exist → the floor itself is what would refuse, and §3.4 should not ship on
    the strength of the capability alone.
 
 The two counters agree exactly on `multiple_axes` and on `unchanged`, by the
 ranking above — a divergence there is a bug in the ranking, and there is a test
-that says so.
+that says so. They agree only for **unadmitted** sets, which is what that
+ranking is about: an admitted multi-axis set falls through to the client gate
+by design, so `{ResolutionOrBitrate, DeliveryMethod}` reads
+`client_cannot_prepare` in the decision and `prepare` in the counterfactual.
+That divergence *is* the unlocked volume, and it has its own test.
 
 **Acceptance:** on a node serving real traffic, the counterfactual's
-`resolution_or_bitrate` row is nonzero and its outcome split — `prepare`
-against `throughput_unreported` against `throughput_insufficient` against
-`axis_not_proven` — is recorded in the status page with a date and a platform
-breakdown. A grand total is not an acceptance: both counters are fed from the
+`resolution_or_bitrate` **or `delivery_method`** row is nonzero and its outcome
+split — `prepare` against `throughput_unreported` against
+`throughput_insufficient` against `axis_not_proven` — is recorded in the status
+page with a date and a platform breakdown. Read `delivery_method` first: the
+axis label is the hardest crossed member, so the admitted pair books there, and
+§3.3.3 measured that a pure `resolution_or_bitrate` transition does not occur
+on a real library at all. A grand total is not an acceptance: both counters are fed from the
 same transitions and their totals are always equal.
 
 **Met 2026-09-03**, and it changed what §3.4 is waiting for — the reading is in
@@ -588,6 +599,15 @@ Vision title's quality change actually crosses, and what Avatar 2160 → 1080
 booked in §3.3.3 — remains unmeasured and still books `multiple_axes`. Audio
 and burned subtitles were never measured in combination with anything. Add a
 row only with a receipt, and say which run.
+
+**One note for whoever compares two readings.** The `axis` label is stable
+across the 2026-09-03 widening — it was and still is the hardest crossed member
+— but the `outcome` column is not. The fleet's dominant transition,
+`{ResolutionOrBitrate, DeliveryMethod}`, moved from `multiple_axes` to
+`client_cannot_prepare` (and to `prepare` counterfactually). The counters are
+in-memory and reset per deploy, so no series spans the change; a status-page
+datapoint recorded before it is still not comparable to one recorded after, on
+that dimension.
 
 ### 3.4 Stage on `Prepare`
 

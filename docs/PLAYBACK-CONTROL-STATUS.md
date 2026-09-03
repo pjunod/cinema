@@ -865,8 +865,23 @@ receipt:
 A transition is admitted or refused **as a whole set**, because that is how it
 was measured. The axis *label* on a decision is unchanged — still the hardest
 member — so `plurxd_playback_preparation_decisions_total` stays comparable
-across the change, and the `MultipleAxes`-above-the-client-gate ordering is
-untouched.
+across the change on that dimension. The `outcome` dimension is not: the
+admitted pair moved from `multiple_axes` to `client_cannot_prepare`, and to
+`prepare` counterfactually. The counters are in-memory and reset per deploy, so
+no series spans it, but two status-page readings taken either side of the
+change are not comparable on outcome.
+
+**A set has no direction, and the run did.** `headroom_refusal` computes its
+floor from the *predecessor's* delivered rate, because an `EffectiveSelection`
+carries a height and no bitrate. Toward a server-selected successor that is
+conservative — the server picked the rung. Away from one it is not: a
+direct-playing successor carries the source file's own bitrate, which nothing
+bounds, so a 1080p transcode delivering 4 Mbit/s clears an 8 Mbit/s floor and
+then asks a 10 Mbit/s link to carry a 40 Mbit/s remux beside it — the stall
+this feature exists to prevent. So the pair is admitted **toward** a
+server-selected successor, which is the direction that ran; a viewer raising
+quality back to a direct-playing source books `axis_not_proven` until either
+someone runs it or the floor learns the successor's rate.
 
 **What is still refused, deliberately.** The grade axis. This run was SDR H.264
 throughout, so `{ResolutionOrBitrate, DeliveryMethod, DynamicRange}` — the set
