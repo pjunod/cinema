@@ -64,29 +64,38 @@ record it separately.
 the 2160p pressure lives and where plan §5.3's one-slot question remains open.
 The iPhone 17 Pro Max is a useful second data point and is not a substitute.
 
-## 3. What to build, and what not to
+## 3. The delta is two lines, not a rebuild
 
-Unchanged from spike §3.1, and it is narrower than it sounds:
+**The corrective harness already exists and its instruments were accepted.**
+The 2026-09-01 corrective pass built and validated every reader this case
+needs — the contiguity runway reader, the pixel-buffer PTS assertion against
+the commit boundary, the per-trial proxy byte counting under unique URLs, and
+the two fields declared unanswered. None of that is rebuilt here.
 
-> Write the smallest harness that primes a successor and swaps to it at a
-> chosen film boundary. Do not build the transaction — no `action_id`, no
-> reserve/prime/commit phases, no server involvement, no branch on `main`.
+What changes:
 
-`scripts/playback-lab device-run` gets most of §3's table **for the
-predecessor** — position, contiguous runway, buffer flags, access-log
-throughput, session identity — and the execution handoff says plainly that it
-**cannot prime a successor**. Two live `AVPlayer` pipelines swapping at a
-boundary is the part you write.
+| | corrective pass (2026-09-01) | this case |
+|---|---|---|
+| recipe pair | same-codec/same-grade, **or** codec-or-grade | a direct-playing top rung → a 1080 transcode, so **both move together** |
+| trials | 4 per device (an instrument check, and it says so) | **20 consecutive**, the spike's own proof bar |
+| devices | iPhone + Apple TV | Apple TV 4K (3rd gen) required; iPhone optional |
+| instruments | built and accepted | **reused unchanged** |
+
+That is the whole ask. If the harness was deleted after the run — spike §3.1
+says it is thrown away — then §4 below is the rebuild list. If it still exists,
+§4 is a checklist to confirm against, not work.
 
 Say in the report how the harness's switch differs from M6's. A runway measured
 against a switch M6 will not use is a number that is wrong in a way nobody can
 see later.
 
-## 4. The seven fields, with the corrective instruments already applied
+## 4. The seven fields — a checklist if the harness survived, a spec if it did not
 
 The first Apple instrument set was rejected and the corrective pass repaired
-it. Those repairs are requirements here, not options — four of the seven fields
-were not measurements the first time.
+it. **Those repairs are already built.** This table exists so the run can be
+confirmed against them, and so the case is reproducible if the harness was
+thrown away as the spike instructs. Four of the seven were not measurements the
+first time, which is why each row says how rather than just what.
 
 | field | how, specifically |
 |---|---|
