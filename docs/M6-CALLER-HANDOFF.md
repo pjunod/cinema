@@ -535,10 +535,12 @@ often M6 can fire at all.
 The first behaviour change, and the first production caller — this is the slice
 that removes `allow(dead_code)` from `PreparationExecutor`.
 
-**It fires on nothing today**, by design: all three clients hardcode
-`dual_player_preparation: false`, so every decision is
-`fallback/client_cannot_prepare` until a coordinated client release flips
-Apple's literal. That is handoff §1 working, not a bug — but it does mean §3.3's
+**It fired on nothing** while all three clients hardcoded
+`dual_player_preparation: false`. **Apple now declares `true`** — the measured
+answer from M5.5's 20/20 commit proof plus the accepted corrective
+instruments — and sends `observedDownloadBps`, so both inputs the throughput
+floor needs now exist on the platform this feature is for. Android and web stay
+`false` on their own evidence. That is handoff §1 working, not a bug — but it does mean §3.3's
 measurement is what tells you the plumbing is right, because §3.4 cannot be
 observed on the fleet until the release ships. Read §3.3.2's counterfactual
 counter before shipping this slice: it is the only reading that says whether
@@ -550,15 +552,25 @@ pointer still names the predecessor.
 
 ### 3.5 The commit trigger
 
-The client acknowledges readiness and the exchange commits. **Blocked**, and
-not on code: plan §13.6 freezes the three acknowledgements from what M5.5
-measures, and `first_frame_ready` is the ack whose Apple instrument was the one
-in question — [M5.5-APPLE-NOT-ACCEPTED.md](M5.5-APPLE-NOT-ACCEPTED.md) §2.2.
-Freezing an ack against an instrument that cannot separate a codec change from
-no change would bake the defect into the protocol.
+The client acknowledges readiness and the exchange commits. **No longer
+blocked.** It was frozen because plan §13.6 freezes the three acknowledgements
+from what M5.5 measures, and `first_frame_ready` was the ack whose Apple
+instrument could not separate a codec change from no change — it returned an
+identical 1–4 ms for both cases, satisfiable by a pixel buffer that predated
+the switch.
 
-Until then the executor's `commit` has tests and no trigger, which is the
-honest state.
+The corrective pass fixed exactly that: the copied buffer's presentation
+timestamp is required to map to film time at or beyond the commit boundary, and
+the two cases separate in the direction physics requires — Apple TV 21–239 ms
+same-codec against 230–327 ms codec/HDR, iPhone 24–160 ms against 163–279 ms.
+An ack frozen against *that* instrument means what it says.
+
+**One residual to carry in.** The 20/20 commit proof ran on the short fixture
+and the validated instruments on the 132-second one, so nobody has twenty
+consecutive commits on the corrected fixture — the corrective pass is four
+trials per device. Memory, the field that would catch accumulation across
+twenty, is unanswered at both sizes. That does not block the ack's meaning; it
+is worth re-confirming on a realistic runway before this ships to viewers.
 
 ## 4. Non-goals
 

@@ -5214,6 +5214,46 @@ final class AppleClientTests: XCTestCase {
         }
     }
 
+    /// The dual-pipeline capability is a measured decision, and this pins it.
+    ///
+    /// It was `false` for a long time as a placeholder — nobody had measured
+    /// it — and M5.5 ran on hardware on 2026-09-01: 20/20 clean commits in
+    /// both the same-codec and the codec/HDR case on an iPhone 17 Pro Max and
+    /// an Apple TV 4K (3rd generation), zero predecessor and zero post-commit
+    /// stalls across eighty acknowledgements, with the corrective instrument
+    /// pass repairing runway, boundary-qualified first frames, and per-trial
+    /// wire counts.
+    ///
+    /// The server *reads* this field rather than inferring it from the
+    /// platform, which is the whole point of the capability document, so this
+    /// literal is the only thing standing between a measured `true` and a
+    /// server that prepares nothing. A silent revert to `false` would look
+    /// exactly like a quiet fleet.
+    ///
+    /// Declared for every Apple device, deliberately: Apple is the one
+    /// platform where both recipes passed on both devices, so there is no
+    /// failing case to carve out. The narrower bound today is the server's
+    /// own `PREPARED_AXIS`, which prepares only a resolution change.
+    func testDualPlayerPreparationIsDeclaredOnEveryAppleDevice() {
+        for hevc in [true, false] {
+            for av1 in [true, false] {
+                for displayHDR in [true, false] {
+                    let capabilities = Caps.controlCapabilities(
+                        hevc: hevc,
+                        av1: av1,
+                        displayHDR: displayHDR,
+                        dolbyVision: displayHDR && hevc
+                    )
+                    XCTAssertTrue(
+                        capabilities.dualPlayerPreparation,
+                        "hevc=\(hevc) av1=\(av1) hdr=\(displayHDR)"
+                    )
+                }
+            }
+        }
+        XCTAssertTrue(Caps.controlCapabilities().dualPlayerPreparation)
+    }
+
     func testAppleCapsDocumentCoversTheProbeMatrixWithoutInventingAHeight() throws {
         for hevc in [false, true] {
             for displayHDR in [false, true] {

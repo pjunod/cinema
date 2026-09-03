@@ -1462,7 +1462,16 @@ class Controller(
             },
             isLikelyToKeepUp = player.playbackState == Player.STATE_READY,
             droppedFrames = null,
-            observedDownloadBps = null,
+            // The server's second-pipeline floor wants twice what this session
+            // is already delivering, and until now this client sent nothing,
+            // so the floor refused on a missing input rather than on a tight
+            // link. This rate is counted off the wire by `MediaOrigin`'s
+            // transfer listener over a rolling 500 ms window — bytes actually
+            // received, not a declared variant bitrate — and is already what
+            // the player's own stats panel shows the viewer. Null until the
+            // first window closes, which the server reads as a refusal: the
+            // honest answer, and the one thing the floor exists to enforce.
+            observedDownloadBps = observedBitsPerSecond,
             observationOverride = controlObservationOverride,
             renderOverride = controlRenderOverride,
             selection = playbackControlSelection(),

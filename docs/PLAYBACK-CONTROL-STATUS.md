@@ -697,17 +697,32 @@ only by tests, and `#[cfg_attr(not(test), allow(dead_code))]` says so rather
 than an invented caller written to satisfy a lint. Two things gate the caller,
 and neither is a code problem:
 
-1. **The capability reads `false` on all three clients.** M5.5 measured Apple
-   `true` on hardware, but `Caps.swift:264`,
-   `PlaybackControlSnapshotMapper.kt:276` and `index.html:6142` still
-   hardcode `false`. M6 **reads** that field rather than re-deriving it
-   ([M6-IMPLEMENTATION-HANDOFF.md](M6-IMPLEMENTATION-HANDOFF.md) §1), so
-   until a coordinated client release flips Apple's literal, a correct server
-   prepares on nothing.
-2. **The capability is too coarse to carry the finding.** Every platform came
-   back recipe- and device-dependent, and a bare boolean cannot say *yes for
-   this recipe on this device*. Narrowing it is a v1 protocol change and
-   M6's to decide deliberately — handoff §3.
+1. ~~**The capability reads `false` on all three clients.**~~ **Apple now
+   declares `true`**, which is the measured answer: M5.5's 20/20 commit proof
+   plus the accepted corrective instruments. Android and web stay `false` on
+   their own evidence — the Google TV's same-codec dual path failed 3/3
+   admission attempts, and Safari's codec/HDR case reached 13/20. Apple's
+   literal is pinned by a test rather than left as a line anyone can quietly
+   revert, because a silent `false` looks exactly like a quiet fleet. M6
+   **reads** the field rather than re-deriving it
+   ([M6-IMPLEMENTATION-HANDOFF.md](M6-IMPLEMENTATION-HANDOFF.md) §1).
+2. **The capability is too coarse to carry the finding** — for Android and
+   web. Both came back recipe- and device-dependent and a bare boolean cannot
+   say *yes for this recipe on this device*, so a correct `false` throws away
+   two Android phones that passed both cases and a TV that passed the harder
+   one. Narrowing it is a v1 protocol change and M6's to decide deliberately —
+   handoff §3. **Apple is the platform where it does not bite**: both recipes
+   passed on both devices, so there is no failing case to carve out, and the
+   narrower bound today is the server's own `PREPARED_AXIS`, which prepares
+   only a resolution change.
+
+3. **The throughput input did not exist.** The floor wants the client's
+   observed rate at twice what the session delivers, and the native clients
+   sent none — shadow mode read `throughput_unreported` on the one transition
+   that reached the check. Apple now sends AVFoundation's `observedBitrate`
+   from the newest access-log event; Android sends the rate `MediaOrigin`
+   already counts off the wire over a rolling 500 ms window. Both are nil
+   until measured, which the server reads as a refusal.
 
 **Where the caller goes is now settled**, in
 [M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md): the control exchange decides and
@@ -741,7 +756,11 @@ with the extraction map in §3.2.1):
    rule is what limits M6";
 4. stage on `Prepare` — the first behaviour change, which fires on nothing
    until a client release flips Apple's literal **and reports its throughput**;
-5. the commit trigger — blocked on the acknowledgements, and not on code.
+5. the commit trigger — **unblocked**. It was frozen because
+   `first_frame_ready`'s Apple instrument could not separate a codec change
+   from no change; the corrective pass requires the copied pixel buffer's PTS
+   to fall at or beyond the commit boundary, and the two cases now separate
+   (Apple TV 21–239 ms same-codec against 230–327 ms codec/HDR).
 
 **The disconnect-does-not-imply-commit property is already covered**, in
 `plurx-core`'s own contract suite on three voters
