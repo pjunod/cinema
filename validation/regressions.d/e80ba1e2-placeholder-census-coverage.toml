@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e80ba1e2"]
+points = ["core.media", "cluster.auth"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "Five scanner tests pin the holes this closes: a statement whose literal opens on an interpolation is resolved before it is judged and its out-of-order assembly is caught; every arm of a runtime-chosen fragment is assembled and validated separately; a compound cfg(all(test, …)) is stripped while cfg(not(test)) is not; a test function with two parameters does not end at the comma in its own signature; and the census pins each module entry to its own file so a mispaired include_str! cannot leave a slice uncensused. The census itself asserts that exactly four parameterised literals resolve to no statement, so a fifth cannot appear unexamined. Restoring the raw-literal statement test drops nine statements from the scan, including analysis_history, and the first of those tests fails."
