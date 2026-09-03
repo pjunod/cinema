@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Runs the M5a container-truth check against the newest CONVERTING rendition
+# in the local cache (docs/M5A-VERIFICATION-ON-NUC4.md).
+#
+# Usage: ./dv-timeline-check [/path/to/source.mkv]
+#
+# Default source is Nosferatu (2024) — file id 70, the file the RPU fixture
+# was captured from, so it is the one the doc names.
+set -euo pipefail
+
+SRC="${1:-/mnt/qnap/20t/movies/Nosferatu (2024)/Nosferatu (2024) Remux-2160p.mkv}"
+CACHE=/srv/plurx/cache/renditions
+
+dv_of() {
+  python3 - "$1" <<'PY' 2>/dev/null || echo "unreadable"
+import json, sys
+print(json.load(open(sys.argv[1]))["promotion"].get("dolby_vision"))
+PY
+}
+
+# A converting rendition is the one whose stored promotion carries a rewritten
+# Dolby Vision record. Every other rendition has "dolby_vision":null or no key.
+rend=""
+for d in "$CACHE"/*/; do
+  [ -f "$d/identity.json" ] || continue
+  if grep -q '"dolby_vision":{' "$d/identity.json" 2>/dev/null; then
+    if [ -z "$rend" ] || [ "$d/identity.json" -nt "$rend/identity.json" ]; then
+      rend="$d"
+    fi
+  fi
+done
+
+if [ -z "$rend" ]; then
+  {
+    echo "No converting rendition in $CACHE."
+    echo
+    echo "Nothing to measure yet. This is a prerequisite failure, not a pass —"
+    echo "walk docs/M5A-VERIFICATION-ON-NUC4.md section 2 before re-running:"
+    echo "  2.1 are you on the node that OWNS the session? renditions are node-local"
+    echo "  2.2 does the title have a fragment index? (vod_index_pending = no)"
+    echo "  2.3 did the client ask to preserve DV? read the decision log"
+    echo "  2.4 is this build newer than #842?"
+    echo
+    echo "Renditions present:"
+    for d in "$CACHE"/*/; do
+      [ -f "$d/identity.json" ] || continue
+      echo "  $(basename "$d")  dolby_vision=$(dv_of "$d/identity.json")"
+    done
+  } >&2
+  exit 2
+fi
+
+segs=$(ls -1 "$rend"/seg*.m4s | sort)
+out=/tmp/served-$(basename "$rend" | cut -c1-8).mp4
+
+echo "rendition: $(basename "$rend")"
+echo "source:    $SRC"
+
+# Zero-padded segment names sort into playlist order.
+cat "$rend/init.mp4" $segs > "$out"
+echo "assembled: $out ($(stat -c%s "$out") bytes, $(echo "$segs" | wc -l) segments)"
+echo
+
+python3 "$HOME/verify-dv-timeline" "$SRC" "$out"
