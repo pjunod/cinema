@@ -159,29 +159,76 @@ test("playback info explicitly separates playback mode from delivery method", ()
   assert.match(stats, /method,playback_mode/);
 });
 
-asyncTest("every web HLS session requests the bounded VOD presentation", async () => {
-  const requests = [];
-  let requestId = 0;
+// `openSession` reaches two more shipped helpers than it used to, and every
+// caller of it here has to hand them the same fakes — otherwise the difference
+// between two cases is the harness rather than the behaviour.
+const USABLE_CAPS_DOCUMENT = Object.freeze({
+  v: 2,
+  client: { kind: "web", build: "v0.3.0-466" },
+  video: [{ codec: "hevc", present: ["sdr", "pq"], dv_profiles: [5, 8] }],
+  audio: ["aac"],
+  containers: ["mp4", "mkv"],
+});
+// For harnesses that slice `openSession` for something other than its caps:
+// the two shipped helpers, over a stub document.
+const CAPS_DOCUMENT_PRELUDE = [
+  `const PLAY_CAPS=${JSON.stringify({ vcodec: "hevc", dvprofile: "5,8" })};`,
+  "function decodeLimits(){return {};}",
+  `function capsDocument(){return ${JSON.stringify(USABLE_CAPS_DOCUMENT)};}`,
+  shippedSource("currentCapsDocument"),
+  shippedSource("capsDocumentIsUsable"),
+].join("\n");
+function buildOpenSession(overrides) {
+  const options = Object.assign(
+    {
+      api: async () => ({}),
+      newRequestId: () => "request-1",
+      vodClientContract: () => ({
+        session: { presentation: "vod", block_budget_secs: 8 },
+        fragLoadPolicy: {},
+      }),
+      PLAYER: {},
+      capsDocument: () => USABLE_CAPS_DOCUMENT,
+      PLAY_CAPS: { vcodec: "hevc,hevc10", dvprofile: "5,8" },
+      decodeLimits: () => ({}),
+    },
+    overrides || {},
+  );
   const build = new Function(
     "api",
     "newRequestId",
     "vodClientContract",
     "PLAYER",
+    "capsDocument",
+    "PLAY_CAPS",
+    "decodeLimits",
     [
       'const PLAYBACK_ID="playback-1";',
+      shippedSource("currentCapsDocument"),
+      shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
       "return {openSession};",
     ].join("\n"),
   );
-  const { openSession } = build(
-    async (url, options) => { requests.push({ url, options }); return { vod: true }; },
-    () => `request-${++requestId}`,
-    () => ({
-      session: { presentation: "vod", block_budget_secs: 8 },
-      fragLoadPolicy: {},
-    }),
-    { controlReporter: { sequence: 17 } },
+  return build(
+    options.api,
+    options.newRequestId,
+    options.vodClientContract,
+    options.PLAYER,
+    options.capsDocument,
+    options.PLAY_CAPS,
+    options.decodeLimits,
   );
+}
+
+asyncTest("every web HLS session requests the bounded VOD presentation", async () => {
+  const requests = [];
+  let requestId = 0;
+  const { openSession } = buildOpenSession({
+    api: async (url, options) => { requests.push({ url, options }); return { vod: true }; },
+    newRequestId: () => `request-${++requestId}`,
+    PLAYER: { controlReporter: { sequence: 17 } },
+  });
 
   await Promise.all([
     openSession(7, { start: 12, height: null }),
@@ -196,6 +243,233 @@ asyncTest("every web HLS session requests the bounded VOD presentation", async (
     assert.equal(request.options.body.control_sequence, 17);
   }
   assert.equal("height" in requests[0].options.body, false);
+});
+
+asyncTest("every web create carries the capabilities its plan was derived from", async () => {
+  const requests = [];
+  const capsCalls = [];
+  const limits = { "hevc/main10/3840x2160/10/pq/60": { lost: 12 } };
+  const { openSession } = buildOpenSession({
+    api: async (url, options) => { requests.push({ url, options }); return { vod: true }; },
+    capsDocument: (caps, seen) => { capsCalls.push([caps, seen]); return USABLE_CAPS_DOCUMENT; },
+    decodeLimits: () => limits,
+  });
+
+  // The remux open, field for field from the copy-HLS path.
+  await openSession(70, {
+    copy: true, aac: false, preserve_dolby_vision: true,
+    start: 0, audio: 0, audio_offset_ms: 0,
+  });
+
+  assert.equal(requests.length, 1);
+  const body = requests[0].options.body;
+  // Without this the create lands in the server's `legacy_trusted` arm, which
+  // derives `convert_dolby_vision` for a build that enumerated nothing — the
+  // straggler population `plan_derivation.legacy_trusted` counts, and the web
+  // player is the last member of it.
+  assert.deepEqual(body.caps, USABLE_CAPS_DOCUMENT);
+  // …and everything the body already said still says it. A create that gained
+  // caps and lost its echo would be re-derived from the document alone, which
+  // is a different plan rather than a better-evidenced one — `/decision`'s
+  // force, and Apple's compatible-base retry, both live in the echo.
+  assert.equal(body.copy, true);
+  assert.equal(body.preserve_dolby_vision, true);
+  assert.equal(body.aac, false);
+  assert.equal(body.audio, 0);
+
+  // The same question `/decision` asked, argument for argument. They are one
+  // helper precisely so they cannot drift; this asserts the helper is what
+  // ran, and that `askDecision` still calls it rather than rebuilding its own.
+  assert.equal(capsCalls.length, 1);
+  assert.deepEqual(capsCalls[0][0], { vcodec: "hevc,hevc10", dvprofile: "5,8" });
+  assert.equal(capsCalls[0][1], limits);
+});
+
+asyncTest("the decision and the create it acts on ask one question", async () => {
+  // Not a grep for `currentCapsDocument()` in `askDecision`: that passes
+  // against a build where the helper is dead. This RUNS both requests through
+  // one set of fakes and compares the two bodies.
+  //
+  // The two halves of the question are the document and the force. A create
+  // that sends the document but not the force is re-derived under
+  // `Force::Auto` while the decision was taken under the viewer's actual
+  // choice — and on `Quality → Original` for a title above this browser's
+  // HEVC ceiling that flips `preserve_dolby_vision` to false, stripping Dolby
+  // Vision from the one request that explicitly asked for the original.
+  const requests = [];
+  const api = async (url, options) => { requests.push({ url, options }); return {}; };
+  const shipped = new Function(
+    "api",
+    "newRequestId",
+    "vodClientContract",
+    "PLAYER",
+    "capsDocument",
+    "PLAY_CAPS",
+    "decodeLimits",
+    "prePlaySelectionQuery",
+    "decisionUrl",
+    "qualityForce",
+    [
+      'const PLAYBACK_ID="playback-1";',
+      shippedSource("currentCapsDocument"),
+      shippedSource("capsDocumentIsUsable"),
+      shippedSource("askDecision"),
+      shippedSource("openSession"),
+      "return {askDecision,openSession};",
+    ].join("\n"),
+  )(
+    api,
+    () => "request-1",
+    () => ({ session: { presentation: "vod", block_budget_secs: 8 } }),
+    {},
+    () => USABLE_CAPS_DOCUMENT,
+    { vcodec: "hevc", dvprofile: "5,8" },
+    () => ({}),
+    () => "",
+    (id) => `/files/${id}/decision?legacy`,
+    () => "original",
+  );
+
+  await shipped.askDecision(70, "original", null);
+  await shipped.openSession(70, { copy: true, preserve_dolby_vision: true });
+  assert.equal(requests.length, 2);
+  const [decision, create] = requests;
+  assert.match(decision.url, /\/files\/70\/decision\?/);
+  assert.deepEqual(
+    create.options.body.caps,
+    decision.options.body.caps,
+    "the create must act on the document the decision was taken from",
+  );
+  assert.match(decision.url, /force=original/);
+  assert.equal(
+    create.options.body.overrides && create.options.body.overrides.force,
+    "original",
+    "…and on the same force, or the server re-derives under Auto",
+  );
+
+  // Auto is the absence of a force, on both sides. Sending `force=auto` would
+  // put an `override force=auto` note on every ordinary create and move the
+  // `overridden` counter for nothing.
+  requests.length = 0;
+  const auto = new Function(
+    "api", "newRequestId", "vodClientContract", "PLAYER",
+    "capsDocument", "PLAY_CAPS", "decodeLimits", "qualityForce",
+    [
+      'const PLAYBACK_ID="playback-1";',
+      shippedSource("currentCapsDocument"),
+      shippedSource("capsDocumentIsUsable"),
+      shippedSource("openSession"),
+      "return {openSession};",
+    ].join("\n"),
+  )(
+    api, () => "request-1",
+    () => ({ session: { presentation: "vod", block_budget_secs: 8 } }),
+    {}, () => USABLE_CAPS_DOCUMENT, { vcodec: "hevc" }, () => ({}),
+    () => "auto",
+  );
+  await auto.openSession(70, { copy: true });
+  assert.equal("overrides" in requests[0].options.body, false);
+});
+
+asyncTest("a create never sends an empty capabilities document", async () => {
+  const requests = [];
+  const { openSession } = buildOpenSession({
+    api: async (url, options) => { requests.push({ url, options }); return { vod: true }; },
+    // What a browser whose probe answered nothing would produce. The server
+    // counts an empty document as `unusable_caps` and returns NO review, so
+    // sending it is strictly worse than sending none — which still gets the
+    // conversion derived.
+    capsDocument: () => ({ v: 2, video: [], audio: [], containers: [] }),
+  });
+  await openSession(70, { copy: true });
+  assert.equal("caps" in requests[0].options.body, false);
+
+  // …and only an EMPTY one. A browser that enumerated no containers has still
+  // told the server which codecs it decodes, and that document is worth
+  // re-deriving from. (This is also what fails when the predicate's `||`
+  // becomes `&&`, which every other case here survives.)
+  const usable = new Function(
+    shippedSource("capsDocumentIsUsable") + "\nreturn capsDocumentIsUsable;",
+  )();
+  assert.equal(usable({ v: 2, video: [{ codec: "hevc" }], audio: [], containers: [] }), true);
+  assert.equal(usable({ v: 2, video: [], audio: ["aac"], containers: [] }), true);
+  assert.equal(usable({ v: 2, video: [], audio: [], containers: ["mp4"] }), true);
+  assert.equal(usable({ v: 2, video: [], audio: [], containers: [] }), false);
+  assert.equal(usable(null), false);
+});
+
+test("the document this browser actually builds is one the server can read", () => {
+  // The guard above is a backstop, and a backstop nobody can reach is worth
+  // saying so about: `buildPlayCaps` seeds `containers` unconditionally, so
+  // the real `capsDocument` cannot produce an empty document however the
+  // probe answers. This is the assertion that would go red if that changed —
+  // at which point the guard stops being decoration and starts being load
+  // bearing, and either way somebody finds out here rather than from a
+  // `plan_derivation.unusable_caps` counter climbing on the fleet.
+  const built = new Function(
+    "SERVER",
+    "navigator",
+    "document",
+    "window",
+    "displayIsHdr",
+    [
+      shippedSource("buildPlayCaps"),
+      shippedSource("capsDocument"),
+      shippedSource("capsDocumentIsUsable"),
+      "return {buildPlayCaps,capsDocument,capsDocumentIsUsable};",
+    ].join("\n"),
+  )(
+    { build: "v0.3.0-466" },
+    { userAgent: "test" },
+    // The bleakest browser this code can meet: no `<video>` to ask, no
+    // MediaSource, no HDR display, and a synchronous HEVC ladder that found
+    // nothing. `buildPlayCaps` still seeds H.264, AAC/MP3 and the base
+    // container list, which is why the guard is a backstop rather than a
+    // branch anyone reaches.
+    { createElement: () => { throw new Error("no DOM"); } },
+    {},
+    () => false,
+  );
+  for (const hevc of [
+    { depth8: false, depth10: false, pq10: false, maxheight: null },
+    { depth8: true, depth10: true, pq10: true, maxheight: 2160 },
+  ]) {
+    const doc = built.capsDocument(built.buildPlayCaps(hevc), {});
+    assert.equal(
+      built.capsDocumentIsUsable(doc),
+      true,
+      `the shipped document must always be worth sending: ${JSON.stringify(doc)}`,
+    );
+  }
+});
+
+test("the caps document stays bounded now that every create carries it", () => {
+  // `openSession` runs on every seek and every audio switch. The server keeps
+  // at most 256 learned limits and clips each label to 160, so anything past
+  // that is bytes nobody reads — and the route's 64 KiB body limit is what
+  // they would eventually run into.
+  const capsDocument = new Function(
+    "SERVER",
+    "navigator",
+    `${shippedSource("capsDocument")}\nreturn capsDocument;`,
+  )({ build: "v0.3.0-466" }, { userAgent: "x".repeat(500) });
+  const limits = {};
+  for (let i = 0; i < 400; i += 1) {
+    limits[`identity-${i}`] = { label: "L".repeat(400), lost: 1, secs: 60, rate: 2, at: i };
+  }
+  const doc = capsDocument({ vcodec: "hevc", acodec: "aac", container: "mp4" }, limits);
+  assert.equal(doc.learned_limits.length, 256);
+  assert.equal(doc.learned_limits[0].label.length, 160);
+  assert.equal(
+    doc.learned_limits[0].identity,
+    "identity-399",
+    "at the cap it keeps the newest, which are the ones still describing this machine",
+  );
+  assert.equal(doc.client.ua.length, 160);
+  assert.ok(
+    JSON.stringify(doc).length < 64 * 1024,
+    `a capped document must fit the create route's body limit: ${JSON.stringify(doc).length} bytes`,
+  );
 });
 
 test("the VOD fetch contract stays below hls.js and beyond the producer watchdog", () => {
@@ -228,25 +502,11 @@ test("the VOD fetch contract stays below hls.js and beyond the producer watchdog
 });
 
 asyncTest("a temporary live recovery presentation remains playable", async () => {
-  const build = new Function(
-    "api",
-    "newRequestId",
-    "vodClientContract",
-    "PlaybackPolicy",
-    "PLAYER",
-    [
-      'const PLAYBACK_ID="playback-1";',
-      shippedSource("openSession"),
-      "return {openSession};",
-    ].join("\n"),
-  );
-  const { openSession } = build(
-    async () => ({ vod: false }),
-    () => "request-1",
-    () => ({ session: { presentation: "vod", block_budget_secs: 8 } }),
-    policy,
-    null,
-  );
+  const { openSession } = buildOpenSession({
+    api: async () => ({ vod: false }),
+    vodClientContract: () => ({ session: { presentation: "vod", block_budget_secs: 8 } }),
+    PLAYER: null,
+  });
   const started = await openSession(42, { copy: true });
   assert.equal(started.vod, false);
 });
@@ -2305,6 +2565,10 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
       'const API="/api/v1"; let TOKEN="token", AUTH_GENERATION=0;',
       'const PLAYBACK_ID="playback-1"; let STREAM_FAILURE=null;',
       shippedSource("api"),
+      // `openSession` attaches this browser's capabilities document; the burn
+      // refusal under test does not care what is in it, only that building one
+      // does not throw.
+      CAPS_DOCUMENT_PRELUDE,
       shippedSource("openSession"),
       shippedSource("currentStreamFailureOverlay"),
       shippedSource("showSessionOpenFailure"),
@@ -3701,7 +3965,12 @@ test("the caps document POST falls back to the query a mixed fleet still answers
   // shapes through one translation and returns the same verdict.
   const source = shippedSource("askDecision");
   assert.match(source, /method:\s*"POST"/);
-  assert.match(source, /caps:\s*capsDocument\(PLAY_CAPS,\s*decodeLimits\(\)\)/);
+  assert.match(source, /caps:\s*currentCapsDocument\(\)/);
+  assert.match(
+    shippedSource("currentCapsDocument"),
+    /capsDocument\(PLAY_CAPS,\s*decodeLimits\(\)\)/,
+    "the document the decision is asked with is still built from this browser's own probe",
+  );
   for (const status of [404, 405, 400]) {
     assert.ok(
       new RegExp(`e\\.status===${status}`).test(source),
