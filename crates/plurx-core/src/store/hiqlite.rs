@@ -1419,7 +1419,9 @@ impl HiqliteAuthStore {
             .client()
             .query_consistent_map::<CountRow, _>(sql, params!())
             .await?;
-        Ok(rows.len() == 1 && rows[0].count == 15)
+        Ok(rows.len() == 1
+            && rows[0].count
+                == super::hiqlite_fragment_index_cluster::ANALYSIS_COMPONENT_SCHEMA_OBJECTS)
     }
 
     async fn migrate_schema(&self) -> Result<(), StoreError> {

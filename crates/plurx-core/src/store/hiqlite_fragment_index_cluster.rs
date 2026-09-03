@@ -652,6 +652,15 @@ SELECT
       WHERE name = 'attempt_errors') AS count
 "#;
 
+/// What [`ANALYSIS_COMPONENT_SCHEMA_CURRENT_SQL`] counts when every part of the
+/// current analysis shape is installed.
+///
+/// It has two callers with different questions — the bootstrap idempotency
+/// check here, and the v21 stale-marker predicate in `hiqlite.rs` — and they
+/// used to carry the number separately. One of them was then updated and the
+/// other was not.
+pub(super) const ANALYSIS_COMPONENT_SCHEMA_OBJECTS: i64 = 16;
+
 pub(super) async fn analysis_component_schema_is_current(
     client: &hiqlite::Client,
 ) -> Result<bool, StoreError> {
@@ -660,7 +669,7 @@ pub(super) async fn analysis_component_schema_is_current(
         .query_consistent_map::<SchemaCountRow, _>(ANALYSIS_COMPONENT_SCHEMA_CURRENT_SQL, params!())
         .await
         .map_err(database_error)?;
-    Ok(rows.len() == 1 && rows[0].0 == 16)
+    Ok(rows.len() == 1 && rows[0].0 == ANALYSIS_COMPONENT_SCHEMA_OBJECTS)
 }
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
@@ -3239,8 +3248,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         now_ms: i64,
         retry_at_ms: i64,
     ) -> Result<bool, StoreError> {
+        // The comma is the attempt history's delimiter, so a code carrying one
+        // would read back as two attempts with codes nobody wrote.
         if error_code.is_empty()
             || error_code.len() > MAX_ERROR_CODE_BYTES
+            || error_code.contains(',')
             || (retryable && retry_at_ms <= now_ms)
         {
             return Err(StoreError::Task(
@@ -3495,6 +3507,52 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
 
 #[cfg(test)]
 mod tests {
+
+    /// No statement may reset `attempts` without resetting `attempt_errors`
+    /// on exactly the same conditions.
+    ///
+    /// Three upserts reopen a job row, each with its own reset conditions. A
+    /// reset that misses the history leaves a row carrying the codes of a
+    /// budget it no longer has — a history that disagrees with the count
+    /// printed beside it. Two of the three are reachable from the
+    /// backend-neutral Store contract; the forced hand-off is not, because
+    /// reaching it twice needs two active forced requests for one identity,
+    /// which a unique index forbids. So the rule is asserted on the
+    /// statements themselves, by deriving the history reset from the budget
+    /// reset it has to mirror.
+    #[test]
+    fn every_attempts_reset_resets_the_attempt_history() {
+        const SOURCE: &str = include_str!("hiqlite_fragment_index_cluster.rs");
+        let production = SOURCE
+            .split_once("\n#[cfg(test)]")
+            .map_or(SOURCE, |(source, _)| source);
+        let squeeze = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        const CLOSE: &str = "cluster_fragment_index_jobs.attempts END";
+        let mut resets = 0;
+        // Keyed on the close, not the open: `attempts = CASE` also appears on
+        // `analysis_requests`, which has no history to keep.
+        for (close, _) in production.match_indices(CLOSE) {
+            let open = production[..close]
+                .rfind("attempts = CASE")
+                .expect("every reset of this column opens a CASE");
+            let budget = &production[open..close + CLOSE.len()];
+            // The history reset is the budget reset with the column and the
+            // reset value swapped. Anything else is a different rule.
+            let expected = squeeze(budget)
+                .replace("attempts", "attempt_errors")
+                .replace("THEN 0", "THEN ''");
+            let tail = &production[open..(close + CLOSE.len() + 900).min(production.len())];
+            let window = squeeze(tail);
+            assert!(
+                window.contains(&expected),
+                "an `attempts` reset without the matching `attempt_errors` reset:\n  \
+                 wanted {expected}"
+            );
+            resets += 1;
+        }
+        assert_eq!(resets, 3, "three upserts reopen a job row");
+    }
+
     use rusqlite::Connection;
 
     use super::{
@@ -3530,10 +3588,18 @@ mod tests {
     fn schema_objects(connection: &Connection) -> Vec<(String, String, String, String)> {
         let mut statement = connection
             .prepare(
+                // Everything the compared steps create or rebuild. The old
+                // two patterns missed `analysis_attempts` and
+                // `analysis_lifecycle_counters` — a table full of enumerated
+                // `reason` literals, which is exactly the shape that drifts —
+                // and the widened `timeline_annotation_sets`.
                 "SELECT type, name, tbl_name, COALESCE(sql, '')
                    FROM sqlite_master
                   WHERE name LIKE 'cluster_fragment_index_%'
                      OR name LIKE 'analysis_requests%'
+                     OR name LIKE 'analysis_attempts%'
+                     OR name LIKE 'analysis_lifecycle_counters%'
+                     OR name LIKE 'timeline_annotation_%'
                   ORDER BY type, name",
             )
             .expect("schema object query");

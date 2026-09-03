@@ -808,6 +808,7 @@ const TABLES: &[TablePlan] = &[
             "attempts",
             "not_before_ms",
             "last_error_code",
+            "attempt_errors",
             "created_at_ms",
             "updated_at_ms",
         ],
@@ -2193,6 +2194,13 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 // the honest value: the destination's own backfill will fill
                 // it in from the probe JSON that comes across with the row.
                 "NULL".to_owned()
+            } else if table.name == "cluster_fragment_index_jobs"
+                && *column == "attempt_errors"
+                && schema_version < 45
+            {
+                // A source below v45 kept no per-attempt history, and an empty
+                // one is the honest value: the column is NOT NULL DEFAULT ''.
+                "''".to_owned()
             } else if (table.name == "dv_conversions"
                 && *column == "recovery_guard_id"
                 && schema_version < 44)
@@ -2551,6 +2559,32 @@ mod tests {
         assert!(value_projection(table, 43, false).ends_with("finished_at_ms, NULL"));
         assert!(value_projection(table, SQLITE_SCHEMA_VERSION, false)
             .ends_with("finished_at_ms, recovery_guard_id"));
+    }
+
+    /// A source below v45 has no attempt history, and the import must carry
+    /// the column anyway.
+    ///
+    /// A plan that omits a column silently drops it: `import_table` projects
+    /// and inserts only `table.columns`, and the parity digest is computed
+    /// from that same projection on both sides, so source and target agree
+    /// about a value neither of them carried. An activation import of a
+    /// library full of dead jobs would land with every history blank — the
+    /// exact defect this column exists to fix, at the moment an operator is
+    /// most likely to be looking for it.
+    #[test]
+    fn pre_v45_fragment_index_jobs_project_an_empty_attempt_history() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "cluster_fragment_index_jobs")
+            .copied()
+            .expect("fragment-index job table plan");
+        let v44 = value_projection(table, 44, false);
+        assert!(v44.contains("last_error_code, '', created_at_ms"), "{v44}");
+        let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
+        assert!(
+            current.contains("last_error_code, attempt_errors, created_at_ms"),
+            "{current}"
+        );
     }
 
     #[test]

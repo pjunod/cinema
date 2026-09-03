@@ -495,6 +495,7 @@ async fn request_value(
     let mut claim_expires_at_ms = request.lease_expires_ms;
     let mut not_before_ms = request.not_before_ms;
     let mut last_error_code = request.last_error_code.clone();
+    let mut attempt_errors = Vec::new();
     let mut updated_at_ms = request.updated_at_ms;
     let mut phase = request_phase.to_owned();
     if request.component == "fragment_index" && !request.result_cache_key.is_empty() {
@@ -527,6 +528,16 @@ async fn request_value(
             if !worker.last_error_code.is_empty() {
                 last_error_code = worker.last_error_code;
             }
+            // The job's own history. `analysis_attempts` is fenced by request,
+            // and a job can exist without a request at all — playback's
+            // foreground enqueue makes one — so the detail view has to read
+            // this from the job or it shows nothing for exactly those rows.
+            attempt_errors = worker
+                .attempt_errors
+                .split(',')
+                .filter(|code| !code.is_empty())
+                .map(str::to_owned)
+                .collect();
             updated_at_ms = updated_at_ms.max(worker.updated_at_ms);
             phase = match storage_state.as_str() {
                 "queued" => "claimed",
@@ -563,6 +574,7 @@ async fn request_value(
         "force": request.force_rebuild,
         "generation": request.result_cache_key,
         "last_error_code": last_error_code,
+        "job_attempt_errors": attempt_errors,
         "created_at_ms": request.created_at_ms,
         "updated_at_ms": updated_at_ms,
         "phase": phase,

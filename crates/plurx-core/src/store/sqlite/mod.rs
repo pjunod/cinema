@@ -1233,6 +1233,17 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Whether v45's attempt-history column is already installed.
+    fn attempt_errors_column_exists(conn: &Connection) -> Result<bool, StoreError> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+              WHERE name = 'attempt_errors'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count == 1)
+    }
+
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let target = SQLITE_SCHEMA_VERSION;
@@ -1251,7 +1262,14 @@ impl SqliteStore {
             // out here. Integrity is re-checked below instead of enforced
             // statement by statement.
             conn.pragma_update(None, "foreign_keys", "OFF")?;
-            let applied = if version == 41 && Self::analysis_component_schema_is_current(conn)? {
+            // A migration commits its own transaction and only then bumps
+            // `user_version`, so a crash in that window leaves the shape
+            // applied and the version behind. `ADD COLUMN` is not idempotent,
+            // so the replay would fail on a column that is already there —
+            // permanently. v41 has carried this guard since it landed.
+            let applied = if (version == 41 && Self::analysis_component_schema_is_current(conn)?)
+                || (version == 45 && Self::attempt_errors_column_exists(conn)?)
+            {
                 Ok(())
             } else {
                 conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
