@@ -2245,7 +2245,7 @@ mod tests {
             label: "4K HEVC Main 10".to_owned(),
             lost: 41,
             secs: 60,
-            rate: 41,
+            rate: 41.0,
             at_ms: NOW_MS - age_ms,
         }
     }
@@ -2576,7 +2576,7 @@ mod tests {
             label: "   ".to_owned(),
             lost: 41,
             secs: 60,
-            rate: 41,
+            rate: 41.0,
             at_ms: NOW_MS,
         };
         assert_eq!(
@@ -2588,7 +2588,7 @@ mod tests {
         let zero_rate = caps::LearnedLimit {
             label: "HEVC Main 10".to_owned(),
             lost: 0,
-            rate: 0,
+            rate: 0.0,
             ..unlabelled.clone()
         };
         assert_eq!(
@@ -2609,6 +2609,47 @@ mod tests {
              lost 41 frames in 60s (41/min); Dolby Vision \u{2192} SDR",
             "no subject is still not a sentence with a hole in it"
         );
+    }
+
+    /// The document the browser actually sends must deserialize.
+    ///
+    /// This is the one that shipped broken. `capsDocument` puts the rate on
+    /// the wire exactly as `lostFrameRate` measured it — one decimal place —
+    /// and `serde_json` refuses a floating-point literal for an integer field,
+    /// `4.0` included. The refusal is not scoped to the field: it aborts the
+    /// whole `DeviceCaps`, and with it the `CreateSession` or decision body
+    /// carrying it. So one decode rescue recorded in a browser's local storage
+    /// was enough to make that browser's capabilities unreadable for thirty
+    /// days.
+    ///
+    /// It went unseen because `askDecision` catches the 400 and retries as the
+    /// flat query, so the viewer got a working, quietly less informed answer.
+    /// A create has no such fallback: once the web client sends its caps
+    /// there, this is a title that will not play.
+    #[test]
+    fn a_learned_limit_survives_the_rate_the_browser_measures() {
+        // Verbatim shape from `capsDocument`, fraction and all.
+        let document: caps::DeviceCaps = serde_json::from_str(
+            r#"{"v":2,"video":[{"codec":"hevc"}],
+                "learned_limits":[{"identity":"v1|hevc|main10|2160|b40","label":"4K HEVC Main 10",
+                                   "lost":13,"secs":19,"rate":41.1,"at":1788000000000}]}"#,
+        )
+        .expect("the document the browser sends has to deserialize");
+        let limit = &document.learned_limits[0];
+        assert!((limit.rate - 41.1).abs() < f64::EPSILON);
+        assert_eq!(limit.at_ms, 1_788_000_000_000, "`at` is the web's spelling");
+        assert!(
+            limit.reason(None).contains("41.1/min"),
+            "the fraction the client measured is what gets printed: {}",
+            limit.reason(None)
+        );
+
+        // A whole number is a float on this wire too — `+(4).toFixed(1)` is
+        // `4`, so both spellings reach the server from the same code path.
+        let whole: caps::DeviceCaps =
+            serde_json::from_str(r#"{"v":2,"audio":["aac"],"learned_limits":[{"rate":4}]}"#)
+                .expect("an integer rate is still a rate");
+        assert!((whole.learned_limits[0].rate - 4.0).abs() < f64::EPSILON);
     }
 
     /// The browser and the server must key a learned limit identically.
