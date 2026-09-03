@@ -946,7 +946,15 @@ expected_occurrences = 14
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
 pattern = "(?:VodPreparationGuard|preparing_sessions|begin_preparing_session|owns_or_preparing|live_or_preparing_session_ids|begin_vod_preparation)"
-expected_occurrences = 29
+# 30 with M6's `VodPreparationGate`, and the extra occurrence is a doc
+# cross-reference rather than an owner: the gate's own comment says it holds
+# `Arc<Shared>` plus an id "the same shape as `VodPreparationGuard`", because
+# `Session` lives in the registry by value and cannot be borrowed across an
+# await. This pattern reads the raw source, so a name in prose counts. The gate
+# owns no producer, no process and no admission — it takes the sessions lock
+# for one slot transition and releases it — which is why the count moves and
+# the ownership picture does not.
+expected_occurrences = 30
 
 [[module_symbols]]
 id = "m4-cancellation-independent-vod-build-owner"

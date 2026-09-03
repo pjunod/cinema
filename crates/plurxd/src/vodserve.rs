@@ -1453,6 +1453,86 @@ impl Session {
     }
 }
 
+/// This engine's half of [`crate::playback_control::PreparationGate`].
+///
+/// M6's preparation slot lives on `ControlState`, which both delivery engines
+/// hold, precisely so it exists here — `into_request` sets `Presentation::Vod`
+/// for every create, so this engine serves the sessions a staged successor is
+/// actually for. What this type adds is the liveness half the slot cannot
+/// answer for itself: a session that has vanished from the registry or carries
+/// a tombstone takes no successor.
+///
+/// Holds `Arc<Shared>` and an id rather than a reference into the registry,
+/// the same shape as [`VodPreparationGuard`], because `Session` lives inside
+/// the `sessions` map by value and cannot be borrowed across an await. Each
+/// call therefore takes the registry lock, holds it for one slot transition,
+/// and releases it — never across durable I/O, which is what the executor's
+/// three-phase order exists to keep true.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct VodPreparationGate {
+    shared: Arc<Shared>,
+    session_id: String,
+}
+
+#[async_trait::async_trait]
+impl crate::playback_control::PreparationGate for VodPreparationGate {
+    async fn stage_preparation(
+        &self,
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+    ) -> bool {
+        let sessions = self.shared.sessions.lock().await;
+        let Some(session) = sessions.get(&self.session_id) else {
+            return false;
+        };
+        if session.tombstone.is_some() {
+            return false;
+        }
+        let staged = session
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stage_preparation(staged_incarnation_id, predecessor_incarnation_id);
+        staged
+    }
+
+    async fn may_commit_preparation(&self, staged_incarnation_id: &str) -> bool {
+        let sessions = self.shared.sessions.lock().await;
+        let Some(session) = sessions.get(&self.session_id) else {
+            return false;
+        };
+        if session.tombstone.is_some() {
+            return false;
+        }
+        let may = session
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .may_commit_preparation(staged_incarnation_id);
+        may
+    }
+
+    async fn settle_preparation(&self, staged_incarnation_id: &str, committed: bool) -> bool {
+        let sessions = self.shared.sessions.lock().await;
+        let Some(session) = sessions.get(&self.session_id) else {
+            // A settle nobody can hear is not a failure. The session is gone,
+            // so its slot is gone with it, and the durable outcome the caller
+            // is reporting has already been written either way.
+            return false;
+        };
+        let mut control = session
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !committed {
+            control.abort_preparation(staged_incarnation_id);
+        }
+        let settled = control.settle_preparation(staged_incarnation_id);
+        drop(control);
+        settled
+    }
+}
+
 /// A prepared rendition plus the exact per-key build gate. The gate remains
 /// held through the final reader/session registry transaction, so a dormant
 /// purge cannot remove the handle between lookup and attachment. Slow build
@@ -1583,6 +1663,31 @@ fn repair_job_for_artifact(
 }
 
 impl VodServe {
+    /// A preparation gate for one live session, or `None` when this engine is
+    /// not serving it.
+    ///
+    /// `None` is not a refusal to be worked around: it means the session is
+    /// served by the rolling actor (or has ended), and the caller should ask
+    /// that engine instead. Returning a gate that always answers `false` would
+    /// look like a full slot and hide the routing question.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn preparation_gate(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Option<Arc<dyn crate::playback_control::PreparationGate>> {
+        let sessions = self.shared.sessions.lock().await;
+        let live = sessions
+            .get(session_id)
+            .is_some_and(|session| session.tombstone.is_none());
+        drop(sessions);
+        live.then(|| {
+            Arc::new(VodPreparationGate {
+                shared: Arc::clone(&self.shared),
+                session_id: session_id.to_owned(),
+            }) as Arc<dyn crate::playback_control::PreparationGate>
+        })
+    }
+
     /// `base` is the renditions root directory (created lazily).
     pub fn new(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
         Self::new_configured(base, store, None, None, None)
@@ -8091,6 +8196,95 @@ mod tests {
         assert!(!cleanup.retention_expired());
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(cleanup.retention_expired());
+    }
+
+    /// M6's preparation slot exists on the engine that serves the sessions.
+    ///
+    /// This is the whole point of moving it off the rolling actor. `create`
+    /// sets `Presentation::Vod` for every session, so a slot only the actor
+    /// held would have staged successors on a path viewers do not take — and
+    /// M6 §3.4's acceptance would have passed while the feature fired on
+    /// nothing, which is the defect class the replacement seam already had
+    /// once.
+    #[tokio::test]
+    async fn a_vod_session_holds_a_preparation_slot() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, &session_id, Arc::clone(&rendition), Instant::now()).await;
+
+        let gate = serve
+            .preparation_gate(&session_id)
+            .await
+            .expect("a live VOD session has a gate");
+        let successor = uuid::Uuid::new_v4().to_string();
+        let predecessor = uuid::Uuid::new_v4().to_string();
+        assert!(
+            gate.stage_preparation(successor.clone(), predecessor.clone())
+                .await
+        );
+        assert!(gate.may_commit_preparation(&successor).await);
+        // One per playback, and the second ask is refused rather than
+        // replacing the first: the store's primary key would reject it, and an
+        // engine that believed in two could commit the wrong one.
+        assert!(
+            !gate
+                .stage_preparation(uuid::Uuid::new_v4().to_string(), predecessor)
+                .await
+        );
+        assert!(gate.settle_preparation(&successor, true).await);
+        assert!(
+            !gate.may_commit_preparation(&successor).await,
+            "a settled successor is no longer committable",
+        );
+    }
+
+    /// Liveness is the engine's half, and it answers before the slot is
+    /// touched: a session that has ended takes no successor, and one that is
+    /// gone from the registry has no gate at all.
+    #[tokio::test]
+    async fn an_ended_vod_session_takes_no_successor() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, &session_id, Arc::clone(&rendition), Instant::now()).await;
+        let gate = serve.preparation_gate(&session_id).await.expect("gate");
+
+        serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get_mut(&session_id)
+            .expect("session")
+            .tombstone = Some(Terminal::Deleted);
+        assert!(
+            !gate
+                .stage_preparation(
+                    uuid::Uuid::new_v4().to_string(),
+                    uuid::Uuid::new_v4().to_string(),
+                )
+                .await,
+            "a tombstoned session takes no successor",
+        );
+        assert!(
+            serve.preparation_gate(&session_id).await.is_none(),
+            "and hands out no further gate",
+        );
+
+        serve.shared.sessions.lock().await.remove(&session_id);
+        assert!(
+            !gate
+                .stage_preparation(
+                    uuid::Uuid::new_v4().to_string(),
+                    uuid::Uuid::new_v4().to_string(),
+                )
+                .await,
+            "nor does a gate outliving its session",
+        );
+        assert!(serve.preparation_gate(&session_id).await.is_none());
     }
 
     #[tokio::test]

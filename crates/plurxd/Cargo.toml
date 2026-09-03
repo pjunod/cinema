@@ -18,6 +18,7 @@ live-hls-recovery = []
 cluster-integration-tests = []
 
 [dependencies]
+async-trait = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
