@@ -4663,29 +4663,8 @@ async fn control_inner(
             None,
         );
     }
-    if route.publication_ready_at_ms != 0 {
-        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
-        return control_error(
-            StatusCode::TOO_EARLY,
-            "owner_transition",
-            "the media session publication handoff is not yet ready",
-            Some(route.incarnation_id),
-            Some(owner_epoch),
-            Some(500),
-            None,
-        );
-    }
-    if route.lease_expires_at_ms <= unix_ms() {
-        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
-        return control_error(
-            StatusCode::TOO_EARLY,
-            "owner_transition",
-            "the media owner lease expired and takeover is not yet settled",
-            Some(route.incarnation_id),
-            Some(owner_epoch),
-            Some(500),
-            None,
-        );
+    if let Some(refusal) = control_owner_refusal(&route, Some(owner_epoch)) {
+        return refusal;
     }
     if route.owner_node_id != state.node_id {
         let relay = crate::playback_control::ControlRelayRequest {
@@ -4749,6 +4728,86 @@ pub(crate) fn control_error(
         }),
     )
         .into_response()
+}
+
+/// Whether this route can authorize control at all, and the answer if not.
+///
+/// The *condition* lives here with the answer on purpose. Two of the three
+/// gates that call this — public ingress and the owner side of the relay —
+/// are separate call sites that could drift, and only the ingress one is
+/// reachable from a test (the relay's needs a signed internal request and
+/// there is no harness). Keeping the predicate here leaves those sites with
+/// no logic of their own to get wrong: the remaining failure mode is deleting
+/// the call, not answering differently from the plane next door.
+pub(super) fn control_owner_refusal(
+    route: &MediaSessionRoute,
+    owner_epoch: Option<u64>,
+) -> Option<Response> {
+    let now_unix_ms = unix_ms();
+    (route.publication_ready_at_ms != 0 || route.lease_expires_at_ms <= now_unix_ms)
+        .then(|| control_owner_answer(route, owner_epoch, now_unix_ms))
+}
+
+/// The control-plane answer for a route that is no longer authorizing control
+/// — its publication handoff is pending, or its owner lease has stopped being
+/// renewed.
+///
+/// There are **three** gates: public ingress, the owner side of the relay in
+/// `internal_media_sessions::control_inner`, and `verify_authority`'s re-read
+/// at the owner. They must not diverge, because the earlier ones return
+/// before the later ones run and would otherwise decide the answer on their
+/// own. All three reach this function, and the classification is the media
+/// plane's, so neither plane can answer one route differently from the other.
+///
+/// `now_unix_ms` comes from the caller's own liveness test rather than being
+/// read again here, so the two cannot land on opposite sides of the lease
+/// boundary.
+pub(super) fn control_owner_answer(
+    route: &MediaSessionRoute,
+    owner_epoch: Option<u64>,
+    now_unix_ms: i64,
+) -> Response {
+    match crate::playback_control::classify_control_owner(route, now_unix_ms) {
+        crate::playback_control::ControlStateError::OwnerLost => {
+            control_owner_lost(route, owner_epoch)
+        }
+        _ => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
+            control_error(
+                StatusCode::TOO_EARLY,
+                "owner_transition",
+                "the media owner is not currently authorizing control; takeover is not settled",
+                Some(route.incarnation_id.clone()),
+                owner_epoch,
+                Some(500),
+                None,
+            )
+        }
+    }
+}
+
+/// No successor can answer this session's control exchange, so the client is
+/// told to stop rather than to retry every 500 ms forever. The retry hint is
+/// deliberately absent: there is nothing to come back to, and all three
+/// reporters read 425-with-a-hint as an instruction to keep going.
+///
+/// The wording does not assert that a node died. On a single-node install
+/// every session is untakeoverable by construction, and the common cause
+/// there is the node's own store writes stalling past the lease rather than
+/// the node being gone — so the message says what is true in both cases: this
+/// session cannot be recovered, reopen.
+pub(super) fn control_owner_lost(route: &MediaSessionRoute, owner_epoch: Option<u64>) -> Response {
+    crate::playback_control::record(crate::playback_control::MetricOutcome::OwnerLost);
+    control_error(
+        StatusCode::GONE,
+        "owner_lost",
+        "this media session's owner no longer holds it and nothing can take it over; \
+         reopen playback",
+        Some(route.incarnation_id.clone()),
+        owner_epoch,
+        None,
+        None,
+    )
 }
 
 /// Execute a control exchange after ingress (or the exact-write relay) has
@@ -4948,6 +5007,9 @@ async fn control_local_inner(
                 Some(500),
                 None,
             );
+        }
+        Some(Err(crate::playback_control::ControlStateError::OwnerLost)) => {
+            return control_owner_lost(route, Some(owner_epoch));
         }
         Some(Err(crate::playback_control::ControlStateError::Unavailable)) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
@@ -13276,6 +13338,228 @@ mod tests {
             refusal.contains("EVENT playlist"),
             "the EVENT gate must fire before any later refusal: {refusal}"
         );
+    }
+
+    async fn control_body(response: Response) -> (StatusCode, serde_json::Value) {
+        let http_status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect control body")
+            .to_bytes();
+        (
+            http_status,
+            serde_json::from_slice(&bytes).expect("control errors are JSON objects"),
+        )
+    }
+
+    fn control_request(generation: String) -> crate::playback_control::ControlRequestV1 {
+        crate::playback_control::ControlRequestV1 {
+            protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+            generation,
+            control_epoch: 1,
+            client_instance_id: uuid::Uuid::new_v4().to_string(),
+            sequence: 1,
+            demand: crate::playback_control::PlaybackDemand::Active,
+            position_ms: 1_000,
+            buffered_from_ms: Some(0),
+            buffered_through_ms: 10_000,
+            playback_rate: 1.0,
+            render_state: crate::playback_control::RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: crate::playback_control::ClientSelection {
+                quality: crate::playback_control::QualitySelection::Auto,
+                audio_track: None,
+                subtitle: crate::playback_control::SubtitleSelection {
+                    mode: crate::playback_control::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: crate::playback_control::CodecPolicy::Auto,
+                dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(crate::playback_control::DynamicCapabilities {
+                platform: crate::playback_control::ClientPlatform::Web,
+                max_height: 1080,
+                codecs: vec![crate::playback_control::CodecPolicy::H264],
+                dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+            supported_actions: None,
+        }
+    }
+
+    /// Drive the **ingress** control gate, not the helper behind it.
+    ///
+    /// That gate returns before `verify_authority` ever runs, so a version of
+    /// this test that called the classifier directly would pass with the gate
+    /// reverted to its old unconditional 425 — which is the one fact this
+    /// change turns on. An adversarial review found exactly that mutation
+    /// surviving, so this posts a real exchange at a durable route instead.
+    #[tokio::test]
+    async fn the_ingress_control_gate_answers_a_lost_owner_gone() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "control-loss-unrelated").await;
+        let user = fixture
+            .store
+            .create_user("control-loss", "hash", false)
+            .await
+            .expect("control-loss user");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                incarnation_id: incarnation_id.clone(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "control-loss".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: "former-owner".to_owned(),
+                // Active, long outside its lease, and serving EVENT — a
+                // readable recipe that no takeover can ever act on, which is
+                // the dominant real case rather than a malformed one. The
+                // response is a real one too, because control admission needs
+                // a bootstrap before it reaches the gate under test.
+                lease_expires_at_ms: 2,
+                recipe_json: crate::media_sessions::takeover_eligible_route(
+                    &session_id,
+                    &incarnation_id,
+                )
+                .recipe_json
+                .replace("\"typeless_playlist\":true", "\"typeless_playlist\":false")
+                .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id)),
+                response_json: serde_json::to_string(&StartResponse {
+                    session_id: session_id.clone(),
+                    playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+                    duration_ms: Some(60_000),
+                    start_seconds: 0.0,
+                    media_origin_ms: Some(0),
+                    height: 720,
+                    encoder: "software".to_owned(),
+                    vod: false,
+                    ladder: vec![],
+                    prior_kbps: None,
+                    delivered_dynamic_range: Some("sdr".to_owned()),
+                    delivered_dolby_vision_profile: None,
+                    control: crate::playback_control::ControlBootstrap::new(
+                        &session_id,
+                        &incarnation_id,
+                        1,
+                        crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+                    ),
+                    plan_notes: Vec::new(),
+                })
+                .expect("start response"),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: 1,
+            },
+        )
+        .await;
+
+        let body = Bytes::from(
+            serde_json::to_vec(&control_request(incarnation_id.clone())).expect("control request"),
+        );
+        let response = control_inner(
+            fixture.state.clone(),
+            session_id,
+            body,
+            unix_ms().saturating_add(4_000),
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::GONE,
+            "a control exchange against an owner nothing can replace must not ask for a retry"
+        );
+        let (_, body) = control_body(response).await;
+        assert_eq!(body["code"], "owner_lost");
+        assert!(
+            body.get("retry_after_ms").is_none(),
+            "a hint is what all three reporters read as an instruction to keep going"
+        );
+        assert_eq!(body["generation"], incarnation_id);
+    }
+
+    /// Its counterpart, through the same gate: a session a survivor can still
+    /// claim keeps the retryable answer and its hint.
+    #[tokio::test]
+    async fn the_ingress_control_gate_keeps_a_claimable_owner_retryable() {
+        let route = {
+            let mut route = eligible_owner_loss_route();
+            route.lease_expires_at_ms = 1;
+            route
+        };
+        let (status, body) = control_body(control_owner_answer(&route, Some(3), NOW_MS)).await;
+        assert_eq!(status, StatusCode::TOO_EARLY);
+        assert_eq!(body["code"], "owner_transition");
+        assert_eq!(body["retry_after_ms"], 500);
+        assert_eq!(
+            body["control_epoch"], 3,
+            "the client still needs the epoch it was fenced against"
+        );
+    }
+
+    /// And the loss answer carries it too, when the caller has one.
+    #[tokio::test]
+    async fn the_loss_answer_reports_the_epoch_its_caller_was_fenced_against() {
+        let mut route = untakeoverable_owner_loss_route();
+        route.lease_expires_at_ms = 1;
+
+        let (status, body) = control_body(control_owner_answer(&route, Some(3), NOW_MS)).await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(body["code"], "owner_lost");
+        assert_eq!(body["control_epoch"], 3);
+        assert_eq!(body["generation"], route.incarnation_id);
+    }
+
+    /// The relay passes `owner_epoch` as an `Option`, and a peer's answer is
+    /// validated against a strict `(status, code)` allowlist before it reaches
+    /// a client — so the owner-side shape has to be a legal control body too.
+    #[tokio::test]
+    async fn the_relay_shaped_loss_answer_is_a_legal_control_body() {
+        let mut route = untakeoverable_owner_loss_route();
+        route.lease_expires_at_ms = 1;
+
+        let (status, body) = control_body(control_owner_answer(&route, None, NOW_MS)).await;
+        assert_eq!(status, StatusCode::GONE);
+        let parsed: crate::playback_control::ControlErrorBody =
+            serde_json::from_value(body).expect("the relay deserializes this exact shape");
+        assert!(
+            parsed.is_valid_for_status(status.as_u16()),
+            "a body the relay would refuse never reaches the client at all"
+        );
+        assert_eq!(parsed.code, "owner_lost");
+        assert!(parsed.retry_after_ms.is_none());
+        assert!(
+            parsed.control_epoch.is_none(),
+            "the relay has no epoch to report and must not invent one"
+        );
+    }
+
+    /// A committed replacement is pending publication with a live lease, so it
+    /// is a transition on this plane too — and its recipe, being a VOD
+    /// handle's, is one no takeover would ever accept. Classifying on the
+    /// recipe alone would end a session whose successor is alive.
+    #[tokio::test]
+    async fn a_publication_fence_with_a_live_lease_stays_retryable_on_the_control_plane() {
+        let mut route = untakeoverable_owner_loss_route();
+        route.lease_expires_at_ms = NOW_MS + 1;
+        route.publication_ready_at_ms =
+            NOW_MS + plurx_core::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS;
+
+        let (status, body) = control_body(control_owner_answer(&route, Some(3), NOW_MS)).await;
+        assert_eq!(status, StatusCode::TOO_EARLY);
+        assert_eq!(body["code"], "owner_transition");
     }
 
     /// The detail object is data. A route that somehow carried a `code` field

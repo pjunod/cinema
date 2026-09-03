@@ -1980,7 +1980,7 @@ impl ControlErrorBody {
             (400, "invalid_control")
                 | (404, "session_gone")
                 | (409, "owner_changed" | "stale_control")
-                | (410, "session_ended")
+                | (410, "session_ended" | "owner_lost")
                 | (425, "owner_transition")
                 | (429, "control_rate_limited")
                 | (503, "control_unavailable")
@@ -2045,6 +2045,10 @@ pub(crate) enum ControlStateError {
     RateLimited(u32),
     SessionEnded,
     OwnerTransition,
+    /// The owner is gone and its durable recipe can never be taken over, so
+    /// no successor will answer this session's control exchange. Distinct
+    /// from `SessionEnded`, which means something deliberately ended it.
+    OwnerLost,
     Unavailable,
 }
 
@@ -2091,13 +2095,35 @@ pub(crate) async fn verify_authority(
     if route.state != "active" {
         return Err(ControlStateError::SessionEnded);
     }
-    if route.publication_ready_at_ms != 0 {
-        return Err(ControlStateError::OwnerTransition);
-    }
-    if route.lease_expires_at_ms <= crate::media_sessions::unix_ms() {
-        return Err(ControlStateError::OwnerTransition);
+    // Both producers of an owner transition go through one classification, so
+    // this plane cannot answer a route differently from the media plane —
+    // which folds the publication fence and the expired lease into the same
+    // `OwnerTransition` and then classifies both together.
+    //
+    // One reading of the clock decides the liveness test and the
+    // classification, so an exchange cannot land on the far side of the lease
+    // boundary between them.
+    let now_unix_ms = crate::media_sessions::unix_ms();
+    if route.publication_ready_at_ms != 0 || route.lease_expires_at_ms <= now_unix_ms {
+        // Answering "retry after 500 ms" forever, against an owner whose
+        // session nothing can take over, is the defect the media plane had —
+        // and the client believes this one, because all three reporters treat
+        // 425 as retryable.
+        return Err(classify_control_owner(&route, now_unix_ms));
     }
     Ok(())
+}
+
+/// The one rule every control gate uses, shared with the media plane so the
+/// two planes cannot answer the same route differently.
+pub(crate) fn classify_control_owner(
+    route: &plurx_core::domain::MediaSessionRoute,
+    now_unix_ms: i64,
+) -> ControlStateError {
+    match crate::media_sessions::classify_owner_loss(route, now_unix_ms) {
+        crate::media_sessions::OwnerLoss::Transitioning(_) => ControlStateError::OwnerTransition,
+        crate::media_sessions::OwnerLoss::Unrecoverable(_) => ControlStateError::OwnerLost,
+    }
 }
 
 #[derive(Clone)]
@@ -10660,9 +10686,14 @@ pub(crate) enum MetricOutcome {
     Gone = 6,
     Unavailable = 7,
     RateLimited = 8,
+    /// Separate from `Gone`, which counts every ordinary teardown and would
+    /// bury this. A node dying and taking sessions with it unrecoverably is
+    /// the one event in this family an operator needs to see on its own.
+    OwnerLost = 9,
 }
 
-static CONTROL_EXCHANGES: [AtomicU64; 9] = [
+static CONTROL_EXCHANGES: [AtomicU64; 10] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -10966,6 +10997,7 @@ pub(crate) fn prometheus() -> String {
         "session_gone",
         "unavailable",
         "rate_limited",
+        "owner_lost",
     ]
     .iter()
     .enumerate()
@@ -16798,6 +16830,50 @@ mod tests {
         assert!(!unavailable.is_valid_for_status(409));
     }
 
+    /// The control plane answers hard owner loss too (plan §10.3). It carried
+    /// the same defect as the media plane and for longer: 425
+    /// `owner_transition` with a 500 ms hint, which all three reporters treat
+    /// as retryable, against an owner that is gone and that no successor can
+    /// replace.
+    #[test]
+    fn a_lost_owner_is_a_distinct_control_answer_from_a_transition() {
+        let lost = ControlErrorBody {
+            code: "owner_lost".to_owned(),
+            message: "the node holding this media session is gone".to_owned(),
+            generation: None,
+            control_epoch: None,
+            retry_after_ms: None,
+            invalid_field: None,
+        };
+        assert!(
+            lost.is_valid_for_status(410),
+            "the code has to be admitted at its own status or the relay refuses it"
+        );
+        assert!(
+            !lost.is_valid_for_status(425),
+            "and must not be accepted at the retryable status it replaces"
+        );
+
+        // The rollout property, pinned rather than discovered: the relay's
+        // validator is a strict allowlist, so an ingress node that predates
+        // this code rejects a new owner's answer and degrades it to
+        // `control_unavailable` — a retry, which is exactly today's
+        // behaviour. The mixed fleet is therefore never *wrong*, only
+        // temporarily too soft, and it settles the moment ingress upgrades.
+        let previously_valid = ["session_ended", "owner_transition"];
+        for code in previously_valid {
+            let body = ControlErrorBody {
+                code: code.to_owned(),
+                ..lost.clone()
+            };
+            let status = if code == "session_ended" { 410 } else { 425 };
+            assert!(
+                body.is_valid_for_status(status),
+                "{code} keeps the status it always had"
+            );
+        }
+    }
+
     /// The shadow metric's full cross product is published from boot, and its
     /// labels are the decision's own vocabulary.
     ///
@@ -17162,6 +17238,19 @@ mod tests {
         now_ms: i64,
         lease_expires_at_ms: i64,
     ) -> (String, String) {
+        activate_route_with_recipe(store, now_ms, lease_expires_at_ms, None).await
+    }
+
+    /// `recipe` decides, for an expired route, whether a successor could ever
+    /// take it over — and so which of the two owner-transition answers the
+    /// authority check returns. `None` is the `{}` recipe every other test
+    /// here uses, which no takeover can act on.
+    async fn activate_route_with_recipe(
+        store: &plurx_core::store::SqliteStore,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+        recipe: Option<&dyn Fn(&str) -> String>,
+    ) -> (String, String) {
         use plurx_core::store::MediaSessionStore as _;
 
         let incarnation = uuid::Uuid::new_v4().to_string();
@@ -17193,7 +17282,7 @@ mod tests {
             request_id: Some(incarnation.clone()),
             request_fingerprint: fingerprint,
             owner_node_id: "node-a".to_owned(),
-            recipe_json: "{}".to_owned(),
+            recipe_json: recipe.map_or_else(|| "{}".to_owned(), |build| build(&incarnation)),
             response_json: "{}".to_owned(),
             publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
             media_origin_ms: 0,
@@ -17260,6 +17349,10 @@ mod tests {
             Err(ControlStateError::SessionEnded)
         );
 
+        // An expired lease is an owner transition only while a successor could
+        // still answer. This route's `{}` recipe is one no takeover can act
+        // on, so nothing is coming and the answer says so rather than asking
+        // for a retry the client would repeat forever.
         let expired_store = SqliteStore::open_in_memory().expect("expired store");
         let (expired_generation, expired_session) = activate_route(&expired_store, 1, 2).await;
         assert_eq!(
@@ -17271,7 +17364,32 @@ mod tests {
                 1,
             )
             .await,
-            Err(ControlStateError::OwnerTransition)
+            Err(ControlStateError::OwnerLost)
+        );
+
+        // The same expiry with a recipe the takeover path accepts stays the
+        // retryable answer it has always been.
+        let eligible_store = SqliteStore::open_in_memory().expect("eligible store");
+        let build = |incarnation: &str| {
+            let route = crate::media_sessions::takeover_eligible_route(
+                &uuid::Uuid::new_v4().to_string(),
+                incarnation,
+            );
+            route.recipe_json
+        };
+        let (eligible_generation, eligible_session) =
+            activate_route_with_recipe(&eligible_store, 1, 2, Some(&build)).await;
+        assert_eq!(
+            verify_authority(
+                &eligible_store,
+                &eligible_session,
+                &eligible_generation,
+                "node-a",
+                1,
+            )
+            .await,
+            Err(ControlStateError::OwnerTransition),
+            "a rolling session a survivor can still claim keeps its retry"
         );
     }
 

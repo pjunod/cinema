@@ -696,7 +696,15 @@ pattern = "publication_ready_at_ms"
 # 73 -> 74 with the live-lease correction: one test-only route stamped with a
 # publication fence to prove a renewing successor is never read as owner loss.
 # It sets the field on a fixture and moves no shipped fence.
-expected_occurrences = 74
+# 74 -> 76 with the control plane's owner-loss answer: the publication fence is
+# now folded into the same classification as the expired lease on all three
+# control gates instead of being answered unconditionally, so each gate's
+# condition names the field, and one test stamps a fence on a fixture to prove
+# a renewing successor is still retryable on this plane. Then 76 -> 75 when the
+# gate condition moved into `control_owner_refusal` beside its answer, so the
+# two call sites name the field once between them instead of twice. No shipped
+# fence moves either way.
+expected_occurrences = 75
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -708,7 +716,9 @@ pattern = "MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS"
 # 4 -> 5 with the live-lease correction: the restored guard test builds its
 # publication fence from the window constant rather than a literal, so the
 # fixture cannot drift away from the window it is meant to represent.
-expected_occurrences = 5
+# 5 -> 6 with the control plane's owner-loss answer: its publication-fence test
+# builds the same fixture from the same constant rather than a literal.
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-durable-publication-blocked-sentinel"
@@ -1267,7 +1277,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `error_body` test helper that renders a typed `ApiError` and returns its
 # status and JSON body together, so the wire answer is asserted as a whole
 # rather than by matching the enum. In-process, launches nothing, owns nothing.
-expected_occurrences = 212
+# +2 with the control plane's owner-loss answer: a `control_body` helper of the
+# same shape, and the ingress-gate test reading `Response::status()` off a real
+# control exchange so the wiring is asserted rather than the helper. Both are
+# in-process; they launch nothing and own nothing.
+expected_occurrences = 214
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

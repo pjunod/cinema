@@ -3415,8 +3415,21 @@ created while this gate was off — answers **410 `media_owner_lost`** carrying
 the film position to reopen at, instead of a 503 `media_owner_transition` that
 would repeat forever. A session the takeover path *can* still claim keeps the
 503, now carrying the same position for a client that stops waiting. The
-control plane's own **425 `owner_transition`** is unchanged and still retries
-without bound; it is the same gap on the other plane and is not yet closed.
+control plane answers the same way: **410 `owner_lost`** with no retry hint
+when nothing can take the session over, and the retryable **425
+`owner_transition`** when a survivor still could. Both planes apply the same
+rule, so they answer one route the same way.
+
+**On a single-node install this is the normal end of an expired session, not a
+dead-node event.** `typeless_playlist` is only ever set when
+`playback.hls_typeless_sliding` or `cluster.session_takeover_enabled` is on, so
+without them every session is untakeoverable by construction and any lease that
+stops being renewed answers `owner_lost`. The usual cause there is the node's
+own store writes stalling past the twelve-second lease rather than a node being
+gone — which is why the wire message says the session's owner no longer holds
+it, and not that a machine died. Treat a rising
+`plurx_playback_control_exchanges_total{outcome="owner_lost"}` on a single node
+as a store-latency signal; on a cluster, as sessions lost with a peer.
 
 Expect recovery on the order of **fifteen to twenty seconds**, not the ten the
 plan's acceptance names. Nothing contests a session until its lease expires,
