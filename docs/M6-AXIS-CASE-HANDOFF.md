@@ -98,9 +98,25 @@ were not measurements the first time.
 | peak memory | **declare unanswered.** AVFoundation decodes in `mediaserverd` and the available tooling exposes no resident memory for `mediaplaybackd` / `videocodecd`; task RSS measures the harness process and repeats the original structural error. The instrument review explicitly allowed this to stand unanswered. |
 | decoder instances | **declare unanswered.** AVFoundation exposes no public hardware-decoder identity, so any number here is a logical `AVPlayer` pipeline count. Plan §5.3's one-slot question stays open, and this case does not close it. |
 
-**Link shaping:** a *stable* contended profile passed explicitly to
-`--network-profile`. Not the named `8mbps-to-1.5mbps` descent — that is a
-bandwidth-cliff recovery rig for a different acceptance.
+**Link shaping: at least twice the predecessor's average rate.** This is a
+requirement, not a preference, and the 2026-09-03 run failed because the
+original wording ("a stable contended profile") left it out.
+
+M6 will not prepare at all unless `observed >= delivered * 2` — that is
+`PreparationConditions::headroom_refusal`, and below it the server answers
+`throughput_insufficient` and stages nothing. A run shaped below that floor is
+measuring a transition **the server would refuse**, so its failures say nothing
+about the axis.
+
+Worked for the 2026-09-03 recipe: predecessor 18.183 Mbit/s → the link must be
+**≥ 36.4 Mbit/s**, and 40 Mbit is the sensible setting. That run used 30 Mbit,
+which is 1.65× — and the two pipelines together wanted 27.8 Mbit/s against a
+30 Mbit cap, 8% headroom. Its eight "predecessor did not reach commit boundary"
+failures are consistent with the throughput floor being correct rather than
+with the axis being unprepared.
+
+Still a *stable* profile, and still not the named `8mbps-to-1.5mbps` descent —
+that is a bandwidth-cliff recovery rig for a different acceptance.
 
 **No simulator.** A measurement of decoder allocation on a simulator is a
 measurement of a Mac.
@@ -109,11 +125,29 @@ measurement of a Mac.
 
 The spike's own, unchanged:
 
-- **20 consecutive clean commits** with **zero predecessor stalls** and **zero
-  post-commit stalls**;
-- runway **varies** across trials and reads `full at ack: false` on every one;
+- **20 clean commits with zero failed admissions**, each with **zero
+  predecessor stalls** and **zero post-commit stalls**. Consecutive was the
+  original wording and it is unreachable when the boundary rotates through a
+  list: if any one boundary fails deterministically, no run of 20 can exist.
+  What matters is that nothing failed, not that the passes were adjacent —
+  **one failed admission still fails the case**;
+- **hold the boundary fixed within a trial group**, or a per-boundary defect
+  hides as scattered failure. The 2026-09-03 run failed 3/3 at 31.0 s, 2/2 at
+  33.0 s and 2/2 at 33.5 s while passing 3/3 at 30.0 s and 32.0 s — a pattern
+  that is deterministic per boundary, which decoder pressure and scheduling are
+  not;
+- runway **varies with trial-to-trial jitter**, not merely across boundaries,
+  and reads `full at ack: false` on every one. A value that is a deterministic
+  function of the commit boundary — the 2026-09-03 run returned exactly four
+  values, repeating precisely on every pass, 12,000 ms at 30.0 s all three
+  times — is a lookup table, not an observation, and is the same class of
+  artifact as the original flat 12,000 ms;
 - **every** copied pixel buffer's PTS falls at or beyond its commit boundary;
-- wire counts **vary** per trial and per device;
+- wire counts **vary per trial in both pipelines**. The 2026-09-03 run's
+  predecessor varied properly (20/20 distinct, 348–541 Mbit) while its
+  successor repeated exactly per boundary — 289.88 Mbit on three separate
+  trials — which is the byte-identical signature that got the first Apple arm
+  rejected. One pipeline counted and the other derived is not a pass;
 - memory and decoder instances recorded as unanswered, with the reason.
 
 A failed admission is evidence against the capability even when another recipe
