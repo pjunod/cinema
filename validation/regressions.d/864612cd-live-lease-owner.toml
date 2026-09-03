@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["864612cd"]
+points = ["core.media", "playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "a_renewing_successor_awaiting_publication_is_never_owner_loss drives classify_durable_route with a route carrying a publication fence and a live lease, asserts that this really is the second producer of OwnerTransition rather than assuming it, and then requires classify_owner_loss to call it a transition — on a VOD recipe, which is takeover-ineligible by design and is exactly what made the regression reach every replaced VOD session rather than an exotic corner. The same test then moves the clock to the lease boundary and requires the answer to become Unrecoverable, so the fix cannot be over-applied into never classifying loss at all. Deleting the live-lease early return fails it. Without this the 410 that tells a viewer their stream stopped fires for the whole 372-second handoff window of an ordinary replacement whose successor is alive and renewing every three seconds."
