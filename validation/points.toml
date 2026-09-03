@@ -591,6 +591,7 @@ paths = [
   "docs/STUTTER-4K.md",
   "scripts/dv-evidence",
   "scripts/verify-dv-timeline",
+  "scripts/dv-timeline-check",
   "scripts/playback-lab",
   "scripts/player-input-fence",
   "crates/plurx-core/examples/init-promotion-probe.rs",
