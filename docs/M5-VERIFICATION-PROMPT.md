@@ -21,25 +21,34 @@ a shut gate is the answer, not an obstacle.
 
 ## 1. Check you are testing the build you think you are
 
-As of 2026-09-03 15:30 UTC this was **not** true on nuc4:
+As of 2026-09-03 19:17 UTC all four nodes carry the merged effort:
 
-| node  | running binary            | deploy checkout           |
-|-------|---------------------------|---------------------------|
-| nynuc | `v0.3.0-515-gc2702f61`    | `v0.3.0-515-gc2702f61`    |
-| m6    | `v0.3.0-515-gc2702f61`    | `v0.3.0-515-gc2702f61`    |
-| nuc3  | `v0.3.0-515-gc2702f61`    | `v0.3.0-515-gc2702f61`    |
-| nuc4  | **`v0.3.0-487-gd7194b05`**| `v0.3.0-515-gc2702f61`    |
+| node  | running binary          | deploy checkout         |
+|-------|-------------------------|-------------------------|
+| nynuc | `v0.3.0-568-gd4c67ff4`  | `v0.3.0-568-gd4c67ff4`  |
+| m6    | `v0.3.0-568-gd4c67ff4`  | `v0.3.0-568-gd4c67ff4`  |
+| nuc4  | `v0.3.0-568-gd4c67ff4`  | `v0.3.0-568-gd4c67ff4`  |
+| nuc3  | `v0.3.0-568-gd4c67ff4`  | `v0.3.0-568-gd4c67ff4`  |
+
+Check it again before you start — `main` moves, and this table is a record
+of one moment, not a promise:
 
 ```bash
 for h in nynuc m6 nuc4 nuc3; do
   printf '%-7s ' "$h"
-  ssh pjunod@$h 'echo "$(docker exec plurxd plurxd --version) checkout=$(cd /opt/noirr/plurx && git describe --always)"'
+  ssh pjunod@$h 'docker logs plurxd 2>&1 | grep -m1 "plurxd starting"' \
+    | sed -E 's/.*build="([^"]+)".*/\1/'
 done
 ```
 
-If the node you are about to test runs a binary older than its checkout,
-have Paul redeploy it first and say so in the report. A Safari play against
-a stale nuc4 proves nothing about #869.
+`docker exec plurxd plurxd --version` reads the same stamp and is fine too;
+the log line is used here because it survives a container that is up but not
+yet serving. If the node you are about to test runs a binary older than its
+checkout, or older than the others, have it redeployed first and say so in
+the report. A Safari play against a stale node proves nothing about #869.
+
+The clients are a separate hand-off: `docs/CLIENT-DEPLOY-PROMPT.md`. Nothing
+in this document needs them.
 
 ## 2. The ops gate — do not proceed past a shut one
 
