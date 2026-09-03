@@ -737,9 +737,11 @@ with the extraction map in §3.2.1):
    server's `copy`/`hdr10` answers, and a subtitle selection is not a burn.
    [M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.3. A shadow mode fed a wrong
    candidate produces a confident wrong measurement;
-3. stage on `Prepare` — the first behaviour change, which fires on nothing
-   until a client release flips Apple's literal;
-4. the commit trigger — blocked on the acknowledgements, and not on code.
+3. ~~shadow mode~~ — **done and read**. See §"Shadow mode ran, and the axis
+   rule is what limits M6";
+4. stage on `Prepare` — the first behaviour change, which fires on nothing
+   until a client release flips Apple's literal **and reports its throughput**;
+5. the commit trigger — blocked on the acknowledgements, and not on code.
 
 **The disconnect-does-not-imply-commit property is already covered**, in
 `plurx-core`'s own contract suite on three voters
@@ -750,6 +752,58 @@ still current and active. Both backends reap the ledger inside
 deadline, so it can never race a live preparation whose owner is still
 renewing. A duplicate of that test at the executor level was written and
 discarded as vacuous.
+
+## Shadow mode ran, and the axis rule is what limits M6
+
+**Read 2026-09-03 on m6**, on `v0.3.0-449-gd1a56d01`, from three deliberate
+viewer quality changes: Avatar 2160 → 1080, and a plain SDR title to 720.
+These are in-memory counters and every deploy resets them, so this is what one
+build had decided at one moment, not a running total.
+
+| axis | outcome | decisions | counterfactual |
+|---|---|---|---|
+| `resolution_or_bitrate` | `client_cannot_prepare` → `throughput_unreported` | 1 | 1 |
+| `delivery_method` | `multiple_axes` | 2 | 2 |
+| `dynamic_range` | `multiple_axes` | 3 | 3 |
+
+`observations`: 3 `in_session`, 3 `replacement` — each viewer action is seen at
+both seams, because the client reports the new selection on the old session and
+*then* replaces it.
+
+**One transition in six is the axis M6 prepares.** The other five are
+multi-axis: a quality change on this library moves the delivery method and the
+delivered grade along with the height, because the top rung direct-plays with
+its grade intact and the lower ones must transcode. `multiple_axes` outranks
+the client gate deliberately, so the counterfactual agrees exactly — **a client
+release does not change these five.** That is the finding, and it was not
+predictable from the code: the axis rule, not the capability literal, is what
+bounds how often M6 can ever fire.
+
+**And the one that qualifies would still be refused.** Its counterfactual is
+`throughput_unreported`, not `prepare`: with the capability assumed satisfied,
+the throughput floor refuses because Apple sends no `observedDownloadBps` at
+all (`PlayerController.swift`), and `DeliveryView::from_status` leaves
+`delivered_bps` `None` on VOD. That split earned itself on its first datapoint
+— folded into one `throughput_unproven` it would have read as "the link was too
+tight" for a link nobody measured.
+
+**What this changes about slice 3.4.** Two client-side facts now gate it, not
+one, and both are small:
+
+1. `dual_player_preparation` → `true` (Apple), already known;
+2. report `observedDownloadBps` (Apple, Android) — the web client already does,
+   from `hls.bandwidthEstimate`.
+
+Without the second, a prepared handoff fires on **nothing** even after the
+first. Neither is a redesign, and neither is a reason to withhold 3.4 — but the
+axis question is open on the evidence: if one-in-six is the true rate, whether
+`PREPARED_AXIS` should stay single-axis is a decision M6 now has numbers for
+and did not before.
+
+**What is not yet known.** Six decisions from three actions on one library and
+one platform. Whether multi-axis dominance is a property of HDR sources, of
+this ladder, or of quality changes generally needs more titles and the other
+two platforms.
 
 ## M5.5 ran, and two thirds of it settled
 

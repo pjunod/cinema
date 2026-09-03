@@ -520,6 +520,16 @@ against `throughput_unreported` against `throughput_insufficient` against
 breakdown. A grand total is not an acceptance: both counters are fed from the
 same transitions and their totals are always equal.
 
+**Met 2026-09-03**, and it changed what §3.4 is waiting for — the reading is in
+[PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md) §"Shadow mode ran, and
+the axis rule is what limits M6". In short: one transition in six was the
+prepared axis, five were `multiple_axes` (delivery method and grade move with
+the height on this library), and the one that qualified answered
+`throughput_unreported` counterfactually rather than `prepare`, because the
+native clients send no `observedDownloadBps`. So a client release must flip two
+literals, not one — and the axis rule, not the capability, is what bounds how
+often M6 can fire at all.
+
 ### 3.4 Stage on `Prepare`
 
 The first behaviour change, and the first production caller — this is the slice
