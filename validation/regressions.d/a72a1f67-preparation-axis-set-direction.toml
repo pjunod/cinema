@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a72a1f67"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The admitted axis table is a set, and a set has no direction, so admitting {ResolutionOrBitrate, DeliveryMethod} on the strength of a downshift run also admitted the upshift nobody ran. PreparationConditions::headroom_refusal derives its floor entirely from the predecessor's delivered rate because an EffectiveSelection carries no bitrate, which is conservative toward a server-selected successor and unbounded away from one: a direct-playing successor carries the source file's own rate. raising_quality_back_to_a_direct_playing_source_is_not_admitted reproduces it directly — reverting successor_rate_is_bounded turns that fallback into a Prepare, handing a second pipeline to a link measured only against a 4 Mbit/s predecessor. the_axis_set_is_an_exact_order_independent_match covers the bitmask itself, which decide_preparation builds method-first against a table written resolution-first, and resolution_together_with_delivery_method_is_prepared now pins the counterfactual divergence the widening created."

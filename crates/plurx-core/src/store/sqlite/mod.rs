@@ -945,12 +945,25 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX dv_recovery_guards_file
         ON dv_recovery_guards(file_id, guard_id);",
-    // v45: the code each charged fragment-index attempt ended with, oldest
+    // v45: what the indexer learned when it could NOT build a fragment index.
+    // Node-local for `fragment_indexes`' reason, keyed the same way, and
+    // invalidated by the same mismatch — the two tables answer one question
+    // with opposite signs. Without it a truncated or unsupported build was a
+    // log line the next library wrap discarded, so the same whole-file read
+    // was spent every pass while `vodserve` answered `vod_index_pending`
+    // forever for a title that was never going to have an index.
+    crate::store::fragindex::FRAGMENT_INDEX_OUTCOMES_SCHEMA,
+    // v46: the code each charged fragment-index attempt ended with, oldest
     // first. `last_error_code` is wiped on every claim and overwritten by the
     // terminal `attempt_limit`, so a row that exhausts its budget says only
     // that it did. The operator text in the Analysis view already promised a
     // history — "resolve the underlying error shown in earlier attempts" —
     // that the row did not keep.
+    //
+    // This entry was v45 on the effort branch and moved when
+    // `FRAGMENT_INDEX_OUTCOMES_SCHEMA` reached `main` first. Position in this
+    // list *is* the version, so the two are ordered by which one shipped
+    // rather than by which was written first.
     crate::store::fragment_index_cluster::ANALYSIS_ATTEMPT_ERRORS_SCHEMA,
 ];
 
@@ -1268,7 +1281,7 @@ impl SqliteStore {
             // so the replay would fail on a column that is already there —
             // permanently. v41 has carried this guard since it landed.
             let applied = if (version == 41 && Self::analysis_component_schema_is_current(conn)?)
-                || (version == 45 && Self::attempt_errors_column_exists(conn)?)
+                || (version == 46 && Self::attempt_errors_column_exists(conn)?)
             {
                 Ok(())
             } else {

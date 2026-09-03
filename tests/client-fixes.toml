@@ -676,3 +676,11 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "nonisolated static func observedDownloadBps(fromObservedBitrate observed: Double) -> Int64?"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testObservedDownloadBpsIsClampedRatherThanTrapping"
+
+[[fixes]]
+id = "apple.close-control-exits"
+commits = ["0f904213"]
+source = "clients/apple/Sources/PlayerInputRouting.swift"
+source_anchor = "static func closeSteps(state: PlayerInputState) -> [PlayerInputOutcome]"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testTheCloseButtonsRunTheCloseControlAndNeverTheBackKey"

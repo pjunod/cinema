@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["284aecd0"]
+points = ["core.media"]
+checks = ["rust-gate"]
+reason = "Two test fixtures the new `fragment_index_outcomes` table moved out from under, both caught by running the suite rather than a focused filter. `store::fragindex`'s own `conn()` built an in-memory sidecar holding only `fragment_indexes`, a shape no deployment has since both migrations always run together — and `put` now retracts a refusal through the second table, so eleven of that module's tests failed on `no such table: fragment_index_outcomes`; the fixture creates both, exactly as each backend does. `sidecar_refuses_a_future_schema_version` carries the sidecar version as a literal on purpose, because an assertion built from `SIDECAR_SCHEMA_VERSION` can never fail on a bump, so v7 to v8 is the deliberate hand edit its own comment asks for. `rust-gate` runs `cargo test -p plurx-core --lib`, which is what went red."

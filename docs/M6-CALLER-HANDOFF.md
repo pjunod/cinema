@@ -503,21 +503,32 @@ actually unlock. Read the refusals in this order:
 1. `throughput_unreported` dominant → **nothing has been measured yet.** Fix
    the inputs (client-side estimate, VOD delivered rate) before drawing any
    conclusion about the floor. This is the expected reading today.
-2. `axis_not_proven` dominant → viewers mostly cross axes M6 does not prepare,
-   and `PREPARED_AXIS` — not the client release — is what limits the feature.
+2. `axis_not_proven` dominant → viewers mostly cross axis *combinations* M6
+   does not prepare, and `PREPARED_AXIS_SETS` — not the client release — is
+   what limits the feature. Read it as a statement about the **set**, not the
+   axis: since 2026-09-03 the gate is a table of combinations, so the `axis`
+   label on such a row names the hardest member of a set that has no receipt,
+   not an axis that is individually unproven.
 3. `throughput_insufficient` dominant, on `platform="web"` where the inputs
    exist → the floor itself is what would refuse, and §3.4 should not ship on
    the strength of the capability alone.
 
 The two counters agree exactly on `multiple_axes` and on `unchanged`, by the
 ranking above — a divergence there is a bug in the ranking, and there is a test
-that says so.
+that says so. They agree only for **unadmitted** sets, which is what that
+ranking is about: an admitted multi-axis set falls through to the client gate
+by design, so `{ResolutionOrBitrate, DeliveryMethod}` reads
+`client_cannot_prepare` in the decision and `prepare` in the counterfactual.
+That divergence *is* the unlocked volume, and it has its own test.
 
 **Acceptance:** on a node serving real traffic, the counterfactual's
-`resolution_or_bitrate` row is nonzero and its outcome split — `prepare`
-against `throughput_unreported` against `throughput_insufficient` against
-`axis_not_proven` — is recorded in the status page with a date and a platform
-breakdown. A grand total is not an acceptance: both counters are fed from the
+`resolution_or_bitrate` **or `delivery_method`** row is nonzero and its outcome
+split — `prepare` against `throughput_unreported` against
+`throughput_insufficient` against `axis_not_proven` — is recorded in the status
+page with a date and a platform breakdown. Read `delivery_method` first: the
+axis label is the hardest crossed member, so the admitted pair books there, and
+§3.3.3 measured that a pure `resolution_or_bitrate` transition does not occur
+on a real library at all. A grand total is not an acceptance: both counters are fed from the
 same transitions and their totals are always equal.
 
 **Met 2026-09-03**, and it changed what §3.4 is waiting for — the reading is in
@@ -530,12 +541,84 @@ native clients send no `observedDownloadBps`. So a client release must flip two
 literals, not one — and the axis rule, not the capability, is what bounds how
 often M6 can fire at all.
 
+#### 3.3.3 The measurement's verdict: the axis rule refuses everything
+
+**Read 2026-09-03**, on the build carrying the seam's file and ask gates, with
+the Apple TV on build 114. Two viewer quality changes, one HDR and one SDR:
+both `multiple_axes` — Avatar 2160 → 1080 ranked to `dynamic_range`, Dance
+Flick 1080 → 720 ranked to `delivery_method`. Neither was a resolution change,
+because the top rung direct-plays and the lower rungs transcode, so the
+delivery method moves with the height every time.
+
+The counterfactual is **identical** to the decision on both, because
+`MultipleAxes` outranks the client gate. So the capability literal was never
+what stood between M6 and firing — `PREPARED_AXIS` is, and it refuses every
+transition the fleet actually produces.
+
+M5.5 proved each axis separately on Apple: its §3 ran **same-codec, same
+grade** ("a resolution/bitrate change only") and **a codec or dynamic-range
+change**, and Apple passed both 20/20 on both devices. It never ran their
+product — the `MultipleAxes` comment says exactly that — and the product is the
+only transition that occurs.
+
+**One hardware case gated the milestone**, spec'd in
+[M6-AXIS-CASE-HANDOFF.md](M6-AXIS-CASE-HANDOFF.md): 20 consecutive commits on a
+recipe pair that moves resolution *and* delivery method together, on a
+direct-playing source. It has now run — §3.3.4.
+
+#### 3.3.4 The axis case passed, and the rule widened to a table
+
+**Ran 2026-09-03** on the Apple TV 4K (3rd generation), build 114: a 2160p
+direct-play source against a 1080p server-selected transcode, so height and
+delivery method move together. **20/20 clean commits**, zero failed admissions,
+zero predecessor stalls, zero post-commit stalls.
+
+The link mattered, and the first attempt is the reason this is worth writing
+down. It ran at 30 Mbit/s against an 18.183 Mbit/s predecessor — 1.65×, *below*
+the 2× floor `headroom_refusal` itself enforces — and failed eight of twenty.
+That was not a measurement of the transition; it was a measurement of a link
+the server would have refused to prepare on. Re-run at 40 Mbit/s (2.20×) it
+passed cleanly. **A hardware run below the server's own gate measures
+nothing**, and the handoff now says so in its link spec.
+
+The run's own controls held: fixed-boundary groups with ack jitter, 16 distinct
+runway values with 5/5 distinct inside every group, both pipelines showing
+20/20 distinct wire counts, and position error varying −8.58 to −0.44 ms rather
+than repeating.
+
+So `PREPARED_AXIS` became `PREPARED_AXIS_SETS`, a table of axis *sets* holding
+exactly the two combinations with a receipt: `{ResolutionOrBitrate}` from M5.5
+and `{ResolutionOrBitrate, DeliveryMethod}` from this run. A transition is
+admitted or refused as a whole set, because that is how it was measured. The
+axis *label* on a decision is unchanged — still the hardest member — so the
+metric stays comparable across the change.
+
+**What is still refused.** The grade axis: this run was SDR H.264 throughout,
+so `{ResolutionOrBitrate, DeliveryMethod, DynamicRange}` — what an HDR or Dolby
+Vision title's quality change actually crosses, and what Avatar 2160 → 1080
+booked in §3.3.3 — remains unmeasured and still books `multiple_axes`. Audio
+and burned subtitles were never measured in combination with anything. Add a
+row only with a receipt, and say which run.
+
+**One note for whoever compares two readings.** The `axis` label is stable
+across the 2026-09-03 widening — it was and still is the hardest crossed member
+— but the `outcome` column is not. The fleet's dominant transition,
+`{ResolutionOrBitrate, DeliveryMethod}`, moved from `multiple_axes` to
+`client_cannot_prepare` (and to `prepare` counterfactually). The counters are
+in-memory and reset per deploy, so no series spans the change; a status-page
+datapoint recorded before it is still not comparable to one recorded after, on
+that dimension.
+
 ### 3.4 Stage on `Prepare`
 
 The first behaviour change, and the first production caller — this is the slice
 that removes `allow(dead_code)` from `PreparationExecutor`.
 
-**It fired on nothing** while all three clients hardcoded
+**Unblocked 2026-09-03** by the axis case in §3.3.4. Until that run this slice
+would have staged successors for transitions M6 then refused; the admitted pair
+is the transition the fleet actually produces, so there is now something for the
+staged path to fire on. It fired on nothing while all
+three clients hardcoded
 `dual_player_preparation: false`. **Apple now declares `true`** — the measured
 answer from M5.5's 20/20 commit proof plus the accepted corrective
 instruments — and sends `observedDownloadBps`, so both inputs the throughput
@@ -547,8 +630,8 @@ counter before shipping this slice: it is the only reading that says whether
 the staged path would fire at all once the literal flips.
 
 **Acceptance:** with a test client reporting `dual_player_preparation: true` on
-a resolution change with headroom, the ledger holds a staged successor and the
-pointer still names the predecessor.
+a resolution-and-delivery-method change with headroom, the ledger holds a
+staged successor and the pointer still names the predecessor.
 
 ### 3.5 The commit trigger
 
@@ -577,7 +660,8 @@ is worth re-confirming on a realistic runway before this ships to viewers.
 - **Do not move the slot or the commit gate out of the actor.** §2.3.
 - **Do not re-derive `dual_player_preparation`.** Read the retained field.
   Three literals were written by assumption once already.
-- **Do not widen `PREPARED_AXIS` without narrowing the capability first.** Its
+- **Do not add a row to `PREPARED_AXIS_SETS` without a hardware receipt, run
+  above the throughput floor.** The table's
   own doc carries the reason: the Google TV's only hard failure was on
   same-codec, so the restriction is not a safe default for the television
   class — it is a decision with a live residual.

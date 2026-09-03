@@ -1238,6 +1238,18 @@ struct PlayerView: View {
         #endif
     }
 
+    /// The `close` control: not `back`. The touch table answers `hide` to
+    /// `back` while chrome is visible — right for a key, wrong for the one
+    /// button whose purpose is to leave. `close_control` closes whatever is
+    /// open and always ends in `exit`; `finishPlayback()` tears everything
+    /// down once, so the earlier steps only keep the reducer's bookkeeping
+    /// honest for the frame the cover is still on screen.
+    private func closePlayer() {
+        for outcome in PlayerInputRouting.closeSteps(state: inputState()) {
+            applyPlayerInputOutcome(outcome, input: .select)
+        }
+    }
+
     private func inputState() -> PlayerInputState {
         if controller.failed { return .failed }
         // Contract §2.2 orders the precedence scrub → menu → info. A pending
@@ -1452,7 +1464,7 @@ struct PlayerView: View {
                         .focused($focusedControl, equals: .retry)
                         #endif
                 }
-                Button("Close") { finishPlayback() }
+                Button("Close") { closePlayer() }
                     .buttonStyle(.bordered)
                     #if os(tvOS)
                     .focused($focusedControl, equals: .close)
@@ -1467,15 +1479,7 @@ struct PlayerView: View {
     #if os(iOS)
     private var closeButton: some View {
         Button {
-            let input = PlayerContractInput.back
-            _ = applyPlayerInputOutcome(
-                PlayerInputRouting.route(
-                    surface: .touch,
-                    state: inputState(),
-                    input: input
-                ),
-                input: input
-            )
+            closePlayer()
         } label: {
             Image(systemName: "xmark.circle.fill")
                 .font(.largeTitle)

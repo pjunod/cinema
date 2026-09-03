@@ -6,6 +6,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlayerInputPolicyTest {
@@ -30,6 +32,45 @@ class PlayerInputPolicyTest {
                     )
                 }
             }
+        }
+    }
+
+    @Test
+    fun theCloseControlLeavesThePlayerFromEveryState() {
+        // The phone's back arrow is `close`, not the BACK key: routed through
+        // `Back` it answered `Hide` in `Transport`, the state it is tapped
+        // from. Every row of `close_control` ends in `Exit`.
+        val close = fixture.getValue("close_control").jsonObject
+        assertEquals(
+            PlayerInputState.entries.map { it.contractName }.toSet(),
+            close.keys.filter { it != "notes" }.toSet(),
+        )
+        PlayerInputState.entries.forEach { state ->
+            val steps = PlayerInputPolicy.closeSteps(state)
+            assertEquals(
+                state.contractName,
+                close.getValue(state.contractName).jsonArray.map { it.jsonPrimitive.content },
+                steps.map { it.contractName },
+            )
+            assertEquals(state.contractName, PlayerInputOutcome.Exit, steps.last())
+            assertFalse("${state.contractName} hides — that is the defect", PlayerInputOutcome.Hide in steps)
+        }
+    }
+
+    @Test
+    fun theCloseArrowWalksTheCloseControlAndNeverTheBackKey() {
+        // The call site, not just the table. Gradle runs unit tests from the
+        // module directory; walk up in case a runner does not.
+        val module = generateSequence(java.io.File("").absoluteFile) { it.parentFile }
+            .first { java.io.File(it, "src/main/java/tv/plurx/app/player/PlayerScreen.kt").isFile }
+        for (screen in listOf("PlayerScreen.kt", "OfflinePlayerScreen.kt")) {
+            val source = java.io.File(module, "src/main/java/tv/plurx/app/player/$screen").readText()
+            val start = source.indexOf("onClose = {")
+            assertTrue("$screen has no onClose call site", start >= 0)
+            val body = source.substring(start, source.indexOf("onPlayPause", start))
+            assertTrue("$screen: the arrow must walk closeSteps", "PlayerInputPolicy.closeSteps(inputState())" in body)
+            assertFalse("$screen: the arrow must not be the BACK key", "PlayerContractInput.Back" in body)
+            assertFalse("$screen: the arrow must not be routed as a key", "PlayerInputPolicy.route(" in body)
         }
     }
 

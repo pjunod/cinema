@@ -310,7 +310,16 @@ pub fn router(state: AppState) -> Router {
         .route("/files/{id}/subs/{subtitle}", get(stream::subtitles_vtt))
         // Creating a stream spawns a process and supersedes its predecessor,
         // so it is a POST. The GET is a deprecated bridge over the same path.
-        .route("/files/{id}/hls/sessions", post(hls::create))
+        .route(
+            "/files/{id}/hls/sessions",
+            post(hls::create)
+                // The web client now sends its capabilities document here as
+                // well, so this route walks exactly what
+                // `/files/{id}/decision` walks and inherits the same bound for
+                // the same reason. A real create is under a kilobyte; a
+                // browser holding the full 256 learned limits is about 40 KiB.
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/files/{id}/hls/start", get(hls::start))
         .route(
             "/hls/{session}/master.m3u8",

@@ -2,7 +2,9 @@ use async_trait::async_trait;
 
 use super::SqliteStore;
 use crate::error::StoreError;
-use crate::segplan::{FragmentIndex, SegmentPlan, SourceIdentity};
+use crate::segplan::{
+    FragmentIndex, FragmentIndexOutcome, IndexRefusal, SegmentPlan, SourceIdentity,
+};
 use crate::store::{FragmentIndexStore, RenditionPlanStore};
 
 #[async_trait]
@@ -30,6 +32,34 @@ impl FragmentIndexStore for SqliteStore {
 
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
         self.with_conn(move |conn| crate::store::fragindex::forget(conn, file_id))
+            .await
+    }
+
+    async fn record_fragment_index_outcome(
+        &self,
+        file_id: i64,
+        source: &SourceIdentity,
+        refusal: IndexRefusal,
+        reason: &str,
+    ) -> Result<FragmentIndexOutcome, StoreError> {
+        let source = source.clone();
+        let reason = reason.to_owned();
+        let now_ms = unix_ms()?;
+        self.with_conn(move |conn| {
+            crate::store::fragindex::record_outcome(
+                conn, file_id, &source, refusal, &reason, now_ms,
+            )
+        })
+        .await
+    }
+
+    async fn fragment_index_outcome(
+        &self,
+        file_id: i64,
+        identity: &SourceIdentity,
+    ) -> Result<Option<FragmentIndexOutcome>, StoreError> {
+        let identity = identity.clone();
+        self.with_read(move |conn| crate::store::fragindex::outcome(conn, file_id, &identity))
             .await
     }
 

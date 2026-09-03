@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["c81189e8"]
+reason = "This commit records how M8 already-passing store contract coverage maps to its five acceptance cases and where the planned-drain dependency actually sits; it changes no runtime behavior and adds no code path to regress."
+ignore = true

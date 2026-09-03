@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c50b9dd4"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "`LearnedLimit.rate` was `i64` while the browser measures it as `+(lost / (playedSeconds / 60)).toFixed(1)` — one decimal place, fractional for most real measurements — and `serde_json` refuses a floating-point literal for an integer field, `4.0` included. The refusal is not scoped to the field: it aborts the whole `DeviceCaps`, and with it the body carrying it, so a single decode rescue recorded in a viewer's local storage made that browser's capabilities unreadable for the thirty days the entry lives. It stayed invisible because `askDecision` catches the 400 and retries as the flat query, quietly dropping to caps v1; a create has no such fallback, so the same document on `POST /files/{id}/hls/sessions` is a 422 at the `Json` extractor and a title that will not play — which is what M1 turns this from a silent downgrade into an outage. `a_learned_limit_survives_the_rate_the_browser_measures` deserializes the verbatim `capsDocument` shape, fraction and all, plus the whole-number spelling the same client code emits; reverting the field to `i64` fails it under `cargo test -p plurx-core`, which `rust-gate` runs."

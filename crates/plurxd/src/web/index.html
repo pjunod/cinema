@@ -5341,7 +5341,9 @@ function specBlock(f){
     : f.vod_index_status==="partial"
       ? `<dt>HLS capability</dt><dd><span class="mode-chip vod">VOD HLS on some devices</span><span class="mode-detail">Analysis is ready for some of this file's delivery routes but not all — a Dolby Vision device can still fall back to Live HLS until the rest is built</span></dd>`
       : f.vod_index_status==="pending"
-        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">Can be used while VOD analysis is pending when live recovery is enabled in Playback settings</span></dd>`
+        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">${f.vod_index_refusal?esc(f.vod_index_refusal)+" — it will be tried again":"Can be used while VOD analysis is pending when live recovery is enabled in Playback settings"}</span></dd>`
+      : f.vod_index_status==="refused"
+        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS only</span><span class="mode-detail">VOD analysis ${f.vod_index_refusal?esc(f.vod_index_refusal):"was refused for this file"} — waiting will not change that; Live HLS requires live recovery to be enabled in Playback settings</span></dd>`
         : f.vod_index_status==="unsupported"
           ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">This codec cannot use the VOD indexer; Live HLS requires live recovery to be enabled in Playback settings</span></dd>`:"";
   const analysis=analysisFileControl(f);
@@ -5436,7 +5438,7 @@ async function askDecision(fileId, force, sel){
   const query=`force=${force}${prePlaySelectionQuery(sel)}`;
   try{
     return await api(`/files/${fileId}/decision?${query}`,
-      {method:"POST", body:{caps:capsDocument(PLAY_CAPS, decodeLimits())}});
+      {method:"POST", body:{caps:currentCapsDocument()}});
   }catch(e){
     if(e && (e.status===404 || e.status===405 || e.status===400)){
       return api(decisionUrl(fileId, force, sel));
@@ -6533,14 +6535,16 @@ function attachHls(video, playlistUrl, startAt){
       });
       if(fallback==='transcode'){
         PLAYER.triedFallback=true;
-        clientLog(Object.assign({level:"warn",event:"stream_rejected",detail:d.type,
-          message:"hls.js could not decode the "+PLAYER.method.replace('_',' ')+" stream ("+d.details+") — re-encoding",
-          control_trigger:controlTrigger},
-          playbackContext()));
-        setLoading(true,"Stream rejected — switching to transcode…",
-          "this browser's decoder refused the copied stream ("+d.details+"); re-encoding instead");
-        startTranscodeFallback("stream-rejected",
-          "the browser refused the "+PLAYER.method.replace('_',' ')+" stream ("+d.details+") — re-encoded instead");
+        const rejection=streamRejectionFacts();
+        // `isMedia` is hls.js's own classification, and it is exactly the
+        // question the profile sentence needs: a network fatal is not the
+        // profile whatever the session was handed.
+        const note=streamRejectionNote(rejection,PLAYER.method,d.details,isMedia);
+        clientLog(streamRejectionReport(rejection,{detail:d.type,
+          message:streamRejectionMessage(rejection,PLAYER.method,d.details,isMedia),
+          control_trigger:controlTrigger}));
+        setLoading(true,"Stream rejected — switching to transcode…",note);
+        startTranscodeFallback("stream-rejected",note);
         return;
       }
       // Say what the server said. This used to be "the server couldn't build
@@ -7063,6 +7067,34 @@ async function openSession(fileId, opts){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
     {playback_id:PLAYBACK_ID,request_id:newRequestId()},contract.session);
+  // The capabilities the plan was derived from, on the request that acts on
+  // it. Without this the server has only the body's echo of its own decision
+  // to go on, and an echo cannot carry `convert_dolby_vision` — no client has
+  // ever been able to ask for a conversion, so the field is not on the wire
+  // and the session keeps the `false` it was built with unless the server
+  // derives it blind. Every create goes through here, so the remux open, the
+  // transcode fallback, seeks and audio switches all send it from one place.
+  // It is also the last build on the fleet holding
+  // `plan_derivation.legacy_trusted` off zero.
+  const caps=currentCapsDocument();
+  if(capsDocumentIsUsable(caps)){
+    body.caps=caps;
+    // The other half of the same question. `/decision` is asked with the
+    // quality menu's force on the query string; a create that hands the server
+    // the document but not the force is re-derived under `Force::Auto`, which
+    // is a DIFFERENT question — and for the two cases where Auto and Original
+    // disagree it answers worse. On `Quality → Original` for a 4K title above
+    // this browser's HEVC ceiling, Auto derives a transcode and therefore
+    // `preserve_dolby_vision = false`, so the viewer who asked for the
+    // untouched original gets the Dolby Vision stripped and the server logs a
+    // `plan_mismatch` against its own player. The same happens wherever a
+    // learned decode limit applies, which Original exists to bypass.
+    //
+    // Sent only alongside the caps because `overrides` is read only by
+    // `review_client_plan`, which only runs when the document is usable.
+    const force=(typeof qualityForce==="function")?qualityForce():"auto";
+    if(force && force!=="auto") body.overrides=Object.assign({force},body.overrides||{});
+  }
   // HLS sessions carry native WebVTT renditions whenever this server says a
   // track can become one. Publishing the group up front lets a later subtitle
   // selection and a readiness-directed re-fetch stay inside the current video
@@ -7415,12 +7447,136 @@ function capsDocument(c, limits){
     // rebuilt with it inlined — the obvious `Object.values()` would send a
     // document whose every limit is anonymous, and an anonymous limit matches
     // nothing on the server. See `decodeLimits()`.
-    learned_limits:Object.entries(limits||{}).map(([identity, l])=>({
-      identity, label:String(l.label||""),
-      lost:Number(l.lost)||0, secs:Number(l.secs)||0, rate:Number(l.rate)||0,
-      at_ms:Number(l.at)||0,
-    })),
+    // Bounded on both axes, because since M1 this document also rides the
+    // create — which every seek and every audio switch sends. The server
+    // keeps at most `MAX_LEARNED_LIMITS` (256) and clips each label to 160,
+    // so anything past that is bytes on the wire that no reader will ever
+    // see. Newest first, so a browser at the cap sends the limits that still
+    // describe what it can play.
+    learned_limits:Object.entries(limits||{})
+      .sort((a,b)=>(Number(b[1].at)||0)-(Number(a[1].at)||0))
+      .slice(0,256)
+      .map(([identity, l])=>({
+        identity, label:String(l.label||"").slice(0,160),
+        lost:Number(l.lost)||0, secs:Number(l.secs)||0, rate:Number(l.rate)||0,
+        at_ms:Number(l.at)||0,
+      })),
   };
+}
+// The one document, for the two requests that send it.
+//
+// `/decision` and the create that acts on its answer have to be asked the
+// same question. When they are not, the create has nothing to re-derive from
+// and falls back to trusting the body's echo of the decision — and the echo
+// cannot carry `convert_dolby_vision`, because no client has ever been able to
+// ask for a conversion. The server derives that field for an echo-only create
+// (`legacy_trusted_review`), but it is deriving it for a build that enumerated
+// nothing; sending the document is what turns that guess back into an answer,
+// and it is the only thing keeping `plan_derivation.legacy_trusted` off zero
+// on this fleet. A shared helper rather than two call sites because the two
+// documents drifting apart is the failure, not either one being wrong.
+//
+function currentCapsDocument(){
+  return capsDocument(PLAY_CAPS, decodeLimits());
+}
+// What this browser was handed, and what it had said it could take.
+//
+// A stream rejection used to be reported as "browser refused the remux
+// stream", which names the wrong party and drops the only two facts that
+// separate a decoder that genuinely cannot keep up from a server that sent a
+// profile this client never claimed. `PLAYER.deliveredDvProfile` is the
+// server's own answer for what the session's bytes carry — it arrives on the
+// create response — and `PLAY_CAPS.dvprofile` is the CSV this browser
+// declared to `/decision`. When the first is not in the second, the browser
+// did exactly what its capabilities document said it would.
+//
+// `caps_mismatch` is derived here for the viewer's sentence only. The server
+// recomputes it from the two fields rather than believing this one, because a
+// client asserting its own correctness is not evidence.
+function streamRejectionFacts(){
+  const p=(typeof PLAYER!=="undefined"&&PLAYER)||{};
+  const declared=String((typeof PLAY_CAPS!=="undefined"&&PLAY_CAPS&&PLAY_CAPS.dvprofile)||"");
+  const delivered=Number(p.deliveredDvProfile)>0?Number(p.deliveredDvProfile):null;
+  // Compared as numbers, because the server does: it parses each element as an
+  // integer, so a client comparing `"08"` as a string would send an accusatory
+  // message on a line the server marks as agreeing.
+  const claimed=declared.split(",").map(s=>parseInt(s,10)).filter(n=>Number.isFinite(n));
+  return {
+    delivered_range:p.deliveredRange||null,
+    delivered_dv_profile:delivered,
+    declared_dv_profiles:declared||null,
+    caps_mismatch:!!(delivered&&claimed.length&&claimed.indexOf(delivered)===-1),
+  };
+}
+// Whether the profile can plausibly be what broke this playback.
+//
+// `streamRejectionFacts()` reports a standing property of the SESSION, not a
+// property of this error. A dropped link on a Dolby Vision session is still a
+// mismatch and is still worth recording — but it is not what failed, and a
+// report that says it is sends an operator after a capabilities bug that did
+// not happen. Only a decoder-class failure can be the profile: on the
+// `<video>` path that is `MEDIA_ERR_DECODE` (3) and `MEDIA_ERR_SRC_NOT_SUPPORTED`
+// (4), and nothing else — the element path classifies *every* error as a media
+// failure for the fallback decision, deliberately, which is a wider test than
+// this one needs.
+function rejectionBlamesTheProfile(facts, causeIsDecode){
+  return !!(facts.caps_mismatch && causeIsDecode);
+}
+// One sentence for the operator's log, from both rejection paths. `cause` is
+// whatever that path knows: the media element's error code and its name, or
+// hls.js's `details`.
+function streamRejectionMessage(facts, method, cause, causeIsDecode){
+  const m=String(method||"").replace('_',' ').trim()||"copied";
+  if(rejectionBlamesTheProfile(facts, causeIsDecode)){
+    return "the server handed this browser a Dolby Vision Profile "
+      +facts.delivered_dv_profile+" stream it did not declare (declared: "
+      +facts.declared_dv_profiles+"; "+cause+") — re-encoding";
+  }
+  return "this browser could not decode the server's "+m+" stream ("+cause+") — re-encoding";
+}
+// The same finding, in the sentence the VIEWER reads.
+//
+// Separate from the log line because they are read by different people for
+// different reasons, and identical in the one respect that matters: neither
+// may say "the browser refused" when the browser did exactly what its own
+// capabilities document promised. That wording is the whole complaint this
+// milestone exists to answer, and leaving it in the two strings on screen
+// while fixing the one nobody sees would have been the wrong half.
+function streamRejectionNote(facts, method, cause, causeIsDecode){
+  const m=String(method||"").replace('_',' ').trim()||"copied";
+  if(rejectionBlamesTheProfile(facts, causeIsDecode)){
+    return "the server sent a Dolby Vision Profile "+facts.delivered_dv_profile
+      +" stream this browser never claimed ("+cause+") — re-encoding instead";
+  }
+  return "this browser could not decode the "+m+" stream the server sent ("
+    +cause+") — re-encoding instead";
+}
+// One `stream_rejected` report, built the same way on both paths.
+//
+// Spelling the fields out at each call site is what left the only test of them
+// a source grep: there was nothing to call. `base` is what that path alone
+// knows — its own `code`/`src`/`detail` and the control trigger; the join and
+// the Dolby Vision facts are added here, for both.
+//
+// `playbackContext()` is applied last on purpose. Its keys are disjoint from
+// everything above, so nothing is overwritten — but `session` is the field the
+// server needs to tie this report to the session it superseded, and a merge
+// order that could drop it is the defect this whole report exists to fix.
+function streamRejectionReport(facts, base){
+  return Object.assign({level:"warn",event:"stream_rejected"}, base||{}, {
+    delivered_range:facts.delivered_range,
+    delivered_dv_profile:facts.delivered_dv_profile,
+    declared_dv_profiles:facts.declared_dv_profiles,
+  }, playbackContext());
+}
+// Whether a create should send it. An EMPTY document is worse than none at
+// all: the server counts one as `unusable_caps` and returns no review, which
+// is the pre-#842 hole with extra steps. `/decision` has no such arm — it has
+// nothing to fall back to and answers on whatever it was given — so only the
+// create asks this.
+function capsDocumentIsUsable(doc){
+  return !!doc && ((doc.video||[]).length>0 || (doc.audio||[]).length>0
+    || (doc.containers||[]).length>0);
 }
 // Re-probe through MediaCapabilities and rebuild the wire string. Async because
 // decodingInfo is, and the server only ever hears one answer per session — so
@@ -9515,12 +9671,23 @@ function wirePlayer(){
     });
     if(fallback==='transcode'){
       PLAYER.triedFallback=true;
-      clientLog({level:"warn",event:"stream_rejected",code,src,
-        message:"browser refused the "+PLAYER.method.replace('_',' ')+" stream — re-encoding",
-        control_trigger:controlTrigger});
-      setLoading(true,"Stream rejected — switching to transcode…","the browser refused the "+PLAYER.method.replace('_',' ')+" stream (code "+code+"); re-encoding instead");
-      startTranscodeFallback("stream-rejected",
-        "the browser refused the "+PLAYER.method.replace('_',' ')+" stream ("+(names[code]||("error "+code))+(msg?": "+msg:"")+") — re-encoded instead");
+      const rejection=streamRejectionFacts();
+      // This path calls EVERY element error a media failure for the fallback
+      // decision, deliberately — but an abort or a dropped link is not the
+      // Dolby Vision profile, and a report that says it is sends someone after
+      // a capabilities bug that did not happen. Only the two decoder codes can
+      // be the profile.
+      const causeIsDecode=(code===3||code===4);
+      const cause="code "+code+": "+(names[code]||("error "+code));
+      const note=streamRejectionNote(rejection,PLAYER.method,cause+(msg?": "+msg:""),causeIsDecode);
+      // The join rides in `streamRejectionReport`. Without `session` the server
+      // cannot tie this report to the session it superseded, and this path had
+      // never sent one.
+      clientLog(streamRejectionReport(rejection,{code,src,
+        message:streamRejectionMessage(rejection,PLAYER.method,cause,causeIsDecode),
+        control_trigger:controlTrigger}));
+      setLoading(true,"Stream rejected — switching to transcode…",note);
+      startTranscodeFallback("stream-rejected",note);
       return;
     }
     clientLog({level:"error",event:"playback_failed",code,src,
