@@ -940,6 +940,8 @@ mean building the harder half of a mechanism whose local half does not exist.
 
 ### §10.3's third bullet is built: a lost owner says where to reopen
 
+**[#880](https://github.com/pjunod/plurx/pull/880).**
+
 Before it, hard owner loss had no answer of its own. A route whose owner
 stopped renewing classifies as `OwnerTransition`, and every **media**-plane
 path turned that into a 503 `media_owner_transition` — "retry shortly" — with
