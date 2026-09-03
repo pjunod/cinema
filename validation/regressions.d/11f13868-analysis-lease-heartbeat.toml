@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["11f13868"]
+points = ["cluster.auth", "server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "Four unit tests drive the shared lease loop with renewal closures on a paused runtime clock: the immediate first tick renews nothing, two store errors inside one lease do not abandon the claim, a renewal that never succeeds self-fences exactly when the lease it held runs out and not a tick earlier, and retirement is not reported as a loss. A fifth asserts the lease metric family renders every event, including the ones still at zero. Restoring the old shape — an unconsumed first tick, or Err treated as a lost lease — fails the first two immediately; removing the deadline arm fails the third; moving retirement back after the outcome write reintroduces the false loss the fourth pins."
