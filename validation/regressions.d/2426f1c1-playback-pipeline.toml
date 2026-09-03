@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2426f1c1"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The previous gate read correctly and matched the empty set, so the evidence has to prove the new key fires on the shape a quality change actually takes and only on that shape: one unit walks a playback through its first session, that session's later exchanges, a second session for the same playback, the second session's later exchanges and a third session, asserting only a session change answers, that it answers what the replaced session was delivering along with its grade, that one change is counted once rather than for the life of the session, that a change back is its own transition against the intermediate height rather than the original, and that a playback this node has never served answers nothing; a second unit fills the table past its cap and asserts the map and the eviction queue stay the same bounded length and that the oldest playback rather than the newest is dropped, since an unbounded table on a long-lived node is a leak and evicting the newest would discard exactly the measurement in progress."
