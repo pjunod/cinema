@@ -35,7 +35,7 @@ one is deleted.
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [execution](M5.5-SPIKE-EXECUTION-HANDOFF.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike **ran 2026-09-01 on all three platforms** and is complete: web and Android `false`, **Apple `true`** after a corrective instrument pass — see §"M5.5 ran, and two thirds of it settled" |
 | 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) · [caller](M6-CALLER-HANDOFF.md) | **building — the server decides, and nothing yet acts on the decision.** Slot [#792](https://github.com/pjunod/plurx/pull/792) · executor [#793](https://github.com/pjunod/plurx/pull/793) · its outcomes pinned [#796](https://github.com/pjunod/plurx/pull/796) · the decision [#798](https://github.com/pjunod/plurx/pull/798) · where the caller goes [#800](https://github.com/pjunod/plurx/pull/800)/[#802](https://github.com/pjunod/plurx/pull/802) · the shadow metric [#822](https://github.com/pjunod/plurx/pull/822) and its counterfactual. `control_local_inner` calls `decide_preparation` on every replacement and in-session selection change, but **only to record a counter** — no code path commits a prepared successor. See §"M6 is building, and what it does not yet reach" |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it". R-M1 closes the unknown-readiness contract and carries the dated [large-MKV observation](M7-M1-LARGE-MKV-OBSERVATION.md); it merged as [#775](https://github.com/pjunod/plurx/pull/775). R-M2 merged as [#789](https://github.com/pjunod/plurx/pull/789) and R-M3, one live subtitle window per playback, merged as [#830](https://github.com/pjunod/plurx/pull/830); the remainder is complete in source. Physical directed-retry evidence for R-M2 is the only piece left, and it needs a device rather than code. **M4 (burn-join) merged as [#794](https://github.com/pjunod/plurx/pull/794)**, not part of this remediation; detection is separately deferred |
-| 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | not started |
+| 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | **partly proven at the store, one bullet built end to end.** Four of five acceptance cases are covered by the store contract and `shared_cache.rs` suites — *at the store*, not end to end — and planned drain (§10.2) is not built at all: it sits on top of M6 §3.4 and is blocked behind the same hardware run. §10.3's no-snapshot fallback is built: a lost owner answers with where to reopen instead of an unbounded retry. See §"M8 is not independent of M6" |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
 
 ### M7 R-M1 acceptance needs code and an observed cache transition
@@ -997,7 +997,102 @@ mean building the harder half of a mechanism whose local half does not exist.
   film-addressed); for rolling, refuse to splice an unrelated producer into an
   EVENT URL and return a successor at an aligned boundary through the current
   control exchange; with no control snapshot, fall back to persisted watch
-  position and fetched frontier and require a normal reopen.
+  position and fetched frontier and require a normal reopen. **The third of
+  those three is built** — see the section below; the first two are not, and
+  are blocked behind the same cross-node ownership M6 §3.4 needs.
+
+
+### §10.3's third bullet is built: a lost owner says where to reopen
+
+**[#880](https://github.com/pjunod/plurx/pull/880).**
+
+Before it, hard owner loss had no answer of its own. A route whose owner
+stopped renewing classifies as `OwnerTransition`, and every **media**-plane
+path turned that into a 503 `media_owner_transition` — "retry shortly" — with
+no bound on how long "shortly" is and nothing in the body. The viewer holds a
+spinner that may never resolve, and if they give up, neither they nor their
+client knows where in the film they were.
+
+**The obvious fix is wrong, and the first draft of this shipped it.** Answer
+"retry" for a grace period after the lease expires, then declare the owner
+lost — with the grace derived from the takeover cadence. Two independent
+adversarial reviews took it apart, and both landed on the same thing: no
+deadline can be correct here.
+
+- `takeover_loop` is gated on `remote_rollout_ready`, which requires every
+  voter reachable with a fresh snapshot. **The moment a node dies, the gate
+  that would replace its sessions shuts**, and stays shut until that node is
+  removed from membership or comes back. A rebooting node's routes are adopted
+  by a survivor minutes later — long past any plausible grace, and after the
+  deadline would have told the viewer their session was over.
+- The scan is paged: `TAKEOVER_BATCH` routes per `TAKEOVER_INTERVAL` tick,
+  behind a settlement semaphore of the same size. A node dying with more live
+  sessions than one page outlives any fixed bound by construction, and the
+  tail of the scan is exactly the set that would be told "gone" while its
+  takeover was still in flight.
+
+So the classification is on the durable recipe instead. `classify_owner_loss`
+applies the takeover path's own row-readable refusals — the `Presentation::Live`
+check in `takeover_recipe_matches_route`, `attempt_takeover`'s
+`typeless_playlist` gate, and the epoch/sequence space — and asks not *has it
+been long enough* but *could this route ever have a successor at all*. That
+verdict is permanent, needs no clock, and covers the common case rather than an
+exotic one: **VOD and EVENT sessions are refused by design** (§4 forbids
+expanding the compatibility path to them), and a session created while
+`cluster.session_takeover_enabled` was off recorded `typeless_playlist: false`
+and is refused too. The source-revision check is deliberately left out — it
+needs a Store read, and every fact this function may be wrong about has to fall
+toward "a successor may still arrive".
+
+Both answers now carry where to reopen, because the thing a viewer loses when
+an owner dies is not only the stream:
+
+| verdict | answer | `reopen_required` |
+|---|---|---|
+| the recipe is takeover-eligible | 503 `media_owner_transition`, unchanged status | `false` — a successor may still arrive, and how long to wait is the client's call |
+| the recipe can never be taken over | **410 `media_owner_lost`** | `true` |
+
+Three things are deliberate:
+
+- **The position is the one a successor would restart from**, not the fetched
+  frontier. `fetched_through_ms` advances to the *end* of a segment the moment
+  the client asks for it, so handing it back unadjusted tells a viewer to
+  reopen past media they never saw — up to a whole copy segment of it.
+  `resume_overlap_ms` is now shared with `takeover_resume`, so the position
+  offered to a client and the position a successor resumes at cannot drift.
+- **`continuous: false` is a field on both answers**, not prose, and it is true
+  of the retry path too: a recovered session is renumbered across an
+  `#EXT-X-DISCONTINUITY`. §10.3 says do not guess transparency.
+- **410, not another 503, for the terminal half.** A client that understands no
+  code still reads "gone" and stops waiting. The web player is taught the code
+  in the same change — a dead owner reaches someone who was already watching,
+  so neither "Still preparing this stream…" nor "Playback failed to start." is
+  true of it.
+
+**What this does not touch.** The playback-control plane has its own owner
+transition answer — `ControlStateError::OwnerTransition` → **425
+`owner_transition`** with a retry hint — and all three clients act on it as
+retryable. That path is unchanged here and still retries without bound against
+a dead owner. It is the same defect on the other plane and wants the same
+treatment; doing both in one change would put two mechanisms in
+`playback_control.rs` at once, which §7 of the roadmap says to sequence rather
+than parallelise.
+
+**And the compatibility path's non-expansion is now driven rather than
+asserted.** §4 requires that typeless-sliding takeover not be expanded to VOD
+or EVENT sessions. The VOD half was already covered by
+`remote_start_contract_rejects_unfenced_or_noncanonical_inputs`; the EVENT half
+was not, because it lives in `attempt_takeover` rather than in a validator.
+`attempt_takeover_refuses_an_event_session` now drives that function against a
+real fixture and requires the EVENT gate to fire before any later refusal.
+
+**Not built by this, and still §10.3:** the VOD *redirect to an equivalent
+successor*, and the rolling *successor at an aligned boundary returned through
+the control exchange*. Both need one node to take ownership of another node's
+session, which is the mechanism M6 §3.4 is blocked on. What is built is the
+honest answer for when neither is possible — the case the milestone actually
+leaves a viewer stuck in.
+
 **Correction, same day.** This section first said shared-store loss had no
 coverage. It does — the search was run against the *store contract* suite,
 where the term does not appear, and the mechanism lives in `shared_cache.rs`
@@ -1014,6 +1109,7 @@ resurrect the immutable VOD handle or redirect to an equivalent successor;
 for rolling, refuse to splice an unrelated producer into an EVENT URL and
 return a successor at an aligned boundary; with no control snapshot, fall back
 to persisted watch position and fetched frontier and require a normal reopen.
+The last of those is now built; the first two are not.
 
 That does not depend on the axis case.
 

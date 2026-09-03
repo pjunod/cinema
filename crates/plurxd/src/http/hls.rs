@@ -3365,7 +3365,9 @@ async fn relay_if_remote(
                 DurableRouteResolution::Absent => return Err(ApiError::NotFound("hls session")),
                 DurableRouteResolution::ActiveLocal(_) => return Ok(None),
                 DurableRouteResolution::ActiveRemote(route) => route,
-                DurableRouteResolution::OwnerTransition(_) => return Err(media_owner_transition()),
+                DurableRouteResolution::OwnerTransition(lost) => {
+                    return Err(owner_transition_answer(&lost))
+                }
                 DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
             }
         }
@@ -3406,7 +3408,9 @@ async fn relay_if_remote(
             }
             DurableRouteResolution::Absent => return Err(ApiError::NotFound("hls session")),
             DurableRouteResolution::ActiveLocal(_) => return Ok(None),
-            DurableRouteResolution::OwnerTransition(_) => return Err(media_owner_transition()),
+            DurableRouteResolution::OwnerTransition(lost) => {
+                return Err(owner_transition_answer(&lost))
+            }
             DurableRouteResolution::Terminal(_) if peer_status == StatusCode::GONE => {
                 return Ok(Some(response));
             }
@@ -5471,7 +5475,9 @@ async fn status_local_before_with_relay(
     let mut route = match resolution {
         DurableRouteResolution::Absent => return Err(ApiError::NotFound("hls session")),
         DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
-        DurableRouteResolution::OwnerTransition(_) => return Err(media_owner_transition()),
+        DurableRouteResolution::OwnerTransition(lost) => {
+            return Err(owner_transition_answer(&lost))
+        }
         DurableRouteResolution::ActiveRemote(_) if !relay_new_owner => {
             return Err(ApiError::Conflict(
                 "media owner changed during status lookup".to_owned(),
@@ -5522,8 +5528,14 @@ async fn status_local_before_with_relay(
                     return Err(ApiError::NotFound("hls session"));
                 }
                 DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
-                DurableRouteResolution::OwnerTransition(_)
-                | DurableRouteResolution::ActiveLocal(_) => {
+                DurableRouteResolution::OwnerTransition(lost) => {
+                    return Err(owner_transition_answer(&lost));
+                }
+                // Reached from inside the outer `ActiveLocal` branch after
+                // `same_route_authority` failed: this node was already the
+                // owner and its incarnation or epoch moved under the read.
+                // That is a genuine transition and stays retryable.
+                DurableRouteResolution::ActiveLocal(_) => {
                     return Err(media_owner_transition());
                 }
             }
@@ -5568,9 +5580,12 @@ async fn status_local_before_with_relay(
                 return Ok(response);
             }
             DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
-            DurableRouteResolution::OwnerTransition(_) | DurableRouteResolution::ActiveLocal(_) => {
-                return Err(media_owner_transition())
+            DurableRouteResolution::OwnerTransition(lost) => {
+                return Err(owner_transition_answer(&lost))
             }
+            // Reached from `ActiveRemote`: this node took ownership between
+            // the relay and its reclassification. Also a genuine transition.
+            DurableRouteResolution::ActiveLocal(_) => return Err(media_owner_transition()),
             DurableRouteResolution::ActiveRemote(next_route) if attempt == 0 => {
                 drop(response);
                 route = next_route;
@@ -5846,7 +5861,7 @@ async fn response_publication_rejection_before(
             "media_session_ended",
             "this media session is no longer active",
         ),
-        Ok(DurableRouteResolution::OwnerTransition(_)) => media_owner_transition(),
+        Ok(DurableRouteResolution::OwnerTransition(lost)) => owner_transition_answer(&lost),
         Ok(DurableRouteResolution::ActiveLocal(_))
         | Ok(DurableRouteResolution::ActiveRemote(_)) => response_publication_rejection(rejection),
         Err(_) => ApiError::typed(
@@ -6172,6 +6187,7 @@ async fn session_file(
                         return Err(ApiError::NotFound("transcode session"));
                     }
                     VodResurrection::Ended => return Err(media_session_ended()),
+                    VodResurrection::OwnerLost(resume) => return Err(media_owner_lost(resume)),
                     VodResurrection::Unavailable => {
                         return Err(vod_resurrection_unavailable());
                     }
@@ -6588,6 +6604,7 @@ async fn video_playlist_local_before(
                 match vod_resurrected_before(state, session, playlist_deadline).await {
                     VodResurrection::Absent => return Err(playlist_error(session, err.error)),
                     VodResurrection::Ended => return Err(media_session_ended()),
+                    VodResurrection::OwnerLost(resume) => return Err(media_owner_lost(resume)),
                     VodResurrection::Unavailable => return Err(vod_resurrection_unavailable()),
                     VodResurrection::Resurrected => {}
                 }
@@ -6734,6 +6751,7 @@ async fn subtitle_playlist_local_before(
                     match vod_resurrected_before(state, session, playlist_deadline).await {
                         VodResurrection::Absent => {}
                         VodResurrection::Ended => return Err(media_session_ended()),
+                        VodResurrection::OwnerLost(resume) => return Err(media_owner_lost(resume)),
                         VodResurrection::Unavailable => return Err(vod_resurrection_unavailable()),
                         VodResurrection::Resurrected => {
                             let answer = tokio::time::timeout_at(
@@ -8378,6 +8396,11 @@ enum VodResurrection {
     Ended,
     Resurrected,
     Unavailable,
+    /// The durable route's owner is gone and no successor took it over
+    /// (plan §10.3). A VOD handle is immutable and film-addressed, so a
+    /// reopen on any node serves the same film from the same place — but it
+    /// is a reopen, and the client is told so rather than left retrying.
+    OwnerLost(crate::media_sessions::OwnerLossResume),
 }
 
 fn vod_resurrection_unavailable() -> ApiError {
@@ -8402,6 +8425,68 @@ fn media_owner_transition() -> ApiError {
         "media_owner_transition",
         "the media owner is changing; retry shortly",
     )
+}
+
+/// The answer for a route classified as an owner transition (plan §10.3).
+///
+/// Both answers carry where a reopen should land, because the thing a viewer
+/// loses when an owner dies is not only the stream but the knowledge of where
+/// they were. Which of the two it is turns on the route's own recipe rather
+/// than on a clock — see `classify_owner_loss` for why a deadline cannot be
+/// made correct here.
+fn owner_transition_answer(route: &MediaSessionRoute) -> ApiError {
+    match crate::media_sessions::classify_owner_loss(route) {
+        crate::media_sessions::OwnerLoss::Transitioning(resume) => {
+            media_owner_transition_with(resume)
+        }
+        crate::media_sessions::OwnerLoss::Unrecoverable(resume) => media_owner_lost(resume),
+    }
+}
+
+/// A successor may still arrive, so this stays the retryable 503 it has always
+/// been — but it now says where to reopen if the client stops waiting, and
+/// that recovery will not be seamless. A recovered session is renumbered
+/// across a `#EXT-X-DISCONTINUITY`, so `continuous: false` is true of the
+/// retry path too, not only of the terminal one.
+fn media_owner_transition_with(resume: crate::media_sessions::OwnerLossResume) -> ApiError {
+    ApiError::typed_detail(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "media_owner_transition",
+        "the media owner is changing; retry shortly, or reopen playback from the position \
+         in this response",
+        owner_loss_detail(resume, false),
+    )
+}
+
+/// The route can never be taken over, so no successor is coming and waiting
+/// cannot change that.
+///
+/// 410 rather than another 503 on purpose: a client that understands no code
+/// at all still reads "gone" and stops waiting, which is the correct
+/// degradation for a session no node will serve again. `continuous: false` and
+/// `reopen_required: true` are the machine-readable form of §10.3's "do not
+/// guess transparency" — the seam is admitted in the body rather than papered
+/// over by a status that invites the client to wait it out.
+fn media_owner_lost(resume: crate::media_sessions::OwnerLossResume) -> ApiError {
+    ApiError::typed_detail(
+        StatusCode::GONE,
+        "media_owner_lost",
+        "the node serving this media session is gone and this session cannot be taken over; \
+         reopen playback from the position in this response",
+        owner_loss_detail(resume, true),
+    )
+}
+
+fn owner_loss_detail(
+    resume: crate::media_sessions::OwnerLossResume,
+    reopen_required: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "film_position_ms": resume.film_position_ms,
+        "film_frontier_ms": resume.film_frontier_ms,
+        "reopen_required": reopen_required,
+        "continuous": false,
+    })
 }
 
 /// Try to resurrect a reaped VOD session from its durable route (plan §2.5)
@@ -8437,7 +8522,14 @@ async fn vod_resurrected_before(
     {
         Ok(DurableRouteResolution::Absent) => return VodResurrection::Absent,
         Ok(DurableRouteResolution::Terminal(_)) => return VodResurrection::Ended,
-        Ok(DurableRouteResolution::OwnerTransition(_)) => return VodResurrection::Unavailable,
+        Ok(DurableRouteResolution::OwnerTransition(lost)) => {
+            return match crate::media_sessions::classify_owner_loss(&lost) {
+                crate::media_sessions::OwnerLoss::Transitioning(_) => VodResurrection::Unavailable,
+                crate::media_sessions::OwnerLoss::Unrecoverable(resume) => {
+                    VodResurrection::OwnerLost(resume)
+                }
+            }
+        }
         Ok(DurableRouteResolution::ActiveRemote(_)) => return VodResurrection::Unavailable,
         Ok(DurableRouteResolution::ActiveLocal(route)) => route,
         Err(_) => return VodResurrection::Unavailable,
@@ -9097,6 +9189,7 @@ async fn segment_local_before(
                 match vod_resurrected_before(state, session, request_deadline).await {
                     VodResurrection::Absent => {}
                     VodResurrection::Ended => return Err(media_session_ended()),
+                    VodResurrection::OwnerLost(resume) => return Err(media_owner_lost(resume)),
                     VodResurrection::Unavailable => return Err(vod_resurrection_unavailable()),
                     VodResurrection::Resurrected => {
                         let answer = vod_segment_before(state, session, seg, request_deadline)
@@ -10407,11 +10500,14 @@ mod tests {
         else {
             panic!("expired active route is not local status absence")
         };
+        // The recipe here is `{}`, which no successor can act on, so the
+        // expired owner is loss rather than a transition. DELETE below must
+        // tombstone it either way.
         assert!(matches!(
             transition,
-            ApiError::Typed {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                code: "media_owner_transition",
+            ApiError::TypedDetail {
+                status: StatusCode::GONE,
+                code: "media_owner_lost",
                 ..
             }
         ));
@@ -13009,6 +13105,195 @@ mod tests {
             Some(successor_touch),
             "stale subtitle bytes cannot renew the same-id successor"
         );
+    }
+
+    /// A route whose durable recipe the takeover path accepts. The fixture is
+    /// `media_sessions`' own, so "eligible" cannot mean two things.
+    fn eligible_owner_loss_route() -> MediaSessionRoute {
+        let mut route = crate::media_sessions::takeover_eligible_route(
+            "00000000-0000-4000-8000-0000000000e2",
+            "00000000-0000-4000-8000-0000000000e1",
+        );
+        route.owner_node_id = "node-gone".to_owned();
+        route.owner_epoch = 3;
+        route.lease_expires_at_ms = NOW_MS;
+        route.updated_at_ms = NOW_MS;
+        route.media_origin_ms = 90_000;
+        route.fetched_through_ms = 60_000;
+        route.produced_playable_through_ms = 120_000;
+        route
+    }
+
+    /// The same route with a recipe nothing will ever take over.
+    fn untakeoverable_owner_loss_route() -> MediaSessionRoute {
+        let mut route = eligible_owner_loss_route();
+        route.recipe_json = route
+            .recipe_json
+            .replace("\"typeless_playlist\":true", "\"typeless_playlist\":false");
+        assert!(
+            route.recipe_json.contains("\"typeless_playlist\":false"),
+            "the EVENT fixture must actually clear the flag"
+        );
+        route
+    }
+
+    async fn error_body(error: ApiError) -> (StatusCode, serde_json::Value) {
+        let response = error.into_response();
+        let http_status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect error body")
+            .to_bytes();
+        (
+            http_status,
+            serde_json::from_slice(&bytes).expect("typed errors are JSON objects"),
+        )
+    }
+
+    /// A route a successor can still take over keeps the retryable 503 it has
+    /// always had — but it now says where to reopen if the client stops
+    /// waiting, and that recovery carries a discontinuity either way.
+    #[tokio::test]
+    async fn an_eligible_route_stays_retryable_and_still_says_where_to_reopen() {
+        let route = eligible_owner_loss_route();
+        let (status, body) = error_body(owner_transition_answer(&route)).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "media_owner_transition");
+        assert_eq!(
+            body["reopen_required"], false,
+            "a client that is willing to wait should keep waiting"
+        );
+        assert_eq!(body["continuous"], false);
+        assert!(body["film_position_ms"].is_i64());
+    }
+
+    /// Hard owner loss the takeover path can never answer (plan §10.3). The
+    /// client is told the session is gone rather than to wait for an event
+    /// that cannot happen, and is handed where to reopen.
+    #[tokio::test]
+    async fn an_untakeoverable_route_answers_gone_with_the_resume_and_no_continuity_claim() {
+        // The EVENT case: nothing will ever replace this session.
+        let route = untakeoverable_owner_loss_route();
+        let (status, body) = error_body(owner_transition_answer(&route)).await;
+
+        assert_eq!(
+            status,
+            StatusCode::GONE,
+            "a session no node will serve again is gone, not temporarily unavailable"
+        );
+        assert_eq!(body["code"], "media_owner_lost");
+        assert_eq!(body["reopen_required"], true);
+        assert_eq!(
+            body["continuous"], false,
+            "§10.3 forbids guessing transparency, and the client reads the field, not the prose"
+        );
+        // 60 s fetched, pulled back by one transcode segment plus the
+        // overlap margin, on a session whose origin is 90 s into the film.
+        let overlap_ms = i64::from(plurx_core::transcode::SEGMENT_SECONDS) * 1_000 + 2_000;
+        assert_eq!(body["film_position_ms"], 90_000 + 60_000 - overlap_ms);
+        assert_eq!(body["film_frontier_ms"], 90_000 + 120_000);
+    }
+
+    /// The wiring, not the helper. Every public media path that answers an
+    /// owner transition must go through the classifier — a call site left on
+    /// the old unconditional 503 would make this fail while every unit test
+    /// on the helper still passed.
+    #[tokio::test]
+    async fn a_public_status_read_of_an_untakeoverable_route_answers_gone() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "owner-loss-unrelated").await;
+        let user = fixture
+            .store
+            .create_user("owner-loss", "hash", false)
+            .await
+            .expect("owner-loss user");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                incarnation_id: incarnation_id.clone(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "owner-loss".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: "former-owner".to_owned(),
+                // Active, but outside its owner lease: routing calls this a
+                // transition, and the recipe decides which kind.
+                lease_expires_at_ms: 2,
+                // An EVENT session — refused by `attempt_takeover` forever.
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: 1,
+            },
+        )
+        .await;
+
+        let Err(answer) = status_local_before_with_relay(
+            &fixture.state,
+            &session_id,
+            Instant::now() + Duration::from_secs(1),
+            false,
+        )
+        .await
+        else {
+            panic!("an expired active route is not local status absence")
+        };
+        assert!(
+            matches!(
+                answer,
+                ApiError::TypedDetail {
+                    status: StatusCode::GONE,
+                    code: "media_owner_lost",
+                    ..
+                }
+            ),
+            "the public status path must classify rather than always answer 503"
+        );
+    }
+
+    /// The EVENT half of §4's non-expansion rule, driven through the function
+    /// that owns it rather than through the flag it reads.
+    #[tokio::test]
+    async fn attempt_takeover_refuses_an_event_session() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "event-refusal-unrelated").await;
+        let mut route = untakeoverable_owner_loss_route();
+        route.owner_node_id = "some-other-node".to_owned();
+
+        let refusal = crate::media_sessions::attempt_takeover_for_test(&fixture.state, route)
+            .await
+            .expect_err("an EVENT session is never taken over");
+        assert!(
+            refusal.contains("EVENT playlist"),
+            "the EVENT gate must fire before any later refusal: {refusal}"
+        );
+    }
+
+    /// The detail object is data. A route that somehow carried a `code` field
+    /// must not be able to rename the error a client dispatches on.
+    #[tokio::test]
+    async fn typed_detail_cannot_shadow_the_code_a_client_dispatches_on() {
+        let error = ApiError::typed_detail(
+            StatusCode::GONE,
+            "media_owner_lost",
+            "message",
+            serde_json::json!({ "code": "not_found", "message": "spoofed", "extra": 1 }),
+        );
+        let (status, body) = error_body(error).await;
+
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(body["code"], "media_owner_lost");
+        assert_eq!(body["message"], "message");
+        assert_eq!(body["extra"], 1);
     }
 
     #[test]

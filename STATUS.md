@@ -193,10 +193,59 @@ counters cannot be re-tested from the outside: they only move when someone
 plays something. The live store is hiqlite; `/var/lib/plurx/plurx.db` was
 last written 2026-08-26 and reading it would answer a stale question.
 
-**Not verified on hardware.** Nothing here has been played from a browser
-against the fleet. `docs/M5-VERIFICATION-PROMPT.md` is the hand-off, and it
-is gated on ops: raft membership, then the analysis queue draining, then
-file 70's converting identity being built.
+**Not verified on hardware.** The fleet serves this code now (below), but
+nothing here has been played from a browser against it.
+`docs/M5-VERIFICATION-PROMPT.md` is the hand-off, and it is gated on ops:
+raft membership, then the analysis queue draining, then file 70's converting
+identity being built.
+
+**Merged to `main` 2026-09-03 as `206ab3c3`**, all six milestones, with the
+`Main promotion gate` green across every one of its 21 jobs. Two late
+corrections landed with it: the caps accusation is scoped to a delivery that
+actually failed and reads exactly the declared set it prints (#870), and a
+tripwire in the fast Rust gate now fails on the commit that appends the next
+schema migration (#872) — v45 broke three "wind a current database backwards"
+fixtures at once, in three files none of which the appending change touched,
+and the worst of them took twenty minutes of `cluster-store-check` to surface.
+
+**Deployed to the four servers 2026-09-03, `v0.3.0-568-gd4c67ff4`** — nynuc,
+m6, nuc4, nuc3, all healthy, all answering `/readyz`. The first attempt did
+not get there: a `deploy.yml` run from an agent session
+restarted nynuc and was then killed mid-task by that session's own command
+timeout, leaving the node out of the cluster for forty minutes while the
+other three were never touched. What that node did while it was out is worth
+recording, because the obvious reading of it was wrong. It looked like a
+catch-up budget too small for the backlog — `install_snapshot_timeout_secs`
+(120) plus the 45s Hiqlite start timeout, so 165s — with each expiry shutting
+Raft down and the node losing ground every cycle: applied 6660079, then
+6661534, then 6661534 again while the quorum watermark climbed 6662973 →
+6665155. Raising that budget to 1800s changed nothing. Under it the process
+sat for twenty minutes with its Raft port listening, its threads parked, and
+not one byte written to `hiqlite/`; the leader logged
+`AppendEntries … Unreachable … deadline has elapsed` against it the whole
+time. **`docker compose up -d` — recreating the container rather than
+restarting the process — caught it up in under a second**, and the node has
+been healthy since. The wedge was in that container, not in the budget, and
+the raised timeout was removed before the deploy.
+
+**The deploy itself avoids the hole it fell into.** `tasks/app.yml` stops the
+stack for the pre-deploy database snapshot and only then runs `make
+docker-up`, so a cold Rust build happens with the voter down — which is
+exactly how a node ends up thousands of entries behind. Each node here was
+brought up with the same steps in the same order, with one addition: a
+`docker compose build` *before* the stop, so the `--build` inside `docker-up`
+is a cache hit. Build time stayed outside the outage and each node was absent
+for about twelve seconds — healthy in 5s, `/readyz` 200 in 5s, no restart
+during the attempt, no `unreplicated SQLite` or failed migration in the
+attempt's logs. `main` moved twice during the rollout (`35a4773b`, then
+`d4c67ff4`), so the first three nodes were run a second time; the whole fleet
+is on one commit rather than three.
+
+**That pre-warm belongs in `app.yml`.** It is the difference between a routine
+deploy and the forty-minute recovery above, and it is four lines. Ansible
+could not run from this session — the linked machine had no
+`ansible-playbook` and 3MB of free disk — so the per-node steps were executed
+directly over ssh instead; that is a deviation to close, not a new pattern.
 
 ## The ✕ on an iPhone could not leave a film
 

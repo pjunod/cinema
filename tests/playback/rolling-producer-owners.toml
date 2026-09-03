@@ -548,7 +548,11 @@ expected_occurrences = 8
 [[module_symbols]]
 id = "m4-durable-route-resolution"
 pattern = "DurableRouteResolution"
-expected_occurrences = 80
+# 80 -> 81 with M8 §10.3's hard-owner-loss answer: one added match arm in the
+# HTTP callers, where the two previously fused `OwnerTransition | ActiveLocal`
+# arms were split so only the transition is classified. No new resolution and
+# no new producer — the same enum, decided in one more place.
+expected_occurrences = 81
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
@@ -682,7 +686,11 @@ pattern = "publication_ready_at_ms"
 # admission returned, so the fence it asks for is proved against the durable
 # pointer rather than against the constant in the code. It sets the sentinel
 # like every other first commit and moves no shipped fence.
-expected_occurrences = 72
+# 72 -> 73 with M8 §10.3: one test-only activation for the public status read
+# that proves an untakeoverable route answers `media_owner_lost` through the
+# handler rather than through the classifier alone. It sets the fence to zero
+# like any ordinary first activation and moves no shipped fence.
+expected_occurrences = 73
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1249,7 +1257,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1 for M0's `write_real_hevc_video`: the `.status()` on the fixture encoder
 # inventoried under `process-command-construction` above. Same child, counted
 # once in each sentinel.
-expected_occurrences = 211
+# +1 with M8 §10.3's owner-loss answers: one `Response::status()` read in the
+# `error_body` test helper that renders a typed `ApiError` and returns its
+# status and JSON body together, so the wire answer is asserted as a whole
+# rather than by matching the enum. In-process, launches nothing, owns nothing.
+expected_occurrences = 212
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

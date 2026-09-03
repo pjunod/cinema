@@ -2567,6 +2567,57 @@ test("a still-starting stream is never reported as a permanent failure", () => {
   }
 });
 
+// A dead owner reaches a viewer who was already watching, so neither of the
+// startup sentences is true of it. The server's own message addresses a client
+// that will one day reopen at the position it carries; the overlay addresses
+// the person, and must not promise a recovery the player cannot yet perform.
+test("a lost owner is reported as a stopped stream, not a startup failure", () => {
+  const failure = policy.parseStreamFailure({
+    status: 410,
+    body: JSON.stringify({
+      code: "media_owner_lost",
+      message:
+        "the node serving this media session is gone and this session cannot be taken over; reopen playback from the position in this response",
+      film_position_ms: 146_000,
+      film_frontier_ms: 210_000,
+      reopen_required: true,
+      continuous: false,
+    }),
+  });
+  assert.equal(failure.code, "media_owner_lost");
+
+  const overlay = policy.streamFailureOverlay(failure);
+  assert.equal(overlay.retryable, false, "no successor is coming, so retrying is not the advice");
+  assert.equal(overlay.title, "This stream stopped.");
+  assert.ok(
+    !overlay.title.toLowerCase().includes("start"),
+    `a mid-film loss is not a startup failure: "${overlay.title}"`,
+  );
+  assert.ok(
+    !overlay.detail.includes("in this response"),
+    "the machine-addressed sentence is not shown to a person",
+  );
+});
+
+// The retryable half of the same answer keeps the sentence it had. A successor
+// may still arrive, so the viewer is told to wait, not to start over.
+test("an owner transition that may still recover still reads as still preparing", () => {
+  const failure = policy.parseStreamFailure({
+    status: 503,
+    body: JSON.stringify({
+      code: "media_owner_transition",
+      message:
+        "the media owner is changing; retry shortly, or reopen playback from the position in this response",
+      film_position_ms: 146_000,
+      reopen_required: false,
+      continuous: false,
+    }),
+  });
+  const overlay = policy.streamFailureOverlay(failure);
+  assert.equal(overlay.retryable, true);
+  assert.equal(overlay.title, "Still preparing this stream…");
+});
+
 // A guess is worse than the generic sentence: it explains the wrong failure
 // with complete confidence. Anything unreadable falls back rather than invents.
 test("an illegible refusal explains nothing rather than guessing", () => {
