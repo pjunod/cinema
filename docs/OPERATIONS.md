@@ -3732,6 +3732,40 @@ re-arms after the verdict has been clean for several consecutive samples — a
 queue that flaps between `degraded` and `healthy` logs on the hour, not on every
 sample.
 
+### Putting a failed queue back to work
+
+When the verdict turns green again after an outage, the work that failed during
+it is still terminal. Nothing reopens it on its own: a `failed` row is a durable
+statement that the queue tried and stopped, and the queue is right not to
+re-litigate it. Retrying four figures of rows one at a time through **Settings →
+Content analysis** is not a repair anybody performs, so there is a bulk action:
+
+```
+POST /api/v1/analysis/reopen
+{"dry_run": true, "limit": 50}
+```
+
+**An empty body is a dry run.** It reports what it would do and changes nothing;
+`dry_run: false` is the only thing that requeues. `limit` is a count of
+**distinct source files**, not of requests, so a file with a failed index and a
+failed marker pass counts once and both are reopened together — the number in
+the confirmation is the number of files you are choosing to re-run. The ceiling
+is 500 files per call; a larger backlog is several calls, which is deliberate:
+read the verdict between them rather than putting the whole backlog back onto a
+queue that may still be broken.
+
+The response says what it skipped and why. `skipped_active` counts rows that
+were still working — reopening those would revoke a fence a live worker is
+holding, so they are left alone. `skipped_source_changed` counts rows whose file
+has changed underneath them; those cannot be retried into the same identity at
+all and are discovery's job, not this one's. `scan_truncated` means the call
+filled its own read ceiling, so the answer describes a page of the backlog
+rather than all of it — run it again.
+
+**Settings → Content analysis → Attention** exposes the same thing as *Reopen
+everything failed…*, which previews first and then asks. *Retry this page* beside
+it is the bounded version: it walks only the rows currently painted.
+
 ## Hardware transcode & recent Intel GPUs
 
 The Docker image defaults to **jellyfin-ffmpeg**, which bundles a current Intel

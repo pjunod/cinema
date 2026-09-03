@@ -234,6 +234,7 @@ pub fn router(state: AppState) -> Router {
             get(analysis::job).delete(analysis::cancel_job),
         )
         .route("/analysis/jobs/{id}/retry", post(analysis::retry_job))
+        .route("/analysis/reopen", post(analysis::reopen))
         .route("/hubs", get(browse::hubs))
         .route("/home/previews", get(browse::home_previews))
         .route("/search", get(browse::search))
@@ -9158,6 +9159,64 @@ mod tests {
         assert_ne!(
             retried["request_id"], requested["request_id"],
             "an explicit retry is a successor generation, not a mutation of its tombstone"
+        );
+
+        // Bulk reopen. The dangerous reading of an empty body is the one
+        // nobody asked for, so an empty body previews.
+        assert_eq!(
+            call(&app, post("/api/v1/analysis/reopen", None, json!({})))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, preview) = call(
+            &app,
+            post("/api/v1/analysis/reopen", Some(&admin), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(
+            preview["dry_run"], true,
+            "an empty reopen body must not requeue anything"
+        );
+        // The one live request above is `queued`, so it is left alone and
+        // said so rather than silently omitted.
+        assert_eq!(preview["reopened"], 0, "{preview}");
+        assert_eq!(preview["files"], 0, "{preview}");
+        for bad in [json!({"limit": 0}), json!({"limit": 501})] {
+            assert_eq!(
+                call(&app, post("/api/v1/analysis/reopen", Some(&admin), bad))
+                    .await
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    "/api/v1/analysis/reopen",
+                    Some(&admin),
+                    json!({"component": "not_a_component"})
+                )
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        // An unknown field is a caller who thinks they asked for something.
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    "/api/v1/analysis/reopen",
+                    Some(&admin),
+                    json!({"dry_run": false, "force": true})
+                )
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
         );
         // Manual semantic boundaries are a separate, revision-fenced admin
         // action. A rebuild cannot implicitly opt into discarding one.

@@ -732,6 +732,183 @@ pub async fn retry_job(
     Ok(Json(request_value(&state, retried, now_ms).await?))
 }
 
+/// What a caller may ask `reopen` to do, and what it defaults to when they
+/// ask for nothing.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisReopenParams {
+    /// Report what would be reopened and change nothing. Defaults to `true`:
+    /// the destructive reading of an empty body is the one an operator did
+    /// not ask for, and a bulk reopen after an outage can put four figures of
+    /// work back on the queue.
+    dry_run: Option<bool>,
+    /// Ceiling on **distinct source files** touched, not requests. A file
+    /// with a failed fragment index and a failed marker pass is one file an
+    /// operator is choosing to re-run, and a limit that counted requests
+    /// would silently do twice what it said.
+    limit: Option<i64>,
+    /// Restrict to one component (`fragment_index`, `skip_markers`, …).
+    component: Option<String>,
+}
+
+/// The largest bulk reopen one call will perform.
+///
+/// A cap rather than a page: the queue this feeds is the one that just came
+/// back from an outage, and a caller who wants five thousand files re-run can
+/// say so five thousand at a time and watch the verdict between calls.
+const ANALYSIS_REOPEN_MAX_FILES: i64 = 500;
+/// How many terminal rows one call will read looking for those files. Bounded
+/// because the history table keeps a long tombstone tail.
+const ANALYSIS_REOPEN_SCAN_LIMIT: i64 = 2_000;
+
+/// POST /api/v1/analysis/reopen — put terminal analysis work back on the
+/// queue in bulk.
+///
+/// The single-job retry already existed and is the right tool for one bad
+/// file. It is the wrong tool for the shape this milestone came from: a queue
+/// that failed every job it claimed for three days, leaving four figures of
+/// rows in `failed` that are terminal only because the queue was broken, not
+/// because the sources were. Reopening those one at a time through the UI is
+/// not a repair anybody performs.
+///
+/// It refuses nothing and skips loudly. A row that is still working is not
+/// reopened and is counted in `skipped_active`, because reopening live work
+/// would revoke a fence a worker is holding. A row whose source has changed
+/// under it cannot be retried into the same identity at all, so it is counted
+/// in `skipped_source_changed` and left for discovery to re-enqueue as a new
+/// generation.
+pub async fn reopen(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Json(params): Json<AnalysisReopenParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let dry_run = params.dry_run.unwrap_or(true);
+    let limit = params.limit.unwrap_or(50);
+    if limit < 1 || limit > ANALYSIS_REOPEN_MAX_FILES {
+        return Err(ApiError::BadRequest(format!(
+            "analysis reopen limit must be between 1 and {ANALYSIS_REOPEN_MAX_FILES} files"
+        )));
+    }
+    if let Some(component) = params.component.as_deref() {
+        if !plurx_core::store::ANALYSIS_METRIC_COMPONENTS.contains(&component) {
+            return Err(ApiError::BadRequest(
+                "invalid analysis component".to_owned(),
+            ));
+        }
+    }
+    let now_ms = crate::state::clock_ms();
+    // `Attention` is the durable set an operator would be looking at when
+    // they reach for this: failed and canceled work, and nothing that is
+    // still moving.
+    let page = state
+        .store
+        .analysis_history(&plurx_core::store::AnalysisHistoryQuery {
+            limit: ANALYSIS_REOPEN_SCAN_LIMIT,
+            cursor: None,
+            filter: plurx_core::store::AnalysisHistoryFilter::Attention,
+            search: String::new(),
+            states: Vec::new(),
+            now_ms,
+        })
+        .await?;
+
+    let mut files: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    let mut reopened: Vec<serde_json::Value> = Vec::new();
+    let mut skipped_active = 0_u64;
+    let mut skipped_source_changed = 0_u64;
+    let mut considered = 0_u64;
+
+    for row in page.rows {
+        if params
+            .component
+            .as_deref()
+            .is_some_and(|component| component != row.component)
+        {
+            continue;
+        }
+        considered += 1;
+        // The limit counts files, so a second component on a file already
+        // inside the limit still gets reopened — that is the point of
+        // counting files rather than requests.
+        if !files.contains(&row.file_id) && i64::try_from(files.len()).unwrap_or(i64::MAX) >= limit
+        {
+            continue;
+        }
+        let durable = durable_state(
+            &row.state,
+            row.not_before_ms,
+            if row.job_error_code.is_empty() {
+                &row.request_error_code
+            } else {
+                &row.job_error_code
+            },
+            now_ms,
+        );
+        if !matches!(durable.as_str(), "failed" | "canceled" | "stale") {
+            skipped_active += 1;
+            continue;
+        }
+        files.insert(row.file_id);
+        if dry_run {
+            reopened.push(serde_json::json!({
+                "request_id": row.request_id,
+                "file_id": row.file_id.to_string(),
+                "title": row.title,
+                "component": row.component,
+                "state": durable,
+                "error_code": row.job_error_code,
+            }));
+            continue;
+        }
+        let successor_id = uuid::Uuid::new_v4().to_string();
+        let Some(retried) = state
+            .store
+            .retry_analysis_request_admin(&row.request_id, &successor_id, now_ms)
+            .await?
+        else {
+            // The source moved under the request. Its identity is no longer
+            // reachable, so this is discovery's job and not ours.
+            skipped_source_changed += 1;
+            files.remove(&row.file_id);
+            continue;
+        };
+        reopened.push(serde_json::json!({
+            "request_id": row.request_id,
+            "successor_id": retried.request_id,
+            "file_id": row.file_id.to_string(),
+            "title": row.title,
+            "component": row.component,
+            "state": durable,
+            "error_code": row.job_error_code,
+        }));
+    }
+
+    if !dry_run && !reopened.is_empty() {
+        kick_analysis_queue(&state);
+        tracing::info!(
+            reopened = reopened.len(),
+            files = files.len(),
+            skipped_active,
+            skipped_source_changed,
+            "analysis work reopened in bulk"
+        );
+    }
+    Ok(Json(serde_json::json!({
+        "dry_run": dry_run,
+        "limit": limit,
+        "scan_limit": ANALYSIS_REOPEN_SCAN_LIMIT,
+        // True when the scan filled its own ceiling, so a caller knows the
+        // answer is a page of the problem rather than all of it.
+        "scan_truncated": considered >= u64::try_from(ANALYSIS_REOPEN_SCAN_LIMIT).unwrap_or(u64::MAX),
+        "considered": considered,
+        "files": files.len(),
+        "reopened": reopened.len(),
+        "skipped_active": skipped_active,
+        "skipped_source_changed": skipped_source_changed,
+        "rows": reopened,
+    })))
+}
+
 /// DELETE /api/v1/analysis/jobs/{job} — durable cooperative cancellation.
 pub async fn cancel_job(
     _admin: AdminUser,

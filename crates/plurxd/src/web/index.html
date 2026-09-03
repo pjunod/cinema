@@ -11382,6 +11382,31 @@ async function retryFailedAnalysis(){
   toast(`${queued} of ${rows.length} ${queued===1?'item':'items'} queued`);
   await renderAnalysis(PAGE_RENDER_GENERATION,true);
 }
+// Bulk reopen, in two steps, because the destructive step is the second one.
+//
+// "Retry this page" walks the rows already painted and is bounded by what the
+// operator can see. This is the tool for the other case: an outage left four
+// figures of rows terminal for a reason that has since been fixed, and none of
+// them are on this page. The server defaults to a dry run for the same reason
+// this asks twice — the count comes back before anything moves.
+async function reopenFailedAnalysis(btn){
+  const label=btn&&btn.textContent;
+  if(btn){btn.disabled=true;btn.textContent="Checking…";}
+  try{
+    const preview=await api("/analysis/reopen",{method:"POST",body:{dry_run:true,limit:500}});
+    const files=preview.files||0, rows=preview.reopened||0;
+    if(!files){ toast("Nothing terminal to reopen"); return; }
+    const scope=preview.scan_truncated?` (the first ${preview.scan_limit} rows examined)`:"";
+    const skipped=preview.skipped_active?` ${preview.skipped_active} still working ${preview.skipped_active===1?'row is':'rows are'} left alone.`:"";
+    if(!confirm(`Reopen ${rows} analysis ${rows===1?'item':'items'} across ${files} ${files===1?'file':'files'}${scope}?${skipped}`)) return;
+    if(btn) btn.textContent="Reopening…";
+    const done=await api("/analysis/reopen",{method:"POST",body:{dry_run:false,limit:500}});
+    const changed=done.skipped_source_changed||0;
+    toast(`${done.reopened||0} reopened${changed?`, ${changed} skipped: source changed`:""}`);
+    await renderAnalysis(PAGE_RENDER_GENERATION,true);
+  }catch(error){ toast(error.message||"Couldn’t reopen analysis"); }
+  finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }
+}
 async function actOnAnalysisRow(key,btn){
   const row=ANALYSIS_ROW_LOOKUP.get(key); if(!row) return;
   const action=analysisAction(row); if(!action||action==="none") return;
@@ -11462,7 +11487,7 @@ function paintAnalysis(snapshot){
     <div class="analysis-sub">Summary metrics include all active work and up to ${counts.terminal_window||8192} recent terminal worker results. The selected filter count below is exact across retained history.</div>
     <div class="analysis-controls"><div class="analysis-search"><input id="analysis-search" data-analysis-focus="search" aria-label="Search analysis work" placeholder="Search title, file, node id, or error…" value="${esc(ANALYSIS_VIEW.query)}" oninput="setAnalysisQuery(this.value)"></div>
       <div class="analysis-filters">${filterButton("all","All")}${filterButton("working","Working")}${filterButton("attention","Attention")}${filterButton("expected","Expected")}${filterButton("ready","Ready")}</div>
-      ${ANALYSIS_VIEW.filter==="attention"&&pageRows.some(analysisCanRetry)?`<button class="ghost sm" data-analysis-focus="retry-page" onclick="retryFailedAnalysis()">Retry this page</button>`:`<span></span>`}</div>
+      ${ANALYSIS_VIEW.filter==="attention"&&pageRows.some(analysisCanRetry)?`<button class="ghost sm" data-analysis-focus="retry-page" onclick="retryFailedAnalysis()">Retry this page</button><button class="ghost sm" data-analysis-focus="reopen-all" onclick="reopenFailedAnalysis(this)">Reopen everything failed…</button>`:`<span></span>`}</div>
     ${rows?`<div class="analysis-table-wrap"><table class="analysis-table"><thead><tr><th scope="col">File</th><th scope="col">Analysis</th><th scope="col">Node / updated</th><th scope="col">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
       :`<div class="empty">${ANALYSIS_VIEW.query||ANALYSIS_VIEW.filter!=="all"?"No analysis work matches these filters.":"Nothing has been queued yet. Use Analyze now on a video’s detail page."}</div>`}
     <div class="analysis-pages"><span>Showing ${shownFrom}–${shownTo} of ${filteredTotal}</span><div class="row"><label>Rows <select data-analysis-focus="page-size" onchange="setAnalysisPageSize(this.value)">${[10,25,50,100].map(size=>`<option value="${size}"${ANALYSIS_VIEW.pageSize===size?' selected':''}>${size}</option>`).join("")}</select></label><button class="ghost sm" data-analysis-focus="previous" ${ANALYSIS_VIEW.page<=1?'disabled':''} onclick="setAnalysisPage(${ANALYSIS_VIEW.page-1})">Previous</button><span>Page ${ANALYSIS_VIEW.page} of ${pages}</span><button class="ghost sm" data-analysis-focus="next" ${!snapshot.next_cursor?'disabled':''} onclick="setAnalysisPage(${ANALYSIS_VIEW.page+1})">Next</button></div></div>`;
