@@ -1306,4 +1306,54 @@ mod tests {
 
         let _store = SqliteStore::open(&path).expect("retry repaired v44 migration");
     }
+
+    /// The downgrade fixture above has to undo every migration *after* the
+    /// guard, and there is exactly one of those today.
+    ///
+    /// The fixture is built by opening at the current version — the committed
+    /// claim it needs can only be written through the store's own API — and
+    /// then winding `user_version` back to 43. Everything the later migrations
+    /// created is still standing at that point, so each one has to be dropped
+    /// by hand or the reopen replays its `CREATE` against a database that
+    /// already has it.
+    ///
+    /// `DROP TABLE IF EXISTS` makes the fixture idempotent, not complete: it
+    /// keeps the *existing* drop harmless, and says nothing about the next
+    /// table. That is precisely how this broke — v45 was appended, the fixture
+    /// was not extended, and the failure landed on a guard test in a file the
+    /// change never touched.
+    ///
+    /// So the count is asserted rather than the drops derived. Deriving them
+    /// would mean working out which objects a migration created and how to
+    /// undo them, which is a down-migration this store deliberately does not
+    /// have. This fails on the commit that appends the migration, and names
+    /// what to do about it there.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
+        const GUARD_SCHEMA_VERSION: i64 = 44;
+        const DROPPED_BY_THE_FIXTURE: [&str; 1] = ["fragment_index_outcomes"];
+
+        assert!(
+            crate::store::sqlite::MIGRATIONS[GUARD_SCHEMA_VERSION as usize - 1]
+                .contains("CREATE TABLE dv_recovery_guards"),
+            "v{GUARD_SCHEMA_VERSION} is no longer the Dolby Vision recovery              guard migration, so the fixtures above are describing the wrong              version — they pin schema 43 because 44 is the guard"
+        );
+        assert_eq!(
+            crate::store::SQLITE_SCHEMA_VERSION - GUARD_SCHEMA_VERSION,
+            DROPPED_BY_THE_FIXTURE.len() as i64,
+            "a migration was appended above the Dolby Vision recovery guard. TWO fixtures wind a current database backwards by hand and must each drop whatever the new migration created, or the reopen replays it against a database that already has it: `sqlite_v43_guard_migration_refuses_an_unrecoverable_committed_claim` here, which winds back to v43, and `populated_v14_import_fixture` in `tests/store_contract.rs`, which winds back to v14 and is only exercised by the 20-minute `cluster-store-check` lane. This assertion is in the fast gate so both are named before that lane runs. Add the drops, then add the table to `DROPPED_BY_THE_FIXTURE`."
+        );
+
+        for table in DROPPED_BY_THE_FIXTURE {
+            assert!(
+                crate::store::sqlite::MIGRATIONS[GUARD_SCHEMA_VERSION as usize..]
+                    .iter()
+                    .any(|migration| migration.contains(table)),
+                "{table} is listed as dropped by the fixture, but no migration \
+                 after v{GUARD_SCHEMA_VERSION} creates it — the list and the \
+                 fixture have drifted apart"
+            );
+        }
+    }
 }
