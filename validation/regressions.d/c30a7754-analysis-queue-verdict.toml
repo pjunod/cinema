@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c30a7754"]
+points = ["core.media", "cluster.auth", "server.api", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "web-static"]
+reason = "Six unit tests drive the verdict rule directly, including a replay of the fleet numbers that produced it (412 claims, 398 lost leases, 0 ready in 24 h classifies dead) and the two cases most likely to become false alarms: nothing claimed and nothing built is idle rather than dead, and one sample with a row past its lease is healthy while two consecutive samples are degraded. A web test asserts each of the four verdicts renders a distinct sentence and that a node which has not sampled yet renders nothing at all rather than idle, so a verdict cannot ship without wording. The store metrics cache test pins that the health block and the verdict travel with the sample. prometheus_scrape_has_no_store_operation still passes, which is what keeps the sampling in the metrics loop rather than the scrape. Removing the idle case makes an unindexed fleet alarm every night; removing the two-sample requirement makes an ordinary sweep gap alarm; removing the per-process baseline makes a queue that built nothing for three days read as healthy off cumulative counters, which is the failure this milestone exists to end."
