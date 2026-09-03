@@ -21,31 +21,36 @@ a shut gate is the answer, not an obstacle.
 
 ## 1. Check you are testing the build you think you are
 
-As of 2026-09-03 19:17 UTC all four nodes carry the merged effort:
+The check is not "does the fleet match a version written down here" — it
+cannot be, because `main` moves and a version in a document is stale the day
+after it is typed. It is **do the four nodes agree with each other and each
+with its own checkout**, and is the build they agree on an ancestor of the
+change you are testing.
 
-| node  | running binary          | deploy checkout         |
-|-------|-------------------------|-------------------------|
-| nynuc | `v0.3.0-568-gd4c67ff4`  | `v0.3.0-568-gd4c67ff4`  |
-| m6    | `v0.3.0-568-gd4c67ff4`  | `v0.3.0-568-gd4c67ff4`  |
-| nuc4  | `v0.3.0-568-gd4c67ff4`  | `v0.3.0-568-gd4c67ff4`  |
-| nuc3  | `v0.3.0-568-gd4c67ff4`  | `v0.3.0-568-gd4c67ff4`  |
-
-Check it again before you start — `main` moves, and this table is a record
-of one moment, not a promise:
+The last two readings, both taken while writing this: 19:17 UTC all four on
+`v0.3.0-568-gd4c67ff4`, 21:55 UTC all four on `v0.3.0-575-gaa486f4b`. Two
+and a half hours, one whole generation. Read it yourself:
 
 ```bash
 for h in nynuc m6 nuc4 nuc3; do
   printf '%-7s ' "$h"
-  ssh pjunod@$h 'docker logs plurxd 2>&1 | grep -m1 "plurxd starting"' \
-    | sed -E 's/.*build="([^"]+)".*/\1/'
+  ssh pjunod@$h 'docker logs plurxd 2>&1 | grep -m1 "plurxd starting";
+                 echo "checkout=$(cd /opt/noirr/plurx && git describe --tags --always)"' \
+    | sed -E 's/\x1b\[[0-9;]*m//g; s/.*build="([^"]+)".*/\1/' | paste -sd' '
 done
 ```
 
-`docker exec plurxd plurxd --version` reads the same stamp and is fine too;
-the log line is used here because it survives a container that is up but not
-yet serving. If the node you are about to test runs a binary older than its
-checkout, or older than the others, have it redeployed first and say so in
-the report. A Safari play against a stale node proves nothing about #869.
+The escape-stripping `sed` is not decoration. `plurxd` logs through
+`tracing`'s formatting layer with ANSI on, so the line reads
+`…build<ESC>[0m<ESC>[2m=<ESC>[0m"v0.3.0-…"`, and a pattern expecting a
+literal `build="` matches nothing and dumps the whole raw line instead.
+
+`docker exec plurxd plurxd --version` reads the same stamp; the log line is
+used here because it survives a container that has exited or is restart
+looping, which is exactly the state worth catching. If the node you are about
+to test runs a binary older than its own checkout, or older than the others,
+have it redeployed first and say so in the report. A Safari play against a
+stale node proves nothing about #869.
 
 The clients are a separate hand-off: `docs/CLIENT-DEPLOY-PROMPT.md`. Nothing
 in this document needs them.
