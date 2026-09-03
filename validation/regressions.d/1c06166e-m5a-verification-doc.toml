@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["1c06166e"]
+reason = "This commit corrects a verification protocol against what running it actually found: placeholder commands in its section 2, three undocumented prerequisites (renditions are node-local, the conversion needs a fragment index, and the conversion itself was disabled until c6892bf5), and a claim that Apple TV triggers the conversion when it was observed asking for HDR10. It touches docs/M5A-VERIFICATION-ON-NUC4.md, docs/STATUS.html and a new operator script under scripts/, and changes no runtime behavior — the correction it records is the one already mapped by c6892bf5-dv-convert-legacy-caps.toml."
+ignore = true
