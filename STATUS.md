@@ -33,7 +33,7 @@ a redeploy before a TV shows the difference.
 ## The player input contract, reviewed and finished
 
 **Lane [`effort/player-input-contract`](https://github.com/pjunod/plurx/pull/814),
-open into main, 2026-09-02.** M1–M4 (web #795, Android #797, Apple #799,
+merged into main, 2026-09-02.** M1–M4 (web #795, Android #797, Apple #799,
 fence and settings fold #810) landed first. Each was then reviewed
 adversarially against the fixtures rather than against its own description,
 which found 29 defects the suites could not see — five of them blockers —
@@ -103,8 +103,8 @@ and iPhone are all unclaimed.
 
 ## M7 M4 burn-join and current-main corrections
 
-**PR [#794](https://github.com/pjunod/plurx/pull/794) — FINAL CI-PREREQUISITE
-FIX UNDER REVIEW.** M7 M4 shipped through the effort train and its first
+**PR [#794](https://github.com/pjunod/plurx/pull/794) — merged `a664dfa5`,
+2026-09-02.** M7 M4 shipped through the effort train and its first
 post-merge repair, then current-`main` CI exposed an ambiguous-success timeout
 while confirming a replacement media session. The exact sentinel-guarded
 confirmation now uses the bounded idempotent-write path; a zero-row replay is
@@ -252,8 +252,8 @@ extraction is observed dying rather than assumed to. Not deployed.
 
 ## Apple pacing-hold freeze — the hold that vetoed its own recovery
 
-**PR [#803](https://github.com/pjunod/plurx/pull/803) — OPEN, awaiting Paul's
-merge (`fd23da27` on `agent/apple-pacing-hold-freeze`, 2026-09-02).** A stalled
+**PR [#803](https://github.com/pjunod/plurx/pull/803) — merged `d9998f6c`,
+2026-09-02.** A stalled
 Apple client with an empty buffer and fetchable media asked the server what to
 do, was told `hold { reason: "time" }`, showed *"The server is pacing this
 stream."*, and returned without reopening its player item. In explicit lease
