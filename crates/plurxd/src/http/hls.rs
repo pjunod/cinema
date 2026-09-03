@@ -8435,7 +8435,7 @@ fn media_owner_transition() -> ApiError {
 /// than on a clock — see `classify_owner_loss` for why a deadline cannot be
 /// made correct here.
 fn owner_transition_answer(route: &MediaSessionRoute) -> ApiError {
-    match crate::media_sessions::classify_owner_loss(route) {
+    match crate::media_sessions::classify_owner_loss(route, unix_ms()) {
         crate::media_sessions::OwnerLoss::Transitioning(resume) => {
             media_owner_transition_with(resume)
         }
@@ -8523,7 +8523,7 @@ async fn vod_resurrected_before(
         Ok(DurableRouteResolution::Absent) => return VodResurrection::Absent,
         Ok(DurableRouteResolution::Terminal(_)) => return VodResurrection::Ended,
         Ok(DurableRouteResolution::OwnerTransition(lost)) => {
-            return match crate::media_sessions::classify_owner_loss(&lost) {
+            return match crate::media_sessions::classify_owner_loss(&lost, unix_ms()) {
                 crate::media_sessions::OwnerLoss::Transitioning(_) => VodResurrection::Unavailable,
                 crate::media_sessions::OwnerLoss::Unrecoverable(resume) => {
                     VodResurrection::OwnerLost(resume)

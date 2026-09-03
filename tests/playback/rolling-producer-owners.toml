@@ -552,7 +552,10 @@ pattern = "DurableRouteResolution"
 # HTTP callers, where the two previously fused `OwnerTransition | ActiveLocal`
 # arms were split so only the transition is classified. No new resolution and
 # no new producer — the same enum, decided in one more place.
-expected_occurrences = 81
+# 81 -> 82 with the live-lease correction: the restored guard test drives
+# `classify_durable_route` itself, so the publication fence is proved to be
+# the classification under test rather than assumed to be. Test-only.
+expected_occurrences = 82
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
@@ -690,7 +693,10 @@ pattern = "publication_ready_at_ms"
 # that proves an untakeoverable route answers `media_owner_lost` through the
 # handler rather than through the classifier alone. It sets the fence to zero
 # like any ordinary first activation and moves no shipped fence.
-expected_occurrences = 73
+# 73 -> 74 with the live-lease correction: one test-only route stamped with a
+# publication fence to prove a renewing successor is never read as owner loss.
+# It sets the field on a fixture and moves no shipped fence.
+expected_occurrences = 74
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -699,7 +705,10 @@ pattern = "MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS"
 # predecessor, so its confirmation must name a publication instant a full
 # safety window out — zero is only valid for a first activation. Test-only,
 # and it uses the constant rather than restating it so the test moves with it.
-expected_occurrences = 4
+# 4 -> 5 with the live-lease correction: the restored guard test builds its
+# publication fence from the window constant rather than a literal, so the
+# fixture cannot drift away from the window it is meant to represent.
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "m4-durable-publication-blocked-sentinel"
