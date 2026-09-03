@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["48d94991"]
+reason = "This commit records what shadow mode measured on the fleet and marks §3.4 blocked on the hardware case the reading exposes; it changes no runtime behavior and adds no code path to regress."
+ignore = true

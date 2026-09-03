@@ -64,6 +64,20 @@ enum PlayerInputRouting {
         }
     }
 
+    /// `close_control` in the fixture: the ✕ is a button, not the `back` key.
+    /// Routed through `back`, it hid the chrome in `transport`, closed the
+    /// panel in `info`, cancelled in `scrub`, and exited in no state a viewer
+    /// could tap it from — so a film could only be left by force-quitting the
+    /// app. Every row closes what is open and then ends in `exit`.
+    static func closeSteps(state: PlayerInputState) -> [PlayerInputOutcome] {
+        switch state {
+        case .hidden, .transport, .timeline, .failed: [.exit]
+        case .scrub: [.cancel, .exit]
+        case .menu: [.closeMenu, .exit]
+        case .info: [.closeInfo, .exit]
+        }
+    }
+
     static func previewStepSeconds(repeatCount: Int) -> Double {
         if repeatCount >= 10 { return 60 }
         if repeatCount >= 5 { return 30 }

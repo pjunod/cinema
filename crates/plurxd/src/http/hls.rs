@@ -5069,6 +5069,8 @@ async fn control_local_inner(
         remember_delivered_selection(
             &recipe.request.playback_id,
             &route.session_id,
+            recipe.request.file_id,
+            &request.selection,
             &response.effective_selection,
             crate::playback_control::GradeIntent::from_request(&recipe.request),
         )
@@ -5206,6 +5208,28 @@ struct DeliveredSelections {
 #[derive(Clone)]
 struct RememberedDelivery {
     session: String,
+    /// The file the predecessor was serving.
+    ///
+    /// A playback id outlives the film. Apple's `PlayerController` mints one
+    /// per `PlayerView` and autoplay-next is a `stop()`-then-`start()` on the
+    /// same controller, so episode N and N+1 share it — and
+    /// `EffectiveSelection` carries no file identity, so without this an
+    /// episode boundary is indistinguishable from a viewer changing quality.
+    /// On a series binge that would be the *dominant* source of replacement
+    /// measurements, and a later slice acting on this seam would stage a
+    /// "seamless handoff" across a film boundary.
+    file_id: i64,
+    /// What the viewer had asked for, as distinct from what was delivered.
+    ///
+    /// The client reopens for its own reasons that are not viewer intent: a
+    /// Dolby Vision fallback to the HDR10 base or to a compatibility
+    /// transcode, a burn-in retry, a failure retry, an out-of-window seek.
+    /// Those change the *delivered* recipe on exactly the two axes whose
+    /// counts are the evidence for or against widening `PREPARED_AXIS`, while
+    /// the viewer asked for nothing. Only `reopen_reason: Some(Stall)` is
+    /// declared on the wire, so the honest discriminator is this: M6 prepares
+    /// for a change the client *asked for*, and an unchanged ask is not one.
+    asked: crate::playback_control::ClientSelection,
     selection: crate::playback_control::EffectiveSelection,
     grade: crate::playback_control::GradeIntent,
 }
@@ -5225,6 +5249,8 @@ const MAX_REMEMBERED_SELECTIONS: usize = 512;
 fn remember_delivered_selection(
     playback: &str,
     session: &str,
+    file_id: i64,
+    asked: &crate::playback_control::ClientSelection,
     delivered: &crate::playback_control::EffectiveSelection,
     grade: crate::playback_control::GradeIntent,
 ) -> Option<(
@@ -5237,22 +5263,37 @@ fn remember_delivered_selection(
     };
     let table = guard.get_or_insert_with(DeliveredSelections::default);
     let replaced = match table.by_playback.get(playback) {
-        Some(held) if held.session != session => Some((held.selection.clone(), held.grade)),
+        // A replacement worth measuring is a *different session*, serving the
+        // *same film*, because the viewer *asked for something else*. Drop any
+        // one of those three and the count fills with things no viewer did:
+        // an episode boundary, or the client's own recovery reopen.
+        Some(held)
+            if held.session != session && held.file_id == file_id && &held.asked != asked =>
+        {
+            Some((held.selection.clone(), held.grade))
+        }
         Some(_) => None,
         None => {
             table.order.push_back(playback.to_owned());
-            while table.order.len() > MAX_REMEMBERED_SELECTIONS {
-                if let Some(evicted) = table.order.pop_front() {
-                    table.by_playback.remove(&evicted);
-                }
-            }
             None
         }
     };
+    // Most-recently-touched, not first-seen. Insertion order would evict the
+    // two-hour film first, and mid-film is exactly when a viewer changes
+    // quality — the entry most worth keeping would be the first one dropped.
+    table.order.retain(|held| held != playback);
+    table.order.push_back(playback.to_owned());
+    while table.order.len() > MAX_REMEMBERED_SELECTIONS {
+        if let Some(evicted) = table.order.pop_front() {
+            table.by_playback.remove(&evicted);
+        }
+    }
     table.by_playback.insert(
         playback.to_owned(),
         RememberedDelivery {
             session: session.to_owned(),
+            file_id,
+            asked: asked.clone(),
             selection: delivered.clone(),
             grade,
         },
@@ -9783,78 +9824,136 @@ mod tests {
             height,
             ..sample_effective_selection()
         };
-        let grade = crate::playback_control::GradeIntent {
-            hdr10: false,
-            preserve_dolby_vision: false,
-            convert_dolby_vision: false,
-        };
         let playback = format!("seam-playback-{}", std::process::id());
         let first = format!("{playback}-session-1");
         let second = format!("{playback}-session-2");
 
         // The playback's first session has nothing to be measured against.
         assert_eq!(
-            remember_delivered_selection(&playback, &first, &selection(2160), grade),
+            remember(&playback, &first, &selection(2160), &asked_1080()),
             None,
         );
         // Its later exchanges answer nothing, so a session is never measured
         // against itself.
         assert_eq!(
-            remember_delivered_selection(&playback, &first, &selection(2160), grade),
+            remember(&playback, &first, &selection(2160), &asked_1080()),
             None,
         );
         // A new session for the same playback is the viewer's quality change,
         // and it is measured against what the old session was delivering.
         let (previous, previous_grade) =
-            remember_delivered_selection(&playback, &second, &selection(1080), grade)
+            remember(&playback, &second, &selection(1080), &asked_720())
                 .expect("the replaced session is remembered");
         assert_eq!(previous.height, 2160);
-        assert_eq!(previous_grade, grade);
+        assert_eq!(previous_grade, seam_grade());
         // Exactly once: the replacement's later exchanges answer nothing, or
         // one change would be counted for the life of the session.
         assert_eq!(
-            remember_delivered_selection(&playback, &second, &selection(1080), grade),
+            remember(&playback, &second, &selection(1080), &asked_720()),
             None,
         );
         // And a change back is its own transition.
-        let (back, _) = remember_delivered_selection(
+        let (back, _) = remember(
             &playback,
             &format!("{playback}-session-3"),
             &selection(2160),
-            grade,
+            &asked_1080(),
         )
         .expect("the second session is remembered too");
         assert_eq!(back.height, 1080);
         // A playback this node has never served is not a measurement.
         assert_eq!(
-            remember_delivered_selection(
+            remember(
                 &format!("seam-other-{}", std::process::id()),
                 "some-session",
                 &selection(720),
-                grade,
+                &asked_720(),
             ),
             None,
+        );
+    }
+
+    /// Three gates, and the count fills with things no viewer did if any one
+    /// of them is dropped.
+    ///
+    /// Found by review, all three confirmed against the shipped clients: a
+    /// playback id outlives the film (Apple mints one per `PlayerView` and
+    /// autoplay-next is `stop()`-then-`start()` on the same controller), and
+    /// the client reopens for its own reasons — a Dolby Vision fallback to the
+    /// HDR10 base or to a compatibility transcode, a burn-in retry, a failure
+    /// retry, an out-of-window seek — none of which declare a `reopen_reason`
+    /// and all of which move the delivered recipe on exactly the two axes
+    /// whose counts are the evidence about `PREPARED_AXIS`.
+    #[test]
+    fn a_replacement_the_viewer_did_not_ask_for_is_not_measured() {
+        let selection = |height: i64| crate::playback_control::EffectiveSelection {
+            height,
+            ..sample_effective_selection()
+        };
+
+        // An episode boundary: same playback, new session, different film.
+        let binge = format!("seam-binge-{}", std::process::id());
+        assert_eq!(
+            remember(&binge, "episode-1", &selection(2160), &asked_1080()),
+            None,
+        );
+        assert_eq!(
+            remember_delivered_selection(
+                &binge,
+                "episode-2",
+                SEAM_FILE + 1,
+                &asked_720(),
+                &selection(1080),
+                seam_grade(),
+            ),
+            None,
+            "a new film is not a viewer changing quality",
+        );
+
+        // The client's own recovery: same film, new session, unchanged ask.
+        let fallback = format!("seam-fallback-{}", std::process::id());
+        assert_eq!(
+            remember(&fallback, "before", &selection(2160), &asked_1080()),
+            None,
+        );
+        assert_eq!(
+            remember(&fallback, "after", &selection(1080), &asked_1080()),
+            None,
+            "a Dolby Vision fallback changes what is delivered, not what was asked",
+        );
+
+        // And the real thing still measures, so the gates are not simply off.
+        let real = format!("seam-real-{}", std::process::id());
+        assert_eq!(
+            remember(&real, "one", &selection(2160), &asked_1080()),
+            None
+        );
+        assert!(
+            remember(&real, "two", &selection(1080), &asked_720()).is_some(),
+            "same film, new session, and the viewer asked for something else",
         );
     }
 
     /// The table is bounded, because a node serves unboundedly many playbacks.
     #[test]
     fn the_remembered_selections_are_bounded() {
-        let grade = crate::playback_control::GradeIntent {
-            hdr10: false,
-            preserve_dolby_vision: false,
-            convert_dolby_vision: false,
-        };
         let tag = format!("bound-{}", std::process::id());
         let first = format!("{tag}-0");
-        remember_delivered_selection(&first, "s", &sample_effective_selection(), grade);
+        let kept = format!("{tag}-kept");
+        remember(&first, "s", &sample_effective_selection(), &asked_1080());
+        remember(&kept, "s", &sample_effective_selection(), &asked_1080());
         for index in 1..=MAX_REMEMBERED_SELECTIONS {
-            remember_delivered_selection(
+            remember(
                 &format!("{tag}-{index}"),
                 "s",
                 &sample_effective_selection(),
-                grade,
+                &asked_1080(),
             );
+            // Touched throughout, and therefore kept: eviction is by last
+            // touch, not by first sight. Insertion order would drop the
+            // two-hour film first, and mid-film is exactly when a viewer
+            // changes quality.
+            remember(&kept, "s", &sample_effective_selection(), &asked_1080());
         }
         let guard = DELIVERED_SELECTIONS.lock().expect("lock");
         let table = guard.as_ref().expect("table");
@@ -9862,8 +9961,60 @@ mod tests {
         assert_eq!(table.by_playback.len(), table.order.len());
         assert!(
             !table.by_playback.contains_key(&first),
-            "the oldest entry is evicted, not the newest",
+            "the least recently touched entry is evicted",
         );
+        assert!(
+            table.by_playback.contains_key(&kept),
+            "and one touched throughout survives however many arrive after it",
+        );
+    }
+
+    /// One film, one grade — the seam's other two gates held constant so a
+    /// test that means to vary the session varies only the session.
+    const SEAM_FILE: i64 = 4_242;
+
+    fn seam_grade() -> crate::playback_control::GradeIntent {
+        crate::playback_control::GradeIntent {
+            hdr10: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        }
+    }
+
+    fn remember(
+        playback: &str,
+        session: &str,
+        delivered: &crate::playback_control::EffectiveSelection,
+        asked: &crate::playback_control::ClientSelection,
+    ) -> Option<(
+        crate::playback_control::EffectiveSelection,
+        crate::playback_control::GradeIntent,
+    )> {
+        remember_delivered_selection(playback, session, SEAM_FILE, asked, delivered, seam_grade())
+    }
+
+    fn asked_at(
+        quality: crate::playback_control::QualitySelection,
+    ) -> crate::playback_control::ClientSelection {
+        crate::playback_control::ClientSelection {
+            quality,
+            audio_track: Some(0),
+            subtitle: crate::playback_control::SubtitleSelection {
+                mode: crate::playback_control::SubtitleMode::Off,
+                track: None,
+            },
+            audio_offset_ms: 0,
+            codec: crate::playback_control::CodecPolicy::Auto,
+            dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+        }
+    }
+
+    fn asked_1080() -> crate::playback_control::ClientSelection {
+        asked_at(crate::playback_control::QualitySelection::Manual { height: 1080 })
+    }
+
+    fn asked_720() -> crate::playback_control::ClientSelection {
+        asked_at(crate::playback_control::QualitySelection::Manual { height: 720 })
     }
 
     /// A minimal delivered selection; only `height` matters to these tests.

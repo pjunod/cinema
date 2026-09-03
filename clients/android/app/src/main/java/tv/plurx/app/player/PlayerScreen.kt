@@ -1246,12 +1246,13 @@ private fun PlayerContent(
                     deliveredDolbyVisionProfile = controller.deliveredDolbyVisionProfile,
                 ),
                 onTransportHeight = { transportHeightPx = it },
-                onBack = {
-                    val input = PlayerContractInput.Back
-                    applyOutcome(
-                        PlayerInputPolicy.route(playerSurface, inputState(), input),
-                        input,
-                    )
+                // The arrow is the `close` control, not the BACK key: `Back`
+                // in `Transport` is `Hide`, so the arrow hid the chrome it was
+                // drawn in. `closeSteps` closes what is open, then exits.
+                onClose = {
+                    PlayerInputPolicy.closeSteps(inputState()).forEach { outcome ->
+                        applyOutcome(outcome, PlayerContractInput.Select)
+                    }
                 },
                 onPlayPause = { controller.playPause(); poke() },
                 onSeekBack = { seekWithMarkerUndo(controller.realPosition() - 10_000); poke() },
@@ -1440,7 +1441,7 @@ internal fun Controls(
     lastFocusedControl: PlayerControlId = PlayerControlId.PlayPause,
     onControlFocused: (PlayerControlId) -> Unit = {},
     onTimelineFocused: (Boolean) -> Unit = {},
-    onBack: () -> Unit,
+    onClose: () -> Unit,
     onPlayPause: () -> Unit,
     onSeekBack: () -> Unit,
     onSeekForward: () -> Unit,
@@ -1518,12 +1519,12 @@ internal fun Controls(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             TvIconButton(
-                onClick = onBack,
+                onClick = onClose,
                 modifier = Modifier.focusProperties {
                     canFocus = formFactor != FormFactor.Television
                 },
             ) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close", tint = Color.White)
             }
         }
 

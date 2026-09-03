@@ -450,6 +450,33 @@
       }
     }
   },
+  "close_control": {
+    "notes": "The `close` control (the iOS ✕, the Android phone's back arrow, the web's ✕ Close) is not `back`. `back` is a key — Menu, BACK, Escape — and with chrome visible on ten-foot and touch it hides the chrome, which is the right answer for a key and the wrong one for a button whose only purpose is to leave: routed through `back`, the iOS ✕ hid the chrome in `transport`, closed the panel in `info`, cancelled in `scrub`, and exited in no state a viewer could tap it from, so the only way out of a film was to force-quit the app (Paul, 2026-09-03). `close` runs these outcomes in order — close whatever is open, then leave — and every row ends in `exit`. The `menu` and `info` rows say what `close` does when it is reached; a client's own modal may take the tap first — on iOS the panel's backdrop lies over the ✕, so that tap is `info × tap_surface` (`close_info`) and the ✕ exits on the next one, and Android composes no arrow while a panel is open.",
+    "hidden": [
+      "exit"
+    ],
+    "transport": [
+      "exit"
+    ],
+    "timeline": [
+      "exit"
+    ],
+    "scrub": [
+      "cancel",
+      "exit"
+    ],
+    "menu": [
+      "close_menu",
+      "exit"
+    ],
+    "info": [
+      "close_info",
+      "exit"
+    ],
+    "failed": [
+      "exit"
+    ]
+  },
   "surface_notes": {
     "desktop": [
       "`left`/`right` outside the timeline are the coalesced ±10 s hotkeys (`timings.desktop_hotkey_coalesce_ms`); `up`/`down` are no longer seeks.",
@@ -460,7 +487,7 @@
     ],
     "touch": [
       "Scrubbing is a drag on the timeline: pointer down = `preview` at the touch position (continuous while dragging), pointer up = `commit`. A plain tap on the bar is a `preview` + `commit` at the tap position.",
-      "`back` is the system back gesture or button (Android) and the close button (iOS has no back key; `close` exits regardless of state after closing whatever is open).",
+      "`back` is the system back gesture or button (Android). iOS has no back key, and the ✕ is not `back` on either phone: it is the `close` control, which exits regardless of state after closing whatever is open — see `close_control`.",
       "`play_pause`, `skip_back`, `skip_forward` are the headset/lock-screen/notification media commands, which work in every state."
     ],
     "ten-foot": [

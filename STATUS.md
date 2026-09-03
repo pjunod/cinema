@@ -38,13 +38,62 @@ create response said this session carries, and the profiles this browser
 declared. The server prints them, recomputes `caps_mismatch` rather than
 believing the client's copy, and keeps them in the stored event's `extra`.
 
+**M3 — the indexer remembers what it could not do.** A `Truncated` or
+`Unsupported` build was a log line: the cursor moved on, and the next wrap of
+the library spent the same whole-file read — up to thirty minutes of one
+node's disk — while `vodserve` answered `vod_index_pending` for a title that
+may never have an index. A node-local `fragment_index_outcomes` table now
+records the refusal, keyed and invalidated exactly like `fragment_indexes`, so
+a replaced file is eligible again with nothing having to notice. Truncated
+backs off (30 min doubling to a day) because the per-file budget is a
+wall-clock guess; unsupported is terminal because it is a property of the
+bytes. The cluster worker records the same row so a clustered node's badge and
+background pass know what it found, but its *queue* policy is left alone —
+that is `effort/fragment-index-queue-repair`'s, and it is rewriting the lease
+and attempt budget this call feeds. The admin badge gained `refused` and
+carries the builder's own reason. A review caught the backoff being inert on
+every clustered voter: the hiqlite store's injected clock answers in unix
+seconds and the deadline is compared against milliseconds.
+
 **Not verified on hardware.** Nothing here has been played from a browser
 against the fleet; the deployed-build re-test is a separate hand-off.
 
+## The ✕ on an iPhone could not leave a film
+
+**PR [#853](https://github.com/pjunod/plurx/pull/853) — MERGED to main as `e31a6cb4`, 2026-09-03, branch `fix/close-control-exits`, fix commit `0f904213`.** Paul: "the x to
+close out media playback does not work on apple devices. There's no way to
+get out of the movie except force close." Confirmed at source, not on a
+device: the iOS ✕ fed `back` to the touch routing table, and `back` while
+chrome is visible is `hide` — right for a key, wrong for the one button whose
+purpose is to leave. So the ✕ hid the chrome in `transport` (the state it is
+tapped from), closed the panel in `info`, cancelled in `scrub`, and exited
+only from `hidden` and `failed`, where it is not drawn. Android's phone back
+arrow had the same fault in both `PlayerScreen` and `OfflinePlayerScreen`;
+the system back gesture there still left after two presses, which is why
+only Apple was reported. The web's `✕ Close` calls `closePlayer()` directly
+and was never affected.
+
+The contract now says what its own touch note already claimed: the ✕ is the
+`close` control, not `back`. `close_control` in
+`tests/playback/player-input-contract.json` gives it one outcome list per
+state — close whatever is open, then `exit`, every row ending in `exit` —
+transcribed as `PlayerInputRouting.closeSteps` (Apple) and
+`PlayerInputPolicy.closeSteps` (Android), each checked against the fixture
+by its client suite; the JS contract test pins the fixture's shape, and the
+Apple suite pins the call site (the ✕ and the failure view's Close run
+`closePlayer()`, and nothing in `PlayerView` manufactures a `back` press).
+Apple build 115, Android versionCode 70 (main took 114/69 while this was open). Swift and Kotlin compile only on
+CI; `make web-check`'s player suites and the input fence are green in the
+clone. **Not run on hardware** — the device pass is the iPhone/iPad ✕ from
+transport and mid-scrub (one tap exits), from info Standard and Debug (the
+panel's backdrop takes the first tap, the second exits — the ✕ sits under
+the panel by design), and the Android phone arrow from transport and
+mid-scrub.
+
 ## Activity's Now playing row, read as a card
 
-**PR [#849](https://github.com/pjunod/plurx/pull/849) — merged 2026-09-03 as
-`a94a32cb`, branch `web/activity-stream-card`.** Paul asked for the activity status display to be "a
+**PR [#849](https://github.com/pjunod/plurx/pull/849) — merged to main as
+`a94a32cb`, 2026-09-03.** Paul asked for the activity status display to be "a
 lot nicer": the Stream cell was one " · "-joined sentence of every session
 fact, with the three things an operator brings to the page — is it playing,
 is the server keeping up, is it held and why — buried among sequence

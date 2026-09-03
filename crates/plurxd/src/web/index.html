@@ -5329,7 +5329,9 @@ function specBlock(f){
     : f.vod_index_status==="partial"
       ? `<dt>HLS capability</dt><dd><span class="mode-chip vod">VOD HLS on some devices</span><span class="mode-detail">Analysis is ready for some of this file's delivery routes but not all — a Dolby Vision device can still fall back to Live HLS until the rest is built</span></dd>`
       : f.vod_index_status==="pending"
-        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">Can be used while VOD analysis is pending when live recovery is enabled in Playback settings</span></dd>`
+        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">${f.vod_index_refusal?esc(f.vod_index_refusal)+" — it will be tried again":"Can be used while VOD analysis is pending when live recovery is enabled in Playback settings"}</span></dd>`
+      : f.vod_index_status==="refused"
+        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS only</span><span class="mode-detail">VOD analysis ${f.vod_index_refusal?esc(f.vod_index_refusal):"was refused for this file"} — waiting will not change that; Live HLS requires live recovery to be enabled in Playback settings</span></dd>`
         : f.vod_index_status==="unsupported"
           ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">This codec cannot use the VOD indexer; Live HLS requires live recovery to be enabled in Playback settings</span></dd>`:"";
   const analysis=analysisFileControl(f);

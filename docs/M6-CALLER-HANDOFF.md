@@ -530,12 +530,41 @@ native clients send no `observedDownloadBps`. So a client release must flip two
 literals, not one — and the axis rule, not the capability, is what bounds how
 often M6 can fire at all.
 
+#### 3.3.3 The measurement's verdict: the axis rule refuses everything
+
+**Read 2026-09-03**, on the build carrying the seam's file and ask gates, with
+the Apple TV on build 114. Two viewer quality changes, one HDR and one SDR:
+both `multiple_axes` — Avatar 2160 → 1080 ranked to `dynamic_range`, Dance
+Flick 1080 → 720 ranked to `delivery_method`. Neither was a resolution change,
+because the top rung direct-plays and the lower rungs transcode, so the
+delivery method moves with the height every time.
+
+The counterfactual is **identical** to the decision on both, because
+`MultipleAxes` outranks the client gate. So the capability literal was never
+what stood between M6 and firing — `PREPARED_AXIS` is, and it refuses every
+transition the fleet actually produces.
+
+M5.5 proved each axis separately on Apple: its §3 ran **same-codec, same
+grade** ("a resolution/bitrate change only") and **a codec or dynamic-range
+change**, and Apple passed both 20/20 on both devices. It never ran their
+product — the `MultipleAxes` comment says exactly that — and the product is the
+only transition that occurs.
+
+**One hardware case now gates the milestone**, spec'd to run in
+[M6-AXIS-CASE-HANDOFF.md](M6-AXIS-CASE-HANDOFF.md): 20 consecutive commits on a
+recipe pair that moves resolution *and* delivery method together, on a
+direct-playing source. Acceptance is the spike's own. §3.4 must not ship before
+it, and `PREPARED_AXIS` must not be widened on the strength of two separate
+single-axis proofs — that reasoning is what shadow mode replaced.
+
 ### 3.4 Stage on `Prepare`
 
 The first behaviour change, and the first production caller — this is the slice
 that removes `allow(dead_code)` from `PreparationExecutor`.
 
-**It fired on nothing** while all three clients hardcoded
+**Blocked on the axis case in §3.3.3** — the measurement says this slice would
+stage successors for transitions M6 then refuses. It fired on nothing while all
+three clients hardcoded
 `dual_player_preparation: false`. **Apple now declares `true`** — the measured
 answer from M5.5's 20/20 commit proof plus the accepted corrective
 instruments — and sends `observedDownloadBps`, so both inputs the throughput
