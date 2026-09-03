@@ -50,6 +50,13 @@ test = "crates/plurx-core/src/playback/mod.rs"
 test_anchor = "dolby_vision_profiles_are_negotiated_individually"
 
 [[decisions]]
+id = "server.dolby-vision-dual-layer"
+source = "crates/plurx-core/src/playback/mod.rs"
+source_anchor = "pub fn dolby_vision_is_dual_layer("
+test = "crates/plurx-core/src/playback/mod.rs"
+test_anchor = "a_blanket_dolby_vision_claim_is_not_a_claim_about_dual_layer"
+
+[[decisions]]
 id = "server.manual-quality"
 source = "crates/plurx-core/src/playback/mod.rs"
 source_anchor = "pub fn decide_forced("

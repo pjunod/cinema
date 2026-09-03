@@ -360,10 +360,19 @@ pub struct FileDto {
     pub playback_defaults: PlaybackDefaultsDto,
     /// Current node-local immutable-VOD index state for video files.
     /// `indexed` means the stored row matches this file's current identity;
-    /// `pending` means the background builder still owes it; `unsupported`
-    /// means this codec cannot use the copy-video indexer.
+    /// `pending` means the background builder still owes it; `refused` means
+    /// it tried and this source cannot be indexed by that pipeline;
+    /// `unsupported` means this codec cannot use the copy-video indexer at
+    /// all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vod_index_status: Option<&'static str>,
+    /// Why the missing pipelines are missing, when the indexer has already
+    /// found out: `refused` carries the builder's own reason, and a truncated
+    /// attempt carries how far it got and how many times it has been tried.
+    /// Absent when nothing has been attempted yet — which is what `pending`
+    /// honestly means, and what it used to mean for all three cases at once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vod_index_refusal: Option<String>,
     /// Start of this file within a multi-file audiobook. Zero for ordinary
     /// media and for the first part. Clients add this to local player time
     /// before posting item progress, so resume remains one continuous book.
@@ -549,6 +558,7 @@ impl FileDto {
             subtitle_streams: f.subtitle_streams,
             playback_defaults,
             vod_index_status: None,
+            vod_index_refusal: None,
             part_offset_ms: 0,
             chapters: Vec::new(),
             available: true,

@@ -87,7 +87,7 @@ CREATE INDEX network_priors_by_updated
     ON network_priors(updated_at_ms, user_id, client_class);";
 
 #[cfg(any(test, feature = "hiqlite-store"))]
-const SIDECAR_SCHEMA_VERSION: i64 = 7;
+const SIDECAR_SCHEMA_VERSION: i64 = 8;
 const MAX_QUERY_ROWS: i64 = 2_000;
 const MAX_PRUNE_ROWS: i64 = 10_000;
 const MAX_PRIORS_PER_USER_CLIENT: i64 = 64;
@@ -489,6 +489,15 @@ impl NodeLocalTelemetry {
                 migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_IDENTITY_KEY);
                 migration.push('\n');
             }
+            // v8: what the indexer learned when it could NOT build an index.
+            // Guarded on the table rather than on `current`, for the reason
+            // v6's comment gives at length: a sidecar being created in this
+            // same batch reports every table absent, and both routes have to
+            // arrive at one shape.
+            if !table_exists(&conn, "fragment_index_outcomes")? {
+                migration.push_str(crate::store::fragindex::FRAGMENT_INDEX_OUTCOMES_SCHEMA);
+                migration.push('\n');
+            }
             migration.push_str(&format!(
                 "PRAGMA user_version = {SIDECAR_SCHEMA_VERSION};\nCOMMIT;"
             ));
@@ -579,6 +588,7 @@ impl NodeLocalTelemetry {
             // backend divergence manufactured by the harness meant to catch
             // it.
             conn.execute("DELETE FROM rendition_plans", [])?;
+            conn.execute("DELETE FROM fragment_index_outcomes", [])?;
             Ok(())
         })
         .await
@@ -610,6 +620,31 @@ impl NodeLocalTelemetry {
 
     pub(crate) async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
         self.with_conn(move |conn| crate::store::fragindex::forget(conn, file_id))
+            .await
+    }
+
+    pub(crate) async fn record_fragment_index_outcome(
+        &self,
+        file_id: i64,
+        source: crate::segplan::SourceIdentity,
+        refusal: crate::segplan::IndexRefusal,
+        reason: String,
+        now_ms: i64,
+    ) -> Result<crate::segplan::FragmentIndexOutcome, StoreError> {
+        self.with_conn(move |conn| {
+            crate::store::fragindex::record_outcome(
+                conn, file_id, &source, refusal, &reason, now_ms,
+            )
+        })
+        .await
+    }
+
+    pub(crate) async fn fragment_index_outcome(
+        &self,
+        file_id: i64,
+        identity: crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::FragmentIndexOutcome>, StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::outcome(conn, file_id, &identity))
             .await
     }
 
@@ -997,7 +1032,7 @@ mod tests {
         // `SIDECAR_SCHEMA_VERSION`, so an assertion built from the same
         // constant can never fail on a bump. Update it by hand, deliberately,
         // exactly as the single-node backend's `assert_eq!(version, 37)` is.
-        assert!(error.to_string().contains("only knows v7"), "{error}");
+        assert!(error.to_string().contains("only knows v8"), "{error}");
     }
 
     #[tokio::test]
@@ -1220,6 +1255,64 @@ mod tests {
             )
             .expect("count");
         assert_eq!(rows, 2);
+    }
+
+    /// v8 adds the table that says why a pipeline has NO index, and an
+    /// already-migrated sidecar has to get it.
+    ///
+    /// The version stamp is not evidence: it is written unconditionally at the
+    /// end of the batch whichever guards fired, so `assert_eq!(version,
+    /// SIDECAR_SCHEMA_VERSION)` passes on a sidecar that gained no table at
+    /// all. This starts from a genuine v7 — every table a v7 held, stamped 7 —
+    /// and asserts the table is there and usable afterwards.
+    #[tokio::test]
+    async fn sidecar_v7_gains_the_outcome_table_it_had_no_way_to_record() {
+        let directory = tempfile::tempdir().expect("sidecar directory");
+        let path = directory.path().join("telemetry.db");
+        {
+            let conn = Connection::open(&path).expect("seed a v7 sidecar");
+            conn.execute_batch(PLAYBACK_EVENTS_SCHEMA).expect("events");
+            conn.execute_batch(NETWORK_PRIORS_SCHEMA).expect("priors");
+            conn.execute_batch(crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA)
+                .expect("indexes");
+            conn.execute_batch(crate::store::renditionplan::RENDITION_PLANS_SCHEMA)
+                .expect("plans");
+            conn.execute_batch(crate::store::fragindex::FRAGMENT_INDEXES_PROMOTION_COLUMNS)
+                .expect("promotion columns");
+            conn.execute_batch(crate::store::fragindex::FRAGMENT_INDEXES_IDENTITY_KEY)
+                .expect("identity key");
+            conn.pragma_update(None, "user_version", 7)
+                .expect("v7 marker");
+        }
+        assert!(
+            !table_exists(
+                &Connection::open(&path).expect("inspect"),
+                "fragment_index_outcomes"
+            )
+            .expect("table check"),
+            "the fixture must start without the table this test is about"
+        );
+
+        let upgraded = NodeLocalTelemetry::open(&path).expect("upgrade to v8");
+        let recorded = upgraded
+            .record_fragment_index_outcome(
+                42,
+                crate::segplan::SourceIdentity::new(4_096, 1_700_000_000_000, "stripped"),
+                crate::segplan::IndexRefusal::Unsupported,
+                "no parseable keyframes".to_owned(),
+                1_700_000_000_000,
+            )
+            .await
+            .expect("an upgraded sidecar can record a refusal");
+        assert_eq!(recorded.next_attempt_at_ms, i64::MAX);
+
+        let conn = Connection::open(&path).expect("inspect");
+        assert_eq!(
+            conn.query_row::<i64, _, _>("PRAGMA user_version", [], |row| row.get(0))
+                .expect("version"),
+            SIDECAR_SCHEMA_VERSION
+        );
+        assert!(table_exists(&conn, "fragment_index_outcomes").expect("table check"));
     }
 
     #[tokio::test]

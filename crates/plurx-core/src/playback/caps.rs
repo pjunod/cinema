@@ -134,8 +134,25 @@ pub struct LearnedLimit {
     pub lost: i64,
     #[serde(default)]
     pub secs: i64,
+    /// Lost frames per minute, as the client measured it.
+    ///
+    /// **`f64`, and that is the whole of this field's history.** The browser
+    /// computes it as `+(lost / (playedSeconds / 60)).toFixed(1)`
+    /// (`playback-policy.js`, `lostFrameRate`) — one decimal place, so
+    /// fractional for most real measurements — and `serde_json` refuses a
+    /// floating-point literal for an integer field, including `4.0`. It is not
+    /// a lenient refusal: the error aborts the *whole* document, so an `i64`
+    /// here meant that any viewer whose browser had recorded one decode rescue
+    /// in the last thirty days could not have their capabilities read at all.
+    /// `/decision` survived it only because `askDecision` catches the 400 and
+    /// retries as the flat query, silently dropping to caps v1; a create has no
+    /// such fallback and would have failed the play outright.
+    ///
+    /// Nothing compares it — it is read once, into the sentence
+    /// `learned client-performance limit for … (N/min)` — so the fraction the
+    /// client measured is also the honest thing to print.
     #[serde(default)]
-    pub rate: i64,
+    pub rate: f64,
     /// Spelled `at` by the web (§4.6); accepted under both names so the
     /// timestamp does not silently read zero.
     #[serde(default, alias = "at")]

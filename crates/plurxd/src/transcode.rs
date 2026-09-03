@@ -7200,11 +7200,36 @@ fn copied_audio_codec(file: &plurx_core::domain::MediaFile, selected: Option<i64
 /// computed from, so leaving it set advertises `dvh1.08.LL` and badges
 /// `dolby_vision` over a stream this path stripped to HDR10.
 ///
+/// **The conversion flag is not the whole question, and keying only on it left
+/// the guard blind.** It asks "was a conversion requested?" when what this path
+/// has to answer is "can what it is about to emit be decoded?" — and those come
+/// apart whenever `preserve` arrives without `convert`. Every way that pair can
+/// be split ends here: a session built by an older node during a rolling
+/// upgrade, an operator with the conversion turned off, a row whose Dolby
+/// Vision columns are missing so [`plurx_core::playback::file_can_convert_to_p81`]
+/// refuses it, a future caller that sets one field and not the other. In each
+/// of them `preserve && !convert` is `true`, and on a path with no RPU rewrite
+/// in it that means the source's own configuration record, its RPUs and its
+/// type-63 enhancement layer, handed over intact.
+///
+/// So the second half of the guard asks the **file**, which this path always
+/// has and can never be wrong about, rather than a flag that travelled: a
+/// dual-layer source is not preserved by a copy that will not convert it. The
+/// one client this narrows against its wishes is a client that enumerated a
+/// dual-layer profile, and it is narrowed on the recovery path only, to a base
+/// layer it can certainly decode — the trade the whole of this function already
+/// makes.
+///
 /// A separate value rather than a mutation, so the caller keeps the decision's
 /// answer to log the difference.
-fn served_copy_options(options: CopySessionOptions) -> CopySessionOptions {
+fn served_copy_options(
+    file: &plurx_core::domain::MediaFile,
+    options: CopySessionOptions,
+) -> CopySessionOptions {
     CopySessionOptions {
-        preserve_dolby_vision: options.preserve_dolby_vision && !options.convert_dolby_vision,
+        preserve_dolby_vision: options.preserve_dolby_vision
+            && !options.convert_dolby_vision
+            && !plurx_core::playback::dolby_vision_is_dual_layer(file),
         convert_dolby_vision: false,
         ..options
     }
@@ -15734,14 +15759,22 @@ impl TranscodeManager {
         // every later `options.` in this function is the served answer. `asked`
         // survives only to log the difference.
         let asked = options;
-        let options = served_copy_options(asked);
+        let options = served_copy_options(&file, asked);
         let served = options;
         let preserve = options.preserve_dolby_vision;
-        if asked.convert_dolby_vision {
+        // Logged whenever EITHER field was given up, not only when a conversion
+        // was asked for. `convert && !preserve` is the pair split the other
+        // way, and a path that silently discarded a conversion is exactly as
+        // worth a line as one that silently discarded a preservation.
+        if asked.preserve_dolby_vision != preserve || asked.convert_dolby_vision {
             tracing::info!(
                 file_id,
-                "this copy cannot convert Dolby Vision, so it strips to the HDR10 base \
-                 instead of preserving a profile this client did not claim"
+                asked_preserve = asked.preserve_dolby_vision,
+                asked_convert = asked.convert_dolby_vision,
+                dual_layer = plurx_core::playback::dolby_vision_is_dual_layer(&file),
+                served_preserve = preserve,
+                "this copy cannot convert Dolby Vision, so it serves the source's base \
+                 layer rather than a stream that names a profile it did not produce"
             );
         }
         let video_options = transcode::CopyVideoOptions::from_probe(
@@ -26699,7 +26732,7 @@ pub(crate) mod tests {
             preserve_dolby_vision: true,
             convert_dolby_vision: true,
         };
-        let served = served_copy_options(asked);
+        let served = served_copy_options(&profile7_file(), asked);
         assert!(
             !served.preserve_dolby_vision,
             "keeping the RPUs on a path that cannot rewrite them hands dual-layer \
@@ -26715,16 +26748,232 @@ pub(crate) mod tests {
             "audio is unrelated"
         );
 
-        // Every other session is untouched: a preserving copy still preserves,
-        // which is the case that would break if the strip-down were
-        // unconditional.
+        // Every other session is untouched: a preserving copy of a source this
+        // path can actually hand over still preserves, which is the case that
+        // would break if the strip-down were unconditional.
         let preserving = CopySessionOptions {
             convert_dolby_vision: false,
             ..asked
         };
         assert!(
-            served_copy_options(preserving).preserve_dolby_vision,
+            served_copy_options(&profile5_file(), preserving).preserve_dolby_vision,
             "a client that claimed the source's own profile still gets it"
+        );
+    }
+
+    /// The guard cannot be keyed on the conversion flag alone, because the
+    /// state that produced the black screen is the one where that flag is
+    /// already `false`.
+    ///
+    /// `preserve && !convert` on a dual-layer source is what every way of
+    /// splitting the pair arrives at: a session built by an older node during
+    /// a rolling upgrade, an operator who turned the conversion off, a row
+    /// whose Dolby Vision columns are missing so `file_can_convert_to_p81`
+    /// refuses it. On this path there is no RPU rewrite, so preserving means
+    /// the source's own Profile 7 record, its RPUs and its type-63
+    /// enhancement layer, handed over intact — the delivery Safari answered
+    /// with `MEDIA_ERR_DECODE`. The file is the fact this path can never be
+    /// wrong about, so the file is what it asks.
+    #[test]
+    fn a_copy_never_preserves_dual_layer_dolby_vision_it_cannot_convert() {
+        let asked = CopySessionOptions {
+            transcode_audio: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: false,
+        };
+        assert!(
+            !served_copy_options(&profile7_file(), asked).preserve_dolby_vision,
+            "a conversion nobody asked for is exactly the case that reaches a \
+             browser as dual-layer Profile 7"
+        );
+
+        // A row scanned before the Dolby Vision columns existed answers from
+        // its label, and answers the conservative way: it cannot convert
+        // either, so preserving it would be the same undecodable delivery.
+        let mut label_only = profile7_file();
+        label_only.dolby_vision = Default::default();
+        assert_eq!(
+            label_only.hdr_format.as_deref(),
+            Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+            "the fallback this asserts about is the label"
+        );
+        assert!(
+            !served_copy_options(&label_only, asked).preserve_dolby_vision,
+            "a label-only Profile 7 row can neither convert nor preserve"
+        );
+
+        // And nothing else moves: a source with no dual layer to refuse is
+        // copied exactly as before.
+        let mut hdr10 = profile5_file();
+        hdr10.hdr = Some("hdr10".into());
+        hdr10.hdr_format = Some("HDR10".into());
+        assert!(
+            served_copy_options(&hdr10, asked).preserve_dolby_vision,
+            "the guard is about dual-layer Dolby Vision, not about copies"
+        );
+    }
+
+    fn profile7_file() -> plurx_core::domain::MediaFile {
+        plurx_core::domain::MediaFile {
+            id: 7,
+            path: PathBuf::from("/media/profile7.mkv"),
+            hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
+            dolby_vision: plurx_core::domain::DolbyVisionFacts {
+                profile: Some(7),
+                level: Some(9),
+                bl_compat_id: Some(1),
+                ..Default::default()
+            },
+            ..profile5_file()
+        }
+    }
+
+    /// And the call site, which the function above cannot speak for.
+    ///
+    /// `a_copy_that_cannot_convert_serves_and_describes_the_hdr10_base` pins
+    /// `served_copy_options`; deleting the *call* to it in
+    /// `start_copy_with_audio_offset` leaves that test green and puts raw
+    /// Profile 7 back on the wire — `-strict unofficial`, RPUs and the
+    /// enhancement layer all retained — which is the exact argv the
+    /// 2026-09-02 production observation carried. So this one reads the argv
+    /// the process is actually given.
+    ///
+    /// It asserts the invariant rather than one string, because
+    /// `copy_video_args` has three strip shapes: the plain filter, the same
+    /// filter behind `dovi_rpu=strip=1` when the build has the bitstream
+    /// filter, and the parameter-set-promotion chain for a source whose
+    /// `hvcC` is a 23-byte stub. All three drop NAL types 62 and 63, and none
+    /// of them asks the muxer for `unofficial`; a preserving argv does the
+    /// opposite on both counts.
+    #[tokio::test]
+    async fn a_copy_that_cannot_convert_strips_the_argv_it_spawns() {
+        use plurx_core::store::SqliteStore;
+        use tracing_subscriber::prelude::*;
+
+        super::require_ffmpeg();
+        let media = crate::test_tempdir().expect("media dir");
+        let src = media.path().join("profile7.mp4");
+        write_real_hevc_video(&src, 4);
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(
+            &store,
+            &src.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(4_000),
+                container: Some("mp4".into()),
+                video_codec: Some("hevc".into()),
+                width: Some(160),
+                height: Some(120),
+                bit_depth: Some(10),
+                hdr: Some("dolby_vision".into()),
+                hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let work = crate::test_tempdir().expect("work");
+        let mgr = Arc::new(
+            TranscodeManager::new(
+                Arc::clone(&store),
+                work.path().to_path_buf(),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            // Pinned rather than probed: the two strip shapes differ only in
+            // whether this build has the `dovi_rpu` bitstream filter, and a
+            // test whose argv depends on the host's ffmpeg asserts something
+            // different on every machine.
+            .with_dv_strippable(false),
+        );
+
+        // A ring, and the argv line is the *oldest* thing in it: `start_copy`
+        // spawns a real ffmpeg whose stderr is logged a line at a time, so a
+        // capacity anywhere near the number of events would evict the one
+        // entry this test exists to read and fail on the `expect` below —
+        // green mutation, red truth. Sized for a noisy encoder rather than
+        // for the handful of lines the happy path emits.
+        let logs = Arc::new(crate::logbuf::LogBuffer::new(8192));
+        let subscriber =
+            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs)));
+        let guard = tracing::subscriber::set_default(subscriber);
+        let started = mgr
+            .start_copy(
+                file_id,
+                0.0,
+                None,
+                // What live-HLS recovery builds from a converting session's
+                // `SessionKind::Copy`: `start_live_recovery_session` copies
+                // both flags straight off `req.kind`.
+                CopySessionOptions {
+                    transcode_audio: false,
+                    preserve_dolby_vision: true,
+                    convert_dolby_vision: true,
+                },
+                "paul",
+                "pb-strip",
+            )
+            .await;
+
+        // The argv is logged by the producer task, not by the call that
+        // returns the session, so `start_copy` completing is not the moment
+        // the line exists. `set_default` is thread-local and this is a
+        // current-thread runtime, so the wait is also what lets that task be
+        // polled at all — a bare read here passes on an idle machine and
+        // fails under a loaded one, which is the flake this loop removes.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let argv = loop {
+            if let Some(line) = logs
+                .tail("trace", 8192)
+                .into_iter()
+                .map(|entry| entry.message)
+                .find(|message| message.contains("copy-video HLS ffmpeg args"))
+            {
+                break line;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the copy path logs the argv it is about to spawn"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        drop(guard);
+
+        assert!(
+            !argv.contains("-strict unofficial"),
+            "`-strict unofficial` is emitted only for preserved Dolby Vision; \
+             its presence means this copy kept the RPUs it cannot rewrite: {argv}"
+        );
+        assert!(
+            argv.contains("62-63"),
+            "the strip has to drop the RPU (62) and the enhancement layer (63); \
+             a filter that names neither is the preserving argv: {argv}"
+        );
+        assert!(
+            argv.contains("-tag:v hvc1"),
+            "the served stream is the HDR10 base, so the sample entry is the \
+             compatible one: {argv}"
+        );
+        assert!(
+            !argv.contains("remove_types=32-34|63"),
+            "that filter is the converting recipe, which this path has no \
+             stage for: {argv}"
+        );
+
+        let info = started.expect("the copy session starts");
+        assert!(
+            matches!(
+                info.kind,
+                SessionKind::Copy {
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                    ..
+                }
+            ),
+            "the badge the create response is computed from has to describe the \
+             same stream the argv produces: {:?}",
+            info.kind
         );
     }
 
@@ -28791,6 +29040,45 @@ pub(crate) mod tests {
         assert!(
             status.map(|s| s.success()).unwrap_or(false),
             "fixture encode failed — this test needs a working ffmpeg"
+        );
+    }
+
+    /// The same, in HEVC.
+    ///
+    /// The copy path's Dolby Vision branch is inside `copy_video_args`'s
+    /// `hevc | h265` arm, so an H.264 fixture never reaches the argv this
+    /// exists to read — and a probe row that merely *claims* `hevc` over
+    /// H.264 bytes produces an ffmpeg that fails for the wrong reason. 10-bit,
+    /// because every Dolby Vision base layer is.
+    fn write_real_hevc_video(path: &std::path::Path, seconds: u32) {
+        let status = std::process::Command::new(
+            std::env::var("PLURX_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
+        )
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size=160x120:rate=15:duration={seconds}"),
+            "-pix_fmt",
+            "yuv420p10le",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-x265-params",
+            "log-level=none:keyint=15:min-keyint=15",
+            "-tag:v",
+            "hvc1",
+            "-y",
+        ])
+        .arg(path)
+        .status();
+        assert!(
+            status.map(|s| s.success()).unwrap_or(false),
+            "HEVC fixture encode failed — this test needs an ffmpeg with libx265"
         );
     }
 
