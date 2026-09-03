@@ -2275,6 +2275,12 @@ fn mdns_advertising_value_enabled(value: &str) -> bool {
 /// identical rows and DNS-SD would rename two of them. A label taken from the
 /// machine hostname, or one carrying this node's own LAN address, is already
 /// unique on the network — and far more use to a person than a UUID prefix.
+///
+/// Both of those are properties of the *machine*, not of the node, so this
+/// assumes the shipped topology of one node per host (`deploy/docker-compose.yml`
+/// fixes `container_name`). Two nodes on one host would compute the same label
+/// and DNS-SD would rename the second; their host records stay distinct
+/// because those are derived from the node id.
 struct DiscoveryName {
     label: String,
     distinct: bool,
@@ -2665,9 +2671,14 @@ fn mdns_service_info(
     };
     // A caller that hands over nothing usable still gets a registrable
     // record: an empty instance label is a DNS-SD failure, not an unnamed
-    // server. An over-long one is *not* silently cut here — the bound belongs
-    // to whoever chooses the label, and a record that cannot be published is
-    // an error the caller reports.
+    // server. An over-long one is *not* cut here — the bound belongs to
+    // whoever chooses the label, and `instance_label` applies it. Past 255
+    // bytes `ServiceInfo::new` refuses outright; between 63 and 255 the
+    // record builds and the daemon drops the label when it writes the
+    // packet, which surfaces only as a warning from the monitor thread. That
+    // is the reason both production callers bound the label before this
+    // point, and the reason to leave this one honest rather than papering
+    // over a caller that did not.
     let instance_name = if instance_name.trim().is_empty() {
         logical_name
     } else {
@@ -4009,6 +4020,42 @@ mod startup_tests {
 
     const SERVER_IDENTITY: &str = r#"{"name":"Living Room","version":"0.2.0","instance_id":"abc","node_id":"node-a","cluster_advertisement":false}"#;
 
+    /// The same server as one node of a cluster: the companion reads
+    /// `cluster_advertisement` and must publish this node's own identity.
+    const CLUSTERED_IDENTITY: &str = r#"{"name":"Living Room","version":"0.2.0","instance_id":"logical-server","node_id":"node-b","cluster_advertisement":true}"#;
+
+    /// One registration attempt, as an advertiser was asked to make it.
+    #[derive(Clone)]
+    struct Advertised {
+        instance_id: String,
+        name: String,
+        instance_name: String,
+        node_id: Option<String>,
+        port: u16,
+        version: String,
+    }
+
+    /// What this machine publishes for `configured`, worked out without
+    /// calling the code under test: the hostname and the address a runner
+    /// happens to have decide the answer, and a test that asked
+    /// `instance_label` would only be asking the change to agree with itself.
+    fn expected_instance_name(configured: &str, node_id: Option<&str>) -> String {
+        let machine = system_hostname();
+        let label = match (configured, machine.as_deref()) {
+            ("plurx", Some(host)) => host.to_owned(),
+            (configured, _) => configured.to_owned(),
+        };
+        match (primary_lan_address(), machine.as_deref(), node_id) {
+            // An address always tells one node from another.
+            (Some(address), _, _) => format!("{label} · {address}"),
+            // So does a hostname, but only when the label is the hostname.
+            (None, Some(_), _) if label != configured || configured == "plurx" => label,
+            // Nothing else does, so a cluster node falls back to its id.
+            (None, _, Some(node_id)) => format!("{label} · {}", node_label_suffix(node_id)),
+            (None, _, None) => label,
+        }
+    }
+
     #[tokio::test]
     async fn the_companion_advertises_the_identity_the_server_reports() {
         let (base_url, server) = identity_server(SERVER_IDENTITY).await;
@@ -5026,23 +5073,14 @@ mod startup_tests {
             .and_then(|p| p.parse::<u16>().ok())
             .expect("port");
 
-        let advertised = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         // A fn pointer cannot capture, so the record lands in a static the
         // test reads back.
-        /// One registration attempt, as the companion made it.
-        struct Advertised {
-            instance_id: String,
-            name: String,
-            instance_name: String,
-            port: u16,
-            version: String,
-        }
         static SEEN: std::sync::Mutex<Vec<Advertised>> = std::sync::Mutex::new(Vec::new());
         fn record(
             instance_id: &str,
             name: &str,
             instance_name: &str,
-            _node_id: Option<&str>,
+            node_id: Option<&str>,
             bind: SocketAddr,
             version: &str,
         ) -> anyhow::Result<mdns_sd::ServiceDaemon> {
@@ -5050,6 +5088,7 @@ mod startup_tests {
                 instance_id: instance_id.to_owned(),
                 name: name.to_owned(),
                 instance_name: instance_name.to_owned(),
+                node_id: node_id.map(str::to_owned),
                 port: bind.port(),
                 version: version.to_owned(),
             });
@@ -5070,7 +5109,6 @@ mod startup_tests {
         assert!(error.contains("no mDNS daemon"), "{error}");
 
         let seen = SEEN.lock().expect("lock");
-        advertised.lock().expect("lock").push(());
         assert_eq!(seen.len(), 1, "exactly one registration was attempted");
         let record = &seen[0];
         assert_eq!(
@@ -5087,15 +5125,76 @@ mod startup_tests {
         // itself. Reverting the companion to publishing `info.name` for a
         // cluster node — the 2026-08-20 regression — fails here on any host
         // with a hostname or a LAN address.
-        let expected = instance_label(
-            &discovery_name(
-                "Living Room",
-                system_hostname().as_deref(),
-                primary_lan_address().as_ref(),
-            ),
-            Some("node-b"),
+        // This fixture is a standalone server, so no node id is published
+        // and none may appear in the label.
+        assert_eq!(record.node_id, None);
+        assert_eq!(
+            record.instance_name,
+            expected_instance_name("Living Room", None)
         );
-        assert_eq!(record.instance_name, expected);
+        drop(seen);
+        server.abort();
+    }
+
+    /// The companion path for a cluster node — the path this whole naming
+    /// change exists for, and the one nothing exercised: `advertise_with`
+    /// must pass the node's own id through (it names the per-node host record
+    /// and rides in TXT) while publishing the label this machine computed for
+    /// itself, not the `server.name` every node of the cluster reports.
+    #[tokio::test]
+    async fn the_companion_advertises_a_cluster_node_as_its_own_machine() {
+        static SEEN: std::sync::Mutex<Vec<Advertised>> = std::sync::Mutex::new(Vec::new());
+        fn record(
+            instance_id: &str,
+            name: &str,
+            instance_name: &str,
+            node_id: Option<&str>,
+            bind: SocketAddr,
+            version: &str,
+        ) -> anyhow::Result<mdns_sd::ServiceDaemon> {
+            SEEN.lock().expect("lock").push(Advertised {
+                instance_id: instance_id.to_owned(),
+                name: name.to_owned(),
+                instance_name: instance_name.to_owned(),
+                node_id: node_id.map(str::to_owned),
+                port: bind.port(),
+                version: version.to_owned(),
+            });
+            anyhow::bail!("no mDNS daemon in this test")
+        }
+
+        let (base_url, server) = identity_server(CLUSTERED_IDENTITY).await;
+        SEEN.lock().expect("lock").clear();
+        let error = format!(
+            "{:#}",
+            advertise_with(
+                &base_url,
+                record,
+                Duration::from_millis(10),
+                std::future::pending(),
+            )
+            .await
+            .expect_err("the stub advertiser refuses")
+        );
+        assert!(error.contains("no mDNS daemon"), "{error}");
+
+        let seen = SEEN.lock().expect("lock");
+        assert_eq!(seen.len(), 1, "exactly one registration was attempted");
+        let record = &seen[0];
+        assert_eq!(
+            record.instance_id, "logical-server",
+            "the logical server clients bind to"
+        );
+        assert_eq!(
+            record.node_id.as_deref(),
+            Some("node-b"),
+            "a cluster node must still be addressed as itself: dropping this \
+             collapses every node's host record onto the logical id"
+        );
+        assert_eq!(
+            record.instance_name,
+            expected_instance_name("Living Room", Some("node-b"))
+        );
         drop(seen);
         server.abort();
     }
@@ -6051,14 +6150,17 @@ mod startup_tests {
         let seen = SEEN.lock().expect("lock").clone();
         assert_eq!(seen.len(), 1, "exactly one registration was attempted");
         let (name, instance_name) = seen[0].clone();
-        let expected = discovery_name(
-            &config.server.name,
-            system_hostname().as_deref(),
-            primary_lan_address().as_ref(),
+        assert_eq!(
+            instance_name,
+            expected_instance_name("plurx", Some(NODE)),
+            "the label a picker shows is the one this machine computed"
         );
-        assert_eq!(name, expected.label, "the TXT name is the display label");
-        assert_eq!(instance_name, instance_label(&expected, Some(NODE)));
-        if expected.distinct {
+        assert_eq!(
+            name,
+            expected_instance_name("plurx", None),
+            "the TXT name is the display label, without the node fallback"
+        );
+        if system_hostname().is_some() || primary_lan_address().is_some() {
             assert!(
                 !instance_name.contains("6b98c6cb8388"),
                 "a machine that can name itself must not be published as a UUID: {instance_name}"
