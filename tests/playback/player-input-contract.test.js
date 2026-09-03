@@ -81,6 +81,27 @@ test("the served web routing table is the fixture routing table", () => {
   assert.deepEqual(webPolicy.INPUT_ROUTING, contract.routing);
 });
 
+test("the close control leaves the player from every state", () => {
+  // `close` is a button, not the `back` key. Routed through `back`, the iOS ✕
+  // hid the chrome in `transport` and exited in no state a viewer could tap it
+  // from (2026-09-03). Every row closes what is open and then ends in `exit`.
+  const close = contract.close_control;
+  assert.ok(close, "no close_control section");
+  const outcomes = new Set(Object.keys(contract.outcomes));
+  const states = Object.keys(contract.states);
+  assert.deepEqual(Object.keys(close).filter((k) => k !== "notes").sort(), [...states].sort(), "close_control: state set");
+  for (const state of states) {
+    const steps = close[state];
+    assert.ok(Array.isArray(steps) && steps.length > 0, `close_control/${state}: no steps`);
+    for (const step of steps) assert.ok(outcomes.has(step), `close_control/${state}/${step} is not a defined outcome`);
+    assert.equal(steps.indexOf("exit"), steps.length - 1, `close_control/${state} must end in exit and run nothing after it`);
+    assert.ok(!steps.includes("hide"), `close_control/${state} hides — that is the defect`);
+  }
+  assert.deepEqual(close.scrub, ["cancel", "exit"]);
+  assert.deepEqual(close.menu, ["close_menu", "exit"]);
+  assert.deepEqual(close.info, ["close_info", "exit"]);
+});
+
 test("the timeline is never a horizontal neighbour of a button", () => {
   const rows = contract.controls.rows;
   const timelineRow = rows.find((r) => r.id === "timeline");
