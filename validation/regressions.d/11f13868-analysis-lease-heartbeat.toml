@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["11f13868", "9000000e"]
+commits = ["11f13868", "9a6530aa"]
 points = ["cluster.auth", "server.api"]
 checks = ["rust-gate", "rust-gate-ci"]
 reason = "Six unit tests drive the shared lease loop with renewal closures on a paused runtime clock: the immediate first tick renews nothing, two store errors inside one lease do not abandon the claim, a renewal that never succeeds self-fences exactly when the lease it held runs out and not a tick earlier, retirement is not reported as a loss, a renewal that loses the race to retirement is not reported as a loss either, and the lease metric family renders every event including the ones still at zero. A seventh drives the outcome reporter directly and asserts that a write matching no row and a write the store refused are both counted rather than discarded. Restoring the old shape — an unconsumed first tick, or Err treated as a lost lease — fails the first two; removing the deadline arm fails the third; removing the retirement guard fails the fifth; restoring `let _ = …` at the outcome writes fails the seventh. The remaining behaviour, that every terminal write happens after the heartbeat is retired, is enforced by the type system rather than by a test: each write takes a HeartbeatRetired proof that only retire_heartbeat can produce, so a path that settles a row while its heartbeat still beats does not compile."
