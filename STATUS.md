@@ -23,8 +23,11 @@ spawned argv gains `-strict unofficial` and keeps NAL 62/63, which is exactly
 the argv the production log carried). The second reads the argv out of a
 scoped `tracing` subscriber, because nothing in the crate captured a spawned
 command line before. Paul's R3 ruling — leave the preserved-Profile-7
-`dvh1.07`-over-`hvc1` inconsistency, which no client can reach — recorded in
-`docs/PLAYBACK.md`.
+`dvh1.07`-over-`hvc1` inconsistency — recorded in `docs/PLAYBACK.md`, with the
+correction the review forced: Android *does* enumerate Profile 7
+(`CapsPolicy.kt` maps `DVHE_DTB -> 7`), so the state is reachable from a
+dual-layer box. The delivery plays; what it cannot rely on is the master
+playlist and the init segment agreeing about the fourcc.
 
 **Not verified on hardware.** Nothing here has been played from a browser
 against the fleet; the deployed-build re-test is a separate hand-off.
