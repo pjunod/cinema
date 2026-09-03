@@ -772,6 +772,62 @@ deadline, so it can never race a live preparation whose owner is still
 renewing. A duplicate of that test at the executor level was written and
 discarded as vacuous.
 
+## The axis rule refuses every real quality change, and M5.5 never ran the case
+
+**Read 2026-09-03 on m6**, on `v0.3.0-487-gd7194b05` — the build carrying the
+seam's file and ask gates, so unlike the first reading this one counts only
+transitions a viewer actually made. Apple TV on build 114, which declares
+`dual_player_preparation: true` and reports `observedDownloadBps`.
+
+Two deliberate quality changes, one HDR title and one SDR:
+
+| title | change | axis | outcome | counterfactual |
+|---|---|---|---|---|
+| Avatar (HDR/DV) | 2160 → 1080 | `dynamic_range` | `multiple_axes` | identical |
+| Dance Flick (SDR H.264) | 1080 → 720 | `delivery_method` | `multiple_axes` | identical |
+
+**Neither is a resolution change.** The top rung direct-plays and the lower
+rungs must transcode, so the delivery method moves with the height *every
+time*; on HDR content the delivered grade moves too. A pure
+`ResolutionOrBitrate` transition does not occur on this library at all.
+
+**So `PREPARED_AXIS` as written refuses everything, and no client release
+changes that.** `MultipleAxes` is ranked above the client gate deliberately —
+which is why the counterfactual is identical to the decision on both rows. The
+capability literal was never the blocker. The axis rule is.
+
+That is the finding shadow mode was built to produce, and it arrived before
+anything was staged on top of it.
+
+### What M5.5 supports, and the one case it never ran
+
+The spike's §3 defines its two cases exactly: **same-codec, same grade** — "a
+resolution/bitrate change only — the axis plan §5.2 expects to be genuinely
+transparent" — and **a codec or dynamic-range change**, expected to be worse.
+Apple passed **both, 20/20, on both required devices**.
+
+So each axis is individually proven on Apple. What the spike never ran is
+**their product**, and the `MultipleAxes` comment says so in as many words:
+"M5.5 ran two cases, not their product." Tonight's measurement is that the
+product is the only thing that actually happens.
+
+**The gap is now exactly one hardware case**, and it is smaller than the
+original arm: 20 consecutive commits on a recipe pair that changes resolution
+*and* delivery method together — a real 2160 → 1080 on a direct-playing source,
+which is the transition the fleet actually produces. The harness exists, the
+corrective instruments are accepted, and the acceptance is the spike's own:
+zero predecessor and zero post-commit stalls, boundary-qualified first frames,
+non-full varying runway, per-trial wire counts.
+
+**Until that case runs, §3.4 must not ship.** Staging a successor for a
+transition M6 then refuses is cost with no benefit, and widening
+`PREPARED_AXIS` to admit the product on the strength of two separate single-axis
+proofs is exactly the reasoning shadow mode exists to replace. If the case
+passes, `PREPARED_AXIS` widens to the measured combination and M6 has something
+to prepare for. If it fails, M6's honest scope is the one-player
+release-and-replace it already has, and that is worth knowing before the
+executor gets a caller.
+
 ## Shadow mode ran, and the axis rule is what limits M6
 
 **Read 2026-09-03 on m6**, on `v0.3.0-449-gd1a56d01`, from three deliberate
