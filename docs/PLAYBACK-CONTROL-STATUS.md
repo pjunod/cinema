@@ -881,7 +881,7 @@ one platform. Whether multi-axis dominance is a property of HDR sources, of
 this ladder, or of quality changes generally needs more titles and the other
 two platforms.
 
-## M8 is not independent of M6, and three of its five cases are already proven
+## M8 is not independent of M6, and four of its five cases are already proven
 
 **Scoped 2026-09-03** against the store contract suite, which was run rather
 than read: 23 media-session tests pass on **both** backends.
@@ -895,7 +895,7 @@ what exists:
 | stale owner | **covered** | `media_session_commit_against_a_moved_pointer_aborts_the_successor`, `media_session_a_removed_owner_cannot_prepare`, `media_session_rejoin_cannot_retarget_an_occupied_preparation_after_pointer_advance` |
 | hard kill during a phase | **covered at the store** | `media_session_maintenance_reaps_an_abandoned_preparation`, and the three `hiqlite_media_session_rejoin_*` post-proposal cases — resurrect-an-aborted, survive-a-post-proposal-commit, classify-a-post-proposal-abort |
 | planned drain | **not built** | see below |
-| shared-store loss | **no coverage** | nothing in the contract suite exercises it |
+| shared-store loss | **covered** | `shared_cache.rs`: `mount_loss_during_publication_cannot_install_or_complete_generation`, `mount_loss_after_commit_begins_preserves_global_generation`, `runtime_failure_revokes_shared_classification_until_readmission`, `stale_canary_proof_cannot_reenable_a_failed_mount`, `gc_refuses_a_replaced_root_before_any_retirement_work` — 12 pass |
 
 **Split-brain (§10.4) is already answered, by a stronger fence than the one the
 plan names.** The plan asks that only the owner holding the current replicated
@@ -934,10 +934,24 @@ mean building the harder half of a mechanism whose local half does not exist.
   EVENT URL and return a successor at an aligned boundary through the current
   control exchange; with no control snapshot, fall back to persisted watch
   position and fetched frontier and require a normal reopen.
-- **Shared-store loss**, which has no coverage at all and is a contract-suite
-  gap rather than a new mechanism.
+**Correction, same day.** This section first said shared-store loss had no
+coverage. It does — the search was run against the *store contract* suite,
+where the term does not appear, and the mechanism lives in `shared_cache.rs`
+instead. A configured path is never treated as shared on its own: every voter
+proves it can read a peer-created canary and that the peer can read its own
+response back through the same mount, and a runtime failure revokes the
+classification immediately while node-local routing continues. The two cases
+M8 actually needs — mount loss *during* publication, and mount loss *after* a
+commit begins — each have their own test, and a stale canary proof cannot
+re-enable a failed mount.
 
-Neither depends on the axis case.
+So §10.3's remaining work is the media-session half, not the storage half:
+resurrect the immutable VOD handle or redirect to an equivalent successor;
+for rolling, refuse to splice an unrelated producer into an EVENT URL and
+return a successor at an aligned boundary; with no control snapshot, fall back
+to persisted watch position and fetched frontier and require a normal reopen.
+
+That does not depend on the axis case.
 
 ## M5.5 ran, and two thirds of it settled
 
