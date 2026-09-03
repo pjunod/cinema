@@ -274,6 +274,15 @@ impl ControlRequestV1 {
         self.accepts(HOLD_ACTION)
     }
 
+    /// Whether this client said it will apply `prepare_replacement`.
+    ///
+    /// A named accessor beside `accepts_hold` rather than exporting the
+    /// constant: the vocabulary is this module's, and a caller that spells the
+    /// name itself is a caller that can misspell it.
+    pub(crate) fn accepts_prepare_replacement(&self) -> bool {
+        self.accepts(PREPARE_REPLACEMENT_ACTION)
+    }
+
     /// Whether this client said it will apply the named action.
     pub(crate) fn accepts(&self, action: &str) -> bool {
         self.supported_actions
@@ -2389,7 +2398,90 @@ impl TerminalCommitReceipt {
 pub(crate) type GateAnswer<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
 
+/// Which delivery engine a gate speaks for.
+///
+/// A label on the staging counter, and the reason it exists: this milestone has
+/// twice shipped a mechanism wired to the engine that serves almost nothing,
+/// and both times the reading that would have caught it did not exist. An
+/// operator must be able to see *which* engine is staging successors without
+/// reading the routing code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreparationEngine {
+    /// The rolling actor — the minority of sessions.
+    Rolling,
+    /// The VOD engine, which `into_request` sends every create to.
+    Vod,
+}
+
+impl PreparationEngine {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Rolling => "rolling",
+            Self::Vod => "vod",
+        }
+    }
+}
+
+/// What a staging attempt came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageOutcome {
+    /// The row exists and the slot holds it.
+    Staged,
+    /// The store's CAS lost: the pointer moved, a successor was already
+    /// staged, or the user is at an admission bound.
+    StoreRefused,
+    /// The row was written and the slot would not take it, so the row was
+    /// aborted again.
+    SlotRefused,
+    /// A real fault, not a refusal.
+    Failed,
+}
+
+impl StageOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Staged => "staged",
+            Self::StoreRefused => "store_refused",
+            Self::SlotRefused => "slot_refused",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+static PREPARATION_STAGES: [[AtomicU64; 4]; 2] = [const { [const { AtomicU64::new(0) }; 4] }; 2];
+
+fn record_stage(engine: PreparationEngine, outcome: StageOutcome) {
+    let engine_index = match engine {
+        PreparationEngine::Rolling => 0,
+        PreparationEngine::Vod => 1,
+    };
+    let outcome_index = match outcome {
+        StageOutcome::Staged => 0,
+        StageOutcome::StoreRefused => 1,
+        StageOutcome::SlotRefused => 2,
+        StageOutcome::Failed => 3,
+    };
+    PREPARATION_STAGES[engine_index][outcome_index].fetch_add(1, Ordering::Relaxed);
+}
+
 pub(crate) trait PreparationGate: Send + Sync {
+    /// Which engine answers for this session.
+    fn engine(&self) -> PreparationEngine;
+
+    /// Whether the slot is free *right now*.
+    ///
+    /// Advisory, and deliberately so: the authority is
+    /// [`Self::stage_preparation`], taken under the slot's own lock. This
+    /// exists because the caller spends a **real encoder** before it can ask
+    /// the authority anything, and one already-staged successor would
+    /// otherwise mean a fresh process started and thrown away on every
+    /// selection change a viewer makes.
+    ///
+    /// A `true` that turns out to be wrong costs one wasted start. A `false`
+    /// is always right — the slot only empties on settle — so this can refuse
+    /// early without ever refusing wrongly.
+    fn slot_is_free<'a>(&'a self) -> GateAnswer<'a>;
+
     /// Take the slot for a successor whose durable row already exists.
     ///
     /// `false` when the slot is occupied or the playback is no longer live. In
@@ -2404,9 +2496,16 @@ pub(crate) trait PreparationGate: Send + Sync {
     /// Whether this exact successor may still be committed. Asked immediately
     /// before the durable CAS, because the gate and the call cannot be one
     /// transaction.
+    ///
+    /// Staging has a production caller; committing does not until M6 §3.5
+    /// ships the trigger, so these two are still reached only by tests. Marked
+    /// individually rather than by exempting the whole trait, so that the day
+    /// §3.5 lands the attribute is the thing that has to be removed.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn may_commit_preparation<'a>(&'a self, staged_incarnation_id: &'a str) -> GateAnswer<'a>;
 
     /// Report a preparation's durable outcome and free the slot.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn settle_preparation<'a>(
         &'a self,
         staged_incarnation_id: &'a str,
@@ -2415,6 +2514,14 @@ pub(crate) trait PreparationGate: Send + Sync {
 }
 
 impl PreparationGate for RollingControlHandle {
+    fn engine(&self) -> PreparationEngine {
+        PreparationEngine::Rolling
+    }
+
+    fn slot_is_free<'a>(&'a self) -> GateAnswer<'a> {
+        Box::pin(async move { self.preparation_slot_is_free().await })
+    }
+
     fn stage_preparation<'a>(
         &'a self,
         staged_incarnation_id: String,
@@ -3024,6 +3131,11 @@ impl ControlState {
         self.preparation.staged_incarnation_id()
     }
 
+    /// Whether the slot holds nothing.
+    pub(crate) fn preparation_slot_is_free(&self) -> bool {
+        matches!(self.preparation, PreparationSlot::Empty)
+    }
+
     /// Whether this exact successor may still be committed.
     // Reached in production only through a `PreparationGate`, and the gate has
     // no caller until the HTTP layer stages a successor — the same state
@@ -3566,13 +3678,11 @@ pub(crate) struct ActionProposal {
 /// asked as late as possible and told as soon as an answer exists. The window
 /// between them is exactly why `settle` re-checks identity rather than
 /// trusting the gate's earlier `true`.
-// Exercised by tests against a real `SqliteStore` — the three phases M6's
-// acceptance names are testable without hardware, and they are the ones worth
-// pinning before a caller exists. Still no production caller until the HTTP
-// layer stages a successor, hence the non-test allow rather than an invented
-// one: a caller written to satisfy a lint is how a mechanism ends up with a
-// shape nobody chose.
-#[cfg_attr(not(test), allow(dead_code))]
+// The caller arrived on 2026-09-03: `stage_prepared_successor` in the HTTP
+// layer, on an in-session selection change from a client that has declared
+// `prepare_replacement`. Until then this carried a non-test `allow(dead_code)`
+// rather than an invented caller, because a caller written to satisfy a lint is
+// how a mechanism ends up with a shape nobody chose.
 pub(crate) struct PreparationExecutor {
     store: std::sync::Arc<dyn plurx_core::store::Store>,
     control: std::sync::Arc<dyn PreparationGate>,
@@ -3580,7 +3690,6 @@ pub(crate) struct PreparationExecutor {
     playback_id: String,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl PreparationExecutor {
     pub(crate) fn new(
         store: std::sync::Arc<dyn plurx_core::store::Store>,
@@ -3608,12 +3717,21 @@ impl PreparationExecutor {
         &self,
         preparation: &plurx_core::domain::MediaSessionPreparation,
     ) -> Result<bool, plurx_core::error::StoreError> {
-        if self
-            .store
-            .prepare_media_session(preparation)
-            .await?
-            .is_none()
-        {
+        // Counted here, labelled by engine, because this is the one place both
+        // engines' staging passes through. Which engine is doing the work is
+        // the reading this milestone twice lacked: a mechanism wired to the
+        // actor that serves almost nothing looks identical, from every other
+        // counter, to one that is simply not firing.
+        let engine = self.control.engine();
+        let prepared = match self.store.prepare_media_session(preparation).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                record_stage(engine, StageOutcome::Failed);
+                return Err(error);
+            }
+        };
+        if prepared.is_none() {
+            record_stage(engine, StageOutcome::StoreRefused);
             return Ok(false);
         }
         if self
@@ -3624,6 +3742,7 @@ impl PreparationExecutor {
             )
             .await
         {
+            record_stage(engine, StageOutcome::Staged);
             return Ok(true);
         }
         let _ = self
@@ -3635,6 +3754,7 @@ impl PreparationExecutor {
                 preparation.now_ms,
             )
             .await;
+        record_stage(engine, StageOutcome::SlotRefused);
         Ok(false)
     }
 
@@ -3646,6 +3766,7 @@ impl PreparationExecutor {
     /// generation and **never reaps the newer player generation** that won,
     /// which is why the predecessor is recorded at preparation time rather
     /// than read fresh at commit.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn commit(
         &self,
         staged_incarnation_id: &str,
@@ -3704,6 +3825,7 @@ impl PreparationExecutor {
     /// ended, or that was never staged, leaves nothing for the actor to hold —
     /// and an owner retrying an abort after a crash must read back the same
     /// outcome rather than a spurious loss.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn abort(
         &self,
         staged_incarnation_id: &str,
@@ -5437,6 +5559,11 @@ enum RollingControlCommand {
         staged_incarnation_id: String,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
+    /// Advisory read of the slot, asked before an encoder is spent finding out
+    /// the hard way. See [`PreparationGate::slot_is_free`].
+    PreparationSlotIsFree {
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     /// Report a preparation's durable outcome. `committed` false covers both a
     /// completed abort and a lost commit CAS — the store returning `Ok(None)`
     /// because the pointer no longer names the recorded predecessor. Both free
@@ -5566,6 +5693,9 @@ impl RollingControlCommand {
             Self::SettleProducerFlowSignal { .. } => Some(20),
             Self::StagePreparation { .. } => Some(21),
             Self::MayCommitPreparation { .. } => Some(22),
+            // Advisory and read-only; it moves nothing, so it is not one of
+            // the command outcomes the operator counter is about.
+            Self::PreparationSlotIsFree { .. } => None,
             Self::SettlePreparation { .. } => Some(23),
             Self::ObservePublication { .. } => Some(4),
             Self::CommitMedia { .. } => Some(5),
@@ -8935,6 +9065,13 @@ impl RollingControlActor {
                 } => {
                     let _ = reply.send(self.control.may_commit_preparation(&staged_incarnation_id));
                 }
+                RollingControlCommand::PreparationSlotIsFree { reply } => {
+                    let _ = reply.send(
+                        !self.retired
+                            && self.terminal.is_none()
+                            && self.control.preparation_slot_is_free(),
+                    );
+                }
                 RollingControlCommand::SettlePreparation {
                     staged_incarnation_id,
                     committed,
@@ -10282,6 +10419,23 @@ impl RollingControlHandle {
         response.await.unwrap_or(false)
     }
 
+    /// Whether the actor's slot currently holds nothing.
+    ///
+    /// Advisory — see [`PreparationGate::slot_is_free`]. Asked on the mailbox
+    /// like every other slot question, so it observes the actor's own view
+    /// rather than a copy that could disagree with it.
+    pub(crate) async fn preparation_slot_is_free(&self) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command(RollingControlCommand::PreparationSlotIsFree { reply })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
     /// Whether this exact successor may still be committed. Asked immediately
     /// before the durable CAS and re-checked after it, because the gate and
     /// the call cannot be one transaction.
@@ -11062,6 +11216,33 @@ pub(crate) fn prometheus() -> String {
             "plurx_playback_preparation_observations_total{{seam=\"{seam}\"}} {}\n",
             PREPARATION_OBSERVATIONS[index].load(Ordering::Relaxed)
         ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_stages_total Successors staged, by the engine that holds the slot and what the attempt came to.\n\
+         # TYPE plurx_playback_preparation_stages_total counter\n",
+    );
+    // Labelled off the enums rather than a parallel list of strings, so a new
+    // engine or outcome cannot be added to one and forgotten in the other.
+    for (engine_index, engine) in [PreparationEngine::Rolling, PreparationEngine::Vod]
+        .into_iter()
+        .enumerate()
+    {
+        for (outcome_index, outcome) in [
+            StageOutcome::Staged,
+            StageOutcome::StoreRefused,
+            StageOutcome::SlotRefused,
+            StageOutcome::Failed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            output.push_str(&format!(
+                "plurx_playback_preparation_stages_total{{engine=\"{}\",outcome=\"{}\"}} {}\n",
+                engine.as_str(),
+                outcome.as_str(),
+                PREPARATION_STAGES[engine_index][outcome_index].load(Ordering::Relaxed)
+            ));
+        }
     }
     output.push_str(
         "# HELP plurx_playback_control_holds_total Holds sent to a client, by the reason production is not advancing.\n\
@@ -16796,6 +16977,123 @@ mod tests {
         };
         assert!(unavailable.is_valid_for_status(503));
         assert!(!unavailable.is_valid_for_status(409));
+    }
+
+    /// The staging counter says *which engine* did it, and that is the point.
+    ///
+    /// This milestone has twice shipped a mechanism wired to the rolling
+    /// actor — which `into_request` routes almost nothing to — and both times
+    /// every other counter looked identical to a mechanism that simply was not
+    /// firing. An operator must be able to read the engine off the metric
+    /// rather than off the routing code.
+    #[test]
+    fn the_staging_metric_publishes_every_engine_and_outcome() {
+        let metrics = prometheus();
+        for engine in [PreparationEngine::Rolling, PreparationEngine::Vod] {
+            for outcome in [
+                StageOutcome::Staged,
+                StageOutcome::StoreRefused,
+                StageOutcome::SlotRefused,
+                StageOutcome::Failed,
+            ] {
+                let series = format!(
+                    "plurx_playback_preparation_stages_total{{engine=\"{}\",outcome=\"{}\"}}",
+                    engine.as_str(),
+                    outcome.as_str(),
+                );
+                assert!(
+                    metrics.contains(&series),
+                    "{series} is missing from the exposition",
+                );
+            }
+        }
+        assert!(
+            metrics.contains("# TYPE plurx_playback_preparation_stages_total counter"),
+            "the family needs its own HELP and TYPE, not a neighbour's",
+        );
+    }
+
+    /// The rolling actor answers the advisory read too, and on the mailbox.
+    ///
+    /// Both engines must agree about what "free" means, or the caller's
+    /// pre-check protects one path and not the other — which is the exact
+    /// asymmetry the slot move existed to remove.
+    #[tokio::test]
+    async fn the_rolling_slot_answers_the_advisory_read() {
+        let now_ms = 2_000;
+        let (predecessor, _store, control, executor) = preparation_fixture(now_ms).await;
+        let gate: Arc<dyn PreparationGate> = Arc::new(control.clone());
+
+        assert!(gate.slot_is_free().await);
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(executor
+            .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+            .await
+            .expect("stage"));
+        assert!(
+            !gate.slot_is_free().await,
+            "a taken slot is visible without spending a second start",
+        );
+        assert!(control.settle_preparation(&successor, true).await);
+        assert!(gate.slot_is_free().await);
+
+        // An actor that is gone answers `false` rather than hanging or
+        // pretending it has room.
+        let dead: Arc<dyn PreparationGate> = Arc::new(RollingControlHandle::unavailable_for_test());
+        assert!(!dead.slot_is_free().await);
+    }
+
+    /// A staged successor is counted once, against the engine that took it.
+    #[tokio::test]
+    async fn staging_counts_against_the_engine_that_holds_the_slot() {
+        let now_ms = 2_000;
+        let (predecessor, _store, _control, executor) = preparation_fixture(now_ms).await;
+        let successor = uuid::Uuid::new_v4().to_string();
+        let before = staged_count(PreparationEngine::Rolling, StageOutcome::Staged);
+        let refused_before = staged_count(PreparationEngine::Rolling, StageOutcome::StoreRefused);
+
+        assert!(executor
+            .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+            .await
+            .expect("stage"));
+        assert_eq!(
+            staged_count(PreparationEngine::Rolling, StageOutcome::Staged),
+            before + 1,
+        );
+        assert_eq!(
+            staged_count(PreparationEngine::Vod, StageOutcome::Staged),
+            0,
+            "the VOD engine did nothing here and must not be credited with it",
+        );
+        // A second successor for the same playback loses the store's CAS
+        // before it ever reaches the slot, and that is a different reading
+        // from a slot refusal.
+        assert!(!executor
+            .stage(&staged_preparation(
+                &uuid::Uuid::new_v4().to_string(),
+                &predecessor,
+                now_ms + 200,
+            ))
+            .await
+            .expect("second stage"));
+        assert_eq!(
+            staged_count(PreparationEngine::Rolling, StageOutcome::StoreRefused),
+            refused_before + 1,
+        );
+    }
+
+    fn staged_count(engine: PreparationEngine, outcome: StageOutcome) -> u64 {
+        let engine_index = match engine {
+            PreparationEngine::Rolling => 0,
+            PreparationEngine::Vod => 1,
+        };
+        let outcome_index = match outcome {
+            StageOutcome::Staged => 0,
+            StageOutcome::StoreRefused => 1,
+            StageOutcome::SlotRefused => 2,
+            StageOutcome::Failed => 3,
+        };
+        PREPARATION_STAGES[engine_index][outcome_index].load(Ordering::Relaxed)
     }
 
     /// The shadow metric's full cross product is published from boot, and its

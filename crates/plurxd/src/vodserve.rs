@@ -1522,6 +1522,28 @@ impl VodPreparationGate {
 }
 
 impl crate::playback_control::PreparationGate for VodPreparationGate {
+    fn engine(&self) -> crate::playback_control::PreparationEngine {
+        crate::playback_control::PreparationEngine::Vod
+    }
+
+    fn slot_is_free<'a>(&'a self) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                return false;
+            };
+            if session.tombstone.is_some() {
+                return false;
+            }
+            let free = session
+                .control
+                .lock()
+                .expect("control lock")
+                .preparation_slot_is_free();
+            free
+        })
+    }
+
     fn stage_preparation<'a>(
         &'a self,
         staged_incarnation_id: String,
@@ -8327,6 +8349,46 @@ mod tests {
             !gate.may_commit_preparation(&successor).await,
             "a settled successor is no longer committable",
         );
+    }
+
+    /// The advisory read refuses before an encoder is spent finding out.
+    ///
+    /// `stage_preparation` is the authority, but it is only reachable *after*
+    /// the caller has started a worker — so a full slot would otherwise cost a
+    /// fresh encoder on every selection change a viewer makes. A `false` here
+    /// is never wrong: the slot empties only on settle.
+    #[tokio::test]
+    async fn the_slot_says_it_is_full_before_an_encoder_is_spent() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, &session_id, Arc::clone(&rendition), Instant::now()).await;
+        let gate = serve.preparation_gate(&session_id).await.expect("gate");
+
+        assert!(gate.slot_is_free().await, "an untouched session has room");
+        let staged = uuid::Uuid::new_v4().to_string();
+        assert!(
+            gate.stage_preparation(staged.clone(), uuid::Uuid::new_v4().to_string())
+                .await
+        );
+        assert!(
+            !gate.slot_is_free().await,
+            "and says so before a second successor is started",
+        );
+        assert!(gate.settle_preparation(&staged, true).await);
+        assert!(gate.slot_is_free().await, "settling frees it again");
+
+        // Liveness answers here too, so a dead session never costs a start.
+        serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get_mut(&session_id)
+            .expect("session")
+            .tombstone = Some(Terminal::Deleted);
+        assert!(!gate.slot_is_free().await);
     }
 
     /// An abandoned successor frees the slot, on this engine too.

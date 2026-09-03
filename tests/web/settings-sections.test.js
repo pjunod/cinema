@@ -65,10 +65,10 @@ function memoryStorage(initial) {
 
 test("every section is a route, grouped in the rail's order", () => {
   const r = routing(memoryStorage(), "#/settings/playback");
-  assert.deepEqual(r.SET_GROUPS.map(([group]) => group), ["Content", "Playback", "Server", "Outside"]);
+  assert.deepEqual(r.SET_GROUPS.map(([group]) => group), ["Content", "Playback", "Server", "Outside", "Developer"]);
   assert.deepEqual(r.SET_TABS.map(([id]) => id), [
     "libraries", "metadata", "playback", "analysis",
-    "maintenance", "users", "system", "cluster", "integrations",
+    "maintenance", "users", "system", "cluster", "integrations", "developer",
   ]);
   const dispatch = {
     metadata: "metadataPanel(d.settings)",
@@ -79,6 +79,7 @@ test("every section is a route, grouped in the rail's order", () => {
     system: "systemPanel(d.sys,d.playbackEvents)",
     cluster: "clusterPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",
+    developer: "developerPanel(d.settings)",
   };
   const panel = shippedSource("settingsPanel");
   for (const [id] of r.SET_TABS) {
@@ -144,7 +145,7 @@ test("the rail marks the active section, shows counts it already has, and never 
   );
   const data = { libs: [{ kind: "movies" }, { kind: "home" }], users: [{}, {}, {}], settings: { tmdb_configured: false } };
   const html = rail(data, esc, { clusterStateView: () => ({ tone: "good" }) })("users");
-  assert.equal((html.match(/class="setgroup"/g) || []).length, 4);
+  assert.equal((html.match(/class="setgroup"/g) || []).length, 5);
   assert.match(html, /class="settab active" role="link" aria-current="page" onclick="setSettingsTab\('users'\)">Users<span class="setn">3<\/span>/);
   assert.match(html, /onclick="setSettingsTab\('libraries'\)">Libraries<span class="setn">2<\/span>/);
   assert.match(html, /Metadata<span class="setdot"/, "a missing TMDB key with a provider library is flagged before the section is opened");
@@ -197,20 +198,56 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     (v) => v, () => {}, () => {}, {}, {},
   );
   const defaults = ["pal", "psl", "psm", "perr"];
-  const streaming = ["prr", "pabr", "phr", "phb", "pha", "phs", "pvod", "pvlr", "pcpv1", "pvws", "pvmb", "serr"];
+  // The two switches that are off on purpose moved to Developer, so Streaming
+  // no longer writes them: a card that saves a field it does not show can turn
+  // something back on that an operator deliberately turned off.
+  const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "serr"];
+  const developer = ["pcpv1", "pph", "dverr"];
+  const experimental = ["phs", "dxerr"];
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
+    run("saveDeveloper", developer)({ disabled: false }),
+    run("saveExperimental", experimental)({ disabled: false }),
   ]).then(() => {
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
-      "hls_ahead_max_secs", "hls_burst_secs", "hls_readrate", "hls_typeless_sliding", "playback_auto_abr",
-      "playback_control_protocol_v1", "stream_readrate", "vod_block_budget_secs", "vod_live_recovery",
+      "hls_ahead_max_secs", "hls_burst_secs", "hls_readrate", "playback_auto_abr",
+      "stream_readrate", "vod_block_budget_secs", "vod_live_recovery",
       "vod_materialize_budget_secs", "vod_presentation", "vod_working_set_bytes",
     ]);
+    assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), [
+      "playback_control_protocol_v1", "playback_prepared_handoff",
+    ]);
+    assert.deepEqual(Object.keys(writes.saveExperimental.body).sort(), ["hls_typeless_sliding"]);
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
+    assert.equal(writes.saveDeveloper.path, "/settings");
   });
+});
+
+test("Developer is where the switches that cost something live", () => {
+  const panel = new Function(
+    "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
+    `${shippedSource("developerPanel")} return developerPanel;`,
+  )(
+    (title, sub) => `HEAD:${title}|${sub}`,
+    (body) => `CARD[${body}]`,
+    (title, sub) => `CARDHEAD:${title}|${sub || ""}`,
+    (id, label, note) => `TOG:${id}|${label}|${note}`,
+    (fn) => `FOOT:${fn}`,
+    esc,
+  );
+  const html = panel({ playback_control_protocol_v1: true, playback_prepared_handoff: false, hls_typeless_sliding: false });
+  for (const id of ["pcpv1", "pph", "phs"]) {
+    assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
+  }
+  assert.match(html, /FOOT:saveDeveloper/);
+  assert.match(html, /FOOT:saveExperimental/);
+  // Each switch says what it costs. "experimental" alone tells an operator
+  // nothing about whether turning it on will cost them a stream.
+  assert.match(html, /spends an encoder/, "the handoff switch must name its price");
+  assert.match(html, /counts against that viewer's session limit/);
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {

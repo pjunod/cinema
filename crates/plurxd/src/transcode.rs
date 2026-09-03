@@ -16637,6 +16637,24 @@ impl TranscodeManager {
             .await
     }
 
+    /// The preparation gate for one session, from whichever engine serves it.
+    ///
+    /// Routed in the same order as [`Self::hls_session_control_with_terminal`]:
+    /// VOD first, because `into_request` sets `Presentation::Vod` for every
+    /// create and that engine therefore holds nearly every session, then the
+    /// rolling actor. `None` means neither is serving it — a session that has
+    /// ended — and is never a reason to stage against the other engine.
+    pub(crate) async fn preparation_gate(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Option<std::sync::Arc<dyn crate::playback_control::PreparationGate>> {
+        if let Some(gate) = self.vod.preparation_gate(session_id).await {
+            return Some(gate);
+        }
+        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        Some(std::sync::Arc::new(session.control.clone()))
+    }
+
     pub(crate) async fn hls_session_control_with_terminal(
         self: &Arc<Self>,
         control: crate::playback_control::LocalControlRequest<'_>,

@@ -602,7 +602,16 @@ expected_occurrences = 14
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
 pattern = "commit_guard_before"
-expected_occurrences = 13
+# 14 with M6's prepared successor. `stage_prepared_successor` writes a durable
+# media-session row and a job lease naming this node as owner, and it does that
+# *after* `create_cluster_session` has returned — so the generation that call
+# checked is already stale by the time the write lands. A node that lost
+# authority in between must not claim a playback it no longer serves, which is
+# what every other fenced write in this module holds a guard for. The guard is
+# taken immediately before `PreparationExecutor::stage` and released when the
+# staging returns; a refused guard aborts the started worker rather than
+# leaving it running behind a fence.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"

@@ -5137,6 +5137,9 @@ async fn control_local_inner(
                 // not start and would then leave the measurement
                 // unattributable.
                 platform: result.platform,
+                route: route.clone(),
+                predecessor_response: start.clone(),
+                accepts_prepare: request.accepts_prepare_replacement(),
             },
         ));
     }
@@ -5318,6 +5321,292 @@ struct PreparationShadowInputs {
     delivered_bps: Option<i64>,
     capabilities: Option<crate::playback_control::DynamicCapabilities>,
     platform: crate::playback_control::ClientPlatform,
+    /// The route this exchange was fence-checked against, so the predecessor
+    /// a staged successor names is the one the client just proved it holds
+    /// rather than one re-read after the fact.
+    route: MediaSessionRoute,
+    /// The predecessor's own response, already parsed by the exchange.
+    predecessor_response: StartResponse,
+    /// Whether this client said it will apply `prepare_replacement`.
+    ///
+    /// The **action vocabulary**, not the capability. `dual_player_preparation`
+    /// says the client can run two players; this says it will understand being
+    /// handed a successor. No shipped client declares it, so staging is inert
+    /// on the fleet until one does — which is what makes shipping the server
+    /// half ahead of the client half safe.
+    accepts_prepare: bool,
+}
+
+/// How long a prepared successor's start may take before it is abandoned.
+///
+/// Generous next to a control exchange's own deadline and short next to a
+/// viewer's patience: this runs on a spawned task, so nothing is waiting on it,
+/// but a start that has not produced a session in ten seconds is a node under
+/// load, and adding a second encoder to that is the opposite of what a prepared
+/// handoff is for.
+const PREPARED_START_BUDGET: Duration = Duration::from_secs(10);
+
+/// How long a staged successor stays a candidate.
+///
+/// A cost, not a reservation. The store's own doc is explicit that a staged
+/// successor counts against the user's admission cap with **nothing
+/// discounted**, because a preparation reaps nothing — so this window is a real
+/// encoder slot held out of a viewer's budget for its whole duration. A minute
+/// is longer than any prime that is going to succeed and shorter than a stall
+/// anyone would sit through; a client that has not acknowledged readiness by
+/// then is not about to.
+///
+/// One clock, deliberately: this is written to the staged row's
+/// `lease_expires_at_ms` as well as the preparation ledger, so
+/// `maintain_media_sessions` is the backstop for an owner that died holding a
+/// successor rather than a second authority racing the first.
+const PREPARED_SUCCESSOR_WINDOW_MS: i64 = 60_000;
+
+/// Whether this operator has enabled prepared handoffs.
+///
+/// A **server** gate, and separate from the client's declared action on
+/// purpose. `supported_actions` is request body: any authenticated account can
+/// put `prepare_replacement` in it, and staging spends a real encoder against
+/// that user's admission cap. The client declaration says a successor would be
+/// understood; this says the operator is willing to pay for one. Absent or `0`
+/// refuses, matching `playback.control_protocol_v1` beside it.
+///
+/// Read per attempt rather than cached: this is the switch an operator reaches
+/// for when a node is in trouble, and a cached `1` would keep spending
+/// encoders after it had been turned off.
+async fn prepared_handoff_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting(plurx_core::store::keys::PLAYBACK_PREPARED_HANDOFF)
+        .await
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1")
+}
+
+/// Start a successor for this playback and stage it durably.
+///
+/// **Make-before-break, and that rests on one fact.**
+/// `TranscodeManager::reap_superseded_before` documents it, and the code
+/// agrees: `create_cluster_session` always passes a replacement deadline, and
+/// `try_vod_session` runs the supersession sweep only when that deadline is
+/// absent. So the successor's worker starts while the predecessor keeps
+/// serving, and the durable half is `prepare_media_session` — never
+/// `activate_media_session`, which reaps the supersession and moves the
+/// playback pointer.
+///
+/// **Order matters more than it looks, and an adversarial review is why.**
+/// The successor's identity is minted *before* the create and handed to it as
+/// the request id, because that id is what the worker is registered under and
+/// therefore what an abort has to name; the first version minted it after and
+/// its teardown silently matched nothing. The slot is asked *before* the
+/// create, because the authoritative refusals — the store's CAS and the slot's
+/// own lock — both live downstream of a started process, so a full slot would
+/// otherwise cost one encoder per selection change a viewer makes. And the
+/// replacement gate is released as soon as the worker exists, because a real
+/// client reopen for the same player needs that gate and would otherwise wait
+/// behind a durable write.
+///
+/// **Returns `false` for every refusal, and they are all the same to a caller:
+/// this successor is not going to exist.** The distinctions live where they can
+/// be acted on — the store separates a lost CAS from a fault, and the counter
+/// separates both from a slot refusal.
+///
+/// **The worker is this function's to clean up.**
+/// [`crate::playback_control::PreparationExecutor::stage`] writes the durable
+/// row first and takes the slot second, and aborts the row itself if the slot
+/// refuses. It knows nothing about the process started here. So a lost stage
+/// aborts the started session as well, or the node keeps an encoder nobody will
+/// ever commit — outliving even the preparation deadline that reaps the row.
+async fn stage_prepared_successor(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    predecessor_recipe: &RemoteStartRequest,
+    predecessor_response: &StartResponse,
+    candidate: &crate::transcode::SessionRequest,
+    source: Option<&MediaFile>,
+) -> bool {
+    // Asked before anything is spent. Advisory — the slot's own lock is the
+    // authority — but a `false` here is always right, and it is the difference
+    // between one wasted encoder and one per selection change.
+    let Some(gate) = state.transcode.preparation_gate(&route.session_id).await else {
+        return false;
+    };
+    if !gate.slot_is_free().await {
+        return false;
+    }
+    // The serving fence, before anything is started. `create_cluster_session`
+    // re-checks the admitted generation after the replacement gate; the
+    // durable write below takes its own commit guard, because the write can
+    // land after the create returns.
+    let authority = state.serving.authority();
+    let Some(admitted_generation) = authority.admit() else {
+        return false;
+    };
+    let deadline = tokio::time::Instant::now() + PREPARED_START_BUDGET;
+    let Ok(Some(user)) = state.store.get_user(route.user_id).await else {
+        return false;
+    };
+
+    // Minted first, because `create_cluster_session` registers the worker
+    // under the request id it is given, and that is the handle an abort needs.
+    // A successor carrying the predecessor's request id is both rejected by
+    // the claim (its intent fingerprint differs, always, since every admitted
+    // transition moves the height or the auto flag) and unabortable.
+    let successor_incarnation = uuid::Uuid::new_v4().to_string();
+    let mut successor_request = candidate.clone();
+    successor_request.request_id = Some(successor_incarnation.clone());
+    // A preparation is not a reopen. The predecessor's recipe may carry a
+    // stall reopen's `previous_session_id`, naming a session that died hours
+    // ago; carried forward it would fail the claim's normalization and, worse,
+    // persist a successor that describes itself as a reopen of a corpse.
+    successor_request.previous_session_id = None;
+    successor_request.reopen_reason = None;
+
+    let started = match state
+        .transcode
+        .create_cluster_session(
+            &successor_request,
+            route.user_id,
+            &user.username,
+            deadline,
+            admitted_generation,
+        )
+        .await
+    {
+        Ok(started) => started,
+        Err(_) => return false,
+    };
+    let successor_session = started.info.session_id.clone();
+    // An idempotent recovery handing back the predecessor's own session is not
+    // a successor. Return without aborting: that session is the one still
+    // serving the viewer.
+    if successor_session == route.session_id || !started.created {
+        return false;
+    }
+    let info = started.info;
+    // Released here, with the worker started and before the durable write. The
+    // gate serializes *starts* for this player, and a client reopen wants it;
+    // holding it across a Raft round trip turns a prepared handoff into a 503
+    // on the path clients use today.
+    drop(started.replacement);
+
+    let abandon = || async {
+        abort_started_session(
+            state,
+            &state.node_id,
+            &successor_incarnation,
+            &successor_session,
+        )
+        .await;
+        false
+    };
+    if uuid::Uuid::parse_str(&successor_session).is_err() {
+        return abandon().await;
+    }
+
+    // The successor's response is the predecessor's with every field the
+    // successor actually owns substituted. Two of these are not cosmetic:
+    //
+    // * `control` — carried unchanged it would point the handed-off client at
+    //   the *predecessor's* session and generation, which are `ended` the
+    //   moment the commit lands. The client would 404 and reopen: exactly the
+    //   interruption this milestone exists to remove.
+    // * the delivered-grade badges — derived from the **delivery method**, not
+    //   from grade intent, so the admitted `{ResolutionOrBitrate,
+    //   DeliveryMethod}` transition is precisely the one that moves them. A
+    //   direct-played HDR10 source becomes an SDR transcode while
+    //   `GradeIntent` never changes.
+    let mut response = predecessor_response.clone();
+    response.session_id = successor_session.clone();
+    response.playlist_url = info.playlist_url.clone();
+    response.duration_ms = info.duration_ms;
+    response.start_seconds = info.start_seconds;
+    let media_origin_ms = (info.media_origin_seconds * 1_000.0).round() as i64;
+    response.media_origin_ms = Some(media_origin_ms);
+    response.height = info.target_height;
+    response.encoder = info.encoder.to_owned();
+    response.vod = info.vod;
+    response.delivered_dynamic_range =
+        session_delivered_dynamic_range(source, &info.kind, info.grade).map(str::to_owned);
+    response.delivered_dolby_vision_profile =
+        session_delivered_dolby_vision_profile(source, &info.kind);
+    // The Auto prior belongs to the predecessor's start and is stale on a
+    // session that has been playing; a successor advertising it would seed the
+    // client's ladder from a measurement about a different stream.
+    response.prior_kbps = None;
+    // Plan notes describe the predecessor's plan.
+    response.plan_notes = Vec::new();
+    // A predecessor created before the control protocol was advertised has no
+    // bootstrap, and inventing one here would advertise an endpoint this
+    // successor's client never asked for — so `None` stays `None`.
+    response.control = response.control.as_ref().and_then(|control| {
+        control.refreshed(
+            &successor_session,
+            &successor_incarnation,
+            route.owner_epoch,
+        )
+    });
+
+    let mut recipe = predecessor_recipe.clone();
+    recipe.protocol_version = crate::media_pool::PROTOCOL_VERSION;
+    recipe.incarnation_id = successor_incarnation.clone();
+    recipe.request = successor_request;
+
+    let (Ok(recipe_json), Ok(response_json)) = (
+        serde_json::to_string(&recipe),
+        serde_json::to_string(&response),
+    ) else {
+        return abandon().await;
+    };
+
+    let now_ms = unix_ms();
+    let preparation = plurx_core::domain::MediaSessionPreparation {
+        incarnation_id: successor_incarnation.clone(),
+        session_id: successor_session.clone(),
+        user_id: route.user_id,
+        playback_id: route.playback_id.clone(),
+        // The generation the pointer must still name at commit, recorded now
+        // rather than read fresh then: a pointer that has moved means a newer
+        // player generation exists, and the correct outcome is to abort this
+        // successor rather than reap that one.
+        expected_predecessor_incarnation_id: route.incarnation_id.clone(),
+        // The successor's own intent, not the predecessor's — the row has to
+        // describe what it is, and every admitted transition moves the
+        // fingerprint by construction.
+        request_fingerprint: recipe.request.durable_intent_fingerprint(route.user_id),
+        // The node that holds the process, which is this one: the worker was
+        // started through `state.transcode`, so a snapshot owner from the
+        // route would name the wrong node for every later abort.
+        owner_node_id: state.node_id.clone(),
+        recipe_json,
+        response_json,
+        media_origin_ms,
+        now_ms,
+        deadline_ms: now_ms.saturating_add(PREPARED_SUCCESSOR_WINDOW_MS),
+    };
+
+    // The durable write is fenced. `create_cluster_session` checked the
+    // generation it was given, but that was before the worker existed; a node
+    // that lost authority in between must not insert a session row and a lease
+    // claiming a playback it no longer serves.
+    let Some(_serving) = authority
+        .commit_guard_before(admitted_generation, deadline.into_std())
+        .await
+    else {
+        return abandon().await;
+    };
+    let executor = crate::playback_control::PreparationExecutor::new(
+        std::sync::Arc::clone(&state.store),
+        gate,
+        route.user_id,
+        route.playback_id.clone(),
+    );
+    match executor.stage(&preparation).await {
+        Ok(true) => true,
+        Ok(false) | Err(_) => abandon().await,
+    }
 }
 
 /// Record what M6 would have done about this exchange's selection change.
@@ -5346,6 +5635,9 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
         delivered_bps,
         capabilities,
         platform,
+        route,
+        predecessor_response,
+        accepts_prepare,
     } = exchange;
     // Released on every exit below, including the early one.
     struct InFlight;
@@ -5420,15 +5712,13 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
         observed_download_bps,
         delivered_bps,
     };
-    crate::playback_control::record_preparation_decision(
-        platform,
-        crate::playback_control::decide_preparation(
-            delivered_view,
-            proposed_view,
-            capabilities.as_ref(),
-            conditions,
-        ),
+    let decision = crate::playback_control::decide_preparation(
+        delivered_view,
+        proposed_view,
+        capabilities.as_ref(),
+        conditions,
     );
+    crate::playback_control::record_preparation_decision(platform, decision);
     // All three clients hardcode the capability `false`, so the counter above
     // books every single-axis transition as `client_cannot_prepare` and can
     // say nothing about the axis rule or the throughput floor. This is the
@@ -5448,6 +5738,27 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
             conditions,
         ),
     );
+    // And, for a client that has declared the action on a server that has
+    // enabled it, do the thing the counter just described. The **production**
+    // decision, not the counterfactual beside it: staging must honour the
+    // capability, and the counterfactual deliberately does not.
+    if accepts_prepare
+        && matches!(
+            decision,
+            crate::playback_control::PreparationDecision::Prepare { .. }
+        )
+        && prepared_handoff_enabled(&state).await
+    {
+        stage_prepared_successor(
+            &state,
+            &route,
+            &recipe,
+            &predecessor_response,
+            &candidate,
+            source.as_ref(),
+        )
+        .await;
+    }
 }
 
 async fn status_local_before(
