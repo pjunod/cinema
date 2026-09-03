@@ -7061,7 +7061,24 @@ async function openSession(fileId, opts){
   // It is also the last build on the fleet holding
   // `plan_derivation.legacy_trusted` off zero.
   const caps=currentCapsDocument();
-  if(capsDocumentIsUsable(caps)) body.caps=caps;
+  if(capsDocumentIsUsable(caps)){
+    body.caps=caps;
+    // The other half of the same question. `/decision` is asked with the
+    // quality menu's force on the query string; a create that hands the server
+    // the document but not the force is re-derived under `Force::Auto`, which
+    // is a DIFFERENT question — and for the two cases where Auto and Original
+    // disagree it answers worse. On `Quality → Original` for a 4K title above
+    // this browser's HEVC ceiling, Auto derives a transcode and therefore
+    // `preserve_dolby_vision = false`, so the viewer who asked for the
+    // untouched original gets the Dolby Vision stripped and the server logs a
+    // `plan_mismatch` against its own player. The same happens wherever a
+    // learned decode limit applies, which Original exists to bypass.
+    //
+    // Sent only alongside the caps because `overrides` is read only by
+    // `review_client_plan`, which only runs when the document is usable.
+    const force=(typeof qualityForce==="function")?qualityForce():"auto";
+    if(force && force!=="auto") body.overrides=Object.assign({force},body.overrides||{});
+  }
   // HLS sessions carry native WebVTT renditions whenever this server says a
   // track can become one. Publishing the group up front lets a later subtitle
   // selection and a readiness-directed re-fetch stay inside the current video
@@ -7414,11 +7431,20 @@ function capsDocument(c, limits){
     // rebuilt with it inlined — the obvious `Object.values()` would send a
     // document whose every limit is anonymous, and an anonymous limit matches
     // nothing on the server. See `decodeLimits()`.
-    learned_limits:Object.entries(limits||{}).map(([identity, l])=>({
-      identity, label:String(l.label||""),
-      lost:Number(l.lost)||0, secs:Number(l.secs)||0, rate:Number(l.rate)||0,
-      at_ms:Number(l.at)||0,
-    })),
+    // Bounded on both axes, because since M1 this document also rides the
+    // create — which every seek and every audio switch sends. The server
+    // keeps at most `MAX_LEARNED_LIMITS` (256) and clips each label to 160,
+    // so anything past that is bytes on the wire that no reader will ever
+    // see. Newest first, so a browser at the cap sends the limits that still
+    // describe what it can play.
+    learned_limits:Object.entries(limits||{})
+      .sort((a,b)=>(Number(b[1].at)||0)-(Number(a[1].at)||0))
+      .slice(0,256)
+      .map(([identity, l])=>({
+        identity, label:String(l.label||"").slice(0,160),
+        lost:Number(l.lost)||0, secs:Number(l.secs)||0, rate:Number(l.rate)||0,
+        at_ms:Number(l.at)||0,
+      })),
   };
 }
 // The one document, for the two requests that send it.

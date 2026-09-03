@@ -283,7 +283,92 @@ asyncTest("every web create carries the capabilities its plan was derived from",
   assert.equal(capsCalls.length, 1);
   assert.deepEqual(capsCalls[0][0], { vcodec: "hevc,hevc10", dvprofile: "5,8" });
   assert.equal(capsCalls[0][1], limits);
-  assert.match(shippedSource("askDecision"), /caps:\s*currentCapsDocument\(\)/);
+});
+
+asyncTest("the decision and the create it acts on ask one question", async () => {
+  // Not a grep for `currentCapsDocument()` in `askDecision`: that passes
+  // against a build where the helper is dead. This RUNS both requests through
+  // one set of fakes and compares the two bodies.
+  //
+  // The two halves of the question are the document and the force. A create
+  // that sends the document but not the force is re-derived under
+  // `Force::Auto` while the decision was taken under the viewer's actual
+  // choice — and on `Quality → Original` for a title above this browser's
+  // HEVC ceiling that flips `preserve_dolby_vision` to false, stripping Dolby
+  // Vision from the one request that explicitly asked for the original.
+  const requests = [];
+  const api = async (url, options) => { requests.push({ url, options }); return {}; };
+  const shipped = new Function(
+    "api",
+    "newRequestId",
+    "vodClientContract",
+    "PLAYER",
+    "capsDocument",
+    "PLAY_CAPS",
+    "decodeLimits",
+    "prePlaySelectionQuery",
+    "decisionUrl",
+    "qualityForce",
+    [
+      'const PLAYBACK_ID="playback-1";',
+      shippedSource("currentCapsDocument"),
+      shippedSource("capsDocumentIsUsable"),
+      shippedSource("askDecision"),
+      shippedSource("openSession"),
+      "return {askDecision,openSession};",
+    ].join("\n"),
+  )(
+    api,
+    () => "request-1",
+    () => ({ session: { presentation: "vod", block_budget_secs: 8 } }),
+    {},
+    () => USABLE_CAPS_DOCUMENT,
+    { vcodec: "hevc", dvprofile: "5,8" },
+    () => ({}),
+    () => "",
+    (id) => `/files/${id}/decision?legacy`,
+    () => "original",
+  );
+
+  await shipped.askDecision(70, "original", null);
+  await shipped.openSession(70, { copy: true, preserve_dolby_vision: true });
+  assert.equal(requests.length, 2);
+  const [decision, create] = requests;
+  assert.match(decision.url, /\/files\/70\/decision\?/);
+  assert.deepEqual(
+    create.options.body.caps,
+    decision.options.body.caps,
+    "the create must act on the document the decision was taken from",
+  );
+  assert.match(decision.url, /force=original/);
+  assert.equal(
+    create.options.body.overrides && create.options.body.overrides.force,
+    "original",
+    "…and on the same force, or the server re-derives under Auto",
+  );
+
+  // Auto is the absence of a force, on both sides. Sending `force=auto` would
+  // put an `override force=auto` note on every ordinary create and move the
+  // `overridden` counter for nothing.
+  requests.length = 0;
+  const auto = new Function(
+    "api", "newRequestId", "vodClientContract", "PLAYER",
+    "capsDocument", "PLAY_CAPS", "decodeLimits", "qualityForce",
+    [
+      'const PLAYBACK_ID="playback-1";',
+      shippedSource("currentCapsDocument"),
+      shippedSource("capsDocumentIsUsable"),
+      shippedSource("openSession"),
+      "return {openSession};",
+    ].join("\n"),
+  )(
+    api, () => "request-1",
+    () => ({ session: { presentation: "vod", block_budget_secs: 8 } }),
+    {}, () => USABLE_CAPS_DOCUMENT, { vcodec: "hevc" }, () => ({}),
+    () => "auto",
+  );
+  await auto.openSession(70, { copy: true });
+  assert.equal("overrides" in requests[0].options.body, false);
 });
 
 asyncTest("a create never sends an empty capabilities document", async () => {
@@ -298,6 +383,93 @@ asyncTest("a create never sends an empty capabilities document", async () => {
   });
   await openSession(70, { copy: true });
   assert.equal("caps" in requests[0].options.body, false);
+
+  // …and only an EMPTY one. A browser that enumerated no containers has still
+  // told the server which codecs it decodes, and that document is worth
+  // re-deriving from. (This is also what fails when the predicate's `||`
+  // becomes `&&`, which every other case here survives.)
+  const usable = new Function(
+    shippedSource("capsDocumentIsUsable") + "\nreturn capsDocumentIsUsable;",
+  )();
+  assert.equal(usable({ v: 2, video: [{ codec: "hevc" }], audio: [], containers: [] }), true);
+  assert.equal(usable({ v: 2, video: [], audio: ["aac"], containers: [] }), true);
+  assert.equal(usable({ v: 2, video: [], audio: [], containers: ["mp4"] }), true);
+  assert.equal(usable({ v: 2, video: [], audio: [], containers: [] }), false);
+  assert.equal(usable(null), false);
+});
+
+test("the document this browser actually builds is one the server can read", () => {
+  // The guard above is a backstop, and a backstop nobody can reach is worth
+  // saying so about: `buildPlayCaps` seeds `containers` unconditionally, so
+  // the real `capsDocument` cannot produce an empty document however the
+  // probe answers. This is the assertion that would go red if that changed —
+  // at which point the guard stops being decoration and starts being load
+  // bearing, and either way somebody finds out here rather than from a
+  // `plan_derivation.unusable_caps` counter climbing on the fleet.
+  const built = new Function(
+    "SERVER",
+    "navigator",
+    "document",
+    "window",
+    "displayIsHdr",
+    [
+      shippedSource("buildPlayCaps"),
+      shippedSource("capsDocument"),
+      shippedSource("capsDocumentIsUsable"),
+      "return {buildPlayCaps,capsDocument,capsDocumentIsUsable};",
+    ].join("\n"),
+  )(
+    { build: "v0.3.0-466" },
+    { userAgent: "test" },
+    // The bleakest browser this code can meet: no `<video>` to ask, no
+    // MediaSource, no HDR display, and a synchronous HEVC ladder that found
+    // nothing. `buildPlayCaps` still seeds H.264, AAC/MP3 and the base
+    // container list, which is why the guard is a backstop rather than a
+    // branch anyone reaches.
+    { createElement: () => { throw new Error("no DOM"); } },
+    {},
+    () => false,
+  );
+  for (const hevc of [
+    { depth8: false, depth10: false, pq10: false, maxheight: null },
+    { depth8: true, depth10: true, pq10: true, maxheight: 2160 },
+  ]) {
+    const doc = built.capsDocument(built.buildPlayCaps(hevc), {});
+    assert.equal(
+      built.capsDocumentIsUsable(doc),
+      true,
+      `the shipped document must always be worth sending: ${JSON.stringify(doc)}`,
+    );
+  }
+});
+
+test("the caps document stays bounded now that every create carries it", () => {
+  // `openSession` runs on every seek and every audio switch. The server keeps
+  // at most 256 learned limits and clips each label to 160, so anything past
+  // that is bytes nobody reads — and the route's 64 KiB body limit is what
+  // they would eventually run into.
+  const capsDocument = new Function(
+    "SERVER",
+    "navigator",
+    `${shippedSource("capsDocument")}\nreturn capsDocument;`,
+  )({ build: "v0.3.0-466" }, { userAgent: "x".repeat(500) });
+  const limits = {};
+  for (let i = 0; i < 400; i += 1) {
+    limits[`identity-${i}`] = { label: "L".repeat(400), lost: 1, secs: 60, rate: 2, at: i };
+  }
+  const doc = capsDocument({ vcodec: "hevc", acodec: "aac", container: "mp4" }, limits);
+  assert.equal(doc.learned_limits.length, 256);
+  assert.equal(doc.learned_limits[0].label.length, 160);
+  assert.equal(
+    doc.learned_limits[0].identity,
+    "identity-399",
+    "at the cap it keeps the newest, which are the ones still describing this machine",
+  );
+  assert.equal(doc.client.ua.length, 160);
+  assert.ok(
+    JSON.stringify(doc).length < 64 * 1024,
+    `a capped document must fit the create route's body limit: ${JSON.stringify(doc).length} bytes`,
+  );
 });
 
 test("the VOD fetch contract stays below hls.js and beyond the producer watchdog", () => {
