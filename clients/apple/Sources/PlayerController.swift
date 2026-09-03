@@ -2312,6 +2312,33 @@ final class PlayerController: ObservableObject {
         Task { await reopen(at: positionForPlaybackIntent()) }
     }
 
+    /// The link rate AVFoundation itself measured, in bits per second.
+    ///
+    /// The server's second-pipeline floor wants the client's *observed*
+    /// throughput — twice what this session is already delivering — and until
+    /// now this client sent nothing, so the floor refused every transition on a
+    /// missing input rather than on a tight link. Shadow mode read exactly that
+    /// on 2026-09-03: the one transition that reached the throughput check
+    /// answered `throughput_unreported`.
+    ///
+    /// `observedBitrate` on the newest access-log event is AVFoundation's own
+    /// empirical download rate, not the variant's declared
+    /// `indicatedBitrate` — the same distinction the web client makes by
+    /// sending `hls.bandwidthEstimate` rather than the level's bitrate.
+    ///
+    /// Nil rather than a number whenever AVFoundation has not measured one:
+    /// the access log is empty before the first segment lands, and it reports
+    /// `-1` for "unknown". A refusal on a missing value is the server's
+    /// documented behaviour and the honest answer; inventing a rate here would
+    /// let a prepared handoff fire on a link nobody measured, which is the one
+    /// thing the floor exists to prevent.
+    private func observedDownloadBitsPerSecond(_ item: AVPlayerItem) -> Int64? {
+        guard let event = item.accessLog()?.events.last else { return nil }
+        let observed = event.observedBitrate
+        guard observed.isFinite, observed > 0 else { return nil }
+        return Int64(observed.rounded())
+    }
+
     /// Film position that a new viewer command should build on. Between
     /// commands the live AVPlayer clock is most precise; during a seek or
     /// replacement, only the optimistic target / last published film time is
@@ -5931,7 +5958,7 @@ extension PlayerController {
             errorCode: failed ? .media : nil,
             errorDetail: failed ? "avplayer_item_failed" : nil,
             droppedFrames: nil,
-            observedDownloadBps: nil,
+            observedDownloadBps: observedDownloadBitsPerSecond(item),
             // A recovery path's evidence is more specific than anything
             // derived from the player's own state, so it wins field by field.
             // Until now both were hardcoded nil and no recovery site set
