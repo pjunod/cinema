@@ -146,7 +146,14 @@ replacement = "every new runtime-owned detached task requires ownership-catalog 
 [[symbols]]
 id = "all-async-sleeps"
 pattern = "tokio::time::sleep\\("
-expected_occurrences = 34
+# +1 for `a_copy_that_cannot_convert_strips_the_argv_it_spawns`. The argv it
+# reads is logged by the producer task, not by the call that returns the
+# session, so the test has to let that task be polled before it can assert
+# anything — a bare read passes on an idle machine and fails under a loaded
+# one. `#[cfg(test)]`-only, bounded by a 20s deadline that asserts rather than
+# hangs, and it decides nothing about producer recovery: it waits for a log
+# line that has already been written or is about to be.
+expected_occurrences = 35
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -1133,7 +1140,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # finished, so sampling the directory on that edge measures the runner rather
 # than the contract. The wait is bounded and still fails on the defect it exists
 # for — a temp file nothing will ever unlink outlasts any timeout.
-expected_occurrences = 541
+# +1 for the `tokio::time::sleep` in
+# `a_copy_that_cannot_convert_strips_the_argv_it_spawns`, reviewed under
+# `all-async-sleeps` above. Same call, counted once in each sentinel.
+expected_occurrences = 542
 
 [[module_structures]]
 id = "bare-time-constructor"
