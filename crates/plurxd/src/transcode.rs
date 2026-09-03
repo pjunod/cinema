@@ -26788,7 +26788,13 @@ pub(crate) mod tests {
             .with_dv_strippable(false),
         );
 
-        let logs = Arc::new(crate::logbuf::LogBuffer::new(256));
+        // A ring, and the argv line is the *oldest* thing in it: `start_copy`
+        // spawns a real ffmpeg whose stderr is logged a line at a time, so a
+        // capacity anywhere near the number of events would evict the one
+        // entry this test exists to read and fail on the `expect` below —
+        // green mutation, red truth. Sized for a noisy encoder rather than
+        // for the handful of lines the happy path emits.
+        let logs = Arc::new(crate::logbuf::LogBuffer::new(8192));
         let subscriber =
             tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs)));
         let guard = tracing::subscriber::set_default(subscriber);
@@ -26812,7 +26818,7 @@ pub(crate) mod tests {
         drop(guard);
 
         let argv = logs
-            .tail("trace", 256)
+            .tail("trace", 8192)
             .into_iter()
             .map(|entry| entry.message)
             .find(|message| message.contains("copy-video HLS ffmpeg args"))
@@ -26832,6 +26838,11 @@ pub(crate) mod tests {
             argv.contains("-tag:v hvc1"),
             "the served stream is the HDR10 base, so the sample entry is the \
              compatible one: {argv}"
+        );
+        assert!(
+            !argv.contains("remove_types=32-34|63"),
+            "that filter is the converting recipe, which this path has no \
+             stage for: {argv}"
         );
 
         let info = started.expect("the copy session starts");

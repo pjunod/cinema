@@ -740,11 +740,19 @@ Three details, each load-bearing:
   stream over an HDR10-compatible base takes the same `hvc1` branch, while
   `copied_hls_codecs` advertises `CODECS="dvh1.07.LL"` for it — the master
   playlist and the sample entry disagree, and nothing defends `hvc1` for
-  Profile 7 the way `tag_for`'s doc comment defends it for 8.1 and 8.4. The
-  state is unreachable today: it needs a client that *enumerates* Profile 7,
-  and none does (Apple `{5,8}`, web `{5,8}`, Android `{4,5,8}`). Paul's ruling,
-  2026-09-03: leave it, record it here, revisit when Android claims 7 from a
-  real decoder enumeration.
+  Profile 7 the way `tag_for`'s doc comment defends it for 8.1 and 8.4.
+  Paul's ruling, 2026-09-03: leave it, and record it here.
+
+  It is **rare, not unreachable**, and the difference is worth stating
+  precisely because a ruling is only as good as its reachability premise.
+  Apple claims `{5,8}` and the web claims `{5,8}`; neither can reach it.
+  Android claims 7 whenever the device's HEVC decoder enumerates `DVHE_DTB`
+  (`CapsPolicy.kt`: `DolbyVisionCodecProfile.DVHE_DTB -> claimed.add(7)`,
+  pinned by `CapsPolicyTest`), so a box with a dual-layer decoder does reach
+  it. The delivery still plays — that client asked for the profile it is being
+  handed, which is the whole reason the preservation is allowed at all. What
+  it cannot rely on is the master playlist and the init segment agreeing about
+  the fourcc, which is the inconsistency and not a decode failure.
 - **Burst-then-hold pacing.** Copy runs as fast as the disk allows; without
   pacing, a 45 Mb/s 4K session would dump the whole file into the session dir
   at once. This was a bare `-re` — ~1× real time — until 2026-07-28, and that
