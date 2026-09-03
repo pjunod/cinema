@@ -1055,7 +1055,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # one leading fetch in a joined test task while seven followers queue behind
 # the same process-local gate. The fixture releases and awaits every task; it
 # owns no shipped producer, timer, or process.
-expected_occurrences = 383
+# 383 -> 388 with the shared analysis lease heartbeat: the five additions are
+# all `tokio::spawn` inside `state.rs`'s own unit tests, each driving the
+# heartbeat loop with a renewal closure on a paused runtime clock and each
+# joined before its test returns. The two production spawns are unchanged —
+# the job heartbeat and the request heartbeat still spawn exactly one task
+# apiece, now running the same loop instead of two copies of it. Neither owns
+# a producer, a process, or a recipe.
+expected_occurrences = 388
 
 [[module_structures]]
 id = "method-spawn"
@@ -1133,7 +1140,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # finished, so sampling the directory on that edge measures the runner rather
 # than the contract. The wait is bounded and still fails on the defect it exists
 # for — a temp file nothing will ever unlink outlasts any timeout.
-expected_occurrences = 541
+# 541 -> 548 with the shared analysis lease heartbeat. Two hand-rolled
+# `tokio::time::interval` loops became one, and that one gained a
+# `tokio::time::sleep_until` per iteration: the deadline arm that self-fences
+# a claim when the lease it holds actually expires, which is what makes it
+# safe to retry a renewal error rather than abandon the build. Net production
+# change is zero constructors and one new shape. The other seven are
+# `tokio::time::sleep` in the same unit tests, advancing a paused clock. None
+# of them bounds a producer: the queue's own bounds are the store's lease and
+# backoff, which are values, not timers.
+expected_occurrences = 548
 
 [[module_structures]]
 id = "bare-time-constructor"
