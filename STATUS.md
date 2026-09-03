@@ -4,6 +4,23 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The Profile 7 diagnosis was right, and already merged
+
+**[`docs/dv-p7-web-delivery-handoff`](https://github.com/pjunod/plurx/pull/PRNUM),
+open into main, 2026-09-03.** The kit-2 diagnosis of the browser refusing the
+Dolby Vision Profile 7 remux describes #842's defect with the right mechanism
+— and #842 is an ancestor of the SHA it names, so its root cause was closed
+before it was written; its log is from a pre-#842 build. What remains is
+four bounded pieces:
+[docs/DV-P7-WEB-DELIVERY-HANDOFF.md](docs/DV-P7-WEB-DELIVERY-HANDOFF.md) —
+the web player sends no caps on create (every web create is
+`legacy_trusted`), the cold first play of a Profile 7 title is HDR10 by
+construction until its converting index exists, the node-local indexer
+forgets `Truncated`/`Unsupported` outcomes and the cluster queue spends the
+attempt budget on lost leases, and the rejection report blames the browser
+and cannot be joined to a session. Rulings for Paul in §6. Nothing built,
+nothing deployed.
+
 ## Activity's Now playing row, read as a card
 
 **PR [#849](https://github.com/pjunod/plurx/pull/849) — open, 2026-09-03,
@@ -62,9 +79,11 @@ the grant renewing on every retry, and the `Time` relabelling above. Full
 qualification green; 1601 unit tests.
 
 **Not fixed here, and still open:** the truncated first segment that caused
-the escalation — a DV Profile 7→8.1 remux the browser refused with
-`MEDIA_ERR_DECODE` after 12 KB of a 12.5 MB segment. Real, separate, and now
-costs a fallback rather than a failure. `vod_index_pending` and
+the escalation — the raw Dolby Vision Profile 7 remux a pre-#842 build served
+through live-HLS recovery, refused with `MEDIA_ERR_DECODE` after 12 KB of a
+12.5 MB segment (the #842 build strips it to HDR10 instead; no converted
+stream has been served to a browser yet — see the handoff entry above). Real,
+separate, and now costs a fallback rather than a failure. `vod_index_pending` and
 `vod_transcode_unavailable` both fell through to live-HLS recovery on this
 file. And the web client reporting `hold` from a player that has never
 started is honest to fix at the client too, though the server invariant has to
