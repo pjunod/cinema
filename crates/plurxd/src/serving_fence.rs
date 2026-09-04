@@ -216,6 +216,8 @@ impl ServingFence {
             || path.ends_with("/photo")
             || path.starts_with("/library/metadata/")
             || path == "/photo/:/transcode"
+            || path.ends_with("/live-tv/channels")
+            || path == "/_internal/v1/live-tv/snapshot"
     }
 
     /// Routes whose successful handler may admit new process-local media

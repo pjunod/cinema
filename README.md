@@ -39,6 +39,9 @@ commit, CI, and full depth, and how to add a regression without losing it.
 [docs/DEVELOPMENT_PIPELINE.md](docs/DEVELOPMENT_PIPELINE.md) explains the
 effort-branch lane for large projects: compile quickly during task integration,
 then run one complete exact-tree qualification before merging to `main`.
+[docs/HDHOMERUN-LIVE-TV-PLAN.md](docs/HDHOMERUN-LIVE-TV-PLAN.md) is the active
+plan for adding one HDHomeRun tuner as bounded live HLS across the web, Apple,
+and Android clients, with DRM and ATSC 3.0 codec limits stated explicitly.
 [docs/AGENT-COMPILE-LOOP.md](docs/AGENT-COMPILE-LOOP.md) is its short
 companion for anyone — contributor or coding agent — whose checkout has no
 Rust toolchain: how to put `cargo check`, Clippy and the unit suite ten

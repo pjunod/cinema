@@ -109,6 +109,10 @@ const LEARNER_PROTOCOL_CAPABILITY: &str = "learner_protocol_v5";
 /// Proof that every active member understands readiness-gated routing and the
 /// promotion/removal intent rows introduced by the complete worker lifecycle.
 const LEARNER_LIFECYCLE_CAPABILITY: &str = "learner_lifecycle_v1";
+/// All live-TV HTTP/settings code is always compiled. A fresh heartbeat row
+/// proves the running process understands the v1 owner/snapshot protocol;
+/// runtime enablement remains off until every active node proves it.
+pub const LIVE_TV_CAPABILITY: &str = "live_tv_v1";
 /// Minimum unreserved capacity required before a learner may be promoted.
 /// This is deliberately independent of media-cache headroom: a voter must
 /// always retain room for Raft WAL growth, a received snapshot, and SQLite's
@@ -412,6 +416,24 @@ const PROTECT_OPERATION_LEASE_FROM_JOIN_STAGING_SQL: &str =
      BEFORE INSERT ON cluster_node_join_staging \
      WHEN EXISTS (SELECT 1 FROM cluster_operation_leases) \
      BEGIN SELECT RAISE(ABORT, 'planned outage lease blocks node join'); END";
+const REQUIRE_LIVE_TV_JOIN_INTENT_ON_RESERVATION_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_live_tv_join_reservation_guard \
+     BEFORE UPDATE OF state ON cluster_join_tokens \
+     WHEN NEW.state = 'redeeming' AND OLD.state = 'issued' \
+       AND EXISTS (SELECT 1 FROM settings \
+         WHERE key = 'live_tv.enabled' AND value = '1') \
+       AND NOT EXISTS (SELECT 1 FROM cluster_live_tv_join_intents intent \
+         WHERE intent.token_hash = NEW.token_hash) \
+     BEGIN SELECT RAISE(ABORT, 'enabled live TV requires a compatible joining binary'); END";
+const REQUIRE_LIVE_TV_JOIN_INTENT_ON_STAGING_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_live_tv_join_staging_guard \
+     BEFORE INSERT ON cluster_node_join_staging \
+     WHEN EXISTS (SELECT 1 FROM settings \
+         WHERE key = 'live_tv.enabled' AND value = '1') \
+       AND NOT EXISTS (SELECT 1 FROM cluster_live_tv_join_intents intent \
+         JOIN cluster_join_tokens token ON token.token_hash = intent.token_hash \
+         WHERE token.node_id = NEW.node_id) \
+     BEGIN SELECT RAISE(ABORT, 'enabled live TV requires a compatible joining binary'); END";
 const EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_operation_lease_heartbeat_expiry \
      BEFORE UPDATE OF last_seen_at ON cluster_nodes \
@@ -549,6 +571,11 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     // readiness; the first old or new heartbeat consumes the marker.
     "CREATE TABLE IF NOT EXISTS cluster_node_join_staging (\
          node_id TEXT PRIMARY KEY) STRICT",
+    // The marker exists only inside one compatible coordinator transaction.
+    // Replicated triggers consult it to reject joins issued by a rolling-back
+    // coordinator while Live TV remains active.
+    "CREATE TABLE IF NOT EXISTS cluster_live_tv_join_intents (\
+         token_hash TEXT PRIMARY KEY) STRICT",
     // Kept separate from `cluster_nodes` so this patch is rolling-compatible
     // with M3 binaries that still write the original six-column row. Public
     // HTTP addressing belongs to the node rather than the logical server: it
@@ -592,6 +619,8 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     PROTECT_OPERATION_LEASE_FROM_PROMOTION_SQL,
     PROTECT_OPERATION_LEASE_FROM_JOIN_RESERVATION_SQL,
     PROTECT_OPERATION_LEASE_FROM_JOIN_STAGING_SQL,
+    REQUIRE_LIVE_TV_JOIN_INTENT_ON_RESERVATION_SQL,
+    REQUIRE_LIVE_TV_JOIN_INTENT_ON_STAGING_SQL,
     // These triggers make the removed-owner fence authoritative for every
     // client version. A still-running older binary uses lease SQL that does
     // not know about the settings marker, but SQLite evaluates these guards
@@ -1019,6 +1048,11 @@ pub struct RedeemJoinRequest {
     pub protocol_min: i64,
     #[serde(default)]
     pub protocol_max: i64,
+    /// Transaction-local admission proof for clusters that have Live TV
+    /// enabled. Older binaries omit this additive field and are rejected by
+    /// replicated triggers before they can become a serving member.
+    #[serde(default)]
+    pub live_tv_v1: bool,
 }
 
 impl RedeemJoinRequest {
@@ -1101,6 +1135,7 @@ impl std::fmt::Debug for RedeemJoinRequest {
             .field("schema_version", &self.schema_version)
             .field("protocol_version", &self.protocol_version)
             .field("protocol_range", &self.declared_protocol_range())
+            .field("live_tv_v1", &self.live_tv_v1)
             .finish()
     }
 }
@@ -1633,6 +1668,14 @@ fn no_absent_node_predicate() -> &'static str {
        WHERE present.removed_at IS NULL AND present.last_seen_at < $3)"
 }
 
+/// Live-TV activation supplies its absence cutoff as parameter 7. Keep this
+/// separate from the learner-protocol predicate because `$3` in the settings
+/// statement is the tuple's `updated_at`, not a liveness boundary.
+fn no_absent_live_tv_node_predicate() -> &'static str {
+    "NOT EXISTS (SELECT 1 FROM cluster_nodes AS present \
+       WHERE present.removed_at IS NULL AND present.last_seen_at < $7)"
+}
+
 /// The same rule as a roster, so a refusal can name who is not answering.
 fn absent_nodes_sql() -> &'static str {
     "SELECT present.node_id FROM cluster_nodes AS present \
@@ -1680,6 +1723,43 @@ fn capability_ready_predicate(capability: &str) -> String {
         "NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
        WHERE {})",
         capability_unready_node_predicate(capability)
+    )
+}
+
+/// Exact replicated precondition for enabling Live TV. Parameter 4 is the
+/// generation key, 5 its expected canonical integer, 6 the owner node, and 7
+/// the oldest heartbeat activation may accept.
+fn live_tv_activation_guard_predicate() -> String {
+    let generation_ready = "(\
+      (NOT EXISTS (SELECT 1 FROM settings WHERE key = $4) AND $5 = 0) \
+      OR EXISTS (SELECT 1 FROM settings WHERE key = $4 \
+        AND value = CAST($5 AS TEXT) AND CAST(value AS INTEGER) = $5)\
+    )";
+    let owner_ready = "EXISTS (SELECT 1 FROM cluster_nodes owner \
+      WHERE owner.node_id = $6 AND owner.role = 'voter' \
+        AND owner.removed_at IS NULL \
+        AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+          WHERE removal.node_id = owner.node_id) \
+        AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance maintenance \
+          WHERE maintenance.node_id = owner.node_id))";
+    format!(
+        // Keep the first occurrence of Hiqlite's named `$N` parameters in
+        // numeric order. Its SQLite binding indexes named placeholders by
+        // first appearance, so `$6` must occur before `$7`.
+        "{generation_ready} AND {} AND {} AND {owner_ready} AND {}",
+        capability_ready_predicate(LIVE_TV_CAPABILITY),
+        no_join_in_flight_predicate(),
+        no_absent_live_tv_node_predicate(),
+    )
+}
+
+fn guarded_live_tv_setting_sql() -> String {
+    format!(
+        "INSERT INTO settings (key, value, updated_at) \
+         SELECT $1, $2, $3 WHERE {} \
+         ON CONFLICT(key) DO UPDATE SET \
+           value = excluded.value, updated_at = excluded.updated_at",
+        live_tv_activation_guard_predicate()
     )
 }
 
@@ -2837,6 +2917,13 @@ impl MembershipManager {
         if role != expected_role {
             return Err(MembershipError::InvalidToken);
         }
+        if !request.live_tv_v1 && self.live_tv_enabled().await? {
+            tracing::warn!(
+                node_id = %request.node_id,
+                "refusing a join from a binary that does not implement the enabled live-TV protocol"
+            );
+            return Err(MembershipError::Incompatible);
+        }
         if self.maintenance_operation_pending().await? {
             return Err(MembershipError::MaintenanceConflict(
                 request.node_id.clone(),
@@ -2929,6 +3016,17 @@ impl MembershipManager {
         // protocol-4-only binary must not be admitted into a cluster that
         // activated while its request was in flight.
         let mut statements = Vec::new();
+        if request.live_tv_v1 {
+            statements.push((
+                "INSERT INTO cluster_live_tv_join_intents (token_hash) \
+                 SELECT token_hash FROM cluster_join_tokens \
+                 WHERE token_hash = $1 AND raft_id = $2 \
+                   AND state IN ('issued', 'redeeming') \
+                 ON CONFLICT(token_hash) DO NOTHING"
+                    .to_owned(),
+                params!(request.token_digest.as_str(), request.raft_id as i64),
+            ));
+        }
         if role.is_learner() && !resume_legacy_partial {
             statements.push((
                 "INSERT INTO cluster_learner_join_intents (token_hash) \
@@ -3118,6 +3216,12 @@ impl MembershipManager {
                 params!(request.token_digest.as_str()),
             ));
         }
+        if request.live_tv_v1 {
+            statements.push((
+                "DELETE FROM cluster_live_tv_join_intents WHERE token_hash = $1".to_owned(),
+                params!(request.token_digest.as_str()),
+            ));
+        }
         let transaction = inner.client.txn(statements).await;
         match transaction {
             Ok(results) => {
@@ -3145,6 +3249,9 @@ impl MembershipManager {
                          it was being admitted"
                     );
                     return Err(MembershipError::ProtocolRangeChanged);
+                }
+                if !request.live_tv_v1 && self.live_tv_enabled().await? {
+                    return Err(MembershipError::Incompatible);
                 }
                 let latest = self.token_record(&request.token_digest).await?;
                 if latest.state == "redeemed" {
@@ -3186,6 +3293,19 @@ impl MembershipManager {
             Err(error) => return Err(error.into()),
         }
         Ok(())
+    }
+
+    async fn live_tv_enabled(&self) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM settings \
+                 WHERE key = 'live_tv.enabled' AND value = '1'",
+                params!(),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count == 1))
     }
 
     async fn upsert_hostname(&self, node_id: &str, hostname: &str) -> Result<(), MembershipError> {
@@ -3551,6 +3671,14 @@ impl MembershipManager {
                     NODE_MAINTENANCE_CAPABILITY,
                     now
                 ),
+            ),
+            (
+                "INSERT INTO cluster_node_capabilities \
+                     (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT(node_id, capability) DO UPDATE SET \
+                       last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(inner.identity.node_id.as_str(), LIVE_TV_CAPABILITY, now),
             ),
         ];
         // Same transaction, same timestamp, same coupling: a protocol-5
@@ -6787,6 +6915,94 @@ impl MembershipManager {
         self.unready_nodes(capability, Read::Quorum).await
     }
 
+    /// Active nodes that cannot currently prove the always-compiled live-TV
+    /// v1 owner/snapshot protocol. A matching capability row from a process
+    /// that has since gone silent is not proof: activation must wait for a
+    /// fresh heartbeat or for the absent member to be removed. An unclustered
+    /// server is the whole serving set and supports the protocol by
+    /// construction.
+    pub async fn live_tv_protocol_pending_nodes(&self) -> Result<Vec<String>, MembershipError> {
+        if !self.is_replicated() {
+            return Ok(Vec::new());
+        }
+        let cutoff = unix_ms()?.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
+        let (missing, absent) = tokio::try_join!(
+            self.nodes_missing_capability(LIVE_TV_CAPABILITY),
+            self.absent_nodes(cutoff),
+        )?;
+        Ok(missing
+            .into_iter()
+            .chain(absent)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
+
+    /// Publish an enabled Live-TV tuple only while the generation, fleet
+    /// capability, fresh presence, join barrier, and owner voter are all true
+    /// in the same replicated transaction. The readiness route is advisory;
+    /// this is the activation linearization point.
+    pub async fn activate_live_tv_settings_if_ready(
+        &self,
+        generation_key: &str,
+        expected_generation: i64,
+        owner_node_id: &str,
+        values: &[(&str, &str)],
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        crate::store::validate_generated_settings(generation_key, expected_generation, values)
+            .map_err(|error| MembershipError::Internal(error.to_string()))?;
+        if values
+            .iter()
+            .find(|(key, _)| *key == crate::store::keys::LIVE_TV_ENABLED)
+            .map(|(_, value)| *value)
+            != Some("1")
+            || values
+                .iter()
+                .find(|(key, _)| *key == crate::store::keys::LIVE_TV_OWNER_NODE_ID)
+                .map(|(_, value)| *value)
+                != Some(owner_node_id)
+        {
+            return Err(MembershipError::Internal(
+                "live-TV activation requires one enabled tuple and its exact owner".to_owned(),
+            ));
+        }
+        let sql = guarded_live_tv_setting_sql();
+        let now = unix_ms()?;
+        let absence_cutoff = now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
+        let mut ordered = values
+            .iter()
+            .filter(|(key, _)| *key != generation_key)
+            .copied()
+            .collect::<Vec<_>>();
+        ordered.extend(
+            values
+                .iter()
+                .filter(|(key, _)| *key == generation_key)
+                .copied(),
+        );
+        let results = inner
+            .client
+            .txn(ordered.iter().map(|(key, value)| {
+                (
+                    sql.clone(),
+                    params!(
+                        *key,
+                        *value,
+                        now,
+                        generation_key,
+                        expected_generation,
+                        owner_node_id,
+                        absence_cutoff
+                    ),
+                )
+            }))
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(!results.is_empty() && results.into_iter().all(|changed| changed == 1))
+    }
+
     async fn unready_nodes(
         &self,
         capability: &str,
@@ -8856,6 +9072,66 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 mod tests {
     use super::*;
 
+    fn install_live_tv_membership_fixture(connection: &rusqlite::Connection) {
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, role TEXT NOT NULL, removed_at INTEGER, last_seen_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_node_capabilities (node_id TEXT NOT NULL, capability TEXT NOT NULL, last_seen_at INTEGER NOT NULL, PRIMARY KEY(node_id, capability)); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_join_tokens (token_hash TEXT PRIMARY KEY, state TEXT NOT NULL, node_id TEXT); \
+                 CREATE TABLE cluster_live_tv_join_intents (token_hash TEXT PRIMARY KEY); \
+                 {REQUIRE_LIVE_TV_JOIN_INTENT_ON_RESERVATION_SQL}; \
+                 {REQUIRE_LIVE_TV_JOIN_INTENT_ON_STAGING_SQL}; \
+                 INSERT INTO cluster_nodes VALUES ('owner', 'voter', NULL, 1);"
+            ))
+            .expect("live-TV membership fixture");
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES ('owner', $1, 1)",
+                rusqlite::params![LIVE_TV_CAPABILITY],
+            )
+            .expect("owner capability");
+    }
+
+    fn commit_live_tv_activation(
+        connection: &mut rusqlite::Connection,
+        session_limit: &str,
+        absence_cutoff: i64,
+    ) -> bool {
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("activation transaction");
+        let sql = guarded_live_tv_setting_sql();
+        let mut changed = Vec::new();
+        for (key, value) in [
+            (crate::store::keys::LIVE_TV_ENABLED, "1"),
+            (crate::store::keys::LIVE_TV_MAX_SESSIONS, session_limit),
+            (crate::store::keys::LIVE_TV_CONFIG_GENERATION, "1"),
+        ] {
+            changed.push(
+                transaction
+                    .execute(
+                        &sql,
+                        rusqlite::params![
+                            key,
+                            value,
+                            1_i64,
+                            crate::store::keys::LIVE_TV_CONFIG_GENERATION,
+                            0_i64,
+                            "owner",
+                            absence_cutoff
+                        ],
+                    )
+                    .expect("guarded activation write"),
+            );
+        }
+        transaction.commit().expect("activation commit");
+        changed.into_iter().all(|count| count == 1)
+    }
+
     // A learner refused every internal peer request — its own operations-status
     // answer to the cluster panel, and every media-session control request it
     // originated — because the shared authority check required a committed
@@ -9070,6 +9346,239 @@ mod tests {
         assert!(!maintenance_preserves_quorum(true, true, 4, 3, 3));
         assert!(maintenance_preserves_quorum(true, true, 1, 1, 1));
         assert!(maintenance_preserves_quorum(false, true, 3, 1, 2));
+    }
+
+    #[test]
+    fn live_tv_activation_and_legacy_join_race_to_one_safe_winner() {
+        let path = std::env::temp_dir().join(format!(
+            "plurx-live-tv-join-race-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let connection = rusqlite::Connection::open(&path).expect("race fixture");
+        install_live_tv_membership_fixture(&connection);
+        connection
+            .execute(
+                "INSERT INTO cluster_join_tokens VALUES ('legacy-token', 'issued', NULL)",
+                [],
+            )
+            .expect("legacy token");
+        drop(connection);
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let activation_path = path.clone();
+        let activation_barrier = Arc::clone(&barrier);
+        let activation = std::thread::spawn(move || {
+            let mut connection = rusqlite::Connection::open(activation_path).expect("activator");
+            connection
+                .busy_timeout(Duration::from_secs(5))
+                .expect("activation busy timeout");
+            activation_barrier.wait();
+            commit_live_tv_activation(&mut connection, "1", 0)
+        });
+        let join_path = path.clone();
+        let join_barrier = Arc::clone(&barrier);
+        let join = std::thread::spawn(move || {
+            let mut connection = rusqlite::Connection::open(join_path).expect("joiner");
+            connection
+                .busy_timeout(Duration::from_secs(5))
+                .expect("join busy timeout");
+            join_barrier.wait();
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .expect("join transaction");
+            let result = transaction.execute(
+                "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = 'legacy-node' \
+                 WHERE token_hash = 'legacy-token' AND state = 'issued'",
+                [],
+            );
+            if result.as_ref().is_ok_and(|changed| *changed == 1) {
+                transaction
+                    .execute(
+                        "INSERT INTO cluster_node_join_staging VALUES ('legacy-node')",
+                        [],
+                    )
+                    .expect("stage legacy join while disabled");
+                transaction
+                    .execute(
+                        "INSERT INTO cluster_nodes VALUES ('legacy-node', 'voter', NULL, 1)",
+                        [],
+                    )
+                    .expect("publish legacy node");
+                transaction.commit().expect("legacy join commit");
+                true
+            } else {
+                false
+            }
+        });
+        barrier.wait();
+        let activated = activation.join().expect("activation outcome");
+        let joined = join.join().expect("join outcome");
+        assert_ne!(activated, joined, "exactly one side must commit");
+
+        let connection = rusqlite::Connection::open(&path).expect("race result");
+        let unsafe_state: bool = connection
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM settings WHERE key = 'live_tv.enabled' AND value = '1') \
+                   AND EXISTS (SELECT 1 FROM cluster_node_join_staging)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("unsafe-state query");
+        assert!(
+            !unsafe_state,
+            "enabled state must never cross a legacy join"
+        );
+    }
+
+    #[test]
+    fn enabled_live_tv_rejects_old_joins_and_rollback_heartbeats_fail_closed() {
+        let mut connection = rusqlite::Connection::open_in_memory().expect("fixture");
+        install_live_tv_membership_fixture(&connection);
+        connection
+            .execute_batch(
+                "INSERT INTO settings VALUES ('live_tv.enabled', '1', 1); \
+                 INSERT INTO settings VALUES ('live_tv.config_generation', '1', 1); \
+                 INSERT INTO cluster_join_tokens VALUES ('old-token', 'issued', NULL); \
+                 INSERT INTO cluster_join_tokens VALUES ('new-token', 'issued', NULL);",
+            )
+            .expect("enabled fixture");
+
+        let old_join = connection.execute(
+            "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = 'old-node' \
+             WHERE token_hash = 'old-token'",
+            [],
+        );
+        assert!(
+            old_join.is_err(),
+            "old coordinator must hit the replicated trigger"
+        );
+
+        let transaction = connection.transaction().expect("compatible join");
+        transaction
+            .execute(
+                "INSERT INTO cluster_live_tv_join_intents VALUES ('new-token')",
+                [],
+            )
+            .expect("compatible proof");
+        transaction
+            .execute(
+                "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = 'new-node' \
+                 WHERE token_hash = 'new-token'",
+                [],
+            )
+            .expect("compatible reservation");
+        transaction
+            .execute(
+                "INSERT INTO cluster_node_join_staging VALUES ('new-node')",
+                [],
+            )
+            .expect("compatible staging");
+        transaction
+            .execute(
+                "INSERT INTO cluster_nodes VALUES ('new-node', 'voter', NULL, 1)",
+                [],
+            )
+            .expect("compatible node");
+        transaction
+            .execute("DELETE FROM cluster_live_tv_join_intents", [])
+            .expect("consume proof");
+        transaction.commit().expect("compatible join commit");
+
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES ('new-node', $1, 1)",
+                rusqlite::params![LIVE_TV_CAPABILITY],
+            )
+            .expect("new capability");
+        connection
+            .execute_batch(
+                "UPDATE cluster_nodes SET last_seen_at = 2 WHERE node_id = 'new-node'; \
+                 DELETE FROM cluster_node_join_staging WHERE node_id = 'new-node';",
+            )
+            .expect("rolled-back binary heartbeat shape");
+        let ready: bool = connection
+            .query_row(
+                &format!("SELECT {}", capability_ready_predicate(LIVE_TV_CAPABILITY)),
+                [],
+                |row| row.get(0),
+            )
+            .expect("rollback capability verdict");
+        assert!(
+            !ready,
+            "a rollback heartbeat must invalidate live-TV authority"
+        );
+
+        connection
+            .execute(
+                "UPDATE cluster_node_capabilities SET last_seen_at = 2 \
+                 WHERE node_id = 'new-node' AND capability = $1",
+                rusqlite::params![LIVE_TV_CAPABILITY],
+            )
+            .expect("current heartbeat capability");
+        let ready: bool = connection
+            .query_row(
+                &format!("SELECT {}", capability_ready_predicate(LIVE_TV_CAPABILITY)),
+                [],
+                |row| row.get(0),
+            )
+            .expect("current capability verdict");
+        assert!(ready);
+    }
+
+    #[test]
+    fn absent_capable_node_cannot_publish_any_live_tv_setting() {
+        let mut connection = rusqlite::Connection::open_in_memory().expect("fixture");
+        install_live_tv_membership_fixture(&connection);
+        assert!(
+            !commit_live_tv_activation(&mut connection, "2", 2),
+            "a capability proof from before the absence cutoff is stale"
+        );
+        let published: i64 = connection
+            .query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))
+            .expect("published setting count");
+        assert_eq!(
+            published, 0,
+            "a refused activation must leave the complete tuple unpublished"
+        );
+    }
+
+    #[test]
+    fn live_tv_generation_allows_one_concurrent_activation_writer() {
+        let path = std::env::temp_dir().join(format!(
+            "plurx-live-tv-cas-race-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let connection = rusqlite::Connection::open(&path).expect("CAS fixture");
+        install_live_tv_membership_fixture(&connection);
+        drop(connection);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let writer = |limit: &'static str| {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut connection = rusqlite::Connection::open(path).expect("CAS writer");
+                connection
+                    .busy_timeout(Duration::from_secs(5))
+                    .expect("CAS busy timeout");
+                barrier.wait();
+                commit_live_tv_activation(&mut connection, limit, 0)
+            })
+        };
+        let first = writer("1");
+        let second = writer("2");
+        barrier.wait();
+        let winners = usize::from(first.join().expect("first writer"))
+            + usize::from(second.join().expect("second writer"));
+        assert_eq!(winners, 1);
+        let connection = rusqlite::Connection::open(path).expect("CAS result");
+        let generation: String = connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'live_tv.config_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("committed generation");
+        assert_eq!(generation, "1");
     }
 
     #[test]
@@ -12290,6 +12799,7 @@ mod tests {
             protocol_version: AUTH_PROTOCOL_MIN,
             protocol_min: AUTH_PROTOCOL_MIN,
             protocol_max: AUTH_PROTOCOL_MAX,
+            live_tv_v1: true,
         };
         assert_eq!(
             validate_redeem_join_request(&valid).expect("valid request"),
@@ -12395,6 +12905,7 @@ mod tests {
             protocol_version: payload.protocol_version,
             protocol_min: AUTH_PROTOCOL_MIN,
             protocol_max: AUTH_PROTOCOL_MAX,
+            live_tv_v1: true,
         };
         let finalize = FinalizeJoinRequest {
             token_digest: digest.clone(),

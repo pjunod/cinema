@@ -1,0 +1,73 @@
+# HDHomeRun Live TV status — what is built and what is proved
+
+**Status:** design · **Effort:** `effort/hdhomerun-live-tv` · **Updated:**
+2026-09-04 · **Live issue:** [#902](https://github.com/pjunod/plurx/issues/902)
+
+Companion to [HDHOMERUN-LIVE-TV-PLAN.md](HDHOMERUN-LIVE-TV-PLAN.md) (the
+contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md)
+(the task-PR and final qualification rules) — this is the one-page answer to
+*where is the effort, what passed, and what decision was made without Paul?*
+
+## Progress — task PRs earn their checkmark
+
+| Milestone | State | PR | Evidence |
+|---|---|---|---|
+| M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
+| M1 device/settings/lineup | review fixes validating | [#906](https://github.com/pjunod/plurx/pull/906) | first effort gate passed; eight attack-review findings fixed locally |
+| M2 live HLS and cluster relay | not started | — | — |
+| M3 web client | not started | — | — |
+| M4 Apple and Android | not started | — | — |
+| M5 docs, hardware, promotion | not started | — | — |
+
+## Current work — close the M1 attack review
+
+M0 is merged to the effort. M1's first exact head passed its pinned compile
+loop and effort gate, then adversarial review requested eight changes. The
+working fix linearizes enablement against joins and the owner voter, rejects
+older joiners while enabled, fences all tuner access on serving authority,
+redacts device failures, isolates malformed lineup rows, makes FFmpeg probing
+admin-only and rate-bounded, rejects mixed aggregate settings writes, and
+makes replicated generation parsing fail closed. The focused race, rollback,
+quorum-loss, parser, socket, and backend-parity tests pass locally; exact-head
+Rust 1.97.1 proof, the effort gate, and re-review are next.
+
+M1 still does not open a tuner stream or start a playback FFmpeg process; those
+lifecycle invariants land together in M2.
+
+## Evidence — exact commands and trees
+
+| When | Tree | Command | Result |
+|---|---|---|---|
+| 2026-09-04 | `main` at `48615baf` | `rustc --version` | `1.97.1 (8bab26f4f 2026-07-14)` |
+| 2026-09-04 | `main` at `48615baf` | `cargo check -p plurxd --all-targets --locked` | passed in source-only compiler loop |
+| 2026-09-04 | staged `codex/hdhomerun-plan` | `make validate-staged` | 115 catalog, 1,294 history, and 160 operations checks passed after review fixes |
+| 2026-09-04 | `b1bf0375` | PR [#904](https://github.com/pjunod/plurx/pull/904) | opened to the effort branch; exact-diff review requested |
+| 2026-09-04 | `8e6eaafa` | adversarial PR review | approved; no actionable diff findings |
+| 2026-09-04 | `a79c4927` | PR [#904](https://github.com/pjunod/plurx/pull/904) | current-head review approved; effort gate passed; merged as `e3f05f2e` |
+| 2026-09-04 | `807d8318` | PR [#906](https://github.com/pjunod/plurx/pull/906) | Rust 1.97.1 fmt/check/clippy and focused tests passed; effort gate passed |
+| 2026-09-04 | `807d8318` | first M1 adversarial review | one critical, five high, and two medium findings; merge held |
+| 2026-09-04 | working M1 fixes | focused local validation | join/activation races, rollback capability, canonical replicated CAS, quorum fence, URL redaction, malformed-row isolation, and Live TV HTTP tests passed |
+
+## Decisions made while the owner is away
+
+| Decision | Why | Revisit when |
+|---|---|---|
+| One manually configured private IPv4 device | Docker/VLAN broadcast discovery cannot be promised from the data-plane namespace | a diagnostic discovery helper can prove its namespace and interfaces |
+| One explicit tuner-owner node with signed relay | prevents four cluster nodes from advertising sixteen leases on four tuners | replicated fenced tuner leases exist |
+| Default two concurrent sessions | FLEX/CONNECT 4K has only two ATSC 3-capable tuners and other clients may compete | hardware evidence supports a different household policy |
+| H.264/AAC at 720p by default | broad client compatibility and realistic realtime encoding | 1080p/2160p fixtures pass on the selected owner |
+| DRM and captions unsupported | plurx has no licensed DRM path; captions lack end-to-end proof | a lawful DRM path or 608/708 fixture exists |
+| All first-party clients are in scope | a living-room feature is not complete as a web-only API | owner explicitly narrows the product surface |
+
+## Known limits — honest until evidence changes them
+
+- HDHomeRun HTTP behavior differs by model and firmware; the hardware pass
+  must record `discover.json`, sanitized lineup facts, headers, and FFmpeg
+  result from the actual device.
+- ATSC 3.0 commonly needs HEVC and AC-4. Device reception does not prove the
+  installed FFmpeg can decode either.
+- Owner failure ends the current live session. The next Watch may start after
+  the owner returns or the configured owner changes; automatic takeover is not
+  part of this effort.
+- An external HDHomeRun client can win a tuner after plurx checks capacity.
+  Runtime `503` remains normal and actionable.

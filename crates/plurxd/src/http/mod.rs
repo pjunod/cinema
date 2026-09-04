@@ -19,11 +19,13 @@ mod extract;
 mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
+pub(crate) mod internal_live_tv;
 pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
 mod items;
 mod keys;
 mod libraries;
+mod live_tv;
 mod network;
 mod offline;
 pub(crate) mod peer_transport;
@@ -83,6 +85,12 @@ pub fn router(state: AppState) -> Router {
             "/settings",
             get(system::get_settings).put(system::update_settings),
         )
+        .route("/live-tv/readiness", get(live_tv::readiness))
+        .route(
+            "/live-tv/readiness/refresh",
+            post(live_tv::refresh_readiness),
+        )
+        .route("/live-tv/channels", get(live_tv::channels))
         .route("/scan/status", get(system::scan_status))
         .route("/activity", get(system::activity))
         .route("/activity/detail", get(system::activity_detail))
@@ -417,6 +425,12 @@ pub fn router(state: AppState) -> Router {
             crate::shared_cache::CANARY_PATH,
             post(internal_media::shared_cache_canary).layer(DefaultBodyLimit::max(
                 crate::shared_cache::MAX_CANARY_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::SNAPSHOT_PATH,
+            post(internal_live_tv::snapshot).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
         )
         .route(
@@ -959,6 +973,10 @@ mod tests {
         for (method, path) in [
             (Method::GET, "/api/v1/search"),
             (Method::GET, "/api/v1/settings"),
+            (Method::GET, "/api/v1/live-tv/readiness"),
+            (Method::GET, "/api/v1/live-tv/channels"),
+            (Method::POST, "/api/v1/live-tv/readiness/refresh"),
+            (Method::POST, crate::live_tv::SNAPSHOT_PATH),
             (Method::POST, "/api/v1/libraries"),
             (Method::POST, "/api/v1/cluster/join-tokens"),
             (Method::POST, "/api/v1/cluster/learner-join-tokens"),
@@ -1052,6 +1070,10 @@ mod tests {
             (Method::POST, "/api/v1/files/8/hls/sessions"),
             (Method::POST, crate::media_sessions::START_PATH),
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
+            (Method::GET, "/api/v1/live-tv/readiness"),
+            (Method::GET, "/api/v1/live-tv/channels"),
+            (Method::POST, "/api/v1/live-tv/readiness/refresh"),
+            (Method::POST, crate::live_tv::SNAPSHOT_PATH),
             (Method::POST, "/api/v1/cluster/join-tokens"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
             (Method::POST, "/api/v1/libraries"),
@@ -1482,6 +1504,8 @@ mod tests {
             "/library/parts/7/0/movie.mkv",
             "/library/metadata/7/thumb",
             "/photo/:/transcode",
+            "/api/v1/live-tv/channels",
+            crate::live_tv::SNAPSHOT_PATH,
         ] {
             let response = app
                 .clone()
@@ -3269,6 +3293,173 @@ mod tests {
                 Some(if enabled { "1" } else { "0" })
             );
         }
+    }
+
+    #[tokio::test]
+    async fn live_tv_settings_are_runtime_only_generation_cas_and_enable_fenced() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["live_tv_enabled"], json!(false));
+        assert_eq!(initial["live_tv_device_ipv4"], json!(""));
+        assert_eq!(initial["live_tv_config_generation"], json!(0));
+
+        let (status, refused_enable) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_enabled": true,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused_enable}");
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::LIVE_TV_CONFIG_GENERATION)
+                .await
+                .expect("generation"),
+            None,
+            "a failed enable must not publish any part of the tuple"
+        );
+
+        let owner = initial["live_tv_owner_node_id"]
+            .as_str()
+            .expect("owner node");
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_owner_node_id": owner,
+                    "live_tv_max_sessions": 2,
+                    "live_tv_output_height": 1080,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["live_tv_enabled"], json!(false));
+        assert_eq!(saved["live_tv_device_ipv4"], json!("192.168.4.20"));
+        assert_eq!(saved["live_tv_owner_node_id"], json!(owner));
+        assert_eq!(saved["live_tv_max_sessions"], json!(2));
+        assert_eq!(saved["live_tv_output_height"], json!(1080));
+        assert_eq!(saved["live_tv_config_generation"], json!(1));
+
+        let (status, stale) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_max_sessions": 1,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+        let (status, unchanged) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{unchanged}");
+        assert_eq!(unchanged["live_tv_max_sessions"], json!(2));
+        assert_eq!(unchanged["live_tv_output_height"], json!(1080));
+        assert_eq!(unchanged["live_tv_config_generation"], json!(1));
+
+        let original_name = unchanged["server_name"].clone();
+        let (status, mixed_aggregate) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "server_name": "must-not-commit",
+                    "live_tv_enabled": false,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{mixed_aggregate}");
+        let (status, after_mixed) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{after_mixed}");
+        assert_eq!(after_mixed["server_name"], original_name);
+        assert_eq!(after_mixed["live_tv_config_generation"], json!(1));
+
+        let (status, mixed_enable) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_enabled": true,
+                    "live_tv_max_sessions": 1,
+                    "live_tv_config_generation": 1
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{mixed_enable}");
+    }
+
+    #[tokio::test]
+    async fn live_tv_quorum_loss_fences_channels_and_stops_readiness_before_device_work() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        let owner = settings["live_tv_owner_node_id"]
+            .as_str()
+            .expect("owner node");
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_owner_node_id": owner,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+
+        state.serving.validation_set_ready(false).await;
+        let (status, readiness) = call(&app, get("/api/v1/live-tv/readiness", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{readiness}");
+        assert_eq!(readiness["ready"], false);
+        assert!(readiness["snapshot"].is_null(), "{readiness}");
+        let authority = readiness["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .find(|check| check["id"] == "serving_authority")
+            .expect("serving-authority check");
+        assert_eq!(authority["ready"], false);
+
+        let (status, channels) = call(&app, get("/api/v1/live-tv/channels", Some(&admin))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{channels}");
+        assert_eq!(channels["code"], "serving_fenced");
+
+        let response = app
+            .clone()
+            .oneshot(post(
+                crate::live_tv::SNAPSHOT_PATH,
+                None,
+                json!({"generation": 1, "force": false, "probe_graph": false}),
+            ))
+            .await
+            .expect("internal fenced response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// N1's two settings move as one complete replicated pair. JSON null

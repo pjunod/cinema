@@ -619,6 +619,19 @@ checks = ["rust-gate", "rust-gate-ci", "user-journey"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
+id = "live-tv.integration"
+title = "HDHomeRun live television"
+contract = "The always-compiled Live TV runtime accepts only an explicit private or link-local IPv4 device, ignores advertised hostnames, refuses proxies and redirects, bounds device and peer documents, publishes one generation-fenced settings tuple, and obtains readiness plus a sanitized non-DRM channel lineup from one committed voter owner. Live HLS sessions preserve capability, cleanup, and finite-file-state boundaries through every ingress and first-party client."
+paths = [
+  "crates/plurxd/src/live_tv.rs",
+  "crates/plurxd/src/http/live_tv.rs",
+  "crates/plurxd/src/http/internal_live_tv.rs",
+  "docs/HDHOMERUN-LIVE-TV-*.md",
+]
+checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract"]
+depends_on = ["server.api", "identity.access", "playback.pipeline"]
+
+[[points]]
 id = "playback.benchmark"
 title = "Cinema-vs-Plex controlled A/B benchmark"
 contract = "The same corpus, operations, output contract, and client clock produce credential-safe raw evidence, distributions, failure rates, and directionally explicit ratios for Cinema and Plex."

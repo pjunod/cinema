@@ -777,6 +777,15 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
+    /// Runtime-only HDHomeRun live-TV configuration. The six values are read
+    /// as one snapshot and written with a generation CAS; the enable bit is
+    /// deliberately absent/off on upgrade.
+    pub const LIVE_TV_ENABLED: &str = "live_tv.enabled";
+    pub const LIVE_TV_DEVICE_IPV4: &str = "live_tv.device_ipv4";
+    pub const LIVE_TV_OWNER_NODE_ID: &str = "live_tv.owner_node_id";
+    pub const LIVE_TV_MAX_SESSIONS: &str = "live_tv.max_sessions";
+    pub const LIVE_TV_OUTPUT_HEIGHT: &str = "live_tv.output_height";
+    pub const LIVE_TV_CONFIG_GENERATION: &str = "live_tv.config_generation";
     /// Opt in to remote media-session placement only after every committed
     /// voter is publishing the current media protocol. Absent is deliberately
     /// off so rolling upgrades keep all starts local.
@@ -1105,8 +1114,44 @@ pub trait SettingsStore: Send + Sync + 'static {
     /// partial write must never leave a durable configuration that no request
     /// actually submitted.
     async fn put_settings(&self, values: &[(&str, &str)]) -> Result<(), StoreError>;
+    /// Atomically replace a related settings tuple only while its generation
+    /// still equals `expected_generation`. `values` must include
+    /// `generation_key` set to exactly expected + 1. A false result is a
+    /// normal concurrent-writer conflict and leaves every value unchanged.
+    async fn put_settings_if_generation(
+        &self,
+        generation_key: &str,
+        expected_generation: i64,
+        values: &[(&str, &str)],
+    ) -> Result<bool, StoreError>;
     /// The stable unique id of this logical server.
     async fn instance_id(&self) -> Result<String, StoreError>;
+}
+
+pub(crate) fn validate_generated_settings(
+    generation_key: &str,
+    expected_generation: i64,
+    values: &[(&str, &str)],
+) -> Result<(), StoreError> {
+    let next = expected_generation
+        .checked_add(1)
+        .ok_or_else(|| StoreError::Database("settings generation exhausted".to_owned()))?;
+    let matches = values
+        .iter()
+        .filter(|(key, value)| *key == generation_key && value.parse::<i64>().ok() == Some(next))
+        .count();
+    let unique = values
+        .iter()
+        .map(|(key, _)| *key)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        == values.len();
+    if expected_generation < 0 || matches != 1 || !unique {
+        return Err(StoreError::Database(
+            "generated settings require unique keys and exactly the next generation".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait]
