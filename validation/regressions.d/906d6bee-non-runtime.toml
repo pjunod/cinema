@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["906d6bee"]
+points = []
+checks = []
+reason = "Ledger only: records the coverage row for the merge-resolution fixes in the commit before it. No runtime behavior changes."
+ignore = true
