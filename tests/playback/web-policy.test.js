@@ -2127,7 +2127,7 @@ test("a persistent supply stall spends its one restart on the sustainable rung",
   }
   assert.match(
     shippedSource("persistentWait"),
-    /stallRecoveryTargetHeight\([\s\S]*?seekTo\(position,true,recoveryHeight\)/,
+    /stallRecoveryTargetHeight\([\s\S]*?seekTo\(position,true,recoveryHeight,false\)/,
     "the shipped persistent-stall path must pass the measured target into its bound reopen",
   );
 });
@@ -2787,6 +2787,7 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
       shippedSource("openSession"),
       shippedSource("currentStreamFailureOverlay"),
       shippedSource("showSessionOpenFailure"),
+      shippedSource("positionForPlaybackIntent"),
       shippedSource("burnSub"),
       "return {burnSub};",
     ].join("\n"),
@@ -3396,6 +3397,9 @@ function carryHarness(player) {
       shippedSource("playbackSelection"),
       shippedSource("setPrePlay"),
       shippedSource("rememberPlaybackSelection"),
+      "function clearPlaybackControlWaiters(){}",
+      shippedSource("supersedePlaybackControlIntent"),
+      shippedSource("pausePlaybackInternally"),
       shippedSource("closePlayer"),
       "return {prePlaySelection, clearPrePlay, playbackSelection, setPrePlay," +
         " rememberPlaybackSelection, closePlayer};",
@@ -3876,7 +3880,9 @@ test("a session that lands on a different range repaints the badge", () => {
     "attachHls",
     "stopPlaybackControl",
     "startPlaybackControl",
-    [shippedSource("attachSession"), "return {attachSession};"].join("\n"),
+    [shippedSource("markPlaybackControlSeekExecuted"),
+      shippedSource("samplePlaybackPresentationClock"),
+      shippedSource("attachSession"), "return {attachSession};"].join("\n"),
   );
   const player = { deliveredRange: "hdr10" };
   const { attachSession } = build(

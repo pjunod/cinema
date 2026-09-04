@@ -20,6 +20,46 @@ function shippedSource(name) {
   return (ends.length ? rest.slice(0, Math.min(...ends)) : rest).trimEnd();
 }
 
+// Run the real full-open and menu code with a controllable decision boundary.
+// Media/server facilities are replaced; intent capture and replacement are not.
+function fullOpenHarness() {
+  const policy = require("../../crates/plurxd/src/web/playback-policy.js");
+  return new Function("PlaybackPolicy", [
+    "let PLAYER=null,PENDING_ATTEMPT_REASON=null,PENDING_DEFAULT_SUB_OFF=false; const decisions=[],released=[],media=[];",
+    "const localStorage={getItem:()=> 'auto',setItem:()=>{}}; const DECODE_LIMIT_TTL_MS=1,DECODE_LIMIT_RETEST_MS=1;",
+    "let modalOpen=true; const node={classList:{contains:()=>modalOpen,add(){modalOpen=true;},toggle(){},remove(){}},style:{},dataset:{},focus(){}};",
+    "const video={paused:false,ended:false,seeking:false,currentTime:10,playbackRate:1,querySelectorAll:()=>[],addEventListener(){},removeEventListener(){},removeAttribute(){},load(){},play(){this.paused=false;media.push('play');return Promise.resolve();},pause(){this.paused=true;media.push('pause');}};",
+    "const document={activeElement:node,getElementById:id=>id==='video'?video:node};",
+    "const window={}; function setTimeout(){return 0;} function setInterval(){return 0;} function clearInterval(){}",
+    "function qualityForce(){return 'auto';} function playQuality(){return 'auto';} function qualityLabel(){return '720p';} function prePlaySelection(){return null;}",
+    "function wirePlayer(){} function setLoading(){} function toast(){} function closeMenu(){} function closePlayer(){throw Error('unexpected close');}",
+    "function clientLog(){} function playbackContext(){return {};} function decodeLimits(){return {};} function playerPixelHeight(){return 1080;}",
+    "function askDecision(file,force,selection){return new Promise(resolve=>decisions.push({file,selection:selection&&{...selection},resolve}));}",
+    "function stopPlayerTimers(){} function releaseSession(id){released.push(id);} function teardownHls(){} function clearSubs(){}",
+    "function prePlayApplication(d,s){return {subtitle:s?.subtitle??null,burnedSub:null,textSub:null};} function autoskipOn(){return false;}",
+    "function newAttempt(){} function selectedAudioIndex(p){return p.audio[p.curAudio]?.index||0;} function setupAirplay(){} function setupTrackMenus(){}",
+    "function renderPlayerInfo(){} function renderSkip(){} function autoNextOn(){return false;} function useNativeHls(){return false;} function segmentedRemuxOk(){return false;}",
+    "function tok(url){return url;} function armStall(){} function remuxUrl(url,audio,pos){return '/remux?audio='+audio+'&start='+pos;}",
+    "function markPlaybackControlSeekExecuted(p,pos){if(p.controlSeek?.targetMs===pos*1000)p.controlSeek.executed=true;}",
+    "function probeDecode(){} function armHitchDetector(){} function pbTick(){} function pbSyncPlayIcon(){} function playerActivity(){}",
+    "function clearPlaybackControlWaiters(){} function notifyPlaybackControl(){} function endWait(){} function pbTotalSec(){return 600;}",
+    "function subNeedsBurn(){return false;} function pbSyncSubIcon(){}",
+    shippedSource("createPlaybackOpenGate"), "const PLAY_OPEN_GATE=createPlaybackOpenGate();",
+    shippedSource("takePlaybackAttemptReason"), shippedSource("playbackSelection"),
+    shippedSource("positionForPlaybackIntent"), shippedSource("supersedePlaybackControlIntent"),
+    shippedSource("beginPlaybackControlSeek"), shippedSource("rememberPlaybackSelection"),
+    shippedSource("playbackInitialRoute"), shippedSource("restartPendingPlaybackOpen"),
+    shippedSource("rememberPlaybackTransportIntent"), shippedSource("applyPlaybackTransportIntent"),
+    shippedSource("pausePlaybackInternally"),
+    shippedSource("handlePlaybackTransportEvent"),
+    shippedSource("beginPlaybackMediaAttachment"), shippedSource("applyPlaybackAttachmentPosition"),
+    shippedSource("resetMediaSource"), shippedSource("play"), shippedSource("setQuality"),
+    shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),
+    shippedSource("offsetLabel"), shippedSource("setSync"), shippedSource("togglePlay"),
+    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},current:()=>PLAYER,decisions,released,media,video,play,setQuality,seekTo,switchAudio,setSub,setSync,togglePlay,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent};",
+  ].join("\n"))(policy);
+}
+
 function bootstrap() {
   return {
     protocol: control.PROTOCOL,
@@ -529,6 +569,10 @@ async function main() {
   assert.equal(adapter.playbackControlSnapshot(video,player).position_ms,15_000);
   video.paused=true;
   assert.equal(adapter.playbackControlSnapshot(video,player).demand,"hold");
+  player.wantsPlayback=true;
+  assert.equal(adapter.playbackControlSnapshot(video,player).demand,"active",
+    "an internal reset pause must not tell the producer to hold the requested replacement");
+  delete player.wantsPlayback;
   video.paused=false; video.seeking=true; player._seekPreview=20;
   const seeking=adapter.playbackControlSnapshot(video,player);
   assert.equal(seeking.render_state,"seeking");
@@ -540,28 +584,30 @@ async function main() {
   assert.equal(committedSeek.seek_target_ms,45_000,
     "a committed destination survives after preview state is cleared");
   player.controlSeek=null;
-  const seekIntentAdapter=new Function([
+  let presentationNow=0;
+  const seekIntentAdapter=new Function("performance",[
     "let PLAYER=null; let notifications=0;",
     "function clearPlaybackControlWaiters(){}",
     "function notifyPlaybackControl(){notifications+=1;}",
     shippedSource("supersedePlaybackControlIntent"),
     shippedSource("beginPlaybackControlSeek"),
     shippedSource("markPlaybackControlSeekExecuted"),
+    shippedSource("samplePlaybackPresentationClock"),
     shippedSource("settlePlaybackControlSeek"),
     "return {begin:beginPlaybackControlSeek,mark:markPlaybackControlSeekExecuted,"+
-      "settle:settlePlaybackControlSeek,"+
+      "settle:settlePlaybackControlSeek,sample:samplePlaybackPresentationClock,"+
       "notifications:()=>notifications};",
-  ].join("\n"))();
+  ].join("\n"))({now:()=>presentationNow});
   const intentPlayer={started:true,offset:0,source:{video_codec:"h264"},
     controlPresentedFrames:0,controlHasFrameCallbacks:true};
-  const intentVideo={currentTime:10,seeking:false,readyState:4};
+  const intentVideo={currentTime:10,seeking:false,readyState:4,paused:false,playbackRate:1};
   const firstIntent=seekIntentAdapter.begin(intentPlayer,30);
   const finalIntent=seekIntentAdapter.begin(intentPlayer,90);
   assert.equal(finalIntent.sequence,firstIntent.sequence+1,"later seeks supersede monotonically");
   assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer,90,1),false,
     "a target-looking frame before execution cannot settle the intent");
   assert.equal(intentPlayer.controlSeek.targetMs,90_000);
-  assert.equal(seekIntentAdapter.mark(intentPlayer,90),true);
+  assert.equal(seekIntentAdapter.mark(intentPlayer,90,intentVideo),true);
   assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer,90.4,1),false,
     "the old loose landing tolerance is not accepted");
   assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer,90.2,1),true,
@@ -569,6 +615,294 @@ async function main() {
   assert.equal(intentPlayer.controlSeek,null);
   assert.equal(seekIntentAdapter.notifications(),3,
     "both intents and the presented landing are published");
+
+  // A delayed audio sample can be a second beyond the landing window. The
+  // first sample proves the destination; the second must advance, not retreat.
+  const audioIntentPlayer={started:true,offset:0,source:{},controlHasFrameCallbacks:true};
+  const audioIntentVideo={currentTime:45,paused:false,seeking:false};
+  seekIntentAdapter.begin(audioIntentPlayer,45);
+  seekIntentAdapter.mark(audioIntentPlayer,45,audioIntentVideo);
+  assert.equal(seekIntentAdapter.settle(audioIntentVideo,audioIntentPlayer),false);
+  audioIntentVideo.currentTime=44.999;
+  assert.equal(seekIntentAdapter.settle(audioIntentVideo,audioIntentPlayer),false);
+  audioIntentVideo.currentTime=45;
+  assert.equal(seekIntentAdapter.settle(audioIntentVideo,audioIntentPlayer),false,
+    "a backward sample cannot lower the proof threshold");
+  audioIntentVideo.currentTime=46;
+  presentationNow+=1000;
+  assert.equal(seekIntentAdapter.settle(audioIntentVideo,audioIntentPlayer),true);
+
+  for(const rate of [1,2]){
+    const p={started:true,offset:0,source:{},controlHasFrameCallbacks:true};
+    const v={currentTime:60,paused:false,seeking:false,playbackRate:rate};
+    seekIntentAdapter.begin(p,60);
+    seekIntentAdapter.mark(p,60,v);
+    presentationNow+=1000; v.currentTime=60+rate;
+    assert.equal(seekIntentAdapter.settle(v,p),false,
+      `the first ${rate}x audio sample at 1 Hz records landing without settling`);
+    presentationNow+=1000; v.currentTime=60+2*rate;
+    assert.equal(seekIntentAdapter.settle(v,p),true,
+      `a later advancing ${rate}x sample settles without needing a 250 ms poll`);
+  }
+  {
+    const p={started:true,offset:0,source:{},controlHasFrameCallbacks:true};
+    const v={currentTime:30,paused:false,seeking:false,playbackRate:1};
+    seekIntentAdapter.begin(p,30); seekIntentAdapter.mark(p,30,v);
+    presentationNow+=500; v.paused=true; seekIntentAdapter.sample(v,p);
+    presentationNow+=60_000; v.paused=false; seekIntentAdapter.sample(v,p);
+    presentationNow+=500; v.currentTime=32;
+    assert.equal(seekIntentAdapter.settle(v,p),false);
+    assert.equal(p.controlSeek.audioPositionMs,null,"paused time cannot justify a wrong landing");
+    v.currentTime=31;
+    assert.equal(seekIntentAdapter.settle(v,p),false);
+    presentationNow+=500; v.playbackRate=2; seekIntentAdapter.sample(v,p);
+    presentationNow+=500; v.currentTime=32.5;
+    assert.equal(seekIntentAdapter.settle(v,p),true,"rate edges integrate the prior active rate");
+    seekIntentAdapter.begin(p,90); seekIntentAdapter.mark(p,90,v);
+    presentationNow+=30_000; v.currentTime=110;
+    assert.equal(seekIntentAdapter.settle(v,p),false);
+    assert.equal(p.controlSeek.audioPositionMs,null,"landing allowance is bounded to eight active seconds");
+  }
+  {
+    const callbacks=[];
+    const queue=new Function(shippedSource("queuePlaybackFrame")+"; return queuePlaybackFrame;")();
+    const p={started:true,offset:0,source:{video_codec:"h264"},controlHasFrameCallbacks:true};
+    const v={currentTime:80,paused:false,seeking:false,
+      requestVideoFrameCallback:callback=>callbacks.push(callback)};
+    const epochs=[];
+    queue(v,p,(_now,_meta,epoch)=>epochs.push(epoch));
+    seekIntentAdapter.begin(p,80); seekIntentAdapter.mark(p,80,v);
+    queue(v,p,(_now,_meta,epoch)=>epochs.push(epoch));
+    callbacks.forEach(callback=>callback(presentationNow,{mediaTime:80}));
+    assert.notEqual(epochs[0],p.controlPresentationEpoch,
+      "a callback queued by the predecessor cannot settle the new execution");
+    assert.equal(epochs[1],p.controlPresentationEpoch);
+    presentationNow+=1000;
+    assert.equal(seekIntentAdapter.settle(v,p,81,1),true,
+      "delayed video presentation is checked against the active media timeline");
+    assert.match(SHIPPED_UI,/if\(epoch===\(p\.controlPresentationEpoch\|\|0\)\)\s*settlePlaybackControlSeek/,
+      "the shipped detector enforces callback ownership before settlement");
+  }
+
+  // Run the actual menu operations, including the progressive audio branch
+  // that previously threw ReferenceError before marking its intent executed.
+  function replacementHarness(){
+    return new Function([
+      "let PLAYER=null; const calls=[],released=[],pending=[]; let held=false,failure=null; let PENDING_ATTEMPT_REASON=null; let PENDING_DEFAULT_SUB_OFF=false;",
+      "const video={currentTime:10,querySelectorAll:()=>[],pause(){},play:()=>Promise.resolve()};",
+      "const document={getElementById:id=>id==='video'?video:null};",
+      "const localStorage={getItem:()=> 'auto',setItem:()=>{}};",
+      "const PlaybackPolicy={subtitleBurnAction:()=> 'burn',hlsTransport:()=> 'mse',copyAudioNeedsTranscode:()=>false,indexPendingFallback:()=> 'progressive_remux'}; const PLAY_CAPS={acodec:'aac'};",
+      "function closeMenu(){} function toast(){} function qualityLabel(){return '720p';}",
+      "function clientLog(){} function playbackContext(){return {};} function renderPlayerInfo(){}",
+      "function clearPlaybackControlWaiters(){} function notifyPlaybackControl(){} function endWait(){}",
+      "function play(id,title,position){calls.push({kind:'play',position});}",
+      "function newAttempt(){} function teardownHls(){} function resetMediaSource(){}",
+      "function clearSubs(){} function pbSyncSubIcon(){} function setLoading(){} function armStall(){}",
+      "function subNeedsBurn(){return true;} function subLabelFor(){return 'PGS';}",
+      "function sessionHeight(){return null;} function langName(){return 'English';}",
+      "function useNativeHls(){return false;} function showSessionOpenFailure(){return false;}",
+      "function selectedAudioIndex(){return 0;} function hlsJsSupported(){return true;} function mseCanTake(){return true;} function clearStreamFailure(){}",
+      "function transcodeOpts(position){return {position};}",
+      "async function openSession(id,opts){calls.push({kind:'session',position:(opts.position??opts.start)*1000});if(failure)throw failure;if(held)return new Promise(resolve=>pending.push(resolve));return {session_id:'replacement'};}",
+      "function releaseSession(id){released.push(id);}",
+      "function attachSession(v,p,info,pos){markPlaybackControlSeekExecuted(p,pos);return pos;}",
+      "function remuxUrl(path,audio,pos){calls.push({kind:'remux',position:pos*1000});return '/remux';}",
+      shippedSource("supersedePlaybackControlIntent"),
+      shippedSource("positionForPlaybackIntent"),
+      shippedSource("beginPlaybackControlSeek"),
+      shippedSource("markPlaybackControlSeekExecuted"),
+      shippedSource("samplePlaybackPresentationClock"),
+      shippedSource("streamGeneration"),
+      shippedSource("restartPendingPlaybackOpen"),
+      shippedSource("rememberPlaybackTransportIntent"),
+      shippedSource("applyPlaybackTransportIntent"),
+      shippedSource("pausePlaybackInternally"),
+      shippedSource("rememberPlaybackSelection"),
+      shippedSource("offsetLabel"),
+      shippedSource("startCopyHls"),
+      shippedSource("setQuality"),shippedSource("setSync"),
+      shippedSource("setSub"),shippedSource("burnSub"),shippedSource("switchAudio"),
+      "return {attach(p){PLAYER=p;},hold(){held=true;},rejectWith(error){failure=error;},released,pending,calls,video,setQuality,setSync,setSub,switchAudio,startCopyHls,streamGeneration,beginPlaybackControlSeek};",
+    ].join("\n"))();
+  }
+  for(const operation of ["quality","audio-sync","subtitle-burn","audio-track"]){
+    const h=replacementHarness();
+    const p={fileId:'film',title:'Film',offset:0,started:true,method:'remux',vod:true,
+      source:{video_codec:'h264'},controlHasFrameCallbacks:true,
+      controlSeek:{sequence:1,targetMs:90_000,executed:true},controlSeekSequence:1,
+      audio:[{index:0},{index:1}],curAudio:0,curSub:-1,subs:[{index:2}],burnedSub:null};
+    h.attach(p);
+    if(operation==='quality') h.setQuality('720');
+    if(operation==='audio-sync') await h.setSync(250);
+    if(operation==='subtitle-burn') await h.setSub(2);
+    if(operation==='audio-track') await h.switchAudio(1);
+    assert.equal(h.calls.length,1,`${operation} makes one replacement`);
+    assert.equal(h.calls[0].position,90_000,`${operation} retains the unpresented seek destination`);
+    assert.equal(p.controlSeek.targetMs,90_000);
+    if(operation==='audio-track') assert.equal(p.controlSeek.executed,true);
+  }
+  {
+    const h=replacementHarness();
+    const p={controlHasFrameCallbacks:true,controlSeekSequence:1}; h.attach(p);
+    const old=h.streamGeneration();
+    h.beginPlaybackControlSeek(p,90);
+    assert.equal(old.live(),false,"a new destination immediately fences an older open, before seek debounce");
+  }
+  for(const command of ['audio','burn']){
+    const h=replacementHarness();
+    const p={fileId:'film',method:'transcode',audio:[{index:0},{index:1}],curAudio:0,
+      subs:[{index:2}],curSub:-1,burnedSub:null,offset:0,controlHasFrameCallbacks:true};
+    h.attach(p);h.hold();
+    const opening=command==='audio'?h.switchAudio(1):h.setSub(2);
+    assert.equal(h.pending.length,1);
+    h.beginPlaybackControlSeek(p,120);
+    h.pending[0]({session_id:'abandoned-'+command});await opening;
+    assert.deepEqual(h.released,['abandoned-'+command],'an obsolete successful create releases its resource');
+  }
+  {
+    const h=replacementHarness();
+    const p={fileId:'film',method:'remux',source:{video_codec:'h264'},audio:[{index:0,codec:'aac'}],curAudio:0,
+      controlHasFrameCallbacks:true};h.attach(p);h.beginPlaybackControlSeek(p,90);
+    h.rejectWith({code:'vod_index_pending'});
+    assert.equal(await h.startCopyHls(h.video,90,()=>true),true);
+    assert.equal(p.copyHls,false);
+    assert.equal(p.controlSeek.executed,true,'progressive index fallback must execute the same destination');
+  }
+  const fullPlayer=()=>({fileId:'film',title:'Film',offset:0,started:true,method:'direct_play',
+    knownDur:600_000,source:{video_codec:'h264'},audio:[{index:0},{index:1}],curAudio:0,
+    subs:[{index:2,text:true}],curSub:-1,burnedSub:null,preplay:{audio:0,subtitle:-1},
+    controlHasFrameCallbacks:true,wantsPlayback:true});
+  for(const native of [false,true]){
+    const h=new Function("native",[
+      "let PLAYER={offset:0,wantsPlayback:true,controlSeekSequence:1}; const instances=[],metadata=[];",
+      "const video={paused:false,currentTime:10,playCount:0,pause(){this.paused=true;},play(){this.paused=false;this.playCount++;return Promise.resolve();},addEventListener(e,f){metadata.push(f);},removeEventListener(){}};",
+      "const document={getElementById:()=>video}; const window={Hls:true}; const TOKEN=null;",
+      "class Hls{static Events={MANIFEST_PARSED:'manifest',ERROR:'error'}; static isSupported(){return true;} constructor(){this.events={};instances.push(this);} on(e,f){this.events[e]=f;} loadSource(){} attachMedia(){} destroy(){}}",
+      "const PlaybackPolicy={bandwidthSeedBps:()=>null}; function preferNativeHls(){return native;} function bufferTargets(){return {fwd:20,back:10};} function vodClientContract(){return {};}",
+      "function clearStreamFailure(){} function refreshSegTimes(){} function tok(url){return url;}",
+      shippedSource("rememberPlaybackTransportIntent"),shippedSource("pausePlaybackInternally"),
+      shippedSource("applyPlaybackTransportIntent"),shippedSource("teardownHls"),
+      shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
+      shippedSource("attachHls"),
+      "return {p:PLAYER,video,instances,metadata,attach:()=>attachHls(video,'/session/index.m3u8',30),teardownHls};",
+    ].join("\n"))(native);
+    h.attach();
+    h.p.controlSeekSequence=2;
+    h.p.controlSeek={sequence:2,targetMs:90_000,executed:true};
+    if(native){
+      h.metadata[0]();
+      assert.equal(h.video.currentTime,90,'late native metadata retains the newest seek, not its original start');
+    }else{
+      h.instances[0].events.manifest();
+      assert.equal(h.video.paused,false,'a seek during manifest loading cannot suppress playback startup');
+      h.p.wantsPlayback=false;
+      h.instances[0].events.manifest();
+      assert.equal(h.video.paused,true,'the same attachment reads the latest Pause');
+    }
+    const oldPlays=h.video.playCount;
+    h.teardownHls();h.video.currentTime=120;
+    if(native)h.metadata[0]();else h.instances[0].events.manifest();
+    assert.equal(h.video.currentTime,120,'departed metadata cannot rewind the next attachment');
+    assert.equal(h.video.playCount,oldPlays,'departed manifest cannot play the next attachment');
+    if(!native) assert.doesNotThrow(()=>h.instances[0].events.error(null,{fatal:true}),
+      'a departed decoder failure cannot recover the replacement');
+  }
+  const resolveDecision=call=>call.resolve({method:'direct_play',play_url:'/original.mp4',
+    source:{video_codec:'h264',duration_ms:600_000},
+    audio:[{index:0,default:call.selection?.audio!==1},{index:1,default:call.selection?.audio===1}],
+    subtitles:[{index:2,text:true}],ladder:[]});
+  for(const laterCommand of ['seek','audio','subtitle']){
+    const h=fullOpenHarness(), before=fullPlayer(); h.attach(before);
+    h.setQuality('720');
+    assert.equal(h.decisions.length,1);
+    if(laterCommand==='seek') await h.seekTo(90);
+    if(laterCommand==='audio') await h.switchAudio(1);
+    if(laterCommand==='subtitle') await h.setSub(2);
+    assert.equal(h.decisions.length,2,'a newer command creates a coherent replacement snapshot');
+    resolveDecision(h.decisions[0]); await flush();
+    assert.equal(h.current(),before,'the old decision must not replace the newer intent');
+    resolveDecision(h.decisions[1]); await flush(); await flush();
+    assert.notEqual(h.current(),before);
+    assert.equal(h.current().controlSeek.targetMs,laterCommand==='seek'?90_000:10_000);
+    if(laterCommand==='audio') assert.equal(h.current().preplay.audio,1);
+    if(laterCommand==='subtitle') assert.equal(h.current().preplay.subtitle,2);
+  }
+  {
+    const h=fullOpenHarness();h.attach(fullPlayer());
+    await h.setSync(250); resolveDecision(h.decisions[0]); await flush(); await flush();
+    assert.equal(h.current().aoffset,250);
+    assert.equal(h.current().method,'remux','a direct-play verdict must not discard the requested audio correction');
+    assert.match(h.video.src,/^\/remux/);
+  }
+  for(const pauseTiming of ['before-open','during-decision']){
+    const h=fullOpenHarness(), p=fullPlayer(); h.attach(p);
+    if(pauseTiming==='before-open'){p.wantsPlayback=false;h.video.paused=true;}
+    h.setQuality('720');
+    if(pauseTiming==='during-decision')h.togglePlay();
+    resolveDecision(h.decisions[0]);await flush();await flush();
+    assert.equal(h.current().wantsPlayback,false,pauseTiming);
+    assert.equal(h.video.paused,true,pauseTiming);
+    assert.equal(h.media.includes('play'),false,'a stream replacement cannot override Pause');
+  }
+  {
+    const h=fullOpenHarness();h.attach(fullPlayer());h.setQuality('720');
+    resolveDecision(h.decisions[0]);await flush();await flush();
+    h.current().controlSeek={sequence:2,targetMs:90_000,executed:true};
+    h.video.onloadedmetadata();
+    assert.equal(h.video.currentTime,90,'late direct metadata cannot restore an older quality-change position');
+  }
+  {
+    const h=fullOpenHarness(),p=fullPlayer();h.attach(p);p.wantsPlayback=false;h.video.paused=true;h.setOpen(false);
+    const opening=h.play('film','Film',0,600_000,null);
+    resolveDecision(h.decisions[0]);await opening;
+    assert.equal(h.current().wantsPlayback,true,'a new click after Close starts playback even for the same file');
+    assert.equal(h.video.paused,false);
+  }
+  {
+    const h=fullOpenHarness(),p=fullPlayer();h.attach(p);
+    h.resetMediaSource(h.video);
+    assert.equal(p.wantsPlayback,true,'internal reset pause is not a viewer pause');
+    assert.equal(p.internalMediaReset,true);
+    h.applyPlaybackTransportIntent(h.video,p);
+    assert.equal(h.video.paused,false);
+  }
+  {
+    const h=fullOpenHarness(),old=fullPlayer();h.attach(old);h.resetMediaSource(h.video);
+    const next=fullPlayer();next.internalMediaReset=true;h.attach(next);
+    h.handlePlaybackTransportEvent(h.video,next,'pause');
+    assert.equal(next.wantsPlayback,true,'the old reset pause event cannot pause the new player');
+    h.handlePlaybackTransportEvent(h.video,next,'pause');
+    assert.equal(next.wantsPlayback,false,'native Pause during preparation remains a real command');
+    assert.equal(next.controlIntentGeneration,1);
+    h.handlePlaybackTransportEvent(h.video,next,'play');
+    assert.equal(next.wantsPlayback,true);assert.equal(next.controlIntentGeneration,2);
+    h.applyPlaybackTransportIntent(h.video,next);
+    next.wantsPlayback=false;
+    h.handlePlaybackTransportEvent(h.video,next,'play');
+    assert.equal(next.wantsPlayback,false,'a delayed internal play event cannot overwrite a newer Pause');
+  }
+  {
+    const h=new Function([
+      "let now=1000,attempts=0,recovered=0; const performance={now:()=>now},document={hidden:false};",
+      "const PERSISTENT_STALL_MS=8000,STALL_MIN_MS=350,SUPPLY_RUNWAY_SECS=1.5; const p={started:true,waitAt:null,controlHasFrameCallbacks:true,controlPresentedFrames:10,source:{video_codec:'h264'},wantsPlayback:true}; let PLAYER=p;",
+      "const v={currentTime:10,paused:false,ended:false,pause(){this.paused=true;}};",
+      "function bufferRunway(){return 10;} function persistentWait(){attempts++;return new Promise(()=>{});}",
+      "function clearStall(){} function finishStallRecovery(){recovered++;} function setLoading(){} function recordWaitStall(){}",
+      "function playerActivity(){} function settlePlaybackControlSeek(){} function pbTick(){} function pbSyncPlayIcon(){} function notifyPlaybackControl(){} function reportTtff(){}",
+      shippedSource("streamHasVideo"),shippedSource("endWait"),
+      shippedSource("samplePlaybackPresentationClock"),shippedSource("pausePlaybackInternally"),
+      shippedSource("playbackProgressTick"),shippedSource("playbackWaitNeedsProgress"),shippedSource("handlePlaybackPlaying"),
+      "return {p,v,tick(time){now=time;playbackProgressTick(v,p);},playing(){handlePlaybackPlaying(v,p);},attempts:()=>attempts,recovered:()=>recovered};",
+    ].join("\n"))();
+    h.tick(1000);h.tick(9000);
+    assert.equal(h.attempts(),1);const began=h.p.waitAt;
+    h.playing();h.tick(20000);
+    assert.equal(h.p.waitAt,began,'playing without frame/clock movement cannot cancel the recovery owner');
+    assert.equal(h.recovered(),0,'an event alone must not report recovered');
+    h.v.currentTime=11;h.p.controlPresentedFrames=11;h.tick(20500);
+    assert.equal(h.p.waitAt,null);assert.equal(h.recovered(),1,'actual output progress retires the wait');
+  }
   player.waitAt=performance.now()-9_000;
   const inferredSupply=adapter.playbackControlSnapshot(video,player);
   assert.equal(inferredSupply.render_state,"stalled");
@@ -737,7 +1071,7 @@ async function main() {
   let replayClicks=0,elementPlays=0,activities=0;
   const endedToggle=new Function("document","replayEnded","playerActivity",
     "supersedePlaybackControlIntent","notifyPlaybackControl",[
-    "let PLAYER={};",shippedSource("togglePlay"),"togglePlay();",
+    "let PLAYER={}; function endWait(){}",shippedSource("togglePlay"),"togglePlay();",
   ].join("\n"))(
     {getElementById:()=>({ended:true,paused:true,play:()=>{elementPlays+=1;},pause:()=>{}})},
     ()=>{replayClicks+=1;},()=>{activities+=1;},()=>{},()=>{},
@@ -749,7 +1083,7 @@ async function main() {
 
   assert.match(shippedSource("wirePlayer"),/visibilitychange[^\n]*notifyPlaybackControl/);
   assert.match(shippedSource("persistentWait"),/error_code:"decoder"/);
-  assert.match(shippedSource("persistentWait"),/askPlaybackControl\("stalled",controlObservation\)/);
+  assert.match(shippedSource("persistentWait"),/askPlaybackControl\("stalled",controlObservation,began\+CONTROL_STALL_DEFER_DEADLINE_MS\)/);
   assert.match(shippedSource("attachHls"),/notifyPlaybackControl\("failed",hlsFailure\.observation\)/);
   assert.match(shippedSource("stallDiagnose"),/notifyPlaybackControl\("stalled"\)/);
   assert.match(shippedSource("handleEnded"),/control_trigger:controlTrigger/);
@@ -952,9 +1286,9 @@ async function main() {
       "PlaybackPolicy", "playQuality", "recordWaitStall", "pbPosSec", "clientLog",
       "setLoading", "startTranscodeFallback", "seekTo", "endWait", "playbackContext",
       "clockFromSec", "CONTROL_CLIENT_ID", "playbackControlSnapshot",
-      "sendPlaybackControl", "window", "PlurxPlaybackControl", "performance",
+      "sendPlaybackControl", "window", "PlurxPlaybackControl", "performance", "bufferRunway",
       [
-        "let PLAYER=null;",
+        "let PLAYER=null; const document={hidden:false};",
         askConstants,
         shippedSource("supersedePlaybackControlIntent"),
         shippedSource("holdReasonText"),
@@ -968,7 +1302,12 @@ async function main() {
         shippedSource("stopPlaybackControl"),
         shippedSource("startPlaybackControl"),
         shippedSource("persistentWait"),
+        shippedSource("streamHasVideo"),
+        shippedSource("samplePlaybackPresentationClock"),
+        shippedSource("playbackProgressTick"),
         "return {",
+        " monitor(player,video){PLAYER=player; playbackProgressTick(video,player);},",
+        " hidden(value){document.hidden=value;},",
         " attach(player,video,bootstrap){PLAYER=player;",
         "   return startPlaybackControl(video,player,bootstrap);},",
         " detach(player){PLAYER=player; stopPlaybackControl(player); PLAYER=null;},",
@@ -1010,7 +1349,8 @@ async function main() {
       },
       { PlurxPlaybackControl: control },
       control,
-      performance,
+      options.clock||performance,
+      () => options.runway??1,
     );
     const made = {
       stub, timers, log, loading, reopened, stalls, sent,
@@ -1034,6 +1374,48 @@ async function main() {
     };
   }
   const stalledVideo = { paused: false, seeking: false };
+
+  // Drive the shipped independent progress clock into the shipped recovery
+  // owner with no waiting event and no control reporter to hide the result.
+  for(const fault of ['silent-clock','silent-video','unlanded-seek','wanted-but-paused']){
+    let now=1_000;
+    const h=stallHarness({clock:{now:()=>now}});
+    const player=Object.assign(stalledPlayer(),{waitAt:null,controlHasFrameCallbacks:true,
+      controlPresentedFrames:10,source:{video_codec:'h264'}});
+    const video={paused:false,seeking:false,ended:false,currentTime:10};
+    if(fault==='wanted-but-paused'){player.wantsPlayback=true;video.paused=true;}
+    if(fault==='unlanded-seek'){
+      player.started=false; video.seeking=true;
+      player.controlSeek={sequence:1,targetMs:90_000,executed:true,executedAt:now};
+    }
+    h.stub.monitor(player,video);
+    now+=7_500;
+    if(fault!=='silent-clock') video.currentTime+=7.5;
+    if(fault==='unlanded-seek') player.controlPresentedFrames+=100;
+    h.stub.monitor(player,video);
+    await flush();
+    assert.equal(h.reopened.length,0,`${fault} has not spent its observation budget`);
+    now+=500;
+    h.stub.monitor(player,video);
+    await flush(); await flush();
+    assert.equal(h.reopened.length,1,`${fault} recovers at eight seconds without a waiting event`);
+    if(fault==='unlanded-seek') assert.equal(h.reopened[0].position,90);
+  }
+  for(const suppression of ['paused','ended','hidden']){
+    let now=1_000;
+    const h=stallHarness({clock:{now:()=>now}});
+    const player=Object.assign(stalledPlayer(),{waitAt:null});
+    const video={paused:false,seeking:false,ended:false,currentTime:10};
+    h.stub.monitor(player,video);
+    if(suppression==='hidden') h.stub.hidden(true); else video[suppression]=true;
+    now+=60_000; h.stub.monitor(player,video);
+    await flush();
+    assert.equal(h.reopened.length,0,`${suppression} is not playback failure`);
+    if(suppression==='hidden') h.stub.hidden(false); else video[suppression]=false;
+    h.stub.monitor(player,video);
+    await flush();
+    assert.equal(h.reopened.length,0,'returning starts a new observation window');
+  }
 
   // Resolves to true only if the promise settles without any fake timer being
   // fired — i.e. something in the shipped code settled it, not its own bound.
@@ -1222,16 +1604,28 @@ async function main() {
   }
 
   {
-    const { h, player } = await askWith({ type: "hold", reason: "no_room" }, {
-      // The real reporter needs about 320 ms to settle its next admitted
-      // exchange. Starting just inside the boundary proves that the ask time
-      // counts against the same absolute frozen-picture deadline.
-      began: performance.now()-19_900,
-      player: { waitRunway: 8 },
-    });
-    assert.equal(h.reopened.length, 1,
-      "an ask that crosses the deadline cannot earn another deferral");
-    assert.equal(player.waitTimer, null);
+    let now=9_500;
+    const h=stallHarness({clock:{now:()=>now}});
+    const player=Object.assign(stalledPlayer(),{waitAt:1,waitRunway:8});
+    h.stub.attach(player,stalledVideo,bootstrap()); h.attached.push(player);
+    await flush();
+    h.answerWith(()=>({type:'hold',reason:'no_room'}));
+    const first=h.stub.stall(player,stalledVideo,1,3);
+    await settleExchange(); await first;
+    assert.equal(h.reopened.length,0);
+    now=17_500;
+    h.holdWith(()=>new Promise(()=>{}));
+    const second=h.stub.stall(player,stalledVideo,1,3);
+    await settleExchange();
+    const waiter=player.controlWaiters[0];
+    assert.equal(waiter.hardExpiry,20_001,'the ask cap is the remaining absolute budget');
+    now=19_900; waiter.extend();
+    assert.equal(h.timers.get(waiter.timer).ms,101,'an extension cannot exceed the stall deadline');
+    now=20_001;
+    h.timers.get(waiter.timer).fn();
+    await second;
+    assert.equal(h.reopened.length,1,'a blocked control request cannot extend a twenty-second freeze');
+    h.stub.detach(player);
   }
 
   // retry_resource paces to the server's interval, clamped, and bounded: a

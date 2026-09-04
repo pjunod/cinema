@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "apple.requested-and-attached-recipe"
+commits = ["96065b89"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct PlayerRecipeRevision"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testNewerSeekAndPauseRetainTheRequestedRecipeUntilItActuallyAttaches"
+
+[[fixes]]
 id = "android.composed-destination-and-playback-demand"
 commits = ["0248fa68"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
