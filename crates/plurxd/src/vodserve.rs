@@ -465,8 +465,10 @@ struct Recipe {
 /// One attached reader, in plan indexes.
 #[derive(Debug, Clone)]
 struct Reader {
-    /// The furthest segment this session has asked for.
+    /// Current playback anchor, owned by accepted control once available.
+    /// Before control arrives, successful media commits are the fallback.
     frontier: u32,
+    control_sequence: Option<u64>,
     /// The last segment actually served — the eviction window's playhead.
     last_served: Option<u32>,
     /// Per-playback provenance for speculative marker production. This is
@@ -479,8 +481,88 @@ impl Reader {
     fn new(frontier: u32) -> Self {
         Self {
             frontier,
+            control_sequence: None,
             last_served: None,
             marker_prewarm: Arc::new(StdMutex::new(MarkerPrewarmLedger::default())),
+        }
+    }
+
+    fn accept_control(&mut self, sequence: u64, index: u32) {
+        // ControlState already accepted the complete owner epoch/sequence.
+        // A new owner's sequence one must replace the old owner's sequence N.
+        self.control_sequence = Some(sequence);
+        self.frontier = index;
+    }
+
+    fn served(&mut self, index: u32) {
+        self.last_served = Some(index);
+        if self.control_sequence.is_none() {
+            self.frontier = index;
+        }
+    }
+}
+
+/// Declared before a registered wait so cancellation first releases the wait
+/// and its file pin, then wakes the scheduler to observe that exact removal.
+struct DemandWake(Arc<Rendition>);
+
+impl Drop for DemandWake {
+    fn drop(&mut self) {
+        self.0.kick();
+    }
+}
+
+struct MaterializeClock {
+    started: Instant,
+    owners: usize,
+    retry_pending: bool,
+    watchdog: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for MaterializeClock {
+    fn drop(&mut self) {
+        if let Some(watchdog) = &self.watchdog {
+            watchdog.abort();
+        }
+    }
+}
+
+/// HTTP timeout may transfer the deadline to a retry; cancellation may not.
+/// The last cancelled owner removes the clock synchronously, fencing its
+/// sleeping watchdog from a later request for the same entry.
+struct MaterializeDemand {
+    rendition: Arc<Rendition>,
+    index: u32,
+    started: Instant,
+}
+
+impl MaterializeDemand {
+    fn retry_pending(&self) {
+        let mut demands = self.rendition.demand_since.lock().expect("demand lock");
+        if let Some(clock) = demands
+            .get_mut(&self.index)
+            .filter(|clock| clock.started == self.started)
+        {
+            clock.retry_pending = true;
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.started.elapsed() >= self.rendition.materialize_budget
+    }
+}
+
+impl Drop for MaterializeDemand {
+    fn drop(&mut self) {
+        let mut demands = self.rendition.demand_since.lock().expect("demand lock");
+        if let Some(clock) = demands
+            .get_mut(&self.index)
+            .filter(|clock| clock.started == self.started)
+        {
+            clock.owners -= 1;
+            if clock.owners == 0 && !clock.retry_pending {
+                demands.remove(&self.index);
+            }
         }
     }
 }
@@ -1099,7 +1181,7 @@ struct Rendition {
     /// One admission-refusal line per fill, not one per materialize.
     warned_admission: AtomicBool,
     /// First blocked demand per plan entry, retained across HTTP 503 retries.
-    demand_since: StdMutex<HashMap<u32, Instant>>,
+    demand_since: StdMutex<HashMap<u32, MaterializeClock>>,
 }
 
 impl Rendition {
@@ -1697,6 +1779,10 @@ struct Shared {
     /// the session-owned detach fence.
     #[cfg(test)]
     terminal_replay_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
+    #[cfg(test)]
+    control_applied_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
+    #[cfg(test)]
+    segment_ready_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only rendezvous immediately before terminal reader detach.
     #[cfg(test)]
     terminal_detach_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
@@ -1975,6 +2061,10 @@ impl VodServe {
                 terminal_eviction_cursor: AtomicU64::new(0),
                 #[cfg(test)]
                 terminal_replay_pause: StdMutex::new(None),
+                #[cfg(test)]
+                control_applied_pause: StdMutex::new(None),
+                #[cfg(test)]
+                segment_ready_pause: StdMutex::new(None),
                 #[cfg(test)]
                 terminal_detach_pause: StdMutex::new(None),
                 #[cfg(test)]
@@ -2756,8 +2846,7 @@ impl VodServe {
         *session.last_touch.lock().expect("touch lock") = Instant::now();
         if let (Some(index), Some(readers)) = (segment_index, readers.as_mut()) {
             if let Some(reader) = readers.get_mut(session_id) {
-                reader.last_served = Some(index);
-                reader.frontier = reader.frontier.max(index);
+                reader.served(index);
             }
         }
         let marker_ledger = segment_index.and_then(|_| {
@@ -3537,6 +3626,17 @@ impl VodServe {
             if !Arc::ptr_eq(&session.lifecycle, &lifecycle) || session.tombstone.is_some() {
                 return None;
             }
+            // Acquire the async reader lock before the sequence fence. From
+            // acceptance through anchor publication there is then no await:
+            // cancelling an HTTP response cannot leave an accepted command
+            // whose exact replay silently skips its playback destination.
+            let control_rendition = session.live_rendition().map(Arc::clone)?;
+            let mut readers = control_rendition.readers.lock().await;
+            if control.snapshot.demand != crate::playback_control::PlaybackDemand::End
+                && !readers.contains_key(control.session_id)
+            {
+                return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+            }
             if crate::media_sessions::unix_ms() >= deadline_unix_ms {
                 return Some(Err(crate::playback_control::ControlStateError::Unavailable));
             }
@@ -3573,6 +3673,28 @@ impl VodServe {
                 Ok(outcome) => outcome,
                 Err(error) => return Some(Err(error)),
             };
+            if disposition == crate::playback_control::ControlDisposition::Accepted
+                && control.snapshot.demand != crate::playback_control::PlaybackDemand::End
+            {
+                if let Some(reader) = readers.get_mut(control.session_id) {
+                    reader.accept_control(
+                        control.sequence,
+                        entry_containing(
+                            &control_rendition.plan,
+                            control.snapshot.buffer_anchor_ms() as f64 / 1_000.0,
+                        ),
+                    );
+                    // Recompute optional speculation only after the accepted
+                    // intent is published. Cancellation before that async
+                    // recompute leaves speculation disabled, never enabled
+                    // for the previous seek, pause, or playback position.
+                    let mut prewarm = reader.marker_prewarm.lock().expect("marker ledger lock");
+                    prewarm.enabled = false;
+                    prewarm.deactivate();
+                }
+                control_rendition.kick();
+            }
+            drop(readers);
 
             if disposition == crate::playback_control::ControlDisposition::Accepted
                 && control.snapshot.demand == crate::playback_control::PlaybackDemand::End
@@ -3649,6 +3771,18 @@ impl VodServe {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
+        #[cfg(test)]
+        let control_applied_pause = self
+            .shared
+            .control_applied_pause
+            .lock()
+            .expect("control pause lock")
+            .clone();
+        #[cfg(test)]
+        if let Some(pause) = control_applied_pause {
+            pause.wait().await;
+            pause.wait().await;
+        }
         let (
             disposition,
             accepted_sequence,
@@ -4058,7 +4192,8 @@ impl VodServe {
             record_failure(&self.shared, rendition, cause.clone());
             return Err(VodError::ProducerFailed(cause));
         }
-        self.shared
+        let demand = self
+            .shared
             .arm_materialize_watchdog(rendition, INIT_DEMAND_INDEX);
         rendition.kick();
         let deadline = Instant::now() + budget;
@@ -4089,12 +4224,18 @@ impl VodServe {
             if let Some(cause) = rendition.failure() {
                 return Err(VodError::ProducerFailed(cause));
             }
+            if demand.expired() {
+                return Err(VodError::ProducerFailed(
+                    "materializing init.mp4 exceeded the producer deadline".to_owned(),
+                ));
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero()
                 || tokio::time::timeout(remaining, &mut notified)
                     .await
                     .is_err()
             {
+                demand.retry_pending();
                 return Err(VodError::Pending {
                     retry_after: PENDING_RETRY_AFTER,
                 });
@@ -4116,17 +4257,6 @@ impl VodServe {
         if let Some(cause) = rendition.failure() {
             return Err(VodError::ProducerFailed(cause));
         }
-        self.shared.arm_materialize_watchdog(rendition, index);
-        // Planned → register demand and block. The frontier moves before the
-        // wait so the driver sees this reader's reach even while registration
-        // is still in flight.
-        {
-            let mut readers = rendition.readers.lock().await;
-            if let Some(reader) = readers.get_mut(session_id) {
-                reader.frontier = reader.frontier.max(index);
-            }
-        }
-        rendition.kick();
         self.blocked_wait(rendition, session_id, index, budget)
             .await
     }
@@ -4140,55 +4270,103 @@ impl VodServe {
         index: u32,
         budget: Duration,
     ) -> Result<SegmentReady, VodError> {
+        let deadline = tokio::time::Instant::now() + budget;
         let key = WaitKey {
             rendition: rendition.key.clone(),
             index,
         };
-        let mut wait = Box::pin(self.shared.pool.wait(key, session_id, budget));
-        // One poll registers the waiter; kick the driver again once it is
-        // really in the pool so `blocked_on` reflects it this pass.
-        let first = std::future::poll_fn(|cx| {
-            use std::future::Future;
-            std::task::Poll::Ready(wait.as_mut().poll(cx))
-        })
-        .await;
-        let outcome = match first {
-            std::task::Poll::Ready(outcome) => outcome,
-            std::task::Poll::Pending => {
-                rendition.kick();
-                // The lost-wakeup window: a materialize (or a failure) that
-                // landed between the caller's materialized-miss and the
-                // registration above fired its satisfy/fail against an empty
-                // pool — and the driver then sees the index as not owed, so
-                // nothing would ever satisfy it again. One re-check after
-                // registering, before sleeping, closes it; dropping `wait`
-                // deregisters synchronously.
-                if let Some(ready) = self.open_materialized(rendition, index).await? {
-                    return Ok(ready);
-                }
-                if let Some(cause) = rendition.failure() {
-                    return Err(VodError::ProducerFailed(cause));
-                }
-                wait.await
-            }
+        let _wake = DemandWake(Arc::clone(rendition));
+        // Reserve synchronously before any await: a seek storm must not park
+        // unbounded unadmitted futures behind the manifest or a disk open.
+        let (mut wait, demand) = {
+            // The watchdog holds this same lock through fail_entry: an
+            // admitted receiver is bound to its deadline before it is visible
+            // to expiry, including on a multithread runtime.
+            let mut clocks = rendition.demand_since.lock().expect("demand lock");
+            let wait = self
+                .shared
+                .pool
+                .register(key, session_id)
+                .map_err(|_| VodError::Busy)?;
+            let demand = self
+                .shared
+                .arm_materialize_watchdog_locked(rendition, index, &mut clocks);
+            (wait, demand)
         };
+        // Admission comes before any persistent demand or deadline state. A
+        // refused GET is not work owed by this rendition.
+        rendition.kick();
+        // Register before rechecking bytes/failure to close the lost-wakeup
+        // window. The registration stays alive through open_materialized,
+        // protecting a just-published target from concurrent eviction.
+        if let Some(ready) = self.open_materialized(rendition, index).await? {
+            return Ok(ready);
+        }
+        if let Some(cause) = rendition.failure() {
+            return Err(VodError::ProducerFailed(cause));
+        }
+        if demand.expired() {
+            return Err(VodError::ProducerFailed(format!(
+                "materializing {} exceeded the producer deadline",
+                segment_name(u64::from(index))
+            )));
+        }
+        #[cfg(test)]
+        let waiting_pause = self
+            .shared
+            .segment_ready_pause
+            .lock()
+            .expect("segment pause lock")
+            .clone();
+        #[cfg(test)]
+        if let Some(pause) = waiting_pause {
+            // Phase one proves the post-registration recheck has finished;
+            // the Ready arm supplies phases two and three around file open.
+            pause.wait().await;
+        }
+        let outcome = wait
+            .wait(deadline.saturating_duration_since(tokio::time::Instant::now()))
+            .await;
         match outcome {
-            Err(_refused) => Err(VodError::Busy),
-            Ok(WaitOutcome::Ready) => match self.open_materialized(rendition, index).await? {
-                Some(ready) => Ok(ready),
-                // Evicted in the instant between satisfy and open — rare, and
-                // a retryable pending is the honest answer.
-                None => Err(VodError::Pending {
+            WaitOutcome::Ready => {
+                #[cfg(test)]
+                let pause = self
+                    .shared
+                    .segment_ready_pause
+                    .lock()
+                    .expect("segment pause lock")
+                    .clone();
+                #[cfg(test)]
+                if let Some(pause) = pause {
+                    pause.wait().await;
+                    pause.wait().await;
+                }
+                match self.open_materialized(rendition, index).await? {
+                    Some(ready) => Ok(ready),
+                    // An eviction already committed before registration, or an
+                    // external unlink, can still remove the file. Publication
+                    // during this admitted wait is protected by its narrow pin.
+                    None => Err(VodError::Pending {
+                        retry_after: PENDING_RETRY_AFTER,
+                    }),
+                }
+            }
+            WaitOutcome::Deadline => {
+                if demand.expired() {
+                    return Err(VodError::ProducerFailed(format!(
+                        "materializing {} exceeded the producer deadline",
+                        segment_name(u64::from(index))
+                    )));
+                }
+                demand.retry_pending();
+                Err(VodError::Pending {
                     retry_after: PENDING_RETRY_AFTER,
-                }),
-            },
-            Ok(WaitOutcome::Deadline) => Err(VodError::Pending {
-                retry_after: PENDING_RETRY_AFTER,
-            }),
-            Ok(WaitOutcome::ProducerFailed(cause)) => Err(VodError::ProducerFailed(cause)),
+                })
+            }
+            WaitOutcome::ProducerFailed(cause) => Err(VodError::ProducerFailed(cause)),
             // The rendition went away under the wait; the session's own
             // tombstone (if any) is the more precise cause on the next GET.
-            Ok(WaitOutcome::Gone) => Err(VodError::Gone(Terminal::Deleted)),
+            WaitOutcome::Gone => Err(VodError::Gone(Terminal::Deleted)),
         }
     }
 
@@ -4298,18 +4476,48 @@ impl Shared {
 
     /// Arm ruling A3's producer deadline once per demanded plan entry. The
     /// timestamp survives shorter HTTP block deadlines and their 503 retries.
-    fn arm_materialize_watchdog(self: &Arc<Self>, rendition: &Arc<Rendition>, index: u32) {
+    fn arm_materialize_watchdog(
+        self: &Arc<Self>,
+        rendition: &Arc<Rendition>,
+        index: u32,
+    ) -> MaterializeDemand {
+        let mut clocks = rendition.demand_since.lock().expect("demand lock");
+        self.arm_materialize_watchdog_locked(rendition, index, &mut clocks)
+    }
+
+    fn arm_materialize_watchdog_locked(
+        self: &Arc<Self>,
+        rendition: &Arc<Rendition>,
+        index: u32,
+        demands: &mut HashMap<u32, MaterializeClock>,
+    ) -> MaterializeDemand {
         let started = Instant::now();
-        {
-            let mut demands = rendition.demand_since.lock().expect("demand lock");
-            if demands.contains_key(&index) {
-                return;
-            }
-            demands.insert(index, started);
+        if let Some(clock) = demands.get_mut(&index) {
+            clock.owners += 1;
+            clock.retry_pending = false;
+            return MaterializeDemand {
+                rendition: Arc::clone(rendition),
+                index,
+                started: clock.started,
+            };
         }
+        demands.insert(
+            index,
+            MaterializeClock {
+                started,
+                owners: 1,
+                retry_pending: false,
+                watchdog: None,
+            },
+        );
+        let owner = MaterializeDemand {
+            rendition: Arc::clone(rendition),
+            index,
+            started,
+        };
         let shared = Arc::clone(self);
         let rendition = Arc::clone(rendition);
-        tokio::spawn(async move {
+        let watchdog = tokio::spawn(async move {
             tokio::time::sleep_until(tokio::time::Instant::from_std(
                 started + rendition.materialize_budget,
             ))
@@ -4327,8 +4535,8 @@ impl Shared {
                         .demand_since
                         .lock()
                         .expect("demand lock")
-                        .remove(&index)
-                        .is_some_and(|since| since == started)
+                        .get(&index)
+                        .is_some_and(|clock| clock.started == started)
                 }
             } else {
                 // The sink takes these locks in the same order and clears the
@@ -4343,39 +4551,65 @@ impl Shared {
                         .demand_since
                         .lock()
                         .expect("demand lock")
-                        .remove(&index)
-                        .is_some_and(|since| since == started)
+                        .get(&index)
+                        .is_some_and(|clock| clock.started == started)
                 }
             };
             if !expired || rendition.failure().is_some() {
                 return;
             }
-            rendition.gen_epoch.fetch_add(1, Relaxed);
-            if !matches!(rendition.slot.belief().await, Producer::Absent { .. }) {
-                let _ = rendition
-                    .slot
-                    .perform(
-                        Step::Terminate {
-                            why: Termination::Idle,
-                        },
-                        || {},
-                    )
-                    .await;
-            }
-            let object = if index == INIT_DEMAND_INDEX {
-                "init.mp4".to_owned()
+            if index != INIT_DEMAND_INDEX {
+                // A slow, cancelled, or superseded segment request cannot
+                // prove that this shared producer is unhealthy. Settle only
+                // currently admitted waiters for this entry; if all callers
+                // disappeared, this is a no-op. Real child failures still
+                // use record_failure to answer the whole rendition.
+                // Keep the episode fence through the synchronous wake. A
+                // cancelled old watchdog must not wake a newly registered
+                // request for this same index after it acquired a new clock.
+                let clocks = rendition.demand_since.lock().expect("demand lock");
+                if !clocks
+                    .get(&index)
+                    .is_some_and(|clock| clock.started == started)
+                {
+                    return;
+                }
+                shared.pool.fail_entry(
+                    &rendition.key,
+                    index,
+                    &format!(
+                        "materializing {} exceeded the {:.1}s producer deadline",
+                        segment_name(u64::from(index)),
+                        rendition.materialize_budget.as_secs_f64()
+                    ),
+                );
+                drop(clocks);
+                rendition.kick();
             } else {
-                segment_name(u64::from(index))
-            };
-            record_failure(
-                &shared,
-                &rendition,
-                format!(
-                    "materializing {object} exceeded the {:.1}s producer deadline",
-                    rendition.materialize_budget.as_secs_f64()
-                ),
-            );
+                // Init waiters inspect their own captured clock after this wake.
+                rendition.init_notify.notify_waiters();
+            }
+            // Preserve expiry long enough for a normal Retry-After cycle to
+            // receive its typed failure, then forget an abandoned HTTP retry.
+            // An old task never removes a newer episode for this same entry.
+            tokio::time::sleep(PENDING_RETRY_AFTER.saturating_mul(2)).await;
+            let mut demands = rendition.demand_since.lock().expect("demand lock");
+            if demands
+                .get(&index)
+                .is_some_and(|clock| clock.started == started && clock.owners == 0)
+            {
+                demands.remove(&index);
+            }
         });
+        if let Some(clock) = demands
+            .get_mut(&index)
+            .filter(|clock| clock.started == started)
+        {
+            clock.watchdog = Some(watchdog.abort_handle());
+        } else {
+            watchdog.abort();
+        }
+        owner
     }
 
     /// Find or build the rendition for `key`, spawning its driver. `None`
@@ -4990,22 +5224,17 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
     if rendition.failure().is_some() {
         return;
     }
-    let mut demands: Vec<Demand> = Vec::new();
-    if let Some(blocked) = shared.pool.blocked_on(&rendition.key) {
-        demands.push(Demand::waiting_on(blocked));
-    }
-    let prewarm_ledgers = {
-        let readers = rendition.readers.lock().await;
-        for reader in readers.values() {
-            demands.push(Demand::idle_at(reader.frontier));
-        }
-        readers
-            .values()
-            .map(|reader| Arc::clone(&reader.marker_prewarm))
-            .collect::<Vec<_>>()
-    };
     let belief = rendition.slot.belief().await;
     let mut manifest = rendition.manifest.lock().await;
+    let (demands, prewarm_ledgers) = {
+        let readers = rendition.readers.lock().await;
+        let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
+        let ledgers = readers
+            .values()
+            .map(|reader| Arc::clone(&reader.marker_prewarm))
+            .collect::<Vec<_>>();
+        (demands, ledgers)
+    };
     let position = Position {
         produced_through: belief.produced_through(),
         positioned_at: belief.positioned_at(),
@@ -5065,7 +5294,7 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             }
         }
         Step::MakeRoom { wanted } => {
-            let windows = rendition.reader_windows().await;
+            let windows = eviction_windows(shared, rendition).await;
             match rendition
                 .dir
                 .make_room(&mut manifest, &windows, wanted)
@@ -5083,9 +5312,27 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
                     // Room may now exist; decide again promptly — and the
                     // freed bytes are node-wide news, so every other
                     // rendition's driver re-examines its hold too.
-                    rendition.kick();
                     if freed.bytes > 0 {
+                        rendition.kick();
                         shared.kick_all();
+                    } else if !matches!(belief, Producer::Absent { .. }) {
+                        // Protected bytes make this an indefinite capacity
+                        // hold. Fence queued writes and release the producer;
+                        // leaving it running would immediately exceed the
+                        // same bound that the zero-progress sweep proved.
+                        rendition.gen_epoch.fetch_add(1, Relaxed);
+                        if let Err(error) = rendition
+                            .slot
+                            .perform(
+                                Step::Terminate {
+                                    why: Termination::IndefiniteHold,
+                                },
+                                || {},
+                            )
+                            .await
+                        {
+                            tracing::warn!(rendition = %rendition.key, "terminating producer after a zero-progress capacity sweep: {error}");
+                        }
                     }
                 }
                 Err(error) => {
@@ -5097,6 +5344,79 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             tracing::warn!(rendition = %rendition.key, "producer stalled: {hold:?}");
         }
     }
+}
+
+/// Preserve all admitted obligations, using accepted control solely to rank
+/// current playback ahead of requests outside its buffer window.
+fn playback_demands(
+    pool: &WaitPool,
+    rendition: &Rendition,
+    readers: &HashMap<String, Reader>,
+    manifest: &Manifest,
+) -> Vec<Demand> {
+    let blocked = pool.demands(&rendition.key);
+    let mut nearest = HashMap::new();
+    let mut oldest = HashMap::new();
+    for request in &blocked {
+        // Publication precedes pool.satisfy. A newly materialized nearest
+        // request must not hide the next missing GET during that interval.
+        if !manifest
+            .state(request.index)
+            .is_some_and(|state| !state.is_materialized())
+        {
+            continue;
+        }
+        let first = oldest
+            .entry(&request.session)
+            .or_insert(request.arrival_order);
+        *first = (*first).min(request.arrival_order);
+        if let Some(reader) = readers.get(&request.session).filter(|reader| {
+            reader.control_sequence.is_some()
+                && reader_window(reader, rendition.seconds_per_segment).covers(request.index)
+        }) {
+            let distance = request.index.abs_diff(reader.frontier);
+            let closest = nearest.entry(&request.session).or_insert(distance);
+            *closest = (*closest).min(distance);
+        }
+    }
+    let mut demands = blocked
+        .iter()
+        .map(|blocked| {
+            let mut demand = Demand::waiting_on(blocked.index);
+            demand.arrival_order = Some(blocked.arrival_order);
+            demand.foreground = match (readers.get(&blocked.session), nearest.get(&blocked.session))
+            {
+                (Some(reader), Some(nearest)) => {
+                    blocked.index.abs_diff(reader.frontier) == *nearest
+                }
+                _ => oldest.get(&blocked.session) == Some(&blocked.arrival_order),
+            };
+            demand
+        })
+        .collect::<Vec<_>>();
+    demands.extend(
+        readers
+            .values()
+            .map(|reader| Demand::idle_at(reader.frontier)),
+    );
+    demands
+}
+
+async fn eviction_windows(shared: &Shared, rendition: &Rendition) -> Vec<ReaderWindow> {
+    let mut windows = rendition.reader_windows().await;
+    windows.extend(
+        shared
+            .pool
+            .retained(&rendition.key)
+            .into_iter()
+            .map(|index| ReaderWindow {
+                back: 0,
+                playhead: index,
+                frontier: index,
+                ahead: 0,
+            }),
+    );
+    windows
 }
 
 /// A completed speculative window has no foreground reason to retain its
@@ -6023,9 +6343,9 @@ fn entry_containing(plan: &SegmentPlan, start_seconds: f64) -> u32 {
 }
 
 /// Apply one accepted control snapshot to the playback's speculative ledger.
-/// The marker seek result is settled before the reader frontier moves, using
-/// only ranges credited by `RenditionSink` and still materialized at this
-/// exact instant.
+/// The accepted playback anchor has already committed with the control
+/// sequence. Marker attribution uses only ranges credited by `RenditionSink`
+/// and still materialized at this exact instant.
 async fn apply_marker_prewarm_control(
     rendition: &Arc<Rendition>,
     session_id: &str,
@@ -6154,21 +6474,13 @@ fn plan_duration_ms(plan: &SegmentPlan) -> i64 {
     (plan.duration_ticks().saturating_mul(1000) / u64::from(plan.timescale.max(1))) as i64
 }
 
-/// A reader's eviction guard: back two segments from the playhead, ahead a
-/// horizon's worth from the frontier.
-///
-/// The high edge covers `max(last_served + 1, frontier)`, not last_served
-/// alone: a forward seek's blocked GET moves the frontier past the playhead,
-/// and a window that forgot it would let `make_room` evict the just-
-/// materialized seek target before the waiter opens it — a Pending → produce
-/// → evict livelock under working-set pressure.
+/// The current playback window, never the interval between every position
+/// visited during this session. Admitted GETs have independent narrow pins,
+/// including the publication-to-open race, so seeking does not need to retain
+/// the entire intervening film.
 fn reader_window(reader: &Reader, seconds_per_segment: f64) -> ReaderWindow {
-    let playhead = reader.last_served.unwrap_or(reader.frontier);
-    let frontier = reader
-        .last_served
-        .map(|served| served.saturating_add(1))
-        .unwrap_or(reader.frontier)
-        .max(reader.frontier);
+    let playhead = reader.frontier;
+    let frontier = reader.frontier.saturating_add(1);
     let per = if seconds_per_segment > 0.0 {
         seconds_per_segment
     } else {
@@ -10495,6 +10807,670 @@ mod tests {
             .wait()
             .await
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn accepted_seek_intent_controls_demand_and_retention_in_both_directions() {
+        const VIEWER: &str = "00000000-0000-4000-8000-000000000001";
+        const GENERATION: &str = "00000000-0000-4000-8000-000000000002";
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        activate_control_route(store.as_ref(), VIEWER, GENERATION).await;
+        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, VIEWER, Arc::clone(&rendition), Instant::now()).await;
+        let control = |sequence, snapshot| crate::playback_control::LocalControlRequest {
+            session_id: VIEWER,
+            generation: GENERATION,
+            owner_node_id: "node-a",
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-000000000005",
+            sequence,
+            snapshot,
+        };
+        let key = |index| WaitKey {
+            rendition: rendition.key.clone(),
+            index,
+        };
+        let old = serve
+            .shared
+            .pool
+            .register(key(3), VIEWER)
+            .expect("old GET admitted");
+        let current = serve
+            .shared
+            .pool
+            .register(key(45), VIEWER)
+            .expect("seek GET admitted");
+        let prefetch = serve
+            .shared
+            .pool
+            .register(key(58), VIEWER)
+            .expect("prefetch admitted");
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        snapshot.render_state = crate::playback_control::RenderState::Seeking;
+        snapshot.seek_target_ms = Some(
+            (rendition.plan.entry(45).expect("target").start_ticks * 1000
+                / u64::from(rendition.timescale)) as i64
+                + 1,
+        );
+        serve
+            .control(control(1, snapshot.clone()))
+            .await
+            .expect("VOD session")
+            .expect("accepted seek");
+        let position = Position {
+            produced_through: None,
+            positioned_at: None,
+            seconds_per_segment: rendition.seconds_per_segment,
+            working_set: WorkingSet::default(),
+        };
+        let readers = rendition.readers.lock().await;
+        let demands = playback_demands(
+            &serve.shared.pool,
+            &rendition,
+            &readers,
+            &*rendition.manifest.lock().await,
+        );
+        assert_eq!(
+            decide(&*rendition.manifest.lock().await, &demands, position),
+            Action::Reposition { to: 45 }
+        );
+        assert!(
+            !reader_window(&readers[VIEWER], rendition.seconds_per_segment).covers(3),
+            "a forward seek does not protect the entire intervening film"
+        );
+        drop(readers);
+
+        snapshot.seek_target_ms = Some(
+            (rendition.plan.entry(3).expect("rewind").start_ticks * 1000
+                / u64::from(rendition.timescale)) as i64
+                + 1,
+        );
+        let mut rewind = serve
+            .control(control(2, snapshot.clone()))
+            .await
+            .expect("VOD session");
+        if let Err(crate::playback_control::ControlStateError::RateLimited(ms)) = rewind {
+            tokio::time::sleep(Duration::from_millis(u64::from(ms) + 1)).await;
+            rewind = serve
+                .control(control(2, snapshot))
+                .await
+                .expect("VOD session");
+        }
+        rewind.expect("accepted rewind");
+        drop(prefetch);
+        let near_prefetch = serve
+            .shared
+            .pool
+            .register(key(10), VIEWER)
+            .expect("nearby prefetch admitted");
+        let mut readers = rendition.readers.lock().await;
+        // An old high GET completing after the backward seek is delivery
+        // evidence, not a new playback command.
+        readers.get_mut(VIEWER).expect("reader").served(45);
+        assert_eq!(readers[VIEWER].frontier, 3);
+        let demands = playback_demands(
+            &serve.shared.pool,
+            &rendition,
+            &readers,
+            &*rendition.manifest.lock().await,
+        );
+        assert_eq!(
+            decide(
+                &*rendition.manifest.lock().await,
+                &demands,
+                Position {
+                    positioned_at: Some(10),
+                    ..position
+                }
+            ),
+            Action::Reposition { to: 3 }
+        );
+        assert!(!reader_window(&readers[VIEWER], rendition.seconds_per_segment).covers(45));
+        drop(readers);
+        assert_eq!(
+            serve.shared.pool.retained(&rendition.key),
+            vec![3, 10, 45],
+            "every admitted request still has a narrow pin"
+        );
+        drop((current, near_prefetch));
+        assert_eq!(serve.shared.pool.retained(&rendition.key), vec![3]);
+        drop(old);
+        assert!(serve.shared.pool.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_control_acceptance_keeps_the_anchor_and_exact_replay() {
+        const VIEWER: &str = "00000000-0000-4000-8000-000000000003";
+        const GENERATION: &str = "00000000-0000-4000-8000-000000000004";
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        activate_control_route(store.as_ref(), VIEWER, GENERATION).await;
+        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, VIEWER, Arc::clone(&rendition), Instant::now()).await;
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        snapshot.render_state = crate::playback_control::RenderState::Seeking;
+        snapshot.seek_target_ms = Some(300_000);
+        let target = entry_containing(&rendition.plan, 300.0);
+        let ledger = Arc::clone(&rendition.readers.lock().await[VIEWER].marker_prewarm);
+        ledger.lock().expect("ledger").enabled = true;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *serve
+            .shared
+            .control_applied_pause
+            .lock()
+            .expect("pause lock") = Some(Arc::clone(&pause));
+        let accepted = {
+            let serve = Arc::clone(&serve);
+            let snapshot = snapshot.clone();
+            tokio::spawn(async move {
+                serve
+                    .control(crate::playback_control::LocalControlRequest {
+                        session_id: VIEWER,
+                        generation: GENERATION,
+                        owner_node_id: "node-a",
+                        owner_epoch: 1,
+                        client_instance_id: "00000000-0000-4000-8000-000000000006",
+                        sequence: 1,
+                        snapshot,
+                    })
+                    .await
+            })
+        };
+        pause.wait().await;
+        assert_eq!(
+            rendition.readers.lock().await[VIEWER].frontier,
+            target,
+            "accepted sequence and playback anchor commit before any cancellable side effects"
+        );
+        assert!(!ledger.lock().expect("ledger").enabled, "accepted intent invalidates old speculation even when the later marker update is cancelled");
+        accepted.abort();
+        let _ = accepted.await;
+        *serve
+            .shared
+            .control_applied_pause
+            .lock()
+            .expect("pause lock") = None;
+        let replay = serve
+            .control(crate::playback_control::LocalControlRequest {
+                session_id: VIEWER,
+                generation: GENERATION,
+                owner_node_id: "node-a",
+                owner_epoch: 1,
+                client_instance_id: "00000000-0000-4000-8000-000000000006",
+                sequence: 1,
+                snapshot,
+            })
+            .await
+            .expect("VOD session")
+            .expect("exact replay");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(rendition.readers.lock().await[VIEWER].frontier, target);
+    }
+
+    #[tokio::test]
+    async fn a_published_blocked_get_keeps_its_pin_through_the_response_file_open() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("viewer", 3).await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *serve.shared.segment_ready_pause.lock().expect("pause lock") = Some(Arc::clone(&pause));
+        let get = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .serve_segment(&rendition, "viewer", 45, Duration::from_secs(5))
+                    .await
+            })
+        };
+        pause.wait().await;
+        // Publication follows the production GET's post-registration check;
+        // the oneshot remembers Ready even if it precedes the next poll.
+        rendition
+            .dir
+            .materialize(
+                &mut *rendition.manifest.lock().await,
+                45,
+                b"target bytes",
+                now_ms(),
+            )
+            .await
+            .expect("publish");
+        serve.shared.pool.satisfy(&rendition.key, 45);
+        pause.wait().await;
+        let windows = eviction_windows(&serve.shared, &rendition).await;
+        let mut manifest = rendition.manifest.lock().await;
+        rendition
+            .dir
+            .make_room(&mut manifest, &windows, u64::MAX)
+            .await
+            .expect("pressure sweep");
+        assert!(manifest.state(45).expect("target").is_materialized());
+        drop(manifest);
+        pause.wait().await;
+        assert_eq!(get.await.expect("GET task").expect("response file").len, 12);
+        assert!(serve.shared.pool.retained(&rendition.key).is_empty());
+        let windows = eviction_windows(&serve.shared, &rendition).await;
+        let mut manifest = rendition.manifest.lock().await;
+        rendition
+            .dir
+            .make_room(&mut manifest, &windows, u64::MAX)
+            .await
+            .expect("later sweep");
+        assert!(
+            !manifest.state(45).expect("target").is_materialized(),
+            "opening releases the narrow pin; old destinations do not become permanent retention"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_and_controlled_readers_both_receive_fair_current_demand() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("legacy", 0).await;
+        rendition.attach_reader("controlled", 45).await;
+        rendition
+            .readers
+            .lock()
+            .await
+            .get_mut("controlled")
+            .expect("reader")
+            .accept_control(1, 45);
+        let old = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 3,
+                },
+                "legacy",
+            )
+            .expect("legacy admitted");
+        let newer = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 45,
+                },
+                "controlled",
+            )
+            .expect("controlled admitted");
+        let readers = rendition.readers.lock().await;
+        let demands = playback_demands(
+            &serve.shared.pool,
+            &rendition,
+            &readers,
+            &*rendition.manifest.lock().await,
+        );
+        let position = Position {
+            produced_through: None,
+            positioned_at: Some(45),
+            seconds_per_segment: rendition.seconds_per_segment,
+            working_set: WorkingSet::default(),
+        };
+        assert_eq!(
+            decide(&*rendition.manifest.lock().await, &demands, position),
+            Action::Reposition { to: 3 }
+        );
+        drop(readers);
+        drop(old);
+        let far = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 55,
+                },
+                "legacy",
+            )
+            .expect("far legacy seek admitted");
+        drop(newer);
+        let readers = rendition.readers.lock().await;
+        let demands = playback_demands(
+            &serve.shared.pool,
+            &rendition,
+            &readers,
+            &*rendition.manifest.lock().await,
+        );
+        assert!(
+            demands
+                .iter()
+                .any(|demand| demand.blocked_on == Some(55) && demand.foreground),
+            "a legacy seek outside the last delivered window remains a fair candidate"
+        );
+        drop(far);
+    }
+
+    #[test]
+    fn an_accepted_new_owner_sequence_one_replaces_the_old_owner_anchor() {
+        let mut reader = Reader::new(3);
+        reader.accept_control(90, 45);
+        reader.accept_control(1, 3);
+        assert_eq!(reader.frontier, 3);
+        assert_eq!(reader.control_sequence, Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_published_nearest_request_cannot_hide_the_next_current_get() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("viewer", 45).await;
+        rendition
+            .readers
+            .lock()
+            .await
+            .get_mut("viewer")
+            .expect("reader")
+            .accept_control(1, 45);
+        let mut waits = Vec::new();
+        for index in [3, 45, 46] {
+            waits.push(
+                serve
+                    .shared
+                    .pool
+                    .register(
+                        WaitKey {
+                            rendition: rendition.key.clone(),
+                            index,
+                        },
+                        "viewer",
+                    )
+                    .expect("admitted"),
+            );
+        }
+        let mut manifest = rendition.manifest.lock().await;
+        rendition
+            .dir
+            .materialize(&mut manifest, 45, b"published", now_ms())
+            .await
+            .expect("publish before satisfy");
+        let readers = rendition.readers.lock().await;
+        let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+        let position = Position {
+            produced_through: Some(45),
+            positioned_at: Some(45),
+            seconds_per_segment: rendition.seconds_per_segment,
+            working_set: WorkingSet::default(),
+        };
+        assert_eq!(
+            decide(&manifest, &demands, position),
+            Action::Produce { next: 46 },
+            "old request3 must not win the publication-to-satisfy interval"
+        );
+        drop(waits);
+    }
+
+    #[tokio::test]
+    async fn a_zero_progress_eviction_does_not_self_schedule_a_hot_loop() {
+        use futures_util::FutureExt;
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition)
+            .expect("unshared")
+            .working_set_budget = 1;
+        rendition.attach_reader("viewer", 0).await;
+        rendition
+            .dir
+            .materialize(
+                &mut *rendition.manifest.lock().await,
+                0,
+                b"protected bytes",
+                now_ms(),
+            )
+            .await
+            .expect("publish");
+        serve.shared.working_set.store(15, Relaxed);
+        let pending = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 1,
+                },
+                "viewer",
+            )
+            .expect("admitted");
+        driver_pass(&serve.shared, &rendition).await;
+        assert!(rendition.wake.notified().now_or_never().is_none(), "zero-byte sweep waits for demand/capacity/maintenance change instead of kicking itself forever");
+        assert_eq!(serve.shared.working_set.load(Relaxed), 15);
+        #[cfg(unix)]
+        {
+            let child = tokio::process::Command::new("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("fake running producer");
+            rendition.slot.attach(child, 0).await;
+            driver_pass(&serve.shared, &rendition).await;
+            assert!(
+                matches!(rendition.slot.belief().await, Producer::Absent { .. }),
+                "zero-progress capacity hold releases a running producer"
+            );
+            assert_eq!(
+                rendition.gen_epoch.load(Relaxed),
+                1,
+                "queued producer writes are fenced"
+            );
+            assert!(rendition.wake.notified().now_or_never().is_none());
+        }
+        drop(pending);
+    }
+
+    #[tokio::test]
+    async fn cancelled_and_refused_gets_leave_no_watchdog_or_reader_frontier() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition)
+            .expect("unshared")
+            .materialize_budget = Duration::from_secs(5);
+        rendition.attach_reader("viewer", 3).await;
+        let mut waits = Vec::new();
+        for index in 10..10 + PER_SESSION_WAIT_CAP as u32 {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            waits.push(tokio::spawn(async move {
+                serve
+                    .serve_segment(&rendition, "viewer", index, Duration::from_secs(1))
+                    .await
+            }));
+        }
+        wait_until("admitted requests", Duration::from_secs(1), async || {
+            serve.shared.pool.len() == PER_SESSION_WAIT_CAP
+        })
+        .await;
+        assert!(matches!(
+            serve
+                .serve_segment(&rendition, "viewer", 50, Duration::from_secs(1))
+                .await,
+            Err(VodError::Busy)
+        ));
+        assert!(!rendition
+            .demand_since
+            .lock()
+            .expect("demand lock")
+            .contains_key(&50));
+        assert_eq!(rendition.readers.lock().await["viewer"].frontier, 3);
+        let watchdogs = rendition
+            .demand_since
+            .lock()
+            .expect("demand lock")
+            .values()
+            .filter_map(|clock| clock.watchdog.clone())
+            .collect::<Vec<_>>();
+        for wait in waits {
+            wait.abort();
+            let _ = wait.await;
+        }
+        assert!(serve.shared.pool.is_empty());
+        assert!(rendition
+            .demand_since
+            .lock()
+            .expect("demand lock")
+            .is_empty());
+        wait_until(
+            "cancelled watchdog tasks",
+            Duration::from_secs(1),
+            async || watchdogs.iter().all(tokio::task::AbortHandle::is_finished),
+        )
+        .await;
+        assert!(
+            rendition.failure().is_none(),
+            "orphaned deadlines cannot poison a shared rendition"
+        );
+        assert!(
+            matches!(
+                serve
+                    .serve_segment(&rendition, "viewer", 50, Duration::from_millis(1))
+                    .await,
+                Err(VodError::Pending { .. })
+            ),
+            "a later destination receives its own production budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_episode_cannot_expire_a_later_wait_for_the_same_entry() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition)
+            .expect("unshared")
+            .materialize_budget = Duration::from_secs(5);
+        let old = serve.shared.arm_materialize_watchdog(&rendition, 10);
+        let old_started = old.started;
+        let old_task = rendition.demand_since.lock().expect("demand lock")[&10]
+            .watchdog
+            .as_ref()
+            .expect("watchdog")
+            .clone();
+        drop(old);
+        wait_until(
+            "old watchdog cancelled",
+            Duration::from_secs(1),
+            async || old_task.is_finished(),
+        )
+        .await;
+        let new = serve.shared.arm_materialize_watchdog(&rendition, 10);
+        assert!(new.started > old_started);
+        let request = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 10,
+                },
+                "viewer",
+            )
+            .expect("new request admitted");
+        assert!(old_task.is_finished());
+        assert_eq!(
+            rendition
+                .demand_since
+                .lock()
+                .expect("demand lock")
+                .get(&10)
+                .expect("new episode retained")
+                .started,
+            new.started
+        );
+        assert_eq!(
+            serve.shared.pool.demands(&rendition.key).len(),
+            1,
+            "old watchdog cannot settle the new request"
+        );
+        drop((request, new));
+    }
+
+    #[tokio::test]
+    async fn a_manifest_recheck_cannot_restart_the_http_block_budget() {
+        // This production seam uses an absolute Tokio deadline; drive the
+        // clock explicitly rather than depend on wall-clock scheduling.
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        tokio::time::pause();
+        let manifest = rendition.manifest.lock().await;
+        let get = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .blocked_wait(&rendition, "viewer", 10, Duration::from_secs(5))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(serve.shared.pool.len(), 1);
+        tokio::time::advance(Duration::from_secs(6)).await;
+        drop(manifest);
+        let result = tokio::time::timeout(Duration::from_millis(100), get)
+            .await
+            .expect("expired GET does not receive a fresh five-second wait")
+            .expect("GET task");
+        assert!(matches!(result, Err(VodError::Pending { .. })));
+    }
+
+    #[tokio::test]
+    async fn cancelled_init_request_does_not_leave_a_rendition_failure() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition)
+            .expect("unshared")
+            .materialize_budget = Duration::from_secs(5);
+        let pending = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move { serve.serve_init(&rendition, Duration::from_secs(1)).await })
+        };
+        wait_until("init deadline owner", Duration::from_secs(1), async || {
+            rendition
+                .demand_since
+                .lock()
+                .expect("demand lock")
+                .contains_key(&INIT_DEMAND_INDEX)
+        })
+        .await;
+        let watchdog = rendition.demand_since.lock().expect("demand lock")[&INIT_DEMAND_INDEX]
+            .watchdog
+            .as_ref()
+            .expect("init watchdog")
+            .clone();
+        pending.abort();
+        let _ = pending.await;
+        assert!(rendition
+            .demand_since
+            .lock()
+            .expect("demand lock")
+            .is_empty());
+        wait_until(
+            "cancelled init watchdog",
+            Duration::from_secs(1),
+            async || watchdog.is_finished(),
+        )
+        .await;
+        assert!(rendition.failure().is_none());
     }
 
     #[tokio::test]
