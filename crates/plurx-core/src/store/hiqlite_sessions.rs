@@ -345,6 +345,7 @@ async fn commit_replay(
     user_id: i64,
     playback_id: &str,
     staged_incarnation_id: &str,
+    expected_receipt: Option<&MediaSessionTerminalAck>,
 ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError> {
     let pointer = store
         .client()
@@ -360,11 +361,33 @@ async fn commit_replay(
     if pointer.as_deref() != Some(staged_incarnation_id) {
         return Ok(None);
     }
+    let control_receipt = if let Some(expected) = expected_receipt {
+        let stored = store
+            .client()
+            .query_consistent_map::<TerminalAckRow, _>(
+                "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
+                        client_instance_id, sequence, request_fingerprint, response_json,
+                        expires_at_ms, updated_at_ms
+                   FROM media_session_terminal_acks WHERE session_id = $1",
+                params!(expected.session_id.clone()),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0);
+        if stored.as_ref() != Some(expected) {
+            return Ok(None);
+        }
+        stored
+    } else {
+        None
+    };
     Ok(route_by(store, "incarnation_id", staged_incarnation_id)
         .await?
         .map(|route| crate::domain::MediaSessionPreparationCommit {
             route,
             predecessor: None,
+            control_receipt,
         }))
 }
 
@@ -1869,7 +1892,14 @@ impl MediaSessionStore for HiqliteAuthStore {
         let Some(staged) = staged_row(self, user_id, playback_id).await? else {
             // No ledger row. Either it was never staged, or an earlier commit
             // already consumed it — and the pointer is the discriminator.
-            return commit_replay(self, user_id, playback_id, staged_incarnation_id).await;
+            return commit_replay(
+                self,
+                user_id,
+                playback_id,
+                staged_incarnation_id,
+                request.control_receipt.as_ref(),
+            )
+            .await;
         };
         if staged.staged_incarnation_id != staged_incarnation_id {
             // A later preparation holds the slot, which does not make this
@@ -1878,7 +1908,14 @@ impl MediaSessionStore for HiqliteAuthStore {
             // must read back. Returning `None` here made a retry of a lost
             // response read as "you lost" on this backend and "here is your
             // route" on SQLite.
-            return commit_replay(self, user_id, playback_id, staged_incarnation_id).await;
+            return commit_replay(
+                self,
+                user_id,
+                playback_id,
+                staged_incarnation_id,
+                request.control_receipt.as_ref(),
+            )
+            .await;
         }
         let predecessor_incarnation = staged.expected_predecessor_incarnation_id.clone();
         let lease_resource = format!("session:{predecessor_incarnation}");
@@ -2149,17 +2186,21 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(None);
         };
         let predecessor = route_by(self, "incarnation_id", &predecessor_incarnation).await?;
-        if let Some(receipt) = &request.control_receipt {
+        let control_receipt = if let Some(receipt) = &request.control_receipt {
             let retained = self
                 .media_session_terminal_ack(&receipt.session_id, request.now_ms)
                 .await?;
             if retained.as_ref() != Some(receipt) {
                 return Ok(None);
             }
-        }
+            retained
+        } else {
+            None
+        };
         Ok(Some(crate::domain::MediaSessionPreparationCommit {
             route,
             predecessor,
+            control_receipt,
         }))
     }
 

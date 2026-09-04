@@ -2689,6 +2689,25 @@ async fn media_session_commit_atomically_retains_its_control_receipt() {
             replay.predecessor.is_none(),
             "{backend}: replay is classified"
         );
+        assert_eq!(
+            replay.control_receipt,
+            Some(receipt.clone()),
+            "{backend}: replay returns the canonical receipt committed with the pointer"
+        );
+        let mut mismatched = commit.clone();
+        mismatched
+            .control_receipt
+            .as_mut()
+            .expect("mismatched receipt")
+            .response_json = "{\"action\":\"different\"}".to_owned();
+        assert!(
+            store
+                .commit_media_session_preparation(user.id, playback, &mismatched)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: mismatched replay: {error}"))
+                .is_none(),
+            "{backend}: pointer equality cannot replay a different response receipt"
+        );
     })
     .await;
 }

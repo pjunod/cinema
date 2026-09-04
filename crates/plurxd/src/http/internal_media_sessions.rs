@@ -832,6 +832,29 @@ async fn control_authorized(
             );
         }
     }
+    match super::hls::preparation_ack_replay(
+        &state,
+        &route,
+        &request.control,
+        request.deadline_unix_ms,
+    )
+    .await
+    {
+        Ok(Some(replay)) => return super::hls::terminal_ack_response(replay),
+        Ok(None) => {}
+        Err(()) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return super::hls::control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the preparation acknowledgement replay is temporarily unavailable",
+                Some(route.incarnation_id.clone()),
+                owner_epoch,
+                Some(500),
+                None,
+            );
+        }
+    }
     if let Err(retry_after_ms) = state.media_sessions.admit_control(&request.session_id) {
         crate::playback_control::record(crate::playback_control::MetricOutcome::RateLimited);
         return super::hls::control_error(
@@ -1111,6 +1134,155 @@ mod tests {
         let body = relay_error_body(response).await;
         assert_eq!(body["code"], "owner_transition");
         assert_eq!(body["retry_after_ms"], 500);
+    }
+
+    #[tokio::test]
+    async fn the_relay_replays_a_committed_preparation_before_returning_ended() {
+        let (_app, state) = super::super::tests::test_app_with_state();
+        let user = state
+            .store
+            .create_user("relay-preparation-replay", "hash", false)
+            .await
+            .expect("relay preparation user");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let recipe_json =
+            crate::media_sessions::takeover_eligible_route(&session_id, &incarnation_id)
+                .recipe_json
+                .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
+        activate_expired_relay_route(
+            &state,
+            &session_id,
+            &incarnation_id,
+            user.id,
+            recipe_json.clone(),
+        )
+        .await;
+
+        let successor_incarnation = uuid::Uuid::new_v4().to_string();
+        let successor_session = uuid::Uuid::new_v4().to_string();
+        state
+            .store
+            .prepare_media_session(&plurx_core::domain::MediaSessionPreparation {
+                incarnation_id: successor_incarnation.clone(),
+                session_id: successor_session.clone(),
+                user_id: user.id,
+                playback_id: "relay-player".to_owned(),
+                expected_predecessor_incarnation_id: incarnation_id.clone(),
+                request_fingerprint: "b".repeat(64),
+                owner_node_id: state.node_id.clone(),
+                recipe_json,
+                response_json: relay_start_response(&successor_session, &successor_incarnation),
+                media_origin_ms: 0,
+                now_ms: 3,
+                deadline_ms: 60_000,
+            })
+            .await
+            .expect("stage successor")
+            .expect("successor accepted");
+
+        let mut control = relay_control_request(incarnation_id.clone());
+        control.sequence = 2;
+        control.capabilities = None;
+        control.supported_actions = Some(vec![
+            crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned()
+        ]);
+        control.acknowledgement = Some(crate::playback_control::ActionAcknowledgement {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            state: crate::playback_control::AcknowledgementState::Committed,
+            buffered_through_ms: None,
+            first_frame_unix_ms: Some(4),
+        });
+        let response_time = crate::media_sessions::unix_ms();
+        let response = crate::playback_control::ControlResponseV1 {
+            protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+            generation: incarnation_id.clone(),
+            control_epoch: 1,
+            accepted_sequence: 2,
+            server_time_unix_ms: response_time,
+            lease: crate::playback_control::PlaybackLeaseView {
+                state: "active".to_owned(),
+                renew_after_ms: crate::playback_control::NEXT_EXCHANGE_MS,
+                expires_at_unix_ms: response_time.saturating_add(1_000),
+            },
+            delivery: crate::playback_control::DeliveryView {
+                presentation: "vod".to_owned(),
+                producer_state: "complete".to_owned(),
+                produced_through_ms: None,
+                fetched_through_ms: 0,
+                delivered_bps: None,
+                delivered_idle_ms: None,
+                recent_producer_speed: None,
+                client_runway_ms: 0,
+                admitted: None,
+                producer_decision: None,
+                hold_reason: None,
+                subtitle_readiness: None,
+                owner_node_hash: "n-0123456789abcdef".to_owned(),
+                owner_epoch: 1,
+            },
+            effective_selection: crate::playback_control::EffectiveSelection {
+                quality_auto: true,
+                height: 720,
+                audio_track: None,
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                codec: "server_selected".to_owned(),
+                dynamic_range: Some("sdr".to_owned()),
+            },
+            action: crate::playback_control::ControlAction::None,
+        };
+        let receipt = plurx_core::domain::MediaSessionTerminalAck {
+            incarnation_id: incarnation_id.clone(),
+            session_id: session_id.clone(),
+            owner_node_id: state.node_id.clone(),
+            owner_epoch: 1,
+            client_instance_id: control.client_instance_id.clone(),
+            sequence: 2,
+            request_fingerprint: control.fingerprint().expect("control fingerprint"),
+            response_json: serde_json::json!({
+                "platform": crate::playback_control::ClientPlatform::Web,
+                "response": response,
+            })
+            .to_string(),
+            expires_at_ms: crate::media_sessions::unix_ms().saturating_add(60_000),
+            updated_at_ms: crate::media_sessions::unix_ms(),
+        };
+        state
+            .store
+            .commit_media_session_preparation(
+                user.id,
+                "relay-player",
+                &plurx_core::domain::MediaSessionPreparationCommitRequest {
+                    staged_incarnation_id: successor_incarnation,
+                    expected_predecessor_owner_node_id: state.node_id.clone(),
+                    expected_predecessor_owner_epoch: 1,
+                    now_ms: 4,
+                    lease_expires_at_ms: 900_000,
+                    control_receipt: Some(receipt),
+                },
+            )
+            .await
+            .expect("commit successor")
+            .expect("successor commit wins");
+
+        let relayed = control_authorized(
+            state.clone(),
+            crate::playback_control::ControlRelayRequest {
+                session_id,
+                generation: incarnation_id,
+                expected_owner_node_id: state.node_id.clone(),
+                expected_owner_epoch: 1,
+                deadline_unix_ms: crate::media_sessions::unix_ms().saturating_add(4_000),
+                control,
+            },
+        )
+        .await;
+        let status = relayed.status();
+        let body = relay_error_body(relayed).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["accepted_sequence"], 2);
+        assert_eq!(body["action"]["type"], "none");
     }
 
     #[tokio::test]

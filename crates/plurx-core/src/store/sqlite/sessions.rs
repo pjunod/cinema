@@ -1682,10 +1682,30 @@ impl MediaSessionStore for SqliteStore {
                         route_from_row,
                     )
                     .optional()?;
+                let control_receipt = if let Some(expected) = &request.control_receipt {
+                    let stored = tx
+                        .query_row(
+                            "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
+                                    client_instance_id, sequence, request_fingerprint, response_json,
+                                    expires_at_ms, updated_at_ms
+                               FROM media_session_terminal_acks WHERE session_id = ?1",
+                            [expected.session_id.as_str()],
+                            terminal_ack_from_row,
+                        )
+                        .optional()?;
+                    if stored.as_ref() != Some(expected) {
+                        tx.rollback()?;
+                        return Ok(None);
+                    }
+                    stored
+                } else {
+                    None
+                };
                 tx.commit()?;
                 return Ok(route.map(|route| MediaSessionPreparationCommit {
                     route,
                     predecessor: None,
+                    control_receipt,
                 }));
             };
             // The CAS this whole milestone exists for. The predecessor comes
@@ -1920,8 +1940,13 @@ impl MediaSessionStore for SqliteStore {
                     .optional()?,
                 None => None,
             };
+            let control_receipt = request.control_receipt.clone();
             tx.commit()?;
-            Ok(Some(MediaSessionPreparationCommit { route, predecessor }))
+            Ok(Some(MediaSessionPreparationCommit {
+                route,
+                predecessor,
+                control_receipt,
+            }))
         })
         .await
     }
