@@ -315,6 +315,122 @@ class HistoryAuditCase(unittest.TestCase):
             report.errors,
         )
 
+    @staticmethod
+    def git(root: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=root, check=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout.strip()
+
+    def pending_merge(self, root: Path, *, client: bool = False):
+        (root / "docs/base.md").write_text("seed\n", encoding="utf-8")
+        base = self.commit(root, "feat: seed")
+        self.git(root, "checkout", "-qb", "incoming")
+        source = root / ("clients/app.swift" if client else "crates/app.rs")
+        source.parent.mkdir(exist_ok=True)
+        source.write_text("corrected behavior\n", encoding="utf-8")
+        (root / "tests/unrelated.rs").write_text(
+            "#[test]\nfn unrelated() {}\n", encoding="utf-8"
+        )
+        incoming = self.commit(root, "fix: retain corrected behavior")
+        self.git(root, "checkout", "-qb", "current", base)
+        (root / "docs/current.md").write_text("current\n", encoding="utf-8")
+        self.commit(root, "docs: describe current branch")
+        self.git(root, "merge", "--no-commit", "--no-ff", "incoming")
+        return base, incoming
+
+    def map_commit(self, coverage: Path, sha: str):
+        self.write_coverage(
+            coverage, f"{sha[:8]}-app.toml",
+            f'''commits = ["{sha[:8]}"]
+points = ["app"]
+checks = ["baseline"]
+reason = "Focused current regression evidence covers the incoming behavior."
+''',
+        )
+
+    def test_pending_merge_accepts_mapping_only_for_its_actual_parents(self):
+        root, catalog, coverage = self.repository()
+        base, incoming = self.pending_merge(root)
+        self.map_commit(coverage, incoming)
+        (root / "tests/client-fixes.toml").write_text(
+            f'version = 1\nenforce_after = "{base}"\n', encoding="utf-8"
+        )
+        report = audit_history(root, catalog, coverage)
+        self.assertEqual(report.errors, ())
+        self.assertEqual(report.covered_by_entry, (incoming,))
+
+        # Once the merge is aborted, a merely existing branch is not evidence.
+        self.git(root, "merge", "--abort")
+        report = audit_history(root, catalog, coverage)
+        self.assertTrue(any("matches 0 audited commits" in error for error in report.errors))
+
+    def test_pending_merge_enforces_incoming_runtime_mapping(self):
+        root, catalog, coverage = self.repository()
+        base, incoming = self.pending_merge(root)
+        (root / "tests/client-fixes.toml").write_text(
+            f'version = 1\nenforce_after = "{base}"\n', encoding="utf-8"
+        )
+        report = audit_history(root, catalog, coverage)
+        self.assertTrue(any(
+            incoming[:8] in error and "needs an explicit" in error
+            for error in report.errors
+        ), report.errors)
+
+    def test_pending_merge_enforces_incoming_client_anchor(self):
+        root, catalog, coverage = self.repository()
+        base, incoming = self.pending_merge(root, client=True)
+        (root / "tests/client-fixes.toml").write_text(
+            f'version = 1\nenforce_after = "{base}"\n', encoding="utf-8"
+        )
+        report = audit_history(root, catalog, coverage)
+        self.assertTrue(any(
+            incoming[:8] in error and "needs a tests/client-fixes.toml anchor row" in error
+            for error in report.errors
+        ), report.errors)
+
+    def test_pending_merge_in_linked_worktree_uses_worktree_local_heads(self):
+        root, catalog, coverage = self.repository()
+        _, incoming = self.pending_merge(root)
+        self.git(root, "merge", "--abort")
+        with tempfile.TemporaryDirectory() as directory:
+            linked = Path(directory) / "linked"
+            self.git(root, "worktree", "add", "-b", "linked", str(linked), "HEAD")
+            self.git(linked, "merge", "--no-commit", "--no-ff", "incoming")
+            self.map_commit(coverage, incoming)
+            self.assertEqual(audit_history(linked, catalog, coverage).errors, ())
+            self.assertTrue(any(
+                "matches 0 audited commits" in error
+                for error in audit_history(root, catalog, coverage).errors
+            ))
+
+    def test_pending_merge_rejects_malformed_or_non_commit_heads(self):
+        root, catalog, coverage = self.repository()
+        self.pending_merge(root)
+        merge_path = root / self.git(root, "rev-parse", "--git-path", "MERGE_HEAD")
+        tree = self.git(root, "rev-parse", "HEAD^{tree}")
+        for invalid in ("", "HEAD\n", "--all\n", "a" * 40 + "\n", tree + "\n", "\xff\n"):
+            with self.subTest(invalid=invalid):
+                merge_path.write_text(invalid, encoding="utf-8")
+                with self.assertRaises(HistoryError):
+                    audit_history(root, catalog, coverage)
+
+    def test_pending_octopus_merge_audits_every_parent_once(self):
+        root, catalog, coverage = self.repository()
+        base, first = self.pending_merge(root)
+        self.git(root, "merge", "--abort")
+        self.git(root, "checkout", "-qb", "second", base)
+        (root / "src/second.rs").write_text("second correction\n", encoding="utf-8")
+        second = self.commit(root, "fix: retain second behavior")
+        self.git(root, "checkout", "current")
+        self.git(root, "merge", "--no-commit", "--no-ff", "incoming", "second")
+        self.map_commit(coverage, first)
+        self.map_commit(coverage, second)
+        report = audit_history(root, catalog, coverage)
+        self.assertEqual(report.errors, ())
+        self.assertEqual(set(report.covered_by_entry), {first, second})
+        self.assertEqual(len(report.issues), 2)
+
 
 class CoverageDirectoryCase(unittest.TestCase):
     """The regression ledger must survive concurrent corrective changes.

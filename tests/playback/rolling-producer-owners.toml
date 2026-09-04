@@ -1144,7 +1144,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # one preparation slot and its durable row together. Without it the first
 # successful stage is the last one for the life of the session. It owns no
 # producer and starts no process — it only settles a slot the actor holds.
-expected_occurrences = 389
+# 389 -> 394 with abb872ba's admitted VOD demand regressions: five test-only
+# task sites exercise control cancellation, publication-to-file-open pinning,
+# refused/cancelled segment GETs, the absolute HTTP deadline, and cancelled
+# init GETs. The cancellation fixtures abort and await their request handles;
+# the file-open fixture joins its GET, and the paused-clock fixture joins its
+# GET through a 100 ms timeout. The segment-cap fixture creates at most
+# PER_SESSION_WAIT_CAP requests from its one spawn site and aborts/joins each.
+# No production task site is added. The existing materialization watchdog now
+# has an exact MaterializeClock AbortHandle instead of being unowned: the
+# request's MaterializeDemand drop removes the last cancelled episode, and
+# clock drop aborts its watchdog. Registration and clock binding share one
+# synchronous lock, so a refused GET creates neither demand nor a watchdog.
+# Expiry only answers that entry's waiters (or wakes init waiters); it no
+# longer terminates the shared producer or records a rendition-wide failure.
+expected_occurrences = 394
 
 [[module_structures]]
 id = "method-spawn"
@@ -1155,7 +1169,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +1: `run_chapter_probe` spawns one bounded ffprobe child. Its caller owns a
 # cancellation token and deadline; the child is kill-on-drop and always reaped
 # on the explicit oversize and ordinary completion paths.
-expected_occurrences = 41
+# 41 -> 42 with abb872ba: the Unix-only zero-progress eviction regression
+# launches `sleep 60` as a fake running producer. It transfers the child to
+# ProducerSlot, then awaits driver_pass; the capacity-hold Terminate step
+# calls Child::kill().await (kill plus reap) before asserting Absent. The child
+# is kill-on-drop if the fixture unwinds. No shipped process is added.
+expected_occurrences = 42
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1246,7 +1265,20 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 555 -> 557 after adversarial review: the incapable-client production-seam
 # regression adds one exchange-floor sleep and one bounded wait for its
 # detached decision to finish. Both are test-only and awaited.
-expected_occurrences = 557
+# 557 -> 560 with abb872ba: one production sleep retains an expired
+# materialization episode for two PENDING_RETRY_AFTER intervals (2 s), so the
+# normal HTTP retry sees its typed failure. The existing watchdog owns this
+# cleanup; it removes only its matching start timestamp with zero owners.
+# Cancellation/materialization can abort it earlier through clock drop. This
+# is not another producer-progress poll or a new retry/replacement authority.
+# The other two constructors are test-only: a control-rate-floor sleep in
+# the forward/backward seek regression and the paused-clock GET-join timeout
+# in the absolute HTTP-budget regression. Both are awaited by their fixture.
+# WaitPool's existing timeout moved into RegisteredWait::wait with no net
+# constructor change. blocked_wait passes the remaining absolute HTTP budget
+# after its manifest recheck; the request retains its bounded slot/file pin
+# until the file opens or the request is dropped, not merely until notification.
+expected_occurrences = 560
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1283,7 +1315,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # returns. It owns no rolling producer, outlives no await, and never runs in a
 # shipped binary — it exists so the argv pin has a real Dolby-Vision-shaped
 # HEVC source to copy.
-expected_occurrences = 67
+# 67 -> 68 with abb872ba: the test-only `sleep 60` child described under
+# method-spawn. ProducerSlot owns it through the awaited kill/reap; this is a
+# running-child capacity regression, not another production encoder path.
+expected_occurrences = 68
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1345,7 +1380,15 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `Response::status()` off an in-process control refusal, which is the whole
 # assertion — that the owner side answers 410 without a retry hint, or 425 with
 # one. In-process; they launch nothing and own nothing.
-expected_occurrences = 216
+# +5 for direct-file range reliability: one production Response::status()
+# classifies successful GETs before playback bookkeeping; four test call sites
+# assert exact raw-file/HEAD/If-Range response codes. All read HTTP metadata.
+# They create no task, process, timer, or rolling-producer owner. The fixtures
+# own only temporary files and consume their response bodies before return.
+# 216 -> 217 with abb872ba: the same test-only `sleep 60` spawn counted under
+# method-spawn and process-command-construction, not a second child.
+# Both reviewed deltas are retained after integrating the effort.
+expected_occurrences = 222
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1370,12 +1413,24 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # calls coordinate test tasks before the leading fetch is released. They are
 # in-process synchronization and do not address or reap an operating-system
 # process.
-expected_occurrences = 306
+# 306 -> 319 with abb872ba: nine Barrier::wait calls belong to the two
+# deterministic control-acceptance/file-open cancellation seams (five behind
+# cfg(test) in the production methods and four in their fixtures). Four more
+# are WaitPool/RegisteredWait waits: the compatibility test helper delegates
+# to the request-owned wait, and three fixture calls prove notified pin
+# retention, admission refusal, and entry-local failure. The shipped GET's
+# old pool.wait becomes registered.wait, for no net change. All thirteen are
+# in-process waits, not OS-child lifecycle calls; the existing timeout remains
+# owned by each admitted request rather than by a detached task.
+expected_occurrences = 319
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
 pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe)|(?<![:.\\w])(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe))\\s*\\("
-expected_occurrences = 32
+# 32 -> 33 with abb872ba: this deliberately conservative pattern also matches
+# the new `pub async fn wait(` declaration on RegisteredWait. It is the
+# oneshot/timeout method inventoried above, not a free OS wait or reap call.
+expected_occurrences = 33
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -1388,7 +1443,10 @@ pattern = "kill_on_drop\\s*\\("
 # +1: the chapter probe is dropped by cancellation or deadline selection and
 # must not leave ffprobe holding a NAS file or the queue's global media slot.
 # +1 with the bounded subtitle window: its kill_on_drop, for the same reason the whole-track extractor has one.
-expected_occurrences = 37
+# 37 -> 38 with abb872ba: cancellation/unwind protection for the test-only
+# `sleep 60` child. The normal regression path still explicitly kills and
+# reaps it through ProducerSlot; kill-on-drop is not the success assertion.
+expected_occurrences = 38
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
