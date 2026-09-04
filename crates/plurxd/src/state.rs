@@ -858,6 +858,8 @@ impl AppState {
         let live_tv = crate::live_tv::LiveTvManager::new(
             Arc::clone(&store),
             Arc::clone(&system),
+            Arc::clone(&transcode),
+            serving.authority(),
             node_id.clone(),
             live_tv_scratch,
         );

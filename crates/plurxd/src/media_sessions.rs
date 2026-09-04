@@ -2611,12 +2611,35 @@ fn relay_response(response: reqwest::Response) -> Result<Response<Body>, PeerTra
     )
 }
 
-fn relay_response_with_limits(
+pub(crate) fn relay_response_with_limits(
     response: reqwest::Response,
     max_lifetime: Duration,
     no_progress_timeout: Duration,
 ) -> Result<Response<Body>, PeerTransportError> {
-    relay_response_with_limits_observed(response, max_lifetime, no_progress_timeout, None, None)
+    relay_response_with_limits_observed(
+        response,
+        max_lifetime,
+        no_progress_timeout,
+        None,
+        None,
+        None,
+    )
+}
+
+pub(crate) fn relay_response_with_limits_counted(
+    response: reqwest::Response,
+    max_lifetime: Duration,
+    no_progress_timeout: Duration,
+    relayed_bytes: Arc<std::sync::atomic::AtomicU64>,
+) -> Result<Response<Body>, PeerTransportError> {
+    relay_response_with_limits_observed(
+        response,
+        max_lifetime,
+        no_progress_timeout,
+        None,
+        None,
+        Some(relayed_bytes),
+    )
 }
 
 struct RelayPumpCompletion(Option<tokio::sync::oneshot::Sender<()>>);
@@ -2670,6 +2693,7 @@ fn relay_response_with_limits_observed(
     no_progress_timeout: Duration,
     completion: Option<tokio::sync::oneshot::Sender<()>>,
     upstream_pulls: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    relayed_bytes: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<Response<Body>, PeerTransportError> {
     let status = StatusCode::from_u16(response.status().as_u16())
         .map_err(|_| PeerTransportError::InvalidResponse)?;
@@ -2764,6 +2788,12 @@ fn relay_response_with_limits_observed(
                 }
                 None => return,
             };
+            if let Some(total) = relayed_bytes.as_ref() {
+                total.fetch_add(
+                    u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
             permit.send(Ok(bytes));
         }
     });
@@ -7450,6 +7480,7 @@ mod tests {
             Duration::from_secs(5),
             Some(settled_tx),
             Some(Arc::clone(&upstream_pulls)),
+            None,
         )
         .expect("build independently pumped relay");
 
@@ -7511,6 +7542,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
             Some(settled_tx),
+            None,
             None,
         )
         .expect("build cancellable relay");

@@ -47,20 +47,17 @@ pub const QUEUE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Speed a class of work must have been measured at before a session of that
 /// class is admitted to software. Above realtime with margin, because a
 /// session at exactly 1.0x never builds the reserve that absorbs a hiccup.
-#[cfg(any(test, feature = "live-hls-recovery"))]
 const SOFTWARE_SAFE_SPEED: f64 = 1.2;
 
 /// The encoder name admission asks about. A constant rather than a literal
 /// because the recording side and the asking side must agree exactly, and a
 /// typo in either would silently mean "nothing has ever been measured".
-#[cfg(any(test, feature = "live-hls-recovery"))]
 pub const SOFTWARE: &str = "software";
 
 /// Who is asking, and therefore who yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
     /// Somebody pressed play and is looking at a spinner.
-    #[cfg(any(test, feature = "live-hls-recovery"))]
     Live,
     /// The pre-transcode producer. Takes what is spare, gives it back the
     /// moment a live start wants it, and does not take it again until every
@@ -70,7 +67,6 @@ pub enum Priority {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PermitOwner {
-    #[cfg(any(test, feature = "live-hls-recovery"))]
     Live,
     Background,
 }
@@ -78,7 +74,6 @@ enum PermitOwner {
 impl From<Priority> for PermitOwner {
     fn from(priority: Priority) -> Self {
         match priority {
-            #[cfg(any(test, feature = "live-hls-recovery"))]
             Priority::Live => PermitOwner::Live,
             Priority::Background => PermitOwner::Background,
         }
@@ -139,7 +134,6 @@ impl Drop for HwSlot {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match self.owner {
-            #[cfg(any(test, feature = "live-hls-recovery"))]
             PermitOwner::Live => {
                 debug_assert!(permits.hardware_live > 0);
                 permits.hardware_live = permits.hardware_live.saturating_sub(1);
@@ -176,7 +170,6 @@ impl Drop for SwPermit {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match self.owner {
-            #[cfg(any(test, feature = "live-hls-recovery"))]
             PermitOwner::Live => {
                 debug_assert!(permits.software_live_permits > 0);
                 debug_assert!(permits.software_live_used >= self.weight);
@@ -214,7 +207,6 @@ impl SwPool {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match priority {
-            #[cfg(any(test, feature = "live-hls-recovery"))]
             Priority::Live if permits.background_active() => return None,
             Priority::Background if permits.live_waiting > 0 || permits.live_active() => {
                 return None;
@@ -226,7 +218,6 @@ impl SwPool {
             return None;
         }
         match priority {
-            #[cfg(any(test, feature = "live-hls-recovery"))]
             Priority::Live => {
                 permits.software_live_permits += 1;
                 permits.software_live_used += weight;
@@ -249,7 +240,6 @@ impl SwPool {
     /// their film hostage to the budget would turn an accounting rule into a
     /// stall. Overcommit is recorded (the pool goes over budget, and every
     /// later `try_take` sees it) rather than hidden.
-    #[cfg(any(test, feature = "live-hls-recovery"))]
     pub fn take_forced(&self, weight: usize) -> SwPermit {
         let mut permits = self
             .permits
@@ -273,13 +263,11 @@ impl SwPool {
 /// between setting and clearing would park the producer for the life of the
 /// process — silently, since a producer that never runs looks exactly like a
 /// producer with nothing to do.
-#[cfg(any(test, feature = "live-hls-recovery"))]
 #[derive(Debug)]
 pub struct LiveWait {
     permits: Arc<Mutex<PermitState>>,
 }
 
-#[cfg(any(test, feature = "live-hls-recovery"))]
 impl Drop for LiveWait {
     fn drop(&mut self) {
         let mut permits = self
@@ -292,7 +280,6 @@ impl Drop for LiveWait {
 }
 
 /// What a start should do, having asked to run on hardware.
-#[cfg(any(test, feature = "live-hls-recovery"))]
 #[derive(Debug, PartialEq)]
 pub enum Admission {
     /// Run on hardware; hold this until the session ends.
@@ -309,7 +296,6 @@ pub enum Admission {
     Refused(String),
 }
 
-#[cfg(any(test, feature = "live-hls-recovery"))]
 impl PartialEq for HwSlot {
     /// Slots are interchangeable; only their existence is meaningful.
     fn eq(&self, _: &HwSlot) -> bool {
@@ -368,7 +354,6 @@ impl Admissions {
     }
 
     /// A handle a detached task can carry — see [`SwPool`].
-    #[cfg(any(test, feature = "live-hls-recovery"))]
     pub fn software_pool(&self) -> SwPool {
         self.software.clone()
     }
@@ -390,7 +375,6 @@ impl Admissions {
 
     /// Announce that a live start is queuing. Hold the guard for as long as the
     /// wait lasts; drop it the moment the start has a slot or has given up.
-    #[cfg(any(test, feature = "live-hls-recovery"))]
     pub fn wait_for_slot(&self) -> LiveWait {
         let mut permits = self
             .permits
@@ -441,7 +425,6 @@ impl Admissions {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match priority {
-            #[cfg(any(test, feature = "live-hls-recovery"))]
             Priority::Live if permits.background_active() => return None,
             Priority::Background if permits.live_waiting > 0 || permits.live_active() => {
                 return None;
@@ -452,7 +435,6 @@ impl Admissions {
             return None;
         }
         match priority {
-            #[cfg(any(test, feature = "live-hls-recovery"))]
             Priority::Live => permits.hardware_live += 1,
             Priority::Background => permits.hardware_background += 1,
         }
@@ -494,7 +476,6 @@ impl Admissions {
     }
 
     /// Decide what a live start that wanted hardware actually gets.
-    #[cfg(any(test, feature = "live-hls-recovery"))]
     pub fn admit(&self, max: usize, work: Workload<'_>) -> Admission {
         if let Some(slot) = self.try_acquire(max, Priority::Live) {
             return Admission::Hardware(slot);
@@ -579,14 +560,12 @@ impl<'a> Workload<'a> {
     }
 
     /// The bucket that answers the admission question.
-    #[cfg(any(test, feature = "live-hls-recovery"))]
     pub fn software_class(&self) -> String {
         self.class(SOFTWARE)
     }
 
     /// Has software any realistic chance here, on a node that has not measured
     /// itself yet?
-    #[cfg(any(test, feature = "live-hls-recovery"))]
     fn hopeless_in_software(&self) -> bool {
         let heavy_codec = matches!(self.codec, "hevc" | "h265" | "hevc10" | "av1" | "vvc");
         // 4K of anything, or HDR in a codec that costs to decode. §2.9's

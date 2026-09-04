@@ -227,7 +227,10 @@ impl ServingFence {
         (method == "POST"
             && (path.ends_with("/hls/sessions")
                 || path.ends_with("/offline-packages")
-                || path.ends_with("/publication")))
+                || path.ends_with("/publication")
+                || (path.contains("/live-tv/channels/") && path.ends_with("/sessions"))
+                || path == "/internal/live-tv/session/start"
+                || path == "/internal/live-tv/session/activate"))
             || (method == "GET"
                 && (path.ends_with("/hls/start")
                     || path.ends_with("/stream.mp4")

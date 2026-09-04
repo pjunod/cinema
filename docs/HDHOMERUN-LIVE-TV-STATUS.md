@@ -1,7 +1,8 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** design · **Effort:** `effort/hdhomerun-live-tv` · **Updated:**
-2026-09-04 · **Live issue:** [#902](https://github.com/pjunod/plurx/issues/902)
+**Status:** M2 implementation · **Effort:** `effort/hdhomerun-live-tv` ·
+**Updated:** 2026-09-04 · **Historical issue:**
+[#902](https://github.com/pjunod/plurx/issues/902)
 
 Companion to [HDHOMERUN-LIVE-TV-PLAN.md](HDHOMERUN-LIVE-TV-PLAN.md) (the
 contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md)
@@ -13,26 +14,28 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 | Milestone | State | PR | Evidence |
 |---|---|---|---|
 | M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
-| M1 device/settings/lineup | review fixes validating | [#906](https://github.com/pjunod/plurx/pull/906) | first effort gate passed; eight attack-review findings fixed locally |
-| M2 live HLS and cluster relay | not started | — | — |
+| M1 device/settings/lineup | merged | [#906](https://github.com/pjunod/plurx/pull/906) | attack-review findings fixed; re-review approved; effort gate passed; merge `b15d241a` |
+| M2 live HLS and cluster relay | focused validation passing | pending Forgejo PR | 22 Live TV, 2 route-matrix, and 2 foreground-admission tests pass; default clippy and no-default compile pass |
 | M3 web client | not started | — | — |
 | M4 Apple and Android | not started | — | — |
 | M5 docs, hardware, promotion | not started | — | — |
 
-## Current work — close the M1 attack review
+## Current work — qualify and review M2
 
-M0 is merged to the effort. M1's first exact head passed its pinned compile
-loop and effort gate, then adversarial review requested eight changes. The
-working fix linearizes enablement against joins and the owner voter, rejects
-older joiners while enabled, fences all tuner access on serving authority,
-redacts device failures, isolates malformed lineup rows, makes FFmpeg probing
-admin-only and rate-bounded, rejects mixed aggregate settings writes, and
-makes replicated generation parsing fail closed. The focused race, rollback,
-quorum-loss, parser, socket, and backend-parity tests pass locally; exact-head
-Rust 1.97.1 proof, the effort gate, and re-review are next.
+M0 and M1 are merged to the effort. M2 now has the always-compiled foreground
+admission path, one-open tuner-to-FFmpeg pump, bounded six-segment live HLS
+scratch, owner-bound capabilities, provisional-start activation, signed
+cluster relay/control, serving and settings-generation fences, idle/progress
+timeouts, activity, and metrics. Playback remains runtime-disabled until an
+administrator follows the safety checklist in Settings → Developer; there is
+no Cargo feature or build variant to unlock.
 
-M1 still does not open a tuner stream or start a playback FFmpeg process; those
-lifecycle invariants land together in M2.
+The focused local tests, default lint build, and no-default compile pass. Next
+is the source-only Rust 1.97.1 loop, effort commit, Forgejo task PR, effort
+gate, exact-diff adversarial review, fixes, re-review, and merge. Forgejo is the
+only mutable remote after the repository migration; its deploy-key
+authorization is currently the publishing blocker, not an implementation
+blocker.
 
 ## Evidence — exact commands and trees
 
@@ -46,7 +49,11 @@ lifecycle invariants land together in M2.
 | 2026-09-04 | `a79c4927` | PR [#904](https://github.com/pjunod/plurx/pull/904) | current-head review approved; effort gate passed; merged as `e3f05f2e` |
 | 2026-09-04 | `807d8318` | PR [#906](https://github.com/pjunod/plurx/pull/906) | Rust 1.97.1 fmt/check/clippy and focused tests passed; effort gate passed |
 | 2026-09-04 | `807d8318` | first M1 adversarial review | one critical, five high, and two medium findings; merge held |
-| 2026-09-04 | working M1 fixes | focused local validation | join/activation races, rollback capability, canonical replicated CAS, quorum fence, URL redaction, malformed-row isolation, and Live TV HTTP tests passed |
+| 2026-09-04 | `bc7305ae` | M1 exact source archive `ca09afb…` | Rust 1.97.1 fmt/check/clippy; core cluster and replicated/SQLite generation suites; 16 Live TV and 2 route-matrix tests passed |
+| 2026-09-04 | `bc7305ae` | M1 final adversarial review and effort gate | approved with no findings; merged as `b15d241a` |
+| 2026-09-04 | working M2 tree | `cargo test -p plurxd live_tv --locked` | 22 passed, including one-GET streaming, bounded scratch, capability, redaction, and quorum cases |
+| 2026-09-04 | working M2 tree | focused route and foreground-admission tests | 4 passed; maintenance/learner routing and cancellation-safe live admission proved |
+| 2026-09-04 | working M2 tree | default clippy and no-default check | passed; Live TV is present in both builds |
 
 ## Decisions made while the owner is away
 
@@ -56,6 +63,8 @@ lifecycle invariants land together in M2.
 | One explicit tuner-owner node with signed relay | prevents four cluster nodes from advertising sixteen leases on four tuners | replicated fenced tuner leases exist |
 | Default two concurrent sessions | FLEX/CONNECT 4K has only two ATSC 3-capable tuners and other clients may compete | hardware evidence supports a different household policy |
 | H.264/AAC at 720p by default | broad client compatibility and realistic realtime encoding | 1080p/2160p fixtures pass on the selected owner |
+| Runtime enablement only; no code feature gate | one binary must expose the same capability everywhere while unsafe activation stays explicit and reversible | never; this is the product contract |
+| One tuner HTTP GET and one FFmpeg process per session | retries can double-lease physical tuners and split lifecycle ownership | a device-native resumable lease protocol exists |
 | DRM and captions unsupported | plurx has no licensed DRM path; captions lack end-to-end proof | a lawful DRM path or 608/708 fixture exists |
 | All first-party clients are in scope | a living-room feature is not complete as a web-only API | owner explicitly narrows the product surface |
 

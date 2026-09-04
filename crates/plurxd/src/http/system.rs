@@ -2562,8 +2562,18 @@ pub async fn update_settings(
         if !updated {
             return Err(ApiError::Conflict(
                 "Live TV activation lost its generation, compatible-and-present-fleet, join, or owner-voter fence; reload readiness and try again"
-                    .into(),
+                .into(),
             ));
+        }
+        let next_generation = expected_generation.saturating_add(1);
+        if let Err(error) =
+            super::live_tv::drain_owner(&state, owner_node_id, next_generation).await
+        {
+            // The committed configuration is already the authoritative fence;
+            // every owner-side worker polls it. This signed drain collapses
+            // the ordinary path to immediate cancellation, while a partition
+            // still fails closed through serving authority and generation.
+            tracing::warn!(%error, owner = %owner_node_id, "live-TV owner drain will converge through its generation fence");
         }
     }
     if let Some(seconds) = req.subtitle_window_secs {
@@ -3239,6 +3249,20 @@ pub async fn activity(
 async fn local_activity(state: &AppState) -> Result<Vec<Activity>, ApiError> {
     let mut activities = Vec::new();
 
+    let live_tv = state.live_tv.activities();
+    if !live_tv.is_empty() {
+        activities.push(Activity {
+            kind: "live_tv",
+            label: if live_tv.len() == 1 {
+                "1 active Live TV session".to_owned()
+            } else {
+                format!("{} active Live TV sessions", live_tv.len())
+            },
+            detail: None,
+            percent: None,
+        });
+    }
+
     let mut statuses: Vec<_> = state
         .jobs
         .all_statuses()
@@ -3576,6 +3600,7 @@ pub async fn activity_detail(
             "syncing": trakt.syncing,
             "note": trakt.note,
         },
+        "live_tv": state.live_tv.activities(),
     });
     if clustered {
         response["activity_nodes"] = serde_json::to_value(activity_nodes(&state.node_id, &peers))
@@ -3715,6 +3740,7 @@ pub(crate) struct MetricsState {
     store_metrics: StoreMetricsCache,
     passive_raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
     passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
+    live_tv: Arc<crate::live_tv::LiveTvManager>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -3729,6 +3755,7 @@ impl FromRef<AppState> for MetricsState {
             store_metrics: state.store_metrics.clone(),
             passive_raft: state.replication.metrics_handle(),
             passive_membership: state.membership.metrics_handle(),
+            live_tv: Arc::clone(&state.live_tv),
         }
     }
 }
@@ -4163,12 +4190,13 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{control_metrics}{playback_metrics}",
+         {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{takeover_metrics}{control_metrics}{playback_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
         control_metrics = crate::playback_control::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
+        live_tv_metrics = state.live_tv.prometheus(),
     );
     (
         [(

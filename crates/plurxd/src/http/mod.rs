@@ -91,6 +91,30 @@ pub fn router(state: AppState) -> Router {
             post(live_tv::refresh_readiness),
         )
         .route("/live-tv/channels", get(live_tv::channels))
+        .route(
+            "/live-tv/channels/{channel}/sessions",
+            post(live_tv::start_session),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/index.m3u8",
+            get(live_tv::playlist),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/status",
+            get(live_tv::session_status),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/keepalive",
+            put(live_tv::keepalive),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/{segment}",
+            get(live_tv::segment),
+        )
+        .route(
+            "/live-tv/sessions/{capability}",
+            delete(live_tv::stop_session),
+        )
         .route("/scan/status", get(system::scan_status))
         .route("/activity", get(system::activity))
         .route("/activity/detail", get(system::activity_detail))
@@ -434,6 +458,36 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            crate::live_tv::START_PATH,
+            post(internal_live_tv::start).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::ACTIVATE_PATH,
+            post(internal_live_tv::activate).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::RESOURCE_PATH,
+            post(internal_live_tv::resource).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::STOP_PATH,
+            post(internal_live_tv::stop).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::DRAIN_PATH,
+            post(internal_live_tv::drain).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
             "/internal/media/fragment-index/{cache_key}",
             get(internal_media::fragment_index),
         )
@@ -554,6 +608,9 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             crate::media_sessions::ABORT_PATH
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
+                | crate::live_tv::RESOURCE_PATH
+                | crate::live_tv::STOP_PATH
+                | crate::live_tv::DRAIN_PATH
         )
     {
         return true;
@@ -570,15 +627,23 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | ["api", "v1", "offline", "media", _, _]
                 | ["api", "v1", "offline", "media", _, _, _]
                 | ["api", "v1", "offline", "media", _, "subs", _, _]
+                | ["api", "v1", "live-tv", "sessions", _, _]
         ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
     let existing_media_control = (method == Method::POST
         && matches!(segments.as_slice(), ["api", "v1", "hls", _, "control"]))
         || (method == Method::DELETE
             && matches!(
                 segments.as_slice(),
-                ["api", "v1", "hls", _] | ["api", "v1", "publication", _]
+                ["api", "v1", "hls", _]
+                    | ["api", "v1", "publication", _]
+                    | ["api", "v1", "live-tv", "sessions", _]
             ));
-    existing_media_read || existing_media_control
+    let live_keepalive = method == Method::PUT
+        && matches!(
+            segments.as_slice(),
+            ["api", "v1", "live-tv", "sessions", _, "keepalive"]
+        );
+    existing_media_read || existing_media_control || live_keepalive
 }
 
 /// One published route matrix for the non-voting capacity role.
@@ -638,6 +703,8 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     | crate::media_sessions::ABORT_PATH
                     | crate::media_sessions::RELAY_PATH
                     | crate::media_sessions::CONTROL_PATH
+                    | crate::live_tv::RESOURCE_PATH
+                    | crate::live_tv::STOP_PATH
             ))
     {
         return true;
@@ -701,6 +768,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 | ["api", "v1", "offline", "media", _, _, _]
                 | ["api", "v1", "offline", "media", _, "subs", _, _]
                 | ["api", "v1", "publication", _, _]
+                | ["api", "v1", "live-tv", "sessions", _, _]
         ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
     let node_local_create = method == Method::POST
         && matches!(
@@ -718,9 +786,16 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     let node_local_close = method == Method::DELETE
         && matches!(
             segments.as_slice(),
-            ["api", "v1", "hls", _] | ["api", "v1", "publication", _]
+            ["api", "v1", "hls", _]
+                | ["api", "v1", "publication", _]
+                | ["api", "v1", "live-tv", "sessions", _]
         );
-    node_local_get || node_local_create || node_local_close
+    let live_keepalive = method == Method::PUT
+        && matches!(
+            segments.as_slice(),
+            ["api", "v1", "live-tv", "sessions", _, "keepalive"]
+        );
+    node_local_get || node_local_create || node_local_close || live_keepalive
 }
 
 async fn cluster_capacity_gate(
@@ -769,12 +844,13 @@ async fn cluster_capacity_gate(
 
 fn safe_trace_target(uri: &Uri) -> String {
     let mut segments = uri.path().split('/').collect::<Vec<_>>();
-    for marker in ["media", "hls", "publication"] {
+    for marker in ["media", "hls", "publication", "sessions"] {
         if let Some(index) = segments.iter().position(|segment| *segment == marker) {
             let is_capability_route = match marker {
                 "media" => index >= 2 && segments.get(index.wrapping_sub(1)) == Some(&"offline"),
                 "hls" => true,
                 "publication" => true,
+                "sessions" => index > 0 && segments.get(index - 1) == Some(&"live-tv"),
                 _ => false,
             };
             if is_capability_route && index + 1 < segments.len() {
