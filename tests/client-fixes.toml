@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "android.requested-and-attached-media-recipe"
+commits = ["c5504641"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "class PlaybackRecipeOwnership"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackRecipeOwnershipTest.kt"
+test_anchor = "seekAfterUnpublishedAudioOffsetOrBurnCarriesTheWholeMediaRecipe"
+
+[[fixes]]
 id = "web.composed-playback-and-attachment-intent"
 commits = ["ca0913c1"]
 source = "crates/plurxd/src/web/index.html"

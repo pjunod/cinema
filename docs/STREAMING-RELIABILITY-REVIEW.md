@@ -398,6 +398,16 @@ window; exact in-flight requests retain their own pins, while superseded waits
 leave. Schedule the latest per-playback target with bounded fairness rather
 than collapsing every waiter to a global minimum.
 
+The Astra implementation review adds an important capacity boundary: fair
+selection is not a real-time guarantee. One producer per rendition can still
+spend its budget repeatedly repositioning between distant active viewers.
+Qualification must exercise that demand spread. Where a single producer
+cannot maintain every admitted viewer's runway, use bounded independently
+scheduled producer windows or refuse excess work explicitly; a FIFO unit
+regression alone does not prove multi-viewer playback quality. Terminal session
+detach must also retire that session's waits and materialization clocks, so a
+departed viewer cannot remain a competing foreground demand until HTTP timeout.
+
 ### P1-12 — `NoRoom` can be returned as an indefinite advisory hold
 
 The scheduler emits `NoRoom` when blocked demand exists and no eligible segment
@@ -646,19 +656,132 @@ can associate a corrective commit with only one source/test pair.
 | P1 | Android failover inherited the failed attempt's owner/deadline and forced paused playback to resume | Failover invalidates the old request generation, starts a fresh playback attempt, preserves the stall budget, retains the prior `playWhenReady`, and rebinds pending presentation | `Controller.retryMediaOnNextNode`; `transportFailoverInvalidatesAWaitingStallWithoutResettingItsBudget` |
 | P1 | Apple/web could overshoot the 20-second control deferral by another poll or ask window | Apple sleeps to the earlier of its cadence and the absolute monotonic deadline; web skips a new ask at or beyond that boundary | `recoveryPollDelayMs` and `persistentWait`; exact-boundary timer tests on both clients |
 | P1 | Apple excluded an executed-but-unpresented destination from recovery and could wait forever for presentation | Executed destinations remain stall-eligible; the presentation monitor has an eight-second absolute deadline and generation-fenced recovery | `PlayerSeekState.allowsStallRecovery` / `beginSeekPresentationMonitor`; seek-state and deadline tests |
-| P1 | Apple quality and audio replacements had no authoritative target or presentation settlement | Each command synchronously publishes an exact film target and generation before any await, then the attached destination must present | production `selectQuality`, `selectOriginalQuality`, and `selectAudio`; `testQualityAndAudioCommandsCreateANewPresentationDestinationSynchronously` |
+| P1 | Apple quality, audio, and reopening subtitle replacements had no authoritative target or presentation settlement | Each command synchronously publishes an exact film target and generation before any await; in-place subtitle mutations settle explicitly, while an attached replacement must present | production `selectQuality`, `selectOriginalQuality`, `selectAudio`, and `selectSubtitle`; `testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously` |
 | P1 | Apple bitmap-overlay selection changed visible output before urgent intent publication | Overlay teardown/installation moved behind the control publication and stale-action check | `applySubtitleSelection`; production-source contract assertion |
 | P1 | Apple native seek completion was not fenced to the item/open generation | The seek captures both and rejects a completion from any replaced item or newer open | native arm of `seek`; source-level generation contract plus seek-state presentation tests |
 | P1 | A late terminal response could re-arm a verdict and stop reporting after viewer intent was cleared | Android, Apple, and web tag pending/retry requests with a local intent generation; storage and reporter shutdown both require the current generation | each `PlaybackControlReporter`/session; delayed-terminal tests on all three clients |
 | P1 | Android Original copy bodies omitted both height and Auto intent, so the server inferred Auto | Every new Android session sends `quality_auto`; Original explicitly sends false while legacy omitted bodies retain compatibility | `subtitleSessionBody`; wire serialization test and server `CreateSession` conversion test |
-| P1 | Android audio settlement accepted a single proximity sample | Audio-only settlement now requires execution, one target landing, and a later strictly advancing clock sample | `PlaybackIntent.presentedAudio`; `audioSettlementRequiresLandingThenPostExecutionClockAdvance` |
+| P1 | Android accepted one proximity sample and Apple required every delayed audio sample to remain within a fixed landing window | Both audio-only paths require execution and two advancing samples on a plausible target-relative timeline. The Astra follow-up below replaces the fixed window with a bounded active-time/rate allowance | both `presentedAudio` implementations and their delayed-cadence/rate/pause regressions |
 | P2 | Android/Apple terminal leases used wall time | Lease age now uses monotonic uptime on both platforms | verdict-store lease tests plus production monotonic clock anchors |
 | P2 | Earlier evidence mapped helper behavior rather than the user command/race seams | Tests now invoke production quality/audio commands or load shipped web functions, and this matrix names every production seam explicitly | `tests/client-fixes.toml`, `AppleClientTests`, and the shipped-source web harness |
 
-The corrections are committed as `78223cef`. Focused Android JVM, Apple
-simulator, web shipped-source, and pinned-Rust regressions are green. The exact
-head remains unmergeable until its second adversarial pass approves these
-closures and the one post-fix task suite passes.
+The first correction set is committed as `78223cef`; its documentation head is
+`17f6e873`. The fresh Astra pass found further failures in that set. The earlier
+green focused tests do not establish that those failures are closed. Forgejo
+PR #6 remains WIP until the complete new tree has exact-head approval and a
+green effort gate; the full qualification stays deferred until the effort is
+frozen.
+
+### Astra follow-up — composition and evidence must survive real timing
+
+The new pass exercises combinations rather than isolated command helpers.
+In particular, a pending seek at 90 seconds followed by a quality or subtitle
+change must not reopen at the outgoing element's 10-second clock. A delayed
+callback from the outgoing session must not settle the replacement simply
+because the track number or media timestamp happens to match.
+
+| Priority | Failure exposed | Correction and current evidence |
+|---|---|---|
+| P1 | Stream-changing commands copied the outgoing observed position instead of the pending destination | All clients carry the pending target through selection changes. Android quality-then-seek composition and the web decision-await boundary remain under active correction |
+| P1 | Subtitle-ready callbacks crossed reporter replacement/end, including same-track replacement | Apple and Android validate the session/intent generation again when the queued UI callback executes. Apple's focused session regressions pass; Android re-verification is in progress |
+| P1 | An in-place subtitle selection falsely retired a still-pending media seek | Selection completion is distinct from destination presentation. A newer subtitle intent inherits and executes the pending destination |
+| P1 | Healthy 1 Hz audio observations never entered a fixed ±250 ms first-sample window | The window accounts for monotonic active playback time and sampled playback rate, capped at eight active seconds; pause/background time does not expand it. Audio then requires a later strictly advancing sample. Focused cadence/rate/pause regressions run on all clients |
+| P1 | A browser frame callback queued before execution could arrive afterward and settle it | The callback carries the execution epoch captured at registration; the detector rejects predecessor epochs. Shipped-source web regression passes |
+| P1 | A decoder could freeze while the element still reported playing, with no `waiting` event | The web monitor samples clock/frame progress independently. Its adversarial review also caught `playing` cancelling a wait without real progress; that correction is active. Android is adding a separate unpresented-target deadline so a wrong-position advancing clock cannot hide the failure |
+| P1 | A second web control ask could extend beyond the absolute 20-second wait budget | The ask receives the original absolute deadline and limits both its initial timer and extension to remaining time. A deterministic just-before-deadline regression passes |
+| P1 | A delayed web decision replaced a newer seek or selection | The open gate previously tracked only other opens, not commands issued during the await. The replacement must capture and validate one coherent current intent; active correction |
+| P1 | Internal web source resets and unconditional `play()` lost the viewer's pause intent | Desired playback must be separate from the media element's temporary paused state during reset; active correction includes pause-during-open regressions |
+| P1 | Web audio sync could reopen direct playback and silently omit the correction; copy-HLS fallback left the destination unexecuted | Decision routing must include the requested offset, and every accepted source mutation must mark its exact execution. Both production paths are under correction |
+| P2 | Abandoned web transcode opens retained server sessions | Stale successful opens must release only their newly created session, without touching the current owner; active correction |
+
+Apple's latest focused run passed 31 tests; the intermediate Android run
+passed 98 and the web static fast lane passed. These are development proofs,
+not exact-head approval. In particular, `AVPlayerItemVideoOutput` proves that a
+decoded frame is available at its returned display time, not that
+`AVPlayerLayer` physically displayed it. Device qualification must test that
+remaining renderer boundary; documentation and source comments must not
+promote availability into compositor evidence.
+
+The next cross-platform review found the same composition defect one layer
+deeper: invalidating an old quality command's task was insufficient if the
+newer seek still executed against the old recipe. Android now carries the
+pending plan replacement through every later command and retains desired
+play/pause state across controller reconstruction. Apple is introducing an
+explicit desired-versus-attached recipe revision, restoring transport from
+live viewer intent after each await, and forbidding a same-position older
+open from acknowledging the newer recipe. Its target-presentation deadline
+cannot transfer recovery to an ordinary clock-based deferral, because an
+advancing wrong-position clock could cancel that deferral. Readiness-triggered
+subtitle disable/re-enable also needs the current viewer-action epoch through
+both asynchronous mutations.
+
+Current retained development evidence is Apple commit `96065b89` with 31
+focused simulator passes and Android commit `0248fa68` with 98 focused JVM
+passes. Subsequent review found that Android's pending-quality state still
+did not retain an unattached audio/burn/offset recipe, and that its target
+retry budget belonged to the replaceable controller. Commit `c5504641` now
+retains the complete requested/attached recipe, waits for confirmed native
+track selection, and transfers the single retry owner across controller
+replacement. Its 105 focused JVM regressions pass; exact-head independent
+approval remains pending.
+
+Web's complete static fast lane passed after coherent full-open intent,
+transport intent, abandoned-session cleanup, and silent-freeze corrections.
+The next review found that attachment callbacks were incorrectly fenced by
+seek sequence: a newer native seek before `MANIFEST_PARSED` suppressed startup,
+while late direct metadata could restore an old start position. Attachment
+identity is now separate from command identity, metadata applies the newest
+target, and departed callbacks cannot mutate the replacement. The production
+HLS/direct attachment regressions and the static fast lane pass. None of these
+intermediate results is an exact-head release approval.
+
+The independent web pass then rejected partial audio/burn/Auto/decoder-rescue
+opens that bypass the coherent full-open owner: a later VOD seek could cancel
+the replacement and keep seeking an old or detached recipe. It also reproduced
+a native `seeking` event cancelling the watchdog's wait without resetting its
+fired latch, and found that `load()` discards queued media events while the
+application retains their numeric expected-event counters. A departed play
+promise can likewise decrement a replacement's counter. These are active
+corrections with real asynchronous command and media-task-queue regressions,
+not closed findings merely because the prior static suite passed.
+
+Apple's independent pass rejected unfenced open/failover subtitle mutations,
+legacy-burn fallback without a dirty recipe, stale pause intent on controller
+reuse, title decisions crossing stop/start, and offline seeks entering the
+network recipe gate. The follow-up adds explicit lifecycle/operation ownership
+and suspension-boundary regressions. It is not approved yet.
+
+### VOD demand slice — scoped adversarial result
+
+Commit `abb872ba` contains the demand/scheduler corrections. The independent
+reviewer repeated all 103 focused tests: 66 VOD tests, including real FFmpeg
+generation; 11 wait-pool tests; and 26 scheduler tests. Pinned Rust 1.97.1
+compilation, all-target Clippy with denied warnings, formatting, and diff checks
+passed on the reviewed source. Its reviewed diff digest is
+`38a87d666049d3352951193764e8fcbc7fc6e053ba8cf101ecd58bf422fbc505`.
+
+The review required corrections beyond the initial patch:
+
+- admission and materialization-clock binding commit atomically; refused GETs
+  own neither a clock nor a sleeping task, and cancellation retires both;
+- accepted control sequence and demand anchor have no cancellable gap;
+  acceptance disables old marker speculation before asynchronous rebuilding;
+- a new control epoch may restart its sequence, and legacy viewers still
+  compete with controlled viewers for foreground work;
+- scheduler choice skips already-materialized obligations, including the
+  publication-before-notification window;
+- a notified request keeps its file pin through the actual response file open;
+- a zero-byte eviction sweep stops the producer instead of immediately
+  self-waking, and queued writes retain their producer epoch fence;
+- the file-open recheck spends the original HTTP deadline rather than starting
+  another full wait budget afterward.
+
+Current-main integration changes the control result shape and test request
+fixtures, so this pre-integration approval is not approval of the merged tree.
+Fresh integrated compilation, focused tests, and exact-head review are required.
+Session-detach cleanup, total serving admission, typed scoped timeout/NoRoom
+actions, disjoint-viewer capacity, and transition transactions remain separate
+open architecture work.
 
 ## Target architecture — immutable renditions plus one replacement transaction
 
