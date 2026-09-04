@@ -1,0 +1,24 @@
+name: forgejo-smoke
+
+on:
+  push:
+    branches:
+      - codex/forgejo-smoke
+  workflow_dispatch:
+
+jobs:
+  local-runner:
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 5
+    steps:
+      - name: Check out the mirrored source
+        uses: https://data.forgejo.org/actions/checkout@v4
+      - name: Prove the local control plane
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${FORGEJO_ACTIONS:-}" = true
+          test "${RUNNER_ENVIRONMENT:-}" = self-hosted
+          test "$(git rev-parse HEAD)" = "${FORGEJO_SHA}"
+          curl --fail --silent --show-error \
+            http://192.168.4.7:3000/api/healthz >/dev/null
