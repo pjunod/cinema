@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["bd1a3850"]
+points = ["playback.pipeline", "core.media"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "spawn_prepared_release gated on may_commit_preparation, which answers false for four states and only one of them means somebody cleaned up: it says the same when the predecessor is tombstoned, idle-reaped, or its actor has closed, and in all three the successor is still staged with its encoder running and its ledger row still holding the playback. Since a viewer's quality change opens a new session that supersedes the predecessor, tombstoning it is the normal path — so the release stood down in the exact flow it exists for, and the successor survived to the 300-second idle sweep. a_dead_predecessor_does_not_mean_the_successor_was_released reproduces it: it stages, terminates the predecessor, and asserts both halves — the slot answers false while the ledger still names the successor. Reverting the read back to the slot makes the release skip that case. Reading the ledger also removes the race that would let a committer and a releaser both pass may_commit before either reached its durable call, which once M6 3.5 lands would kill a successor a viewer was watching."
