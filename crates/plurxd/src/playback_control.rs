@@ -1980,7 +1980,7 @@ impl ControlErrorBody {
             (400, "invalid_control")
                 | (404, "session_gone")
                 | (409, "owner_changed" | "stale_control")
-                | (410, "session_ended")
+                | (410, "session_ended" | "owner_lost")
                 | (425, "owner_transition")
                 | (429, "control_rate_limited")
                 | (503, "control_unavailable")
@@ -2045,6 +2045,10 @@ pub(crate) enum ControlStateError {
     RateLimited(u32),
     SessionEnded,
     OwnerTransition,
+    /// The owner is gone and its durable recipe can never be taken over, so
+    /// no successor will answer this session's control exchange. Distinct
+    /// from `SessionEnded`, which means something deliberately ended it.
+    OwnerLost,
     Unavailable,
 }
 
@@ -2091,13 +2095,35 @@ pub(crate) async fn verify_authority(
     if route.state != "active" {
         return Err(ControlStateError::SessionEnded);
     }
-    if route.publication_ready_at_ms != 0 {
-        return Err(ControlStateError::OwnerTransition);
-    }
-    if route.lease_expires_at_ms <= crate::media_sessions::unix_ms() {
-        return Err(ControlStateError::OwnerTransition);
+    // Both producers of an owner transition go through one classification, so
+    // this plane cannot answer a route differently from the media plane —
+    // which folds the publication fence and the expired lease into the same
+    // `OwnerTransition` and then classifies both together.
+    //
+    // One reading of the clock decides the liveness test and the
+    // classification, so an exchange cannot land on the far side of the lease
+    // boundary between them.
+    let now_unix_ms = crate::media_sessions::unix_ms();
+    if route.publication_ready_at_ms != 0 || route.lease_expires_at_ms <= now_unix_ms {
+        // Answering "retry after 500 ms" forever, against an owner whose
+        // session nothing can take over, is the defect the media plane had —
+        // and the client believes this one, because all three reporters treat
+        // 425 as retryable.
+        return Err(classify_control_owner(&route, now_unix_ms));
     }
     Ok(())
+}
+
+/// The one rule every control gate uses, shared with the media plane so the
+/// two planes cannot answer the same route differently.
+pub(crate) fn classify_control_owner(
+    route: &plurx_core::domain::MediaSessionRoute,
+    now_unix_ms: i64,
+) -> ControlStateError {
+    match crate::media_sessions::classify_owner_loss(route, now_unix_ms) {
+        crate::media_sessions::OwnerLoss::Transitioning(_) => ControlStateError::OwnerTransition,
+        crate::media_sessions::OwnerLoss::Unrecoverable(_) => ControlStateError::OwnerLost,
+    }
 }
 
 #[derive(Clone)]
@@ -2359,6 +2385,91 @@ impl TerminalCommitReceipt {
             }
             result.changed().await.map_err(|_| ())?;
         }
+    }
+}
+
+/// The authority that answers whether a successor is still wanted.
+///
+/// A trait rather than a `RollingControlHandle` because **the rolling actor
+/// serves the minority of sessions.** `hls_session_control_with_terminal`
+/// offers every exchange to the VOD engine first, and `into_request` sets
+/// `Presentation::Vod` for every create, so a gate that existed only on the
+/// actor would let M6 stage successors on a path viewers do not take — and its
+/// acceptance would pass while the feature fired on nothing. That is the same
+/// defect the replacement seam had when it keyed on a field only stall reopens
+/// set, and the file already made this move once: `retained_capabilities`
+/// became [`ControlState::last_capabilities`] for exactly this reason.
+///
+/// The slot itself therefore lives on [`ControlState`], which both engines
+/// hold. What each engine keeps is the *liveness* question — retired, ended,
+/// tombstoned — which only it can answer, and which it answers before touching
+/// the slot.
+/// Boxed rather than `async fn`, and hand-written rather than `async_trait`.
+///
+/// The trait has to be object-safe — the whole point is that
+/// `PreparationExecutor` holds one without knowing which engine answers — and
+/// `async fn` in a trait is not. `async_trait` would generate exactly this,
+/// but it is a proc-macro dependency, and adding one to `plurxd` makes every
+/// lock-file-gated advisory lane run for the sake of eliding four lines of
+/// signature. Not worth it.
+pub(crate) type GateAnswer<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
+
+pub(crate) trait PreparationGate: Send + Sync {
+    /// Take the slot for a successor whose durable row already exists.
+    ///
+    /// `false` when the slot is occupied or the playback is no longer live. In
+    /// both cases the caller must abort the row it just created, because
+    /// nothing else knows about it.
+    fn stage_preparation<'a>(
+        &'a self,
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+    ) -> GateAnswer<'a>;
+
+    /// Whether this exact successor may still be committed. Asked immediately
+    /// before the durable CAS, because the gate and the call cannot be one
+    /// transaction.
+    fn may_commit_preparation<'a>(&'a self, staged_incarnation_id: &'a str) -> GateAnswer<'a>;
+
+    /// Report a preparation's durable outcome and free the slot.
+    fn settle_preparation<'a>(
+        &'a self,
+        staged_incarnation_id: &'a str,
+        committed: bool,
+    ) -> GateAnswer<'a>;
+}
+
+impl PreparationGate for RollingControlHandle {
+    fn stage_preparation<'a>(
+        &'a self,
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+    ) -> GateAnswer<'a> {
+        Box::pin(RollingControlHandle::stage_preparation(
+            self,
+            staged_incarnation_id,
+            predecessor_incarnation_id,
+        ))
+    }
+
+    fn may_commit_preparation<'a>(&'a self, staged_incarnation_id: &'a str) -> GateAnswer<'a> {
+        Box::pin(RollingControlHandle::may_commit_preparation(
+            self,
+            staged_incarnation_id,
+        ))
+    }
+
+    fn settle_preparation<'a>(
+        &'a self,
+        staged_incarnation_id: &'a str,
+        committed: bool,
+    ) -> GateAnswer<'a> {
+        Box::pin(RollingControlHandle::settle_preparation(
+            self,
+            staged_incarnation_id,
+            committed,
+        ))
     }
 }
 
@@ -2694,6 +2805,23 @@ pub(crate) struct ControlState {
     /// owner-epoch advance: the next accepted exchange must then be sequence 1,
     /// which the fence requires to carry a document.
     last_capabilities: Option<DynamicCapabilities>,
+    /// This playback's single preparation slot.
+    ///
+    /// Here for the third time and the same reason as its two neighbours: the
+    /// rolling actor has one and the VOD engine, which serves most sessions,
+    /// has no actor at all. One slot per playback is already the store's
+    /// invariant and the ledger's primary key enforces it; holding it here as
+    /// well means neither engine ever believes in a second successor the store
+    /// would reject, which is what would let a commit name the wrong one.
+    ///
+    /// **The single-writer argument is the engine's, not this struct's.** The
+    /// rolling actor owns its `ControlState` outright and is the only thing
+    /// that can reach this field; the VOD engine holds its own behind the
+    /// per-session `control` mutex, taken for the whole of an exchange. Either
+    /// way one writer per playback, which is what the slot's transitions need
+    /// — but it is now a property each engine has to keep rather than one this
+    /// field gets for free from living on an actor.
+    preparation: PreparationSlot,
 }
 
 impl Default for ControlState {
@@ -2708,6 +2836,7 @@ impl Default for ControlState {
             prior_action: ControlAction::None,
             last_selection: None,
             last_capabilities: None,
+            preparation: PreparationSlot::Empty,
         }
     }
 }
@@ -2854,6 +2983,81 @@ impl ControlState {
             changed,
             capabilities: self.last_capabilities.clone(),
         }
+    }
+
+    /// Record that a successor has been staged.
+    ///
+    /// Refused when the slot is occupied. One preparation per playback is the
+    /// store's invariant and the ledger's primary key enforces it; refusing
+    /// here as well means no engine ever believes in a second successor the
+    /// store would reject, which is what would let a commit name the wrong one.
+    ///
+    /// Liveness is the caller's: this struct does not know whether its session
+    /// is retired, ended or tombstoned, and each engine answers that before
+    /// asking.
+    pub(crate) fn stage_preparation(
+        &mut self,
+        staged_incarnation_id: String,
+        predecessor_incarnation_id: String,
+    ) -> bool {
+        if !matches!(self.preparation, PreparationSlot::Empty) {
+            return false;
+        }
+        self.preparation = PreparationSlot::Staged {
+            staged_incarnation_id,
+            predecessor_incarnation_id,
+        };
+        true
+    }
+
+    /// Move the slot to aborting, and say whether this call is the one that
+    /// moved it.
+    ///
+    /// `false` covers an empty slot, a different successor, and an abort
+    /// already under way. None of those is an error: an owner retrying after a
+    /// crash must read back the same outcome, and a stale executor must not be
+    /// able to tear down a successor that replaced the one it knew about.
+    pub(crate) fn abort_preparation(&mut self, staged_incarnation_id: &str) -> bool {
+        if !self.preparation.may_abort(staged_incarnation_id) {
+            return false;
+        }
+        let already = matches!(self.preparation, PreparationSlot::Aborting { .. });
+        self.preparation = PreparationSlot::Aborting {
+            staged_incarnation_id: staged_incarnation_id.to_owned(),
+        };
+        !already
+    }
+
+    /// Clear the slot once its durable outcome is known.
+    ///
+    /// Called for a committed successor and for a completed abort alike: after
+    /// either, this playback has no staged generation. Commit's own CAS lives
+    /// in the store, and its `Ok(None)` — the pointer no longer names the
+    /// recorded predecessor — reaches the caller as an abort rather than a
+    /// commit, which is the rule that keeps a lost race from reaping a newer
+    /// player generation.
+    pub(crate) fn settle_preparation(&mut self, staged_incarnation_id: &str) -> bool {
+        if self.preparation.staged_incarnation_id() != Some(staged_incarnation_id) {
+            return false;
+        }
+        self.preparation = PreparationSlot::Empty;
+        true
+    }
+
+    /// The successor this slot is holding, if any.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn staged_incarnation_id(&self) -> Option<&str> {
+        self.preparation.staged_incarnation_id()
+    }
+
+    /// Whether this exact successor may still be committed.
+    // Reached in production only through a `PreparationGate`, and the gate has
+    // no caller until the HTTP layer stages a successor — the same state
+    // `PreparationExecutor` itself is in, and recorded the same way rather
+    // than papered over with an invented caller.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn may_commit_preparation(&self, staged_incarnation_id: &str) -> bool {
+        self.preparation.may_commit(staged_incarnation_id)
     }
 
     /// Recover the immutable result for the exact accepted identity/sequence
@@ -3397,7 +3601,7 @@ pub(crate) struct ActionProposal {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct PreparationExecutor {
     store: std::sync::Arc<dyn plurx_core::store::Store>,
-    control: RollingControlHandle,
+    control: std::sync::Arc<dyn PreparationGate>,
     user_id: i64,
     playback_id: String,
 }
@@ -3406,7 +3610,7 @@ pub(crate) struct PreparationExecutor {
 impl PreparationExecutor {
     pub(crate) fn new(
         store: std::sync::Arc<dyn plurx_core::store::Store>,
-        control: RollingControlHandle,
+        control: std::sync::Arc<dyn PreparationGate>,
         user_id: i64,
         playback_id: String,
     ) -> Self {
@@ -6053,10 +6257,6 @@ struct RollingControlActor {
     #[cfg_attr(not(test), allow(dead_code))]
     retained_capabilities: Option<DynamicCapabilities>,
     settled_target: Option<SettledTarget>,
-    /// This playback's single preparation slot. One per playback is already
-    /// the store's invariant; holding it here makes the actor the only thing
-    /// that can move it.
-    preparation: PreparationSlot,
     delivery: RollingDeliverySnapshot,
     producer_progress_at: Option<Instant>,
     producer_exit_at: Option<Instant>,
@@ -6159,7 +6359,6 @@ impl RollingControlActor {
             demand: None,
             retained_capabilities: None,
             settled_target: None,
-            preparation: PreparationSlot::Empty,
             delivery: RollingDeliverySnapshot::default(),
             producer_progress_at: None,
             producer_exit_at: None,
@@ -7151,13 +7350,11 @@ impl RollingControlActor {
         true
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     /// Record that a successor has been staged.
     ///
-    /// Refused when the slot is occupied. One preparation per playback is the
-    /// store's invariant and the ledger's primary key enforces it; refusing
-    /// here as well means the actor never believes in a second successor the
-    /// store would reject, which is what would let a commit name the wrong one.
+    /// The actor answers the liveness half — a retired or terminal playback
+    /// takes no successor — and [`ControlState::stage_preparation`] owns the
+    /// slot's own rule, so both engines apply the same one.
     fn stage_preparation(
         &mut self,
         staged_incarnation_id: String,
@@ -7166,49 +7363,16 @@ impl RollingControlActor {
         if self.retired || self.terminal.is_some() {
             return false;
         }
-        if !matches!(self.preparation, PreparationSlot::Empty) {
-            return false;
-        }
-        self.preparation = PreparationSlot::Staged {
-            staged_incarnation_id,
-            predecessor_incarnation_id,
-        };
-        true
+        self.control
+            .stage_preparation(staged_incarnation_id, predecessor_incarnation_id)
     }
 
-    /// Move the slot to aborting, and say whether this call is the one that
-    /// moved it.
-    ///
-    /// `false` covers an empty slot, a different successor, and an abort
-    /// already under way. None of those is an error: an owner retrying after a
-    /// crash must read back the same outcome, and a stale executor must not be
-    /// able to tear down a successor that replaced the one it knew about.
     fn abort_preparation(&mut self, staged_incarnation_id: &str) -> bool {
-        if !self.preparation.may_abort(staged_incarnation_id) {
-            return false;
-        }
-        let already = matches!(self.preparation, PreparationSlot::Aborting { .. });
-        self.preparation = PreparationSlot::Aborting {
-            staged_incarnation_id: staged_incarnation_id.to_owned(),
-        };
-        !already
+        self.control.abort_preparation(staged_incarnation_id)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    /// Clear the slot once its durable outcome is known.
-    ///
-    /// Called for a committed successor and for a completed abort alike: after
-    /// either, this playback has no staged generation. Commit's own CAS lives
-    /// in the store, and its `Ok(None)` — the pointer no longer names the
-    /// recorded predecessor — reaches the actor as an abort rather than a
-    /// commit, which is the rule that keeps a lost race from reaping a newer
-    /// player generation.
     fn settle_preparation(&mut self, staged_incarnation_id: &str) -> bool {
-        if self.preparation.staged_incarnation_id() != Some(staged_incarnation_id) {
-            return false;
-        }
-        self.preparation = PreparationSlot::Empty;
-        true
+        self.control.settle_preparation(staged_incarnation_id)
     }
 
     fn maybe_commit_producer_decision_at(&mut self, committed_at: Instant) -> bool {
@@ -8566,7 +8730,7 @@ impl RollingControlActor {
         // slot to `Aborting` here is what makes that true by construction: a
         // commit arriving afterwards finds `may_commit` false and cannot
         // publish a successor the viewer never waited for.
-        if let Some(staged) = self.preparation.staged_incarnation_id() {
+        if let Some(staged) = self.control.preparation.staged_incarnation_id() {
             let staged = staged.to_owned();
             self.abort_preparation(&staged);
         }
@@ -8795,7 +8959,7 @@ impl RollingControlActor {
                     staged_incarnation_id,
                     reply,
                 } => {
-                    let _ = reply.send(self.preparation.may_commit(&staged_incarnation_id));
+                    let _ = reply.send(self.control.may_commit_preparation(&staged_incarnation_id));
                 }
                 RollingControlCommand::SettlePreparation {
                     staged_incarnation_id,
@@ -10522,9 +10686,14 @@ pub(crate) enum MetricOutcome {
     Gone = 6,
     Unavailable = 7,
     RateLimited = 8,
+    /// Separate from `Gone`, which counts every ordinary teardown and would
+    /// bury this. A node dying and taking sessions with it unrecoverably is
+    /// the one event in this family an operator needs to see on its own.
+    OwnerLost = 9,
 }
 
-static CONTROL_EXCHANGES: [AtomicU64; 9] = [
+static CONTROL_EXCHANGES: [AtomicU64; 10] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -10828,6 +10997,7 @@ pub(crate) fn prometheus() -> String {
         "session_gone",
         "unavailable",
         "rate_limited",
+        "owner_lost",
     ]
     .iter()
     .enumerate()
@@ -13264,7 +13434,7 @@ mod tests {
         let (mut actor, _) = staged_actor();
         assert!(!actor.stage_preparation("successor-2".to_owned(), "current-1".to_owned()));
         assert_eq!(
-            actor.preparation.staged_incarnation_id(),
+            actor.control.preparation.staged_incarnation_id(),
             Some("successor-1")
         );
     }
@@ -13275,8 +13445,8 @@ mod tests {
     #[test]
     fn only_the_successor_the_slot_holds_may_commit() {
         let (actor, _) = staged_actor();
-        assert!(actor.preparation.may_commit("successor-1"));
-        assert!(!actor.preparation.may_commit("successor-2"));
+        assert!(actor.control.may_commit_preparation("successor-1"));
+        assert!(!actor.control.may_commit_preparation("successor-2"));
     }
 
     /// **Disconnect does not imply commit.** Whatever ends the playback, a
@@ -13290,17 +13460,17 @@ mod tests {
             RollingTerminalCause::LeaseExpired,
         ] {
             let (mut actor, _) = staged_actor();
-            assert!(actor.preparation.may_commit("successor-1"));
+            assert!(actor.control.may_commit_preparation("successor-1"));
 
             let outcome = actor.terminate(cause);
             assert!(matches!(outcome, RollingTerminalOutcome::Won(_)));
 
             assert!(
-                matches!(actor.preparation, PreparationSlot::Aborting { .. }),
+                matches!(actor.control.preparation, PreparationSlot::Aborting { .. }),
                 "{cause:?} must leave the successor aborting"
             );
             assert!(
-                !actor.preparation.may_commit("successor-1"),
+                !actor.control.may_commit_preparation("successor-1"),
                 "{cause:?} must refuse a late commit"
             );
         }
@@ -13320,8 +13490,8 @@ mod tests {
             !actor.abort_preparation("successor-1"),
             "a retried abort reports no movement rather than a spurious loss"
         );
-        assert!(!actor.preparation.may_commit("successor-1"));
-        assert!(actor.preparation.may_abort("successor-1"));
+        assert!(!actor.control.may_commit_preparation("successor-1"));
+        assert!(actor.control.preparation.may_abort("successor-1"));
     }
 
     /// A stale executor cannot tear down a successor that replaced the one it
@@ -13332,7 +13502,7 @@ mod tests {
         assert!(!actor.abort_preparation("successor-2"));
         assert!(!actor.settle_preparation("successor-2"));
         assert_eq!(
-            actor.preparation.staged_incarnation_id(),
+            actor.control.preparation.staged_incarnation_id(),
             Some("successor-1")
         );
     }
@@ -13348,7 +13518,7 @@ mod tests {
                 assert!(actor.abort_preparation("successor-1"));
             }
             assert!(actor.settle_preparation("successor-1"));
-            assert_eq!(actor.preparation, PreparationSlot::Empty);
+            assert_eq!(actor.control.preparation, PreparationSlot::Empty);
             assert!(actor.stage_preparation("successor-2".to_owned(), "current-1".to_owned()));
         }
     }
@@ -16660,6 +16830,50 @@ mod tests {
         assert!(!unavailable.is_valid_for_status(409));
     }
 
+    /// The control plane answers hard owner loss too (plan §10.3). It carried
+    /// the same defect as the media plane and for longer: 425
+    /// `owner_transition` with a 500 ms hint, which all three reporters treat
+    /// as retryable, against an owner that is gone and that no successor can
+    /// replace.
+    #[test]
+    fn a_lost_owner_is_a_distinct_control_answer_from_a_transition() {
+        let lost = ControlErrorBody {
+            code: "owner_lost".to_owned(),
+            message: "the node holding this media session is gone".to_owned(),
+            generation: None,
+            control_epoch: None,
+            retry_after_ms: None,
+            invalid_field: None,
+        };
+        assert!(
+            lost.is_valid_for_status(410),
+            "the code has to be admitted at its own status or the relay refuses it"
+        );
+        assert!(
+            !lost.is_valid_for_status(425),
+            "and must not be accepted at the retryable status it replaces"
+        );
+
+        // The rollout property, pinned rather than discovered: the relay's
+        // validator is a strict allowlist, so an ingress node that predates
+        // this code rejects a new owner's answer and degrades it to
+        // `control_unavailable` — a retry, which is exactly today's
+        // behaviour. The mixed fleet is therefore never *wrong*, only
+        // temporarily too soft, and it settles the moment ingress upgrades.
+        let previously_valid = ["session_ended", "owner_transition"];
+        for code in previously_valid {
+            let body = ControlErrorBody {
+                code: code.to_owned(),
+                ..lost.clone()
+            };
+            let status = if code == "session_ended" { 410 } else { 425 };
+            assert!(
+                body.is_valid_for_status(status),
+                "{code} keeps the status it always had"
+            );
+        }
+    }
+
     /// The shadow metric's full cross product is published from boot, and its
     /// labels are the decision's own vocabulary.
     ///
@@ -17024,6 +17238,19 @@ mod tests {
         now_ms: i64,
         lease_expires_at_ms: i64,
     ) -> (String, String) {
+        activate_route_with_recipe(store, now_ms, lease_expires_at_ms, None).await
+    }
+
+    /// `recipe` decides, for an expired route, whether a successor could ever
+    /// take it over — and so which of the two owner-transition answers the
+    /// authority check returns. `None` is the `{}` recipe every other test
+    /// here uses, which no takeover can act on.
+    async fn activate_route_with_recipe(
+        store: &plurx_core::store::SqliteStore,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+        recipe: Option<&dyn Fn(&str) -> String>,
+    ) -> (String, String) {
         use plurx_core::store::MediaSessionStore as _;
 
         let incarnation = uuid::Uuid::new_v4().to_string();
@@ -17055,7 +17282,7 @@ mod tests {
             request_id: Some(incarnation.clone()),
             request_fingerprint: fingerprint,
             owner_node_id: "node-a".to_owned(),
-            recipe_json: "{}".to_owned(),
+            recipe_json: recipe.map_or_else(|| "{}".to_owned(), |build| build(&incarnation)),
             response_json: "{}".to_owned(),
             publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
             media_origin_ms: 0,
@@ -17122,6 +17349,10 @@ mod tests {
             Err(ControlStateError::SessionEnded)
         );
 
+        // An expired lease is an owner transition only while a successor could
+        // still answer. This route's `{}` recipe is one no takeover can act
+        // on, so nothing is coming and the answer says so rather than asking
+        // for a retry the client would repeat forever.
         let expired_store = SqliteStore::open_in_memory().expect("expired store");
         let (expired_generation, expired_session) = activate_route(&expired_store, 1, 2).await;
         assert_eq!(
@@ -17133,7 +17364,32 @@ mod tests {
                 1,
             )
             .await,
-            Err(ControlStateError::OwnerTransition)
+            Err(ControlStateError::OwnerLost)
+        );
+
+        // The same expiry with a recipe the takeover path accepts stays the
+        // retryable answer it has always been.
+        let eligible_store = SqliteStore::open_in_memory().expect("eligible store");
+        let build = |incarnation: &str| {
+            let route = crate::media_sessions::takeover_eligible_route(
+                &uuid::Uuid::new_v4().to_string(),
+                incarnation,
+            );
+            route.recipe_json
+        };
+        let (eligible_generation, eligible_session) =
+            activate_route_with_recipe(&eligible_store, 1, 2, Some(&build)).await;
+        assert_eq!(
+            verify_authority(
+                &eligible_store,
+                &eligible_session,
+                &eligible_generation,
+                "node-a",
+                1,
+            )
+            .await,
+            Err(ControlStateError::OwnerTransition),
+            "a rolling session a survivor can still claim keeps its retry"
         );
     }
 
@@ -18186,7 +18442,7 @@ mod tests {
         let control = RollingControlHandle::spawn("session-start");
         let executor = PreparationExecutor::new(
             Arc::clone(&store),
-            control.clone(),
+            Arc::new(control.clone()),
             7,
             "player-a".to_owned(),
         );
@@ -18530,7 +18786,7 @@ mod tests {
         let store: Arc<dyn plurx_core::store::Store> = Arc::new(concrete);
         let executor = PreparationExecutor::new(
             Arc::clone(&store),
-            RollingControlHandle::unavailable_for_test(),
+            Arc::new(RollingControlHandle::unavailable_for_test()),
             7,
             "player-a".to_owned(),
         );

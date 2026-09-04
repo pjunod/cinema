@@ -189,11 +189,13 @@ Store lane passes locally: 120 of 120.
 **The deployed-build re-test, as far as it goes.** The fleet was read over
 SSH on 2026-09-03. The handoff's premise holds: #842 (`60e1be68`) is an
 ancestor of every binary now running, so the arm it closed is closed in
-production. Three nodes run `v0.3.0-515-gc2702f61`, matching their
-checkouts; **nuc4 runs `v0.3.0-487-gd7194b05`** while its own checkout sits
-at 515 — twenty-eight commits of drift, and nuc4 is the node the M5
-verification document names. That has to be redeployed before any play
-against it means anything. nuc4's `plurxd` logged no plan-derivation traffic
+production. At that reading three nodes ran `v0.3.0-515-gc2702f61`, matching
+their checkouts, while **nuc4 ran `v0.3.0-487-gd7194b05`** against a checkout
+at 515 — twenty-eight commits of drift, on the node the M5 verification
+document names. *That drift is closed:* the deploy recorded below brought all
+four to one build, and the version table has been taken out of
+`M5-VERIFICATION-PROMPT.md` §1 entirely, because a version written into a
+document is stale the day after. nuc4's `plurxd` logged no plan-derivation traffic
 at all in twelve hours, which is the honest reason the `plan_derivation`
 counters cannot be re-tested from the outside: they only move when someone
 plays something. The live store is hiqlite; `/var/lib/plurx/plurx.db` was
@@ -245,7 +247,11 @@ for about twelve seconds — healthy in 5s, `/readyz` 200 in 5s, no restart
 during the attempt, no `unreplicated SQLite` or failed migration in the
 attempt's logs. `main` moved twice during the rollout (`35a4773b`, then
 `d4c67ff4`), so the first three nodes were run a second time; the whole fleet
-is on one commit rather than three.
+is on one commit rather than three, and it moved again to
+`v0.3.0-575-gaa486f4b` shortly afterwards. That churn is the point: the useful
+question about the fleet is whether the four nodes agree with each other and
+with their own checkouts, not whether they match a version typed into a
+document, and `M5-VERIFICATION-PROMPT.md` §1 now asks it that way.
 
 **That pre-warm belongs in `app.yml`.** It is the difference between a routine
 deploy and the forty-minute recovery above, and it is four lines. Ansible

@@ -552,7 +552,10 @@ pattern = "DurableRouteResolution"
 # HTTP callers, where the two previously fused `OwnerTransition | ActiveLocal`
 # arms were split so only the transition is classified. No new resolution and
 # no new producer — the same enum, decided in one more place.
-expected_occurrences = 81
+# 81 -> 82 with the live-lease correction: the restored guard test drives
+# `classify_durable_route` itself, so the publication fence is proved to be
+# the classification under test rather than assumed to be. Test-only.
+expected_occurrences = 82
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
@@ -690,7 +693,22 @@ pattern = "publication_ready_at_ms"
 # that proves an untakeoverable route answers `media_owner_lost` through the
 # handler rather than through the classifier alone. It sets the fence to zero
 # like any ordinary first activation and moves no shipped fence.
-expected_occurrences = 73
+# 73 -> 74 with the live-lease correction: one test-only route stamped with a
+# publication fence to prove a renewing successor is never read as owner loss.
+# It sets the field on a fixture and moves no shipped fence.
+# 74 -> 76 with the control plane's owner-loss answer: the publication fence is
+# now folded into the same classification as the expired lease on all three
+# control gates instead of being answered unconditionally, so each gate's
+# condition names the field, and one test stamps a fence on a fixture to prove
+# a renewing successor is still retryable on this plane. Then 76 -> 75 when the
+# gate condition moved into `control_owner_refusal` beside its answer, so the
+# two call sites name the field once between them instead of twice. No shipped
+# fence moves either way.
+# 75 -> 77 with the relay-gate harness: two test-only activations that stand up
+# a durable route this node owns whose lease has already run out, so the relay's
+# own owner gate can be driven at all. Each sets the blocked sentinel and then
+# confirms to zero like any ordinary first activation; no shipped fence moves.
+expected_occurrences = 77
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -699,7 +717,12 @@ pattern = "MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS"
 # predecessor, so its confirmation must name a publication instant a full
 # safety window out — zero is only valid for a first activation. Test-only,
 # and it uses the constant rather than restating it so the test moves with it.
-expected_occurrences = 4
+# 4 -> 5 with the live-lease correction: the restored guard test builds its
+# publication fence from the window constant rather than a literal, so the
+# fixture cannot drift away from the window it is meant to represent.
+# 5 -> 6 with the control plane's owner-loss answer: its publication-fence test
+# builds the same fixture from the same constant rather than a literal.
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-durable-publication-blocked-sentinel"
@@ -710,7 +733,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # that did not before.
 # 22 -> 23 with R-M3's pointer test, for the same activation described in
 # `m4-activation-publication-handoff-fence` above.
-expected_occurrences = 23
+# 23 -> 24 with the relay-gate harness: its shared activation helper names the
+# blocked sentinel once, the way every other activation fixture does.
+expected_occurrences = 24
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -946,7 +971,23 @@ expected_occurrences = 14
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
 pattern = "(?:VodPreparationGuard|preparing_sessions|begin_preparing_session|owns_or_preparing|live_or_preparing_session_ids|begin_vod_preparation)"
-expected_occurrences = 29
+# 32 with M6's `VodPreparationGate`, and both extra occurrences are doc
+# cross-references rather than owners. This pattern reads the raw source, so a
+# name in prose counts.
+#
+# One says the gate holds `Arc<Shared>` plus an id "the same shape as
+# `VodPreparationGuard`", because `Session` lives in the registry by value and
+# cannot be borrowed across an await. The other says what the gate's `None`
+# does *not* mean: absence from `sessions` is not absence from this engine —
+# `owns_or_preparing` is the question a router must ask — so a caller cannot
+# read `None` as "ask the rolling actor" and re-create the misrouting M6's slot
+# move exists to fix.
+#
+# The gate owns no producer, no process and no admission: it takes the sessions
+# lock for one slot transition, pinned to the exact incarnation it was made
+# for, and releases it. That is why the count moves and the ownership picture
+# does not.
+expected_occurrences = 32
 
 [[module_symbols]]
 id = "m4-cancellation-independent-vod-build-owner"
@@ -1261,7 +1302,15 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `error_body` test helper that renders a typed `ApiError` and returns its
 # status and JSON body together, so the wire answer is asserted as a whole
 # rather than by matching the enum. In-process, launches nothing, owns nothing.
-expected_occurrences = 212
+# +2 with the control plane's owner-loss answer: a `control_body` helper of the
+# same shape, and the ingress-gate test reading `Response::status()` off a real
+# control exchange so the wiring is asserted rather than the helper. Both are
+# in-process; they launch nothing and own nothing.
+# +2 with the relay-gate harness: the two relay tests each read
+# `Response::status()` off an in-process control refusal, which is the whole
+# assertion — that the owner side answers 410 without a retry hint, or 425 with
+# one. In-process; they launch nothing and own nothing.
+expected_occurrences = 216
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

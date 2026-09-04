@@ -374,15 +374,36 @@ conflicts, not triggers for a new replacement.
 | 409 | `owner_changed` | Control epoch lost after owner takeover | Re-snapshot under the returned epoch; never retry the old mutation |
 | 409 | `stale_control` | Generation, client instance, sequence, or action fence lost | Apply returned current state; do not retry stale state |
 | 410 | `session_ended` | Session deliberately ended or superseded | Stop renewing predecessor; follow successor if supplied |
-| 425 | `owner_transition` | Durable route exists but takeover is unresolved | Retry after the bounded response hint |
-
-The media plane answers the same durable state with 503 `media_owner_transition`
-or, when the route's own recipe can never be taken over, 410
-`media_owner_lost`; both carry `film_position_ms`, `film_frontier_ms` and
-`continuous:false`. The 425 above is the control plane's and is not yet split
-that way, so it still retries without bound against a dead owner.
+| 410 | `owner_lost` | The owner is gone and its durable recipe can never be taken over | Stop retrying; reopen from the film position the media plane returns |
+| 425 | `owner_transition` | Durable route exists and a successor could still claim it | Retry after the bounded response hint |
 | 429 | `control_rate_limited` | Client exceeded the per-session control budget | Back off to the returned interval; media remains independent |
 | 503 | `control_unavailable` | No eligible owner can currently answer | Keep consuming buffer and retry through another ingress |
+
+The two owner answers are decided by one rule, `classify_owner_loss`, shared
+with the media plane: a route no longer authorizing control — publication
+fence pending, or lease no longer renewed — is a transition while the takeover
+path could still accept it, and loss when it never can. A live lease is a live
+owner either way; a committed replacement holds one through its whole
+publication window.
+
+Three gates apply that rule — public ingress, the owner side of the relay, and
+`verify_authority`'s re-read — because each returns before the next runs. Each
+is pinned by a test that drives it.
+
+The media plane answers the same durable state with 503
+`media_owner_transition` or 410 `media_owner_lost`, and carries
+`film_position_ms`, `film_frontier_ms` and `continuous:false` with both. The
+control plane deliberately carries no resume: the client is already fetching
+media, so the position reaches it there, and `ControlErrorBody` is
+`deny_unknown_fields` — new fields on it would be a mixed-fleet parse hazard
+for no gain.
+
+**Rollout property.** `validated_control_relay_response` checks a peer's error
+body against a strict `(status, code)` allowlist, so an ingress node that
+predates `owner_lost` refuses a newer owner's answer and degrades it to
+`control_unavailable` — a retry, which is exactly the behaviour that exists
+today. A mixed fleet is therefore never *wrong* here, only temporarily too
+soft, and it settles as soon as ingress is upgraded.
 
 No control error destroys the currently buffered player by itself. The client
 controller makes that choice only after buffer exhaustion or a terminal

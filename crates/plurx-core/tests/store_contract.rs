@@ -837,6 +837,122 @@ fn staged_preparation(
 
 /// Acceptance 1, 2, 3 and 4 — everything a prepare must leave alone.
 ///
+/// An uncommitted successor cannot renew its way past its own deadline.
+///
+/// The ledger's reaper is keyed on the successor's state, never on the
+/// deadline, and its comment says the retirement sweep already ended any
+/// staged row whose deadline passed "like any other active row". That is only
+/// true while nothing renews it — and the owner node holds a real session for
+/// the successor, so it is in `renewable_session_ids` and the lease loop offers
+/// it every tick. Without this refusal a preparation nobody commits holds an
+/// encoder and one of that user's admission slots for as long as the node
+/// lives, and the deadline the operator was promised never arrives.
+#[tokio::test]
+async fn a_staged_successor_cannot_renew_past_its_deadline() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-renew-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-renew user: {error}"));
+        let playback = "staged-renew-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fa01";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fa02",
+            backend,
+        )
+        .await;
+        let staged = "00000000-0000-4000-8000-00000000fa03";
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                staged,
+                "00000000-0000-4000-8000-00000000fa04",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: prepare must win"));
+
+        // Arm the publication fence, so the *only* thing left refusing the
+        // renewal is the staged row itself. Without this the test would pass
+        // for the wrong reason — renewal already refuses a row at the
+        // publication sentinel.
+        store
+            .arm_media_session_handoff(staged, "staged-node", 1, 400_000, 4_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: arm handoff: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: arming must win"));
+        let renewed = store
+            .renew_media_sessions(
+                "staged-node",
+                &[MediaSessionRenewal {
+                    incarnation_id: staged.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 0,
+                    fetched_through_ms: 0,
+                    media_sequence: 0,
+                }],
+                4_000,
+                6_000_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew: {error}"));
+        assert!(
+            renewed.is_empty(),
+            "{backend}: a staged successor must not be renewable — its \
+             preparation deadline is its whole life"
+        );
+
+        // So the deadline arrives, the retirement sweep ends it, and the
+        // ledger row goes with it. The predecessor is untouched throughout.
+        store
+            .maintain_media_sessions(880_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: maintenance: {error}"));
+        let successor = store
+            .media_session_route_by_incarnation(staged)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: successor route: {error}"));
+        assert!(
+            successor.is_none_or(|route| route.state != "active"),
+            "{backend}: the expired successor must not still be active"
+        );
+        let current = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route after maintenance: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the playback still has a pointer"));
+        assert_eq!(
+            current.incarnation_id, predecessor,
+            "{backend}: an abandoned preparation leaves the viewer's own \
+             session exactly where it was"
+        );
+        assert_eq!(current.state, "active", "{backend}");
+
+        // And the slot is free again, which is what makes the next quality
+        // change able to prepare at all.
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                "00000000-0000-4000-8000-00000000fa05",
+                "00000000-0000-4000-8000-00000000fa06",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second prepare: {error}"))
+            .unwrap_or_else(|| {
+                panic!("{backend}: the reaped preparation must not hold the slot forever")
+            });
+    })
+    .await;
+}
+
 /// These are one test because they are one claim: a staged successor exists
 /// and changes nothing. Splitting them would let three of the four keep
 /// passing while the interesting one rotted.

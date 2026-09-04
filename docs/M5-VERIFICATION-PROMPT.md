@@ -21,25 +21,39 @@ a shut gate is the answer, not an obstacle.
 
 ## 1. Check you are testing the build you think you are
 
-As of 2026-09-03 15:30 UTC this was **not** true on nuc4:
+The check is not "does the fleet match a version written down here" — it
+cannot be, because `main` moves and a version in a document is stale the day
+after it is typed. It is **do the four nodes agree with each other and each
+with its own checkout**, and is the build they agree on an ancestor of the
+change you are testing.
 
-| node  | running binary            | deploy checkout           |
-|-------|---------------------------|---------------------------|
-| nynuc | `v0.3.0-515-gc2702f61`    | `v0.3.0-515-gc2702f61`    |
-| m6    | `v0.3.0-515-gc2702f61`    | `v0.3.0-515-gc2702f61`    |
-| nuc3  | `v0.3.0-515-gc2702f61`    | `v0.3.0-515-gc2702f61`    |
-| nuc4  | **`v0.3.0-487-gd7194b05`**| `v0.3.0-515-gc2702f61`    |
+The last two readings, both taken while writing this: 19:17 UTC all four on
+`v0.3.0-568-gd4c67ff4`, 21:55 UTC all four on `v0.3.0-575-gaa486f4b`. Two
+and a half hours, one whole generation. Read it yourself:
 
 ```bash
 for h in nynuc m6 nuc4 nuc3; do
   printf '%-7s ' "$h"
-  ssh pjunod@$h 'echo "$(docker exec plurxd plurxd --version) checkout=$(cd /opt/noirr/plurx && git describe --always)"'
+  ssh pjunod@$h 'docker logs plurxd 2>&1 | grep -m1 "plurxd starting";
+                 echo "checkout=$(cd /opt/noirr/plurx && git describe --tags --always)"' \
+    | sed -E 's/\x1b\[[0-9;]*m//g; s/.*build="([^"]+)".*/\1/' | paste -sd' '
 done
 ```
 
-If the node you are about to test runs a binary older than its checkout,
-have Paul redeploy it first and say so in the report. A Safari play against
-a stale nuc4 proves nothing about #869.
+The escape-stripping `sed` is not decoration. `plurxd` logs through
+`tracing`'s formatting layer with ANSI on, so the line reads
+`…build<ESC>[0m<ESC>[2m=<ESC>[0m"v0.3.0-…"`, and a pattern expecting a
+literal `build="` matches nothing and dumps the whole raw line instead.
+
+`docker exec plurxd plurxd --version` reads the same stamp; the log line is
+used here because it survives a container that has exited or is restart
+looping, which is exactly the state worth catching. If the node you are about
+to test runs a binary older than its own checkout, or older than the others,
+have it redeployed first and say so in the report. A Safari play against a
+stale node proves nothing about #869.
+
+The clients are a separate hand-off: `docs/CLIENT-DEPLOY-PROMPT.md`. Nothing
+in this document needs them.
 
 ## 2. The ops gate — do not proceed past a shut one
 
