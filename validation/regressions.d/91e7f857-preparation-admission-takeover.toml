@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["91e7f857"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Preparation regressions prove capacity and serving authority are reserved before acceptance, accepted settlement survives cancellation, exact replay survives real ledger-read failure, and independent durable cleanup frees the actor slot. Store contracts reject stale-owner staging and rejoin; the deterministic three-voter commit loser preserves the winner's renewed lease and canonical receipt, while expired and moved-pointer refusals clean up their staging. Fresh-engine takeover coverage proves inherited cleanup before new control and fences old detached staging."
