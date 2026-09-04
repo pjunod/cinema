@@ -12,7 +12,7 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 
 | Milestone | State | PR | Evidence |
 |---|---|---|---|
-| M0 plan and adversarial review | PR review | [#904](https://github.com/pjunod/plurx/pull/904) | plan approved; exact-PR review and effort gate pending |
+| M0 plan and adversarial review | effort gate | [#904](https://github.com/pjunod/plurx/pull/904) | exact-PR review approved at `8e6eaafa`; gate pending |
 | M1 device/settings/lineup | not started | — | — |
 | M2 live HLS and cluster relay | not started | — | — |
 | M3 web client | not started | — | — |
@@ -30,8 +30,8 @@ fencing, idempotent provisional start/activation, owner-authoritative lineup,
 mixed-version capability proof, independent producer watchdog, exact FFmpeg
 graph readiness, typed bounded resources, `omit_endlist`, no-feature-gate
 tests, client recovery, and per-PR review/status gates. The reviewer approved
-the amended plan with no remaining findings; an independent review of the
-exact PR diff is now active.
+the amended plan with no remaining findings. The exact PR diff at `8e6eaafa`
+also received an Approve verdict with no actionable findings.
 
 ## Evidence — exact commands and trees
 
@@ -41,6 +41,7 @@ exact PR diff is now active.
 | 2026-09-04 | `main` at `48615baf` | `cargo check -p plurxd --all-targets --locked` | passed in source-only compiler loop |
 | 2026-09-04 | staged `codex/hdhomerun-plan` | `make validate-staged` | 115 catalog, 1,294 history, and 160 operations checks passed after review fixes |
 | 2026-09-04 | `b1bf0375` | PR [#904](https://github.com/pjunod/plurx/pull/904) | opened to the effort branch; exact-diff review requested |
+| 2026-09-04 | `8e6eaafa` | adversarial PR review | approved; no actionable diff findings |
 
 ## Decisions made while the owner is away
 
