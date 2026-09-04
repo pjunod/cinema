@@ -1945,14 +1945,18 @@ function playerSnapshotExpression() {
       play_started_at:p.playStartedAt==null?null:p.playStartedAt,
       offset:Number(p.offset||0),
       ttff_ms:p.ttffMs==null?null:p.ttffMs, stalls:p.stalls||0,
-      lifetime_stalls:rollup.closed_stalls+rollup.last_stalls,
-      lifetime_hitches:rollup.closed_hitches+rollup.last_hitches,
+      lifetime_stalls:typeof PLAYBACK_LIFETIME_STALLS==='undefined'
+        ?rollup.closed_stalls+rollup.last_stalls:PLAYBACK_LIFETIME_STALLS,
+      lifetime_hitches:typeof PLAYBACK_LIFETIME_HITCHES==='undefined'
+        ?rollup.closed_hitches+rollup.last_hitches:PLAYBACK_LIFETIME_HITCHES,
       stalls_by_kind:p.stallsByKind||{supply:0,decode:0}, buffer_limits:p.bufferLimits||{},
       stall_recoveries:p.stallRecoveries||0, recovering_stall:p.recoveringStall||null,
       hitches:{back:h.back||0,held:h.held||0,late:h.late||0,drop:h.drop||0,gap:h.gap||0,slow:h.slow||0,rate:h.rate==null?null:h.rate},
       decode:p.decodeInfo||null, health:p.health||null,
       source:p.source||null, audio_count:(p.audio||[]).length, subtitle_count:(p.subs||[]).length,
       current_audio:p.curAudio==null?null:p.curAudio, current_subtitle:p.curSub==null?null:p.curSub,
+      auto_switch_seq:typeof AUTO_SWITCH_SEQ==='undefined'?0:AUTO_SWITCH_SEQ,
+      auto_switches:(p.abr&&p.abr.switches||[]).map(entry=>({...entry})),
       media_event_seq:globalThis.__plurxLabMediaEventSeq||0,
       media_events:(globalThis.__plurxLabMediaEvents||[]).slice(-512),
       frame_probe:{...(globalThis.__plurxLabFrameProbe||{supported:false,last_frame_at_ms:null,
@@ -2003,14 +2007,24 @@ async function setCasePreferences(driver, quality) {
       }
       if(v&&typeof v.requestVideoFrameCallback==='function'&&!v.__plurxLabFrameProbe){
         v.__plurxLabFrameProbe=true;
-        globalThis.__plurxLabFrameProbe={supported:true,last_frame_at_ms:null,maximum_gap_ms:0,frames:0};
-        const frame=(now)=>{
+        globalThis.__plurxLabFrameProbe={supported:true,sequence:0,last_frame_at_ms:null,
+          maximum_gap_ms:0,frames:0,last_frame:null};
+        const frame=(now,metadata)=>{
           const probe=globalThis.__plurxLabFrameProbe;
           if(probe){
             if(probe.last_frame_at_ms!=null)
               probe.maximum_gap_ms=Math.max(probe.maximum_gap_ms,now-probe.last_frame_at_ms);
             probe.last_frame_at_ms=now;
             probe.frames+=1;
+            probe.sequence+=1;
+            const p=(typeof PLAYER!=='undefined'&&PLAYER)||{};
+            probe.last_frame={sequence:probe.sequence,at_ms:now,
+              media_time:metadata&&Number.isFinite(metadata.mediaTime)?metadata.mediaTime:null,
+              absolute_time:metadata&&Number.isFinite(metadata.mediaTime)
+                ?Number(p.offset||0)+metadata.mediaTime:null,
+              width:metadata&&Number.isFinite(metadata.width)?metadata.width:v.videoWidth,
+              height:metadata&&Number.isFinite(metadata.height)?metadata.height:v.videoHeight,
+              method:p.method||null,session_id:p.sessionId||null,attempt_id:p.attemptId||null};
           }
           v.requestVideoFrameCallback(frame);
         };
@@ -2123,14 +2137,8 @@ async function performOperation(driver, testCase, start) {
     if (!Array.isArray(qualities) || qualities.length < 2) {
       throw new Error("quality-cycle needs at least two named switches");
     }
-    await driver.exec(`
-      { const probe=globalThis.__plurxLabFrameProbe;
-        if(probe){probe.maximum_gap_ms=0;probe.frames=0;}
-      }
-      return true;
-    `);
     const changes = [];
-    let before = await driver.eval(playerSnapshotExpression());
+    let before = start;
     const transitionOrigin = performance.now();
     const timeline = [sampleFrom(start, 0)];
     const repetitions = Number(testCase.repetitions || 1);
@@ -2151,44 +2159,67 @@ async function performOperation(driver, testCase, start) {
       `);
       before = await driver.eval(playerSnapshotExpression());
       await driver.exec(`setQuality(${JSON.stringify(quality)}); return true;`);
-      const after = await waitFor(async () => {
+      let targetFrameSequence = null;
+      const committed = await waitFor(async () => {
         const state = await driver.eval(playerSnapshotExpression());
         timeline.push(sampleFrom(state, performance.now() - transitionOrigin));
         const selected = await driver.eval("playQuality()");
         if (state.video.error) return state;
         if (selected !== quality || !state.started || state.video.seeking
             || state.video.ready_state < 2 || state.video.current_time <= 0.05) return null;
-        if (spec.expected_method && (state.decided_method !== spec.expected_method
-            || state.method !== spec.expected_method)) return null;
-        if (spec.expected_height && state.video.height !== Number(spec.expected_height)) return null;
-        if (state.frame_probe?.supported && state.frame_probe.frames < 1) return null;
+        const targetState = (!spec.expected_method || (state.decided_method === spec.expected_method
+            && state.method === spec.expected_method))
+          && (!spec.expected_height || state.video.height === Number(spec.expected_height));
+        if (!targetState) {
+          targetFrameSequence = null;
+          return null;
+        }
+        if (state.frame_probe?.supported) {
+          const sequence = Number(state.frame_probe.sequence || 0);
+          if (targetFrameSequence === null) {
+            targetFrameSequence = sequence;
+            return null;
+          }
+          const frame = state.frame_probe.last_frame;
+          if (!frame || Number(frame.sequence || 0) <= targetFrameSequence) return null;
+          if (spec.expected_method && frame.method !== spec.expected_method) return null;
+          if (spec.expected_height && Number(frame.height) !== Number(spec.expected_height)) return null;
+          if (frame.session_id !== state.session_id || frame.attempt_id !== state.attempt_id) return null;
+        }
         return state;
       }, Number(testCase.switch_wait_timeout_seconds || 30) * 1000, `committed quality switch to ${quality}`, 50);
-      const readyMs = Math.max(0, after.sampled_at_ms - before.sampled_at_ms);
+      const targetFrame = committed.frame_probe?.supported ? committed.frame_probe.last_frame : null;
+      const readyAtMs = Number(targetFrame?.at_ms ?? committed.sampled_at_ms);
+      const landedPosition = Number(targetFrame?.absolute_time ?? committed.video.absolute_time);
+      const readyMs = Math.max(0, readyAtMs - before.sampled_at_ms);
       const expectedPosition = before.video.absolute_time + readyMs / 1000;
-      changes.push({
+      const change = {
         quality,
         expected_method: spec.expected_method || null,
-        actual_method: after.method,
+        actual_method: committed.method,
         expected_height: spec.expected_height || null,
         ready_ms: readyMs,
         from_session_id: before.session_id,
-        to_session_id: after.session_id,
+        to_session_id: committed.session_id,
         from_player_generation: before.player_generation,
-        to_player_generation: after.player_generation,
+        to_player_generation: committed.player_generation,
         from_position_seconds: before.video.absolute_time,
-        to_position_seconds: after.video.absolute_time,
+        to_position_seconds: landedPosition,
         expected_position_seconds: expectedPosition,
-        landing_error_seconds: Math.abs(after.video.absolute_time - expectedPosition),
-        decoded_height: after.video.height,
-        runway_seconds: after.video.runway,
-        video_gap_ms: transitionMetrics(before, after).maximum_video_gap_ms,
-      });
-      before = after;
+        landing_error_seconds: Math.abs(landedPosition - expectedPosition),
+        decoded_height: committed.video.height,
+        runway_seconds: committed.video.runway,
+        committed_frame_sequence: committed.frame_probe?.last_frame?.sequence ?? null,
+        video_gap_ms: null,
+      };
+      let evidenceEnd = committed;
       const holdSeconds = Number(testCase.switch_hold_seconds || 0);
       if (holdSeconds > 0) {
-        before = await sampleWindow(driver, holdSeconds, 100, transitionOrigin, timeline);
+        evidenceEnd = await sampleWindow(driver, holdSeconds, 100, transitionOrigin, timeline);
       }
+      change.video_gap_ms = transitionMetrics(before, evidenceEnd).maximum_video_gap_ms;
+      changes.push(change);
+      before = evidenceEnd;
     }
     return {
       changes,
@@ -2284,6 +2315,31 @@ function sampledVideoGap(timeline) {
     maximumGapMs = Math.max(maximumGapMs, Number(timeline.at(-1).at_ms || 0) - openedAt);
   }
   return { maximum_clock_gap_ms: maximumGapMs, samples: (timeline || []).length };
+}
+
+/** Read the player's timestamped Auto ledger without losing moves between polls. */
+function automaticSwitchesAfter(before, after) {
+  const beforeSequence = Number(before?.auto_switch_seq || 0);
+  const afterSequence = Number(after?.auto_switch_seq || 0);
+  const events = (after?.auto_switches || [])
+    .filter((event) => Number(event.seq || 0) > beforeSequence)
+    .map((event) => {
+      const from = event.from_height == null ? null : Number(event.from_height);
+      const to = event.to_height == null ? null : Number(event.to_height);
+      const comparable = Number.isFinite(from) && Number.isFinite(to);
+      return {
+        ...event,
+        at_ms: Math.max(0, Number(event.at_ms || 0) - Number(before?.sampled_at_ms || 0)),
+        direction: comparable && to > from ? "up" : comparable && to < from ? "down" : "method",
+      };
+    });
+  const expectedEvents = afterSequence - beforeSequence;
+  return {
+    complete: expectedEvents >= 0 && events.length === expectedEvents,
+    event_count: events.length,
+    expected_event_count: expectedEvents,
+    events,
+  };
 }
 
 /** One row of the timeline: everything a later rung decision could need. */
@@ -2951,10 +3007,14 @@ function scoreRecovery(criteria, observation) {
       },
     };
   }
-  const events = rungHistory(timeline);
-  const restarts = events.reduce((total, event) => total + (event.restart_count ?? 0), 0);
-  const upgrades = peakUpgradeRate(events);
-  const downshifts = events.filter((event) => event.direction === "down");
+  const sampledEvents = rungHistory(timeline);
+  const restarts = sampledEvents.reduce((total, event) => total + (event.restart_count ?? 0), 0);
+  const automaticSwitches = automaticSwitchesAfter(
+    observation.transition_start, observation.transition_end,
+  );
+  const switchEvents = automaticSwitches.events;
+  const upgrades = peakUpgradeRate(switchEvents);
+  const downshifts = switchEvents.filter((event) => event.direction === "down");
   const transition = transitionMetrics(observation.transition_start, observation.transition_end);
   const sampledTransition = sampledVideoGap(timeline);
   if (observation.transition_end?.frame_probe?.supported !== true) {
@@ -2989,6 +3049,12 @@ function scoreRecovery(criteria, observation) {
   if (downshifts.length > (criteria.maximum_downshifts ?? Number.POSITIVE_INFINITY)) {
     errors.push(`${downshifts.length} Auto downshifts, want <= ${criteria.maximum_downshifts}`);
   }
+  if (!automaticSwitches.complete) {
+    errors.push(
+      `Auto switch trace retained ${automaticSwitches.event_count}/`
+      + `${automaticSwitches.expected_event_count} events`,
+    );
+  }
   if (!transition.complete) {
     errors.push(
       `Auto transition event trace retained ${transition.event_count}/${transition.expected_event_count} events`,
@@ -3001,7 +3067,7 @@ function scoreRecovery(criteria, observation) {
     );
   }
   if (downshifts.length && stableAfterDownshiftMs > 0) {
-    const laterMoves = events.filter((event) => event.at_ms > downshifts[0].at_ms);
+    const laterMoves = switchEvents.filter((event) => event.seq !== downshifts[0].seq);
     if (laterMoves.length) {
       errors.push(
         `${laterMoves.length} additional rung move(s) followed the accepted Auto downshift`,
@@ -3033,10 +3099,10 @@ function scoreRecovery(criteria, observation) {
   if (downshifts.length && criteria.minimum_post_switch_runway_seconds !== undefined) {
     const first = downshifts[0];
     const sample = timeline.find((candidate) => candidate.at_ms >= first.at_ms);
-    const runway = Number(sample?.runway_seconds || 0);
-    if (runway <= Number(criteria.minimum_post_switch_runway_seconds)) {
+    const runway = Number(sample?.runway_seconds);
+    if (!Number.isFinite(runway) || runway <= Number(criteria.minimum_post_switch_runway_seconds)) {
       errors.push(
-        `Auto downshift runway ${runway.toFixed(3)}s, want > `
+        `Auto downshift runway ${Number.isFinite(runway) ? `${runway.toFixed(3)}s` : "was not finite"}, want > `
         + `${Number(criteria.minimum_post_switch_runway_seconds).toFixed(3)}s`,
       );
     }
@@ -3056,11 +3122,12 @@ function scoreRecovery(criteria, observation) {
       restarts,
       peak_upgrades_per_60s: upgrades,
       recovered_after_ms: recoveredAt,
-      rung_events: events,
+      rung_events: sampledEvents,
+      auto_switches: automaticSwitches,
       downshifts: downshifts.length,
       transition,
       evidence_scope: criteria.evidence_scope || null,
-      counter_rebases: events.filter((event) => event.counter_rebase).length,
+      counter_rebases: sampledEvents.filter((event) => event.counter_rebase).length,
       samples: timeline.length,
     },
   };
@@ -3821,6 +3888,7 @@ module.exports = {
   SHAPER_SLICE_BYTES,
   ShapingProxy,
   TokenBucket,
+  automaticSwitchesAfter,
   cdpBrowserArgs,
   findOrCreateCdpPageTarget,
   completedFragmentIndexPass,

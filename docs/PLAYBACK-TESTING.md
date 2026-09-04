@@ -132,6 +132,11 @@ valid terminal states: `passed` and `failed`; `skipped`, a missing result, or a
 missing tool in a strict validation profile is a harness failure.
 Chromium's presented-frame callback measures the maximum inter-frame gap;
 sampled media-clock progress is the explicit fallback on engines without it.
+Each callback is tagged with its method, session, attempt, decoded dimensions,
+and media time. A quality change must first expose the exact target state and
+then present a later target-tagged frame; an outgoing frame cannot satisfy the
+handoff. Page-lifetime stall and hitch totals increment where the player records
+the fault, so replacing `PLAYER` between polls cannot erase the last failure.
 
 **How to read it:** a fallback is a failure even when the rescue transcode
 plays. The viewer got pixels, but the requested path broke — exactly the Safari
@@ -447,9 +452,13 @@ count same-reason restarts directly; a player-object transition records a
 `counter_rebase` and rebases the raw counter before deciding whether a window
 was stall-free. Height changes and attempt changes are separate: an in-place
 rung move is not mislabeled as a restart, while any changed attempt identity
-spends the zero-restart budget. A page-lifetime sequenced media-event trace
+spends the zero-restart budget. Auto moves come from the player's own
+page-monotonic, timestamped switch ledger rather than inferred sampled heights;
+multiple moves between 100 ms polls therefore remain multiple moves, and the
+ten-second deadline is the switch instant. A page-lifetime sequenced media-event trace
 keeps waits and destructive reopens visible across PLAYER replacement and
-invalidates the run if its bounded retained window was insufficient.
+invalidates the run if its bounded retained window was insufficient. The same
+completeness check applies to the bounded Auto-switch log.
 
 **What it deliberately does not do.** It injects no probe onto the play path,
 changes no rate control, and does not steer the player. Choosing a rung in
@@ -507,7 +516,9 @@ to browser decode. Use the JSON when the one-line cause is not enough.
 The browser quality cycle is deliberately labeled `browser_video_partial`.
 For each of 40 changes it proves the requested delivered method and exact
 height, a newly presented frame, film-position error, runway, player/session
-identity, and presented-frame gap; it gates p95 at 100 ms and max at 250 ms.
+identity, and presented-frame gap through the post-commit hold; it gates p95 at
+100 ms and max at 250 ms. Landing uses the accepted target frame's media time,
+not an independently sampled audio/media-element clock.
 Headless Chromium is muted, so this artifact has no honest audio-render gap
 oracle and cannot satisfy the final cross-platform transparent-quality SLO by
 itself. Apple and Android device receipts must supply the <=100 ms audio proof.

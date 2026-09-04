@@ -3366,6 +3366,15 @@ function bufferRunway(v){
 // switch, quality change, rescue transcode) are far cheaper than a cold start
 // and would flatter the average.
 let ATTEMPT_SEQ=0;
+// Auto quality evidence needs the switch itself, not a later sample that may
+// have skipped over several moves. This sequence is page-lifetime like the
+// attempt sequence, while PLAYER.abr.switches remains the bounded debug log.
+let AUTO_SWITCH_SEQ=0;
+// These page-lifetime totals are incremented at the fault itself. Sampling an
+// outgoing PLAYER after replacement is impossible, so rolling per-player
+// counters only when a harness polls can lose the last fault before a switch.
+let PLAYBACK_LIFETIME_STALLS=0;
+let PLAYBACK_LIFETIME_HITCHES=0;
 // Every full play() open supersedes the previous one, including an older call
 // still awaiting a decision or session. The token is independent of PLAYER so
 // it survives the point where a successful open replaces that object.
@@ -3540,6 +3549,7 @@ function noteAutoStall(p,kind,episodeAtMs){
 }
 function recordWaitStall(p, kind, ms, runway, detail, episodeAtMs, controlTrigger){
   p.stalls=(p.stalls||0)+1;
+  PLAYBACK_LIFETIME_STALLS++;
   p.stallsByKind=p.stallsByKind||{supply:0,decode:0};
   p.stallsByKind[kind]++;
   noteAutoStall(p,kind,episodeAtMs);
@@ -8407,6 +8417,7 @@ function armHitchDetector(v){
       // fault, before the counters, so the attribution covers all of them.
       const blame=()=>{
         h.n++;
+        PLAYBACK_LIFETIME_HITCHES++;
         if(skew!=null) h.skewAt=+skew.toFixed(3);
         const m=p.marks||{};
         for(const k of ["flush","frag","append"]){
@@ -9116,7 +9127,10 @@ function autoSwitchLabel(value){
   return typeof value==='number'?`${value}p`:String(value||'Auto');
 }
 function recordAutoSwitch(p,from,to,reason,position){
-  const entry={from:autoSwitchLabel(from),to:autoSwitchLabel(to),reason,
+  const fromHeight=typeof from==='number'&&Number.isFinite(from)?from:null;
+  const toHeight=typeof to==='number'&&Number.isFinite(to)?to:null;
+  const entry={seq:++AUTO_SWITCH_SEQ,at_ms:performance.now(),
+    from:autoSwitchLabel(from),to:autoSwitchLabel(to),from_height:fromHeight,to_height:toHeight,reason,
     position:Math.max(0,position||0)};
   p.abr.switches.push(entry);
   if(p.abr.switches.length>8) p.abr.switches.shift();
