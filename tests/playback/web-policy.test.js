@@ -677,7 +677,7 @@ asyncTest("a temporary live recovery presentation remains playable", async () =>
 
 test("an initial VOD refusal stays visible instead of closing the player", () => {
   const play = shippedSource("play");
-  assert.match(play, /showSessionOpenFailure\(e\)/);
+  assert.match(play, /showSessionOpenFailure\(error\)/);
   assert.doesNotMatch(
     play,
     /openSession[\s\S]{0,500}return closePlayer\(\)/,
@@ -793,6 +793,9 @@ test("estimated skip markers are hedged without rebuilding each tick", () => {
     "clientLog",
     `${shippedSource("markerIsEstimated")}
 ${shippedSource("markerAutoSkipEligible")}
+${shippedSource("hasPendingPlaybackOpen")}
+${shippedSource("playbackOwnsAttachedMedia")}
+${shippedSource("playbackMarkersUsable")}
 ${shippedSource("renderSkip")}
 return renderSkip;`,
   )(
@@ -862,7 +865,10 @@ return markerAutoSkipEligible;`,
     "renderSkip",
     "skipMarker",
     "markerAutoSkipEligible",
-    `${shippedSource("checkMarkers")}
+    `${shippedSource("hasPendingPlaybackOpen")}
+${shippedSource("playbackOwnsAttachedMedia")}
+${shippedSource("playbackMarkersUsable")}
+${shippedSource("checkMarkers")}
 return checkMarkers;`,
   )(
     player,
@@ -931,7 +937,10 @@ test("only a tail kind that runs to the end finishes playback", () => {
     "reportProgress",
     "finishPlayback",
     "seekTo",
-    `${shippedSource("skipMarker")}
+    `${shippedSource("hasPendingPlaybackOpen")}
+${shippedSource("playbackOwnsAttachedMedia")}
+${shippedSource("playbackMarkersUsable")}
+${shippedSource("skipMarker")}
 return skipMarker;`,
   )(
     { durMs: 100_000, fileId: 7, markers: [] },
@@ -1672,6 +1681,7 @@ function autoRescueHarness(player, autoAbr = true) {
     "rememberAutoRung",
     [
       shippedSourceIfPresent("claimAutoFallback"),
+      shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       shippedSourceIfPresent("releaseAutoFallback"),
       shippedSource("maybeDecodeRescue"),
       shippedSource("rescueAutoSupply"),
@@ -1769,7 +1779,8 @@ async function autoRungTick(autoAbr) {
     "playerPixelHeight",
     "switchAutoRung",
     "rememberAutoRung",
-    `${shippedSource("autoControllerTick")}\nreturn autoControllerTick;`,
+    `${shippedSource("hasPendingPlaybackOpen")}
+${shippedSource("playbackOwnsAttachedMedia")}\n${shippedSource("autoControllerTick")}\nreturn autoControllerTick;`,
   )(
     player,
     { playback_auto_abr: autoAbr },
@@ -2160,8 +2171,8 @@ test("a transcode stall reopen is bound to the exact predecessor", () => {
     "viewer-directed seeks are ordinary creates",
   );
   assert.match(
-    shippedSource("seekTo"),
-    /stallReopenSessionOptions\([\s\S]*?sessionId:PLAYER\.sessionId/,
+    shippedSource("seekTo")+shippedSource("executePlaybackMediaChange"),
+    /previousSessionId:PLAYER\.sessionId[\s\S]*stallReopenSessionOptions\([\s\S]*?sessionId:change\.previousSessionId/,
     "the shipped restart path must carry the typed predecessor binding",
   );
 });
@@ -2788,6 +2799,9 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
       shippedSource("currentStreamFailureOverlay"),
       shippedSource("showSessionOpenFailure"),
       shippedSource("positionForPlaybackIntent"),
+      shippedSource("selectedAudioIndex"),
+      shippedSource("requestPlaybackMediaChange"),shippedSource("executePlaybackMediaChange"),
+      shippedSource("beginPlaybackPreparation"),
       shippedSource("burnSub"),
       "return {burnSub};",
     ].join("\n"),
@@ -3400,7 +3414,12 @@ function carryHarness(player) {
       "function clearPlaybackControlWaiters(){}",
       shippedSource("supersedePlaybackControlIntent"),
       shippedSource("pausePlaybackInternally"),
+      shippedSource("playbackTransportEvents"),
+      shippedSource("resetPlaybackTransportEvents"),shippedSource("resetMediaSource"),
+      shippedSource("rememberPlaybackTransportIntent"),
       shippedSource("closePlayer"),
+      shippedSource("beginPlaybackPreparation"),"function play(){}",
+      shippedSource("retirePlaybackPredecessor"),
       "return {prePlaySelection, clearPrePlay, playbackSelection, setPrePlay," +
         " rememberPlaybackSelection, closePlayer};",
     ].join("\n"),
@@ -4198,7 +4217,7 @@ test("the caps document POST falls back to the query a mixed fleet still answers
       `a ${status} from an older or stricter node must fall back, not fail the play`,
     );
   }
-  assert.match(source, /return api\(decisionUrl\(fileId, force, sel\)\)/);
+  assert.match(source, /return api\(decisionUrl\(fileId, force, sel\),\{signal\}\)/);
 });
 
 test("the browser and the server key a learned limit identically", () => {

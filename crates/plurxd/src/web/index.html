@@ -3406,6 +3406,49 @@ function createPlaybackOpenGate(){
   };
 }
 const PLAY_OPEN_GATE=createPlaybackOpenGate();
+// Network preparation has one absolute lifetime, separate from presentation.
+// A moving predecessor cannot extend it. Cancellation/timeout settles even a
+// transport that ignores abort, and its eventual session result is released.
+function beginPlaybackPreparation(isCurrent){
+  beginPlaybackPreparation.active?.cancel();
+  const controller=new AbortController(), began=performance.now();
+  let abandoned=false, rejectPending=null;
+  const cancelled=()=>Object.assign(new Error("Playback preparation superseded."),{name:"AbortError"});
+  const timedOut=()=>Object.assign(new Error("Playback preparation timed out. Your place is saved."),{name:"TimeoutError"});
+  const owner={
+    cancel(){abandoned=true;controller.abort();rejectPending?.(cancelled());},
+    finish(){if(beginPlaybackPreparation.active===owner)beginPlaybackPreparation.active=null;},
+    async run(operation,release){
+      if(abandoned||!isCurrent()) throw cancelled();
+      const remaining=20000-(performance.now()-began);
+      if(remaining<=0){abandoned=true;controller.abort();throw timedOut();}
+      let timer;
+      const deadline=new Promise((_,reject)=>{
+        rejectPending=reject;
+        timer=setTimeout(()=>{
+          abandoned=true;
+          reject(timedOut());
+          controller.abort();
+        },remaining);
+      });
+      try{
+        const result=Promise.resolve(operation(controller.signal)).then(value=>{
+          if(!abandoned&&performance.now()-began>=20000){
+            abandoned=true;controller.abort();if(release)release(value);throw timedOut();
+          }
+          if(abandoned||!isCurrent()){
+            if(release) release(value);
+            throw cancelled();
+          }
+          return value;
+        });
+        return await Promise.race([result,deadline]);
+      }finally{clearTimeout(timer);rejectPending=null;}
+    }
+  };
+  beginPlaybackPreparation.active=owner;
+  return owner;
+}
 // Set by a caller that is about to re-enter play() for a reason play()
 // cannot infer — a quality change looks exactly like a resume from the
 // inside, and mislabelling it would put restart timings in the cold-start
@@ -3468,7 +3511,8 @@ function playbackContext(){
 // or one that throws on an odd configuration, leaves the field null rather
 // than blocking playback on a diagnostic.
 async function probeDecode(){
-  const p=PLAYER; if(!p) return;
+  const p=PLAYER; if(!playbackOwnsAttachedMedia(p)) return;
+  const attachment=p.mediaAttachment;
   const src=p.source||{};
   // Same ladder the transport choice uses, for the same reason: `codec[0]` is
   // what gets asked about, and on a 10-bit source the honest question is the
@@ -3489,11 +3533,12 @@ async function probeDecode(){
   };
   try{
     const r=await navigator.mediaCapabilities.decodingInfo(cfg);
-    if(PLAYER===p) p.decodeInfo={supported:!!r.supported, smooth:!!r.smooth, hw:!!r.powerEfficient};
+    if(playbackOwnsAttachedMedia(p)&&p.mediaAttachment===attachment)
+      p.decodeInfo={supported:!!r.supported, smooth:!!r.smooth, hw:!!r.powerEfficient};
   }catch(e){}
 }
 function reportTtff(){
-  const p=PLAYER; if(!p||!p.playStartedAt) return;
+  const p=PLAYER; if(!playbackOwnsAttachedMedia(p)||!p.playStartedAt) return;
   const ms=Math.round(performance.now()-p.playStartedAt);
   p.playStartedAt=null;   // first frame only; a seek is not a start
   p.ttffMs=ms;
@@ -3529,6 +3574,7 @@ const CHASE_REPORT_MS=60000; // one report per minute while it persists
 function beginWait(v){
   const p=PLAYER;
   if(!p||!p.started||v.seeking||v.paused) return;
+  if(!playbackOwnsAttachedMedia(p)) return;
   if(p.waitAt) return;                       // already hungry; not a second one
   p.waitAt=performance.now();
   p.waitRunway=bufferRunway(v);
@@ -3584,11 +3630,12 @@ function endWait(resumed){
 // make one method-aware attempt. Auto remuxes move to a smaller transcode;
 // explicit quality choices and already-compatible streams simply reconnect.
 async function persistentWait(v,p,began,generation,actionGeneration){
+  if(!playbackOwnsAttachedMedia(p)) return;
   if(PLAYER!==p || p.waitAt!==began || !(p.started||p.controlSeek?.executed) ||
      (p._seekToken||0)!==generation ||
      (p.controlIntentGeneration||0)!==actionGeneration ||
      p.wantsPlayback===false || (p.wantsPlayback==null&&v.paused) ||
-     (v.seeking&&!p.controlSeek?.executed)) return;
+     (v.seeking&&!p.controlSeek?.executed&&!p.progressWatch?.fired)) return;
   p.waitTimer=null;
   const ms=Math.round(performance.now()-began), runway=p.waitRunway;
   const kind=(runway!=null && runway<SUPPLY_RUNWAY_SECS)?"supply":"decode";
@@ -3616,11 +3663,11 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   // every condition the entry guard checked, because none of them survived
   // the await on their own — acting on a stale generation here would reopen
   // a stream the viewer already left.
-  if(PLAYER!==p || p.waitAt!==began || !(p.started||p.controlSeek?.executed) ||
+  if(!playbackOwnsAttachedMedia(p)||p.waitAt!==began || !(p.started||p.controlSeek?.executed) ||
      (p._seekToken||0)!==generation ||
      (p.controlIntentGeneration||0)!==actionGeneration ||
      p.wantsPlayback===false || (p.wantsPlayback==null&&v.paused) ||
-     (v.seeking&&!p.controlSeek?.executed)) return;
+     (v.seeking&&!p.controlSeek?.executed&&!p.progressWatch?.fired)) return;
   // The ask itself consumes frozen-picture time. Re-read the absolute age
   // after it settles so a slow control response cannot extend the deadline.
   const controlElapsedMs=Math.round(performance.now()-began);
@@ -3785,7 +3832,7 @@ function reportRateChase(v){
 // would be a denial of service on the log ring, and a single hitch is noise —
 // what identifies a cause is the count and the spacing.
 function reportHitches(){
-  const p=PLAYER; if(!p||!p.hitches) return;
+  const p=PLAYER; if(!playbackOwnsAttachedMedia(p)||!p.hitches) return;
   const h=p.hitches, n=h.back+h.held+(h.late||0)+(h.drop||0)+h.gap;
   if(n<5 || p._hitchReported===n) return;
   if(n!==5 && n%50!==0) return;
@@ -5470,14 +5517,14 @@ function decisionUrl(fileId, force, sel){
 // translation. So a mixed fleet mid-deploy is a non-event rather than a
 // broken player, which is the only reason it is safe to send this at all
 // while nodes are still rolling.
-async function askDecision(fileId, force, sel){
+async function askDecision(fileId, force, sel, signal=null){
   const query=`force=${force}${prePlaySelectionQuery(sel)}`;
   try{
     return await api(`/files/${fileId}/decision?${query}`,
-      {method:"POST", body:{caps:currentCapsDocument()}});
+      {method:"POST", body:{caps:currentCapsDocument()},signal});
   }catch(e){
     if(e && (e.status===404 || e.status===405 || e.status===400)){
-      return api(decisionUrl(fileId, force, sel));
+      return api(decisionUrl(fileId, force, sel),{signal});
     }
     throw e;
   }
@@ -6400,6 +6447,8 @@ function attachHls(video, playlistUrl, startAt){
     // for the whole film.
     const tgt=bufferTargets(PLAYER&&PLAYER.bufSegSecs);
     PLAYER.bufTarget=tgt;
+    const observesCurrent=()=>attachment.current()&&attachedPlayer.hls===hls
+      &&playbackOwnsAttachedMedia(attachedPlayer);
     const hls=new Hls({
       enableWorker:false,
       maxBufferLength:tgt.fwd,
@@ -6421,7 +6470,7 @@ function attachHls(video, playlistUrl, startAt){
       xhrSetup:x=>{
         if(TOKEN) x.setRequestHeader("authorization","Bearer "+TOKEN);
         x.addEventListener("load",()=>{
-          if(attachment.current()&&x.status>=400) noteStreamFailure(x.status, x.responseText);
+          if(observesCurrent()&&x.status>=400) noteStreamFailure(x.status, x.responseText);
         });
       }});
     const estimateSeed=PlaybackPolicy.bandwidthSeedBps({
@@ -6438,6 +6487,7 @@ function attachHls(video, playlistUrl, startAt){
     PLAYER.hls=hls;
     hls.loadSource(playlistUrl);
     hls.attachMedia(video);
+    resetPlaybackTransportEvents(video);
     hls.on(Hls.Events.MANIFEST_PARSED,()=>{
       // A newer native seek still belongs to this attachment. It must not
       // suppress the only play request when the manifest finally arrives.
@@ -6453,6 +6503,7 @@ function attachHls(video, playlistUrl, startAt){
     //   frag    a segment boundary — 1.75s apart on this source.
     //   append  new data handed to the SourceBuffer.
     if(Hls.Events.BUFFER_FLUSHING) hls.on(Hls.Events.BUFFER_FLUSHING,(_,d)=>{
+      if(!observesCurrent()) return;
       markEvent("flush");
       const p=PLAYER; if(!p||!p.marks) return;
       // How far BEHIND the picture the eviction ended. A few seconds is the
@@ -6461,11 +6512,14 @@ function attachHls(video, playlistUrl, startAt){
       const end=d&&isFinite(d.endOffset)?d.endOffset:null;
       p.marks.flushEdge=end==null?null:+((video.currentTime||0)-end).toFixed(1);
     });
-    if(Hls.Events.FRAG_CHANGED) hls.on(Hls.Events.FRAG_CHANGED,()=>markEvent("frag"));
+    if(Hls.Events.FRAG_CHANGED) hls.on(Hls.Events.FRAG_CHANGED,()=>{
+      if(observesCurrent()) markEvent("frag");
+    });
     // The playlist is the only place the real append granularity is written
     // down. TARGETDURATION tracks the longest segment published so far, so a
     // session that later cuts a longer one re-tunes again.
     if(Hls.Events.LEVEL_LOADED) hls.on(Hls.Events.LEVEL_LOADED,(_,d)=>{
+      if(!observesCurrent()) return;
       // A retry that loaded the playlist succeeded. Its earlier 503 is stale
       // now, not after an arbitrary wall-clock TTL; otherwise an unrelated
       // later fatal is confidently mislabeled "Still preparing".
@@ -6485,6 +6539,7 @@ function attachHls(video, playlistUrl, startAt){
     // when the picture is cheap. This is the number the quota is charged in,
     // read from the transfer that just happened.
     if(Hls.Events.FRAG_LOADED) hls.on(Hls.Events.FRAG_LOADED,(_,d)=>{
+      if(!observesCurrent()) return;
       const stats=d&&((d.frag&&d.frag.stats)||d.stats);
       const b=stats&&(stats.total||stats.loaded);
       const p=PLAYER; if(!p||p.hls!==hls||!(b>0)) return;
@@ -6504,14 +6559,16 @@ function attachHls(video, playlistUrl, startAt){
       p.segBytes=b;
       retuneBuffer(p.bufSegSecs||((d.frag.duration>0)?d.frag.duration:1), true);
     });
-    if(Hls.Events.BUFFER_APPENDED) hls.on(Hls.Events.BUFFER_APPENDED,()=>markEvent("append"));
+    if(Hls.Events.BUFFER_APPENDED) hls.on(Hls.Events.BUFFER_APPENDED,()=>{
+      if(observesCurrent()) markEvent("append");
+    });
     // Buffer pressure, classified. "It stopped buffering" has four unrelated
     // causes and they need different fixes: the browser refusing more data
     // (quota — the ceiling we cannot raise), an append that failed for another
     // reason, a decode error, or simply nothing arriving. Reporting them as
     // one event would leave the M0 buffer question unanswerable.
     hls.on(Hls.Events.ERROR,(_,d)=>{
-      if(!attachment.current()) return;
+      if(!observesCurrent()) return;
       // Counted here, but a FATAL one still falls through to the rescue below:
       // hls.js gives up on a segment after `appendErrorMaxRetry`, and a buffer
       // failure that has become terminal is a dead player, not a statistic.
@@ -6619,7 +6676,7 @@ function attachHls(video, playlistUrl, startAt){
     // Apple TV can fetch segments itself when AirPlaying.
     PLAYER.segSrc=tok(playlistUrl); PLAYER.segTimes=null; PLAYER._segIdx=null;
     refreshSegTimes();
-    video.src=tok(playlistUrl);
+    setPlaybackMediaSource(video,tok(playlistUrl));
     const go=()=>{ video.removeEventListener("loadedmetadata",go);
       applyPlaybackAttachmentPosition(video,attachedPlayer,attachment,startAt); };
     video.addEventListener("loadedmetadata",go);
@@ -6863,6 +6920,7 @@ function stopPlaybackControl(p){
   clearPlaybackControlWaiters(p);
 }
 function notifyPlaybackControl(renderOverride,observationOverride){
+  if(!playbackOwnsAttachedMedia(PLAYER))return null;
   const p=PLAYER;
   if(!p) return null;
   if(["stalled","failed"].includes(renderOverride)) p.controlRenderOverride=renderOverride;
@@ -7098,11 +7156,11 @@ function startPlaybackControl(v,p,bootstrap){
   try{
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
       clientInstanceId:CONTROL_CLIENT_ID,
-      snapshot:()=>PLAYER===p?playbackControlSnapshot(v,p):null,
+      snapshot:()=>playbackOwnsAttachedMedia(p)?playbackControlSnapshot(v,p):null,
       intentGeneration:()=>p.controlIntentGeneration||0,
       send:sendPlaybackControl,
       onExchange:({request,response,error,intentGeneration})=>{
-        if(PLAYER!==p||p.controlReporter!==reporter) return;
+        if(!playbackOwnsAttachedMedia(p)||p.controlReporter!==reporter) return;
         p.controlLastRequest=request;
         settlePlaybackControlWaiters(p,request,response,error);
         if(response&&response.delivery
@@ -7147,7 +7205,7 @@ function startPlaybackControl(v,p,bootstrap){
     return null;
   }
 }
-async function openSession(fileId, opts){
+async function openSession(fileId, opts, signal=null){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
     {playback_id:PLAYBACK_ID,request_id:newRequestId()},contract.session);
@@ -7202,7 +7260,7 @@ async function openSession(fileId, opts){
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
   if(body.height==null) delete body.height;
-  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body});
+  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal});
 }
 // Take on a newly-opened session's identity, and attach it.
 //
@@ -7785,15 +7843,64 @@ function qualityLabel(){
   return h?`${h}p`:"Auto";
 }
 
-async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt){
+async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
   const openAttempt=reservedOpenAttempt||PLAY_OPEN_GATE.begin("open");
   const openIsCurrent=()=>PLAY_OPEN_GATE.current(openAttempt);
+  const predecessor=PLAYER?.mediaPredecessor||PLAYER;
+  play.failedPreparation=null;
+  const preparation=beginPlaybackPreparation(openIsCurrent);
+  const failPreparation=error=>{
+    if(!openIsCurrent()) return;
+    preparation.finish();
+    const wanted=PLAYER;
+    const latest=wanted?.fileId===fileId;
+    const retry={fileId,title,knownDurMs,meta,predecessor,
+      resumeMs:latest&&wanted.controlSeek?Math.round(wanted.controlSeek.targetMs):resumeMs,
+      wantsPlayback:fullIntent.wantsPlayback,
+      selection:latest?playbackSelection(wanted,fileId):selection,
+      audioOffsetMs:latest?(wanted.aoffset||0):sessionAudioOffset};
+    play.failedPreparation=retry;
+    if(play.pendingIntent===fullIntent)play.pendingIntent=null;
+    if(predecessor){
+      PLAYER=predecessor;
+      if(latest&&predecessor.fileId===fileId){
+        const audio=selectedAudioIndex(wanted);
+        Object.assign(predecessor,{wantsPlayback:wanted.wantsPlayback,
+          controlSeek:wanted.controlSeek,controlSeekSequence:wanted.controlSeekSequence,
+          controlIntentGeneration:wanted.controlIntentGeneration,
+          preplay:retry.selection,aoffset:retry.audioOffsetMs,
+          curSub:wanted.curSub,burnedSub:wanted.burnedSub,pendingOpenAttempt:openAttempt});
+        const index=predecessor.audio?.findIndex(track=>track.index===audio);
+        if(index>=0)predecessor.curAudio=index;
+      }
+    }
+    const p=PLAYER;
+    if(p){
+      p.stallPrompt=true;
+    }
+    if(!showSessionOpenFailure(error)) setLoading(true,"Playback could not prepare.",error.message,
+      `<button onclick="retryPlayback()">Try again</button>`+
+      `<button onclick="closePlayer()">Close</button>`);
+  };
+  if(PLAYER){
+    // A full play owns the destination immediately, including a different
+    // title whose decision has not returned yet. Old partial creates and
+    // decoder callbacks cannot attach over its loading phase.
+    PLAYER._seekToken=(PLAYER._seekToken||0)+1;
+    PLAYER.pendingMediaChange=null;
+    PLAYER.mediaAttachment=null;
+    PLAYER.retiringOpenAttempt=openAttempt;
+  }
+  if(predecessor)predecessor.retiringOpenAttempt=openAttempt;
   const inputPlayer=PLAYER&&PLAYER.fileId===fileId
     &&document.getElementById("modal")?.classList.contains("open")?PLAYER:null;
   if(inputPlayer){
     rememberPlaybackTransportIntent(document.getElementById("video"),inputPlayer);
     inputPlayer.pendingOpenAttempt=openAttempt;
   }
+  const fullIntent={attempt:openAttempt,fileId,predecessor,
+    wantsPlayback:retryIntent?retryIntent.wantsPlayback:(inputPlayer?inputPlayer.wantsPlayback:true)};
+  play.pendingIntent=fullIntent;
   // Consume both one-shot inputs before the first await. An overlapping play
   // may set its own reason while this decision is in flight; reading the
   // shared slot afterwards would steal the newer attempt's attribution.
@@ -7805,7 +7912,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   // An internal reopen (quality/subtitle change) is still this playback and
   // keeps its correction. A different title, or a player that was closed,
   // starts clean at zero.
-  const sessionAudioOffset=PLAYER&&PLAYER.fileId===fileId ? (PLAYER.aoffset||0) : 0;
+  const sessionAudioOffset=retryIntent?.audioOffsetMs??
+    (PLAYER&&PLAYER.fileId===fileId ? (PLAYER.aoffset||0) : 0);
   const replacementBandwidthSeed=PLAYER&&PLAYER.fileId===fileId
     ? PlaybackPolicy.bandwidthSeedBps({
         outgoingEstimateBps:PLAYER.hls&&PLAYER.hls.bandwidthEstimate,
@@ -7823,7 +7931,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     ? (PLAYER.controlIntentGeneration||0) : 0;
   // The track choice this playback runs with: the detail screen's pickers on a
   // cold start, what is already playing on an internal reopen.
-  const selection=playbackSelection(PLAYER, fileId);
+  const selection=retryIntent?.selection??playbackSelection(PLAYER, fileId);
   const modal=document.getElementById("modal"), video=document.getElementById("video");
   const playerWasOpen=modal.classList.contains("open");
   const playerOpener=playerWasOpen?(PLAYER&&PLAYER._opener):document.activeElement;
@@ -7848,8 +7956,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   // play. Asking for the policy default and correcting afterwards is what used
   // to force a remux over a perfectly decodable audio choice.
   let decision;
-  try{ decision=await askDecision(fileId, qualityForce(), selection);}
-  catch(e){ if(!openIsCurrent()) return; setLoading(false); toast(e.message); return closePlayer(); }
+  try{ decision=await preparation.run(signal=>askDecision(fileId, qualityForce(), selection,signal));}
+  catch(e){failPreparation(e);return;}
   if(!openIsCurrent()) return;
   let retestDecodeLimit=false;
   let learnedLimitView=null;
@@ -7883,7 +7991,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
         // would hand the learned-limit transcode the policy default audio and
         // silently discard the viewer's choice on exactly the devices that need
         // the transcode most.
-        const d2=await askDecision(fileId, "transcode", selection);
+        const d2=await preparation.run(signal=>askDecision(fileId,"transcode",selection,signal));
         if(!openIsCurrent()) return;
         learnedLimitView=PlaybackPolicy.learnedDecodeLimitView({
           source:decision.source||{},limit:lim,ordinaryRange,
@@ -7892,7 +8000,11 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
         d2.reasons=[`${learnedLimitView.reason} `+
           `(Quality → Original bypasses this measurement)`].concat(d2.reasons||[]);
         decision=d2;
-      }catch(e){ if(!openIsCurrent()) return; /* the limit is advice; the original decision still plays */ }
+      }catch(e){
+        if(!openIsCurrent()) return;
+        if(e.name==='TimeoutError'||e.name==='AbortError'){failPreparation(e);return;}
+        /* the limit is advice; the original decision still plays */
+      }
     }
   }
   const startSec=(resumeMs||0)/1000;
@@ -7906,18 +8018,24 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     ? PlaybackPolicy.initialAutoRung({ladder,persistedHeight:autoLastGoodHeight(),
         priorKbps,playerHeight:playerPixelHeight(video)})
     : null;
-  // Stop the outgoing playback's timers *before* PLAYER is replaced below. The
-  // clearInterval further down runs after the reassignment, so it only ever
-  // cleared the new object's null timer — on auto-next each episode left its
-  // 5-second progress poster running, and after N episodes N+1 of them were
-  // POSTing at once. Same trap for the idle and stall timers.
-  stopPlayerTimers();
-  // The outgoing item's session, if any, is finished the moment this one is
-  // decided — auto-next through a season would otherwise leave one encoder
-  // per episode running out its idle timeout.
-  if(PLAYER && PLAYER.sessionId) releaseSession(PLAYER.sessionId);
-  teardownHls();
-  clearSubs(video);   // drop whatever the last item left showing
+  // Keep the real outgoing decoder until preparation succeeds. Its callbacks
+  // are fenced during preparation; retire that exact object (not the incoming
+  // PLAYER) at attachment so its session and timers cannot be leaked.
+  const outgoing=predecessor;
+  let retired=false;
+  const retireOutgoing=()=>{
+    if(retired) return;retired=true;
+    const incoming=PLAYER;
+    if(outgoing){
+      PLAYER=outgoing;
+      stopPlayerTimers();
+      teardownHls();
+      if(outgoing.sessionId)releaseSession(outgoing.sessionId);
+      PLAYER=incoming;
+    }
+    if(incoming)incoming.mediaPredecessor=null;
+    clearSubs(video);
+  };
   const src=decision.source||{};
   const book=meta&&meta.audiobook;
   // A pre-play subtitle is resolved BEFORE the player object exists, because a
@@ -7987,7 +8105,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     controlIntentGeneration:replacementControlIntentGeneration,
     controlSequenceFloor:replacementControlSequenceFloor,
     controlPresentedFrames:0,controlHasFrameCallbacks:false,
-    wantsPlayback:inputPlayer?inputPlayer.wantsPlayback:true,
+    wantsPlayback:fullIntent.wantsPlayback,
+    mediaPredecessor:outgoing,
     internalMediaReset:true,pendingOpenAttempt:openAttempt, };
   const openedPlayer=PLAYER;
   const openIsAttached=()=>openIsCurrent()&&PLAYER===openedPlayer
@@ -8042,8 +8161,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     // ordinary path, and on the forced-burn path above PLAYER is the one that
     // knows a burn is why this is a transcode at all.
     setLoading(true,"Starting the transcoder…",transcodeReason(PLAYER));
-    let info; try{ info=await openSession(fileId,transcodeOpts(startSec,initialAudio));}catch(e){
-      if(openIsAttached()&&!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
+    const options=transcodeOpts(startSec,initialAudio);
+    let info; try{info=await preparation.run(signal=>openSession(fileId,options,signal),
+      late=>releaseSession(late&&late.session_id));}catch(e){
+      if(openIsAttached())failPreparation(e);
       return;
     }
     if(!PLAY_OPEN_GATE.acceptResource(openAttempt,info&&info.session_id,releaseSession)) return;
@@ -8051,6 +8172,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
       releaseSession(info&&info.session_id);
       return;
     }
+    retireOutgoing();
     const from=attachSession(video, openedPlayer, info, startSec);
     setLoading(true,"Preparing the stream…",(PLAYER.encoder?("encoder: "+PLAYER.encoder+" — "):"")+
       (PLAYER.vod?"already transcoded — playing from the cache":"buffering the first segments"));
@@ -8072,9 +8194,9 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     setLoading(true,"Preparing the stream…",
       why? `${why} — sending it as HLS so the player can buffer ahead`
          : "remuxing to HLS — keeping the original video");
-    try{ if(!await startCopyHls(video, startSec, openIsAttached, openAttempt)) return; }
+    try{ if(!await startCopyHls(video,startSec,openIsAttached,openAttempt,preparation,retireOutgoing)) return; }
     catch(e){
-      if(openIsAttached()&&!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
+      if(openIsAttached())failPreparation(e);
       return;
     }
   } else {
@@ -8105,18 +8227,25 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
       PLAYER.probeUrl=decision.play_url;
       armStall(startSec);
     }
+    retireOutgoing();
     resetMediaSource(video);
     const attachment=beginPlaybackMediaAttachment(openedPlayer);
-    video.src=url;
+    setPlaybackMediaSource(video,url);
     markPlaybackControlSeekExecuted(PLAYER,startSec);
-    video.onloadedmetadata=()=>{ video.onloadedmetadata=null;
-      if(openIsAttached()&&!isRemux)
+    video.onloadedmetadata=()=>{
+      if(!openIsAttached()) return;
+      video.onloadedmetadata=null;
+      if(!isRemux)
         applyPlaybackAttachmentPosition(video,openedPlayer,attachment,startSec); };
     applyPlaybackTransportIntent(video,openedPlayer);
   }
 
   if(!openIsAttached()) return;
   openedPlayer.pendingOpenAttempt=null;
+  samplePlaybackPresentationClock(video,openedPlayer);
+  notifyPlaybackControl();
+  preparation.finish();
+  if(play.pendingIntent===fullIntent)play.pendingIntent=null;
 
   // A pre-play TEXT subtitle, applied to the stream that just attached. Here
   // rather than before the route, because setSub() shifts the cues by
@@ -8134,6 +8263,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   PLAYER.progressTimer=setInterval(()=>playbackProgressTick(video,openedPlayer),500);
   clearInterval(PLAYER.timer);
   PLAYER.timer=setInterval(()=>{
+    if(!playbackOwnsAttachedMedia(openedPlayer)) return;
     reportProgress(fileId); reportHitches(); maybeDecodeRescue();
     autoControllerTick().catch(()=>{}); refreshSegTimes();
   }, PlaybackPolicy.AUTO_DEFAULTS.sampleMs);
@@ -8153,11 +8283,95 @@ function playbackInitialRoute(decision,audio,nativeHls,segmentedRemux,audioOffse
 // that open with one snapshot of the newest destination and track choices.
 // Otherwise its late response would overwrite in-place mutations of PLAYER.
 function restartPendingPlaybackOpen(p,reason){
+  // Controls still describe the outgoing title until the new decision builds
+  // its player. They must not reopen that title over the newer destination.
+  if(p&&p.retiringOpenAttempt&&p.retiringOpenAttempt!==p.pendingOpenAttempt
+     &&PLAY_OPEN_GATE.current(p.retiringOpenAttempt)) return true;
+  if(p&&PLAYER===p&&p.pendingMediaChange){
+    executePlaybackMediaChange(p,p.pendingMediaChange);
+    return true;
+  }
   if(!p||PLAYER!==p||!p.pendingOpenAttempt||!PLAY_OPEN_GATE.current(p.pendingOpenAttempt)) return false;
   PENDING_ATTEMPT_REASON=reason;
   const position=positionForPlaybackIntent(document.getElementById("video"),p);
   play(p.fileId,p.title||"",Math.round(position*1000),p.knownDur||0,p.meta);
   return true;
+}
+// Desired media is not the media currently attached. Keep the entire pending
+// route until it attaches; a newer seek/track command inherits it even on VOD.
+// Each execution snapshots options before its await and owns its own response.
+function requestPlaybackMediaChange(p,change){
+  p.pendingMediaChange=Object.assign({},p.pendingMediaChange||{},change);
+  return executePlaybackMediaChange(p,p.pendingMediaChange);
+}
+async function executePlaybackMediaChange(p,change){
+  const v=document.getElementById("video");
+  if(!v||PLAYER!==p||p.pendingMediaChange!==change) return false;
+  const pos=positionForPlaybackIntent(v,p), audio=selectedAudioIndex(p), subtitle=p.curSub;
+  const {live:streamIsCurrent}=streamGeneration();
+  const live=()=>streamIsCurrent()&&p.pendingMediaChange===change;
+  const preparation=beginPlaybackPreparation(live);
+  const method=p.burnedSub!=null?'transcode':change.method;
+  const opts=method==='transcode'?PlaybackPolicy.stallReopenSessionOptions({
+    options:transcodeOpts(pos,audio,change.height),forceReopen:!!change.forceReopen,
+    method,sessionId:change.previousSessionId||p.sessionId}):null;
+  newAttempt(change.reason||"stream-change");
+  p.stallFrom=pos;
+  if(change.automatic&&p.abr) p.abr.switching=true;
+  // Keep the predecessor until the create succeeds. Its output cannot settle
+  // the new destination, which remains unexecuted until the attach below.
+  setLoading(true,"Preparing the stream…","your place and selections are saved");
+  try{
+    if(method==='transcode'){
+      const info=await preparation.run(signal=>openSession(p.fileId,opts,signal),
+        late=>releaseSession(late&&late.session_id));
+      if(!live()){ releaseSession(info&&info.session_id); return false; }
+      retirePlaybackPredecessor(p);
+      teardownHls(); resetMediaSource(v); clearSubs(v);
+      p.started=false; p.method='transcode'; p.copyHls=false;
+      p.health=null;
+      if(change.height>0) p.autoHeight=change.height;
+      if(change.note) p.rescuedNote=change.note;
+      armStall(attachSession(v,p,info,pos),20000);
+    }else if(change.copyHls){
+      if(!await startCopyHls(v,pos,live,null,preparation,()=>retirePlaybackPredecessor(p))) return false;
+    }else{
+      retirePlaybackPredecessor(p);
+      teardownHls(); resetMediaSource(v); clearSubs(v);
+      p.started=false; p.method='remux'; p.copyHls=false; p.offset=pos;
+      p.probeUrl=`/api/v1/files/${p.fileId}/stream.mp4`;
+      setPlaybackMediaSource(v,remuxUrl(`/api/v1/files/${p.fileId}/stream.mp4`,audio,pos));
+      markPlaybackControlSeekExecuted(p,pos);
+      armStall(pos,20000); applyPlaybackTransportIntent(v,p);
+    }
+    if(!live()) return false;
+    p.pendingMediaChange=null;
+    samplePlaybackPresentationClock(v,p);
+    notifyPlaybackControl();
+    if(change.automatic&&p.abr){
+      const now=performance.now();
+      Object.assign(p.abr,{switching:false,lastSwitchAtMs:now,stableSinceMs:now,
+        mildSamples:0,upgradeSinceMs:null,previousRunway:null});
+      p.abr.stallEvents.supply=[];
+      if(change.from!=null) recordAutoSwitch(p,change.from,change.height||"transcode Auto",
+        change.switchReason||change.reason,pos,p.sessionId);
+    }
+    if(subtitle>=0&&p.burnedSub==null) await setSub(subtitle);
+    return true;
+  }catch(e){
+    if(!live()) return false;
+    if(change.automatic&&p.abr){
+      p.abr.switching=false;
+      if(change.height>0){
+        p.abr.failedHeights=p.abr.failedHeights||new Set();
+        p.abr.failedHeights.add(change.height);
+      }
+    }
+    // Retain the desired recipe for Retry/the next command, but surface the
+    // failed attempt now; neither silence nor restoring desired=attached lies.
+    if(!showSessionOpenFailure(e)){showStallRecoveryFailure(e.message);toast(e.message);}
+    return false;
+  }finally{preparation.finish();}
 }
 // Open (or re-open) a copy-video HLS session for the current file and attach it
 // as native HLS. The video stream is the server's untouched original; only the
@@ -8167,7 +8381,7 @@ function restartPendingPlaybackOpen(p,reason){
 // `live` (optional) is re-checked after the await: a seek or audio switch that
 // has since been superseded must not attach, or two hls.js instances end up
 // pulling two server sessions at once. Returns false when it bailed.
-async function startCopyHls(v, startSec, live, openAttempt){
+async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeAttach){
   const aidx=selectedAudioIndex(PLAYER);
   const src=PLAYER.source||{}, track=PLAYER.audio&&PLAYER.audio[PLAYER.curAudio];
   const codec=track&&track.codec;
@@ -8185,9 +8399,11 @@ async function startCopyHls(v, startSec, live, openAttempt){
   });
   let info;
   try{
-    info=await openSession(PLAYER.fileId,{copy:true,aac,
+    const fileId=PLAYER.fileId, options={copy:true,aac,
       preserve_dolby_vision:!!PLAYER.preserveDolbyVision,start:startSec||0,audio:aidx,
-      audio_offset_ms:PLAYER.aoffset||0});
+      audio_offset_ms:PLAYER.aoffset||0};
+    info=preparation?await preparation.run(signal=>openSession(fileId,options,signal),
+      late=>releaseSession(late&&late.session_id)):await openSession(fileId,options);
   }catch(error){
     if(live && !live()) return false;
     const fallback=PlaybackPolicy.indexPendingFallback({
@@ -8199,6 +8415,7 @@ async function startCopyHls(v, startSec, live, openAttempt){
     // remux; use that route instead of turning a background-cache miss into an
     // unplayable title. Safari/native HLS is excluded by the policy above.
     const from=startSec||0;
+    if(beforeAttach)beforeAttach();
     const base=`/api/v1/files/${PLAYER.fileId}/stream.mp4`;
     PLAYER.method='remux'; PLAYER.copyHls=false; PLAYER.offset=from;
     PLAYER.probeUrl=base;
@@ -8210,7 +8427,7 @@ async function startCopyHls(v, startSec, live, openAttempt){
       "the HLS index is still building — remuxing without segmentation");
     resetMediaSource(v);
     if(live && !live()) return false;
-    v.src=remuxUrl(base,aidx,from);
+    setPlaybackMediaSource(v,remuxUrl(base,aidx,from));
     markPlaybackControlSeekExecuted(PLAYER,from);
     armStall(from,20000); applyPlaybackTransportIntent(v,PLAYER);
     return true;
@@ -8222,6 +8439,7 @@ async function startCopyHls(v, startSec, live, openAttempt){
     return false;
   }
   PLAYER.method='remux'; PLAYER.copyHls=true;
+  if(beforeAttach)beforeAttach();
   armStall(attachSession(v, PLAYER, info, startSec));
   return true;
 }
@@ -8417,14 +8635,16 @@ function parseSegTimes(text){
 }
 async function refreshSegTimes(){
   const p=PLAYER;
-  if(!p || !p.segSrc || p.hls) return;
+  if(!playbackOwnsAttachedMedia(p) || !p.segSrc || p.hls) return;
+  const source=p.segSrc, attachment=p.mediaAttachment;
+  const current=()=>playbackOwnsAttachedMedia(p)&&p.segSrc===source&&p.mediaAttachment===attachment;
   const now=performance.now();
   if(p._segFetch && now-p._segFetch<9000) return;   // the playlist grows ~every 4s at 2x
   p._segFetch=now;
   try{
-    const r=await fetch(p.segSrc,{cache:"no-store"}); if(!r.ok) return;
+    const r=await fetch(source,{cache:"no-store"}); if(!r.ok||!current()) return;
     const times=parseSegTimes(await r.text());
-    if(PLAYER===p && times.length>((p.segTimes&&p.segTimes.length)||0)) p.segTimes=times;
+    if(current() && times.length>((p.segTimes&&p.segTimes.length)||0)) p.segTimes=times;
   }catch(e){}
 }
 // A frame callback registered before a new media execution belongs to the
@@ -8507,6 +8727,10 @@ function armHitchDetector(v){
     // Bail the moment this playback is replaced, or the callback outlives its
     // PLAYER and starts recording another stream's frames as this one's.
     if(PLAYER!==p) return;
+    if(!playbackOwnsAttachedMedia(p)){
+      prev=null;rateWin.length=0;
+      queuePlaybackFrame(v,p,step);return;
+    }
     p.controlPresentedFrames=(p.controlPresentedFrames||0)+1;
     if(epoch===(p.controlPresentationEpoch||0))
       settlePlaybackControlSeek(v,p,meta.mediaTime,p.controlPresentedFrames);
@@ -9039,6 +9263,7 @@ function teardownHls(){
     });
     if(estimate) PLAYER.bandwidthSeedBps=estimate;
     try{PLAYER.hls.destroy()}catch(e){}
+    resetPlaybackTransportEvents(document.getElementById("video"));
     PLAYER.hls=null;
   }
 }
@@ -9048,7 +9273,27 @@ function resetMediaSource(v){
     rememberPlaybackTransportIntent(v,PLAYER);
     PLAYER.internalMediaReset=true;
   }
-  try{ pausePlaybackInternally(v); v.removeAttribute("src"); v.load(); }catch(e){}
+  try{ pausePlaybackInternally(v); v.removeAttribute("src"); v.load(); }
+  catch(e){} finally { resetPlaybackTransportEvents(v); }
+}
+// load()/src changes discard queued media tasks. Expectations belong to that
+// load and to the individual play promise, never to an unowned numeric count.
+function resetPlaybackTransportEvents(v){
+  if(v) v._plurxTransportEvents={play:[],pause:[]};
+}
+function playbackTransportEvents(v){
+  return v._plurxTransportEvents||(v._plurxTransportEvents={play:[],pause:[]});
+}
+function setPlaybackMediaSource(v,url){
+  v.src=url;
+  resetPlaybackTransportEvents(v);
+}
+function retirePlaybackPredecessor(p){
+  if(!p?.mediaPredecessor) return;
+  const predecessor=p.mediaPredecessor;
+  PLAYER=predecessor;stopPlayerTimers();teardownHls();
+  if(predecessor.sessionId)releaseSession(predecessor.sessionId);
+  PLAYER=p;p.mediaPredecessor=null;
 }
 // Attachment ownership is not command ownership: a native seek or Pause can
 // change the current command while this same decoder is still loading.
@@ -9067,7 +9312,7 @@ function pausePlaybackInternally(v){
   if(!v) return;
   // pause dispatches its event later, possibly after PLAYER was replaced.
   // Tag the actual transition on the persistent element, not the old player.
-  if(!v.paused) v._plurxInternalPauseEvents=(v._plurxInternalPauseEvents||0)+1;
+  if(!v.paused) playbackTransportEvents(v).pause.push({});
   v.pause();
 }
 function rememberPlaybackTransportIntent(v,p){
@@ -9077,24 +9322,31 @@ function applyPlaybackTransportIntent(v,p){
   if(!v||!p||PLAYER!==p) return;
   rememberPlaybackTransportIntent(v,p);
   if(p.wantsPlayback){
-    const expectsEvent=v.paused;
-    if(expectsEvent) v._plurxInternalPlayEvents=(v._plurxInternalPlayEvents||0)+1;
+    const events=playbackTransportEvents(v), token={};
+    if(v.paused) events.play.push(token);
     v.play().catch(()=>{
-      if(expectsEvent) v._plurxInternalPlayEvents=Math.max(0,(v._plurxInternalPlayEvents||0)-1);
+      const index=events.play.indexOf(token);
+      if(index>=0) events.play.splice(index,1);
     });
   }else pausePlaybackInternally(v);
 }
 function handlePlaybackTransportEvent(v,p,event){
   if(!v||!p||PLAYER!==p) return;
   if(event==="pause"){
-    if(v._plurxInternalPauseEvents>0){ v._plurxInternalPauseEvents--; return; }
+    if(playbackTransportEvents(v).pause.shift()) return;
+    if(!v.paused) return; // queued native edge superseded by a newer Play
     if(v.ended||v.error) return;
     p.wantsPlayback=false;
+    if(typeof play==='function'&&play.pendingIntent&&PLAY_OPEN_GATE.current(play.pendingIntent.attempt))
+      play.pendingIntent.wantsPlayback=false;
     supersedePlaybackControlIntent(p);
     endWait(false);
   }else if(event==="play"){
-    if(v._plurxInternalPlayEvents>0){ v._plurxInternalPlayEvents--; return; }
+    if(playbackTransportEvents(v).play.shift()) return;
+    if(v.paused) return; // queued native edge superseded by a newer Pause
     p.wantsPlayback=true;
+    if(typeof play==='function'&&play.pendingIntent&&PLAY_OPEN_GATE.current(play.pendingIntent.attempt))
+      play.pendingIntent.wantsPlayback=true;
     supersedePlaybackControlIntent(p);
   }
 }
@@ -9171,10 +9423,22 @@ function playbackIsReal(){
 // viewer's or the watchdog's decision and must never be swallowed by an
 // automatic move already in flight.
 function claimAutoFallback(p){
-  if(p&&p.pendingOpenAttempt&&PLAY_OPEN_GATE.current(p.pendingOpenAttempt)) return false;
+  if(p&&p.pendingMediaChange) return false;
+  if(hasPendingPlaybackOpen(p)) return false;
   if(!p || p.autoFallbackInFlight) return false;
   p.autoFallbackInFlight=true;
   return true;
+}
+function hasPendingPlaybackOpen(p){
+  return !!(p&&((p.pendingOpenAttempt&&PLAY_OPEN_GATE.current(p.pendingOpenAttempt))
+    ||(p.retiringOpenAttempt&&PLAY_OPEN_GATE.current(p.retiringOpenAttempt))));
+}
+// PLAYER is the requested destination during preparation; the shared video
+// can still belong to its predecessor. Only the attached owner may interpret
+// media events/clock samples as playback evidence or trigger automatic work.
+// Transport/selection commands deliberately use desired PLAYER independently.
+function playbackOwnsAttachedMedia(p){
+  return !!p&&PLAYER===p&&!p.pendingMediaChange&&!hasPendingPlaybackOpen(p);
 }
 // Always released, including on failure: a 5xx on the replacement session must
 // leave Auto able to try again rather than wedging every later rescue.
@@ -9184,15 +9448,15 @@ function releaseAutoFallback(p){ if(p) p.autoFallbackInFlight=false; }
 async function startTranscodeFallback(reason, note){
   const v=document.getElementById("video");
   if(!PLAYER || !PLAYER.fileId || !v) return;
+  if(play.pendingIntent&&play.pendingIntent.fileId!==PLAYER.fileId
+     &&hasPendingPlaybackOpen(PLAYER)) return false;
+  if(hasPendingPlaybackOpen(PLAYER)
+     &&reason!=="stall-manual"&&reason!=="stall-terminal") return false;
   const startSec=positionForPlaybackIntent(v,PLAYER);
   endWait(false);
   beginPlaybackControlSeek(PLAYER,startSec,
     reason==="stall-manual"||reason==="stall-terminal");
-  // Bump the generation: this is a restart like any other. `PLAYER===me` alone
-  // was not enough — a seek mutates PLAYER in place rather than replacing it, so
-  // an identity check still passed and both streams attached.
-  const {me, live}=streamGeneration();
-  newAttempt(reason||"fallback");
+  const me=PLAYER;
   me.stallPrompt=false;
   // Before the session is opened, because `transcodeOpts` reads it: a stream
   // the browser refused is not a stream it lacked the pixels for, so the
@@ -9200,35 +9464,6 @@ async function startTranscodeFallback(reason, note){
   // for that reason — the decode rescue and the manual Force-transcode button
   // both arrive here meaning something else entirely.
   if(reason==="stream-rejected") me.refusedOriginal=true;
-  // A stalled predecessor must be detached before the await: if it refills,
-  // its late `playing` event would falsely report recovery for a replacement
-  // that does not exist yet. Decode rescue and stream rejection are different:
-  // keep any still-playing picture until session creation succeeds, so a 5xx
-  // cannot turn a marginal stream into a blank player with no way back.
-  const resetBeforeOpen=PlaybackPolicy.fallbackResetBeforeOpen({reason});
-  if(resetBeforeOpen){
-    me.started=false;
-    teardownHls();
-    resetMediaSource(v);
-    if(reason==="stall-manual")
-      setLoading(true,"Starting the transcoder…","your place is saved");
-  }
-  let info; try{ info=await openSession(me.fileId,transcodeOpts(startSec,selectedAudioIndex(me)));}catch(e){
-    if(live()){
-      if(finishStallRecovery("failed",e.message)) showStallRecoveryFailure(e.message);
-      else if(resetBeforeOpen) showStallRecoveryFailure(e.message);
-      else setLoading(false);
-      toast(e.message);
-    }
-    return;
-  }
-  if(!live()){ releaseSession(info&&info.session_id); return; }
-  // Session creation is the commit point for non-stall fallbacks. Until here,
-  // the old picture remains intact; after here no event from it may satisfy the
-  // replacement's watchdog or recovery accounting.
-  if(!resetBeforeOpen){ teardownHls(); resetMediaSource(v); }
-  me.started=false;
-  me.method='transcode'; me.copyHls=false;
   // A silent switch is a lie of omission. Without this the overlay keeps the
   // decision's remux Reason over a transcode session picked mid-flight — and
   // a cache hit makes the swap fast enough to miss entirely, which read as
@@ -9237,9 +9472,10 @@ async function startTranscodeFallback(reason, note){
   // row is the standing answer for what the client did about it. The
   // decode-rescue writes its own note before calling here, so only fill one
   // in when this caller brought one.
-  if(note && !me.rescuedNote) me.rescuedNote=note;
-  setLoading(true,"Preparing the stream…",(info.encoder?("encoder: "+info.encoder+" — "):"")+"transcoding instead of remuxing");
-  armStall(attachSession(v, me, info, startSec));
+  return requestPlaybackMediaChange(me,{method:'transcode',copyHls:false,
+    reason:reason||"fallback",note:note||me.rescuedNote,
+    automatic:reason==='decode-rescue'||reason==='auto-supply',
+    from:reason==='auto-supply'?me.method:null,switchReason:"supply stalls"});
 }
 // The decode-margin rescue, run from the 5s tick. When an AUTO session on a
 // copy path has measured itself out of decoder headroom AND the viewer is
@@ -9250,6 +9486,7 @@ async function startTranscodeFallback(reason, note){
 // minute CLEARS the remembered limit, so a GPU upgrade is noticed.
 function maybeDecodeRescue(){
   const p=PLAYER, v=document.getElementById("video");
+  if(!playbackOwnsAttachedMedia(p)) return;
   if(!p || !v || !p.started || !p.hitches || v.paused) return;
   if(p.method!=='remux' && p.method!=='direct_play') return;
   const h=p.hitches, secs=playedSecs(v), q=qualityForce();
@@ -9354,50 +9591,10 @@ async function switchAutoRung(currentHeight,decision){
   try{
     const pos=positionForPlaybackIntent(v,p);
     beginPlaybackControlSeek(p,pos,false);
-    const track=p.audio&&p.audio[p.curAudio], aidx=track?track.index:(p.curAudio||0);
-    const {me,live}=streamGeneration();
-    me.abr.switching=true;
-    me.stallFrom=pos;
-    newAttempt("auto-quality");
-    me.started=false;
-    setLoading(true,"Adjusting quality…",
-      `${autoSwitchLabel(currentHeight)} → ${autoSwitchLabel(decision.height)} — ${decision.reason}`);
-    // This is the measured restart model, not Phase 3's prepared handoff. Capture
-    // the outgoing estimate while tearing down, then pay one visible restart.
-    teardownHls();
-    let info;
-    try{
-      info=await openSession(me.fileId,transcodeOpts(pos,aidx,decision.height));
-    }catch(e){
-      // This rung is not available on this server for this file — a Dolby
-      // Vision reshape that cannot reach it, an encoder that will not start,
-      // a refusal. Remember it: the dwell and hold timers cannot end a loop
-      // whose every cycle looks new, and this one oscillated 720<->1080 on a
-      // ~2 minute period in production.
-      me.abr.failedHeights=me.abr.failedHeights||new Set();
-      me.abr.failedHeights.add(decision.height);
-      if(live()){
-        me.abr.switching=false;
-        setLoading(true,"Quality adjustment failed.",e.message,
-          `<button onclick="retryPlayback()">Try again</button>`+
-          `<button onclick="closePlayer()">Close</button>`);
-      }
-      return;
-    }
-    if(!live()){ releaseSession(info&&info.session_id); return; }
-    me.method='transcode'; me.copyHls=false; me.autoHeight=decision.height;
-    me.health=null;
-    const now=performance.now();
-    me.abr.lastSwitchAtMs=now;
-    me.abr.stableSinceMs=now;
-    me.abr.mildSamples=0;
-    me.abr.upgradeSinceMs=null;
-    me.abr.previousRunway=null;
-    me.abr.stallEvents.supply=[];
-    recordAutoSwitch(me,currentHeight,decision.height,decision.reason,pos,info.session_id);
-    me.abr.switching=false;
-    armStall(attachSession(v,me,info,pos),20000);
-    toast(`Quality → ${decision.height}p — ${decision.reason}`);
+    const attached=await requestPlaybackMediaChange(p,{method:'transcode',copyHls:false,
+      height:decision.height,reason:"auto-quality",automatic:true,
+      from:currentHeight,switchReason:decision.reason});
+    if(attached) toast(`Quality → ${decision.height}p — ${decision.reason}`);
   } finally { releaseAutoFallback(p); }
 }
 async function rescueAutoSupply(){
@@ -9418,6 +9615,9 @@ async function rescueAutoSupply(){
       "switched to transcode Auto after 3 supply stalls in 60 seconds");
   } finally { releaseAutoFallback(p); }
   if(PLAYER!==p) return;
+  // The retained recipe owns completion even if a newer command superseded
+  // this invocation. It records the switch exactly once, at actual attachment.
+  if(p.pendingMediaChange) return;
   p.abr.switching=false;
   if(p.method!=='transcode'){
     p.abr.supplyRescued=false;
@@ -9427,17 +9627,19 @@ async function rescueAutoSupply(){
   p.abr.lastSwitchAtMs=now;
   p.abr.stableSinceMs=now;
   p.abr.stallEvents.supply=[];
-  recordAutoSwitch(p,before,"transcode Auto","supply stalls",pos);
 }
 async function autoControllerTick(){
   const p=PLAYER, v=document.getElementById("video");
+  const attachment=p?.mediaAttachment, session=p?.sessionId, stream=p?.streamId;
+  if(!playbackOwnsAttachedMedia(p)) return;
   if(!(SERVER&&SERVER.playback_auto_abr)||!p||!v||!p.abr||qualityForce()!=='auto'||!p.started||v.paused||p.abr.switching) return;
   if(p.autoFallbackInFlight) return;
   await pollSessionHealth(true);
   // Re-checked after the poll for the same reason it is checked before it: the
   // unawaited `maybeDecodeRescue()` earlier in this interval can have claimed
   // the automatic move while this tick was waiting on the health request.
-  if(PLAYER!==p||!p.abr||p.abr.switching||p.autoFallbackInFlight) return;
+  if(PLAYER!==p||p.mediaAttachment!==attachment||p.sessionId!==session||p.streamId!==stream
+     ||!p.abr||p.abr.switching||p.autoFallbackInFlight||!playbackOwnsAttachedMedia(p)) return;
   const now=performance.now(), windowMs=PlaybackPolicy.AUTO_DEFAULTS.stallWindowMs;
   for(const kind of ['supply','decode']){
     p.abr.stallEvents[kind]=(p.abr.stallEvents[kind]||[]).filter(at=>now-at<windowMs);
@@ -9492,6 +9694,15 @@ function armStall(fromSec, graceMs){
 // Recovery offered by a diagnosed stall: restart the stream at the position we
 // were trying to reach, rather than making the user close and re-open the item.
 function retryPlayback(){
+  if(play.failedPreparation){
+    const retry=play.failedPreparation;play.failedPreparation=null;
+    PENDING_ATTEMPT_REASON="retry";
+    if(PLAYER?.fileId===retry.fileId){
+      retry.wantsPlayback=PLAYER.wantsPlayback;
+      beginPlaybackControlSeek(PLAYER,retry.resumeMs/1000);
+    }
+    return play(retry.fileId,retry.title,retry.resumeMs,retry.knownDurMs,retry.meta,null,retry);
+  }
   if(!PLAYER) return;
   const loading=document.getElementById("ploading"); if(loading) loading.classList.remove("failed");
   PLAYER.stallPrompt=false;
@@ -9501,39 +9712,34 @@ function retryPlayback(){
 }
 async function stallDiagnose(){
   const v=document.getElementById("video");
-  if(!PLAYER || PLAYER.started) return;
-  const from=(PLAYER.stallFrom!=null)?PLAYER.stallFrom:0;
+  const p=PLAYER;
+  if(!playbackOwnsAttachedMedia(p) || p.started) return;
+  const generation=p._seekToken||0, action=p.controlIntentGeneration||0;
+  const current=()=>playbackOwnsAttachedMedia(p)&&!p.started&&(p._seekToken||0)===generation
+    &&(p.controlIntentGeneration||0)===action;
+  const from=(p.stallFrom!=null)?p.stallFrom:0;
   if(pbPosSec()>from+0.35) return;   // it actually started moving — never mind
   const controlTrigger=notifyPlaybackControl("stalled");
   const hdrs={}; if(TOKEN) hdrs["authorization"]="Bearer "+TOKEN;
-  const url=PLAYER.probeUrl;
+  const url=p.probeUrl;
   let verdict="Playback hasn't started.", detail="Open Settings → Logs and read the last plurxd::stream / transcode line.";
   if(url){
     try{
-      const ctl=new AbortController();
-      const res=await fetch(url,{headers:hdrs,signal:ctl.signal});
-      const status=res.status;
-      let segState=null;   // 'blocked' | number(status) | null(n/a)
-      if(PLAYER.method==='transcode'){
-        try{
-          const txt=await res.text();
-          const seg=(txt.split('\n').find(l=>l&&!l.startsWith('#')&&/\.ts(\?|$)/.test(l))||"").trim();
-          if(seg){ const segUrl=(seg[0]==='/'||/^https?:/.test(seg))?seg:url.replace(/[^/]*$/,seg);
-            const r2=await fetch(segUrl,{headers:hdrs}); segState=r2.status; try{r2.body&&r2.body.cancel&&r2.body.cancel();}catch(e){} }
-        }catch(e){ segState='blocked'; }
-      } else { try{ctl.abort();}catch(e){} }    // remux: don't drain the pipe, kill_on_drop stops ffmpeg
+      const {status,segState}=await probePlaybackSource(url,hdrs,p.method==='transcode');
+      if(!current()) return;
       const serverErr = status>=500 || (typeof segState==='number'&&segState>=500);
       const reached   = status>=200 && status<400 && segState!=='blocked' && !(typeof segState==='number'&&segState>=400);
       if(serverErr){ verdict="The server couldn't build the stream."; detail="ffmpeg failed on this file — open Settings → Logs and read the last remux/transcode line, it names the real cause."; }
       else if(reached){ verdict="The stream reaches the browser but won't play."; detail="Usually a codec this browser can't decode, or an extension interfering. Try a private window with extensions off; if it still fails, the ffmpeg line in Settings → Logs will say why."; }
       else { verdict="The stream request looks blocked."; detail="A privacy/ad-blocker extension is the usual cause — it eats /stream.mp4 and /hls/*.ts requests. Open in a private window with extensions disabled, or allowlist this site, then play again."; }
     }catch(e){
-      verdict="The stream request was blocked before it reached the server.";
-      detail="A browser privacy or ad-blocker extension is the usual cause (it silently drops /stream.mp4 and /hls/ requests). Open in a private window with extensions disabled, or allowlist this site.";
+      if(!current()) return;
+      verdict=e.name==='TimeoutError'?"The stream probe timed out.":"The stream request failed.";
+      detail="The server or network did not answer the playback probe. Your place is saved; retry, or inspect Settings → Logs.";
     }
   }
-  console.warn("[cinema] playback stall diagnosis",{method:PLAYER.method,url,networkState:v&&v.networkState,readyState:v&&v.readyState,error:v&&v.error&&v.error.code,verdict});
-  if(PLAYER.started) return;   // raced with a late start
+  if(!current()) return;
+  console.warn("[cinema] playback stall diagnosis",{method:p.method,url,networkState:v&&v.networkState,readyState:v&&v.readyState,error:v&&v.error&&v.error.code,verdict});
   finishStallRecovery("failed",verdict);
   clientLog({level:"warn",event:"stall",src:(url||"").split("?")[0],message:verdict,
     detail:detail,control_trigger:controlTrigger});
@@ -9544,6 +9750,34 @@ async function stallDiagnose(){
   const loading=document.getElementById("ploading"); if(loading) loading.classList.add("failed");
   PLAYER.stallPrompt=true;
   toast(verdict);
+}
+// One deadline covers response headers, playlist body and the sample segment.
+// Abort releases network work; the race also bounds transports ignoring abort.
+async function probePlaybackSource(url,headers,isTranscode){
+  const ctl=new AbortController();
+  let timer;
+  const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>{
+    const error=new Error("playback probe timed out"); error.name="TimeoutError";
+    reject(error); ctl.abort();
+  },8000);});
+  try{
+    return await Promise.race([deadline,(async()=>{
+      const res=await fetch(url,{headers,signal:ctl.signal});
+      const status=res.status;
+      let segState=null;
+      if(isTranscode){
+        const txt=await res.text();
+        const seg=(txt.split('\n').find(l=>l&&!l.startsWith('#')&&/\.(?:ts|m4s)(\?|$)/.test(l))||"").trim();
+        if(seg){
+          const segUrl=(seg[0]==='/'||/^https?:/.test(seg))?seg:url.replace(/[^/]*$/,seg);
+          const response=await fetch(segUrl,{headers,signal:ctl.signal});
+          segState=response.status;
+          if(response.body) response.body.cancel().catch(()=>{});
+        }
+      }
+      return {status,segState};
+    })()]);
+  }finally{clearTimeout(timer);ctl.abort();}
 }
 
 // ---- loading status, projection chrome, skip intro/credits ----------------
@@ -9744,6 +9978,7 @@ function markPlaybackControlSeekExecuted(p,targetSec,v){
 // timeline has advanced since execution. Only active monotonic time counts;
 // pause/background time cannot expand the landing allowance indefinitely.
 function samplePlaybackPresentationClock(v,p){
+  if(!playbackOwnsAttachedMedia(p))return 0;
   const pending=p?.controlSeek;
   if(!pending?.executed) return 0;
   const now=performance.now();
@@ -9766,6 +10001,7 @@ function samplePlaybackPresentationClock(v,p){
 // picture or audio clock continues to move during the replacement.
 function playbackProgressTick(v,p){
   if(!v||!p||PLAYER!==p) return;
+  if(!playbackOwnsAttachedMedia(p)) return;
   samplePlaybackPresentationClock(v,p);
   const pending=p.controlSeek;
   const active=(p.wantsPlayback??!v.paused)&&!v.ended&&!document.hidden
@@ -9813,6 +10049,7 @@ function playbackProgressTick(v,p){
   persistentWait(v,p,p.waitAt,p._seekToken||0,p.controlIntentGeneration||0).catch(()=>{});
 }
 function settlePlaybackControlSeek(v,p,presentedMediaTime,presentedFrameSequence){
+  if(!playbackOwnsAttachedMedia(p))return false;
   const pending=p&&p.controlSeek;
   const playedMs=samplePlaybackPresentationClock(v,p);
   if(!pending||!pending.executed||!v||!p.started||v.seeking) return false;
@@ -9862,7 +10099,7 @@ function pbTick(){
   if(sk){ sk.setAttribute("aria-valuenow", Math.round(f*100)); sk.setAttribute("aria-valuetext", clockFromSec(pos)+(tot>0?" of "+clockFromSec(tot):"")); }
   // Seeking a transcode restarts the session at a new offset, which moves the
   // whole subtitle timeline — re-shift the cues whenever that happens.
-  if(PLAYER.curSub>=0 && PLAYER._subOff!=null && PLAYER._subOff!==(PLAYER.offset||0)) setSub(PLAYER.curSub);
+  if(playbackOwnsAttachedMedia(PLAYER)&&!PLAYER.controlSeek&&PLAYER.curSub>=0 && PLAYER._subOff!=null && PLAYER._subOff!==(PLAYER.offset||0)) setSub(PLAYER.curSub);
 }
 function pbSyncPlayIcon(){ const v=document.getElementById("video"), b=document.getElementById("pbplay");
   if(b&&v){ const paused=(v.paused||v.ended); b.textContent=paused?"▶":"❚❚"; b.setAttribute("aria-label", paused?"Play":"Pause"); } }
@@ -9889,13 +10126,17 @@ function togglePlay(){
   const v=document.getElementById("video"); if(!v) return;
   endWait(false);
   supersedePlaybackControlIntent(PLAYER);
-  if(v.ended) replayEnded();
+  const pending=typeof play==='function'&&play.pendingIntent;
+  if(pending&&PLAY_OPEN_GATE.current(pending.attempt)){
+    pending.wantsPlayback=!pending.wantsPlayback;
+    if(PLAYER){PLAYER.wantsPlayback=pending.wantsPlayback;applyPlaybackTransportIntent(v,PLAYER);}
+  }else if(v.ended) replayEnded();
   else if(PLAYER){
     rememberPlaybackTransportIntent(v,PLAYER);
     PLAYER.wantsPlayback=!PLAYER.wantsPlayback;
     applyPlaybackTransportIntent(v,PLAYER);
   }
-  playerActivity();
+  if(PLAYER)playerActivity();
   notifyPlaybackControl();
 }
 // Directional nudges coalesce: accumulate against a frozen base, preview live
@@ -9993,11 +10234,13 @@ function pbWireSeek(){
   seek.addEventListener("blur",()=>{ if(!PLAYER||PLAYER._seekDragging)return; cancelPendingSeek(); });
 }
 function playbackWaitNeedsProgress(p){
-  return !!(p&&p.progressWatch?.fired&&p.waitAt!=null);
+  return !!(p&&(p.pendingMediaChange||hasPendingPlaybackOpen(p)||
+    (p.progressWatch?.fired&&p.waitAt!=null)));
 }
 function handlePlaybackPlaying(v,p){
   if(!p||PLAYER!==p) return;
   if(p.wantsPlayback===false){ pausePlaybackInternally(v); return; }
+  if(!playbackOwnsAttachedMedia(p)) return;
   const first=!p.started, needsProgress=playbackWaitNeedsProgress(p);
   p.started=true;
   // A decoder may emit playing without producing another frame or clock
@@ -10036,7 +10279,7 @@ function wirePlayer(){
   // decided when playback resumes, because that is the first moment its
   // duration is known. See beginWait/endWait.
   v.addEventListener("waiting",()=>{
-    if(!PLAYER) return;
+    if(!playbackOwnsAttachedMedia(PLAYER)) return;
     const action=PlaybackPolicy.waitingOverlayAction({
       started:PLAYER.started, stallPrompt:PLAYER.stallPrompt
     });
@@ -10058,7 +10301,7 @@ function wirePlayer(){
     handlePlaybackTransportEvent(v,PLAYER,"play");
     notifyPlaybackControl();
   });
-  v.addEventListener("seeking",()=>{ endWait(false); notifyPlaybackControl(); });
+  v.addEventListener("seeking",()=>{ notifyPlaybackControl(); });
   v.addEventListener("seeked",notifyPlaybackControl);
   v.addEventListener("ratechange",notifyPlaybackControl);
   v.addEventListener("ended",notifyPlaybackControl);
@@ -10066,6 +10309,7 @@ function wirePlayer(){
   // And a remux/direct stream the browser rejects gets one automatic rescue:
   // restart as a transcode session (the server re-encodes to plain H.264/AAC).
   v.addEventListener("error",()=>{
+    if(!playbackOwnsAttachedMedia(PLAYER)) return;
     // Detaching the source on purpose (the reset a remux seek does before
     // handing over the next stream) can raise an error event with no source
     // attached. That is us, not a broken file — never rescue-transcode on it.
@@ -10164,8 +10408,12 @@ function markerAutoSkipEligible(m){
   if(m.provenance!=null) return m.provenance==="authored"||m.provenance==="manual";
   return m.chapter!==false;
 }
+function playbackMarkersUsable(p){
+  return playbackOwnsAttachedMedia(p)&&!p.controlSeek;
+}
 function checkMarkers(){
-  if(!PLAYER.markers||!PLAYER.markers.length) return;
+  if(!playbackMarkersUsable(PLAYER)){renderSkip(null);return;}
+  if(!PLAYER.markers||!PLAYER.markers.length){renderSkip(null);return;}
   const pos=markerNowMs();
   const m=PLAYER.markers.find(mk=> pos>=mk.start_ms && pos < mk.end_ms-400);
   renderSkip(m||null);
@@ -10173,6 +10421,7 @@ function checkMarkers(){
 }
 function renderSkip(m){
   const c=document.getElementById("pskip"); if(!c) return;
+  if(!playbackMarkersUsable(PLAYER))m=null;
   if(!m){ if(c.dataset.k){ c.innerHTML=""; c.dataset.k=""; } return; }
   const estimated=markerIsEstimated(m);
   const key=m.kind+m.start_ms+(estimated?"e":"");
@@ -10191,12 +10440,14 @@ function renderSkip(m){
   }
 }
 function skipCurrent(){
+  if(!playbackMarkersUsable(PLAYER)){renderSkip(null);return;}
   const pos=markerNowMs();
   const m=(PLAYER.markers||[]).find(mk=> pos>=mk.start_ms && pos<mk.end_ms);
   if(m) skipMarker(m,false);
 }
 function skipMarker(m,automatic=false){
   const c=document.getElementById("pskip"); if(c){ c.innerHTML=""; c.dataset.k=""; }
+  if(!playbackMarkersUsable(PLAYER))return;
   clientLog({level:"info",event:automatic?"marker_automatic_skip":"marker_manual_skip",
     detail:m.kind||"unknown",message:"playback marker skipped"});
   // A tail marker that runs to the very end → treat "skip" as "finished".
@@ -10259,7 +10510,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   // implementation coalesced only UI nudges, so two independent inputs still
   // issued two media mutations and let their completion events race.
   await new Promise(done=>setTimeout(done,100));
-  if(!PLAYER||PLAYER.controlSeek!==seekIntent) return;
+  if(!PLAYER||PLAYER.controlSeek!==seekIntent||hasPendingPlaybackOpen(PLAYER)) return;
   // Direct play and film-addressed VOD seek without opening a new session.
   if(!forceReopen && (PLAYER.method==='direct_play' || PLAYER.vod)){
     try{ v.currentTime=Math.max(0,targetSec-(PLAYER.offset||0)); }catch(e){}
@@ -10282,9 +10533,11 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     resetMediaSource(v);
     if(!live()) return;
     const attachment=beginPlaybackMediaAttachment(me);
-    v.onloadedmetadata=()=>{ v.onloadedmetadata=null;
+    v.onloadedmetadata=()=>{
+      if(!attachment.current()) return;
+      v.onloadedmetadata=null;
       applyPlaybackAttachmentPosition(v,me,attachment,targetSec); };
-    v.src=url; markPlaybackControlSeekExecuted(me,targetSec);
+    setPlaybackMediaSource(v,url); markPlaybackControlSeekExecuted(me,targetSec);
     armStall(targetSec,20000); applyPlaybackTransportIntent(v,me);
     return;
   }
@@ -10292,52 +10545,9 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   // double-clicked ±10, or a drag landing near a keyboard nudge) would tear down
   // and re-attach hls.js twice. Token the call and bail any superseded one after
   // its await, so only the last seek attaches.
-  const {me, live}=streamGeneration();
-  newAttempt(forceReopen?"stall-restart":"seek");
-  const track=PLAYER.audio[PLAYER.curAudio]; const aidx=track?track.index:(PLAYER.curAudio||0);
-  const curSub=PLAYER.curSub;
-  // The stream we are about to build has NOT started. Saying so is what stops a
-  // failed seek from hanging: `started` gates the `waiting` handler (which would
-  // otherwise paint "Buffering…" over the overlay with no diagnosis and no way
-  // out) and it gates the stall watchdog's own early-out.
-  me.started=false;
-  const failed=e=>{ if(live()){
-    me.started=true;
-    if(finishStallRecovery("failed",e.message)) showStallRecoveryFailure(e.message);
-    else setLoading(false);
-  } toast(e.message); };
-  setLoading(true, PLAYER.method==='transcode'?"Skipping ahead…":"Seeking…",
-    PLAYER.method==='transcode'?"the transcoder is re-seeking":"");
-  teardownHls();
-  if(forceReopen) resetMediaSource(v); // native HLS has no PLAYER.hls to destroy
-  [...v.querySelectorAll("track")].forEach(t=>t.remove());
-  if(PLAYER.method==='transcode'){
-    const opts=PlaybackPolicy.stallReopenSessionOptions({
-      options:transcodeOpts(targetSec,aidx,autoHeightOverride),forceReopen,
-      method:PLAYER.method,sessionId:PLAYER.sessionId
-    });
-    let info; try{ info=await openSession(PLAYER.fileId,opts);}catch(e){ return failed(e); }
-    if(!live()){ releaseSession(info&&info.session_id); return; }
-    armStall(attachSession(v, PLAYER, info, targetSec), 20000);
-  } else if(PLAYER.copyHls){
-    // Copy-video HLS (Safari): re-open the session at the target position.
-    // The guard goes *into* startCopyHls: checking after it returned would be
-    // too late, it has already attached.
-    try{ if(!await startCopyHls(v, targetSec, live)) return; }catch(e){ return failed(e); }
-    armStall(PLAYER.offset,20000);
-  } else {
-    PLAYER.method='remux'; PLAYER.offset=targetSec;
-    const url=remuxUrl(`/api/v1/files/${PLAYER.fileId}/stream.mp4`, aidx, targetSec);
-    // Hand the element a clean slate first. Assigning .src straight over a live
-    // progressive stream leaves the aborted fetch and its buffered range
-    // attached, and the replacement can then sit at readyState 0 forever.
-    resetMediaSource(v);
-    if(!live()) return;
-    PLAYER.probeUrl=`/api/v1/files/${PLAYER.fileId}/stream.mp4`;
-    v.src=url; markPlaybackControlSeekExecuted(PLAYER,targetSec);
-    armStall(targetSec,20000); applyPlaybackTransportIntent(v,me);
-  }
-  if(curSub>=0) setTimeout(()=>{ if(live()&&me.curSub===curSub) setSub(curSub); },400);
+  return requestPlaybackMediaChange(PLAYER,{method:PLAYER.method,copyHls:!!PLAYER.copyHls,
+    reason:forceReopen?"stall-restart":"seek",height:autoHeightOverride,
+    forceReopen,previousSessionId:PLAYER.sessionId});
 }
 function autoskipOn(){ try{ return localStorage.getItem("plurx_autoskip")==="1"; }catch(e){ return false; } }
 function setAutoskip(on){ try{ localStorage.setItem("plurx_autoskip", on?"1":"0"); }catch(e){}
@@ -10354,25 +10564,33 @@ function togglePlayerAutonext(){ setAutoNext(!autoNextOn()); toast(autoNextOn()?
 // season, else the first episode of the next season. Reuses AUTOPLAY-on-navigate
 // so the page behind the player follows along. Returns true if it started one.
 async function playNextEpisode(){
+  const current=playbackContinuation(PLAYER);
   const itemId=ITEM_FOR_FILE[PLAYER&&PLAYER.fileId]; if(!itemId) return false;
-  let cur; try{ cur=await api(`/items/${itemId}`); }catch(e){ return false; }
+  const preparation=beginPlaybackPreparation(current);
+  const read=path=>preparation.run(signal=>api(path,{signal}));
+  try{
+  const cur=await read(`/items/${itemId}`);
+  if(!current()) return false;
   if(!cur.item || cur.item.kind!=='episode') return false;   // movies don't chain
   const anc=cur.ancestors||[], season=anc[anc.length-1], show=anc[anc.length-2];
   if(!season) return false;
   let next=null;
-  const sd=await api(`/items/${exactWireId(season)}`).catch(()=>null);
+  const sd=await read(`/items/${exactWireId(season)}`);
+  if(!current()) return false;
   if(sd){
     const eps=(sd.children||[]).filter(c=>c.kind==='episode');
     const i=eps.findIndex(e=>exactWireId(e)===itemId);
     if(i>=0 && eps[i+1]) next=eps[i+1];
   }
   if(!next && show){                                         // roll over to next season
-    const shd=await api(`/items/${exactWireId(show)}`).catch(()=>null);
+    const shd=await read(`/items/${exactWireId(show)}`);
+    if(!current()) return false;
     if(shd){
       const seasons=(shd.children||[]).filter(c=>c.kind==='season');
       const si=seasons.findIndex(s=>exactWireId(s)===exactWireId(season));
       if(si>=0 && seasons[si+1]){
-        const nsd=await api(`/items/${exactWireId(seasons[si+1])}`).catch(()=>null);
+        const nsd=await read(`/items/${exactWireId(seasons[si+1])}`);
+        if(!current()) return false;
         if(nsd) next=(nsd.children||[]).filter(c=>c.kind==='episode')[0]||null;
       }
     }
@@ -10382,6 +10600,16 @@ async function playNextEpisode(){
   toast("▶ Up next: "+next.title);
   location.hash="#/item/"+exactWireId(next);
   return true;
+  }catch(error){
+    if(current())toast("Could not load the next episode. Choose it from the library to retry.");
+    return false;
+  }finally{preparation.finish();}
+}
+function playbackContinuation(p){
+  const action=p?.controlIntentGeneration||0, generation=p?._seekToken||0;
+  const open=p?.pendingOpenAttempt;
+  return ()=>!!p&&PLAYER===p&&(p.controlIntentGeneration||0)===action
+    &&(p._seekToken||0)===generation&&p.pendingOpenAttempt===open;
 }
 async function playNextAudiobookPart(){
   if(!PLAYER||!PLAYER.bookParts||PLAYER.bookParts.length<2) return false;
@@ -10395,10 +10623,12 @@ async function playNextAudiobookPart(){
 // Video reached its natural end (or auto-skipped credits hit the end): play the
 // next episode if autoplay is on, otherwise fall back to prior behavior.
 async function finishPlayback(closeIfNoNext){
+  const current=playbackContinuation(PLAYER);
   if(PLAYER&&PLAYER.bookParts){ closePlayer(); return; }
   if(autoNextOn()){
     setLoading(true,"Up next…","finding the next episode");
     if(await playNextEpisode()) return;                      // navigation + play take over
+    if(!current()) return;
     setLoading(false);
   }
   if(closeIfNoNext) closePlayer();
@@ -10419,24 +10649,31 @@ const ENDED_SLACK_SEC=15;
 // stream marked a film watched permanently and told Trakt so.
 async function handleEnded(fileId){
   const p=PLAYER, generation=(PLAYER&&PLAYER._seekToken)||0;
+  if(!playbackOwnsAttachedMedia(p)) return;
+  const current=playbackContinuation(p);
   const actionGeneration=(PLAYER&&PLAYER.controlIntentGeneration)||0;
   const total=pbTotalSec(), pos=pbPosSec();
   if(PLAYER&&PLAYER.bookParts&&PLAYER.bookParts.length){
     const i=PLAYER.bookParts.findIndex(p=>p.id===PLAYER.fileId);
     if(i>=0&&PLAYER.bookParts[i+1]){
       await reportProgress(fileId,false);
+      if(!current()) return;
       if(await playNextAudiobookPart()) return;
+      if(!current()) return;
     }
   }
   // total===0 means no runtime is known for this file (nothing probed, and a
   // growing stream's own duration is not a substitute). There is nothing
   // better to judge by, so `ended` stands.
   if(!(total>0) || pos>=total-ENDED_SLACK_SEC){
-    await reportProgress(fileId,true); return finishPlayback(false);
+    await reportProgress(fileId,true);
+    if(!current()) return;
+    return finishPlayback(false);
   }
   // Truncated. Record where playback actually reached — never the runtime —
   // so resume lands here rather than at the end.
   await reportProgress(fileId,false);
+  if(!current()) return;
   const prev=PLAYER.endedAt; PLAYER.endedAt=pos;
   // Dying at the same spot means retrying will die there again. Count only
   // repeats at the same position, so a stream that gets further each time is
@@ -10764,6 +11001,9 @@ function setQuality(q){
       message:`quality ${from} → ${q}`,detail:`from=${from} to=${q}`,reason:"manual"},
       playbackContext()));
     PENDING_ATTEMPT_REASON="quality";
+    // A manual quality choice replaces an automatic/compatibility recipe.
+    // In particular Original must not inherit a pending forced transcode.
+    PLAYER.pendingMediaChange=null;
     const v=document.getElementById("video");
     const pos=positionForPlaybackIntent(v,PLAYER);
     beginPlaybackControlSeek(PLAYER,pos);
@@ -10794,6 +11034,10 @@ async function setSync(v){
   toast("Audio sync: "+offsetLabel(PLAYER.aoffset));
   const video=document.getElementById("video");
   const pos=positionForPlaybackIntent(video,PLAYER);
+  if(me.pendingMediaChange){
+    beginPlaybackControlSeek(me,pos);
+    return executePlaybackMediaChange(me,me.pendingMediaChange);
+  }
   if(PLAYER.method==='direct_play'){
     // A direct file has nowhere to apply a correction, so this playback alone
     // moves onto the remux path. The next play still begins from its decision.
@@ -10877,6 +11121,8 @@ async function setSub(index){
     notifyPlaybackControl();
   }
   rememberPlaybackSelection("subtitle", index);
+  if(burnAction!=="burn"&&me.burnedSub!=null) return burnSub(null);
+  if(burnAction==="burn") me.burnedSub=index;
   if(restartPendingPlaybackOpen(me,"subtitle")) return true;
   if(burnAction==="burn"){ await burnSub(index); return true; }
   if(me.burnedSub!=null){
@@ -10957,33 +11203,19 @@ async function burnSub(index){
   // whose default is the forced bitmap track would burn it straight back in.
   if(index==null){
     me.burnedSub=null;
+    me.pendingMediaChange=null;
     PENDING_ATTEMPT_REASON="subtitle-off";
     PENDING_DEFAULT_SUB_OFF=true;
     toast("Subtitles off");
     play(me.fileId, me.title||"", Math.round(pos*1000), me.knownDur||0, me.meta);
     return;
   }
-  const track=me.audio&&me.audio[me.curAudio];
-  const aidx=track?track.index:(me.curAudio||0);
-  const {live}=streamGeneration();
-  newAttempt("subtitle-burn");
-  teardownHls();
-  clearSubs(v);
   me.curSub=index;
   me.burnedSub=index;
   pbSyncSubIcon();
   const s=(me.subs||[]).find(x=>x.index===index);
   setLoading(true, "Burning in subtitles…",
     `${subLabelFor(s,index)} — this format is a picture, so the server draws it in`);
-  let info;
-  try{
-    info=await openSession(me.fileId,transcodeOpts(pos,aidx));
-  }catch(e){
-    if(live() && !showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
-    return;
-  }
-  if(!live()){ releaseSession(info&&info.session_id); return; }
-  me.method='transcode'; me.copyHls=false;
   // The overlay's Reason row otherwise keeps quoting the /decision verdict —
   // "forced original quality (no video transcode)" — over a session that IS a
   // transcode, which sent a whole debugging session in the wrong direction.
@@ -10992,8 +11224,8 @@ async function burnSub(index){
               +(sessionHeight()?(qualityForce()==="original"
                   ?" · kept at source resolution (Original)"
                   :" · kept at source resolution (the verdict was to send the source)"):"")];
-  armStall(attachSession(v, me, info, pos), 20000);
-  toast("Subtitles: "+subLabelFor(s,index));
+  const attached=await requestPlaybackMediaChange(me,{method:'transcode',copyHls:false,reason:"subtitle-burn"});
+  if(attached) toast("Subtitles: "+subLabelFor(s,index));
 }
 // Cycle Off → each track → Off (the 'c' hotkey and the CC button's long game).
 async function cycleSub(){
@@ -11018,38 +11250,9 @@ async function switchAudio(idx){
   rememberPlaybackSelection("audio", aidx);
   beginPlaybackControlSeek(me,pos);
   if(restartPendingPlaybackOpen(me,"audio")) return;
-  // Same generation counter as seekTo: this also restarts the server stream, so
-  // a seek landing mid-switch (or a second switch) must win outright instead of
-  // both attaching.
-  const {live}=streamGeneration();
-  newAttempt("audio");
-  teardownHls();
-  const curSub=me.curSub;
-  [...v.querySelectorAll("track")].forEach(t=>t.remove()); // re-added below if a sub was on
-  if(me.method==='transcode'){
-    let info; try{ info=await openSession(me.fileId,transcodeOpts(pos,aidx));}catch(e){
-      if(live()&&!showSessionOpenFailure(e)) toast(e.message);
-      return;
-    }
-    if(!live()){ releaseSession(info&&info.session_id); return; }
-    armStall(attachSession(v, me, info, pos),20000);
-  } else if(me.copyHls){
-    // Copy-video HLS (Safari): re-open with the chosen audio track.
-    try{ if(!await startCopyHls(v, pos, live)) return; }catch(e){
-      if(live()&&!showSessionOpenFailure(e)) toast(e.message);
-      return;
-    }
-  } else {
-    // Switching audio forces a remux so the chosen track is the one delivered.
-    me.method='remux'; me.offset=pos;
-    resetMediaSource(v);
-    v.src=remuxUrl(`/api/v1/files/${me.fileId}/stream.mp4`, aidx, pos);
-    markPlaybackControlSeekExecuted(me,pos);
-    armStall(pos,20000);
-    applyPlaybackTransportIntent(v,me);
-  }
-  toast("Audio: "+(langName(track&&track.language)||("Track "+(idx+1))));
-  if(curSub>=0) setTimeout(()=>{ if(live()&&me.curSub===curSub) setSub(curSub); },400);
+  const attached=await requestPlaybackMediaChange(me,{method:me.method==='transcode'?'transcode':'remux',
+    copyHls:!!me.copyHls,reason:"audio"});
+  if(attached) toast("Audio: "+(langName(track&&track.language)||("Track "+(idx+1))));
 }
 
 // ---- playback stats overlay (press i, or the Stats button) ----------------
@@ -11379,7 +11582,10 @@ function updateStats(){
 // can't keep a session alive past the idle reaper either.
 async function pollSessionHealth(force){
   const p=PLAYER;
-  if(!p) return;
+  if(!playbackOwnsAttachedMedia(p)) return;
+  const session=p.sessionId, stream=p.streamId, attachment=p.mediaAttachment;
+  const current=()=>playbackOwnsAttachedMedia(p)&&p.sessionId===session&&p.streamId===stream
+    &&p.mediaAttachment===attachment;
   const ov=document.getElementById("statsov");
   if(!force&&(!ov||!ov.classList.contains("on"))) return;
   // Two shapes of stream, one question. An HLS session answers from the
@@ -11393,29 +11599,31 @@ async function pollSessionHealth(force){
   if(!url){ if(p.health){ p.health=null; updateStats(); } return; }
   try{
     const h=await api(url);
-    if(PLAYER===p) { p.health=h; updateStats(); }
+    if(current()) { p.health=h; updateStats(); }
   }catch(e){
     // A stream that has finished deregisters, and a short film's remux finishes
     // long before the viewer does. Blanking the panel at that moment is exactly
     // the vanishing-section problem this work exists to fix — so keep the last
     // numbers, which are the real final ones, and say that is what they are.
-    if(PLAYER!==p) return;
+    if(!current()) return;
     if(p.health && !p.health.final){ p.health.final=true; updateStats(); }
     else if(!p.health) p.health=null;
   }
 }
 setInterval(()=>{ pollSessionHealth().catch(()=>{}); }, 2000);
-async function reportProgress(fileId, ended){
+async function reportProgress(fileId, ended, attachedOwner){
+  const p=attachedOwner||PLAYER;
+  if(!p||p.fileId!==fileId||(!attachedOwner&&!playbackOwnsAttachedMedia(p)))return;
   const video=document.getElementById("video");
-  const posMs=Math.round((PLAYER.bookOffset||0)+((PLAYER.offset||0)+ (video.currentTime||0))*1000);
+  const posMs=Math.round((p.bookOffset||0)+((p.offset||0)+ (video.currentTime||0))*1000);
   // The file's probed duration is the truth. Only direct play's own
   // video.duration is the whole file: a progressive remux's grows as ffmpeg
   // writes, and an offset HLS stream's covers the tail alone. Reporting either
   // as the runtime marked films watched minutes in. With nothing trustworthy,
   // send none — the server then keeps the duration it probed at scan time, and
   // declines to auto-mark if it has none either.
-  const durMs = PLAYER.bookDuration || PLAYER.knownDur
-    || ((PLAYER.method==='direct_play' && video.duration && isFinite(video.duration))
+  const durMs = p.bookDuration || p.knownDur
+    || ((p.method==='direct_play' && video.duration && isFinite(video.duration))
         ? Math.round(video.duration*1000) : null);
   if(!ITEM_FOR_FILE[fileId]) return;
   try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs}}); }catch(e){}
@@ -11424,6 +11632,16 @@ function closePlayer(){
   // Fence a full play() still awaiting its decision/session. PLAYER identity
   // alone cannot do that because close intentionally keeps the object around.
   PLAY_OPEN_GATE.invalidate();
+  const progressPlayer=play.pendingIntent?play.pendingIntent.predecessor:
+    play.failedPreparation?play.failedPreparation.predecessor:(PLAYER?.mediaPredecessor||PLAYER);
+  if(progressPlayer?.fileId){
+    reportProgress(progressPlayer.fileId,false,progressPlayer);
+  }
+  beginPlaybackPreparation.active?.cancel();
+  beginPlaybackPreparation.active?.finish();
+  play.failedPreparation=null;
+  play.pendingIntent=null;
+  retirePlaybackPredecessor(PLAYER);
   const video=document.getElementById("video");
   const player=document.getElementById("player");
   const opener=PLAYER&&PLAYER._opener;
@@ -11438,7 +11656,6 @@ function closePlayer(){
   // corner, and it reads as the app having hung. Every exit runs through here,
   // including the automatic one when a film ends with nothing queued after it.
   exitPresentationModes();
-  if(PLAYER.fileId) reportProgress(PLAYER.fileId);
   supersedePlaybackControlIntent(PLAYER);
   // Bump the generation so a seek or audio switch still awaiting its
   // hls/start finds itself superseded and doesn't attach a stream to a player
@@ -11453,7 +11670,8 @@ function closePlayer(){
   // timer, and PLAYER survives the close, so an armed one would have fired
   // seekTo on a player the viewer had already left.
   if(PLAYER){ PLAYER.aoffset=0; PLAYER._seekDragging=false; PLAYER.controlSeek=null;
-    PLAYER.wantsPlayback=false; PLAYER.pendingOpenAttempt=null; cancelPendingSeek(); }
+    PLAYER.wantsPlayback=false; PLAYER.pendingOpenAttempt=null; PLAYER.pendingMediaChange=null;
+    cancelPendingSeek(); }
   // Same reason, same scope: the track choice was this playback's, and this
   // playback is over. PLAYER survives the close, so leaving `preplay` set would
   // make playbackSelection() keep matching on the next cold start of the same
@@ -11471,7 +11689,7 @@ function closePlayer(){
   const sk=document.getElementById("pskip"); if(sk){ sk.innerHTML=""; sk.dataset.k=""; }
   const pl=document.getElementById("player"); if(pl) pl.classList.remove("idle","statson");
   [...video.querySelectorAll("track")].forEach(t=>t.remove());
-  pausePlaybackInternally(video); video.removeAttribute("src"); video.load();
+  resetMediaSource(video);
   document.getElementById("modal").classList.remove("open");
   const app=document.getElementById("app"); if(app) app.inert=false;
   const restoreFocus=()=>{
