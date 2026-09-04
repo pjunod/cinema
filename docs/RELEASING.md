@@ -100,9 +100,9 @@ CI passes the tag name automatically when it publishes an image.
    publication workflow used for recovery. That workflow peels the annotated
    tag once, builds x86-64 and aarch64 binaries inside the pinned Bookworm
    toolchain, and stamps both with the validated tag. It packages and smoke
-   tests each platform by digest before assigning the GHCR tags `{version}`,
-   `{major}.{minor}`, and `latest`. Pushes to `main` build but do not publish,
-   so releases are always deliberate.
+   tests each platform by digest before assigning the local Forgejo registry
+   tags `{version}`, `{major}.{minor}`, and `latest`. Pushes to `main` build but
+   do not publish, so releases are always deliberate.
 
 ### The release pull request is the gate the cut depends on
 
@@ -121,7 +121,8 @@ pull request's CI run — real runners, real load, full toolchain — is the
 run the tag actually depends on. A red required check there stops the cut.
 The one exception is the standing infrastructure rule, stated here for the
 release path: if the tests ran and passed and the job then died on a
-GitHub-side fault — artifact upload, a quota refusal, runner capacity —
+Forgejo infrastructure fault — artifact upload, storage pressure, runner
+capacity —
 note it in the release pull request and proceed. A `FAILED` or `panicked`
 test line is never that exception; on the release path it is a gate doing
 its job.
@@ -139,17 +140,12 @@ manual workflow from current `main` and pass the existing annotated tag; the
 workflow resolves source and runtime files from that immutable tag rather than
 from the branch that supplied the repaired workflow.
 
+Open Forgejo → `noirr/plurx` → Actions → `publish release image`, choose
+`main`, enter the existing tag in `release_tag`, and run it. Require that exact
+run to finish green before checking the registry aliases:
+
 ```bash
-started=$(date -u +%Y-%m-%dT%H:%M:%SZ)   # bound the run lookup to this command
-gh workflow run publish-release.yml --ref main \
-  -f release_tag=v0.2.7                 # rebuild and verify the existing tag
-run_id=$(gh run list --workflow publish-release.yml --branch main \
-  --event workflow_dispatch --created ">=$started" --user @me --limit 10 \
-  --json databaseId,displayTitle \
-  --jq 'map(select(.displayTitle == "publish v0.2.7"))[0].databaseId')
-                                           # capture this named dispatch only
-gh run watch "$run_id" --exit-status     # require that exact run to succeed
-image=ghcr.io/pjunod/plurx
+image=192.168.4.7:3000/noirr/plurxd
 version_digest=$(docker buildx imagetools inspect "$image:0.2.7" \
   | sed -n 's/^Digest:[[:space:]]*//p' | head -1)
 for alias in 0.2.7 0.2 latest; do
