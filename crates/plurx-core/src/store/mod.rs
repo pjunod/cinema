@@ -971,6 +971,15 @@ pub mod keys {
     /// HLS sessions. Explicit opt-in until every client has a passive reporter
     /// and mixed-fleet behavior has been measured.
     pub const PLAYBACK_CONTROL_PROTOCOL_V1: &str = "playback.control_protocol_v1";
+    /// Stage M6 successors for clients that declare `prepare_replacement`.
+    ///
+    /// Absent/`0` refuses; only `1` enables. Explicitly a **server** gate and
+    /// not the client's word: `supported_actions` is request body, so any
+    /// authenticated account can declare the action, and staging starts a real
+    /// encoder that counts against that user's admission cap. The action
+    /// declaration says the client will understand a successor; this says the
+    /// operator is willing to spend one.
+    pub const PLAYBACK_PREPARED_HANDOFF: &str = "playback.prepared_handoff";
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite

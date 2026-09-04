@@ -7415,6 +7415,39 @@ pub struct StartInfo {
 
 /// A cluster worker and the process-local replacement gate that must remain
 /// held until the ingress has durably accepted or rejected that worker.
+/// Which replacement gate a cluster start serializes on.
+///
+/// The gate exists so two *replacements* for one player cannot race. A
+/// speculative M6 preparation is not a replacement: it supersedes nothing and
+/// moves no pointer, and what keeps it from racing a real start is the store's
+/// CAS on `expected_predecessor_incarnation_id` — a real start moves the
+/// pointer, and the preparation's commit then loses, which is the designed
+/// outcome.
+///
+/// So a preparation takes a gate of its own. Sharing the viewer's would mean a
+/// speculative warm-up holding it for the length of a process start while that
+/// viewer's own stall recovery waits `CLUSTER_REPLACEMENT_GATE_WAIT` and then
+/// takes a capacity error — a real interruption caused by the mechanism whose
+/// entire purpose is removing one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClusterStartScope {
+    /// A start the viewer is waiting on.
+    Replacement,
+    /// A speculative M6 successor nobody is waiting on yet.
+    Preparation,
+}
+
+impl ClusterStartScope {
+    fn gate_suffix(self) -> &'static str {
+        match self {
+            // The historical key shape, so a rolling upgrade cannot let a
+            // pre-upgrade and a post-upgrade replacement pass each other.
+            Self::Replacement => "replacement",
+            Self::Preparation => "preparation",
+        }
+    }
+}
+
 pub(crate) struct ClusterSessionStart {
     pub(crate) info: StartInfo,
     pub(crate) replacement: ClusterReplacementGuard,
@@ -13271,14 +13304,43 @@ impl TranscodeManager {
         deadline: tokio::time::Instant,
         admitted_serving_generation: u64,
     ) -> Result<ClusterSessionStart, String> {
+        self.create_cluster_session_scoped(
+            req,
+            user_id,
+            user_name,
+            deadline,
+            admitted_serving_generation,
+            ClusterStartScope::Replacement,
+        )
+        .await
+    }
+
+    /// Start a cluster-owned session in a named replacement scope.
+    ///
+    /// The scope only chooses which replacement gate the start serializes on,
+    /// and there are exactly two because there are two kinds of start.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn create_cluster_session_scoped(
+        &self,
+        req: &SessionRequest,
+        user_id: i64,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+        admitted_serving_generation: u64,
+        scope: ClusterStartScope,
+    ) -> Result<ClusterSessionStart, String> {
         let serving_admission = ClusterServingAdmission {
             generation: admitted_serving_generation,
             deadline,
         };
         self.require_cluster_serving_authority(serving_admission)?;
         let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
-        let gate_key =
-            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str(),]).to_string();
+        let gate_key = serde_json::json!([
+            supersession_user.as_str(),
+            req.playback_id.as_str(),
+            scope.gate_suffix(),
+        ])
+        .to_string();
         let replacement = self
             .acquire_cluster_replacement_gate(
                 gate_key,
@@ -16635,6 +16697,24 @@ impl TranscodeManager {
     > {
         self.hls_session_control_with_terminal(control, i64::MAX, None)
             .await
+    }
+
+    /// The preparation gate for one session, from whichever engine serves it.
+    ///
+    /// Routed in the same order as [`Self::hls_session_control_with_terminal`]:
+    /// VOD first, because `into_request` sets `Presentation::Vod` for every
+    /// create and that engine therefore holds nearly every session, then the
+    /// rolling actor. `None` means neither is serving it — a session that has
+    /// ended — and is never a reason to stage against the other engine.
+    pub(crate) async fn preparation_gate(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Option<std::sync::Arc<dyn crate::playback_control::PreparationGate>> {
+        if let Some(gate) = self.vod.preparation_gate(session_id).await {
+            return Some(gate);
+        }
+        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        Some(std::sync::Arc::new(session.control.clone()))
     }
 
     pub(crate) async fn hls_session_control_with_terminal(

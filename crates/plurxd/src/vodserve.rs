@@ -1522,6 +1522,28 @@ impl VodPreparationGate {
 }
 
 impl crate::playback_control::PreparationGate for VodPreparationGate {
+    fn engine(&self) -> crate::playback_control::PreparationEngine {
+        crate::playback_control::PreparationEngine::Vod
+    }
+
+    fn slot_is_free<'a>(&'a self) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                return false;
+            };
+            if session.tombstone.is_some() {
+                return false;
+            }
+            let free = session
+                .control
+                .lock()
+                .expect("control lock")
+                .preparation_slot_is_free();
+            free
+        })
+    }
+
     fn stage_preparation<'a>(
         &'a self,
         staged_incarnation_id: String,

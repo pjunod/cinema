@@ -5199,6 +5199,10 @@ async fn control_local_inner(
                 // not start and would then leave the measurement
                 // unattributable.
                 platform: result.platform,
+                route: route.clone(),
+                predecessor_response: start.clone(),
+                accepts_prepare: request.accepts_prepare_replacement(),
+                handoff_from_ms: request.buffered_through_ms,
             },
         ));
     }
@@ -5380,6 +5384,422 @@ struct PreparationShadowInputs {
     delivered_bps: Option<i64>,
     capabilities: Option<crate::playback_control::DynamicCapabilities>,
     platform: crate::playback_control::ClientPlatform,
+    /// The route this exchange was fence-checked against, so the predecessor a
+    /// staged successor names is the one the client just proved it holds.
+    route: MediaSessionRoute,
+    /// The predecessor's own response, already parsed by the exchange.
+    predecessor_response: StartResponse,
+    /// Whether this client said it will apply `prepare_replacement` — the
+    /// **action vocabulary**, not the capability.
+    accepts_prepare: bool,
+    /// Where the successor should begin: the end of what this client has
+    /// already buffered, because that is where the handoff lands.
+    handoff_from_ms: i64,
+}
+
+/// Whether this operator has enabled prepared handoffs.
+///
+/// A **server** gate, and separate from the client's declared action on
+/// purpose. `supported_actions` is request body: any authenticated account can
+/// put `prepare_replacement` in it, and staging spends a real encoder against
+/// that user's admission cap. The client declaration says a successor would be
+/// understood; this says the operator is willing to pay for one. Absent or `0`
+/// refuses, matching `playback.control_protocol_v1` beside it.
+///
+/// Read per attempt rather than cached: this is the switch an operator reaches
+/// for when a node is in trouble, and a cached `1` would keep spending encoders
+/// after it had been turned off.
+async fn prepared_handoff_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting(plurx_core::store::keys::PLAYBACK_PREPARED_HANDOFF)
+        .await
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1")
+}
+
+/// How long a prepared successor's start may take before it is abandoned.
+const PREPARED_START_BUDGET_MS: u64 = 10_000;
+const PREPARED_START_BUDGET: Duration = Duration::from_millis(PREPARED_START_BUDGET_MS);
+
+/// How long a staged successor stays a candidate.
+///
+/// A cost, not a reservation: the store counts a staged successor against the
+/// user's admission cap with **nothing discounted**, because a preparation
+/// reaps nothing. This window is a real encoder slot held out of a viewer's
+/// budget for its whole duration, and it is now genuinely a minute — renewal
+/// refuses a row the preparation ledger still names, so the deadline arrives
+/// instead of being pushed forward every lease tick.
+const PREPARED_SUCCESSOR_WINDOW_MS: i64 = 60_000;
+
+/// The shortest gap between two staging attempts for one playback.
+///
+/// The slot pre-check is not enough on its own, and the reason is the seam this
+/// milestone is built on: a viewer's quality change arrives as a **new session**
+/// for the same playback, with a brand-new `ControlState` whose slot reads
+/// empty — while the store's one-preparation-per-playback invariant, which is
+/// keyed on the playback, still holds the row from the old session. So without
+/// a cooldown every selection change on the new session starts a real encoder,
+/// learns from the store that the slot is taken, and kills it again. At the
+/// 250 ms exchange floor that is four process spawns a second from one client.
+///
+/// Longer than the successor's whole life, start included.
+///
+/// The cooldown clock starts when the worker starts; the successor's deadline
+/// is written after it, so its life is `start latency + window`. A cooldown of
+/// only `window` would let the retry land inside the previous successor's live
+/// row on any slow start — and the store would refuse it, after another
+/// encoder. `PREPARED_START_BUDGET` bounds that latency, so covering both plus
+/// a margin is what makes "one attempt per window" true.
+const PREPARED_ATTEMPT_COOLDOWN: Duration =
+    Duration::from_millis(PREPARED_SUCCESSOR_WINDOW_MS as u64 + PREPARED_START_BUDGET_MS + 5_000);
+
+/// When each playback last had an encoder spent on a staging attempt.
+///
+/// Node-local and best-effort — the durable invariant is the store's. This
+/// only has to stop the spawn-and-kill loop, and it is read and written under
+/// one lock on a detached task, so a lost race costs one extra start rather
+/// than correctness.
+static PREPARED_ATTEMPTS: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<String, Instant>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Entries older than this are dropped whenever the map is walked, so a
+/// long-lived node does not accumulate one per playback it ever served.
+const PREPARED_ATTEMPT_RETENTION: Duration = Duration::from_secs(600);
+
+/// Whether this playback is outside its cooldown.
+///
+/// Read-only. The attempt is recorded by [`record_prepared_attempt`] at the
+/// moment an encoder is actually started, not here — a node that is briefly not
+/// serving, or a store read that fails, must not cost the playback a window for
+/// a preparation that spent nothing.
+async fn prepared_attempt_admitted(playback_id: &str) -> bool {
+    let now = Instant::now();
+    let attempts = PREPARED_ATTEMPTS.lock().await;
+    !attempts
+        .get(playback_id)
+        .is_some_and(|last| now.duration_since(*last) < PREPARED_ATTEMPT_COOLDOWN)
+}
+
+/// Start this playback's cooldown, and drop entries nothing is waiting on.
+async fn record_prepared_attempt(playback_id: &str) {
+    let now = Instant::now();
+    let mut attempts = PREPARED_ATTEMPTS.lock().await;
+    attempts.retain(|_, last| now.duration_since(*last) < PREPARED_ATTEMPT_RETENTION);
+    attempts.insert(playback_id.to_owned(), now);
+}
+
+/// Why a staging attempt did not produce a successor.
+///
+/// Named rather than a bare `false`, because there are eleven ways for this
+/// feature to do nothing and an operator who turns it on and sees no successors
+/// has to be able to tell "off" from "broken". Every one of them is logged at
+/// debug with this reason, and the ones that cost an encoder are logged at info.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreparedRefusal {
+    /// Neither delivery engine is serving this session any more.
+    NoEngine,
+    /// The slot already holds a successor.
+    SlotOccupied,
+    /// Another attempt for this playback is still inside the cooldown.
+    Cooldown,
+    /// This node is not admitted to serve.
+    NotServing,
+    /// The user record could not be read.
+    NoUser,
+    /// The worker did not start.
+    StartFailed,
+    /// The start handed back a session that is not a new successor.
+    NotASuccessor,
+    /// The successor's identity or recipe could not be represented.
+    Malformed,
+    /// The node lost serving authority between the start and the write.
+    Fenced,
+    /// The stage was refused. Deliberately one reason and not two: the executor
+    /// answers `Ok(false)` for a lost store CAS and for a slot that would not
+    /// take the row, and the caller cannot tell them apart — nor should it,
+    /// since it does the same thing either way. The split that matters to an
+    /// operator is on `plurx_playback_preparation_stages_total{outcome}`, which
+    /// records it where it is actually known.
+    StageRefused,
+    /// A store fault. The row's fate is unknown.
+    StoreFailed,
+}
+
+impl PreparedRefusal {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NoEngine => "no_engine",
+            Self::SlotOccupied => "slot_occupied",
+            Self::Cooldown => "cooldown",
+            Self::NotServing => "not_serving",
+            Self::NoUser => "no_user",
+            Self::StartFailed => "start_failed",
+            Self::NotASuccessor => "not_a_successor",
+            Self::Malformed => "malformed",
+            Self::Fenced => "fenced",
+            Self::StageRefused => "stage_refused",
+            Self::StoreFailed => "store_failed",
+        }
+    }
+
+    /// Whether work was spent before this refusal.
+    ///
+    /// `StartFailed` counts: `try_create_cluster` attaches a rendition before
+    /// it takes its serving guard, so a refusal there can leave real work
+    /// behind even though no session came back. `NotASuccessor` does not — that
+    /// branch returns a session this call did not create and must not touch.
+    fn spent_an_encoder(self) -> bool {
+        matches!(
+            self,
+            Self::StartFailed
+                | Self::Malformed
+                | Self::Fenced
+                | Self::StageRefused
+                | Self::StoreFailed
+        )
+    }
+}
+
+/// Start a successor for this playback and stage it durably.
+///
+/// **Make-before-break, and that rests on one fact.**
+/// `TranscodeManager::reap_superseded_before` documents it and the code agrees:
+/// `create_cluster_session` always passes a replacement deadline, and
+/// `try_vod_session` runs the supersession sweep only when that deadline is
+/// absent. So the successor's worker starts while the predecessor keeps
+/// serving, and the durable half is `prepare_media_session` — never
+/// `activate_media_session`, which reaps the supersession and moves the
+/// playback pointer.
+///
+/// **Order matters more than it looks, and an adversarial review is why.**
+/// The successor's identity is minted *before* the create and handed to it as
+/// the request id, because that id is what the worker is registered under and
+/// therefore what an abort has to name. The slot and the cooldown are checked
+/// *before* the create, because the authoritative refusals both live downstream
+/// of a started process. And the replacement gate is released as soon as the
+/// worker exists, because a real client reopen for the same player needs that
+/// gate and would otherwise wait behind a durable write.
+///
+/// **The worker is this function's to clean up.**
+/// [`crate::playback_control::PreparationExecutor::stage`] writes the durable
+/// row first and takes the slot second, and aborts the row itself if the slot
+/// refuses. It knows nothing about the process started here.
+async fn stage_prepared_successor(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    predecessor_recipe: &RemoteStartRequest,
+    predecessor_response: &StartResponse,
+    candidate: &crate::transcode::SessionRequest,
+    source: Option<&MediaFile>,
+    handoff_from_ms: i64,
+) -> Result<String, PreparedRefusal> {
+    let Some(gate) = state.transcode.preparation_gate(&route.session_id).await else {
+        return Err(PreparedRefusal::NoEngine);
+    };
+    // Advisory — the slot's own lock is the authority — but a `false` here is
+    // always right, and it is the difference between one wasted encoder and one
+    // per selection change.
+    if !gate.slot_is_free().await {
+        return Err(PreparedRefusal::SlotOccupied);
+    }
+    // The slot above is this *session's*; the store's invariant is the
+    // *playback's*, and a quality change arrives as a new session. Without this
+    // the two disagree exactly when it matters.
+    if !prepared_attempt_admitted(&route.playback_id).await {
+        return Err(PreparedRefusal::Cooldown);
+    }
+    let authority = state.serving.authority();
+    let Some(admitted_generation) = authority.admit() else {
+        return Err(PreparedRefusal::NotServing);
+    };
+    let deadline = tokio::time::Instant::now() + PREPARED_START_BUDGET;
+    let Ok(Some(user)) = state.store.get_user(route.user_id).await else {
+        return Err(PreparedRefusal::NoUser);
+    };
+
+    // Minted first, because `create_cluster_session` registers the worker under
+    // the request id it is given, and that is the handle an abort needs. A
+    // successor carrying the predecessor's request id is both rejected by the
+    // claim — its intent fingerprint differs on every admitted transition, by
+    // construction — and unabortable.
+    let successor_incarnation = uuid::Uuid::new_v4().to_string();
+    let mut successor_request = candidate.clone();
+    successor_request.request_id = Some(successor_incarnation.clone());
+    // A preparation is not a reopen. The predecessor's recipe may carry a stall
+    // reopen's `previous_session_id`, naming a session that died hours ago.
+    successor_request.previous_session_id = None;
+    successor_request.reopen_reason = None;
+    // **Where the successor starts, and why it is not the playhead.** The
+    // handoff happens when the predecessor's buffer runs out, not now — the
+    // client keeps playing what it already has. A successor warmed at
+    // `position_ms` would re-encode content the viewer has buffered and hand
+    // over frames already shown; one warmed at zero, which is what the
+    // predecessor's own recipe says, would warm the opening of the film while
+    // the viewer is forty minutes in.
+    successor_request.start_seconds = (handoff_from_ms.max(0) as f64) / 1_000.0;
+
+    // Recorded here, immediately before the only call that spends anything, so
+    // every refusal above this line is free to retry on the next exchange.
+    record_prepared_attempt(&route.playback_id).await;
+    let started = match state
+        .transcode
+        .create_cluster_session_scoped(
+            &successor_request,
+            route.user_id,
+            &user.username,
+            deadline,
+            admitted_generation,
+            // Its own gate, not the viewer's: a speculative warm-up must never
+            // make that viewer's own stall recovery wait and then fail.
+            crate::transcode::ClusterStartScope::Preparation,
+        )
+        .await
+    {
+        Ok(started) => started,
+        Err(_) => return Err(PreparedRefusal::StartFailed),
+    };
+    let successor_session = started.info.session_id.clone();
+    // An idempotent recovery handing back an existing session is not a
+    // successor. Return without aborting: that session is not this call's.
+    if !started.created || successor_session == route.session_id {
+        return Err(PreparedRefusal::NotASuccessor);
+    }
+    let info = started.info;
+    // Released with the worker started and before the durable write. This is
+    // the preparation's own gate rather than the viewer's, so holding it could
+    // only ever delay another preparation — but a Raft round trip is still not
+    // something to hold a per-player lock across.
+    drop(started.replacement);
+
+    // Every exit past here owns the worker. `state.node_id` rather than the
+    // route's owner: the worker was started through `state.transcode`, so it is
+    // here, and a snapshot owner would send the abort to the wrong node.
+    let abandon = |reason: PreparedRefusal| {
+        let session = successor_session.clone();
+        let incarnation = successor_incarnation.clone();
+        async move {
+            abort_started_session(state, &state.node_id, &incarnation, &session).await;
+            Err(reason)
+        }
+    };
+    if uuid::Uuid::parse_str(&successor_session).is_err() {
+        return abandon(PreparedRefusal::Malformed).await;
+    }
+
+    // The successor's response is the predecessor's with every field the
+    // successor owns substituted. Two of these are not cosmetic:
+    //
+    // * `control` — carried unchanged it would point the handed-off client at
+    //   the *predecessor's* session, which is `ended` the moment the commit
+    //   lands. The client would 404 and reopen: exactly the interruption this
+    //   removes. The epoch is the literal `1` because `prepare_media_session`
+    //   inserts the staged row at epoch 1 and `preparation_route_matches`
+    //   asserts it; the route's epoch is the *predecessor's* and would hand a
+    //   taken-over session's client a 409.
+    // * the delivered-grade badges — derived from the **delivery method**, not
+    //   from grade intent, so the admitted `{ResolutionOrBitrate,
+    //   DeliveryMethod}` transition is precisely the one that moves them. A
+    //   direct-played HDR10 source becomes an SDR transcode while `GradeIntent`
+    //   never changes.
+    let mut response = predecessor_response.clone();
+    response.session_id = successor_session.clone();
+    response.playlist_url = info.playlist_url.clone();
+    response.duration_ms = info.duration_ms;
+    response.start_seconds = info.start_seconds;
+    let media_origin_ms = (info.media_origin_seconds * 1_000.0).round() as i64;
+    response.media_origin_ms = Some(media_origin_ms);
+    response.height = info.target_height;
+    response.encoder = info.encoder.to_owned();
+    response.vod = info.vod;
+    response.delivered_dynamic_range =
+        session_delivered_dynamic_range(source, &info.kind, info.grade).map(str::to_owned);
+    response.delivered_dolby_vision_profile =
+        session_delivered_dolby_vision_profile(source, &info.kind);
+    // The Auto prior belongs to the predecessor's start and is stale on a
+    // session that has been playing; plan notes describe the predecessor's plan.
+    response.prior_kbps = None;
+    response.plan_notes = Vec::new();
+    // A predecessor created before the control protocol was advertised has no
+    // bootstrap, and inventing one here would advertise an endpoint this
+    // successor's client never asked for — so `None` stays `None`.
+    response.control = response
+        .control
+        .as_ref()
+        .and_then(|control| control.refreshed(&successor_session, &successor_incarnation, 1));
+
+    let mut recipe = predecessor_recipe.clone();
+    recipe.protocol_version = crate::media_pool::PROTOCOL_VERSION;
+    recipe.incarnation_id = successor_incarnation.clone();
+    recipe.request = successor_request;
+
+    let (Ok(recipe_json), Ok(response_json)) = (
+        serde_json::to_string(&recipe),
+        serde_json::to_string(&response),
+    ) else {
+        return abandon(PreparedRefusal::Malformed).await;
+    };
+
+    let now_ms = unix_ms();
+    let preparation = plurx_core::domain::MediaSessionPreparation {
+        incarnation_id: successor_incarnation.clone(),
+        session_id: successor_session.clone(),
+        user_id: route.user_id,
+        playback_id: route.playback_id.clone(),
+        // The generation the pointer must still name at commit, recorded now
+        // rather than read fresh then: a pointer that has moved means a newer
+        // player generation exists, and the correct outcome is to abort this
+        // successor rather than reap that one.
+        expected_predecessor_incarnation_id: route.incarnation_id.clone(),
+        // The successor's own intent, not the predecessor's — the row has to
+        // describe what it is.
+        request_fingerprint: recipe.request.durable_intent_fingerprint(route.user_id),
+        owner_node_id: state.node_id.clone(),
+        recipe_json,
+        response_json,
+        media_origin_ms,
+        now_ms,
+        deadline_ms: now_ms.saturating_add(PREPARED_SUCCESSOR_WINDOW_MS),
+    };
+
+    // The durable write is fenced. `create_cluster_session` checked the
+    // generation it was given, but that was before the worker existed; a node
+    // that lost authority in between must not insert a session row and a lease
+    // claiming a playback it no longer serves.
+    let Some(_serving) = authority
+        .commit_guard_before(admitted_generation, deadline.into_std())
+        .await
+    else {
+        return abandon(PreparedRefusal::Fenced).await;
+    };
+    let executor = crate::playback_control::PreparationExecutor::new(
+        std::sync::Arc::clone(&state.store),
+        gate,
+        route.user_id,
+        route.playback_id.clone(),
+    );
+    // Bounded, because the guard above is a read lock on the serving-authority
+    // transition and the quorum-loss publisher needs the write side. Every
+    // other holder of this guard in this file wraps its work in a `timeout_at`
+    // for exactly that reason: a Raft proposal that stalls during an election
+    // would otherwise block authority-loss publication for the whole node, from
+    // a detached best-effort task nobody is waiting on.
+    match tokio::time::timeout_at(deadline, executor.stage(&preparation)).await {
+        Ok(Ok(true)) => Ok(successor_session),
+        Ok(Ok(false)) => abandon(PreparedRefusal::StageRefused).await,
+        // Commit-unknown, and an elapsed timeout is the same class: SQLite
+        // blocking work and a submitted Raft proposal can both complete after
+        // their future is dropped, so the row may exist. The worker is killed
+        // either way — it is local and unusable — and a row that did land
+        // expires at its own `deadline_ms`, which maintenance now enforces
+        // directly rather than waiting for the generic retirement. That is the
+        // honest answer, and it is why this reason is named separately rather
+        // than folded into the refusals.
+        Ok(Err(_)) | Err(_) => abandon(PreparedRefusal::StoreFailed).await,
+    }
 }
 
 /// Record what M6 would have done about this exchange's selection change.
@@ -5408,6 +5828,10 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
         delivered_bps,
         capabilities,
         platform,
+        route,
+        predecessor_response,
+        accepts_prepare,
+        handoff_from_ms,
     } = exchange;
     // Released on every exit below, including the early one.
     struct InFlight;
@@ -5482,15 +5906,13 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
         observed_download_bps,
         delivered_bps,
     };
-    crate::playback_control::record_preparation_decision(
-        platform,
-        crate::playback_control::decide_preparation(
-            delivered_view,
-            proposed_view,
-            capabilities.as_ref(),
-            conditions,
-        ),
+    let decision = crate::playback_control::decide_preparation(
+        delivered_view,
+        proposed_view,
+        capabilities.as_ref(),
+        conditions,
     );
+    crate::playback_control::record_preparation_decision(platform, decision);
     // All three clients hardcode the capability `false`, so the counter above
     // books every single-axis transition as `client_cannot_prepare` and can
     // say nothing about the axis rule or the throughput floor. This is the
@@ -5510,6 +5932,58 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
             conditions,
         ),
     );
+
+    // The measurement is done, so the in-flight slot is released *before* the
+    // staging work. The cap was sized for a store read; staging adds a process
+    // start and a Raft round trip, and holding a slot across those would let
+    // one client saturate all 32 and drop every other viewer's decision
+    // sample — blinding the counters this milestone is justified by.
+    drop(_in_flight);
+
+    if !accepts_prepare
+        || !matches!(
+            decision,
+            crate::playback_control::PreparationDecision::Prepare { .. }
+        )
+    {
+        return;
+    }
+    if !prepared_handoff_enabled(&state).await {
+        return;
+    }
+    let playback = crate::transcode::session_log_id(&route.playback_id);
+    match stage_prepared_successor(
+        &state,
+        &route,
+        &recipe,
+        &predecessor_response,
+        &candidate,
+        source.as_ref(),
+        handoff_from_ms,
+    )
+    .await
+    {
+        Ok(successor) => tracing::info!(
+            playback = %playback,
+            predecessor = %crate::transcode::session_log_id(&route.session_id),
+            successor = %crate::transcode::session_log_id(&successor),
+            handoff_from_ms,
+            "staged a prepared successor"
+        ),
+        // Info when work was spent and debug when it was not, because those are
+        // different operational events: one is a refusal that cost nothing, the
+        // other is work thrown away.
+        Err(reason) if reason.spent_an_encoder() => tracing::info!(
+            playback = %playback,
+            reason = reason.as_str(),
+            "abandoned a prepared successor after starting it"
+        ),
+        Err(reason) => tracing::debug!(
+            playback = %playback,
+            reason = reason.as_str(),
+            "did not prepare a successor"
+        ),
+    }
 }
 
 async fn status_local_before(
