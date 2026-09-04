@@ -183,6 +183,63 @@ class OperationsContractCase(unittest.TestCase):
 
         self.assertLess(pinned, libraries)
 
+    def test_activity_capture_observes_one_real_tick_without_hiding_extra_requests(self):
+        script = read("scripts/ui-baseline")
+        capture = runpy.run_path(str(ROOT / "scripts/ui-baseline"))["ACTIVITY_CAPTURE_JS"]
+        web = read("crates/plurxd/src/web/index.html")
+        page_timer = web.split("function setPageTimer(", 1)[1].split("\nasync function render()", 1)[0]
+        production = "function setPageTimer(" + page_timer
+        contract = r"""
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const [capture, production] = process.argv.slice(1);
+for (const startupDelay of [0, 1600, 7000]) {
+  for (const extraRequest of [false, true]) {
+    let now = 0, next = 0;
+    const timers = new Map(), calls = [];
+    const context = vm.createContext({
+      location: {hash: '#/activity'}, PAGE_TIMER: null, PAGE_RENDER_GENERATION: 1,
+      setInterval(callback, delay, ...args) {
+        const id = ++next;
+        timers.set(id, {callback, delay, args, due: now + delay});
+        return id;
+      },
+      clearInterval(id) { timers.delete(id); },
+      record: value => calls.push(value),
+    });
+    context.window = context;
+    vm.runInContext(capture + '\n' + production, context);
+    vm.runInContext(`
+      record('activity/detail'); // initial production render
+      setPageTimer(() => record('activity/detail'), 3000);
+      setInterval(() => record('unrelated'), 4000);
+    `, context);
+    if (extraRequest) {
+      vm.runInContext("setInterval(() => record('activity/detail'), 4000)", context);
+    }
+    const target = startupDelay + 4500;
+    while (true) {
+      const ready = [...timers].filter(([, t]) => t.due <= target)
+        .sort((a, b) => a[1].due - b[1].due)[0];
+      if (!ready) break;
+      const [id, timer] = ready;
+      now = timer.due;
+      timer.due += timer.delay;
+      timer.callback(...timer.args);
+    }
+    assert.equal(context.__plurxActivityCaptureTick, true);
+    assert.equal(context.PAGE_TIMER, null);
+    assert.ok(calls.includes('unrelated'), 'other timers must remain real');
+    const count = calls.filter(call => call === 'activity/detail').length;
+    assert.equal(count === 2, !extraRequest,
+      `raw request golden: delay=${startupDelay}, extra=${extraRequest}, count=${count}`);
+  }
+}
+"""
+        subprocess.run(["node", "-e", contract, capture, production], check=True)
+        self.assertIn("page.add_init_script(ACTIVITY_CAPTURE_JS)", script)
+        self.assertIn("ACTIVITY_DETAIL_BUSY === 0", script)
+
     def test_store_verdict_handles_unused_forgejo_workflow_without_weakening_required_lane(self):
         verdict = workflow_job_blocks(".github/workflows/ci.yml")["cluster_store"]
         step = workflow_step_blocks(verdict)["Select the required Store graph"]

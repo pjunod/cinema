@@ -1083,6 +1083,32 @@ def open_player(page, timeout_ms):
         timeout=timeout_ms)
 
 
+# Capture-only instrumentation: keep the first real Activity polling callback,
+# but stop its interval synchronously before another tick can enter the sample.
+# Python/browser round-trip latency must not decide whether the raw request log
+# contains one or two refreshes. Other timers and every actual request remain
+# untouched; the ordinary observation window still detects additional fetches.
+ACTIVITY_CAPTURE_JS = """
+(() => {
+  const schedule = window.setInterval.bind(window);
+  window.__plurxActivityCaptureTick = false;
+  window.setInterval = (callback, delay, ...args) => {
+    if (typeof callback !== "function") return schedule(callback, delay, ...args);
+    const timer = schedule(function (...values) {
+      if (delay === 3000 && location.hash === "#/activity" &&
+          typeof PAGE_TIMER !== "undefined" && PAGE_TIMER === timer) {
+        clearInterval(timer);
+        PAGE_TIMER = null;
+        window.__plurxActivityCaptureTick = true;
+      }
+      return callback.apply(this, values);
+    }, delay, ...args);
+    return timer;
+  };
+})();
+"""
+
+
 def freeze_timers(page):
     """Stop every pending timer, so the page cannot repaint under the recorders.
 
@@ -1229,6 +1255,8 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
     page = pw_context.new_page()
+    if name == "activity":
+        page.add_init_script(ACTIVITY_CAPTURE_JS)
     problems = []
     # The request log. Four documents cite a "request-log invariant" — converting
     # a route, or wearing a different layout, must not change which endpoints it
@@ -1382,6 +1410,14 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # lands on the same steady state instead of on whichever half of the
         # cycle happened to be showing.
         page.wait_for_timeout(settle_ms)
+        if name == "activity":
+            # The initial render and exactly one shipped timer callback must
+            # both finish. Do not normalize counts: an extra application fetch
+            # remains in api_calls and must still fail the unchanged golden.
+            page.wait_for_function(
+                "() => window.__plurxActivityCaptureTick === true && ACTIVITY_DETAIL_BUSY === 0",
+                timeout=args.timeout,
+            )
         if route.get("player"):
             # The request inventory has already observed one complete activity
             # period above. Player startup includes a real media request and
