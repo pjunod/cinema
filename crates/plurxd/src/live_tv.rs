@@ -1917,15 +1917,8 @@ async fn run_live_session(
     // Join the child and its bounded stderr reader before classifying startup
     // failure; otherwise EOF can beat the decoder diagnostic to the waiter.
     let cleanup = cleanup_session(&session).await;
-    let result = if session.decoder_unavailable.load(Ordering::Acquire)
-        && matches!(
-            result,
-            Err(LiveTvError::StreamFailed(_) | LiveTvError::StartupTimeout(_))
-        ) {
-        Err(LiveTvError::CodecUnsupported("The tuner owner's FFmpeg cannot decode this channel's video or audio. ATSC 3.0 may require HEVC and AC-4 support; try an ATSC 1.0 channel or a decoder-capable FFmpeg build.".into()))
-    } else {
-        result
-    };
+    let result =
+        classify_live_source_error(result, session.decoder_unavailable.load(Ordering::Acquire));
     {
         let error = result.as_ref().err().cloned().unwrap_or_else(|| {
             LiveTvError::CapabilityExpired("the live-TV session stopped".into())
@@ -1958,6 +1951,22 @@ async fn run_live_session(
             return;
         }
         manager.retire_session(&session);
+    }
+}
+
+fn classify_live_source_error(
+    result: Result<(), LiveTvError>,
+    decoder_unavailable: bool,
+) -> Result<(), LiveTvError> {
+    if decoder_unavailable
+        && matches!(
+            result,
+            Err(LiveTvError::StreamFailed(_) | LiveTvError::StartupTimeout(_))
+        )
+    {
+        Err(LiveTvError::CodecUnsupported("The tuner owner's FFmpeg could not detect or decode the required video and audio. ATSC 3.0 may require HEVC and AC-4 support; try an ATSC 1.0 channel or a decoder-capable FFmpeg build.".into()))
+    } else {
+        result
     }
 }
 
@@ -2326,7 +2335,7 @@ fn spawn_live_ffmpeg(
             "-map",
             "0:v:0",
             "-map",
-            "0:a:0?",
+            "0:a:0",
             "-sn",
             "-dn",
         ]);
@@ -2403,6 +2412,8 @@ async fn capture_live_stderr(
         let text = String::from_utf8_lossy(&window).to_ascii_lowercase();
         if text.contains("decoding requested, but no decoder found for:")
             || (text.contains("decoder (codec ") && text.contains(") not found for input stream"))
+            || text.contains("stream map '0:a:0' matches no streams")
+            || text.contains("stream map '0:v:0' matches no streams")
         {
             decoder_unavailable.store(true, Ordering::Release);
         }
@@ -3996,10 +4007,82 @@ exec /bin/cat >/dev/null
     }
 
     #[tokio::test]
+    async fn live_tv_real_video_only_source_cannot_publish_the_aac_profile() {
+        plurx_core::testfixtures::require_ffmpeg();
+        let root = crate::test_tempdir().expect("audio-required root");
+        let ffmpeg = plurx_core::testfixtures::ffmpeg();
+        let source = tokio::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=25",
+                "-t",
+                "0.5",
+                "-an",
+                "-c:v",
+                "mpeg2video",
+                "-f",
+                "mpegts",
+                "pipe:1",
+            ])
+            .kill_on_drop(true)
+            .output()
+            .await
+            .expect("generate video-only MPEG-TS");
+        assert!(
+            source.status.success(),
+            "{}",
+            String::from_utf8_lossy(&source.stderr)
+        );
+        let system = SystemInfo {
+            ffmpeg,
+            ..SystemInfo::default()
+        };
+        let mut child = spawn_live_ffmpeg(&system, Encoder::Software, Some(2), 720, root.path())
+            .expect("start exact production graph");
+        let detected = Arc::new(AtomicBool::new(false));
+        let stderr = tokio::spawn(capture_live_stderr(
+            child.stderr.take().expect("stderr"),
+            Arc::clone(&detected),
+        ));
+        let mut stdin = child.stdin.take().expect("stdin");
+        stdin
+            .write_all(&source.stdout)
+            .await
+            .expect("one video-only source");
+        drop(stdin);
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .expect("FFmpeg exit deadline")
+            .expect("FFmpeg exit");
+        stderr.await.expect("bounded stderr collection");
+        assert!(
+            !status.success(),
+            "the H.264/AAC profile must require audio"
+        );
+        assert!(
+            !root.path().join("index.m3u8").exists(),
+            "no successful HLS publication without audio"
+        );
+        assert!(matches!(
+            classify_live_source_error(
+                Err(LiveTvError::StreamFailed("child exited".into())),
+                detected.load(Ordering::Acquire)
+            ),
+            Err(LiveTvError::CodecUnsupported(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn live_tv_decoder_diagnostic_capture_is_bounded_and_specific() {
         for (diagnostic, unsupported) in [
             ("Decoding requested, but no decoder found for: ac4", true),
             ("Decoder (codec ac4) not found for input stream #0:1", true),
+            ("Stream map '0:a:0' matches no streams.", true),
             ("Error opening output: no space left on device", false),
             ("Invalid data found when processing input", false),
         ] {

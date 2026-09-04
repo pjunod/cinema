@@ -63,6 +63,14 @@ separately. Local lint and policy checks passed; the exact committed tree still
 needs Rust 1.97.1 verification. No current-commit approval
 or merge qualification is claimed.
 
+Commit `3945a713` contains the owner/recovery/cleanup hardening. Astra's closure
+review accepted those findings and identified optional audio as a final gap:
+the first profile now requires detectable video and audio. A new real-MPEG-TS
+regression exercises the production FFmpeg arguments. Its Mac run could not
+execute FFmpeg because Homebrew's x265 dylib is missing; the isolated compiler
+image now includes FFmpeg for the pinned-toolchain verification. The user's
+Homebrew installation was not modified.
+
 Next is compilation and tests of the completed fixes, adversarial approval,
 the Forgejo effort gate, and task merge.
 Forgejo is the only mutable remote after the repository migration. Repository

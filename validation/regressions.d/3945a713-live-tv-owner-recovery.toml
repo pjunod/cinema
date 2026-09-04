@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3945a713"]
+points = ["live-tv.integration", "cluster.membership", "server.api"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "resource-bounds", "operations-contract"]
+reason = "Retained focused tests exercise the real start_local discovery/lineup/start path, identical-request recovery and terminal replay, starts paused before insertion versus drain/shutdown, stale drains preserving newer sessions, final-waiter cancellation, failed scratch cleanup retention/retry, unpolled/dropped segment response permit release, expiring metrics, exact disabled-owner recovery CAS across A-to-B-to-C edits, bounded cluster Activity, and response-signature tampering. The source-only pinned-toolchain loop compiles all call sites and runs these regressions before push. Real multi-node transport partitions and real FFmpeg rolling-window acceptance remain separately tracked; constructed inventory tests do not claim that evidence."

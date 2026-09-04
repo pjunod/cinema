@@ -160,6 +160,15 @@ default. Video bitrate is 4 Mb/s at 720p and 8 Mb/s at 1080p. The encoder must
 force an IDR at every 4-second boundary so each segment is independently
 decodable.
 
+Both video and audio are required inputs. A demuxer that sees no usable audio
+must not silently publish video-only HLS while advertising AAC. Missing
+decoder and required-stream diagnostics map to `codec_unsupported`; unrelated
+FFmpeg failures remain `stream_failed`. Recognition uses bounded stderr and
+the upstream [decoder diagnostic](https://ffmpeg.org/doxygen/trunk/ffmpeg__demux_8c_source.html)
+and [required-map diagnostic](https://ffmpeg.org/doxygen/trunk/ffmpeg__opt_8c_source.html),
+without returning raw process logs or claiming that every missing audio stream
+is AC-4.
+
 One session owns:
 
 ```text
