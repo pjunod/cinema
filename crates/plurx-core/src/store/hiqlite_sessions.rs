@@ -2824,6 +2824,13 @@ impl MediaSessionStore for HiqliteAuthStore {
                       WHERE incarnation_id = $7 AND owner_node_id = $4 AND owner_epoch = $5
                         AND state = 'active' AND lease_expires_at_ms > $2
                         AND publication_ready_at_ms != $8
+                        -- A staged successor's deadline is its whole life; see
+                        -- the SQLite backend's renewal for why renewing it is
+                        -- the one thing that can make that deadline never
+                        -- arrive. Keyed on the ledger row, which commit
+                        -- deletes.
+                        AND NOT EXISTS (SELECT 1 FROM media_session_preparations staged
+                          WHERE staged.staged_incarnation_id = media_sessions.incarnation_id)
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                           WHERE request.user_id = media_sessions.user_id
                             AND request.incarnation_id = media_sessions.incarnation_id
