@@ -1700,6 +1700,27 @@ to at least that deadline plus 135 seconds; the supported maximum pair is
 3,600 seconds and 65 minutes. Do not use the 65-minute maximum as the ordinary
 default: it delays reporting a build that can never become ready.
 
+Use `make docker-up`, not bare `docker compose up`, for a Compose rollout. Its
+first recipe is a read-only, fail-closed preflight that runs `docker compose
+config` in `deploy/`, so shell variables, `deploy/.env`, interpolation defaults,
+and override files have the same precedence they will have during the rollout.
+It then reads the effective snapshot timeout from the resolved container
+environment or, when the environment is empty, a readable bind-mounted
+production TOML. A resolved command-line `--config` path takes precedence over
+`PLURX_CONFIG`, as it does in the server. The command exits before any Compose
+mutation unless the resolved health start period covers that timeout plus all
+three named startup phases.
+
+If `PLURX_CONFIG` points into a named volume or another opaque mount, expose
+`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` in the resolved environment. With
+no explicit value, the preflight assumes the source maximum rather than
+guessing that the hidden TOML uses the default. Run the check independently
+when diagnosing configuration without changing a container:
+
+```bash
+make docker-startup-budget-check
+```
+
 **Synchronize clocks before cluster work.** All voters and the external load
 generator must run NTP/chrony (or an equivalent disciplined source), and
 monitor offset continuously. Membership reachability and artwork repair proofs

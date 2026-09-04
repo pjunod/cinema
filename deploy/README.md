@@ -509,3 +509,15 @@ without hiding a permanently broken build for an hour. If `.env` raises
 `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS`, also set
 `PLURX_HEALTH_START_PERIOD` to at least that timeout plus 135 seconds. The
 maximum supported pair is shown in `.env.example`.
+
+Run `make docker-up` from the repository root for every Compose rollout. Its
+read-only `docker-startup-budget-check` prerequisite resolves shell variables,
+`deploy/.env`, Compose defaults and overrides, and a readable bind-mounted
+production TOML before `docker compose up` can replace a container. If a named
+volume or another opaque mount hides the production config, the check assumes
+the source maximum unless the resolved
+`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` is explicit. This conservative
+fallback prevents a custom 600-second TOML deadline from accidentally shipping
+with the five-minute health grace. An explicit command-line `--config` takes
+precedence over `PLURX_CONFIG`, matching the server. A direct `docker compose
+up` bypasses the preflight.

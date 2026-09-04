@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["93039753"]
+commits = ["93039753", "9aa8584b"]
 points = ["cluster.auth", "cluster.membership", "operations.packaging"]
 checks = ["rust-gate", "cluster-auth", "operations-contract", "history-regressions"]
-reason = "The vendored Hiqlite regression fills the bounded Raft request queue before dropping the RPC cancellation guard and requires an independent retained reconnect signal, so reverting to best-effort Reset enqueueing loses the only recovery instruction. The standard cluster-auth lane runs that exact regression plus both snapshot mismatch boundaries, the three-voter learner snapshot lifecycle, topology and leader/follower failure drills, and real-daemon restart contracts. Operations contracts keep the final Docker health check unique, derive its default startup budget from all three named application phases, and require the explicit Compose timeout/health override pair."
+reason = "The vendored Hiqlite regressions fill the bounded Raft request and writer queues, require the handler coordinator to consume a retained reset, discard a canceled queued RPC before a replacement socket can transmit it, and prove forced reset cleanup cannot block behind the writer. The standard cluster-auth lane runs those exact regressions, both snapshot mismatch boundaries, OpenRaft's locked offset-zero retry test, the three-voter learner snapshot lifecycle, topology and leader/follower failure drills, and real-daemon restart contracts. Operations contracts parse the effective Compose and final-image health grace, derive the budget from source timeout bounds and all three named application phases, and require the preflight to precede every standard Compose mutation."

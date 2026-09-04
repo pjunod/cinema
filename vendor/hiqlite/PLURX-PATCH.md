@@ -125,6 +125,9 @@ The `validation-test-helpers` feature adds process-local apply-pause and
 transport-partition controls used only by Plurx's separate-process acceptance
 harness. Production binaries do not enable or compile those controls.
 
-The retained lockfile, README, tests, and static assets are upstream
-provenance, not an in-place test suite; the workspace excludes this directory
+The README, upstream tests, and static assets remain provenance rather than an
+in-place test suite. `Cargo.lock` is the deliberate exception: Plurx regenerates
+it to pin OpenRaft 0.9.25 and its resolver-selected transitive dependencies, so
+the focused vendor lane exercises the snapshot reset semantics actually
+shipped by the application. The workspace excludes this directory
 deliberately.

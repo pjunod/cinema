@@ -15,7 +15,7 @@ use openraft::error::Unreachable;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{Notify, oneshot};
@@ -76,7 +76,7 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
         debug!("Building new Raft Cache client with target {}", node);
 
         let (sender, rx) = flume::bounded(1);
-        let reset = Arc::new(Notify::new());
+        let reset = Arc::new(ConnectionResetState::default());
 
         let task = tokio::task::spawn(Box::pin(Self::ws_handler(
             self.node_id,
@@ -109,7 +109,7 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
         debug!("Building new Raft DB client with target {}", node);
 
         let (sender, rx) = flume::bounded(1);
-        let reset = Arc::new(Notify::new());
+        let reset = Arc::new(ConnectionResetState::default());
 
         let task = tokio::task::spawn(Box::pin(Self::ws_handler(
             self.node_id,
@@ -185,10 +185,156 @@ enum RaftRequest {
     Shutdown,
 }
 
+impl RaftRequest {
+    fn outbound_disposition(
+        &self,
+        socket_epoch: u64,
+        reset_epoch: u64,
+    ) -> Option<OutboundDisposition> {
+        let response_is_closed = match self {
+            #[cfg(feature = "sqlite")]
+            Self::AppendDB((ack, _)) => ack.is_closed(),
+            #[cfg(feature = "sqlite")]
+            Self::VoteDB((ack, _)) => ack.is_closed(),
+            #[cfg(feature = "sqlite")]
+            Self::SnapshotDB((ack, _)) => ack.is_closed(),
+            #[cfg(feature = "cache")]
+            Self::AppendCache((ack, _)) => ack.is_closed(),
+            #[cfg(feature = "cache")]
+            Self::VoteCache((ack, _)) => ack.is_closed(),
+            #[cfg(feature = "cache")]
+            Self::SnapshotCache((ack, _)) => ack.is_closed(),
+            Self::StreamResponse(_) | Self::ReaderExit | Self::Shutdown => return None,
+        };
+
+        if response_is_closed {
+            Some(OutboundDisposition::DropCancelled)
+        } else if reset_epoch != socket_epoch {
+            Some(OutboundDisposition::Reconnect)
+        } else {
+            Some(OutboundDisposition::Send)
+        }
+    }
+
+    fn fail_outbound(self, error: Error) {
+        let ack = match self {
+            #[cfg(feature = "sqlite")]
+            Self::AppendDB((ack, _)) => Some(ack),
+            #[cfg(feature = "sqlite")]
+            Self::VoteDB((ack, _)) => Some(ack),
+            #[cfg(feature = "sqlite")]
+            Self::SnapshotDB((ack, _)) => Some(ack),
+            #[cfg(feature = "cache")]
+            Self::AppendCache((ack, _)) => Some(ack),
+            #[cfg(feature = "cache")]
+            Self::VoteCache((ack, _)) => Some(ack),
+            #[cfg(feature = "cache")]
+            Self::SnapshotCache((ack, _)) => Some(ack),
+            Self::StreamResponse(_) | Self::ReaderExit | Self::Shutdown => None,
+        };
+        if let Some(ack) = ack {
+            let _ = ack.send(Err(error));
+        }
+    }
+}
+
 #[derive(Debug)]
 enum WritePayload {
     Payload(Vec<u8>),
     Close,
+}
+
+#[derive(Default)]
+struct ConnectionResetState {
+    epoch: AtomicU64,
+    notify: Notify,
+}
+
+impl ConnectionResetState {
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    fn request_reset(&self, observed_epoch: u64) {
+        if self
+            .epoch
+            .compare_exchange(
+                observed_epoch,
+                observed_epoch.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.notify.notify_one();
+        }
+    }
+
+    async fn changed_since(&self, observed_epoch: u64) {
+        while self.epoch() == observed_epoch {
+            self.notify.notified().await;
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OutboundDisposition {
+    Send,
+    DropCancelled,
+    Reconnect,
+}
+
+#[derive(Debug)]
+enum WriteEnqueueError {
+    Reset,
+    Disconnected(flume::SendError<WritePayload>),
+}
+
+async fn next_connected_event(
+    reset: &ConnectionResetState,
+    socket_epoch: u64,
+    rx_read: &flume::Receiver<RaftRequest>,
+    rx: &flume::Receiver<RaftRequest>,
+) -> Option<Result<RaftRequest, flume::RecvError>> {
+    select! {
+        biased;
+        _ = reset.changed_since(socket_epoch) => None,
+        result = rx_read.recv_async() => Some(result),
+        result = rx.recv_async() => Some(result),
+    }
+}
+
+async fn enqueue_write_or_reset(
+    tx_write: &flume::Sender<WritePayload>,
+    payload: WritePayload,
+    reset: &ConnectionResetState,
+    socket_epoch: u64,
+) -> Result<(), WriteEnqueueError> {
+    select! {
+        biased;
+        _ = reset.changed_since(socket_epoch) => Err(WriteEnqueueError::Reset),
+        result = tx_write.send_async(payload) => result.map_err(WriteEnqueueError::Disconnected),
+    }
+}
+
+async fn stop_stream_tasks(
+    tx_write: &flume::Sender<WritePayload>,
+    handle_write: JoinHandle<()>,
+    handle_read: JoinHandle<()>,
+    forced_reset: bool,
+) {
+    // Cleanup must never queue behind a blocked socket write. A reset is a
+    // forced transport boundary, so abort both split tasks immediately after
+    // a best-effort close. Other reconnects retain the short graceful window.
+    let _ = tx_write.try_send(WritePayload::Close);
+    if !forced_reset {
+        time::sleep(Duration::from_millis(250)).await;
+    }
+
+    handle_write.abort();
+    handle_read.abort();
+    let _ = handle_write.await;
+    let _ = handle_read.await;
 }
 
 #[allow(clippy::type_complexity)]
@@ -204,7 +350,7 @@ impl NetworkStreaming {
         heartbeat_interval: u64,
         is_raft_stopped: Arc<AtomicBool>,
         is_startup_finished: Arc<AtomicBool>,
-        reset: Arc<Notify>,
+        reset: Arc<ConnectionResetState>,
     ) {
         let mut request_id = 0usize;
         // TODO probably, a Vec<_> is faster here since we would never have too many in flight reqs
@@ -295,6 +441,7 @@ impl NetworkStreaming {
                 in_flight.is_empty(),
                 "raft in flight buffer should always be empty when restoring a connection"
             );
+            let socket_epoch = reset.epoch();
 
             let (tx_write, rx_write) = flume::bounded(1);
             let (tx_read, rx_read) = flume::bounded(1);
@@ -307,14 +454,15 @@ impl NetworkStreaming {
             let handle_read = task::spawn(Box::pin(Self::stream_reader(read, tx_read.clone())));
             let handle_write = task::spawn(Box::pin(Self::stream_writer(write, rx_write)));
 
-            loop {
-                let res = select! {
-                    _ = reset.notified() => {
+            let mut forced_reset = false;
+            'connected: loop {
+                let res = match next_connected_event(&reset, socket_epoch, &rx_read, &rx).await {
+                    None => {
                         debug!("RPC future was cancelled - reconnecting Raft stream");
+                        forced_reset = true;
                         break;
                     }
-                    res = rx_read.recv_async() => res,
-                    res = rx.recv_async() => res,
+                    Some(res) => res,
                 };
 
                 let req = match res {
@@ -333,6 +481,21 @@ impl NetworkStreaming {
                         break;
                     }
                 };
+
+                match req.outbound_disposition(socket_epoch, reset.epoch()) {
+                    Some(OutboundDisposition::DropCancelled) => {
+                        debug!("Dropping cancelled Raft request before transport write");
+                        continue;
+                    }
+                    Some(OutboundDisposition::Reconnect) => {
+                        req.fail_outbound(Error::Connect(
+                            "Raft transport reset before request write".into(),
+                        ));
+                        forced_reset = true;
+                        break;
+                    }
+                    Some(OutboundDisposition::Send) | None => {}
+                }
 
                 let stream_req = match req {
                     #[cfg(feature = "sqlite")]
@@ -391,11 +554,28 @@ impl NetworkStreaming {
                 if let Some((ack, payload)) = stream_req {
                     let bytes = serialize(&payload).unwrap();
 
-                    if let Err(err) = tx_write.send_async(WritePayload::Payload(bytes)).await {
-                        let _ = ack.send(Err(Error::Connect(format!(
-                            "Error sending Write Request to WebSocket writer: {err}"
-                        ))));
-                        break;
+                    match enqueue_write_or_reset(
+                        &tx_write,
+                        WritePayload::Payload(bytes),
+                        &reset,
+                        socket_epoch,
+                    )
+                    .await
+                    {
+                        Ok(()) => {}
+                        Err(WriteEnqueueError::Reset) => {
+                            let _ = ack.send(Err(Error::Connect(
+                                "Raft transport reset during request write".into(),
+                            )));
+                            forced_reset = true;
+                            break 'connected;
+                        }
+                        Err(WriteEnqueueError::Disconnected(err)) => {
+                            let _ = ack.send(Err(Error::Connect(format!(
+                                "Error sending Write Request to WebSocket writer: {err}"
+                            ))));
+                            break 'connected;
+                        }
                     }
 
                     in_flight.insert(request_id, ack);
@@ -403,20 +583,13 @@ impl NetworkStreaming {
                 }
             }
 
-            let _ = tx_write.send_async(WritePayload::Close).await;
+            stop_stream_tasks(&tx_write, handle_write, handle_read, forced_reset).await;
 
             for (_, ack) in in_flight.drain() {
                 let _ = ack.send(Err(Error::Connect("Raft WebSocket stream ended".into())));
             }
             // reset to a reasonable size for the next start to keep memory usage under control
             in_flight = HashMap::with_capacity(4);
-
-            // Give the writer enough time to possibly send out the close request.
-            // Since we need to re-connect, there is no need to rush anyway.
-            time::sleep(Duration::from_millis(250)).await;
-
-            handle_write.abort();
-            handle_read.abort();
 
             if shutdown {
                 break;
@@ -494,17 +667,20 @@ impl NetworkStreaming {
 pub struct NetworkConnectionStreaming {
     node: Node,
     sender: flume::Sender<RaftRequest>,
-    reset: Arc<Notify>,
+    reset: Arc<ConnectionResetState>,
     task: Option<JoinHandle<()>>,
 }
 
 struct ConnectionResetGuard {
-    reset: Option<Arc<Notify>>,
+    reset: Option<(Arc<ConnectionResetState>, u64)>,
 }
 
 impl ConnectionResetGuard {
-    fn new(reset: Arc<Notify>) -> Self {
-        Self { reset: Some(reset) }
+    fn new(reset: Arc<ConnectionResetState>) -> Self {
+        let epoch = reset.epoch();
+        Self {
+            reset: Some((reset, epoch)),
+        }
     }
 
     fn disarm(&mut self) {
@@ -514,13 +690,14 @@ impl ConnectionResetGuard {
 
 impl Drop for ConnectionResetGuard {
     fn drop(&mut self) {
-        if let Some(reset) = self.reset.take() {
+        if let Some((reset, epoch)) = self.reset.take() {
             // A reset must not share the bounded request queue. The queue may
             // still contain the RPC whose future OpenRaft just dropped; a
             // best-effort `try_send` can then lose the only instruction that
-            // tears down its stale WebSocket. Notify retains one permit while
-            // the handler reconnects, so cancellation cannot be missed.
-            reset.notify_one();
+            // tears down its stale WebSocket. The epoch is durable state, so
+            // cancellation cannot be missed or applied to a replacement
+            // socket created after this request began.
+            reset.request_reset(epoch);
         }
     }
 }
@@ -754,8 +931,6 @@ mod tests {
     use openraft::{SnapshotMeta, SnapshotSegmentId, Vote};
 
     use super::*;
-    use tokio::sync::Notify;
-
     fn test_node() -> Node {
         Node {
             id: 7,
@@ -803,7 +978,7 @@ mod tests {
                 addr_api: "127.0.0.1:32402".to_owned(),
             },
             sender,
-            reset: Arc::new(Notify::new()),
+            reset: Arc::new(ConnectionResetState::default()),
             task: Some(task),
         };
 
@@ -816,23 +991,143 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_rpc_wait_signals_stream_reset_when_request_queue_is_full() {
+    async fn handler_coordinator_consumes_retained_reset_when_request_queue_is_full() {
         let (sender, receiver) = flume::bounded(1);
+        let (_reader_sender, reader_receiver) = flume::bounded(1);
         sender
             .try_send(RaftRequest::Shutdown)
             .expect("fill the bounded request queue");
-        let reset = Arc::new(Notify::new());
+        let reset = Arc::new(ConnectionResetState::default());
+        let socket_epoch = reset.epoch();
         let guard = ConnectionResetGuard::new(Arc::clone(&reset));
 
         drop(guard);
 
-        tokio::time::timeout(Duration::from_secs(1), reset.notified())
-            .await
-            .expect("the independent reset signal must be retained");
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_connected_event(&reset, socket_epoch, &reader_receiver, &receiver),
+        )
+        .await
+            .expect("the handler's reconnect consumer must observe the retained reset");
+        assert!(event.is_none());
         assert!(matches!(
             receiver.recv_async().await,
             Ok(RaftRequest::Shutdown)
         ));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn replacement_socket_drops_cancelled_request_after_consuming_reset() {
+        let reset = Arc::new(ConnectionResetState::default());
+        let stale_socket_epoch = reset.epoch();
+        let (cancelled_ack, cancelled_rx) = oneshot::channel();
+        let cancelled = RaftRequest::SnapshotDB((
+            cancelled_ack,
+            InstallSnapshotRequest {
+                vote: Vote::new_committed(1, 1),
+                meta: test_snapshot_meta(),
+                offset: 3,
+                data: b"old".to_vec(),
+                done: false,
+            },
+        ));
+        drop(cancelled_rx);
+
+        let guard = ConnectionResetGuard::new(Arc::clone(&reset));
+        drop(guard);
+        reset.changed_since(stale_socket_epoch).await;
+
+        let replacement_socket_epoch = reset.epoch();
+        assert_eq!(
+            cancelled.outbound_disposition(replacement_socket_epoch, reset.epoch()),
+            Some(OutboundDisposition::DropCancelled)
+        );
+
+        let (live_ack, _live_rx) = oneshot::channel();
+        let live = RaftRequest::SnapshotDB((
+            live_ack,
+            InstallSnapshotRequest {
+                vote: Vote::new_committed(1, 1),
+                meta: test_snapshot_meta(),
+                offset: 0,
+                data: b"new".to_vec(),
+                done: false,
+            },
+        ));
+        assert_eq!(
+            live.outbound_disposition(replacement_socket_epoch, reset.epoch()),
+            Some(OutboundDisposition::Send)
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn live_request_on_stale_socket_requires_reconnect() {
+        let reset = ConnectionResetState::default();
+        let socket_epoch = reset.epoch();
+        reset.request_reset(socket_epoch);
+        let (ack, _rx) = oneshot::channel();
+        let request = RaftRequest::SnapshotDB((
+            ack,
+            InstallSnapshotRequest {
+                vote: Vote::new_committed(1, 1),
+                meta: test_snapshot_meta(),
+                offset: 0,
+                data: Vec::new(),
+                done: true,
+            },
+        ));
+
+        assert_eq!(
+            request.outbound_disposition(socket_epoch, reset.epoch()),
+            Some(OutboundDisposition::Reconnect)
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_interrupts_write_enqueue_under_backpressure() {
+        let (tx_write, _rx_write) = flume::bounded(1);
+        tx_write
+            .try_send(WritePayload::Payload(b"blocked".to_vec()))
+            .expect("fill writer queue");
+        let reset = ConnectionResetState::default();
+        let socket_epoch = reset.epoch();
+        let enqueue = enqueue_write_or_reset(
+            &tx_write,
+            WritePayload::Payload(b"waiting".to_vec()),
+            &reset,
+            socket_epoch,
+        );
+        tokio::pin!(enqueue);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            std::future::Future::poll(enqueue.as_mut(), &mut context).is_pending(),
+            "the write enqueue must be blocked before reset"
+        );
+        reset.request_reset(socket_epoch);
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), &mut enqueue).await,
+            Ok(Err(WriteEnqueueError::Reset))
+        ));
+    }
+
+    #[tokio::test]
+    async fn forced_reset_cleanup_does_not_wait_for_full_writer_queue() {
+        let (tx_write, _rx_write) = flume::bounded(1);
+        tx_write
+            .try_send(WritePayload::Payload(b"blocked".to_vec()))
+            .expect("fill writer queue");
+        let handle_write = tokio::spawn(std::future::pending());
+        let handle_read = tokio::spawn(std::future::pending());
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            stop_stream_tasks(&tx_write, handle_write, handle_read, true),
+        )
+        .await
+        .expect("forced reset cleanup must not queue behind the writer");
     }
 
     #[test]
@@ -874,7 +1169,7 @@ mod tests {
         let mut network = NetworkConnectionStreaming {
             node: test_node(),
             sender,
-            reset: Arc::new(Notify::new()),
+            reset: Arc::new(ConnectionResetState::default()),
             task: None,
         };
         let responder = tokio::spawn(async move {
@@ -928,7 +1223,7 @@ mod tests {
         let mut network = NetworkConnectionStreaming {
             node: test_node(),
             sender,
-            reset: Arc::new(Notify::new()),
+            reset: Arc::new(ConnectionResetState::default()),
             task: None,
         };
         let responder = tokio::spawn(async move {

@@ -66,7 +66,9 @@ services:
     # Keep this paired with PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS when a
     # deployment raises the default 120s snapshot deadline. The start period
     # must cover that value plus the three startup allowances (135s total).
-    # Five minutes covers the default without hiding a broken build for the
+    # `make docker-up` proves the resolved pair before changing containers;
+    # invoking `docker compose up` directly bypasses that safety check. Five
+    # minutes covers the default without hiding a broken build for the
     # one-hour maximum; `.env.example` shows the maximum pair.
     healthcheck:
       test: ["CMD", "plurxd", "healthcheck"]
@@ -105,7 +107,8 @@ services:
       PLURX_BIND: "0.0.0.0:32400"
       PLURX_DATA_DIR: "/var/lib/plurx"
       # Empty leaves a TOML value (or the built-in 120s default) authoritative.
-      # When set in .env, pair it with PLURX_HEALTH_START_PERIOD above.
+      # `make docker-up` checks readable bind-mounted TOML too; when set in
+      # .env, pair this with PLURX_HEALTH_START_PERIOD above.
       PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: "${PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS:-}"
       # Multicast cannot escape a Docker bridge. The host-network discovery
       # companion below owns Bonjour so this container does not publish a
