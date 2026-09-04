@@ -1169,6 +1169,8 @@ mod tests {
                 user_id: user.id,
                 playback_id: "relay-player".to_owned(),
                 expected_predecessor_incarnation_id: incarnation_id.clone(),
+                expected_predecessor_owner_node_id: state.node_id.clone(),
+                expected_predecessor_owner_epoch: 1,
                 request_fingerprint: "b".repeat(64),
                 owner_node_id: state.node_id.clone(),
                 recipe_json,

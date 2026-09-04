@@ -971,6 +971,11 @@ pub struct MediaSessionPreparation {
     /// commit will advance away from. Never optional: a preparation with no
     /// predecessor is a start, and a start is an activation.
     pub expected_predecessor_incarnation_id: String,
+    /// Exact predecessor authority that admitted this staging attempt. A
+    /// takeover keeps the incarnation stable while advancing this tuple, so
+    /// pointer identity alone cannot fence an old detached worker.
+    pub expected_predecessor_owner_node_id: String,
+    pub expected_predecessor_owner_epoch: i64,
     pub request_fingerprint: String,
     pub owner_node_id: String,
     pub recipe_json: String,

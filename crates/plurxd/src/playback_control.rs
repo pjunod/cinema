@@ -14752,7 +14752,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_epoch_rollover_preserves_one_action_id_for_one_staging() {
+    fn owner_epoch_rollover_aborts_instead_of_reannouncing_old_staging() {
         let request = request();
         let mut state = ControlState::default();
         let started = Instant::now();
@@ -14792,7 +14792,15 @@ mod tests {
                 ControlAcceptance::new(Some(ClientPlatform::Apple), Some(&successor)),
             )
             .expect("epoch-two action");
-        assert_eq!(rolled.2, first.2);
+        assert!(matches!(first.2, ControlAction::Prepare { .. }));
+        assert_eq!(rolled.2, ControlAction::None);
+        assert_eq!(
+            state.preparation_directive(),
+            Some(PreparationDirective::Abort {
+                staged_incarnation_id: successor.staged_incarnation_id,
+                acknowledgement_rejected: false,
+            })
+        );
     }
 
     #[test]
@@ -20609,6 +20617,8 @@ mod tests {
             user_id: 7,
             playback_id: "player-a".to_owned(),
             expected_predecessor_incarnation_id: predecessor.to_owned(),
+            expected_predecessor_owner_node_id: "node-a".to_owned(),
+            expected_predecessor_owner_epoch: 1,
             request_fingerprint: "b".repeat(64),
             owner_node_id: "node-a".to_owned(),
             recipe_json: "{}".to_owned(),

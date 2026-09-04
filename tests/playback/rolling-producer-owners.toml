@@ -621,7 +621,9 @@ pattern = "hls_session_status_publication"
 # 3 -> 4 with cancellation-independent preparation settlement: the admission
 # owner retains the exact status-publication handle accepted by the playback
 # actor so its detached Store result reports against the same owner/session.
-expected_occurrences = 4
+# 4 -> 5: the no-status Abort fixture also captures this publication before
+# explicitly discarding it; it verifies status is unnecessary for cleanup.
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "m4-exact-media-session-end"
@@ -660,7 +662,8 @@ pattern = "media_session_route_for_playback"
 # dropped-reply, exact-singleflight, and internal-relay regressions each read
 # the durable route only to prove that the production path reached its one
 # canonical outcome. They add no read-then-act authority.
-expected_occurrences = 20
+# 20 -> 21: serving-loss settlement regression witnesses the final pointer.
+expected_occurrences = 21
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -1172,7 +1175,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # owner settles an actor-accepted preparation independently of the HTTP waiter.
 # A 32-slot semaphore bounds active owners, exact retries join the same receipt,
 # and the task starts no worker or process.
-expected_occurrences = 391
+# 391 -> 393: the serving-loss regression owns and joins/cancels its HTTP
+# waiter and serving-loss task. No new production task owner is introduced.
+expected_occurrences = 393
 
 [[module_structures]]
 id = "method-spawn"
@@ -1290,7 +1295,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 570 -> 571 in the exact-SHA replay review fix: one awaited exchange-floor
 # sleep separates Prepare from the late acknowledgement whose stale ingress
 # snapshot reaches the already-completed singleflight receipt.
-expected_occurrences = 571
+# 571 -> 577: admission capacity gets one inherited-deadline timeout;
+# takeover cleanup gets one existing-reconciliation-deadline timeout. The
+# remaining net four constructors belong to bounded settlement regressions.
+expected_occurrences = 577
 
 [[module_structures]]
 id = "bare-time-constructor"

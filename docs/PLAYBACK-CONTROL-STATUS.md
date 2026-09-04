@@ -705,6 +705,15 @@ predecessor; it still does not create the worker behind the staged playlist.
 Settings → Developer therefore names this as an integration-only path and
 lists the worker, client, and fleet receipts required before viewer enablement.
 
+Preparation settlement reserves bounded capacity and serving authority before
+the actor accepts a terminal acknowledgement, then completes independently of
+the HTTP waiter. Exact retries join the canonical receipt, including during a
+transient ledger-read failure. A takeover cleans the departed owner's staged
+row before publishing its worker; both Store backends fence detached staging
+by the predecessor owner node and epoch. The replicated commit transaction
+rolls back every dependent mutation when its pointer CAS loses, then replays
+the winner or conditionally cleans up the refused preparation.
+
 Three rollout facts still matter:
 
 1. ~~**The capability reads `false` on all three clients.**~~ **Apple now

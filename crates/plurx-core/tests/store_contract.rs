@@ -825,6 +825,8 @@ fn staged_preparation(
         user_id,
         playback_id: playback_id.to_owned(),
         expected_predecessor_incarnation_id: predecessor.to_owned(),
+        expected_predecessor_owner_node_id: "staged-node".to_owned(),
+        expected_predecessor_owner_epoch: 1,
         request_fingerprint: "b".repeat(64),
         owner_node_id: "staged-node".to_owned(),
         recipe_json: "{}".to_owned(),
@@ -2713,7 +2715,7 @@ async fn media_session_commit_atomically_retains_its_control_receipt() {
 }
 
 #[tokio::test]
-async fn stale_predecessor_owner_cannot_commit_or_abort_a_preparation() {
+async fn stale_predecessor_owner_cannot_stage_rejoin_commit_or_abort_a_preparation() {
     for_each_backend(|store, backend| async move {
         let user = store
             .create_user("staged-owner-fence-user", "hash", false)
@@ -2781,6 +2783,28 @@ async fn stale_predecessor_owner_cannot_commit_or_abort_a_preparation() {
             .unwrap_or_else(|error| panic!("{backend}: retained ledger: {error}"))
             .is_some());
 
+        let mut replacement = preparation.clone();
+        replacement.incarnation_id = "00000000-0000-4000-8000-00000000fb05".into();
+        replacement.session_id = "00000000-0000-4000-8000-00000000fb06".into();
+        assert!(
+            !matches!(
+                store
+                    .rejoin_media_session_preparation(staged, &replacement)
+                    .await,
+                Ok(Some(_))
+            ),
+            "{backend}: stale rejoin must not replace the retained ledger"
+        );
+        assert_eq!(
+            store
+                .staged_media_session_for_playback(user.id, playback)
+                .await
+                .expect("retained ledger")
+                .expect("original staged row")
+                .staged_incarnation_id,
+            staged
+        );
+
         let cleaned = store
             .abort_media_session_preparation(
                 user.id,
@@ -2797,6 +2821,29 @@ async fn stale_predecessor_owner_cannot_commit_or_abort_a_preparation() {
         assert!(
             cleaned.is_some(),
             "{backend}: the current owner can clean up"
+        );
+        assert!(
+            store
+                .prepare_media_session(&replacement)
+                .await
+                .expect("stale stage")
+                .is_none(),
+            "{backend}: old detached staging cannot recreate the ledger after takeover cleanup"
+        );
+        assert!(store
+            .media_session_route_by_incarnation(&replacement.incarnation_id)
+            .await
+            .expect("stale successor absent")
+            .is_none());
+        replacement.expected_predecessor_owner_node_id = "successor-owner".into();
+        replacement.expected_predecessor_owner_epoch = 2;
+        assert!(
+            store
+                .prepare_media_session(&replacement)
+                .await
+                .expect("new owner stage")
+                .is_some(),
+            "{backend}: the new owner can stage after cleanup"
         );
     })
     .await;
@@ -24451,4 +24498,144 @@ async fn offline_package_contract_runs_through_dyn_store() {
         );
     })
     .await;
+}
+
+/// A commit that read the preparation ledger before another exact commit won
+/// must replay the winner without submitting any durable loser mutations.
+/// In particular, its stale lease values cannot overwrite a renewal that
+/// happened after the winning commit.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn hiqlite_preparation_commit_loser_cannot_mutate_canonical_winner() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated preparation commit race state");
+
+    let user = store
+        .create_user("preparation-commit-race-user", "hash", false)
+        .await
+        .expect("create preparation commit race user");
+    let playback = "preparation-commit-race-playback";
+    let predecessor = "00000000-0000-4000-8000-00000000ba01";
+    let predecessor_activation = current_media_session(
+        &store,
+        user.id,
+        playback,
+        predecessor,
+        "00000000-0000-4000-8000-00000000ba02",
+        "hiqlite",
+    )
+    .await;
+    let successor = "00000000-0000-4000-8000-00000000ba03";
+    store
+        .prepare_media_session(&staged_preparation(
+            user.id,
+            playback,
+            successor,
+            "00000000-0000-4000-8000-00000000ba04",
+            predecessor,
+        ))
+        .await
+        .expect("stage preparation commit race successor")
+        .expect("preparation commit race staging must win");
+
+    let receipt = MediaSessionTerminalAck {
+        incarnation_id: predecessor.to_owned(),
+        session_id: predecessor_activation.session_id,
+        owner_node_id: "staged-node".to_owned(),
+        owner_epoch: 1,
+        client_instance_id: "00000000-0000-4000-8000-00000000ba05".to_owned(),
+        sequence: 2,
+        request_fingerprint: "d".repeat(64),
+        response_json: "{\"action\":\"commit-race\"}".to_owned(),
+        expires_at_ms: 60_000,
+        updated_at_ms: 3_000,
+    };
+    let mut commit = preparation_commit_request(successor, 3_000, 5_000_000);
+    commit.control_receipt = Some(receipt.clone());
+
+    let (ledger_read, release_loser) =
+        HiqliteAuthStore::validation_pause_next_preparation_commit_after_ledger_read();
+    let loser_store = store.clone();
+    let loser_commit = commit.clone();
+    let loser = tokio::spawn(async move {
+        loser_store
+            .commit_media_session_preparation(user.id, playback, &loser_commit)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), ledger_read)
+        .await
+        .expect("losing commit must reach the post-ledger-read seam")
+        .expect("losing commit dropped the post-ledger-read seam");
+
+    let winner = store
+        .commit_media_session_preparation(user.id, playback, &commit)
+        .await
+        .expect("winning preparation commit")
+        .expect("winning preparation commit must advance the pointer");
+    assert!(winner.predecessor.is_some(), "the winner is a fresh commit");
+    assert_eq!(winner.control_receipt, Some(receipt.clone()));
+
+    store
+        .arm_media_session_handoff(successor, "staged-node", 1, 400_000, 4_000)
+        .await
+        .expect("arm committed successor")
+        .expect("committed successor arming must win");
+    let renewed = store
+        .renew_media_sessions(
+            "staged-node",
+            &[MediaSessionRenewal {
+                incarnation_id: successor.to_owned(),
+                owner_epoch: 1,
+                produced_playable_through_ms: 24_000,
+                fetched_through_ms: 18_000,
+                media_sequence: 8,
+            }],
+            4_100,
+            6_000_000,
+        )
+        .await
+        .expect("renew the canonical winner before releasing the loser");
+    assert_eq!(renewed.len(), 1, "the canonical winner must renew");
+
+    release_loser
+        .send(())
+        .expect("losing commit must still be waiting at the seam");
+    let replay = tokio::time::timeout(Duration::from_secs(10), loser)
+        .await
+        .expect("losing commit must finish after release")
+        .expect("losing commit task must not panic")
+        .expect("losing commit must classify its rolled-back proposal")
+        .expect("an exact loser must replay the canonical winner");
+    assert!(
+        replay.predecessor.is_none(),
+        "the losing caller must be classified as a replay"
+    );
+    assert_eq!(
+        replay.control_receipt,
+        Some(receipt.clone()),
+        "the losing caller must receive the winner's exact durable receipt"
+    );
+
+    let canonical = store
+        .media_session_route_for_playback(user.id, playback)
+        .await
+        .expect("read canonical winner after losing proposal")
+        .expect("canonical winner must remain current");
+    assert_eq!(canonical.incarnation_id, successor);
+    assert_eq!(canonical.lease_expires_at_ms, 6_000_000);
+    assert_eq!(canonical.produced_playable_through_ms, 24_000);
+    assert_eq!(canonical.fetched_through_ms, 18_000);
+    assert_eq!(canonical.media_sequence, 8);
+    assert_eq!(
+        store
+            .media_session_terminal_ack(&receipt.session_id, 4_101)
+            .await
+            .expect("read canonical commit receipt"),
+        Some(receipt),
+    );
 }

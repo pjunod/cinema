@@ -35,6 +35,12 @@ type RejoinProposalPause = (
     tokio::sync::oneshot::Receiver<()>,
 );
 
+#[cfg(feature = "hiqlite-contract-tests")]
+type PreparationCommitLedgerReadPause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
 /// Contract-only seam which freezes one activation after its optimistic
 /// pointer read and before its replicated transaction is submitted. It lets
 /// the three-voter contract deterministically order activation+renewal inside
@@ -56,6 +62,13 @@ static REJOIN_LEDGER_READ_PAUSE: std::sync::LazyLock<
 #[cfg(feature = "hiqlite-contract-tests")]
 static REJOIN_PROPOSAL_PAUSE: std::sync::LazyLock<std::sync::Mutex<Option<RejoinProposalPause>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// Contract-only seam for ordering an exact competing commit after this caller
+/// observed the preparation ledger but before its Raft proposal is submitted.
+#[cfg(feature = "hiqlite-contract-tests")]
+static PREPARATION_COMMIT_LEDGER_READ_PAUSE: std::sync::LazyLock<
+    std::sync::Mutex<Option<PreparationCommitLedgerReadPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 #[cfg(feature = "hiqlite-contract-tests")]
 impl HiqliteAuthStore {
@@ -100,6 +113,23 @@ impl HiqliteAuthStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(pause.is_none(), "rejoin proposal pause already armed");
+        *pause = Some((reached_sender, release_receiver));
+        (reached_receiver, release_sender)
+    }
+
+    pub fn validation_pause_next_preparation_commit_after_ledger_read() -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached_sender, reached_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        let mut pause = PREPARATION_COMMIT_LEDGER_READ_PAUSE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            pause.is_none(),
+            "preparation commit ledger-read pause already armed"
+        );
         *pause = Some((reached_sender, release_receiver));
         (reached_receiver, release_sender)
     }
@@ -391,6 +421,45 @@ async fn commit_replay(
         }))
 }
 
+/// Classify a replicated commit proposal whose pointer CAS did not emit a
+/// row. An exact committed pointer wins first. Every other loss releases this
+/// caller's still-staged successor with the same predecessor owner fence used
+/// by an explicit abort; a takeover therefore retains the old owner's ledger,
+/// while an expired preparation or moved pointer cannot strand the slot.
+async fn classify_preparation_commit_cas_loss(
+    store: &HiqliteAuthStore,
+    user_id: i64,
+    playback_id: &str,
+    request: &MediaSessionPreparationCommitRequest,
+) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError> {
+    if let Some(replay) = commit_replay(
+        store,
+        user_id,
+        playback_id,
+        &request.staged_incarnation_id,
+        request.control_receipt.as_ref(),
+    )
+    .await?
+    {
+        return Ok(Some(replay));
+    }
+    store
+        .abort_media_session_preparation(
+            user_id,
+            playback_id,
+            &MediaSessionPreparationAbortRequest {
+                staged_incarnation_id: request.staged_incarnation_id.clone(),
+                expected_predecessor_owner_node_id: request
+                    .expected_predecessor_owner_node_id
+                    .clone(),
+                expected_predecessor_owner_epoch: request.expected_predecessor_owner_epoch,
+                now_ms: request.now_ms,
+            },
+        )
+        .await?;
+    Ok(None)
+}
+
 async fn staged_row(
     store: &HiqliteAuthStore,
     user_id: i64,
@@ -476,6 +545,9 @@ fn prepare_statements(
                       WHERE owner_node_id = $2 AND state = 'active'
                         AND lease_expires_at_ms > $4 AND incarnation_id != $8) < $11
                 AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $12)
+                AND EXISTS (SELECT 1 FROM media_sessions
+                  WHERE incarnation_id = $7 AND owner_node_id = $13
+                    AND owner_epoch = $14 AND state = 'active')
              ON CONFLICT(resource) DO UPDATE SET
                 expires_at_ms = excluded.expires_at_ms,
                 revision = job_leases.revision + 1,
@@ -496,7 +568,9 @@ fn prepare_statements(
                 MAX_CURRENT_PER_USER,
                 MAX_SESSION_ROWS_PER_USER,
                 MAX_OWNED,
-                removed_owner_key.as_str()
+                removed_owner_key.as_str(),
+                preparation.expected_predecessor_owner_node_id.as_str(),
+                preparation.expected_predecessor_owner_epoch
             ),
         ),
         (
@@ -526,6 +600,9 @@ fn prepare_statements(
                       WHERE owner_node_id = $6 AND state = 'active'
                         AND lease_expires_at_ms > $12 AND incarnation_id != $1) < $16
                 AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $17)
+                AND EXISTS (SELECT 1 FROM media_sessions
+                  WHERE incarnation_id = $13 AND owner_node_id = $18
+                    AND owner_epoch = $19 AND state = 'active')
              RETURNING incarnation_id, session_id, user_id, playback_id, owner_node_id",
             params!(
                 preparation.incarnation_id.as_str(),
@@ -544,7 +621,9 @@ fn prepare_statements(
                 MAX_CURRENT_PER_USER,
                 MAX_SESSION_ROWS_PER_USER,
                 MAX_OWNED,
-                removed_owner_key.as_str()
+                removed_owner_key.as_str(),
+                preparation.expected_predecessor_owner_node_id.as_str(),
+                preparation.expected_predecessor_owner_epoch
             ),
         ),
         (
@@ -557,7 +636,15 @@ fn prepare_statements(
                 WHERE incarnation_id = $3 AND session_id = $7
                   AND user_id = $1 AND playback_id = $2
                   AND owner_node_id = $8 AND state = 'active'
-                  AND publication_ready_at_ms = $9)",
+                  AND publication_ready_at_ms = $9)
+               AND EXISTS (SELECT 1 FROM media_playback_pointers pointer
+                 JOIN media_sessions predecessor
+                   ON predecessor.incarnation_id = pointer.current_incarnation_id
+                WHERE pointer.user_id = $1 AND pointer.playback_id = $2
+                  AND pointer.current_incarnation_id = $4
+                  AND predecessor.owner_node_id = $10
+                  AND predecessor.owner_epoch = $11
+                  AND predecessor.state = 'active')",
             params!(
                 preparation.user_id,
                 preparation.playback_id.as_str(),
@@ -567,7 +654,9 @@ fn prepare_statements(
                 preparation.now_ms,
                 preparation.session_id.as_str(),
                 preparation.owner_node_id.as_str(),
-                MEDIA_SESSION_PUBLICATION_BLOCKED
+                MEDIA_SESSION_PUBLICATION_BLOCKED,
+                preparation.expected_predecessor_owner_node_id.as_str(),
+                preparation.expected_predecessor_owner_epoch
             ),
         ),
     ]
@@ -831,6 +920,9 @@ fn validate_preparation(
         // A successor staged against itself is not a successor, and the
         // pointer guard would pass for it because the pointer would name it.
         && preparation.expected_predecessor_incarnation_id != preparation.incarnation_id
+        && !preparation.expected_predecessor_owner_node_id.is_empty()
+        && preparation.expected_predecessor_owner_node_id.len() <= 256
+        && preparation.expected_predecessor_owner_epoch > 0
         && preparation.user_id > 0
         && !preparation.playback_id.is_empty()
         && preparation.playback_id.len() <= 128
@@ -1544,6 +1636,19 @@ impl MediaSessionStore for HiqliteAuthStore {
         preparation: &crate::domain::MediaSessionPreparation,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
         validate_preparation(preparation)?;
+        let predecessor = route_by(
+            self,
+            "incarnation_id",
+            &preparation.expected_predecessor_incarnation_id,
+        )
+        .await?;
+        if !predecessor.as_ref().is_some_and(|predecessor| {
+            predecessor.owner_node_id == preparation.expected_predecessor_owner_node_id
+                && predecessor.owner_epoch == preparation.expected_predecessor_owner_epoch
+                && predecessor.state == "active"
+        }) {
+            return Ok(None);
+        }
         // Replay by exact identity, before anything is attempted. The ledger's
         // primary key would otherwise turn an owner's retry into "you already
         // have one".
@@ -1676,24 +1781,12 @@ impl MediaSessionStore for HiqliteAuthStore {
         // Hiqlite executes this ordered vector as one Raft proposal. The
         // preparation's pointer/admission/empty-ledger predicates therefore
         // observe the abort statements that precede them.
-        let Some(predecessor) = route_by(
-            self,
-            "incarnation_id",
-            &existing
-                .as_ref()
-                .expect("named occupied slot was checked above")
-                .expected_predecessor_incarnation_id,
-        )
-        .await?
-        else {
-            return Ok(None);
-        };
         let mut statements = abort_statements(
             preparation.user_id,
             &preparation.playback_id,
             staged_incarnation_id,
-            &predecessor.owner_node_id,
-            predecessor.owner_epoch,
+            &preparation.expected_predecessor_owner_node_id,
+            preparation.expected_predecessor_owner_epoch,
             preparation.now_ms,
         );
         // Rejoin may release the ledger only after the named active row was
@@ -1917,6 +2010,19 @@ impl MediaSessionStore for HiqliteAuthStore {
             )
             .await;
         }
+        #[cfg(feature = "hiqlite-contract-tests")]
+        {
+            let ledger_read_pause = {
+                let mut pause = PREPARATION_COMMIT_LEDGER_READ_PAUSE
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                pause.take()
+            };
+            if let Some((reached, release)) = ledger_read_pause {
+                let _ = reached.send(());
+                let _ = release.await;
+            }
+        }
         let predecessor_incarnation = staged.expected_predecessor_incarnation_id.clone();
         let lease_resource = format!("session:{predecessor_incarnation}");
         let staged_lease_resource = format!("session:{}", staged.staged_incarnation_id);
@@ -1965,7 +2071,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // here reads the pointer to decide what to reap; a pointer that no
         // longer names the predecessor simply fails every guard, and the
         // abort branch below is what turns that into the right outcome.
-        let statements: Vec<(&str, hiqlite::Params)> = vec![
+        let mut statements: Vec<(&str, hiqlite::Params)> = vec![
             (
                 "UPDATE media_playback_pointers
                     SET current_incarnation_id = $1, updated_at_ms = $2
@@ -1991,7 +2097,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                           AND owner_node_id = $10 AND owner_epoch = $11
                           AND client_instance_id = $12 AND sequence = $13
                           AND request_fingerprint = $14 AND response_json = $15
-                          AND expires_at_ms = $16 AND updated_at_ms = $17))",
+                          AND expires_at_ms = $16 AND updated_at_ms = $17))
+                  RETURNING current_incarnation_id",
                 params!(
                     staged.staged_incarnation_id.as_str(),
                     now_ms,
@@ -2096,7 +2203,13 @@ impl MediaSessionStore for HiqliteAuthStore {
                 params!(user_id, playback_id, staged.staged_incarnation_id.as_str()),
             ),
         ];
-        let mut statements = statements;
+        // Every dependent write consumes the pointer CAS's observable output.
+        // When another proposal commits after the optimistic ledger read, the
+        // first statement returns no row and Hiqlite fails parameter
+        // resolution for statement one. That statement error rolls the whole
+        // Raft transaction back before a replay can renew the already-current
+        // successor or alter its job lease.
+        statements[1].1[5] = Param::StmtOutputNamed(0, "current_incarnation_id".into());
         if let Some(receipt) = &request.control_receipt {
             if receipt.incarnation_id != predecessor_incarnation {
                 return Ok(None);
@@ -2132,22 +2245,56 @@ impl MediaSessionStore for HiqliteAuthStore {
             validate_sql(sql)?;
         }
         let statement_count = statements.len();
-        let changed = self
-            .client()
-            .txn(statements)
-            .await?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
+        let results = match self.client().txn(statements).await {
+            Ok(results) => results,
+            Err(error) => {
+                if error
+                    .to_string()
+                    .contains("StmtIndex(0) does not have observable row output")
+                {
+                    return classify_preparation_commit_cas_loss(
+                        self,
+                        user_id,
+                        playback_id,
+                        request,
+                    )
+                    .await;
+                }
+                return Err(database_error(error));
+            }
+        };
+        let changed = match results.into_iter().collect::<Result<Vec<_>, _>>() {
+            Ok(changed) => changed,
+            Err(error) => {
+                if error
+                    .to_string()
+                    .contains("StmtIndex(0) does not have observable row output")
+                {
+                    return classify_preparation_commit_cas_loss(
+                        self,
+                        user_id,
+                        playback_id,
+                        request,
+                    )
+                    .await;
+                }
+                return Err(database_error(error));
+            }
+        };
+        if changed.len() != statement_count {
+            return Err(StoreError::Task(
+                "replicated media-session preparation commit returned an incomplete result vector"
+                    .to_owned(),
+            ));
+        }
         let fresh_commit = changed.first().copied() == Some(1);
-        // An all-zero replicated transaction is ambiguous between "I lost
-        // every precondition" and "I am an exact replay", so the exact
-        // post-commit projection below is the discriminator — never
-        // rows_affected on its own.
-        let transaction_replay =
-            changed.len() == statement_count && changed.iter().all(|affected| *affected == 0);
-        if !fresh_commit && !transaction_replay {
-            return Ok(None);
+        if !fresh_commit {
+            // Defensive fallback for clients which report a zero affected-row
+            // result instead of surfacing the missing statement output. The
+            // output chain still made the proposal mutation-free; exact
+            // durable replay wins, otherwise an owner-fenced abort releases a
+            // genuinely rejected preparation.
+            return classify_preparation_commit_cas_loss(self, user_id, playback_id, request).await;
         }
         let pointer = self
             .client()
@@ -3902,6 +4049,8 @@ mod tests {
             user_id: 1,
             playback_id: "playback".to_owned(),
             expected_predecessor_incarnation_id: "00000000-0000-4000-8000-000000000001".to_owned(),
+            expected_predecessor_owner_node_id: "owner".to_owned(),
+            expected_predecessor_owner_epoch: 1,
             request_fingerprint: "a".repeat(64),
             owner_node_id: "owner".to_owned(),
             recipe_json: "{}".to_owned(),
@@ -3956,26 +4105,22 @@ mod tests {
     /// the exact activation and renews it, then caller A finally enters its
     /// replicated transaction with the stale activation lease.
     ///
-    /// The transaction must observe B's current pointer and affect zero rows.
-    /// In particular it may not rewrite the renewed session/job lease, the
-    /// pointer timestamp, or the resolved request. The all-zero result is only
-    /// accepted after exact route and current-pointer reads outside the
-    /// transaction, so an ordinary precondition failure cannot masquerade as
-    /// a replay.
-    /// §4.2's guards, written for the commit path rather than inherited.
-    ///
-    /// The all-zero replicated transaction is ambiguous between "I lost every
-    /// precondition" and "I am an exact replay", and only the post-commit
-    /// projection tells them apart. These assertions are what stop that
-    /// discriminator being quietly deleted by somebody who reads the
-    /// `rows_affected` check above it and concludes it is redundant.
+    /// The transaction must observe B's current pointer and roll A's proposal
+    /// back. In particular it may not rewrite the renewed successor/job lease
+    /// merely because those later statements see B's already-current pointer.
+    /// The pointer CAS therefore exposes a row and the next statement consumes
+    /// it: a zero-row CAS is a statement-output error, which Hiqlite rolls back
+    /// before the exact durable replay projection runs.
     #[test]
     fn preparation_commit_disambiguates_replay_from_total_loss() {
         let source = method_source("commit_media_session_preparation");
         assert!(
-            source.contains("changed.iter().all(|affected| *affected == 0)"),
-            "an all-zero transaction must be treated as a candidate replay \
-             rather than a loss"
+            source.contains("RETURNING current_incarnation_id")
+                && source.contains(
+                    "Param::StmtOutputNamed(0, \"current_incarnation_id\".into())"
+                )
+                && source.contains("StmtIndex(0) does not have observable row output"),
+            "a losing pointer CAS must roll back every dependent write before replay classification"
         );
         assert!(
             source.contains("pointer.as_deref() != Some(staged.staged_incarnation_id.as_str())"),
@@ -4097,7 +4242,7 @@ mod tests {
         let normalized_method = method.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalized_method.contains(
-                "let statements = abort_statements(user_id, playback_id, staged_incarnation_id, now_ms);"
+                "let statements = abort_statements( user_id, playback_id, &request.staged_incarnation_id, &request.expected_predecessor_owner_node_id, request.expected_predecessor_owner_epoch, request.now_ms, );"
             ) && method.matches("let statements =").count() == 1
                 && method.matches(".txn(").count() == 1
                 && method.matches(".txn(statements)").count() == 1
@@ -4111,7 +4256,14 @@ mod tests {
                 && !method.contains("\"DELETE "),
             "the public abort path must submit the shared statement vector unchanged"
         );
-        let statements = abort_statements(1, "playback", "00000000-0000-4000-8000-000000000002", 1);
+        let statements = abort_statements(
+            1,
+            "playback",
+            "00000000-0000-4000-8000-000000000002",
+            "owner",
+            1,
+            1,
+        );
         assert_eq!(
             statements.len(),
             4,

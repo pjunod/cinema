@@ -166,6 +166,9 @@ fn validate_preparation(preparation: &MediaSessionPreparation) -> Result<(), Sto
         // A successor staged against itself is not a successor. The pointer
         // CAS below would pass for it, because the pointer would name it.
         && preparation.expected_predecessor_incarnation_id != preparation.incarnation_id
+        && !preparation.expected_predecessor_owner_node_id.is_empty()
+        && preparation.expected_predecessor_owner_node_id.len() <= 256
+        && preparation.expected_predecessor_owner_epoch > 0
         && preparation.user_id > 0
         && !preparation.playback_id.is_empty()
         && preparation.playback_id.len() <= 128
@@ -270,6 +273,30 @@ fn prepare_within(
     tx: &rusqlite::Transaction<'_>,
     preparation: &MediaSessionPreparation,
 ) -> rusqlite::Result<Option<MediaSessionRoute>> {
+    let predecessor_is_authoritative = tx
+        .query_row(
+            "SELECT 1 FROM media_playback_pointers pointer
+              JOIN media_sessions predecessor
+                ON predecessor.incarnation_id = pointer.current_incarnation_id
+             WHERE pointer.user_id = ?1 AND pointer.playback_id = ?2
+               AND pointer.current_incarnation_id = ?3
+               AND predecessor.owner_node_id = ?4
+               AND predecessor.owner_epoch = ?5
+               AND predecessor.state = 'active'",
+            params![
+                preparation.user_id,
+                preparation.playback_id,
+                preparation.expected_predecessor_incarnation_id,
+                preparation.expected_predecessor_owner_node_id,
+                preparation.expected_predecessor_owner_epoch,
+            ],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !predecessor_is_authoritative {
+        return Ok(None);
+    }
     let existing = tx
         .query_row(
             &format!(
