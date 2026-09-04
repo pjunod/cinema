@@ -535,6 +535,35 @@ ALTER TABLE cluster_fragment_index_jobs
     ADD COLUMN attempt_errors TEXT NOT NULL DEFAULT '';
 "#;
 
+/// Which copy-video identity a fragment-index request is for.
+///
+/// A file has one to three of them — stripped, preserved, converting — and
+/// before this the queue could only ever ask for one. A request resolved
+/// whichever identity lacked an index first, and its row then became the dedup
+/// tombstone that stopped background discovery asking for the others. So a
+/// Dolby Vision Profile 7 title got its stripped identity and never its
+/// converting one, which is why no converting fragment index existed anywhere
+/// on the fleet: only a play attempt or an admin request could reach it.
+///
+/// Empty for `skip_markers`, which has no copy-video identity, and empty on
+/// every row written before this column existed. Empty therefore means
+/// "whichever identity is next", which is exactly the old behaviour, so a
+/// request in flight across the upgrade resolves the way it always did.
+///
+/// The forced-successor cancellation is why this has to be a column rather
+/// than something folded into an existing one. Forcing a rebuild of one
+/// identity must cancel the pending background request for *that* identity and
+/// leave its siblings alone; `cancelled` is terminal, so cancelling all three
+/// would refuse their generations for good. Nothing else on the row can carry
+/// it: `requested_generation` is a fresh UUID on a forced request by design,
+/// `pipeline_version` is the engine digest the resolver compares directly and
+/// the store dedups and prunes on, and `expected_predecessor_generation` is
+/// the heads CAS token.
+pub const ANALYSIS_REQUEST_IDENTITY_SCHEMA: &str = r#"
+ALTER TABLE analysis_requests
+    ADD COLUMN video_identity TEXT NOT NULL DEFAULT '';
+"#;
+
 pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_ANALYSIS_MAX_ATTEMPTS: i64 = 5;
 pub const MAX_ANALYSIS_MAX_ATTEMPTS: i64 = 20;
@@ -909,6 +938,11 @@ pub struct NewAnalysisRequest {
     pub source_mtime: i64,
     pub component: String,
     pub pipeline_version: String,
+    /// The copy-video identity this request is for, as an argv fingerprint.
+    /// Empty means "whichever identity is next", which is what every request
+    /// written before the column existed meant, and what `skip_markers` — which
+    /// has no copy-video identity at all — always means.
+    pub video_identity: String,
     pub requested_generation: String,
     pub priority: String,
     pub trigger: String,
@@ -926,6 +960,11 @@ pub struct AnalysisRequest {
     pub source_mtime: i64,
     pub component: String,
     pub pipeline_version: String,
+    /// The copy-video identity this request is for, as an argv fingerprint.
+    /// Empty means "whichever identity is next", which is what every request
+    /// written before the column existed meant, and what `skip_markers` — which
+    /// has no copy-video identity at all — always means.
+    pub video_identity: String,
     pub requested_generation: String,
     pub expected_predecessor_generation: String,
     pub priority: String,

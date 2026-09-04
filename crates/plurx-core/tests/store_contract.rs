@@ -9166,6 +9166,10 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
                 hiqlite::params!(),
             ),
             (
+                "ALTER TABLE analysis_requests DROP COLUMN video_identity",
+                hiqlite::params!(),
+            ),
+            (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
                 hiqlite::params!(AUTH_SCHEMA_MIGRATION_SOURCE),
             ),
@@ -9293,6 +9297,10 @@ async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {
                 hiqlite::params!(),
             ),
             (
+                "ALTER TABLE analysis_requests DROP COLUMN video_identity",
+                hiqlite::params!(),
+            ),
+            (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
                 hiqlite::params!(V23_SCHEMA_VERSION),
             ),
@@ -9363,6 +9371,142 @@ async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {
 /// test asserts rather than assuming.
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect v27 request-identity migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v27-request-identity-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current request-identity schema");
+    current
+        .put_setting("migration.v27.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    // Rewind to v26: the identity column gone, a request row already in the
+    // table, and the meta version pinned to the literal it is named for. The
+    // row is what proves the migration is additive — a file already queued
+    // when the fleet upgrades must come out the other side asking for the same
+    // work, which for an empty identity means "whichever identity is next".
+    client
+        .txn([
+            (
+                "INSERT INTO analysis_requests
+                    (request_id, file_id, source_size, source_mtime, component,
+                     pipeline_version, requested_generation,
+                     expected_predecessor_generation, priority, trigger,
+                     force_rebuild, target_node_id, state, fence, attempts,
+                     not_before_ms, cancel_requested, created_at_ms, updated_at_ms)
+                 VALUES ($1, 1, 100, 10, 'fragment_index', 'v26-pipeline',
+                         'v26-generation', '', 'normal', 'background', 0,
+                         'node-a', 'queued', 0, 0, 0, 0, 0, 0)",
+                hiqlite::params!("v26-row"),
+            ),
+            (
+                "ALTER TABLE analysis_requests DROP COLUMN video_identity",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(V26_SCHEMA_VERSION),
+            ),
+        ])
+        .await
+        .expect("construct v26 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit v26 fixture");
+
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v26 through v27 request-identity migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v27.proof")
+            .await
+            .expect("read v26 migration proof")
+            .as_deref(),
+        Some("survives")
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('analysis_requests')
+              WHERE name = 'video_identity'",
+            1,
+        ),
+        // The row that predates the column reads back an empty history, not a
+        // NULL: the column is NOT NULL DEFAULT ''.
+        (
+            "SELECT COUNT(*) AS value FROM analysis_requests
+              WHERE request_id = 'v26-row' AND video_identity = ''",
+            1,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect migrated v26 attempt-history schema");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+
+    // A second open is a no-op: the marker is current, so the step does not
+    // run at all.
+    HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("re-opening an already migrated v27 store");
+
+    // The column present with the marker behind is not a race that
+    // `settle_migration_attempt` should forgive: no other voter finished the
+    // step, so the tree is inconsistent and the daemon must refuse rather
+    // than carry on against a schema it cannot account for.
+    client
+        .execute(
+            "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+            hiqlite::params!(V26_SCHEMA_VERSION),
+        )
+        .await
+        .expect("rewind the marker under an already-migrated shape");
+    let inconsistent = match HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await {
+        Ok(_) => panic!("a column that already exists under a stale marker must refuse"),
+        Err(error) => error,
+    };
+    assert!(
+        inconsistent.to_string().contains("duplicate column"),
+        "{inconsistent}"
+    );
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("inspect the refused marker");
+    assert_eq!(
+        rows[0].value, V26_SCHEMA_VERSION,
+        "a refused migration leaves the marker exactly where it was"
+    );
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
@@ -9389,8 +9533,8 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
         .expect("seed unrelated replicated row");
     drop(current);
 
-    // Rewind to v25: the column gone, a job row already in the table, and the
-    // meta version back one step.
+    // Rewind to v25: the attempt-history column gone, a job row already in the
+    // table, and the meta version pinned to the literal it is named for.
     client
         .txn([
             (
@@ -9407,8 +9551,12 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
                 hiqlite::params!(),
             ),
             (
+                "ALTER TABLE analysis_requests DROP COLUMN video_identity",
+                hiqlite::params!(),
+            ),
+            (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-                hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+                hiqlite::params!(V25_SCHEMA_VERSION),
             ),
         ])
         .await
@@ -9466,7 +9614,7 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
     client
         .execute(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-            hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+            hiqlite::params!(V25_SCHEMA_VERSION),
         )
         .await
         .expect("rewind the marker under an already-migrated shape");
@@ -9486,15 +9634,11 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
         .await
         .expect("inspect the refused marker");
     assert_eq!(
-        rows[0].value,
-        AUTH_SCHEMA_VERSION - 1,
+        rows[0].value, V25_SCHEMA_VERSION,
         "a refused migration leaves the marker exactly where it was"
     );
 }
 
-/// The schema this fixture rewinds to. Named rather than derived from
-/// `AUTH_SCHEMA_VERSION`: the point of the test is the v24 → v25 step, and
-/// deriving it moved the fixture every time a later step landed.
 #[cfg(feature = "hiqlite-contract-tests")]
 /// The replicated version each migration fixture rebuilds, written as the
 /// literal it is named for.
@@ -9507,6 +9651,8 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
 /// supposed to be proving.
 const V23_SCHEMA_VERSION: i64 = 23;
 const V24_SCHEMA_VERSION: i64 = 24;
+const V25_SCHEMA_VERSION: i64 = 25;
+const V26_SCHEMA_VERSION: i64 = 26;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9564,6 +9710,10 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
             // costume of a migration defect.
             (
                 "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE analysis_requests DROP COLUMN video_identity",
                 hiqlite::params!(),
             ),
             (
@@ -9827,6 +9977,10 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
                 hiqlite::params!(),
             ),
             (
+                "ALTER TABLE analysis_requests DROP COLUMN video_identity",
+                hiqlite::params!(),
+            ),
+            (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
                 hiqlite::params!(V24_SCHEMA_VERSION),
             ),
@@ -10022,6 +10176,10 @@ async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
                 // column that is already there — a fixture defect wearing the
                 // costume of a migration one.
                 "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE analysis_requests DROP COLUMN video_identity",
                 hiqlite::params!(),
             ),
             (
@@ -10222,6 +10380,10 @@ async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
                 hiqlite::params!(),
             ),
             (
+                "ALTER TABLE analysis_requests DROP COLUMN video_identity",
+                hiqlite::params!(),
+            ),
+            (
                 "UPDATE cluster_meta SET schema_version = 7 WHERE singleton = 1",
                 hiqlite::params!(),
             ),
@@ -10402,6 +10564,10 @@ async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
                 // column that is already there — a fixture defect wearing the
                 // costume of a migration one.
                 "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE analysis_requests DROP COLUMN video_identity",
                 hiqlite::params!(),
             ),
             (
@@ -10589,6 +10755,10 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
                 // column that is already there — a fixture defect wearing the
                 // costume of a migration one.
                 "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE analysis_requests DROP COLUMN video_identity",
                 hiqlite::params!(),
             ),
             (
@@ -11541,6 +11711,10 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
                 hiqlite::params!(),
             ),
             (
+                "ALTER TABLE analysis_requests DROP COLUMN video_identity",
+                hiqlite::params!(),
+            ),
+            (
                 "UPDATE cluster_meta SET schema_version = 21 WHERE singleton = 1",
                 hiqlite::params!(),
             ),
@@ -11688,6 +11862,7 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             source_mtime: 10,
             component: "fragment_index".to_owned(),
             pipeline_version: "legacy-fragment-index".to_owned(),
+            video_identity: String::new(),
             requested_generation: "legacy-generation".to_owned(),
             priority: "normal".to_owned(),
             trigger: "admin".to_owned(),
@@ -11709,6 +11884,7 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             source_mtime: 10,
             component: "fragment_index".to_owned(),
             pipeline_version: "pipeline-v1".to_owned(),
+            video_identity: String::new(),
             requested_generation: "analysis-generation-v1".to_owned(),
             priority: "normal".to_owned(),
             trigger: "admin".to_owned(),
@@ -11829,6 +12005,7 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             source_mtime: 20,
             component: "fragment_index".to_owned(),
             pipeline_version: "pipeline-v1".to_owned(),
+            video_identity: String::new(),
             requested_generation: "replacement-generation-v1".to_owned(),
             priority: "normal".to_owned(),
             trigger: "admin".to_owned(),
@@ -11876,6 +12053,7 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             source_mtime: 20,
             component: "fragment_index".to_owned(),
             pipeline_version: "pipeline-v1".to_owned(),
+            video_identity: String::new(),
             requested_generation: "forced-generation-v1".to_owned(),
             priority: "forced".to_owned(),
             trigger: "admin".to_owned(),
@@ -11984,6 +12162,7 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             source_mtime: 30,
             component: "fragment_index".to_owned(),
             pipeline_version: "pipeline-v1".to_owned(),
+            video_identity: String::new(),
             requested_generation: "rebind-generation-v1".to_owned(),
             priority: "normal".to_owned(),
             trigger: "admin".to_owned(),
@@ -15520,6 +15699,7 @@ async fn analysis_history_contract_runs_through_dyn_store() {
             source_mtime: 1,
             component: "fragment_index".to_owned(),
             pipeline_version: pipeline_sha256.clone(),
+            video_identity: String::new(),
             requested_generation: "history-generation-old".to_owned(),
             priority: "normal".to_owned(),
             trigger: "admin".to_owned(),
@@ -16288,6 +16468,7 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
                 source_mtime: 1,
                 component: "fragment_index".to_owned(),
                 pipeline_version: "analysis-pipeline-v1".to_owned(),
+                video_identity: String::new(),
                 requested_generation: "analysis-admin-generation".to_owned(),
                 priority: "normal".to_owned(),
                 trigger: "admin".to_owned(),
@@ -16373,6 +16554,7 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             source_mtime: 1,
             component: "skip_markers".to_owned(),
             pipeline_version: "chapter-classifier-v1".to_owned(),
+            video_identity: String::new(),
             requested_generation: "semantic-generation-v1".to_owned(),
             priority: "normal".to_owned(),
             trigger: "admin".to_owned(),
@@ -16541,6 +16723,7 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
                 source_mtime: replaced.mtime,
                 component: "skip_markers".to_owned(),
                 pipeline_version: "chapter-classifier-v1".to_owned(),
+                video_identity: String::new(),
                 requested_generation: "source-replaced-generation".to_owned(),
                 priority: "normal".to_owned(),
                 trigger: "admin".to_owned(),
@@ -16594,6 +16777,7 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
                 source_mtime: 1,
                 component: "skip_markers".to_owned(),
                 pipeline_version: "chapter-classifier-v1".to_owned(),
+                video_identity: String::new(),
                 requested_generation: "source-deleted-generation".to_owned(),
                 priority: "normal".to_owned(),
                 trigger: "admin".to_owned(),
@@ -16649,6 +16833,7 @@ async fn active_force_precedes_later_normal_requests_through_dyn_store() {
                     source_mtime: 1,
                     component: component.to_owned(),
                     pipeline_version: pipeline.clone(),
+                    video_identity: String::new(),
                     requested_generation: format!("forced-generation-{component}"),
                     priority: "forced".to_owned(),
                     trigger: "admin".to_owned(),
@@ -16679,6 +16864,7 @@ async fn active_force_precedes_later_normal_requests_through_dyn_store() {
                         source_mtime: 1,
                         component: component.to_owned(),
                         pipeline_version: pipeline,
+                        video_identity: String::new(),
                         requested_generation: String::new(),
                         priority: String::new(),
                         trigger: String::new(),
@@ -16739,6 +16925,7 @@ async fn analysis_priority_ages_fairly_and_survives_worker_handoff_through_dyn_s
                     source_mtime: 1,
                     component: "fragment_index".to_owned(),
                     pipeline_version: pipeline_char.to_string().repeat(64),
+                    video_identity: String::new(),
                     requested_generation: format!("priority-generation-{name}"),
                     priority: priority.to_owned(),
                     trigger: if force_rebuild { "admin" } else { "background" }.to_owned(),
@@ -16841,6 +17028,7 @@ async fn foreground_demand_promotes_an_existing_structural_job_through_dyn_store
             source_mtime: 1,
             component: "fragment_index".to_owned(),
             pipeline_version: first_pipeline.clone(),
+            video_identity: String::new(),
             requested_generation: "analysis-foreground-promotion-generation".to_owned(),
             priority: "normal".to_owned(),
             trigger: "background".to_owned(),
@@ -16967,6 +17155,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
             source_mtime: 1,
             component: "fragment_index".to_owned(),
             pipeline_version: pipeline_sha256.clone(),
+            video_identity: String::new(),
             requested_generation: "analysis-attached-metrics-generation".to_owned(),
             priority: "normal".to_owned(),
             trigger: "admin".to_owned(),
@@ -17555,6 +17744,7 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             source_mtime: 1,
             component: "skip_markers".to_owned(),
             pipeline_version: "chapter-classifier-v1".to_owned(),
+            video_identity: String::new(),
             requested_generation: "terminal-analysis-generation".to_owned(),
             priority: "normal".to_owned(),
             trigger: "background".to_owned(),
@@ -18051,6 +18241,7 @@ async fn analysis_admin_retry_resets_attempt_budget_through_dyn_store() {
                 source_mtime: 1,
                 component: "fragment_index".to_owned(),
                 pipeline_version: "analysis-pipeline-v1".to_owned(),
+                video_identity: String::new(),
                 requested_generation: "attempt-budget-v1".to_owned(),
                 priority: "normal".to_owned(),
                 trigger: "admin".to_owned(),
@@ -18132,6 +18323,7 @@ async fn analysis_admin_retry_queues_only_its_forced_generation_through_dyn_stor
                 source_mtime: 1,
                 component: "fragment_index".to_owned(),
                 pipeline_version: pipeline_sha256.clone(),
+                video_identity: String::new(),
                 requested_generation: "analysis-retry-original-generation".to_owned(),
                 priority: "normal".to_owned(),
                 trigger: "background".to_owned(),
@@ -18273,6 +18465,7 @@ async fn analysis_identity_and_submitted_cancellation_run_through_dyn_store() {
             source_mtime: 1,
             component: "fragment_index".to_owned(),
             pipeline_version: "pipeline-v1".to_owned(),
+            video_identity: String::new(),
             requested_generation: "generation-v1".to_owned(),
             priority: "normal".to_owned(),
             trigger: "admin".to_owned(),
@@ -18415,6 +18608,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             source_mtime: 1,
             component: "fragment_index".to_owned(),
             pipeline_version: pipeline_sha256.clone(),
+            video_identity: String::new(),
             requested_generation: "repair-normal-generation".to_owned(),
             priority: "normal".to_owned(),
             trigger: "admin".to_owned(),

@@ -6,12 +6,17 @@ Everything below is a read. **Do not change code, do not restart nodes to
 "help", and do not retarget or edit queue rows.** If a gate is shut, stop and
 report which one — a shut gate is the answer, not an obstacle.
 
-Two efforts land together and this verifies both:
+Three changes are being verified, and §1 is how you tell which of them the
+fleet is actually running:
 
-- `effort/fragment-index-queue-repair` (PR #881) — the queue can be watched,
-  reopened, and stops building the same file once per voter.
-- `agent/sampled-source-attestation` (PR #877) — attestation reads a bounded
-  64 MiB sample instead of hashing whole films.
+- **PR #877** — attestation reads a bounded 64 MiB sample instead of hashing
+  whole films. Merged to `main`.
+- **PR #881** — the queue can be watched, reopened, and stops building the same
+  file once per voter. Merged to `main`.
+- **PR #895** — one request per copy-video identity. This is the
+  **stop-the-fleet** upgrade (replicated schema v27, SQLite v47), and it is the
+  one that makes a converting Dolby Vision index appear without anyone asking
+  for it. Check whether it is deployed before reading §6.
 
 ## 0. What you have
 
@@ -32,8 +37,9 @@ curl -s localhost:32400/metrics | grep -m1 plurx_build_info
 systemctl show -p ExecStart plurx 2>/dev/null | head -1
 ```
 
-The running binary must contain both merges. If any node is behind, say which
-and stop — a fleet running two different queue policies is not a measurement,
+The running binary must contain the same merges on every node, and §6 needs you
+to know whether that includes PR #895 — `plurx_build_info` is the answer. If
+any node is behind, say which and stop — a fleet running two different queue policies is not a measurement,
 and it is exactly the shape that made the last verification unreadable.
 
 ## 2. The one-word answer, on every node
@@ -97,7 +103,8 @@ live WAL-mode file.
 - `max(built_at_ms)` advancing past 2026-08-31 is the first proof of life.
 - A **second** `pipeline_sha256` appearing is the converting pipeline being
   built for the first time ever. That is the headline result for Dolby Vision
-  Profile 7, and it may not appear at all — see §6.
+  Profile 7 — but whether to expect it depends on which build is deployed, so
+  read §6 before concluding anything from its absence.
 - `attempt_limit` will **not** shrink on its own. Those rows are history and
   nothing deletes them. §5 is how they come back.
 
@@ -147,26 +154,48 @@ verdict between calls is the entire reason for the ceiling.
 **"Nothing left to reopen" is the healthy answer**, not an error: a file whose
 successor is already queued or built is deliberately not offered again.
 
-## 6. What is NOT fixed, so do not chase it
+## 6. The converting Dolby Vision index — the headline result
 
-**No converting Dolby Vision index will appear from the background pass**, and
-that is expected. Background discovery issues one request per file, that
-request resolves the *first* identity lacking an index, and the request row is
-then the dedup tombstone — so a DV file gets its stripped identity and never
-its converting one. Only a play attempt or an admin request can ask for the
-converting identity today.
+**Which answer is correct here depends on which build is deployed**, so check
+§1 first and then read the matching paragraph.
 
-That is milestone M5.2 and it is **not built**: it needs a column on
-`analysis_requests`, which is a schema bump on both backends and therefore a
-stop-the-fleet deploy. The analysis is in
-`docs/CONTENT-ANALYSIS-INDEX-HANDOFF.md` §5.9 and the decision is Paul's.
+**If M5.2 is deployed** (replicated schema **v27**, SQLite **v47** — this is
+the stop-the-fleet upgrade), background discovery issues one request per
+copy-video identity a file lacks, rather than one request per file that
+resolved whichever identity was missing first and tombstoned the rest. A
+converting Dolby Vision index should therefore appear **on its own**, without
+anybody asking for one:
 
-So: if you want to see a converting artifact appear, ask for one explicitly on
-a known P7 title (file 70) rather than waiting for the background pass. If it
-still does not appear after that, *that* is a finding worth reporting.
+```sql
+SELECT pipeline_sha256, COUNT(*) FROM cluster_fragment_index_artifacts GROUP BY 1;
+```
 
-Also expected and not a fault: `foreground_preempted` continuing to appear on
-busy nodes, and `attempt_limit` staying flat at 1,939 until §5 is run.
+A **second** `pipeline_sha256` is the proof. It is the first converting
+fragment index the fleet has ever built, and it is what the whole effort was
+aiming at. Expect it to take discovery passes rather than minutes (§7).
+
+Check the requests too — one file should now hold more than one:
+
+```sql
+SELECT file_id, component, video_identity, state
+  FROM analysis_requests WHERE component = 'fragment_index'
+ ORDER BY file_id LIMIT 20;
+```
+
+Distinct non-empty `video_identity` values on the same `file_id` is the
+mechanism working. An empty one is not a fault: it means "whichever identity
+is next", which is what every row written before the upgrade meant.
+
+**If M5.2 is not deployed**, no converting index will appear from the
+background pass, and that is expected rather than a fault — the request row is
+the dedup tombstone for the file's other identities, so only a play attempt or
+an admin request can reach the converting one. Ask for one explicitly on a
+known P7 title (file 70) rather than waiting. If it still does not appear after
+that, *that* is a finding worth reporting.
+
+Also expected and not a fault in either case: `foreground_preempted` continuing
+to appear on busy nodes, and `attempt_limit` staying flat at 1,939 until §5 is
+run.
 
 ## 7. Rate — read it, do not tune it
 

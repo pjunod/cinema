@@ -965,6 +965,13 @@ const MIGRATIONS: &[&str] = &[
     // list *is* the version, so the two are ordered by which one shipped
     // rather than by which was written first.
     crate::store::fragment_index_cluster::ANALYSIS_ATTEMPT_ERRORS_SCHEMA,
+    // v47: which copy-video identity a fragment-index request is for. A file
+    // has one to three of them and the queue could only ever ask for one,
+    // because the first request became the dedup tombstone for the rest — so
+    // a Dolby Vision Profile 7 title got its stripped identity and never its
+    // converting one. Empty means whichever identity is next, which is what
+    // every row written before this column meant.
+    crate::store::fragment_index_cluster::ANALYSIS_REQUEST_IDENTITY_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1257,6 +1264,17 @@ impl SqliteStore {
         Ok(count == 1)
     }
 
+    /// Whether v47's request-identity column is already installed.
+    fn video_identity_column_exists(conn: &Connection) -> Result<bool, StoreError> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('analysis_requests')
+              WHERE name = 'video_identity'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count == 1)
+    }
+
     /// Whether v45's negative fragment index is already installed.
     ///
     /// A replay guard is normally about a crash between a migration's commit
@@ -1317,6 +1335,7 @@ impl SqliteStore {
             let applied = if (version == 41 && Self::analysis_component_schema_is_current(conn)?)
                 || (version == 45 && Self::fragment_index_outcomes_table_exists(conn)?)
                 || (version == 46 && Self::attempt_errors_column_exists(conn)?)
+                || (version == 47 && Self::video_identity_column_exists(conn)?)
             {
                 Ok(())
             } else {
@@ -2107,7 +2126,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 46,
+            version, 47,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

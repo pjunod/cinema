@@ -27,13 +27,19 @@ voter that claims a job whose artifact another voter already published settles
 it by hydration instead of rebuilding, which on a four-voter fleet is three
 full bitstream passes over each file that nobody needed to run.
 
-Two things are written down rather than built. **M5.2** — one background
-request per copy-video identity, which is why no converting Dolby Vision index
-exists anywhere on the fleet — needs a column on `analysis_requests` to scope
-the forced-successor cancellation, and that is a schema bump on both backends
-and therefore a stop-the-fleet deploy. Paul's call; the analysis is in
-`docs/CONTENT-ANALYSIS-INDEX-HANDOFF.md` §5.9 so the call is informed.
-**M5.4** cannot be measured until M5.2 exists.
+**M5.2** is in, on Paul's ruling: background discovery now issues one request
+per copy-video identity a file lacks, instead of one request that resolved
+whichever identity was missing first and tombstoned the rest. That old shape is
+why no converting Dolby Vision index existed anywhere on the fleet — a Profile
+7 title got its stripped identity and never its converting one, so only a play
+attempt or an admin request could reach the identity that makes P7 play as
+graded. It needed `analysis_requests.video_identity` (replicated v27, SQLite
+v47) because the forced-successor cancellation has to be scoped to one
+identity: `cancelled` is terminal, so a force that cancelled all three would
+refuse the siblings' generations for good. **That makes this a stop-the-fleet
+deploy** — every node down, upgraded, and back up together.
+
+**M5.4** cannot be measured until M5.2 has run on the fleet.
 
 Every milestone got an adversarial review before merge and every review found
 real defects — the M3 and M4 reviews each found a fault that would have

@@ -90,7 +90,7 @@ fn job_from_row(row: &Row<'_>) -> rusqlite::Result<ClusterFragmentIndexJob> {
 }
 
 const REQUEST_COLS: &str = "request_id, file_id, source_size, source_mtime, component,
-    pipeline_version, requested_generation, expected_predecessor_generation,
+    pipeline_version, video_identity, requested_generation, expected_predecessor_generation,
     priority, trigger, force_rebuild,
     target_node_id, state, COALESCE(owner_node_id, ''), fence,
     COALESCE(lease_expires_ms, 0), attempts, not_before_ms,
@@ -136,23 +136,24 @@ fn request_from_row(row: &Row<'_>) -> rusqlite::Result<AnalysisRequest> {
         source_mtime: row.get(3)?,
         component: row.get(4)?,
         pipeline_version: row.get(5)?,
-        requested_generation: row.get(6)?,
-        expected_predecessor_generation: row.get(7)?,
-        priority: row.get(8)?,
-        trigger: row.get(9)?,
-        force_rebuild: row.get::<_, i64>(10)? != 0,
-        target_node_id: row.get(11)?,
-        state: row.get(12)?,
-        owner_node_id: row.get(13)?,
-        fence: row.get(14)?,
-        lease_expires_ms: row.get(15)?,
-        attempts: row.get(16)?,
-        not_before_ms: row.get(17)?,
-        result_cache_key: row.get(18)?,
-        last_error_code: row.get(19)?,
-        cancel_requested: row.get::<_, i64>(20)? != 0,
-        created_at_ms: row.get(21)?,
-        updated_at_ms: row.get(22)?,
+        video_identity: row.get(6)?,
+        requested_generation: row.get(7)?,
+        expected_predecessor_generation: row.get(8)?,
+        priority: row.get(9)?,
+        trigger: row.get(10)?,
+        force_rebuild: row.get::<_, i64>(11)? != 0,
+        target_node_id: row.get(12)?,
+        state: row.get(13)?,
+        owner_node_id: row.get(14)?,
+        fence: row.get(15)?,
+        lease_expires_ms: row.get(16)?,
+        attempts: row.get(17)?,
+        not_before_ms: row.get(18)?,
+        result_cache_key: row.get(19)?,
+        last_error_code: row.get(20)?,
+        cancel_requested: row.get::<_, i64>(21)? != 0,
+        created_at_ms: row.get(22)?,
+        updated_at_ms: row.get(23)?,
     })
 }
 
@@ -333,43 +334,44 @@ impl ClusterFragmentIndexStore for SqliteStore {
             transaction.execute(
                 "INSERT INTO analysis_requests
                     (request_id, file_id, source_size, source_mtime, component,
-                     pipeline_version, requested_generation, expected_predecessor_generation,
+                     pipeline_version, video_identity, requested_generation,
+                     expected_predecessor_generation,
                      priority, trigger,
                      force_rebuild, target_node_id, state, owner_node_id, fence,
                      lease_expires_ms, attempts, not_before_ms, result_cache_key,
                      last_error_code, cancel_requested, created_at_ms, updated_at_ms)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                         CASE WHEN ?5 = 'skip_markers' THEN COALESCE((
                           SELECT generation_id FROM timeline_annotation_sets
                            WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
                         ), '') ELSE '' END,
-                        ?8, ?9, ?10, ?11,
-                        CASE WHEN ?10 = 0 AND ?5 = 'skip_markers' AND EXISTS (
+                        ?9, ?10, ?11, ?12,
+                        CASE WHEN ?11 = 0 AND ?5 = 'skip_markers' AND EXISTS (
                           SELECT 1 FROM timeline_annotation_sets
                            WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
-                             AND argv_fingerprint = ?12 AND publication_priority = 'forced'
+                             AND argv_fingerprint = ?13 AND publication_priority = 'forced'
                         ) THEN 'ready' ELSE 'queued' END,
-                        NULL, 0, NULL, 0, ?13,
-                        CASE WHEN ?10 = 0 AND ?5 = 'skip_markers' THEN (
+                        NULL, 0, NULL, 0, ?14,
+                        CASE WHEN ?11 = 0 AND ?5 = 'skip_markers' THEN (
                           SELECT generation_id FROM timeline_annotation_sets
                            WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
-                             AND argv_fingerprint = ?12 AND publication_priority = 'forced'
+                             AND argv_fingerprint = ?13 AND publication_priority = 'forced'
                         ) ELSE NULL END,
-                        NULL, 0, ?14, ?14
+                        NULL, 0, ?15, ?15
                   WHERE EXISTS (SELECT 1 FROM files
                                  WHERE id = ?2 AND size = ?3 AND mtime = ?4)
                     AND (SELECT COUNT(*) FROM analysis_requests
-                          WHERE state IN ('queued', 'running', 'submitted')) < ?15
-                    AND (?10 = 1 OR (
+                          WHERE state IN ('queued', 'running', 'submitted')) < ?16
+                    AND (?11 = 1 OR (
                       NOT EXISTS (SELECT 1 FROM analysis_requests
                         WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
                           AND component = ?5 AND force_rebuild = 1
-                          AND target_node_id = ?11
+                          AND target_node_id = ?12
                           AND state IN ('queued', 'running', 'submitted', 'ready'))
                       AND NOT EXISTS (SELECT 1 FROM analysis_requests
                         WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
                           AND component = ?5 AND pipeline_version = ?6
-                          AND requested_generation = ?7 AND target_node_id = ?11)
+                          AND requested_generation = ?8 AND target_node_id = ?12)
                     ))
                  ON CONFLICT DO NOTHING",
                 params![
@@ -379,6 +381,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     request.source_mtime,
                     request.component,
                     request.pipeline_version,
+                    request.video_identity,
                     request.requested_generation,
                     request.priority,
                     request.trigger,
@@ -400,6 +403,16 @@ impl ClusterFragmentIndexStore for SqliteStore {
                          WHERE older.file_id = ?2 AND older.source_size = ?3
                            AND older.source_mtime = ?4 AND older.component = ?5
                            AND older.pipeline_version = ?6 AND older.force_rebuild = 0
+                           -- A force is for ONE copy-video identity. Cancelling
+                           -- its siblings would strand them: cancelled is
+                           -- terminal, so their generations would be refused
+                           -- for good and the file would never get its other
+                           -- indexes. An empty identity on either side means
+                           -- whichever identity is next, which is what every
+                           -- pre-column row and every skip_markers row means,
+                           -- so it still supersedes the way it always did.
+                           AND (older.video_identity = ?8 OR older.video_identity = ''
+                                OR ?8 = '')
                            AND older.state IN ('queued','running','submitted')
                            AND EXISTS (SELECT 1 FROM analysis_requests successor
                              WHERE successor.request_id = ?7 AND successor.force_rebuild = 1))",
@@ -411,6 +424,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         request.component,
                         request.pipeline_version,
                         request.request_id,
+                        request.video_identity,
                     ],
                 )?;
                 transaction.execute(
@@ -421,6 +435,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                       WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
                         AND component = ?5 AND pipeline_version = ?6
                         AND force_rebuild = 0 AND state IN ('queued','running','submitted')
+                        AND (video_identity = ?8 OR video_identity = '' OR ?8 = '')
                         AND EXISTS (SELECT 1 FROM analysis_requests successor
                           WHERE successor.request_id = ?7 AND successor.force_rebuild = 1)",
                     params![
@@ -431,6 +446,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         request.component,
                         request.pipeline_version,
                         request.request_id,
+                        request.video_identity,
                     ],
                 )?;
                 transaction.execute(
@@ -2972,6 +2988,7 @@ mod tests {
             source_mtime: 10,
             component: "fragment_index".to_owned(),
             pipeline_version: "test-pipeline".to_owned(),
+            video_identity: String::new(),
             requested_generation: if force_rebuild {
                 format!("generation-{id}")
             } else {
@@ -3759,6 +3776,136 @@ mod tests {
         assert_eq!(requests[0].state, "failed");
         assert_eq!(requests[0].attempts, 2);
         assert_eq!(requests[0].last_error_code, "attempt_limit");
+    }
+
+    #[tokio::test]
+    async fn one_file_holds_one_request_per_copy_video_identity() {
+        // The shape M5.2 exists for. A file has one to three copy-video
+        // identities; before this, the first request became the dedup
+        // tombstone for all of them, so a Dolby Vision title got its stripped
+        // identity and never its converting one.
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        let mut stripped = request("identity-stripped", false, 10);
+        stripped.video_identity = "identity-a".to_owned();
+        stripped.requested_generation = "generation-a".to_owned();
+        let mut converting = request("identity-converting", false, 11);
+        converting.video_identity = "identity-b".to_owned();
+        converting.requested_generation = "generation-b".to_owned();
+
+        assert_eq!(
+            store
+                .enqueue_analysis_request(&stripped)
+                .await
+                .expect("enqueue the stripped identity")
+                .request_id,
+            "identity-stripped"
+        );
+        assert_eq!(
+            store
+                .enqueue_analysis_request(&converting)
+                .await
+                .expect("enqueue the converting identity")
+                .request_id,
+            "identity-converting",
+            "a second identity of the same file must not dedup against the first"
+        );
+        let live = store.analysis_requests(10).await.expect("requests");
+        assert_eq!(live.len(), 2);
+        let mut identities = live
+            .iter()
+            .map(|request| request.video_identity.as_str())
+            .collect::<Vec<_>>();
+        identities.sort_unstable();
+        assert_eq!(identities, vec!["identity-a", "identity-b"]);
+
+        // The identity survives the round trip, which is what lets the
+        // resolver build the one that was asked for rather than the one that
+        // happens to be missing first.
+        let read = store
+            .analysis_request("identity-converting")
+            .await
+            .expect("read back")
+            .expect("the converting request");
+        assert_eq!(read.video_identity, "identity-b");
+    }
+
+    #[tokio::test]
+    async fn forcing_one_identity_leaves_its_siblings_alone() {
+        // The reason the identity had to be a column. The forced-successor
+        // cancellation scopes on file, component and pipeline version; without
+        // the identity it cancels every sibling, and `cancelled` is terminal,
+        // so their generations are refused for good and the file never gets
+        // its other indexes.
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        for (id, identity, generation) in [
+            ("bg-a", "identity-a", "generation-a"),
+            ("bg-b", "identity-b", "generation-b"),
+        ] {
+            let mut background = request(id, false, 10);
+            background.video_identity = identity.to_owned();
+            background.requested_generation = generation.to_owned();
+            store
+                .enqueue_analysis_request(&background)
+                .await
+                .unwrap_or_else(|error| panic!("enqueue {id}: {error}"));
+        }
+
+        let mut forced = request("forced-a", true, 20);
+        forced.video_identity = "identity-a".to_owned();
+        store
+            .enqueue_analysis_request(&forced)
+            .await
+            .expect("force the first identity");
+
+        let by_id = store
+            .analysis_requests(10)
+            .await
+            .expect("requests")
+            .into_iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            by_id["bg-a"].state, "cancelled",
+            "the forced identity's own background request is superseded"
+        );
+        assert_eq!(
+            by_id["bg-b"].state, "queued",
+            "a sibling identity must survive a force aimed at another one"
+        );
+        assert!(
+            by_id["bg-b"].last_error_code.is_empty(),
+            "{:?}",
+            by_id["bg-b"]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unidentified_force_still_supersedes_everything_it_used_to() {
+        // Every row written before the column, and every `skip_markers` row,
+        // carries an empty identity and means "whichever is next". A force
+        // with no identity must keep superseding all of them, or the upgrade
+        // changes the meaning of requests already in flight.
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        store
+            .enqueue_analysis_request(&request("legacy", false, 10))
+            .await
+            .expect("enqueue a pre-column background request");
+        store
+            .enqueue_analysis_request(&request("forced-legacy", true, 20))
+            .await
+            .expect("force with no identity");
+        let by_id = store
+            .analysis_requests(10)
+            .await
+            .expect("requests")
+            .into_iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(by_id["legacy"].state, "cancelled");
+        assert_eq!(by_id["legacy"].video_identity, "");
     }
 
     #[tokio::test]
