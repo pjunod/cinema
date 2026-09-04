@@ -12,7 +12,7 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 
 | Milestone | State | PR | Evidence |
 |---|---|---|---|
-| M0 plan and adversarial review | ready for PR | pending | adversarial re-review approved; fast lane passed |
+| M0 plan and adversarial review | PR review | [#904](https://github.com/pjunod/plurx/pull/904) | plan approved; exact-PR review and effort gate pending |
 | M1 device/settings/lineup | not started | — | — |
 | M2 live HLS and cluster relay | not started | — | — |
 | M3 web client | not started | — | — |
@@ -21,7 +21,7 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 
 ## Current work — design before bytes
 
-The current branch is `codex/hdhomerun-plan`, based on
+PR #904 is open from `codex/hdhomerun-plan` to
 `effort/hdhomerun-live-tv`. Architecture and protocol pre-reviews rejected
 adapting the finite-file VOD engine and rejected per-node tuner capacity. A
 third adversarial review found three critical and eleven high/medium gaps. The
@@ -30,7 +30,8 @@ fencing, idempotent provisional start/activation, owner-authoritative lineup,
 mixed-version capability proof, independent producer watchdog, exact FFmpeg
 graph readiness, typed bounded resources, `omit_endlist`, no-feature-gate
 tests, client recovery, and per-PR review/status gates. The reviewer approved
-the amended plan with no remaining findings.
+the amended plan with no remaining findings; an independent review of the
+exact PR diff is now active.
 
 ## Evidence — exact commands and trees
 
@@ -39,6 +40,7 @@ the amended plan with no remaining findings.
 | 2026-09-04 | `main` at `48615baf` | `rustc --version` | `1.97.1 (8bab26f4f 2026-07-14)` |
 | 2026-09-04 | `main` at `48615baf` | `cargo check -p plurxd --all-targets --locked` | passed in source-only compiler loop |
 | 2026-09-04 | staged `codex/hdhomerun-plan` | `make validate-staged` | 115 catalog, 1,294 history, and 160 operations checks passed after review fixes |
+| 2026-09-04 | `b1bf0375` | PR [#904](https://github.com/pjunod/plurx/pull/904) | opened to the effort branch; exact-diff review requested |
 
 ## Decisions made while the owner is away
 
