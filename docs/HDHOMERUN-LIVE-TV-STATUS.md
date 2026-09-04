@@ -1,6 +1,6 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** M2 implementation · **Effort:** `effort/hdhomerun-live-tv` ·
+**Status:** M2 qualified, publishing · **Effort:** `effort/hdhomerun-live-tv` ·
 **Updated:** 2026-09-04 · **Historical issue:**
 [#902](https://github.com/pjunod/plurx/issues/902)
 
@@ -15,7 +15,7 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 |---|---|---|---|
 | M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
 | M1 device/settings/lineup | merged | [#906](https://github.com/pjunod/plurx/pull/906) | attack-review findings fixed; re-review approved; effort gate passed; merge `b15d241a` |
-| M2 live HLS and cluster relay | focused validation passing | pending Forgejo PR | 22 Live TV, 2 route-matrix, and 2 foreground-admission tests pass; default clippy and no-default compile pass |
+| M2 live HLS and cluster relay | qualified; publishing | pending Forgejo PR | Rust 1.97.1 workspace check/clippy, no-default compile, 22 Live TV, 2 route-matrix, and 2 foreground-admission tests pass at `dd528728` |
 | M3 web client | not started | — | — |
 | M4 Apple and Android | not started | — | — |
 | M5 docs, hardware, promotion | not started | — | — |
@@ -30,12 +30,11 @@ timeouts, activity, and metrics. Playback remains runtime-disabled until an
 administrator follows the safety checklist in Settings → Developer; there is
 no Cargo feature or build variant to unlock.
 
-The focused local tests, default lint build, and no-default compile pass. Next
-is the source-only Rust 1.97.1 loop, effort commit, Forgejo task PR, effort
-gate, exact-diff adversarial review, fixes, re-review, and merge. Forgejo is the
-only mutable remote after the repository migration; its deploy-key
-authorization is currently the publishing blocker, not an implementation
-blocker.
+The exact source-only Rust 1.97.1 loop passes. Next is the Forgejo task PR,
+effort gate, exact-diff adversarial review, fixes, re-review, and merge.
+Forgejo is the only mutable remote after the repository migration; its
+deploy-key authorization is currently the publishing blocker, not an
+implementation blocker.
 
 ## Evidence — exact commands and trees
 
@@ -54,6 +53,7 @@ blocker.
 | 2026-09-04 | working M2 tree | `cargo test -p plurxd live_tv --locked` | 22 passed, including one-GET streaming, bounded scratch, capability, redaction, and quorum cases |
 | 2026-09-04 | working M2 tree | focused route and foreground-admission tests | 4 passed; maintenance/learner routing and cancellation-safe live admission proved |
 | 2026-09-04 | working M2 tree | default clippy and no-default check | passed; Live TV is present in both builds |
+| 2026-09-04 | `dd528728` archive `a2d9da92…b4304f02` | exact Rust 1.97.1 source-only loop | format, workspace check, workspace clippy `-D warnings`, no-default compile, 22 Live TV, 2 route-matrix, and 2 admission tests passed |
 
 ## Decisions made while the owner is away
 
