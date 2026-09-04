@@ -116,7 +116,7 @@ jobs:
           --error "Store test binary build failed"
       - name: Retain the Store shard log and receipt
         if: always()
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: cluster-store-shard-${{ matrix.shard_index }}
           path: |
@@ -150,7 +150,7 @@ jobs:
       - name: Download every Store shard receipt
         id: download_store_shards
         continue-on-error: true
-        uses: https://data.forgejo.org/actions/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           pattern: cluster-store-shard-*
           path: target/validation/store-shards
@@ -169,7 +169,7 @@ jobs:
             2>&1 | tee target/validation/cluster-store-shard-aggregate.log
       - name: Retain the Store shard aggregate
         if: always()
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: cluster-store-shard-aggregate
           path: |
