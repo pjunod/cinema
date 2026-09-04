@@ -1,6 +1,6 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** M2 Astra approved and focused qualification passed; M3 web in review · **Effort:** `effort/hdhomerun-live-tv` ·
+**Status:** synchronization merged; M2 ledger corrected; web/native in review · **Effort:** `effort/hdhomerun-live-tv` ·
 **Updated:** 2026-09-04 · **Historical issue:**
 [#902](https://github.com/pjunod/plurx/issues/902)
 
@@ -15,13 +15,13 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 |---|---|---|---|
 | M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
 | M1 device/settings/lineup | merged | [#906](https://github.com/pjunod/plurx/pull/906) | attack-review findings fixed; re-review approved; effort gate passed; merge `b15d241a` |
-| Forgejo main synchronization | Astra approved; fresh gate pending | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | pushed `c4b66e1d`, incorporating main `4ce33f95`; pinned fmt/check/clippy passed |
-| M2 live HLS and cluster relay | Astra approved; focused qualification passed | pending Forgejo PR | candidate `4baf64bb`: 41 Live TV, 1 signature, 2 route and 2 admission regressions passed on Rust 1.97.1 |
-| M3 web client | implementation under Astra review | — | Developer configuration/enable/recovery card, channel browser and separate live player implemented in own worktree; 7 lifecycle and 14 settings tests pass |
-| M4 Apple and Android | not started | — | — |
+| Forgejo main synchronization | merged | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | Astra approved `c4b66e1d`; fresh gate run 61 passed; merge `e8095916` |
+| M2 live HLS and cluster relay | ownership ledger correction; fresh gate pending | [#13](http://192.168.4.7:3000/noirr/plurx/pulls/13) | Astra-approved `3c911018`: pinned fmt/check/clippy, 41 Live TV, 1 signature, 1 Activity, 2 route and 2 admission tests passed; new-base merge `95d71d00` has identical tree |
+| M3 web client | browser structure passed; final Astra fixes in progress | — | 72 captures at `59bf4932`, no console/page errors; 12 focused tests after fixing ambiguous-start and wall-clock findings; live media acceptance remains |
+| M4 Apple and Android | Apple implementation and focused tests in progress | — | Apple API, serialized lease, player and Developer settings compile on iOS/tvOS; 11 focused iOS tests pass; Android compiler ready, implementation remains |
 | M5 docs, hardware, promotion | not started | — | — |
 
-## Current work — close the remaining M2 review findings
+## Current work — finish client acceptance and effort gates
 
 M0 and M1 are merged to the effort. M2 now has the always-compiled foreground
 admission path, one-open tuner-to-FFmpeg pump, bounded six-segment live HLS
@@ -73,13 +73,23 @@ execute FFmpeg because Homebrew's x265 dylib is missing; the isolated compiler
 image now includes FFmpeg for the pinned-toolchain verification. The user's
 Homebrew installation was not modified.
 
-Next are the Forgejo effort gates and task merges, then completion of web and
-native clients. Browser PR controls are temporarily unavailable while the Mac
-is locked; source work and compiler checks continue. No authentication bypass
-or credential extraction was attempted.
-Forgejo is the only mutable remote after the repository migration. Repository
-access is confirmed through the host SSH agent; the supplied deploy key
-remains scoped to node access.
+PR #7 merged after actual Astra approval and its fresh effort gate. PR #13's
+policy check identified eight stale task/process ownership counts. Astra
+independently attributed every new site; the ledger now names those owners,
+and all 115 validation tests pass. The ledger does not waive the ownership
+check. The updated candidate must pass a fresh effort gate before merge.
+
+Web structural acceptance produced 72 desktop/mobile captures across all three
+layouts with no console/page errors. Actual Astra then found that a typed lost
+owner response and a wall-clock adjustment could bypass uncertain-start
+quarantine. The working fix uses monotonic deadlines and keeps ambiguous starts
+blocked for 90 seconds. Native Apple has the same fixes, an app-wide uncertainty
+barrier across profile switches, explicit live controls, and the runtime-only
+Developer card. Hardware playback and Android implementation remain outstanding.
+
+Browser access has resumed after the Mac was unlocked. Forgejo is the only
+mutable remote after migration; no authentication bypass or credential
+extraction was attempted. The supplied deploy key remains scoped to node access.
 
 ## Evidence — exact commands and trees
 
