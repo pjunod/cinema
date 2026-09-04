@@ -557,6 +557,17 @@ can panic or construct an invalid bound.
 return `Content-Range: bytes */len` with 416 where required, and cover empty,
 suffix, overflow, and malformed ranges.
 
+**Corrective task:** [Forgejo #14](http://192.168.4.7:3000/noirr/plurx/pulls/14)
+at exact-approved `9239999a` implements the parser and actual-response tests,
+HEAD method handling, conservative If-Range fallback without a strong current
+validator, and successful-GET-only playback bookkeeping. The bounded list is
+validated before choosing its first satisfiable range. Independent review
+caught two edge cases before approval: descending numbers that both saturate
+to `u64::MAX`, and a positive suffix on an empty representation. The latter
+returns an empty 200, consistent with
+[RFC 9110 byte ranges](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.1.2),
+without constructing a negative end. All 45 focused stream tests pass.
+
 ### P2-10 — wait capacity is neither configurable nor attributable
 
 The hard-coded 64-node/four-session cap has no Developer setting, per-playback
@@ -832,8 +843,27 @@ progress. Diagnostics and next-episode lookups must be bounded and fenced to
 the exact title. A pending audio/burn/Auto/fallback recipe must survive a
 newer seek. Finally, a decision or create whose response headers or JSON body
 never arrives needs an absolute preparation deadline; advancing predecessor
-frames do not prove that the requested replacement is progressing. This
-deadline and predecessor-preservation correction is active, not yet approved.
+frames do not prove that the requested replacement is progressing.
+
+Web correction `0a70d6fb` passed its tracked effort commit hook, the full static fast lane, and independent
+source review at ordered three-file SHA-256 manifest
+`8d6eff271d2c3e5b96990b7630f3a049c28155ff1d819e9f4a1410f3becebdc9`
+(`index.html`, `web-control.test.js`, `web-policy.test.js`). One 20-second
+preparation owner bounds decision, create, and body reading; supersession
+aborts transport and a stale successful response releases only its own
+session. The actual predecessor remains attached until successful replacement,
+including failure and Retry paths. Cold Close is null-safe; Close while title
+B is preparing attributes final progress only to actual title A.
+
+The last adversarial pass reproduced retained-predecessor events stealing
+the incoming owner's deadline or attributing A's playback to B. One shared
+actual-attachment eligibility predicate now governs native playing/waiting,
+watchdogs, progress, markers, TTFF, health/ABR, reporter observations, subtitles,
+and HLS error/XHR/fragment/level callbacks. Actual shipped-source regressions
+hold a partial replacement open and fire the old HLS callback set. This is
+scoped ownership proof, not a physical continuity receipt or completion of
+all cold pre-decision quality/track/seek inputs. Exact committed and integrated
+PR-head approval remains required.
 
 One additional P2 audit lead belongs to the canonical intent work below:
 Apple and Android reporters sample an observation and an intent generation
@@ -878,6 +908,12 @@ documentation debt:
    synchronously at accepted control and check it at worker creation,
    publication, readiness, commit, and switch. Ordinary heartbeat sequence
    numbers must not invalidate unchanged intent.
+   Also test overlapping server creates: A and B can both capture predecessor
+   P before placement; A activates, then the newer B loses predecessor CAS.
+   Client-side stale-response fencing does not make B the server's final
+   activation. HTTP cancellation does not prove a detached activation owner
+   stopped. The canonical desired owner must serialize or safely rebase this
+   path; exercise it with advisory control disabled as well as enabled.
 2. **Safe film-time mapping.** `stage_prepared_successor` derives resume from
    `media_origin_ms + fetched_through_ms`. That can skip a client's buffered
    but unseen film. Use the explicit seek destination, or a bounded aligned

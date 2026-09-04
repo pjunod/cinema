@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "web.bounded-preparation-and-retained-observers"
+commits = ["0a70d6fb"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "function playbackOwnsAttachedMedia(p)"
+test = "tests/playback/web-control.test.js"
+test_anchor = "HLS callbacks cannot replace the original preparation deadline"
+
+[[fixes]]
 id = "android.media-request-and-transport-ownership"
 commits = ["310a226b"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/StallReopen.kt"
