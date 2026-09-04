@@ -1,6 +1,6 @@
 # Streaming reliability — review, repair, and promotion status
 
-**Status:** review PR open · **Effort:** `effort/streaming-reliability` ·
+**Status:** review approved; merge pending · **Effort:** `effort/streaming-reliability` ·
 **Started:** 2026-09-04 · **Baseline:** `origin/main` at `48615baf`
 
 Companion to [PLAYBACK.md](PLAYBACK.md) (the shipped playback contract),
@@ -42,8 +42,8 @@ or call a green unit suite physical playback evidence.
 | Workstream | State | Current evidence | Exit condition |
 |---|---|---|---|
 | Last-seven-days change review | **Complete** | 1,193 commits · 217 first-parent changes · 512 files · 220,101 insertions · 50,655 deletions since 2026-08-28; method and disposition are in the findings document | Exact-head review verifies scope and evidence |
-| End-to-end architecture review | **Adversarial findings returned** | Independent server, client, and operations passes converge on the missing prepare/commit transaction, incomplete VOD recipe coverage, and unbounded client freezes; exact-head review found eight document defects now being addressed | Exact-head re-review approves the corrected document |
-| Review and status PR | **Open — [#903](https://github.com/pjunod/plurx/pull/903)** | Ranked findings, current/target architecture, repair order, SLOs, race matrix, and saved questions are written | Adversarial exact-head approval and focused documentation contracts green |
+| End-to-end architecture review | **Complete — adversarially approved** | Independent server, client, and operations passes converge on the missing prepare/commit transaction, incomplete VOD recipe coverage, and unbounded client freezes; exact-head re-review approved every correction at `b3179001` | Keep the approved contract authoritative while implementation evidence accumulates |
+| Review and status PR | **Approved; merge pending — [#903](https://github.com/pjunod/plurx/pull/903)** | Ranked findings, current/target architecture, repair order, SLOs, race matrix, saved questions, exact-head adversarial approval, and the focused documentation gate are complete | Merge the current status-only head after its fresh gate and adversarial check |
 | Corrective task PRs | **Waiting on review** | No implementation claim yet | Every accepted finding has code, a regression, or an explicit evidence-only disposition |
 | Final qualification | **Not started** | The candidate is not frozen | Current `main` merged into the effort; unit suite and full promotion gate green once on the final fixed tree; qualification receipt inspected |
 | Promotion and cleanup | **Not started** | No main-bound PR exists | Effort PR merged; task and effort branches removed only after the merge is proven |
@@ -98,6 +98,7 @@ or call a green unit suite physical playback evidence.
 
 | At (America/New_York) | State change |
 |---|---|
+| 2026-09-04 | PR #903 exact-head adversarial re-review approved the architecture and findings at `b3179001` with no remaining merge-blocking factual or design errors. The required Effort development gate passed; this status-only accuracy update is the final pre-merge change. |
 | 2026-09-04 | PR #903 re-review found three remaining acceptance/evidence holes: supported transitions could all refuse, Auto could still visibly stutter, and retained fleet/receipt claims lacked executable detail. The contract now requires 20/20 commits for qualified tuples, applies continuity SLOs to Auto, and retains the commands and named receipts. |
 | 2026-09-04 | PR #903 exact-head adversarial review found eight documentation/architecture defects: adaptation authority, seek intent, owner-loss acceptance, gated-feature inventory, numerical SLOs, retained evidence, completion scope, and inconsistent status. All eight were corrected for re-review. |
 | 2026-09-04 | Opened draft review PR [#903](https://github.com/pjunod/plurx/pull/903); completed independent client, server, and operations passes; recorded four P0 blockers and the target immutable-rendition/transaction architecture. |
