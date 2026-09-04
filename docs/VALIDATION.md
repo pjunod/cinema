@@ -38,6 +38,20 @@ deliberate integration proof, not release evidence. The final `effort/**` to
 `main` PR runs the full CI fan-out and writes an exact-tree qualification
 record.
 
+## CI control plane — Forgejo is authoritative
+
+Forgejo at `http://192.168.4.7:3000/noirr/plurx` owns repository events,
+workflow state, logs, artifacts, packages, and runner assignment. GitHub
+Actions is disabled. Forgejo pushes refs to `pjunod/plurx` as an external
+mirror; GitHub does not send source, credentials, or jobs back into the local
+pipeline.
+
+The workflow files remain under `.github/workflows/` because Forgejo uses that
+directory when `.forgejo/workflows/` is absent. There is deliberately one
+workflow source rather than a local copy and a mirror copy that can drift.
+First-party actions are qualified to `data.forgejo.org`; third-party actions
+use explicit upstream URLs so resolution never depends on an instance default.
+
 `make check` is the mandatory portable repository baseline: catalog lint,
 historical regression coverage, operations source contracts, Rust formatting,
 clippy, and the Rust test suite. Point-aware validation always includes the
@@ -112,7 +126,7 @@ executed with identical feature resolution.
 | Profile | Intended use | Additional evidence |
 |---|---|---|
 | `commit` | Pre-commit and ordinary local work | Mandatory Rust/catalog baseline; shared API wire check; web syntax, contrast, golden, and accessibility when affected |
-| `ci` | Main-bound PRs, optional merge queue, and `main` | Ordinary PRs scope to the diff; `effort/**` qualification PRs, `merge_group`, and push events enable every surface. Task PRs into `effort/**` use the separate compile-only workflow |
+| `ci` | Main-bound PRs and `main` | Ordinary PRs scope to the diff; `effort/**` qualification PRs and push events enable every surface. Task PRs into `effort/**` use the separate compile-only workflow |
 | `full` | Before a risky merge or release | Browser playback; both native-client suites; Android device tests when an explicit disposable device is selected; container startup/restart |
 | `nightly` | Scheduled deep regression search | Exhaustive playback and restart matrix; interrupted-production recovery; resource bounds; all runnable full checks; a gating 15-minute PGS parser fuzz campaign; report-only mutation sampling over Rust files changed in the last seven days |
 
@@ -213,11 +227,11 @@ deliberate: a wasted half hour is recoverable, and silently dropped cluster
 evidence is not.
 
 `Main promotion gate` waits for every selected main-workflow job and accepts an
-unselected job only when GitHub records it as skipped. An effort qualification
+unselected job only when Forgejo records it as skipped. An effort qualification
 is stricter: scope enables every surface and the qualification writer refuses
 any result other than `success`. `Effort development gate` separately waits
 for policy plus every affected compile/static job. Configure only those two
-aggregates if branch protection becomes available: `Main promotion gate` on
+aggregates in Forgejo branch protection: `Main promotion gate` on
 `main`, and `Effort development gate` on `effort/**`. Individual jobs remain
 visible evidence but do not become permanent branch rules. Pushes and tags
 enable all surfaces, and an absent or invalid
@@ -225,26 +239,12 @@ pull-request base also enables all jobs. Impact optimization therefore fails
 open: a bad diff base costs time; it never suppresses tests. The scheduled
 workflow still runs the `nightly` profile.
 
-### Runner mode — one repository variable selects the pool
+### Runner boundary — every workflow is local
 
-`CI_RUNNER_MODE` selects where every trusted validation job starts. It accepts
-exactly `self-hosted` or `github`; an unset variable defaults to `self-hosted`
-so a missing setting cannot silently spend hosted-runner minutes. The workflow
-still pins the environment within either pool: Linux uses Ubuntu 24.04 and
-Apple uses macOS 26 with Xcode 26.6.
-
-```bash
-scripts/ci-runner-mode status       # print the active mode or the unset default
-scripts/ci-runner-mode github       # route new workflow runs to GitHub-hosted runners
-scripts/ci-runner-mode self-hosted  # route new workflow runs back to the lab fleet
-```
-
-Changing the variable affects workflow runs created after the change. Jobs in
-an existing run keep the runner labels captured when that run was created. The
-switch does not move in-progress work, and GitHub Actions does not retry a queued
-or failed hosted job on the other pool automatically. That is deliberate: an
-automatic fallback can run privileged repository code on a trust boundary you
-did not select.
+Every `runs-on` declaration includes `self-hosted` and the exact lab capability
+labels it needs. There is no hosted-runner switch or automatic fallback. A
+missing local capability therefore leaves a visible queued job instead of
+moving trusted repository code to an external execution boundary.
 
 ### The runner roster — a label is a claim about a machine
 
@@ -256,7 +256,7 @@ it must be updated in the same change that changes the fleet — a roster that
 has drifted from reality proves nothing.
 
 It exists because a `runs-on` naming a label nothing carries is not an error
-GitHub reports. The job queues, indefinitely, and is eventually cancelled
+Forgejo reports. The job queues, indefinitely, and is eventually cancelled
 having never started. That failure has happened twice here: the required Store
 lane spent a day at 45 attempts, 15 started and 27 cancelled while queued with
 waits reaching 234 minutes, because exactly one runner carried `ci-store`; and
@@ -366,8 +366,8 @@ defaults to `shadow`, so a manual run exercises the same jobs on the same fleet
 while `continue-on-error` keeps the result advisory:
 
 ```bash
-# from the Actions tab, or:
-gh workflow run store-shards.yml --ref main -f execution-mode=shadow
+# Forgejo → plurx → Actions → replicated Store shards → Run workflow
+# Set execution-mode to shadow.
 ```
 
 The dispatch entry point is only visible once the workflow is on the default
@@ -377,9 +377,8 @@ for the shadow campaign, only the cheapest way to find out whether the graph
 can run at all.
 
 Eligible packaging changes require both rows of the `package_smoke` matrix.
-The arm64 row selects the self-hosted Linux/ARM64 `ci-arm64` VM pool, or
-`ubuntu-24.04-arm` in GitHub-hosted mode. It proves both the kernel and Docker
-engine are native `aarch64`, then performs the same exact-candidate binary
+The arm64 row selects the self-hosted Linux/ARM64 `ci-arm64` VM pool. It proves
+both the kernel and Docker engine are native `aarch64`, then performs the same exact-candidate binary
 export, runtime-only image build, identity checks, health probe, and stop/start
 smoke as amd64 without QEMU. Its manifest and digests are retained as required
 qualification evidence, and `Main promotion gate` depends directly on the
@@ -391,21 +390,15 @@ concurrency group with Apple tests so laptop capacity is not oversubscribed;
 `queue: max` preserves every pending required job instead of replacing an
 older pending candidate.
 
-GitHub-hosted mode also requires an account with usable Actions billing and
-spending limits. If GitHub refuses the job before assigning a runner, repair
-the account billing limit or switch back to `self-hosted`; workflow code cannot
-fall back from that account-level refusal.
-
-Disposable GitHub runners install the pinned ffmpeg, Playwright, XcodeGen, KVM,
-and cross-compiler prerequisites in the job. Persistent lab runners verify the
-same dependencies but do not mutate themselves; Ansible remains the source of
-truth for their installed toolchains.
+Persistent lab runners verify their pinned ffmpeg, Playwright, XcodeGen, KVM,
+and cross-compiler dependencies but do not mutate themselves; Ansible remains
+the source of truth for installed toolchains.
 
 ### Which ffmpeg the profiles assume
 
 Every CI profile runs **ffmpeg 6**, from a pinned Ubuntu 24.04 environment.
-`.github/actions/ffmpeg` installs it on a disposable GitHub runner or verifies
-the Ansible-provisioned build on a persistent lab runner. It prints the build
+`.github/actions/ffmpeg` verifies the Ansible-provisioned build on a persistent
+lab runner. It prints the build
 that actually resolved into the job log and step summary, and fails the job
 when the major is not the one that lane named. So the selected environment and
 the expected major move together in a reviewable diff, and neither can move on
