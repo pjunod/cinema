@@ -1069,14 +1069,41 @@ Three things are deliberate:
   so neither "Still preparing this stream…" nor "Playback failed to start." is
   true of it.
 
-**What this does not touch.** The playback-control plane has its own owner
-transition answer — `ControlStateError::OwnerTransition` → **425
-`owner_transition`** with a retry hint — and all three clients act on it as
-retryable. That path is unchanged here and still retries without bound against
-a dead owner. It is the same defect on the other plane and wants the same
-treatment; doing both in one change would put two mechanisms in
-`playback_control.rs` at once, which §7 of the roadmap says to sequence rather
-than parallelise.
+**The control plane followed, in its own change.** It carried the same defect
+and for longer: `ControlStateError::OwnerTransition` → **425
+`owner_transition`** with a 500 ms hint, which all three reporters act on as
+retryable. It now answers **410 `owner_lost`** with no hint when nothing can
+take the session over, decided by the same `classify_owner_loss` so the two
+planes cannot disagree about one route.
+
+Two things that only showed up by looking at the wiring rather than the
+helper. There are **three** gates on that path — a public-ingress admission
+check, the owner side of the relay, and `verify_authority`'s re-read — and each
+returns before the next runs, so changing only the last left the fix
+unreachable from every real client. All three now go through one function, and
+each also folds the publication fence into the same classification rather than
+answering it unconditionally, which is what the media plane already does.
+
+**One of the three is not pinned by a test that drives it.** The public-ingress
+gate is, by an exchange posted at a durable EVENT route whose lease has
+expired; `verify_authority`'s is, through a real store. The owner side of the
+relay needs a signed internal request, and signing one needs a replicated
+membership fixture that does not exist — so it is recorded as untested rather
+than assumed.
+
+What was done instead of testing it is to leave it nothing to get wrong: the
+gate's *condition* moved into `control_owner_refusal` alongside its answer, so
+both call sites are a single `if let Some(refusal) = …` with no logic of their
+own. The remaining failure mode there is deleting the call, not answering
+differently from the plane next door — and the ingress site, which is tested,
+proves the shared function. A harness for signed internal requests would close
+it properly and would pay for itself the next time anything touches the relay. And the control plane deliberately carries **no** resume
+fields: `ControlErrorBody` is `deny_unknown_fields` and the relay validates a
+peer's body against a strict `(status, code)` allowlist, so new fields would be
+a mixed-fleet parse hazard for a position the client already receives from the
+media plane. The new *code* has that property too, in the safe direction: an
+old ingress refuses a new owner's `owner_lost` and degrades it to a retry —
+today's behaviour — rather than to a wrong terminal answer.
 
 **And the compatibility path's non-expansion is now driven rather than
 asserted.** §4 requires that typeless-sliding takeover not be expanded to VOD

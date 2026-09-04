@@ -840,29 +840,13 @@ async fn control_inner(
             None,
         );
     }
-    if route.publication_ready_at_ms != 0 {
-        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
-        return super::hls::control_error(
-            StatusCode::TOO_EARLY,
-            "owner_transition",
-            "the media session publication handoff is not yet ready",
-            Some(route.incarnation_id),
-            owner_epoch,
-            Some(500),
-            None,
-        );
-    }
-    if route.lease_expires_at_ms <= unix_ms() {
-        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
-        return super::hls::control_error(
-            StatusCode::TOO_EARLY,
-            "owner_transition",
-            "the media owner lease expired and takeover is not yet settled",
-            Some(route.incarnation_id),
-            owner_epoch,
-            Some(500),
-            None,
-        );
+    // The owner side of the relay. This returns before `control_local` ever
+    // reaches `verify_authority`, so it has to classify rather than assume, or
+    // the same binary answers one route two ways depending on which node the
+    // client happened to reach. Condition and answer both live in the shared
+    // function; this site owns no part of the decision.
+    if let Some(refusal) = super::hls::control_owner_refusal(&route, owner_epoch) {
+        return refusal;
     }
     super::hls::control_local(&state, &route, request.control, request.deadline_unix_ms).await
 }
