@@ -1227,7 +1227,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertEqual(
             workflow.count("sha256sum clients/android/Dockerfile"), 2
         )
-        self.assertEqual(workflow.count("secrets.FORGEJO_REGISTRY_TOKEN"), 2)
+        self.assertEqual(workflow.count("secrets.LOCAL_REGISTRY_TOKEN"), 2)
         self.assertIn("192.168.4.7:3000/noirr/android-build", workflow)
         self.assertEqual(workflow.count("PLURX_ANDROID_IMAGE_READY=1"), 4)
         makefile = read("Makefile")
@@ -1454,7 +1454,7 @@ class OperationsContractCase(unittest.TestCase):
 
         self.assertIn("uses: ./.github/workflows/publish-release.yml", ci)
         self.assertIn("REGISTRY_IMAGE: 192.168.4.7:3000/noirr/plurxd", publisher)
-        self.assertEqual(publisher.count("secrets.FORGEJO_REGISTRY_TOKEN"), 4)
+        self.assertEqual(publisher.count("secrets.LOCAL_REGISTRY_TOKEN"), 4)
         self.assertEqual(
             publisher.count(
                 "buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml"

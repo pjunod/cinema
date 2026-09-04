@@ -572,7 +572,7 @@ jobs:
       # pull replaces the rebuild; any failure falls back to the local build.
       - name: Reuse the pinned Android toolchain image from Forgejo
         env:
-          REGISTRY_TOKEN: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
         run: |
           tag="192.168.4.7:3000/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
           echo "$REGISTRY_TOKEN" | docker login 192.168.4.7:3000 -u fleet --password-stdin || true
@@ -694,7 +694,7 @@ jobs:
           test -w /dev/kvm
       - name: Reuse the pinned Android toolchain image from Forgejo
         env:
-          REGISTRY_TOKEN: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
         run: |
           tag="192.168.4.7:3000/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
           echo "$REGISTRY_TOKEN" | docker login 192.168.4.7:3000 -u fleet --password-stdin || true

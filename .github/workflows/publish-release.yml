@@ -92,7 +92,7 @@ jobs:
         with:
           registry: 192.168.4.7:3000
           username: fleet
-          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Detect an existing immutable version index
         id: registry
         env:
@@ -159,7 +159,7 @@ jobs:
         with:
           registry: 192.168.4.7:3000
           username: fleet
-          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Compile and export the exact tagged binaries
         uses: https://github.com/docker/build-push-action@v6
         with:
@@ -282,7 +282,7 @@ jobs:
         with:
           registry: 192.168.4.7:3000
           username: fleet
-          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Verify architecture binding, labels, version, and runtime
         env:
           ARCH: ${{ matrix.arch }}
@@ -367,7 +367,7 @@ jobs:
         with:
           registry: 192.168.4.7:3000
           username: fleet
-          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Reconfirm the remote tag has not moved
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
