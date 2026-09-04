@@ -23,13 +23,15 @@ The architecture has made two important corrections:
 - the control protocol gives one actor a typed, sequenced view of client
   demand, delivery state, producer state, and intended selection.
 
-The gap is between those foundations. The public HLS path is VOD-only, but VOD
-still refuses every transcode rendition and burned-subtitle stream. The
-control plane can record a proposed successor, but it neither prepares playable
-media nor sends, acknowledges, commits, or rolls back a replacement action.
-Every client still destroys or detaches the working stream during important
-changes. Two client recovery loops also have paths where a permanent freeze
-cannot cause a recovery.
+The gap is between those foundations. Session creation prefers VOD, but VOD
+still refuses every transcode rendition and burned-subtitle stream. The shipped
+default Cargo feature and runtime default then silently route those refusals
+through the retained growing-live engine, contradicting the published cutover.
+The control plane can record a proposed successor, but it neither prepares
+playable media nor sends, acknowledges, commits, or rolls back a replacement
+action. Every client still destroys or detaches the working stream during
+important changes. Two client recovery loops also have paths where a permanent
+freeze cannot cause a recovery.
 
 That is not a tuning problem. Increasing timeouts, changing buffer sizes, or
 adding another retry will not complete a transaction that has no reachable
@@ -41,13 +43,13 @@ then make the clients use it.
 | Priority | Count | Meaning |
 |---|---:|---|
 | P0 | 4 | A viewer can remain frozen indefinitely, or a core playback class cannot be served |
-| P1 | 10 | A transition can lose position, choose stale state, poison a rendition, or interrupt healthy playback |
-| P2 | 8 | Tests, operations, telemetry, or enablement can certify or present the wrong thing |
-| P3 | 2 | Protocol conformance and documentation drift invite the next defect |
+| P1 | 12 | A transition can lose position, choose stale state, poison a rendition, or interrupt healthy playback |
+| P2 | 10 | Tests, operations, telemetry, or enablement can certify or present the wrong thing |
+| P3 | 3 | Input, protocol-conformance, and documentation drift invite the next defect |
 
-No finding recommends restoring growing live HLS. The target keeps immutable
-VOD as the media plane and makes control an actual transaction rather than a
-second session-start hint channel.
+No finding recommends keeping growing live HLS as a production fallback. The
+target makes immutable VOD the whole segmented media plane and makes control an
+actual transaction rather than a second session-start hint channel.
 
 ## Scope and method — broad history, narrow claims
 
@@ -190,23 +192,31 @@ owner needs a finite deadline after which it reattaches the identical delivery
 or tries the compatible decode/HDR fallback. Prove the whole loop, not only the
 pure `holdMayDecideStall` predicate.
 
-### P0-3 — public HLS is VOD-only while VOD refuses transcode and burn
+### P0-3 — transcode and burn silently fall back to the old mutable stream
 
-The VOD cutover removed the mutable live presentation from public session
-creation. That is the right end state. However, VOD creation still returns
-`vod_transcode_unavailable` for transcode rungs and rejects bitmap subtitle
-burn. These are not edge cases: unsupported source codecs, remote bandwidth,
-quality selection, HDR conversion, and burn-only subtitles all require a
-different recipe.
+VOD creation returns `vod_transcode_unavailable` for transcode rungs and rejects
+bitmap subtitle burn. These are not edge cases: unsupported source codecs,
+remote bandwidth, quality selection, HDR conversion, and burn-only subtitles
+all require a different recipe.
 
-**Impact:** the one presentation allowed by the API cannot serve the playback
-classes that most need buffering and immutable addressing. The system either
-refuses them or leaves clients on older destructive replacement machinery.
+The claimed cutover is not the shipped behavior. `plurxd` enables the
+`live-hls-recovery` Cargo feature by default, and production treats a missing
+runtime setting as enabled. VOD index, transcode, burn, and source refusals can
+therefore enter the retained growing-HLS engine. Tests invert the production
+default and require an explicit `1`, so ordinary refusal tests do not exercise
+the deployed configuration.
+
+**Impact:** the playback classes that most need buffering and immutable
+addressing are exactly the classes routed back to the mutable playlist/session
+architecture implicated in freezing and restart discontinuities.
 
 **Required correction:** implement immutable, on-demand transcode renditions
 and burn renditions over the existing fragment plan. A segment number must
 always name the same film-time interval across every rendition, and a far seek
-must materialize only bounded work around the requested interval.
+must materialize only bounded work around the requested interval. Remove the
+Cargo feature split and production-default fallback. Until recipe coverage is
+complete, any emergency live recovery is an explicit Developer enablement with
+its freeze/seek costs and production-equivalent tests, never a silent default.
 
 ### P0-4 — prepared replacement has no reachable commit
 
@@ -363,6 +373,44 @@ score the transition itself, and add manual down/up, Auto cliff, preparation
 timeout, and leak checks. The assertion must fail if a requested case was
 skipped or never reached playback.
 
+### P1-11 — VOD uses historical fetch maxima as current seek demand
+
+The reader frontier is a monotonic high-water mark. The driver schedules work
+from it, and eviction protects one continuous range from just before the last
+served segment through that old high frontier plus the ahead window. A viewer
+who seeks one hour forward and then back to five minutes can therefore keep
+production aimed near one hour and protect most of the intervening title from
+eviction. The working set can reach `NoRoom` while the player waits at five
+minutes.
+
+The wait pool compounds this by exposing only the lowest blocked segment to the
+driver. During a scrub, a stale low request can win while the newest desired
+target is refused by the cap. Its limits are also hard-coded at four waits per
+session and 64 per node despite the VOD plan promising a configurable global
+cap; sixteen maximally blocked clients can make every request from the
+seventeenth fail immediately. Existing tests prove a forward target and pool
+limits separately; they do not prove latest-target service after a reversal or
+fair service at the global limit.
+
+**Required correction:** split historical delivery telemetry from current
+demand. A large accepted discontinuity creates a new demand generation and
+window; exact in-flight requests retain their own pins, while superseded waits
+leave. Schedule the latest per-playback target with bounded fairness rather
+than collapsing every waiter to a global minimum.
+
+### P1-12 — `NoRoom` can be returned as an indefinite advisory hold
+
+The scheduler emits `NoRoom` when blocked demand exists and no eligible segment
+can be evicted. VOD publishes it as a producer hold. At an unmaterialized seek
+target there may be no ready-ahead frontier, so control sends `hold` and the
+client waits even though the producer has already said waiting cannot create
+space.
+
+**Required correction:** classify working-set exhaustion as bounded resource
+recovery, retire stale demand generations, and return a retryable/terminal
+decision if space cannot be made. A condition that needs external state change
+is not a healthy pacing hold.
+
 ### P2-1 — Android reports the wrong selection identity
 
 Android creates sessions using the current quality preference, but its control
@@ -462,6 +510,32 @@ satisfied and waits for its 1.5–3 second cap before legacy recovery proceeds.
 when ownership changes. Reporter adoption of the new owner proceeds
 independently, and no old-owner action may cross the epoch.
 
+### P2-9 — malformed and unsatisfiable byte ranges become full-file responses
+
+The direct-play Range parser returns the same `None` for a missing header, a
+malformed range, and an unsatisfiable range. The serving path turns every
+`None` into a full `200`, and `len - 1` underflows for an empty file.
+
+**Impact:** a bad or out-of-range media retry can unexpectedly transfer the
+whole file instead of receiving `416 Range Not Satisfiable`; zero-length media
+can panic or construct an invalid bound.
+
+**Required correction:** parse into `Missing`, `Valid`, and `Unsatisfiable`,
+return `Content-Range: bytes */len` with 416 where required, and cover empty,
+suffix, overflow, and malformed ranges.
+
+### P2-10 — wait capacity is neither configurable nor attributable
+
+The hard-coded 64-node/four-session cap has no Developer setting, per-playback
+fairness view, or rejection attribution. An operator cannot tell whether a 503
+came from one seek storm, many healthy viewers, abandoned demand, or a budget
+appropriate for a different node.
+
+**Required correction:** expose bounded wait capacity beside its memory/file-
+descriptor cost, record live/admitted/refused waits by reason without unbounded
+labels, and schedule one current demand per playback before admitting a second
+from another.
+
 ### P3-1 — client snapshot validation is weaker than the server contract
 
 The server requires every non-off subtitle mode to name a track. Apple and
@@ -483,6 +557,14 @@ still describes live recovery removed by the VOD cutover.
 **Required correction:** keep one generated capability/readiness matrix as the
 current truth and archive milestone chronology as history. Operator-facing
 status must be updated by the same PR that changes behavior.
+
+### P3-3 — progressive pacing accepts non-finite input
+
+The progressive stream pace parser rejects negative values but accepts
+positive infinity, which can be passed into ffmpeg argument construction.
+
+**Required correction:** accept only finite values within an explicit sane
+range, with zero retaining its documented unpaced meaning.
 
 ## Target architecture — immutable renditions plus one replacement transaction
 
@@ -568,13 +650,16 @@ spending a token, or changing an observable condition.
 | Order | PR outcome | Findings closed | Proof before merge |
 |---:|---|---|---|
 | 1 | Review, status, and acceptance contract | P2-2, scope for all | docs/static contracts + adversarial approval |
-| 2 | Finite client stall recovery | P0-1, P0-2, P2-1 | Apple + Android units; source-level player contract; focused builds |
-| 3 | VOD demand ownership and failure actions | P1-1, P1-2 | HTTP seek-storm/disconnect tests; typed control failure test |
-| 4 | Real VOD transcode/burn rendition | P0-3, P1-8 foundation | copy/transcode/burn lifecycle; far seek; owner interruption |
-| 5 | Aligned multivariant quality | P1-7 common path | manual and Auto changes with zero player replacement and bounded overlap |
-| 6 | Prepared replacement transaction | P0-4, P1-3 through P1-6, P2-3 | stale/deadline/race matrix plus web/Apple/Android handoff tests |
-| 7 | Developer enablement and durable rollout evidence | P2-2, P2-5, P2-6 | settings/API/UI tests; restart-persistent action ledger; readiness refusal |
-| 8 | Acceptance restoration and final qualification | P2-4 and all | HTTP VOD matrix, browser matrix, native device evidence, unit suite, promotion gate |
+| 2 | Truthful playback harness and nightly browser | P1-10, P2-4 | transition scoring + quality operations; requested-case proof; nightly resolves installed Chromium |
+| 3 | Finite client stall recovery and identity | P0-1, P0-2, P2-1, P2-7, P2-8 | web + Apple + Android units; source-level player contract; focused builds |
+| 4 | Serving-authority liveness | P1-9 | delayed-observer/term-change tests; immutable-read drain; focused cluster gate |
+| 5 | VOD demand generations, fairness, and failure actions | P1-1, P1-2, P1-11, P1-12, P2-10 | HTTP seek reversal/storm/disconnect tests; typed failure action |
+| 6 | Real VOD transcode/burn rendition | P0-3, P1-8 foundation | copy/transcode/burn lifecycle; far seek; production-default configuration |
+| 7 | Aligned multivariant quality | P1-7 common path | manual and Auto changes with zero player replacement and bounded overlap |
+| 8 | Prepared replacement transaction | P0-4, P1-3 through P1-6, P2-3 | stale/deadline/race matrix plus web/Apple/Android handoff tests |
+| 9 | Developer enablement and durable rollout evidence | P2-2, P2-5, P2-6 | settings/API/UI tests; restart-persistent action ledger; readiness refusal |
+| 10 | Cluster VOD continuity and input hardening | P1-8, P2-9, P3-1, P3-3 | node-loss drill; shared conformance vectors; HTTP range/input tests |
+| 11 | Acceptance restoration and final qualification | all | HTTP VOD matrix, browser matrix, native device evidence, unit suite, promotion gate |
 
 PR boundaries may move when compilation exposes a tighter dependency, but no
 PR may claim a finding without the user-visible regression for that finding.

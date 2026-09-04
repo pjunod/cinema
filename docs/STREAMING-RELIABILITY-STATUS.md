@@ -33,9 +33,9 @@ The effort has four product outcomes:
   intact.
 
 The review may change any component or contract needed to reach those
-outcomes. It will not restore the removed live-HLS presentation, hide an
-unfinished capability behind a compile-time gate, or call a green unit suite
-physical playback evidence.
+outcomes. It will not preserve the retained live-HLS engine as an unannounced
+production fallback, hide an unfinished capability behind a compile-time gate,
+or call a green unit suite physical playback evidence.
 
 ## Workstreams — the review decides the build order
 
@@ -50,10 +50,12 @@ physical playback evidence.
 
 ## Known facts — claims already verified against the baseline
 
-1. **Public HLS creation is VOD-only.** Omitted presentation means VOD and an
-   explicit live request is refused; the removed growing-live engine is not a
-   recovery option. That architectural correction is real, but transcode and
-   subtitle-burn VOD classes still return typed unavailable responses.
+1. **The documented VOD-only cutover is not the production default.** Omitted
+   presentation means VOD and an explicit live request is refused, but the
+   default Cargo feature retains growing live HLS and a missing runtime setting
+   enables fallback. VOD refuses transcode and subtitle burn, so those common
+   classes silently enter the old mutable engine. Tests invert the runtime
+   default and therefore miss the shipped configuration.
 2. **The control plane stages but does not yet complete transparent change.**
    The 2026-09-04 M6 slice can write a prepared successor from an accepted
    in-session selection change. Its own handoff records the commit trigger as
