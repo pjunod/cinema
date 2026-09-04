@@ -37,14 +37,13 @@ passed with `--geckodriver`); it adds no package to plurx or the harness.
 make playback-doctor       # check codecs, filters, browser, and the debug server
 make playback-fixtures     # build + ffprobe the corpus; cached under target/
 make playback-smoke        # 11 risk-weighted Chrome cases, about 2–4 minutes
-make playback-full         # 44 Chrome cases: every fixture × quality + restarts
+make playback-full         # 45 Chrome cases: source × quality + operations
 
 # Film-addressed VOD: steady play, 20 seeks, and suspend/resume.
 scripts/playback-lab run --suite vod --json out/vod.json
 
 # Fault injection: drive a session through a bandwidth cliff (see below).
-scripts/playback-lab run --suite stall-recovery \
-  --network-profile 8mbps-to-1.5mbps --json out/stall-recovery.json
+make playback-stall-recovery
 
 # Safari: first enable Develop → Allow Remote Automation in Safari.
 # macOS may also require you to run `safaridriver --enable` once yourself.
@@ -82,7 +81,7 @@ source × quality product, then targeted operations where they are meaningful.
 | Container | MP4 · MKV · WebM · AVI |
 | Resolution | 720p · 1080p · 2160p |
 | Quality | Auto · Original · Original one-stream · 1080p · 720p · 480p |
-| Operation | cold play · seek/restart · 20 native VOD seeks · VOD suspend/resume · audio switch · text-subtitle toggle |
+| Operation | cold play · seek/restart · 20 native VOD seeks · VOD suspend/resume · audio switch · text-subtitle toggle · 20 manual 720p/down-to-Original quality cycles |
 | Browser state | reported codecs · HDR display · MSE · native HLS |
 
 Running every operation against every source adds minutes without adding a new
@@ -123,6 +122,30 @@ A case fails on any of these:
 - a direct/remux path rejected by the browser and rescued by fallback;
 - a quality rung decoding above its requested height;
 - `Original · one stream` accidentally using copy-HLS.
+
+Operation cases keep two clocks. The post-operation snapshot measures steady
+playback rate without counting a seek as spontaneous clock progress. A separate
+page-lifetime event sequence begins before the operation and survives PLAYER
+replacement, so waits, gaps, aborts, and destructive reopens during the switch
+cannot disappear when the steady window begins. Requested cases have only two
+valid terminal states: `passed` and `failed`; `skipped`, a missing result, or a
+missing tool in a strict validation profile is a harness failure.
+Chromium's presented-frame callback measures the maximum inter-frame gap;
+sampled media-clock progress is the explicit fallback on engines without it.
+Each callback is tagged with its method, session, attempt, decoded dimensions,
+and media time. A quality change must first expose the exact target state and
+then present a later target-tagged frame; an outgoing frame cannot satisfy the
+handoff. Page-lifetime stall and hitch totals increment where the player records
+the fault, so replacing `PLAYER` between polls cannot erase the last failure.
+API presence alone is not frame evidence: Auto trusts this oracle only after a
+finite post-cliff callback. If no callback arrives, sampled media-clock gaps are
+authoritative; if callbacks stop, the open gap continues to the final sample.
+Browsers that expose the callback must also produce an outgoing baseline before
+a manual transition begins. The Auto ledger is joined to the first target-tagged
+presented frame, which must land within 250 ms of the recorded handoff position.
+Because the nightly cliff currently observes one downshift, that transition must
+itself satisfy the 100 ms p95 budget; 250 ms remains the absolute maximum for a
+future multi-run distribution rather than an excuse for a 200 ms nightly hitch.
 
 **How to read it:** a fallback is a failure even when the rescue transcode
 plays. The viewer got pixels, but the requested path broke — exactly the Safari
@@ -427,26 +450,33 @@ describe adaptation. Every artifact therefore carries an `outcome`:
 | `harness` | The observation was too short to outlast banked runway, or the run itself failed before it could produce a playback verdict. |
 
 The criteria live in `tests/playback/cases.json` beside the case, not in the
-script: restarts, upgrades per 60 s, the recovery deadline, and the sustained
-window are review material. The player gives every attempt a globally
-monotonic identity, while its raw stall counter carries across in-place
+script: zero reopens, exactly one downshift by ten seconds, no wait event, at
+most a 250 ms video gap, more than one second of post-switch runway, no second
+move for the next 60 seconds, and the sustained window are review material. The
+player gives every attempt a globally monotonic identity, while its raw stall
+counter carries across in-place
 `newAttempt()` changes and resets only when `play()` creates a new player
 object. The harness samples both identities. Attempt transitions therefore
 count same-reason restarts directly; a player-object transition records a
 `counter_rebase` and rebases the raw counter before deciding whether a window
-was stall-free. The current `stall-recovery` case restarts the live object, so
-its counter remains exact at any poll rate. A future case that can replace one
-or more player objects between samples needs a player-owned monotonic total
-before it can claim the same evidence; intermediate counters would otherwise
-be unobservable.
+was stall-free. Height changes and attempt changes are separate: an in-place
+rung move is not mislabeled as a restart, while any changed attempt identity
+spends the zero-restart budget. Auto moves come from the player's own
+page-monotonic, timestamped switch ledger rather than inferred sampled heights;
+multiple moves between 100 ms polls therefore remain multiple moves, and the
+ten-second deadline is the switch instant. A page-lifetime sequenced media-event trace
+keeps waits and destructive reopens visible across PLAYER replacement and
+invalidates the run if its bounded retained window was insufficient. The same
+completeness check applies to the bounded Auto-switch log.
 
 **What it deliberately does not do.** It injects no probe onto the play path,
 changes no rate control, and does not steer the player. Choosing a rung in
-response to the cliff is the N4 controller's job; this harness only creates the
-condition and records the answer. Until that controller lands, a
-`stall-recovery` run is *expected* to fail with `outcome: recovery` — that
-recorded failure is the baseline the controller has to move, which is why the
-suite is not part of `make validate`.
+response to the cliff is the controller's job; this harness only creates the
+condition and records the answer. The suite is expected to fail until the
+controller performs a seamless move; that is a product failure, not permission
+to omit the case from nightly validation. `playback-auto-cliff` is therefore a
+strict nightly point, and the nightly artifact upload retains its JSON, JUnit,
+and capture tree even when the case fails.
 
 **Comparing runs.** `scripts/playback-lab normalize --json <artifact>` reduces
 a report to its behavioral shape with UUIDs, ports, wall-clock, temporary
@@ -467,9 +497,10 @@ scripts/playback-lab normalize --json out/head.json --out out/head.trace.json
 diff -u out/base.trace.json out/head.trace.json
 ```
 
-The shaping fixture is opt-in: it is built only for the suite that plays it,
-and it is excluded from `full`'s source × quality product, so the existing
-suites keep exactly their previous cases and corpus.
+The shaping fixture is opt-in: it is built only for the suite that plays it and
+is excluded from `full`'s source × quality product. The full suite adds one
+explicit manual quality cycle because transition behavior is not represented
+by a steady-state Cartesian product.
 
 ## Reports keep enough evidence to reproduce the failing layer
 
@@ -491,12 +522,25 @@ The first line proves the expensive 4K video stayed on the copy path. The next
 two isolate a missing first frame to the server's tone-map command rather than
 to browser decode. Use the JSON when the one-line cause is not enough.
 
+The browser quality cycle is deliberately labeled `browser_video_partial`.
+For each of 40 changes it proves the requested delivered method and exact
+height, a newly presented frame, film-position error, runway, player/session
+identity, and presented-frame gap through the post-commit hold; it gates p95 at
+100 ms and max at 250 ms. Landing uses the accepted target frame's media time,
+not an independently sampled audio/media-element clock.
+Headless Chromium is muted, so this artifact has no honest audio-render gap
+oracle and cannot satisfy the final cross-platform transparent-quality SLO by
+itself. Apple and Android device receipts must supply the <=100 ms audio proof.
+
 ## Browser and device coverage is a pool, not one pretend-universal browser
 
 **Chrome and Edge:** these are separate explicit targets, both driven through
 the browser's built-in DevTools protocol. They run headless unless `--headed`
 is passed and need no downloaded driver. Chrome never silently substitutes
 Edge, or vice versa, so a green browser name means that browser actually ran.
+The pinned CI provisioning action exports its exact Chromium executable as
+`PLURX_PLAYBACK_CHROME`; raw-CDP runs launched later through Make inherit that
+path. A missing executable is a failed requested case, never a green skip.
 
 **Safari:** `--browser safari` uses macOS's built-in WebDriver and performs a
 real element click to satisfy autoplay policy. It is headed because Safari has

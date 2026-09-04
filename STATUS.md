@@ -1,8 +1,17 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-03 · Kept current by the working agent in the same
+**Updated:** 2026-09-04 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Streaming reliability is under end-to-end review and repair
+
+**Effort `effort/streaming-reliability`, started 2026-09-04 from `48615baf`.**
+The live progress ledger is
+[STREAMING-RELIABILITY-STATUS.md](docs/STREAMING-RELIABILITY-STATUS.md): review
+scope, verified facts, task PRs, adversarial findings, test evidence, and the
+autonomous decisions made while Paul is away. The effort does not reach
+`main` until its final fixed tree has one full qualification receipt.
 
 ## The fragment-index queue built nothing for three days
 

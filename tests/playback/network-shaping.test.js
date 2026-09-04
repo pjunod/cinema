@@ -1176,6 +1176,49 @@ function healthyTimeline(overrides = {}) {
   return Array.from({ length: 46 }, (_, index) => sample(index * 1000, overrides));
 }
 
+function autoSwitch(seq, atMs, fromHeight, toHeight, overrides = {}) {
+  return {
+    seq,
+    at_ms: 20_000 + atMs,
+    from: `${fromHeight}p`,
+    to: `${toHeight}p`,
+    from_height: fromHeight,
+    to_height: toHeight,
+    reason: "test",
+    position: atMs / 1000,
+    target_method: "transcode",
+    target_session_id: "session-1",
+    target_attempt_id: "a1",
+    ...overrides,
+  };
+}
+
+function autoTransition(events, overrides = {}) {
+  const finalAtMs = 95_000;
+  return {
+    sampled_at_ms: finalAtMs,
+    media_event_seq: 0,
+    media_events: [],
+    auto_switch_seq: events.length ? events.at(-1).seq : 0,
+    auto_switches: events,
+    frame_probe: {
+      supported: true, sequence: events.length, frames: events.length,
+      last_frame_at_ms: finalAtMs, maximum_gap_ms: 50,
+      last_frame: events.length ? { sequence: events.length, at_ms: finalAtMs } : null,
+      auto_presentations: events.map((event) => ({
+        switch_seq: event.seq,
+        frame: {
+          sequence: event.seq, at_ms: event.at_ms + 50,
+          absolute_time: event.position, height: event.to_height,
+          method: event.target_method, session_id: event.target_session_id,
+          attempt_id: event.target_attempt_id,
+        },
+      })),
+    },
+    ...overrides,
+  };
+}
+
 /**
  * A healthy shaped run. Both stages carry a ledger consistent with what they
  * delivered, because that is what the scored gates read: `admitted_bytes` over
@@ -1238,6 +1281,194 @@ test("a clean recovery passes", () => {
   const score = lab.scoreRecovery(CRITERIA, observation());
   assert.deepEqual(score.errors, []);
   assert.equal(score.outcome, "passed");
+});
+
+test("Auto acceptance requires one seamless downshift inside ten seconds", () => {
+  const criteria = {
+    ...CRITERIA,
+    maximum_automatic_restarts: 0,
+    minimum_downshifts: 1,
+    maximum_downshifts: 1,
+    maximum_downshift_ms: 10_000,
+    minimum_post_switch_runway_seconds: 1,
+    maximum_single_transition_video_gap_ms: 100,
+    maximum_video_gap_ms: 250,
+    maximum_landing_error_seconds: 0.25,
+    maximum_wait_events: 0,
+    stable_after_downshift_seconds: 60,
+  };
+  const timeline = Array.from({ length: 751 }, (_, index) => sample(index * 100, {
+    height: index < 50 ? 720 : 360,
+    runway_seconds: 2,
+    sampled_at_ms: 20_000 + index * 100,
+    media_event_seq: 0,
+    media_events: [],
+  }));
+  const transitionStart = {
+    sampled_at_ms: 20_000,
+    media_event_seq: 0,
+    media_events: [],
+    auto_switch_seq: 0,
+    auto_switches: [],
+  };
+  const oneDownshift = [autoSwitch(1, 5_000, 720, 360)];
+  const clean = lab.scoreRecovery(criteria, observation({
+    timeline,
+    transition_start: transitionStart,
+    transition_end: autoTransition(oneDownshift),
+  }));
+  assert.deepEqual(clean.errors, []);
+  assert.equal(clean.metrics.downshifts, 1);
+  assert.equal(clean.metrics.restarts, 0);
+
+  const destructive = timeline.map((row, index) => ({
+    ...row,
+    attempt_id: index < 50 ? "a1" : "a2",
+    player_generation: index < 50 ? 1 : 2,
+  }));
+  const reopened = lab.scoreRecovery(criteria, observation({
+    timeline: destructive,
+    transition_start: transitionStart,
+    transition_end: autoTransition(oneDownshift),
+  }));
+  assert.ok(reopened.errors.some((error) => /automatic restarts/.test(error)));
+
+  const gapped = timeline.map((row, index) => index === timeline.length - 1 ? {
+    ...row,
+    media_event_seq: 2,
+    media_events: [
+      { seq: 1, event: "waiting", at_ms: 21_000 },
+      { seq: 2, event: "playing", at_ms: 21_400 },
+    ],
+  } : row);
+  const discontinuous = lab.scoreRecovery(criteria, observation({
+    timeline: gapped,
+    transition_start: transitionStart,
+    transition_end: {
+      sampled_at_ms: 65_000,
+      media_event_seq: 2,
+      media_events: gapped.at(-1).media_events,
+      auto_switch_seq: 1,
+      auto_switches: oneDownshift,
+    },
+  }));
+  assert.ok(discontinuous.errors.some((error) => /video gap 400 ms/.test(error)));
+  assert.ok(discontinuous.errors.some((error) => /transition wait events/.test(error)));
+
+  const visibleHitch = lab.scoreRecovery(criteria, observation({
+    timeline,
+    transition_start: transitionStart,
+    transition_end: autoTransition(oneDownshift, {
+      frame_probe: {
+        ...autoTransition(oneDownshift).frame_probe,
+        maximum_gap_ms: 200,
+      },
+    }),
+  }));
+  assert.ok(visibleHitch.errors.some((error) => /every nightly cliff/.test(error)),
+    "one nightly cliff must itself meet the 100ms distribution budget");
+
+  for (const jump of [-1, 1]) {
+    const discontinuousLanding = autoTransition(oneDownshift);
+    discontinuousLanding.frame_probe.auto_presentations[0].frame.absolute_time += jump;
+    const score = lab.scoreRecovery(criteria, observation({
+      timeline,
+      transition_start: transitionStart,
+      transition_end: discontinuousLanding,
+    }));
+    assert.ok(score.errors.some((error) => /landed 1\.000s from the handoff boundary/.test(error)),
+      `${jump < 0 ? "backward" : "forward"} film-position jumps must fail`);
+  }
+
+  const silent = timeline.map((row, index) => ({
+    ...row,
+    absolute_time: index < 4 ? 0 : row.absolute_time,
+  }));
+  const inertFrameApi = lab.scoreRecovery(criteria, observation({
+    timeline: silent,
+    transition_start: transitionStart,
+    transition_end: autoTransition(oneDownshift, {
+      frame_probe: {
+        supported: true, sequence: 0, frames: 0,
+        last_frame_at_ms: null, maximum_gap_ms: 0, last_frame: null,
+      },
+    }),
+  }));
+  assert.ok(inertFrameApi.errors.some((error) => /video gap 400 ms/.test(error)),
+    "API presence without a callback uses the sampled-clock fallback");
+  assert.equal(inertFrameApi.metrics.transition.frame_probe_operative, false);
+
+  const stoppedFrameApi = lab.scoreRecovery(criteria, observation({
+    timeline,
+    transition_start: transitionStart,
+    transition_end: autoTransition(oneDownshift, {
+      frame_probe: {
+        supported: true, sequence: 1, frames: 1,
+        last_frame_at_ms: 21_000, maximum_gap_ms: 0,
+        last_frame: { sequence: 1, at_ms: 21_000 },
+      },
+    }),
+  }));
+  assert.ok(stoppedFrameApi.errors.some((error) => /video gap 74000 ms/.test(error)),
+    "a callback that stops remains an open presented-frame gap");
+
+  const oscillating = timeline.map((row, index) => ({ ...row, height: index === 0 ? 720 : 360 }));
+  const collapsedMoves = [
+    autoSwitch(1, 10, 720, 360),
+    autoSwitch(2, 20, 360, 480),
+    autoSwitch(3, 30, 480, 360),
+  ];
+  const movedAgain = lab.scoreRecovery(criteria, observation({
+    timeline: oscillating,
+    transition_start: transitionStart,
+    transition_end: autoTransition(collapsedMoves),
+  }));
+  assert.ok(movedAgain.errors.some((error) => /additional rung move/.test(error)));
+  assert.equal(movedAgain.metrics.auto_switches.event_count, 3,
+    "moves that collapse between two 100ms samples remain authoritative");
+
+  const beforeFirstPoll = timeline.map((row) => ({ ...row, height: 360 }));
+  beforeFirstPoll[0] = { ...beforeFirstPoll[0], height: 720 };
+  const seam = lab.scoreRecovery(criteria, observation({
+    timeline: beforeFirstPoll,
+    transition_start: transitionStart,
+    transition_end: autoTransition([autoSwitch(1, 1, 720, 360)]),
+  }));
+  assert.equal(seam.metrics.downshifts, 1,
+    "the pre-cliff boundary makes a fast first-sample transition visible");
+
+  const lateLedger = lab.scoreRecovery(criteria, observation({
+    timeline,
+    transition_start: transitionStart,
+    transition_end: autoTransition([autoSwitch(1, 10_001, 720, 360)]),
+  }));
+  assert.ok(lateLedger.errors.some((error) => /downshift took 10001 ms/.test(error)),
+    "the deadline comes from the switch timestamp, not the next sample");
+
+  const retained = Array.from({ length: 8 }, (_, index) =>
+    autoSwitch(index + 2, index + 2, index % 2 ? 360 : 480, index % 2 ? 480 : 360));
+  const truncated = lab.scoreRecovery(criteria, observation({
+    timeline,
+    transition_start: transitionStart,
+    transition_end: {
+      ...autoTransition(retained),
+      auto_switch_seq: 9,
+    },
+  }));
+  assert.ok(truncated.errors.some((error) => /switch trace retained 8\/9/.test(error)),
+    "the bounded player log cannot silently discard an earlier move");
+
+  for (const invalid of [Number.NaN, Number.POSITIVE_INFINITY]) {
+    const invalidRunway = timeline.map((row) => ({ ...row }));
+    invalidRunway[50].runway_seconds = invalid;
+    const score = lab.scoreRecovery(criteria, observation({
+      timeline: invalidRunway,
+      transition_start: transitionStart,
+      transition_end: autoTransition(oneDownshift),
+    }));
+    assert.ok(score.errors.some((error) => /runway .*not finite/.test(error)),
+      `${String(invalid)} runway must fail closed`);
+  }
 });
 
 test("a cliff that was never applied fails as a shaping fault, not a player fault", () => {
@@ -1478,21 +1709,37 @@ test("too many restarts and too many upgrades each fail on their own", () => {
     ...row,
     height: [360, 480, 720][index % 3],
     ttff_ms: 500 + (index % 3),
+    attempt_id: `a${index + 1}`,
   }));
-  const score = lab.scoreRecovery(CRITERIA, observation({ timeline: churn }));
+  const switches = [
+    autoSwitch(1, 1_000, 720, 480),
+    autoSwitch(2, 2_000, 480, 720),
+    autoSwitch(3, 3_000, 720, 480),
+    autoSwitch(4, 4_000, 480, 720),
+  ];
+  const score = lab.scoreRecovery(CRITERIA, observation({
+    timeline: churn,
+    transition_start: {
+      sampled_at_ms: 20_000, media_event_seq: 0, media_events: [],
+      auto_switch_seq: 0, auto_switches: [],
+    },
+    transition_end: autoTransition(switches),
+  }));
   assert.ok(score.errors.some((error) => /automatic restarts/.test(error)), score.errors.join("; "));
   assert.ok(score.errors.some((error) => /upgrades inside one 60s window/.test(error)), score.errors.join("; "));
   assert.equal(score.outcome, "recovery");
 });
 
-test("one downgrade is one restart, counted once even though TTFF also resets", () => {
+test("a seamless downgrade is not mislabeled as a player restart", () => {
   const stepped = healthyTimeline().map((row, index) =>
     index < 5 ? { ...row, height: 720, ttff_ms: 400 } : { ...row, height: 360, ttff_ms: 900 });
   const events = lab.rungHistory(stepped);
-  assert.equal(events.length, 1, "a height change and its TTFF reset are one restart");
+  assert.equal(events.length, 1, "the rung transition remains observable");
   assert.equal(events[0].direction, "down");
   assert.equal(events[0].from_height, 720);
   assert.equal(events[0].to_height, 360);
+  assert.equal(events[0].restart_count, 0,
+    "an unchanged attempt identity proves the player did not reopen");
 });
 
 test("a new player attempt is a restart even when its rung and TTFF match", () => {
@@ -1789,6 +2036,20 @@ test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => 
   assert.equal(cases.length, 1);
   assert.equal(cases[0].operation, "shaped-cliff");
   assert.ok(cases[0].recovery.recovery_deadline_seconds > 0, "the criteria are in the manifest, not the code");
+  assert.equal(cases[0].recovery.maximum_automatic_restarts, 0);
+  assert.equal(cases[0].recovery.minimum_downshifts, 1);
+  assert.equal(cases[0].recovery.maximum_downshifts, 1);
+  assert.equal(cases[0].recovery.maximum_downshift_ms, 10_000);
+  assert.equal(cases[0].recovery.maximum_single_transition_video_gap_ms, 100);
+  assert.equal(cases[0].recovery.maximum_video_gap_ms, 250);
+  assert.equal(cases[0].recovery.maximum_landing_error_seconds, 0.25);
+  assert.equal(cases[0].recovery.stable_after_downshift_seconds, 60);
+  assert.ok(
+    cases[0].recovery.recovery_observe_seconds * 1000
+      >= cases[0].recovery.maximum_downshift_ms
+        + cases[0].recovery.stable_after_downshift_seconds * 1000,
+    "the observation covers the latest allowed move plus its full stability dwell",
+  );
   assert.ok(
     cases[0].recovery.recovery_observe_seconds
       >= cases[0].recovery.recovery_deadline_seconds
@@ -1800,13 +2061,377 @@ test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => 
   const full = lab.expandCases(manifest, "full");
   assert.equal(full.some((testCase) => testCase.fixture === "shaping-mpeg4-mp3-720"), false);
   assert.equal(lab.expandCases(manifest, "smoke").length, 11, "the smoke suite is unchanged");
-  assert.equal(full.length, 44, "the full suite is unchanged");
+  assert.equal(full.length, 45, "the full suite includes one explicit quality transition");
+  const quality = full.find((testCase) => testCase.operation === "quality-cycle");
+  assert.deepEqual(quality.switches, [
+    { quality: "720", expected_method: "transcode", expected_height: 720 },
+    { quality: "original", expected_method: "remux", expected_height: 1080 },
+  ]);
+  assert.equal(quality.repetitions, 20);
+  assert.equal(quality.require_same_session, true);
+  assert.equal(quality.require_same_player_generation, true);
+  assert.equal(quality.evidence_scope, "browser_video_partial");
+  assert.equal(quality.minimum_runway_seconds, 2);
+  assert.equal(quality.transition.p95_video_gap_ms, 100);
+  assert.equal(quality.transition.maximum_video_gap_ms, 250);
+  assert.equal(quality.transition.maximum_reopen_events, 0);
+  assert.equal(quality.transition.maximum_stalls, 0);
+  assert.equal(quality.transition.maximum_hitches, 0);
 
   const ordinaryCorpus = lab.fixturesForBuild(manifest);
   assert.equal(ordinaryCorpus.some((fixture) => fixture.id === "shaping-mpeg4-mp3-720"), false,
     "the general fixtures command does not pay for the 120-second opt-in source");
   const shapedCorpus = lab.fixturesForBuild(manifest, new Set(["shaping-mpeg4-mp3-720"]));
   assert.deepEqual(shapedCorpus.map((fixture) => fixture.id), ["shaping-mpeg4-mp3-720"]);
+});
+
+test("the CI-provisioned Chromium path is a first-class browser candidate", async () => {
+  await withTempDir(async (directory) => {
+    const chromium = path.join(directory, "headless-shell");
+    await fsp.writeFile(chromium, "fixture", "utf8");
+    const previous = process.env.PLURX_PLAYBACK_CHROME;
+    process.env.PLURX_PLAYBACK_CHROME = chromium;
+    try {
+      assert.equal(lab.findChrome(), chromium);
+    } finally {
+      if (previous === undefined) delete process.env.PLURX_PLAYBACK_CHROME;
+      else process.env.PLURX_PLAYBACK_CHROME = previous;
+    }
+  });
+});
+
+test("transition scoring retains gaps and reopens that precede the steady window", () => {
+  const event = (seq, name, at) => ({ seq, event: name, at_ms: at });
+  const snapshot = (overrides = {}) => ({
+    sampled_at_ms: 0,
+    media_event_seq: 0,
+    media_events: [],
+    started: true,
+    decided_method: "remux",
+    method: "remux",
+    tried_fallback: false,
+    copy_hls: false,
+    vod: false,
+    stalls: 0,
+    hitches: {},
+    ttff_ms: 100,
+    session_id: "session-1",
+    player_generation: 1,
+    video: {
+      error: null, current_time: 10, absolute_time: 10, height: 1080,
+      width: 1920, runway: 3, dropped: 0, total: 300,
+    },
+    ...overrides,
+  });
+  const continuityStart = snapshot({ lifetime_stalls: 2, lifetime_hitches: 4 });
+  const operationEnd = snapshot({
+    sampled_at_ms: 500,
+    media_event_seq: 3,
+    media_events: [event(1, "pause", 100), event(2, "emptied", 110), event(3, "playing", 500)],
+  });
+  const end = snapshot({
+    sampled_at_ms: 8_500,
+    media_event_seq: 3,
+    media_events: operationEnd.media_events,
+    video: { ...operationEnd.video, current_time: 18, absolute_time: 18 },
+  });
+  const score = lab.scoreCase(
+    { thresholds: { minimum_clock_rate: 0.9, maximum_hitches: 2, maximum_stalls: 0 } },
+    {
+      quality: "original",
+      operation: "quality-cycle",
+      switches: ["720", "original"],
+      repetitions: 1,
+      require_same_player_generation: true,
+      transition: { maximum_video_gap_ms: 250, maximum_wait_events: 0, maximum_reopen_events: 0 },
+    },
+    { method: "remux", delivery: { mode: "progressive" } },
+    operationEnd,
+    end,
+    8,
+    { changes: [{
+      quality: "720", ready_ms: 100, landing_error_seconds: 0,
+      from_player_generation: 1, to_player_generation: 2,
+    }] },
+    continuityStart,
+  );
+  assert.match(score.errors.join("; "), /transition video gap 400 ms/);
+  assert.match(score.errors.join("; "), /destructive reopen events/);
+  assert.match(score.errors.join("; "), /1\/2 quality switches completed/);
+  assert.match(score.errors.join("; "), /replaced the player/);
+
+  assert.deepEqual(lab.sampledVideoGap([
+    sample(0, { absolute_time: 10, ready_state: 4 }),
+    sample(100, { absolute_time: 10.1, ready_state: 4 }),
+    sample(200, { absolute_time: 10.1, ready_state: 1 }),
+    sample(300, { absolute_time: 10.1, ready_state: 1 }),
+    sample(500, { absolute_time: 10.3, ready_state: 4 }),
+  ]), { maximum_clock_gap_ms: 400, samples: 5 });
+
+  const frameMeasured = lab.transitionMetrics(continuityStart, snapshot({
+    sampled_at_ms: 800,
+    lifetime_stalls: 3,
+    lifetime_hitches: 6,
+    frame_probe: {
+      supported: true, last_frame_at_ms: 750, maximum_gap_ms: 310, frames: 8,
+    },
+  }));
+  assert.equal(frameMeasured.maximum_video_gap_ms, 310,
+    "Chromium's presented-frame callback is the precise gap oracle");
+  assert.equal(frameMeasured.stalls, 1);
+  assert.equal(frameMeasured.hitches, 2);
+});
+
+test("player snapshots retain stall and hitch counts across object replacement", () => {
+  let now = 10_000;
+  const page = {};
+  const video = {
+    currentTime: 10, duration: 100, paused: false, seeking: false, ended: false,
+    readyState: 4, videoWidth: 1920, videoHeight: 1080, playbackRate: 1, error: null,
+    getVideoPlaybackQuality: () => ({ droppedVideoFrames: 0, totalVideoFrames: 100 }),
+  };
+  const document = { getElementById: () => video };
+  const performance = { now: () => ++now };
+  const take = (player, lifetimeStalls, lifetimeHitches) => new Function(
+    "PLAYER", "document", "performance", "bufferRunway", "globalThis",
+    "PLAYBACK_LIFETIME_STALLS", "PLAYBACK_LIFETIME_HITCHES",
+    `return ${lab.playerSnapshotExpression()};`,
+  )(player, document, performance, () => 3, page, lifetimeStalls, lifetimeHitches);
+
+  const first = { stalls: 2, hitches: { back: 1 } };
+  assert.deepEqual(
+    [take(first, 2, 1).lifetime_stalls, take(first, 2, 1).lifetime_hitches],
+    [2, 1],
+  );
+  // These faults land after the last sample of the outgoing object. The
+  // page-lifetime counters are incremented at the fault sites, so replacement
+  // cannot erase them even though the harness never sees `first` again.
+  first.stalls = 3;
+  first.hitches.back = 2;
+  const second = { stalls: 0, hitches: {} };
+  assert.deepEqual(
+    [take(second, 3, 2).lifetime_stalls, take(second, 3, 2).lifetime_hitches],
+    [3, 2],
+    "the outgoing object's final faults survive an unsampled replacement",
+  );
+
+  second.stalls = 1;
+  second.hitches.held = 4;
+  assert.deepEqual(
+    [take(second, 4, 6).lifetime_stalls, take(second, 4, 6).lifetime_hitches],
+    [4, 6],
+  );
+  assert.deepEqual(
+    [take(null, 4, 6).lifetime_stalls, take(null, 4, 6).lifetime_hitches],
+    [4, 6],
+  );
+  assert.deepEqual(
+    [take(null, 4, 6).lifetime_stalls, take(null, 4, 6).lifetime_hitches],
+    [4, 6],
+    "a null interval cannot reset the page lifetime",
+  );
+
+  const web = fs.readFileSync(path.join(ROOT, "crates/plurxd/src/web/index.html"), "utf8");
+  assert.match(web, /p\.stalls=\(p\.stalls\|\|0\)\+1;\s*PLAYBACK_LIFETIME_STALLS\+\+;/);
+  assert.match(web, /h\.n\+\+;\s*PLAYBACK_LIFETIME_HITCHES\+\+;/);
+});
+
+test("a requested case can never disappear behind a skipped status", () => {
+  const testCase = { name: "fixture :: auto :: steady", quality: "auto", operation: "steady" };
+  const result = lab.enforceCaseResult(testCase, { id: "fixture" }, { status: "skipped" });
+  assert.equal(result.status, "failed");
+  assert.equal(result.outcome, "harness");
+  assert.match(result.errors[0], /non-terminal status "skipped"/);
+});
+
+test("quality cycles wait for the requested rendition and a presented frame", async () => {
+  let selected = "original";
+  let committed = "original";
+  let renditionPolls = 0;
+  let sampledAt = 1_000;
+  let position = 10;
+  let frames = 0;
+  let frameSequence = 0;
+  let lastFrame = null;
+  let maximumGapMs = 0;
+  let switchPolls = null;
+  const presentFrame = () => {
+    frames += 1;
+    frameSequence += 1;
+    const down = committed === "720";
+    lastFrame = {
+      sequence: frameSequence,
+      at_ms: sampledAt,
+      media_time: position,
+      absolute_time: position,
+      width: down ? 1280 : 1920,
+      height: down ? 720 : 1080,
+      method: down ? "transcode" : "remux",
+      session_id: "stable-session",
+      attempt_id: "a1",
+    };
+  };
+  const state = () => {
+    sampledAt += 50;
+    position += 0.05;
+    if (switchPolls === null && frames === 0) presentFrame();
+    if (switchPolls !== null) {
+      switchPolls += 1;
+      renditionPolls = switchPolls;
+      if (switchPolls === 1) presentFrame(); // one late frame from the outgoing rendition
+      if (switchPolls === 2) committed = selected;
+      if (switchPolls === 4) presentFrame(); // first frame after target state was observed
+      if (switchPolls >= 5) maximumGapMs = Math.max(maximumGapMs, 150);
+    }
+    const down = committed === "720";
+    return {
+      sampled_at_ms: sampledAt,
+      media_event_seq: 0,
+      media_events: [],
+      lifetime_stalls: 0,
+      lifetime_hitches: 0,
+      started: true,
+      decided_method: down ? "transcode" : "remux",
+      method: down ? "transcode" : "remux",
+      session_id: "stable-session",
+      attempt_id: "a1",
+      player_generation: 7,
+      keeper_fires: 0,
+      frame_probe: {
+        supported: true, sequence: frameSequence, last_frame_at_ms: lastFrame?.at_ms ?? null,
+        maximum_gap_ms: maximumGapMs, frames, last_frame: lastFrame,
+      },
+      video: {
+        error: null, paused: false, ended: false, seeking: false, ready_state: 4,
+        current_time: position, absolute_time: position, height: down ? 720 : 1080,
+        runway: 3,
+      },
+      hitches: {},
+      stalls: 0,
+    };
+  };
+  let current = state();
+  const driver = {
+    exec: async (script) => {
+      const requested = /setQuality\("([^\"]+)"\)/.exec(script);
+      if (requested) {
+        selected = requested[1];
+        renditionPolls = 0;
+        switchPolls = 0;
+      }
+      if (script.includes("probe.maximum_gap_ms=0")) {
+        maximumGapMs = 0;
+        frames = 0;
+        switchPolls = null;
+      }
+      return true;
+    },
+    eval: async (expression) => {
+      if (expression === "playQuality()") return selected;
+      current = state();
+      return current;
+    },
+  };
+  const operation = await lab.performOperation(driver, {
+    operation: "quality-cycle",
+    switches: [
+      { quality: "720", expected_method: "transcode", expected_height: 720 },
+      { quality: "original", expected_method: "remux", expected_height: 1080 },
+    ],
+    repetitions: 1,
+    switch_hold_seconds: 0.01,
+    switch_wait_timeout_seconds: 1,
+  }, current);
+  assert.equal(operation.changes.length, 2);
+  assert.deepEqual(operation.changes.map((change) => change.actual_method), ["transcode", "remux"]);
+  assert.deepEqual(operation.changes.map((change) => change.decoded_height), [720, 1080]);
+  assert.deepEqual(operation.changes.map((change) => change.committed_frame_sequence), [4, 7]);
+  assert.ok(renditionPolls >= 4,
+    "the old frame and the target-state poll were not accepted without a later target frame");
+  assert.ok(
+    operation.changes[1].from_position_seconds > operation.changes[0].to_position_seconds,
+    "the second handoff boundary is sampled after the inter-switch hold",
+  );
+  assert.deepEqual(operation.changes.map((change) => change.video_gap_ms), [150, 150],
+    "the post-commit hold remains inside each switch's gap measurement");
+
+  const inertState = {
+    ...current,
+    frame_probe: {
+      supported: true, sequence: 0, last_frame_at_ms: null,
+      maximum_gap_ms: 0, frames: 0, last_frame: null,
+    },
+  };
+  const inertDriver = {
+    exec: async () => true,
+    eval: async (expression) => expression === "playQuality()" ? "original" : inertState,
+  };
+  await assert.rejects(
+    () => lab.performOperation(inertDriver, {
+      operation: "quality-cycle",
+      switches: [
+        { quality: "720", expected_method: "transcode", expected_height: 720 },
+        { quality: "original", expected_method: "remux", expected_height: 1080 },
+      ],
+      frame_baseline_timeout_seconds: 0.01,
+    }, inertState),
+    /outgoing frame before quality switch/,
+    "an API-present but inert callback cannot omit the first handoff seam",
+  );
+});
+
+test("quality-cycle scoring rejects missing runway and a single excessive gap", () => {
+  const snapshot = {
+    sampled_at_ms: 0,
+    media_event_seq: 0,
+    media_events: [],
+    lifetime_stalls: 0,
+    lifetime_hitches: 0,
+    started: true,
+    decided_method: "remux",
+    method: "remux",
+    tried_fallback: false,
+    copy_hls: false,
+    vod: false,
+    stalls: 0,
+    hitches: {},
+    ttff_ms: 100,
+    session_id: "session-1",
+    player_generation: 1,
+    frame_probe: { supported: true, last_frame_at_ms: 0, maximum_gap_ms: 0, frames: 1 },
+    video: {
+      error: null, current_time: 10, absolute_time: 10, height: 1080,
+      width: 1920, runway: 3, dropped: 0, total: 300,
+    },
+  };
+  const changes = Array.from({ length: 40 }, (_, index) => ({
+    quality: index % 2 ? "original" : "720",
+    ready_ms: 100,
+    landing_error_seconds: 0,
+    from_session_id: "session-1",
+    to_session_id: "session-1",
+    from_player_generation: 1,
+    to_player_generation: 1,
+    runway_seconds: index === 0 ? undefined : 3,
+    video_gap_ms: index === 1 ? 300 : index < 4 ? 150 : 50,
+  }));
+  const score = lab.scoreCase(
+    { thresholds: { minimum_clock_rate: 0.9, maximum_hitches: 0, maximum_stalls: 0 } },
+    {
+      quality: "original", operation: "quality-cycle", switches: ["720", "original"],
+      repetitions: 20, minimum_runway_seconds: 2,
+      transition: { p95_video_gap_ms: 100, maximum_video_gap_ms: 250 },
+    },
+    { method: "remux", delivery: { mode: "progressive" } },
+    snapshot,
+    { ...snapshot, sampled_at_ms: 8_000, video: { ...snapshot.video, current_time: 18 } },
+    8,
+    { changes, timeline: [] },
+    snapshot,
+  );
+  assert.match(score.errors.join("; "), /no measured runway/);
+  assert.match(score.errors.join("; "), /video-gap p95 150 ms/);
+  assert.match(score.errors.join("; "), /video-gap max 300 ms/);
 });
 
 test("the VOD suite makes native seeking and resume invariants executable", () => {
