@@ -43,8 +43,7 @@ make playback-full         # 45 Chrome cases: source × quality + operations
 scripts/playback-lab run --suite vod --json out/vod.json
 
 # Fault injection: drive a session through a bandwidth cliff (see below).
-scripts/playback-lab run --suite stall-recovery \
-  --network-profile 8mbps-to-1.5mbps --json out/stall-recovery.json
+make playback-stall-recovery
 
 # Safari: first enable Develop → Allow Remote Automation in Safari.
 # macOS may also require you to run `safaridriver --enable` once yourself.
@@ -131,6 +130,8 @@ replacement, so waits, gaps, aborts, and destructive reopens during the switch
 cannot disappear when the steady window begins. Requested cases have only two
 valid terminal states: `passed` and `failed`; `skipped`, a missing result, or a
 missing tool in a strict validation profile is a harness failure.
+Chromium's presented-frame callback measures the maximum inter-frame gap;
+sampled media-clock progress is the explicit fallback on engines without it.
 
 **How to read it:** a fallback is a failure even when the rescue transcode
 plays. The viewer got pixels, but the requested path broke — exactly the Safari
@@ -436,9 +437,10 @@ describe adaptation. Every artifact therefore carries an `outcome`:
 
 The criteria live in `tests/playback/cases.json` beside the case, not in the
 script: zero reopens, exactly one downshift by ten seconds, no wait event, at
-most a 250 ms video gap, more than one second of post-switch runway, upgrades
-per 60 s, and the sustained window are review material. The player gives every
-attempt a globally monotonic identity, while its raw stall counter carries across in-place
+most a 250 ms video gap, more than one second of post-switch runway, no second
+move for the next 60 seconds, and the sustained window are review material. The
+player gives every attempt a globally monotonic identity, while its raw stall
+counter carries across in-place
 `newAttempt()` changes and resets only when `play()` creates a new player
 object. The harness samples both identities. Attempt transitions therefore
 count same-reason restarts directly; a player-object transition records a
@@ -454,7 +456,9 @@ changes no rate control, and does not steer the player. Choosing a rung in
 response to the cliff is the controller's job; this harness only creates the
 condition and records the answer. The suite is expected to fail until the
 controller performs a seamless move; that is a product failure, not permission
-to omit the case from nightly validation.
+to omit the case from nightly validation. `playback-auto-cliff` is therefore a
+strict nightly point, and the nightly artifact upload retains its JSON, JUnit,
+and capture tree even when the case fails.
 
 **Comparing runs.** `scripts/playback-lab normalize --json <artifact>` reduces
 a report to its behavioral shape with UUIDs, ports, wall-clock, temporary
@@ -499,6 +503,14 @@ SERVER WARN plurxd::transcode: transcode ffmpeg: No such filter: 'zscale'
 The first line proves the expensive 4K video stayed on the copy path. The next
 two isolate a missing first frame to the server's tone-map command rather than
 to browser decode. Use the JSON when the one-line cause is not enough.
+
+The browser quality cycle is deliberately labeled `browser_video_partial`.
+For each of 40 changes it proves the requested delivered method and exact
+height, a newly presented frame, film-position error, runway, player/session
+identity, and presented-frame gap; it gates p95 at 100 ms and max at 250 ms.
+Headless Chromium is muted, so this artifact has no honest audio-render gap
+oracle and cannot satisfy the final cross-platform transparent-quality SLO by
+itself. Apple and Android device receipts must supply the <=100 ms audio proof.
 
 ## Browser and device coverage is a pool, not one pretend-universal browser
 
