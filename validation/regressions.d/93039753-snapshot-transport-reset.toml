@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["93039753"]
+points = ["cluster.auth", "cluster.membership", "operations.packaging"]
+checks = ["rust-gate", "cluster-auth", "operations-contract", "history-regressions"]
+reason = "The vendored Hiqlite regression fills the bounded Raft request queue before dropping the RPC cancellation guard and requires an independent retained reconnect signal, so reverting to best-effort Reset enqueueing loses the only recovery instruction. The standard cluster-auth lane runs that exact regression plus both snapshot mismatch boundaries, the three-voter learner snapshot lifecycle, topology and leader/follower failure drills, and real-daemon restart contracts. Operations contracts keep the final Docker health check unique, derive its default startup budget from all three named application phases, and require the explicit Compose timeout/health override pair."
