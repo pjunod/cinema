@@ -54,9 +54,15 @@ pub struct Demand {
     /// can make a producer move against the ahead window, and the only one
     /// that can make it move backwards.
     pub blocked_on: Option<u32>,
-    /// The furthest segment this reader has asked for. Where the ahead window
-    /// is measured from once nothing is blocked.
+    /// The reader's current playback anchor. Accepted control owns this
+    /// position; GET order and speculative prefetch do not advance it.
     pub frontier: u32,
+    /// This admitted GET is nearest to the reader's accepted playback anchor
+    /// inside its current buffer window.
+    /// Other admitted GETs remain owed, but cannot make an abandoned seek
+    /// destination outrank the one the viewer has just selected.
+    pub foreground: bool,
+    pub arrival_order: Option<u64>,
 }
 
 impl Demand {
@@ -66,6 +72,8 @@ impl Demand {
         Demand {
             blocked_on: None,
             frontier,
+            foreground: false,
+            arrival_order: None,
         }
     }
 
@@ -74,6 +82,8 @@ impl Demand {
         Demand {
             blocked_on: Some(index),
             frontier: index,
+            foreground: false,
+            arrival_order: None,
         }
     }
 }
@@ -305,7 +315,47 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
                 }
             };
         }
-        return serve_blocked(manifest, &owed, position, reposition);
+        let mut foreground = demands
+            .iter()
+            .filter(|demand| demand.foreground)
+            .filter_map(|demand| demand.blocked_on)
+            .filter(|index| owed.binary_search(index).is_ok())
+            .collect::<Vec<_>>();
+        foreground.sort_unstable();
+        foreground.dedup();
+        // Keep every admitted request in `owed` for capacity protection. Only
+        // select the next producer move from the current playback windows;
+        // old requests resume when these are served or end by their deadline.
+        let candidates = if foreground.is_empty() {
+            &owed
+        } else {
+            &foreground
+        };
+        if let Some(oldest) = demands
+            .iter()
+            .filter(|demand| {
+                demand
+                    .blocked_on
+                    .is_some_and(|index| candidates.binary_search(&index).is_ok())
+            })
+            .filter_map(|demand| Some((demand.arrival_order?, demand.blocked_on?)))
+            .min()
+        {
+            // Each current viewer's nearest GET competes in admission order.
+            // Opportunistic production near the current cursor must not let
+            // one viewer's continuing prefetch starve a rewind by another.
+            return serve_blocked(manifest, &[oldest.1], position, reposition);
+        }
+        return serve_blocked(
+            manifest,
+            if foreground.is_empty() {
+                &owed
+            } else {
+                &foreground
+            },
+            position,
+            reposition,
+        );
     }
 
     // Nothing is blocked, so this is ahead-fill, and it runs *forward from the
@@ -483,6 +533,73 @@ mod tests {
         }
     }
 
+    #[test]
+    fn current_playback_beats_both_an_old_low_wait_and_later_far_prefetch() {
+        let manifest = manifest(200);
+        let mut current = Demand::waiting_on(90);
+        current.foreground = true;
+        assert_eq!(
+            decide(
+                &manifest,
+                &[waiting(3), current, waiting(180)],
+                position(None)
+            ),
+            Action::Reposition { to: 90 }
+        );
+        // A backward seek is equally authoritative; no numeric or arrival
+        // ordering heuristic can substitute for accepted playback intent.
+        current.blocked_on = Some(3);
+        current.frontier = 3;
+        assert_eq!(
+            decide(
+                &manifest,
+                &[waiting(90), current, waiting(180)],
+                positioned(90)
+            ),
+            Action::Reposition { to: 3 }
+        );
+        // The old admitted requests remain owed once current work settles.
+        assert_eq!(
+            decide(&manifest, &[waiting(90), waiting(180)], position(None)),
+            Action::Reposition { to: 90 }
+        );
+    }
+
+    #[test]
+    fn continuing_forward_fetches_cannot_starve_another_viewers_rewind() {
+        let manifest = manifest(200);
+        let first_viewer = Demand {
+            blocked_on: Some(90),
+            frontier: 90,
+            foreground: true,
+            arrival_order: Some(1),
+        };
+        let rewind_viewer = Demand {
+            blocked_on: Some(3),
+            frontier: 3,
+            foreground: true,
+            arrival_order: Some(2),
+        };
+        assert_eq!(
+            decide(&manifest, &[first_viewer, rewind_viewer], positioned(90)),
+            Action::Produce { next: 90 }
+        );
+        let next_forward_get = Demand {
+            blocked_on: Some(91),
+            frontier: 91,
+            foreground: true,
+            arrival_order: Some(3),
+        };
+        assert_eq!(
+            decide(
+                &manifest,
+                &[next_forward_get, rewind_viewer],
+                positioned(90)
+            ),
+            Action::Reposition { to: 3 }
+        );
+    }
+
     /// The same position, under a working set of `used` against `budget`.
     fn under_pressure(through: Option<u32>, used: u64, budget: u64, held: bool) -> Position {
         Position {
@@ -641,6 +758,8 @@ mod tests {
         let readers = [Demand {
             blocked_on: Some(3),
             frontier: 30,
+            foreground: false,
+            arrival_order: None,
         }];
         match decide(&manifest, &readers, position(Some(29))) {
             Action::Reposition { to } => assert_eq!(to, 3),
