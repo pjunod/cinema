@@ -59,8 +59,12 @@ until curl -fsS "$base/readyz" >/dev/null 2>&1; do
   sleep 1
 done
 
-curl -fsS "$base/healthz" | grep -q .
-curl -fsS "$base/metrics" | grep -q '^# HELP'
+# `grep -q` exits after the first match and can close the pipe while curl is
+# still writing. With `pipefail`, curl then reports error 23 even though the
+# endpoint and assertion both succeeded. Consume the complete response while
+# discarding grep's output so a healthy container cannot fail from SIGPIPE.
+curl -fsS "$base/healthz" | grep . >/dev/null
+curl -fsS "$base/metrics" | grep '^# HELP' >/dev/null
 before="$(curl -fsS "$base/api/v1/server")"
 instance_before="$(printf '%s' "$before" | sed -n 's/.*"instance_id":"\([^"]*\)".*/\1/p')"
 test -n "$instance_before"
