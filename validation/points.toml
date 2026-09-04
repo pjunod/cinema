@@ -619,6 +619,14 @@ checks = ["rust-gate", "rust-gate-ci", "user-journey"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
+id = "live-tv.integration"
+title = "HDHomeRun live television"
+contract = "One configured HDHomeRun supplies a bounded non-DRM channel lineup and live HLS session through one cluster owner, while every ingress and first-party client preserves capability, cleanup, and finite-file-state boundaries."
+paths = ["docs/HDHOMERUN-LIVE-TV-*.md"]
+checks = ["operations-contract"]
+depends_on = ["server.api", "identity.access", "playback.pipeline"]
+
+[[points]]
 id = "playback.benchmark"
 title = "Cinema-vs-Plex controlled A/B benchmark"
 contract = "The same corpus, operations, output contract, and client clock produce credential-safe raw evidence, distributions, failure rates, and directionally explicit ratios for Cinema and Plex."
