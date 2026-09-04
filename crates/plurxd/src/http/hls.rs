@@ -5203,7 +5203,7 @@ async fn control_local_inner(
                 predecessor_response: start.clone(),
                 accepts_prepare: request.accepts_prepare_replacement(),
                 handoff_from_ms: request.buffered_through_ms,
-                position_ms: request.position_ms,
+                anchor_ms: request.seek_target_ms.unwrap_or(request.position_ms),
             },
         ));
     }
@@ -5396,9 +5396,15 @@ struct PreparationShadowInputs {
     /// Where the successor should begin: the end of what this client has
     /// already buffered, because that is where the handoff lands.
     handoff_from_ms: i64,
-    /// The playhead the handoff point is clamped against — `handoff_from_ms` is
-    /// client-reported and bounded only by the file's duration.
-    position_ms: i64,
+    /// What the handoff point is clamped against.
+    ///
+    /// The **seek target** when the client is seeking, and the playhead
+    /// otherwise — the same anchor `ControlRequestV1::validate` bounds
+    /// `buffered_through_ms` against. Using the playhead alone would clamp a
+    /// viewer who has just scrubbed to 40:00 back to 2:00 and warm the
+    /// successor there, which is the exact failure the clamp exists to prevent,
+    /// inverted.
+    anchor_ms: i64,
 }
 
 /// Whether this operator has enabled prepared handoffs.
@@ -5474,12 +5480,17 @@ const PREPARED_SUCCESSOR_WINDOW_MS: i64 = 60_000;
 /// that. Retrying any sooner spends an encoder to be told by the store what the
 /// cooldown already knew.
 ///
-/// The margin is deliberately generous rather than tight. Being a few seconds
-/// slow to offer a viewer a second prepared handoff costs them nothing — they
-/// are still watching the stream they have — while being a few seconds early
-/// costs a real encoder every time.
+/// The margin covers the release itself, which is neither instant nor bounded:
+/// it aborts a durable row and then kills a process. A cooldown equal to the
+/// life *excluding* the release would let the next attempt start an encoder
+/// while the previous row was still being torn down, and be refused by the
+/// store for it.
+///
+/// Generous rather than tight on purpose. Being slow to offer a viewer a second
+/// prepared handoff costs them nothing — they are still watching the stream
+/// they have — while being early costs a real encoder every time.
 const PREPARED_ATTEMPT_COOLDOWN: Duration =
-    Duration::from_millis(PREPARED_SUCCESSOR_WINDOW_MS as u64 + PREPARED_START_BUDGET_MS + 5_000);
+    Duration::from_millis(PREPARED_SUCCESSOR_WINDOW_MS as u64 + PREPARED_START_BUDGET_MS + 30_000);
 
 /// When each playback last had an encoder spent on a staging attempt.
 ///
@@ -5595,8 +5606,8 @@ struct PreparedHandoffPoint {
     /// The end of what the client says it has buffered — where the handoff
     /// lands, because the client keeps playing what it already has.
     handoff_from_ms: i64,
-    /// The playhead, which bounds the above.
-    position_ms: i64,
+    /// What bounds the above: the seek target when seeking, else the playhead.
+    anchor_ms: i64,
 }
 
 /// The successor a release has to reclaim, and everything it needs to name it.
@@ -5631,11 +5642,20 @@ struct PreparedSuccessor {
 /// half and the slot half in the right order; this supplies the caller and the
 /// clock, and then ends the process.
 ///
-/// **A committed successor is not released.** The check is the slot itself: a
-/// commit settles it, so `may_commit_preparation` answers `false` afterwards
-/// and this returns having done nothing. That is also what makes this safe to
-/// keep once M6 §3.5 lands — the committer wins by settling first, and this
-/// becomes the path for successors nobody claimed.
+/// **The check is the ledger row, not the predecessor's slot.** A slot answers
+/// `false` for four different states and only one of them means somebody
+/// cleaned up: it also answers `false` when the predecessor was tombstoned,
+/// when it was idle-reaped, and when the actor closed — all of which leave the
+/// successor *still staged*, its encoder running and its row still holding the
+/// playback's one-preparation invariant. Gating on the slot therefore skipped
+/// the release in the flow this feature is built around, where the viewer's
+/// quality change opens a **new** session that supersedes the predecessor.
+///
+/// The ledger cannot be ambiguous that way. Commit deletes the row and abort
+/// deletes the row, so a row that still names this incarnation means nobody has
+/// claimed or released it — which is exactly the condition for reclaiming it,
+/// and is also what keeps this from killing a successor a viewer is watching
+/// once M6 §3.5 lands.
 fn spawn_prepared_release(
     state: AppState,
     gate: std::sync::Arc<dyn crate::playback_control::PreparationGate>,
@@ -5650,10 +5670,18 @@ fn spawn_prepared_release(
     } = successor;
     tokio::spawn(async move {
         tokio::time::sleep(window).await;
-        // The slot is the authority on whether anyone still wants this. A
-        // commit settles it; a session that has ended answers `false` too, and
-        // in that case its slot went with it.
-        if !gate.may_commit_preparation(&successor_incarnation).await {
+        // Still ours to reclaim? Only if the ledger still names it. A commit or
+        // an abort deletes the row, and maintenance deletes it at the deadline
+        // if this node died holding it — so anything else means somebody got
+        // there first and the worker is not this task's to kill.
+        let still_staged = state
+            .store
+            .staged_media_session_for_playback(user_id, &playback_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|staged| staged.staged_incarnation_id == successor_incarnation);
+        if !still_staged {
             return;
         }
         let executor = crate::playback_control::PreparationExecutor::new(
@@ -5664,7 +5692,9 @@ fn spawn_prepared_release(
         );
         // Durable row first, then the slot — the executor's own order, and the
         // one that cannot leave the slot free while a row still holds the
-        // playback's one-preparation invariant.
+        // playback's one-preparation invariant. Settling the predecessor's slot
+        // is best-effort by nature: the predecessor may be long gone, and a
+        // slot that went with its session needs nothing.
         let released = executor
             .abort(&successor_incarnation, unix_ms())
             .await
@@ -5718,7 +5748,7 @@ async fn stage_prepared_successor(
 ) -> Result<String, PreparedRefusal> {
     let PreparedHandoffPoint {
         handoff_from_ms,
-        position_ms,
+        anchor_ms,
     } = handoff;
     let Some(gate) = state.transcode.preparation_gate(&route.session_id).await else {
         return Err(PreparedRefusal::NoEngine);
@@ -5769,7 +5799,7 @@ async fn stage_prepared_successor(
     // account that reports the whole film as buffered would otherwise get a
     // successor warmed at the last segment — an encoder spent on content the
     // handoff can never reach, once per cooldown, indefinitely.
-    let horizon = position_ms.saturating_add(PREPARED_HANDOFF_HORIZON_MS);
+    let horizon = anchor_ms.saturating_add(PREPARED_HANDOFF_HORIZON_MS);
     successor_request.start_seconds = (handoff_from_ms.clamp(0, horizon.max(0)) as f64) / 1_000.0;
 
     // Recorded here, immediately before the only call that spends anything, so
@@ -6017,7 +6047,7 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
         predecessor_response,
         accepts_prepare,
         handoff_from_ms,
-        position_ms,
+        anchor_ms,
     } = exchange;
     // Released on every exit below, including the early one.
     struct InFlight;
@@ -6147,7 +6177,7 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
         source.as_ref(),
         PreparedHandoffPoint {
             handoff_from_ms,
-            position_ms,
+            anchor_ms,
         },
     )
     .await

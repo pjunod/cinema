@@ -17104,6 +17104,55 @@ mod tests {
         drop(store);
     }
 
+    /// A tombstoned predecessor does not mean the successor was released.
+    ///
+    /// This is why the release path reads the **ledger** and not the
+    /// predecessor's slot. A slot answers `false` for four different states and
+    /// only one of them means somebody cleaned up — it says the same thing when
+    /// the predecessor was tombstoned, idle-reaped, or its actor closed, and in
+    /// all three the successor is *still staged*: encoder running, row still
+    /// holding the playback's one-preparation invariant.
+    ///
+    /// And that is not an edge case, it is the designed flow: a viewer's
+    /// quality change opens a **new** session for the same playback, which
+    /// supersedes the predecessor and tombstones it. Gating on the slot skipped
+    /// the release exactly when it was needed.
+    #[tokio::test]
+    async fn a_dead_predecessor_does_not_mean_the_successor_was_released() {
+        let now_ms = 2_000;
+        let (predecessor, store, control, executor) = preparation_fixture(now_ms).await;
+        let gate: Arc<dyn PreparationGate> = Arc::new(control.clone());
+        let successor = uuid::Uuid::new_v4().to_string();
+        assert!(executor
+            .stage(&staged_preparation(&successor, &predecessor, now_ms + 100))
+            .await
+            .expect("stage"));
+
+        // The predecessor ends, which is what a quality change does to it.
+        control
+            .terminate(RollingTerminalCause::End)
+            .await
+            .expect("terminate");
+
+        assert!(
+            !gate.may_commit_preparation(&successor).await,
+            "the slot says no — and this is the answer that used to be read as \
+             'somebody already released it'",
+        );
+        // But the ledger still names the successor, which is the truth: nobody
+        // committed it and nobody aborted it, so its encoder is still running
+        // and its row still holds the playback.
+        let staged = store
+            .staged_media_session_for_playback(7, "player-a")
+            .await
+            .expect("read staged");
+        assert_eq!(
+            staged.map(|staged| staged.staged_incarnation_id),
+            Some(successor.clone()),
+            "the release path has to reclaim this, not stand down",
+        );
+    }
+
     /// A committed successor is not released out from under its client.
     ///
     /// The release path's whole check is the slot: a commit settles it, so
