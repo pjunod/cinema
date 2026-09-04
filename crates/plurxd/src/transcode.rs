@@ -17212,6 +17212,39 @@ impl TranscodeManager {
     /// decision. Holding this token prevents a completed release from being
     /// forgotten and re-created as a fresh, permissive gate by a delayed
     /// request.
+    /// The gate a `PreparationExecutor` needs for this session (M6 §3.4),
+    /// resolved through **both** engines.
+    ///
+    /// VOD first, and that order is the whole point. Every public create is
+    /// `Presentation::Vod` and lives in `VodServe`'s registry; `self.sessions`
+    /// holds only the incident-recovery sessions. Asking the rolling actor
+    /// alone is the failure [`PreparationGate`]'s own doc predicts — a gate
+    /// that exists only on the actor lets M6 stage successors on a path
+    /// viewers do not take, and its acceptance passes while the feature fires
+    /// on nothing. A first version of this did exactly that.
+    ///
+    /// `None` when neither engine has a live local session: an expired,
+    /// remote-owned or already-retired playback stages nothing, because a row
+    /// the gate never holds is reaped only by the maintenance backstop and
+    /// until then costs the user an admission slot.
+    /// The VOD engine, for the test that proves a public session resolves a
+    /// preparation gate through it.
+    #[cfg(test)]
+    pub(crate) fn vod_for_test(&self) -> &Arc<crate::vodserve::VodServe> {
+        &self.vod
+    }
+
+    pub(crate) async fn session_preparation_gate(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<dyn crate::playback_control::PreparationGate>> {
+        if let Some(gate) = self.vod.preparation_gate(session_id).await {
+            return Some(gate);
+        }
+        let control = self.sessions.lock().await.get(session_id)?.control.clone();
+        Some(Arc::new(control) as Arc<dyn crate::playback_control::PreparationGate>)
+    }
+
     pub(crate) fn session_adoption_token(&self, session_id: &str) -> Option<SessionAdoptionToken> {
         Some(SessionAdoptionToken {
             gate: self.session_adoption_gate(session_id)?,

@@ -10901,6 +10901,26 @@ pub(crate) fn record_preparation_decision(platform: ClientPlatform, decision: Pr
     }
 }
 
+/// Whether a `Prepare` decision reached the ledger (M6 §3.4).
+///
+/// Separate from the decision counter because they answer different questions:
+/// that one says what M6 *decided*, this one says whether the decision became
+/// durable state. They differ whenever the one successor slot is already
+/// taken, the store refuses the row against the per-user admission cap, or no
+/// engine could resolve a gate for the session — none of which are failures,
+/// and all of which are invisible from the decision alone.
+///
+/// The no-gate case is counted as a refusal deliberately. Leaving it silent is
+/// what made the first version of §3.4 look healthy while it fired on nothing:
+/// the decision counter climbed and this one stayed at zero, which reads
+/// identically to "no transitions were admitted".
+static PREPARATIONS_STAGED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_preparation_staged(staged: bool) {
+    PREPARATIONS_STAGED[usize::from(staged)].fetch_add(1, Ordering::Relaxed);
+}
+
 /// Record the same selection change decided as if the client could prepare.
 ///
 /// Separate call rather than a second recording inside the one above, because
@@ -11093,6 +11113,16 @@ pub(crate) fn prometheus() -> String {
         output.push_str(&format!(
             "plurx_playback_preparation_observations_total{{seam=\"{seam}\"}} {}\n",
             PREPARATION_OBSERVATIONS[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_staged_total Prepare decisions that reached the ledger, and those that did not.\n\
+         # TYPE plurx_playback_preparation_staged_total counter\n",
+    );
+    for (index, outcome) in ["refused", "staged"].iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_preparation_staged_total{{outcome=\"{outcome}\"}} {}\n",
+            PREPARATIONS_STAGED[index].load(Ordering::Relaxed)
         ));
     }
     output.push_str(
