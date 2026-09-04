@@ -256,6 +256,22 @@ impl SnapshotCache {
         F: FnOnce() -> Future,
         Future: std::future::Future<Output = Result<LiveTvSnapshot, LiveTvError>>,
     {
+        self.get_or_refresh_inner(generation, force, || {}, refresh)
+            .await
+    }
+
+    async fn get_or_refresh_inner<F, Future, Admitted>(
+        &self,
+        generation: i64,
+        force: bool,
+        admitted: Admitted,
+        refresh: F,
+    ) -> Result<LiveTvSnapshot, LiveTvError>
+    where
+        F: FnOnce() -> Future,
+        Future: std::future::Future<Output = Result<LiveTvSnapshot, LiveTvError>>,
+        Admitted: FnOnce(),
+    {
         let requested = tokio::time::Instant::now();
         let _forced_permit = if force {
             Some(self.forced_admission.try_acquire().map_err(|_| {
@@ -266,6 +282,11 @@ impl SnapshotCache {
         } else {
             None
         };
+        // Kept as an explicit seam so concurrency regressions can prove every
+        // follower recorded its request time and acquired bounded admission
+        // before the leading device operation is released. Production passes
+        // a no-op and pays no synchronization cost.
+        admitted();
         let mut state = self.state.lock().await;
         let now = tokio::time::Instant::now();
 
@@ -1029,49 +1050,72 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn concurrent_forced_refreshes_perform_one_bounded_device_operation() {
+    async fn forced_refresh_burst(
+        cache: Arc<SnapshotCache>,
+        outcome: Result<LiveTvSnapshot, LiveTvError>,
+    ) -> Vec<Result<LiveTvSnapshot, LiveTvError>> {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let cache = Arc::new(SnapshotCache::default());
         let calls = Arc::new(AtomicUsize::new(0));
-        let start = Arc::new(tokio::sync::Barrier::new(MAX_FORCED_REFRESH_CALLERS + 1));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut tasks = Vec::new();
         for _ in 0..MAX_FORCED_REFRESH_CALLERS {
             let cache = Arc::clone(&cache);
             let calls = Arc::clone(&calls);
-            let start = Arc::clone(&start);
+            let release = Arc::clone(&release);
+            let entered_tx = entered_tx.clone();
+            let outcome = outcome.clone();
             tasks.push(tokio::spawn(async move {
-                start.wait().await;
                 cache
-                    .get_or_refresh(7, true, || async move {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        // Keep the first operation in flight long enough for
-                        // every released caller to become its follower.
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        Ok(cache_test_snapshot(7))
-                    })
+                    .get_or_refresh_inner(
+                        7,
+                        true,
+                        move || entered_tx.send(()).expect("entry observer"),
+                        move || async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            let permit = release.acquire_owned().await.expect("release semaphore");
+                            permit.forget();
+                            outcome
+                        },
+                    )
                     .await
             }));
         }
-        start.wait().await;
+        drop(entered_tx);
+        // Each notification occurs after the caller recorded its request time
+        // and acquired one bounded permit, but before it tries the cache lock.
+        // Releasing the leader now therefore makes every other task a follower
+        // by construction rather than by a wall-clock scheduling assumption.
+        for _ in 0..MAX_FORCED_REFRESH_CALLERS {
+            entered_rx.recv().await.expect("admitted caller");
+        }
+        release.add_permits(1);
+        let mut results = Vec::new();
         for task in tasks {
-            assert_eq!(
-                task.await
-                    .expect("refresh task")
-                    .expect("snapshot")
-                    .generation,
-                7
-            );
+            results.push(task.await.expect("refresh task"));
         }
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
             "one forced burst must perform exactly one device refresh"
         );
+        assert_eq!(
+            cache.forced_admission.available_permits(),
+            MAX_FORCED_REFRESH_CALLERS,
+            "every forced admission must be restored"
+        );
+        results
+    }
 
-        let permits = cache.forced_admission.available_permits();
-        assert_eq!(permits, MAX_FORCED_REFRESH_CALLERS);
+    #[tokio::test]
+    async fn concurrent_forced_refreshes_perform_one_bounded_device_operation() {
+        let cache = Arc::new(SnapshotCache::default());
+        let results = forced_refresh_burst(Arc::clone(&cache), Ok(cache_test_snapshot(7))).await;
+        for result in results {
+            assert_eq!(result.expect("snapshot").generation, 7);
+        }
+
         let held = (0..MAX_FORCED_REFRESH_CALLERS)
             .map(|_| {
                 cache
@@ -1085,6 +1129,38 @@ mod tests {
             "forced-refresh admission must have a fixed ceiling"
         );
         drop(held);
+    }
+
+    #[tokio::test]
+    async fn concurrent_forced_refreshes_share_failure_and_stale_fallback() {
+        let cache = Arc::new(SnapshotCache::default());
+        let failures = forced_refresh_burst(
+            Arc::clone(&cache),
+            Err(LiveTvError::DeviceUnavailable("device offline".to_owned())),
+        )
+        .await;
+        for failure in failures {
+            assert_eq!(
+                failure.expect_err("offline tuner must fail").to_string(),
+                "device offline"
+            );
+        }
+
+        let cache = Arc::new(SnapshotCache::default());
+        cache
+            .get_or_refresh(7, false, || async { Ok(cache_test_snapshot(7)) })
+            .await
+            .expect("prime fresh snapshot");
+        let stale = forced_refresh_burst(
+            cache,
+            Err(LiveTvError::DeviceUnavailable("device offline".to_owned())),
+        )
+        .await;
+        for snapshot in stale {
+            let snapshot = snapshot.expect("stale fallback");
+            assert_eq!(snapshot.freshness, SnapshotFreshness::Stale);
+            assert_eq!(snapshot.refresh_error.as_deref(), Some("device offline"));
+        }
     }
 
     #[test]
