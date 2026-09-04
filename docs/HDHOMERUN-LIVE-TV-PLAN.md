@@ -284,11 +284,25 @@ Controls are Play/Pause · Mute/volume · captions when proved · Fullscreen ·
 Close. The timeline reads **LIVE** and exposes no forward/back seek controls.
 Changing channels deletes the old session before creating the new one.
 Owner loss, producer stall, capability expiry, or returning from background
-after idle reap stops the live adapter, attempts one best-effort DELETE, and
+after idle reap stops the live adapter, attempts bounded DELETE retries, and
 shows a typed Watch-again state. It never invokes VOD recovery or resume.
+
+No-progress or intentional pause releases the tuner after 30 seconds. Unknown
+start outcomes require a 90-second monotonic grace period. A token-free local
+marker is written before POST, retained during active ownership, and cleared
+only after confirmed DELETE or a definitive start refusal. Reload/restart with
+that marker earns a fresh 90-second grace; wall-clock adjustments cannot bypass
+it. Saving the marker must succeed before allocation. This is conservative:
+web tabs sharing one origin wait while another tab refreshes its ownership
+marker, and a restart may wait even when the old session has already expired.
+Other devices retain the server's normal configured concurrency limit.
 
 **Acceptance:** web, Apple, and Android client tests assert that live playback
 starts and closes exactly one session and issues zero finite-file state writes.
+`python3 scripts/live-tv-browser --self-host --out target/live-tv-browser`
+uses generated H.264/AAC HLS with a fake tuner API to require actual advancing
+browser media time, pause/resume, fullscreen stop, channel switching, route
+cleanup, typed refusal and late-start release. It never opens household tuners.
 
 ## 3. Protocol and trust boundary — the tuner is untrusted LAN input
 
