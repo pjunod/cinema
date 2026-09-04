@@ -3533,10 +3533,11 @@ impl VodServe {
                 accepted_sequence: u64,
                 action: crate::playback_control::ControlAction,
                 action_suppressed: bool,
+                preparation_directive: Option<Box<crate::playback_control::PreparationDirective>>,
                 platform: crate::playback_control::ClientPlatform,
                 selection: crate::playback_control::SelectionObservation,
                 lease_expires_at_unix_ms: i64,
-                marker_prewarm: Option<MarkerPrewarmControl>,
+                marker_prewarm: Option<Box<MarkerPrewarmControl>>,
             },
         }
         let outcome = {
@@ -3552,15 +3553,18 @@ impl VodServe {
             // two reads of the same fence, and taking the lock twice would let
             // another exchange land between them and be measured against a
             // selection this one had already replaced.
-            let (accepted, selection) = {
+            let (accepted, selection, preparation_directive) = {
                 let mut fence = session.control.lock().expect("control lock");
                 let accepted = fence.accept(
                     control.generation,
                     control.owner_epoch,
                     control.client_instance_id,
                     control.sequence,
-                    control.snapshot.platform(),
-                    &control.prepared_successor,
+                    crate::playback_control::ControlAcceptance::observed(
+                        control.snapshot.platform(),
+                        &control.prepared_successor,
+                        control.snapshot.acknowledgement.as_ref(),
+                    ),
                 );
                 // Only for an accepted exchange: a replay is the same exchange
                 // arriving twice, and it changed the selection the first time
@@ -3576,14 +3580,14 @@ impl VodServe {
                 } else {
                     crate::playback_control::SelectionObservation::default()
                 };
-                (accepted, observation)
+                let preparation_directive = fence.preparation_directive();
+                (accepted, observation, preparation_directive)
             };
             let (disposition, accepted_sequence, action, platform, action_suppressed) =
                 match accepted {
                     Ok(outcome) => outcome,
                     Err(error) => return Some(Err(error)),
                 };
-
             if disposition == crate::playback_control::ControlDisposition::Accepted
                 && control.snapshot.demand == crate::playback_control::PlaybackDemand::End
             {
@@ -3594,6 +3598,7 @@ impl VodServe {
                     accepted_sequence,
                     action,
                     action_suppressed,
+                    preparation_directive,
                     lease_expires_at_unix_ms: crate::media_sessions::unix_ms(),
                     lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
                     lease_state: "ended",
@@ -3649,11 +3654,12 @@ impl VodServe {
                     accepted_sequence,
                     action,
                     action_suppressed,
+                    preparation_directive: preparation_directive.map(Box::new),
                     platform,
                     selection: selection.clone(),
                     lease_expires_at_unix_ms: crate::media_sessions::unix_ms()
                         .saturating_add(remaining_ms),
-                    marker_prewarm,
+                    marker_prewarm: marker_prewarm.map(Box::new),
                 })
             }
         };
@@ -3666,6 +3672,7 @@ impl VodServe {
             accepted_sequence,
             action,
             action_suppressed,
+            preparation_directive,
             platform,
             selection,
             lease_expires_at_unix_ms,
@@ -3698,6 +3705,7 @@ impl VodServe {
                 accepted_sequence,
                 action,
                 action_suppressed,
+                preparation_directive,
                 platform,
                 selection,
                 lease_expires_at_unix_ms,
@@ -3707,10 +3715,11 @@ impl VodServe {
                 accepted_sequence,
                 action,
                 action_suppressed,
+                preparation_directive.map(|directive| *directive),
                 platform,
                 selection,
                 lease_expires_at_unix_ms,
-                marker_prewarm,
+                marker_prewarm.map(|prewarm| *prewarm),
             ),
         };
         if let Some(marker_prewarm) = marker_prewarm {
@@ -3738,6 +3747,7 @@ impl VodServe {
             accepted_sequence,
             action,
             action_suppressed,
+            preparation_directive,
             lease_expires_at_unix_ms,
             lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
             lease_state: "active",
