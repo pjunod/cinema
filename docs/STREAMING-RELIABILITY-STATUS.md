@@ -1,6 +1,6 @@
 # Streaming reliability — review, repair, and promotion status
 
-**Status:** review in progress · **Effort:** `effort/streaming-reliability` ·
+**Status:** review PR open · **Effort:** `effort/streaming-reliability` ·
 **Started:** 2026-09-04 · **Baseline:** `origin/main` at `48615baf`
 
 Companion to [PLAYBACK.md](PLAYBACK.md) (the shipped playback contract),
@@ -8,6 +8,10 @@ Companion to [PLAYBACK.md](PLAYBACK.md) (the shipped playback contract),
 chronicle), and [VOD-CUTOVER.md](VOD-CUTOVER.md) (the immutable-HLS cutover) —
 this page answers *what the current reliability effort is doing, what has been
 proved, and what remains before it may reach `main`*.
+
+The detailed, ranked result is
+[STREAMING-RELIABILITY-REVIEW.md](STREAMING-RELIABILITY-REVIEW.md). Review task
+PR [#903](https://github.com/pjunod/plurx/pull/903) targets the effort branch.
 
 The working copy is an isolated clone under `/private/tmp`; the existing
 developer checkouts are not used for implementation or validation. Task
@@ -38,8 +42,8 @@ physical playback evidence.
 | Workstream | State | Current evidence | Exit condition |
 |---|---|---|---|
 | Last-seven-days change review | **Running** | 1,193 commits · 217 first-parent changes · 512 files · 220,101 insertions · 50,655 deletions since 2026-08-28 | Every playback-affecting subsystem and cross-cutting cluster/storage change is dispositioned in the findings document |
-| End-to-end architecture review | **Running** | Server, web, Apple, Android, operations, and test passes assigned independently | One current-state diagram, failure model, ranked findings, and target architecture agree with the code rather than prior status prose |
-| Review and status PR | **Building** | This page is the first artifact | Adversarial exact-head approval and focused documentation contracts green |
+| End-to-end architecture review | **Draft complete** | Independent server, client, and operations passes converge on the missing prepare/commit transaction, incomplete VOD recipe coverage, and unbounded client freezes | Exact-head adversarial pass agrees with the final document and no cited claim is stale |
+| Review and status PR | **Open — [#903](https://github.com/pjunod/plurx/pull/903)** | Ranked findings, current/target architecture, repair order, SLOs, race matrix, and saved questions are written | Adversarial exact-head approval and focused documentation contracts green |
 | Corrective task PRs | **Waiting on review** | No implementation claim yet | Every accepted finding has code, a regression, or an explicit evidence-only disposition |
 | Final qualification | **Not started** | The candidate is not frozen | Current `main` merged into the effort; unit suite and full promotion gate green once on the final fixed tree; qualification receipt inspected |
 | Promotion and cleanup | **Not started** | No main-bound PR exists | Effort PR merged; task and effort branches removed only after the merge is proven |
@@ -60,6 +64,15 @@ physical playback evidence.
    physical evidence debt. This effort will preserve that distinction.
 4. **The required compiler is available.** Rust 1.97.1 is installed and is
    invoked explicitly because Homebrew Rust 1.95.0 precedes it on `PATH`.
+5. **The strongest freeze gates are not running.** Pull-request CI explicitly
+   omits VOD steady, seek-storm, and stall-recovery cases. All eight inspected
+   nightly runs from 2026-08-28 through 2026-09-04 failed before playback
+   because the installed Playwright Chromium executable was not passed to the
+   playback lab.
+6. **The fleet reproduces an unbounded-hold class.** Seven-day node-local
+   telemetry includes repeated Apple `server_hold` outcomes at one frozen
+   position for many minutes. The current Apple and web paths allow an advisory
+   producer hold to defer a decoder recovery without spending a finite budget.
 
 ## Decisions made without waiting
 
@@ -83,5 +96,5 @@ physical playback evidence.
 
 | At (America/New_York) | State change |
 |---|---|
+| 2026-09-04 | Opened draft review PR [#903](https://github.com/pjunod/plurx/pull/903); completed independent client, server, and operations passes; recorded four P0 blockers and the target immutable-rendition/transaction architecture. |
 | 2026-09-04 | Created isolated clone and `effort/streaming-reliability`; confirmed authenticated GitHub access and the pinned Rust 1.97.1 toolchain; began independent server, client, and operations/architecture reviews. |
-
