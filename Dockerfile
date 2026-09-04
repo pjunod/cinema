@@ -140,7 +140,12 @@ EXPOSE 32400
 VOLUME ["/var/lib/plurx"]
 USER plurx
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+# A recovering replicated store may legitimately spend the configured 120s
+# snapshot-transfer budget plus 45s proving its startup watermark before the
+# HTTP listener exists. Keep Docker from declaring that bounded recovery
+# unhealthy first; once the grace period ends, the ordinary retry cadence
+# still detects a genuinely wedged process.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=3m \
     CMD ["plurxd", "healthcheck"]
 
 ENTRYPOINT ["plurxd"]

@@ -10,6 +10,7 @@ use fastwebsockets::{FragmentCollectorRead, Frame, OpCode, Payload, WebSocketWri
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use openraft::error::RPCError;
+use openraft::error::RemoteError;
 use openraft::error::Unreachable;
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -586,6 +587,20 @@ impl NetworkConnectionStreaming {
     }
 }
 
+/// Preserve errors returned by the peer as remote Raft errors.
+///
+/// In particular, OpenRaft's chunked snapshot transport recognizes a remote
+/// `SnapshotMismatch` and restarts the transfer at offset zero. Flattening the
+/// peer response into `Unreachable` hides that recovery signal and makes every
+/// later retry resume at the rejected nonzero offset.
+#[cfg(any(feature = "cache", feature = "sqlite"))]
+fn remote_raft_error<Err>(node: &Node, error: Err) -> RPCError<NodeId, Node, Err>
+where
+    Err: std::error::Error,
+{
+    RPCError::RemoteError(RemoteError::new_with_node(node.id, node.clone(), error))
+}
+
 /// AppendEntries performs the durable follower write Raft is waiting for.
 ///
 /// OpenRaft already drops the network future at `hard_ttl`; cancelling the
@@ -635,7 +650,7 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
             .await?
         {
             RaftStreamResponsePayload::SnapshotDB(resp) => {
-                resp.map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))
+                resp.map_err(|err| remote_raft_error(&self.node, err))
             }
             _ => unreachable!(),
         }
@@ -703,7 +718,7 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
             .await?
         {
             RaftStreamResponsePayload::SnapshotCache(resp) => {
-                resp.map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))
+                resp.map_err(|err| remote_raft_error(&self.node, err))
             }
             _ => unreachable!(),
         }
@@ -730,6 +745,9 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
 
 #[cfg(test)]
 mod tests {
+    use openraft::error::{InstallSnapshotError, RaftError, SnapshotMismatch};
+    use openraft::SnapshotSegmentId;
+
     use super::*;
     use tokio::sync::Notify;
 
@@ -784,5 +802,33 @@ mod tests {
 
         assert_eq!(option.soft_ttl(), Duration::from_millis(600));
         assert_eq!(append_response_ttl(&option), Duration::from_millis(800));
+    }
+
+    #[test]
+    fn snapshot_mismatch_remains_a_remote_api_error() {
+        let node = Node {
+            id: 7,
+            addr_raft: "127.0.0.1:32401".to_owned(),
+            addr_api: "127.0.0.1:32402".to_owned(),
+        };
+        let mismatch = SnapshotMismatch {
+            expect: SnapshotSegmentId::from(("snapshot", 0)),
+            got: SnapshotSegmentId::from(("snapshot", 6_291_456)),
+        };
+
+        let error: RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>> =
+            remote_raft_error(
+                &node,
+                RaftError::APIError(InstallSnapshotError::SnapshotMismatch(mismatch.clone())),
+            );
+
+        assert!(matches!(
+            error,
+            RPCError::RemoteError(RemoteError {
+                target: 7,
+                target_node: Some(target_node),
+                source: RaftError::APIError(InstallSnapshotError::SnapshotMismatch(actual)),
+            }) if target_node == node && actual == mismatch
+        ));
     }
 }

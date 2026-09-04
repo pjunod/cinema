@@ -308,6 +308,11 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}", dockerfile)
         self.assertIn("PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}", compose)
 
+        # Replicated startup can legitimately use 120s for snapshot transfer
+        # and another 45s to prove the quorum watermark. Docker must not fail
+        # the dependent discovery service before that bounded recovery ends.
+        self.assertIn("--start-period=3m", dockerfile)
+
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
         distro_install = dockerfile.index("intel-media-va-driver-non-free")
