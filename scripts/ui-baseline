@@ -1083,6 +1083,32 @@ def open_player(page, timeout_ms):
         timeout=timeout_ms)
 
 
+# Capture-only instrumentation: keep the first real Activity polling callback,
+# but stop its interval synchronously before another tick can enter the sample.
+# Python/browser round-trip latency must not decide whether the raw request log
+# contains one or two refreshes. Other timers and every actual request remain
+# untouched; the ordinary observation window still detects additional fetches.
+ACTIVITY_CAPTURE_JS = """
+(() => {
+  const schedule = window.setInterval.bind(window);
+  window.__plurxActivityCaptureTick = false;
+  window.setInterval = (callback, delay, ...args) => {
+    if (typeof callback !== "function") return schedule(callback, delay, ...args);
+    const timer = schedule(function (...values) {
+      if (delay === 3000 && location.hash === "#/activity" &&
+          typeof PAGE_TIMER !== "undefined" && PAGE_TIMER === timer) {
+        clearInterval(timer);
+        PAGE_TIMER = null;
+        window.__plurxActivityCaptureTick = true;
+      }
+      return callback.apply(this, values);
+    }, delay, ...args);
+    return timer;
+  };
+})();
+"""
+
+
 def freeze_timers(page):
     """Stop every pending timer, so the page cannot repaint under the recorders.
 
@@ -1225,10 +1251,165 @@ def stress_classic_header(page, name, layout_id):
         raise Fail(f"{name}: activity stress fixture did not exercise truncation")
 
 
+def stress_long_track_containment(page, name, layout_id):
+    """Make every item layout contain the longest ordinary track description.
+
+    The seeded media has one short generated audio track, so the steady-state
+    picture cannot exercise the intrinsic-width failure from a real DTS-HD
+    title. After the shutter, replace that row with the same disclosure shape
+    production renders and measure it in Chromium at both baseline viewports.
+    This is deliberately post-capture: adversarial content is an assertion,
+    not a new visual golden.
+    """
+    if name != "item":
+        return
+    metrics = page.evaluate("""() => {
+      const versions = [...document.querySelectorAll(".version")];
+      const version = versions.find(candidate =>
+        [...candidate.querySelectorAll(".specs dt")]
+          .some(term => (term.textContent || "").trim() === "Audio"));
+      const term = version && [...version.querySelectorAll(".specs dt")]
+        .find(candidate => (candidate.textContent || "").trim() === "Audio");
+      const value = term && term.nextElementSibling;
+      if (!version || !value) return null;
+      const beforeDocumentOverflow = document.documentElement.scrollWidth
+        - document.documentElement.clientWidth;
+      value.textContent = "FallbackAudioTrackIdentifierWithoutAnyNaturalBreakOpportunity0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      const fallbackRange = document.createRange();
+      fallbackRange.selectNodeContents(value);
+      const fallbackDocumentOverflow = document.documentElement.scrollWidth
+        - document.documentElement.clientWidth;
+      const fallbackInternalOverflow = value.scrollWidth - value.clientWidth;
+      const fallbackLines = fallbackRange.getClientRects().length;
+      value.innerHTML = `<details class="trkfold"><summary>
+        <span class="trk on">English · DTS · 5.1 · DTS-HD Master Audio / 5.1 / 48 kHz / 3409 kbps / 24-bit · <span class="tdef">plays by default</span></span>
+        <span class="trkmore">1 more</span>
+      </summary><div class="trks trkrest"><span class="trk"><span class="stress-token">CommentaryTrackIdentifierWithoutAnyNaturalBreakOpportunity0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ</span></span></div></details>`;
+      const details = value.querySelector("details");
+      const summary = value.querySelector("summary");
+      const chip = value.querySelector("summary .trk");
+      details.open = true;
+      const restChip = value.querySelector(".trkrest .trk");
+      const token = value.querySelector(".stress-token");
+      const ownerBox = version.getBoundingClientRect();
+      const valueBox = value.getBoundingClientRect();
+      const summaryBox = summary.getBoundingClientRect();
+      const chipBox = chip.getBoundingClientRect();
+      const restChipBox = restChip.getBoundingClientRect();
+      const tokenRange = document.createRange();
+      tokenRange.selectNodeContents(token);
+      return {
+        beforeDocumentOverflow,
+        fallbackDocumentOverflow,
+        fallbackInternalOverflow,
+        afterDocumentOverflow: document.documentElement.scrollWidth
+          - document.documentElement.clientWidth,
+        ownerPastViewport: ownerBox.right - document.documentElement.clientWidth,
+        ownerBeforeViewport: -ownerBox.left,
+        valuePastOwner: valueBox.right - ownerBox.right,
+        valueBeforeOwner: ownerBox.left - valueBox.left,
+        summaryPastValue: summaryBox.right - valueBox.right,
+        chipPastValue: chipBox.right - valueBox.right,
+        restChipPastValue: restChipBox.right - valueBox.right,
+        summaryBeforeValue: valueBox.left - summaryBox.left,
+        chipBeforeValue: valueBox.left - chipBox.left,
+        restChipBeforeValue: valueBox.left - restChipBox.left,
+        chipInternalOverflow: chip.scrollWidth - chip.clientWidth,
+        restChipInternalOverflow: restChip.scrollWidth - restChip.clientWidth,
+        chipHeight: chipBox.height,
+        restChipHeight: restChipBox.height,
+        fallbackLines,
+        tokenLines: tokenRange.getClientRects().length,
+        viewportWidth: document.documentElement.clientWidth,
+      };
+    }""")
+    if metrics is None:
+        raise Fail(f"{name}/{layout_id}: track containment fixture did not find an Audio row")
+    leaks = {
+        key: value for key, value in metrics.items()
+        if key not in {"chipHeight", "restChipHeight", "fallbackLines", "tokenLines", "viewportWidth"}
+        and value > 1
+    }
+    if leaks:
+        rendered = ", ".join(f"{key}={value:.1f}px" for key, value in leaks.items())
+        raise Fail(f"{name}/{layout_id}: long track escaped its owner ({rendered})")
+    if metrics["chipHeight"] <= 0 or metrics["restChipHeight"] <= 0:
+        raise Fail(f"{name}/{layout_id}: long track stress fixture did not render")
+    if metrics["viewportWidth"] <= 720 and metrics["tokenLines"] < 2:
+        raise Fail(f"{name}/{layout_id}: unbroken track token did not wrap at the narrow viewport")
+    if metrics["viewportWidth"] <= 720 and metrics["fallbackLines"] < 2:
+        raise Fail(f"{name}/{layout_id}: unbroken fallback audio text did not wrap at the narrow viewport")
+
+
+def stress_cluster_metric_containment(page, name, layout_id):
+    """Exercise a dynamic hostname in the zero-floored cluster health grid."""
+    if name != "item":
+        return
+    metrics = page.evaluate("""() => {
+      const fixture = document.createElement("div");
+      fixture.className = "cluster-health";
+      fixture.style.cssText = "grid-template-columns:repeat(3,minmax(0,1fr));max-width:700px";
+      fixture.innerHTML = `<div class="clmetric"><strong>ClusterLeaderHostnameWithoutAnyNaturalBreakOpportunity0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ</strong><span>Current leader</span></div>
+        <div class="clmetric"><strong>3 / 3</strong><span>Fresh heartbeats</span></div>
+        <div class="clmetric"><strong>3 · q2</strong><span>Voters · quorum</span></div>`;
+      document.querySelector("main").append(fixture);
+      const metric = fixture.querySelector(".clmetric");
+      const value = metric.querySelector("strong");
+      const fixtureBox = fixture.getBoundingClientRect();
+      const metricBox = metric.getBoundingClientRect();
+      const valueBox = value.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(value);
+      return {
+        documentOverflow: document.documentElement.scrollWidth
+          - document.documentElement.clientWidth,
+        fixturePastViewport: fixtureBox.right - document.documentElement.clientWidth,
+        metricPastFixture: metricBox.right - fixtureBox.right,
+        valuePastMetric: valueBox.right - metricBox.right,
+        valueBeforeMetric: metricBox.left - valueBox.left,
+        valueInternalOverflow: value.scrollWidth - value.clientWidth,
+        valueHeight: valueBox.height,
+        valueLines: range.getClientRects().length,
+        viewportWidth: document.documentElement.clientWidth,
+      };
+    }""")
+    leaks = {
+        key: value for key, value in metrics.items()
+        if key not in {"valueHeight", "valueLines", "viewportWidth"} and value > 1
+    }
+    if leaks:
+        rendered = ", ".join(f"{key}={value:.1f}px" for key, value in leaks.items())
+        raise Fail(f"{name}/{layout_id}: cluster metric escaped its owner ({rendered})")
+    if metrics["valueHeight"] <= 0:
+        raise Fail(f"{name}/{layout_id}: cluster metric stress fixture did not render")
+    if metrics["viewportWidth"] <= 720 and metrics["valueLines"] < 2:
+        raise Fail(f"{name}/{layout_id}: cluster hostname did not wrap at the narrow viewport")
+
+
+def counted_api_calls(name, route, api_calls):
+    """Keep exact control-plane counts, including route-owned polling reads."""
+    counted = {}
+    for call in api_calls:
+        if route.get("player") and call == "POST /api/v1/items/<id>/progress":
+            counted[call] = 1
+        # Chromium is free to satisfy one direct-play video with one GET or
+        # several byte-range GETs. The baseline contract is that the real
+        # direct endpoint was used; its transport chunk count changes with
+        # decoder buffering and is not a UI or routing invariant. Control
+        # plane calls remain exact counts.
+        elif route.get("player") and call == "GET /api/v1/files/<id>/direct":
+            counted[call] = 1
+        else:
+            counted[call] = counted.get(call, 0) + 1
+    return dict(sorted(counted.items()))
+
+
 def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
     page = pw_context.new_page()
+    if name == "activity":
+        page.add_init_script(ACTIVITY_CAPTURE_JS)
     problems = []
     # The request log. Four documents cite a "request-log invariant" — converting
     # a route, or wearing a different layout, must not change which endpoints it
@@ -1382,6 +1563,14 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # lands on the same steady state instead of on whichever half of the
         # cycle happened to be showing.
         page.wait_for_timeout(settle_ms)
+        if name == "activity":
+            # The initial render and exactly one shipped timer callback must
+            # both finish. Do not normalize counts: an extra application fetch
+            # remains in api_calls and must still fail the unchanged golden.
+            page.wait_for_function(
+                "() => window.__plurxActivityCaptureTick === true && ACTIVITY_DETAIL_BUSY === 0",
+                timeout=args.timeout,
+            )
         if route.get("player"):
             # The request inventory has already observed one complete activity
             # period above. Player startup includes a real media request and
@@ -1451,6 +1640,8 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         settle(page)
         page.screenshot(path=str(shot), full_page=not args.viewport_only)
         stress_classic_header(page, name, layout_id)
+        stress_long_track_containment(page, name, layout_id)
+        stress_cluster_metric_containment(page, name, layout_id)
         # Refusals annotate a capture that is already failing; they never
         # fail one on their own. Some fetches are non-ok by design — the
         # segment-playlist probe, the subtitle sidecar, the reader search —
@@ -1474,20 +1665,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
                 )
             problems = annotations + problems
             raise Fail(f"{name}: " + "; ".join(problems[:5]))
-        counted = {}
-        for call in api_calls:
-            if route.get("player") and call == "POST /api/v1/items/<id>/progress":
-                counted[call] = 1
-            # Chromium is free to satisfy one direct-play video with one GET or
-            # several byte-range GETs. The baseline contract is that the real
-            # direct endpoint was used; its transport chunk count changes with
-            # decoder buffering and is not a UI or routing invariant. Control
-            # plane calls remain exact counts.
-            elif route.get("player") and call == "GET /api/v1/files/<id>/direct":
-                counted[call] = 1
-            else:
-                counted[call] = counted.get(call, 0) + 1
-        return focus, dict(sorted(counted.items())), dom
+        return focus, counted_api_calls(name, route, api_calls), dom
     finally:
         # A context disappearing is not the same lifecycle as a viewer closing
         # the player. Return an HLS capability immediately instead of leaving

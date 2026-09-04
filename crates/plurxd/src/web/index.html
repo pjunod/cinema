@@ -63,7 +63,9 @@
     header.top .activity{min-width:0;max-width:min(48vw,860px);overflow:hidden}
     header.top .activity .activitytext{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   }
-  main{padding:22px 20px 60px;max-width:1400px;margin:0 auto}
+  /* Full-bleed children consume these insets too: changing a breakpoint must
+     not leave a second, independently sized negative margin behind. */
+  main{--main-inset-top:22px;--main-inset-x:20px;padding:var(--main-inset-top) var(--main-inset-x) 60px;max-width:1400px;margin:0 auto}
   /* Phone header: one non-wrapping row overflowed and clipped the profile chip.
      Stack it — logo + controls on row 1, then the nav and search full-width. */
   @media(max-width:640px){
@@ -83,7 +85,7 @@
     header.top .activity{order:5;flex-basis:100%}
     .getappbtn{display:none}          /* the install banner already covers this on phones */
     .lookbtn .lookword{display:none}  /* icon-only to save width */
-    main{padding:16px 14px 60px}
+    main{--main-inset-top:16px;--main-inset-x:14px}
   }
 
   .center{min-height:100dvh;display:grid;place-items:center;padding:20px}
@@ -289,7 +291,7 @@
   .amenu .amseg button.sel{border-color:var(--accent);background:var(--panel2);color:var(--text)}
   .amenu .amseg button.sel::before{content:none}
   .lookmenu{min-width:250px}
-  .amthemes{display:grid;grid-template-columns:1fr 1fr;gap:0 4px}
+  .amthemes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 4px}
   .amthemes .amnote{display:block;margin:0;font-size:9px}
   .lookbtn{display:inline-flex;align-items:center;gap:7px}
   @media(max-width:640px){ .lookword{display:none} }
@@ -311,7 +313,7 @@
   .tsw{display:inline-block;width:12px;height:12px;border-radius:50%;background:var(--accent);vertical-align:middle;box-shadow:0 0 0 2px var(--panel),0 0 7px var(--accent)}
   .empty{color:var(--muted);padding:40px;text-align:center;border:1px dashed var(--line);border-radius:var(--radius)}
 
-  .detail{display:grid;grid-template-columns:260px 1fr;gap:28px}
+  .detail{display:grid;grid-template-columns:260px minmax(0,1fr);gap:28px}
   .detail .poster{cursor:default}
   .detail .poster:hover{transform:none;border-color:var(--line)}
   .detail h1{margin:0 0 6px}
@@ -965,7 +967,7 @@
     background:var(--panel2);border:1px solid var(--line);padding:5px 12px;border-radius:999px;cursor:pointer;white-space:nowrap}
   .activity .spin{width:10px;height:10px;flex:none;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .9s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
-  .kvgrid{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-size:13px;margin:0}
+  .kvgrid{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 16px;font-size:13px;margin:0}
   .kvgrid dt{color:var(--muted)} .kvgrid dd{margin:0;word-break:break-all}
   .logbox{background:#0a0b0f;border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px;
     max-height:380px;overflow:auto;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap}
@@ -1032,14 +1034,14 @@
   .cluster-health{display:grid;grid-template-columns:minmax(260px,1.7fr) repeat(3,minmax(105px,.55fr));gap:12px;align-items:stretch}
   .cluster-health>.clstate{margin:0}
   .clmetric{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px;display:flex;flex-direction:column;justify-content:center}
-  .clmetric strong{font-size:20px;line-height:1.15;color:var(--text)}
+  .clmetric strong{font-size:20px;line-height:1.15;color:var(--text);min-width:0;overflow-wrap:anywhere}
   .clmetric span{margin-top:5px;color:var(--muted);font-size:11px;line-height:1.35}
   .cluster-main{display:grid;gap:16px}
   /* Two components, two columns. The store never shares a card with the
      machines carrying it, so a number on this screen always belongs to
      exactly one of them. */
   .cluster-board{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:16px;align-items:start}
-  .cluster-board.clsolo{grid-template-columns:1fr}
+  .cluster-board.clsolo{grid-template-columns:minmax(0,1fr)}
   .clcolumn{min-width:0;display:grid;gap:16px;align-content:start}
   /* The roster is the one part of this screen that changes size while you use
      it: opening a node card used to move every section below it by as much as
@@ -1154,14 +1156,14 @@
   .cldialogbody p{color:var(--muted);font-size:13px;line-height:1.55}
   .cldialogactions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
   @media(max-width:900px){
-    .cluster-board{grid-template-columns:1fr}
-    .cluster-health{grid-template-columns:repeat(3,1fr)}
+    .cluster-board{grid-template-columns:minmax(0,1fr)}
+    .cluster-health{grid-template-columns:repeat(3,minmax(0,1fr))}
     .cluster-health>.clstate{grid-column:1/-1}
   }
   @media(max-width:620px){
-    .cluster-health{grid-template-columns:1fr}
+    .cluster-health{grid-template-columns:minmax(0,1fr)}
     .cluster-health>.clstate{grid-column:auto}
-    .clcontextfacts{grid-template-columns:1fr}
+    .clcontextfacts{grid-template-columns:minmax(0,1fr)}
     .clnodesummaryright{justify-content:flex-start}
   }
   /* Trakt device-link code: big, mono, unmissable — you type it on another screen */
@@ -1203,7 +1205,7 @@
   .pager .muted{font-size:13px}
 
   /* ---- detail pages (movie / show / season / episode) ---- */
-  .hero{position:relative;margin:-22px -20px 22px}
+  .hero{position:relative;margin:calc(-1 * var(--main-inset-top)) calc(-1 * var(--main-inset-x)) 22px}
   .herobg{position:absolute;inset:0;height:360px;background-size:cover;background-position:center 20%;opacity:.42;
     -webkit-mask-image:linear-gradient(180deg,#000 0%,rgba(0,0,0,.35) 55%,transparent 100%);
     mask-image:linear-gradient(180deg,#000 0%,rgba(0,0,0,.35) 55%,transparent 100%)}
@@ -1243,24 +1245,29 @@
   .version{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-top:14px}
   .version .vh{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:4px}
   .version .vt{font-weight:600;font-size:14px}
-  /* 84px, not 64: "Subtitles" is the longest term this list has to name, and a
-     wrapped two-line label beside a one-line value reads as a broken row. */
-  .specs{display:grid;grid-template-columns:84px 1fr;gap:5px 14px;font-size:13px;margin:8px 0 0}
+  /* Fractional content tracks always carry a zero floor in this stylesheet.
+     Bare `1fr` is `minmax(auto,1fr)`, which lets an intrinsic-width child make
+     the grid wider than its card. tests/web/layout-containment.test.js keeps
+     that contract across the main UI and both readers. 84px, not 64:
+     "Subtitles" is the longest label, and wrapping it reads as a broken row. */
+  .specs{display:grid;grid-template-columns:84px minmax(0,1fr);gap:5px 14px;font-size:13px;margin:8px 0 0}
   .specs dt{color:var(--muted)}
-  .specs dd{margin:0;color:var(--text)}
+  .specs dd{margin:0;color:var(--text);min-width:0;overflow-wrap:anywhere}
   .specs .fn{color:var(--muted);font-size:12px;word-break:break-all}
   /* Track facts: one chip per audio/subtitle track, with the track the server
      would select marked. The marker is words and not only a colour — "plays by
      default" has to survive a monochrome theme and a screen reader. */
-  .specs .trks{display:flex;flex-wrap:wrap;gap:6px}
-  .specs .trk{border:1px solid var(--line);border-radius:999px;padding:2px 9px;line-height:1.5}
+  .specs .trks{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+  .specs .trk{border:1px solid var(--line);border-radius:999px;padding:2px 9px;line-height:1.5;min-width:0;max-width:100%;overflow-wrap:anywhere}
   .specs .trk.on{border-color:var(--accent);color:var(--accent)}
   .specs .trk .tdef{font-weight:600}
   /* Large track inventories stay out of the way until they are wanted.
      Native details/summary keeps the disclosure keyboard-accessible without
      adding another page-level state machine. The server-selected track is the
      one line that remains visible while the disclosure is closed. */
-  .specs .trkfold summary{display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;width:max-content;max-width:100%}
+  .specs .trkfold{min-width:0;max-width:100%}
+  .specs .trkfold summary{display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;width:fit-content;max-width:100%;min-width:0}
+  .specs .trkfold summary>.trk{flex:0 1 auto}
   .specs .trkfold summary::-webkit-details-marker{display:none}
   .specs .trkfold summary::after{content:"▸";color:var(--muted);font-size:11px;transition:transform .12s}
   .specs .trkfold[open] summary::after{transform:rotate(90deg)}
@@ -1333,7 +1340,7 @@
   .art.ph.season{background:linear-gradient(160deg,#2b3350,#141826);flex-direction:column;gap:1px}
   .art.ph.season .snum{font-size:38px;line-height:1}
   .art.ph.season .sl{font-size:10px;letter-spacing:.18em;color:#8891ab;text-transform:uppercase;font-weight:700}
-  @media(max-width:720px){ .dwrap{grid-template-columns:1fr} .dwrap .poster{max-width:200px} .eprow{grid-template-columns:110px 1fr} .eprow .epplay{display:none} }
+  @media(max-width:720px){ .dwrap{grid-template-columns:minmax(0,1fr)} .dwrap .poster{max-width:200px} .eprow{grid-template-columns:110px minmax(0,1fr)} .eprow .epplay{display:none} }
   .art.ph{display:grid;place-items:center;font-size:30px;font-weight:800;letter-spacing:.5px;color:#39415a;user-select:none}
 
   /* ================= Terminal theme: structural chrome =====================
