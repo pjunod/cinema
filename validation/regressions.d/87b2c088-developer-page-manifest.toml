@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["87b2c088"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "The Developer settings section routed and dispatched but had no SETTINGS_MANIFEST entry, so loadSettingsTab read manifest.required off undefined and the page rendered an error with a Retry that could never work. Four existing assertions about that section passed because each asked whether it exists, not whether it can load, and the structural sweep captures #/settings which lands on the last-visited section. settings-sections.test.js now asserts that every id in SET_TABS has a manifest entry: deleting the entry fails it with the section named. page-read-budget.test.js pins the manifest by value and is updated with it."
