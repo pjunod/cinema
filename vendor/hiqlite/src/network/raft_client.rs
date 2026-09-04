@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{ReadHalf, WriteHalf};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 use tokio::{select, task, time};
 use tracing::{debug, error, info};
@@ -76,6 +76,7 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
         debug!("Building new Raft Cache client with target {}", node);
 
         let (sender, rx) = flume::bounded(1);
+        let reset = Arc::new(Notify::new());
 
         let task = tokio::task::spawn(Box::pin(Self::ws_handler(
             self.node_id,
@@ -87,11 +88,13 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
             self.heartbeat_interval,
             self.is_raft_stopped.clone(),
             self.is_startup_finished.clone(),
+            Arc::clone(&reset),
         )));
 
         NetworkConnectionStreaming {
             node: node.clone(),
             sender,
+            reset,
             task: Some(task),
         }
     }
@@ -106,6 +109,7 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
         debug!("Building new Raft DB client with target {}", node);
 
         let (sender, rx) = flume::bounded(1);
+        let reset = Arc::new(Notify::new());
 
         let task = tokio::task::spawn(Box::pin(Self::ws_handler(
             self.node_id,
@@ -117,11 +121,13 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
             self.heartbeat_interval,
             self.is_raft_stopped.clone(),
             self.is_startup_finished.clone(),
+            Arc::clone(&reset),
         )));
 
         NetworkConnectionStreaming {
             node: node.clone(),
             sender,
+            reset,
             task: Some(task),
         }
     }
@@ -176,11 +182,6 @@ enum RaftRequest {
     StreamResponse(RaftStreamResponse),
 
     ReaderExit,
-    /// Cancel every in-flight request and reconnect the stream. OpenRaft may
-    /// drop an RPC future at its hard TTL; without this signal the WebSocket
-    /// manager can retain that abandoned request forever on a half-open
-    /// connection and prevent snapshot retry from making progress.
-    Reset,
     Shutdown,
 }
 
@@ -203,6 +204,7 @@ impl NetworkStreaming {
         heartbeat_interval: u64,
         is_raft_stopped: Arc<AtomicBool>,
         is_startup_finished: Arc<AtomicBool>,
+        reset: Arc<Notify>,
     ) {
         let mut request_id = 0usize;
         // TODO probably, a Vec<_> is faster here since we would never have too many in flight reqs
@@ -268,7 +270,6 @@ impl NetworkStreaming {
                                         RaftRequest::ReaderExit => {
                                             continue;
                                         }
-                                        RaftRequest::Reset => continue,
                                         RaftRequest::Shutdown => {
                                             break 'outer;
                                         }
@@ -308,6 +309,10 @@ impl NetworkStreaming {
 
             loop {
                 let res = select! {
+                    _ = reset.notified() => {
+                        debug!("RPC future was cancelled - reconnecting Raft stream");
+                        break;
+                    }
                     res = rx_read.recv_async() => res,
                     res = rx.recv_async() => res,
                 };
@@ -374,10 +379,6 @@ impl NetworkStreaming {
                         debug!(
                             "ReaderExit - Client Stream reader exited - initiating shutdown + reconnect"
                         );
-                        break;
-                    }
-                    RaftRequest::Reset => {
-                        debug!("RPC future was cancelled - reconnecting Raft stream");
                         break;
                     }
                     RaftRequest::Shutdown => {
@@ -493,29 +494,33 @@ impl NetworkStreaming {
 pub struct NetworkConnectionStreaming {
     node: Node,
     sender: flume::Sender<RaftRequest>,
+    reset: Arc<Notify>,
     task: Option<JoinHandle<()>>,
 }
 
 struct ConnectionResetGuard {
-    sender: Option<flume::Sender<RaftRequest>>,
+    reset: Option<Arc<Notify>>,
 }
 
 impl ConnectionResetGuard {
-    fn new(sender: flume::Sender<RaftRequest>) -> Self {
-        Self {
-            sender: Some(sender),
-        }
+    fn new(reset: Arc<Notify>) -> Self {
+        Self { reset: Some(reset) }
     }
 
     fn disarm(&mut self) {
-        self.sender = None;
+        self.reset = None;
     }
 }
 
 impl Drop for ConnectionResetGuard {
     fn drop(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.try_send(RaftRequest::Reset);
+        if let Some(reset) = self.reset.take() {
+            // A reset must not share the bounded request queue. The queue may
+            // still contain the RPC whose future OpenRaft just dropped; a
+            // best-effort `try_send` can then lose the only instruction that
+            // tears down its stale WebSocket. Notify retains one permit while
+            // the handler reconnects, so cancellation cannot be missed.
+            reset.notify_one();
         }
     }
 }
@@ -561,7 +566,7 @@ impl NetworkConnectionStreaming {
         // Keep a cancellation guard alive across both enqueue and response so
         // that drop also tears down a half-open WebSocket and lets the next
         // snapshot/append attempt establish a clean stream.
-        let mut reset = ConnectionResetGuard::new(self.sender.clone());
+        let mut reset = ConnectionResetGuard::new(Arc::clone(&self.reset));
         let result = tokio::time::timeout(soft_ttl, async {
             self.sender.send_async(req).await.map_err(|err| {
                 error!(
@@ -798,6 +803,7 @@ mod tests {
                 addr_api: "127.0.0.1:32402".to_owned(),
             },
             sender,
+            reset: Arc::new(Notify::new()),
             task: Some(task),
         };
 
@@ -810,13 +816,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_rpc_wait_requests_stream_reset() {
+    async fn dropping_rpc_wait_signals_stream_reset_when_request_queue_is_full() {
         let (sender, receiver) = flume::bounded(1);
-        let guard = ConnectionResetGuard::new(sender);
+        sender
+            .try_send(RaftRequest::Shutdown)
+            .expect("fill the bounded request queue");
+        let reset = Arc::new(Notify::new());
+        let guard = ConnectionResetGuard::new(Arc::clone(&reset));
 
         drop(guard);
 
-        assert!(matches!(receiver.recv_async().await, Ok(RaftRequest::Reset)));
+        tokio::time::timeout(Duration::from_secs(1), reset.notified())
+            .await
+            .expect("the independent reset signal must be retained");
+        assert!(matches!(
+            receiver.recv_async().await,
+            Ok(RaftRequest::Shutdown)
+        ));
     }
 
     #[test]
@@ -858,6 +874,7 @@ mod tests {
         let mut network = NetworkConnectionStreaming {
             node: test_node(),
             sender,
+            reset: Arc::new(Notify::new()),
             task: None,
         };
         let responder = tokio::spawn(async move {
@@ -911,6 +928,7 @@ mod tests {
         let mut network = NetworkConnectionStreaming {
             node: test_node(),
             sender,
+            reset: Arc::new(Notify::new()),
             task: None,
         };
         let responder = tokio::spawn(async move {

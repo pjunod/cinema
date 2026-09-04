@@ -268,6 +268,14 @@ class OperationsContractCase(unittest.TestCase):
             "stop_grace_period: ${PLURX_STOP_GRACE_PERIOD:-65m}", compose
         )
         self.assertIn(
+            'start_period: "${PLURX_HEALTH_START_PERIOD:-5m}"', compose
+        )
+        self.assertIn(
+            'PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: '
+            '"${PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS:-}"',
+            compose,
+        )
+        self.assertIn(
             'PLURX_NODE_HOSTNAME: "${PLURX_NODE_HOSTNAME:-${HOSTNAME:-}}"',
             compose,
         )
@@ -309,6 +317,9 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}", compose)
 
         runtime = dockerfile.split("FROM runtime-assets AS runtime", 1)[1]
+        self.assertNotRegex(runtime, r"(?m)^FROM ")
+        self.assertEqual(dockerfile.count("\nHEALTHCHECK "), 1)
+        self.assertEqual(runtime.count("\nHEALTHCHECK "), 1)
         healthcheck = re.search(
             r'(?m)^HEALTHCHECK --interval=(\S+) --timeout=(\S+) '
             r'--start-period=(\S+) \\\n'
@@ -327,25 +338,55 @@ class OperationsContractCase(unittest.TestCase):
         start_period_seconds = int(duration.group(1)) * multiplier
 
         config_source = read("crates/plurx-core/src/config.rs")
-        max_snapshot = re.search(
-            r"MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = ([\d_]+);",
+        default_snapshot = re.search(
+            r"DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = ([\d_]+);",
             config_source,
         )
         migration_source = read("crates/plurx-core/src/cluster/migration.rs")
-        hiqlite_start = re.search(
-            r"HIQLITE_START_TIMEOUT: Duration = Duration::from_secs\((\d+)\);",
-            migration_source,
+        phase_names = (
+            "HIQLITE_HEALTH_TIMEOUT",
+            "MEMBERSHIP_ADMISSION_TIMEOUT",
+            "SNAPSHOT_CATCHUP_GRACE",
+        )
+        phases = {
+            name: re.search(
+                rf"{name}: Duration = Duration::from_secs\((\d+)\);",
+                migration_source,
+            )
+            for name in phase_names
+        }
+        self.assertIsNotNone(default_snapshot)
+        self.assertTrue(all(value is not None for value in phases.values()))
+        assert default_snapshot is not None
+
+        # Dockerfile owns the image default. Compose exposes a paired override
+        # for operators who deliberately extend the snapshot deadline.
+        supported_default_startup_seconds = int(
+            default_snapshot.group(1).replace("_", "")
+        ) + sum(int(value.group(1)) for value in phases.values() if value)
+        self.assertGreaterEqual(
+            start_period_seconds, supported_default_startup_seconds
+        )
+
+        env_example = read("deploy/.env.example")
+        max_snapshot = re.search(
+            r"# PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS=(\d+)", env_example
+        )
+        max_health = re.search(
+            r"# PLURX_HEALTH_START_PERIOD=(\d+)([smh])", env_example
         )
         self.assertIsNotNone(max_snapshot)
-        self.assertIsNotNone(hiqlite_start)
-        assert max_snapshot is not None and hiqlite_start is not None
-
-        # Startup owns three sequential 45s allowances: Hiqlite health,
-        # membership admission, and catch-up after the snapshot deadline.
-        supported_startup_seconds = int(
-            max_snapshot.group(1).replace("_", "")
-        ) + 3 * int(hiqlite_start.group(1))
-        self.assertGreaterEqual(start_period_seconds, supported_startup_seconds)
+        self.assertIsNotNone(max_health)
+        assert max_snapshot is not None and max_health is not None
+        max_health_seconds = int(max_health.group(1)) * {
+            "s": 1,
+            "m": 60,
+            "h": 3_600,
+        }[max_health.group(2)]
+        supported_max_startup_seconds = int(max_snapshot.group(1)) + sum(
+            int(value.group(1)) for value in phases.values() if value
+        )
+        self.assertGreaterEqual(max_health_seconds, supported_max_startup_seconds)
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
@@ -896,6 +937,19 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("make cluster-harness-check", jobs["cluster_topology"])
         self.assertNotIn("make cluster-store-check", jobs["cluster_topology"])
         self.assertIn("run: make cluster-wal-check", workflow)
+        wal_lane = makefile.split(".PHONY: cluster-wal-check", 1)[1].split(
+            ".PHONY:", 1
+        )[0]
+        self.assertIn(
+            "dropping_rpc_wait_signals_stream_reset_when_request_queue_is_full",
+            wal_lane,
+        )
+        self.assertIn(
+            "sqlite_install_snapshot_preserves_mismatch_for_offset_reset", wal_lane
+        )
+        self.assertIn(
+            "cache_install_snapshot_preserves_mismatch_for_offset_reset", wal_lane
+        )
         self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):

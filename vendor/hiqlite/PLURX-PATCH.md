@@ -1,7 +1,8 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twelve compatibility patches for clustered deployments:
+Apache-2.0. Plurx carries thirteen compatibility patches for clustered
+deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -41,10 +42,19 @@ Apache-2.0. Plurx carries twelve compatibility patches for clustered deployments
   chunk stream to offset zero, and let a restarted follower converge. The
   `sqlite_install_snapshot_preserves_mismatch_for_offset_reset` and
   `cache_install_snapshot_preserves_mismatch_for_offset_reset` tests drive the
-  production `install_snapshot` methods through a nonzero mismatch and require
-  the exact remote error shape consumed by OpenRaft's retained offset-reset
-  test. Remove this patch only after upstream Hiqlite preserves peer snapshot
-  errors on both transports.
+  production `install_snapshot` methods through a nonzero mismatch and guard
+  the remote-error boundary. OpenRaft's retained offset-reset test covers its
+  private chunk sender, while Plurx's three-voter learner snapshot contract
+  covers convergence; these vendor tests do not claim to drive that private
+  sender themselves. Remove this patch only after upstream Hiqlite preserves
+  peer snapshot errors on both transports.
+- A dropped OpenRaft RPC signals its WebSocket manager through a dedicated
+  retained notification instead of best-effort enqueueing `Reset` behind the
+  request itself. The old one-slot queue could be full at the hard deadline,
+  lose the reset, and leave a leader permanently waiting on the abandoned
+  connection after a follower had installed its snapshot. The
+  `dropping_rpc_wait_signals_stream_reset_when_request_queue_is_full` regression
+  keeps cancellation independent of request-queue pressure.
 - Snapshot build, install, read, and asynchronous cleanup share one
   file-ownership boundary. Completed files use fsync plus atomic rename, and a
   separately fsynced pointer publishes the exact current generation (including
@@ -98,10 +108,11 @@ Apache-2.0. Plurx carries twelve compatibility patches for clustered deployments
   is how a contaminating entry is identified down to its SQL. Production
   binaries compile none of it.
 
-Remove this vendor when an upstream Hiqlite release contains all twelve patches
+Remove this vendor when an upstream Hiqlite release contains all thirteen patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
-and the interrupted snapshot tests above keep the twelfth patch load-bearing.
+and the snapshot RPC error-boundary plus queue-saturated reset tests above keep
+the transport-recovery patches load-bearing.
 
 Cargo records this package as path-sourced, which means cargo-audit skips it.
 The weekly `rust-audit.yml` job uses `scripts/vendor-audit-lock` to restore this

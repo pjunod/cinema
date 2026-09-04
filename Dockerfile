@@ -140,13 +140,13 @@ EXPOSE 32400
 VOLUME ["/var/lib/plurx"]
 USER plurx
 
-# A replicated startup may spend 45s reaching Hiqlite health, 45s awaiting
-# membership admission, then the configured snapshot timeout plus another 45s
-# reaching its quorum watermark. The supported maximum is therefore 3,735s;
-# round it up to the existing 65-minute operational bound. Docker ends this
-# grace on the first successful probe, so an ordinary start still becomes
-# healthy immediately and later failures use the normal retry cadence.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=65m \
+# The default replicated startup may spend 45s reaching Hiqlite health, 45s
+# awaiting admission, then the 120s snapshot timeout plus another 45s reaching
+# its quorum watermark. Five minutes covers that 255s budget with margin while
+# still exposing a broken build promptly. Compose can lengthen the grace when
+# an operator lengthens the snapshot timeout; a successful probe ends startup
+# grace immediately and later failures use the normal retry cadence.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5m \
     CMD ["plurxd", "healthcheck"]
 
 ENTRYPOINT ["plurxd"]

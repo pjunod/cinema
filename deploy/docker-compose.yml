@@ -63,6 +63,16 @@ services:
     image: ${PLURX_IMAGE:-plurx/plurxd:latest}
     container_name: plurxd
     restart: unless-stopped
+    # Keep this paired with PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS when a
+    # deployment raises the default 120s snapshot deadline. The start period
+    # must cover that value plus the three startup allowances (135s total).
+    # Five minutes covers the default without hiding a broken build for the
+    # one-hour maximum; `.env.example` shows the maximum pair.
+    healthcheck:
+      test: ["CMD", "plurxd", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: "${PLURX_HEALTH_START_PERIOD:-5m}"
     # At the supported 3,600s snapshot-transfer maximum, a recovering voter can
     # spend 45s becoming healthy, 45s confirming admission, 3,645s catching up,
     # and 30s draining Hiqlite's writer/Raft tasks. Docker's 10-second default
@@ -94,6 +104,9 @@ services:
       PLURX_NODE_HOSTNAME: "${PLURX_NODE_HOSTNAME:-${HOSTNAME:-}}"
       PLURX_BIND: "0.0.0.0:32400"
       PLURX_DATA_DIR: "/var/lib/plurx"
+      # Empty leaves a TOML value (or the built-in 120s default) authoritative.
+      # When set in .env, pair it with PLURX_HEALTH_START_PERIOD above.
+      PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: "${PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS:-}"
       # Multicast cannot escape a Docker bridge. The host-network discovery
       # companion below owns Bonjour so this container does not publish a
       # duplicate service on the private `media` bridge.

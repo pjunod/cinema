@@ -1692,6 +1692,14 @@ remain unchanged. During a rolling upgrade, an old-binary leader keeps its
 fixed 10-second deadline until that voter is upgraded; do not treat the new
 deadline as effective cluster-wide until every possible leader is current.
 
+Compose forwards `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` explicitly and
+pairs it with `PLURX_HEALTH_START_PERIOD`. The default five-minute health grace
+covers the 120-second snapshot deadline plus the three sequential 45-second
+startup phases. If you raise the snapshot deadline, set the health start period
+to at least that deadline plus 135 seconds; the supported maximum pair is
+3,600 seconds and 65 minutes. Do not use the 65-minute maximum as the ordinary
+default: it delays reporting a build that can never become ready.
+
 **Synchronize clocks before cluster work.** All voters and the external load
 generator must run NTP/chrony (or an equivalent disciplined source), and
 monitor offset continuously. Membership reachability and artwork repair proofs
@@ -2446,6 +2454,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
 | `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Snapshot transfer/install deadline in seconds, bounded 10–3,600; keep identical on every voter |
+| `PLURX_HEALTH_START_PERIOD` | — | `5m` | Compose-only Docker readiness grace; when extending the snapshot deadline, set this to at least that value plus 135 seconds |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |

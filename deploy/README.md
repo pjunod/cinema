@@ -502,3 +502,10 @@ scrape. The same image also contains the read-only `plurx-cluster-check
 inspect-wal` stopped-node tool; the safe preservation and interpretation
 runbook is in
 [`docs/OPERATIONS.md`](../docs/OPERATIONS.md#inspecting-a-stopped-voter-without-changing-it).
+
+The image and Compose default to a five-minute startup health grace: enough for
+the default 120-second snapshot deadline and the three 45-second startup phases,
+without hiding a permanently broken build for an hour. If `.env` raises
+`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS`, also set
+`PLURX_HEALTH_START_PERIOD` to at least that timeout plus 135 seconds. The
+maximum supported pair is shown in `.env.example`.

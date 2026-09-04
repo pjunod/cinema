@@ -134,6 +134,18 @@ hiqlite-baseline: ## Measure the manual M0 one-voter cost gate on a quiet host
 .PHONY: cluster-wal-check
 cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::dropping_rpc_wait_signals_stream_reset_when_request_queue_is_full \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::sqlite_install_snapshot_preserves_mismatch_for_offset_reset \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::cache_install_snapshot_preserves_mismatch_for_offset_reset \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  snapshot_metrics --lib -- --test-threads=1
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
