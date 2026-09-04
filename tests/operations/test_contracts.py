@@ -182,6 +182,20 @@ class OperationsContractCase(unittest.TestCase):
 
         self.assertLess(pinned, libraries)
 
+    def test_ui_baseline_reserves_distinct_http_raft_and_api_ports(self):
+        script = read("scripts/ui-baseline")
+        contract = runpy.run_path(
+            str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_port_contract"
+        )
+        ports = contract["free_ports"](0, 3)
+
+        self.assertEqual(len(ports), 3)
+        self.assertEqual(len(set(ports)), 3)
+        self.assertTrue(all(port > 0 for port in ports))
+        self.assertIn("self.port, self.raft_port, self.api_port = free_ports", script)
+        self.assertIn('raft_bind = "127.0.0.1:{self.raft_port}"', script)
+        self.assertIn('api_bind = "127.0.0.1:{self.api_port}"', script)
+
     def test_ui_baseline_releases_players_and_narrowly_retries_root_attachment(self):
         script = read("scripts/ui-baseline")
         contract = runpy.run_path(
