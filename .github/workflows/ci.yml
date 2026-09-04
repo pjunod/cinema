@@ -218,7 +218,7 @@ jobs:
           --command "make cluster-store-check"
       - name: Retain the Store lane log and receipt
         if: always()
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: cluster-store-legacy-contracts
           path: |
@@ -371,7 +371,7 @@ jobs:
           "${receipt[@]}"
       - name: Retain the topology lane log and receipt
         if: always()
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: cluster-topology-contracts
           path: |
@@ -382,7 +382,7 @@ jobs:
       - name: Retain deterministic topology evidence
         if: always() && needs.scope.outputs.cluster_auth == 'true'
         continue-on-error: true
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: cluster-topology-semantic
           path: target/validation/cluster-topology-semantic.json
@@ -391,7 +391,7 @@ jobs:
       - name: Retain deterministic failure-drill evidence
         if: always() && needs.scope.outputs.cluster_auth == 'true'
         continue-on-error: true
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: cluster-failure-drills
           path: target/validation/cluster-failure-drills.json
@@ -772,7 +772,7 @@ jobs:
       - name: Upload Android test reports
         if: always()
         continue-on-error: true
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: android-instrumentation-reports
           path: |
@@ -969,7 +969,7 @@ jobs:
             "$IMAGE" build-identity)" = "$GITHUB_SHA"
           scripts/container-smoke "$IMAGE"
       - name: Retain the exact package receipt
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: package-smoke-receipt-${{ matrix.arch }}
           path: |
@@ -979,7 +979,7 @@ jobs:
           retention-days: 14
       - name: Retain candidate binaries for push, tag, and qualification runs
         if: needs.scope.outputs.qualification == 'true'
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: package-smoke-binaries-${{ matrix.arch }}
           path: |
@@ -992,7 +992,7 @@ jobs:
       - name: Retain candidate binaries for non-qualification push and tag runs
         if: github.event_name == 'push' && needs.scope.outputs.qualification != 'true'
         continue-on-error: true
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: package-smoke-binaries-${{ matrix.arch }}
           path: |
@@ -1096,7 +1096,7 @@ jobs:
           --output target/validation/qualification-receipt.json
       - name: Retain the effort qualification record
         if: needs.scope.outputs.qualification == 'true'
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: effort-qualification-${{ github.event.pull_request.number }}
           path: target/validation/qualification-receipt.json

@@ -1429,10 +1429,26 @@ class OperationsContractCase(unittest.TestCase):
         # Every artifact has an explicit bound. Only the tiny qualification
         # receipt outlives the one-day diagnostic binaries.
         self.assertEqual(
-            workflow.count("uses: https://data.forgejo.org/actions/upload-artifact@v4"),
+            workflow.count("uses: https://data.forgejo.org/forgejo/upload-artifact@v4"),
             workflow.count("retention-days:"),
         )
         self.assertIn("retention-days: 14", workflow)
+
+        # GitHub's v4 artifact clients reject every non-GitHub server. Forgejo
+        # publishes patched v4 clients with that host check removed; all local
+        # workflows must use those clients for both upload and download.
+        for workflow_path in (ROOT / ".github" / "workflows").glob("*.yml"):
+            workflow_text = workflow_path.read_text(encoding="utf-8")
+            self.assertNotIn(
+                "https://data.forgejo.org/actions/upload-artifact@v4",
+                workflow_text,
+                workflow_path.name,
+            )
+            self.assertNotIn(
+                "https://data.forgejo.org/actions/download-artifact@v4",
+                workflow_text,
+                workflow_path.name,
+            )
 
         # Ordinary PRs retain only the small identity/digest receipt. Pushes
         # and final qualifications retain exact binaries for one day.

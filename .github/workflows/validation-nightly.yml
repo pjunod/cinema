@@ -54,7 +54,7 @@ jobs:
       # days ago.
       - name: Upload deep-validation evidence
         if: always()
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: nightly-deep-validation-evidence
           path: target/validation
@@ -62,7 +62,7 @@ jobs:
           retention-days: 14
       - name: Upload deep-validation captures
         if: always()
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: nightly-deep-validation-captures
           path: |
@@ -107,7 +107,7 @@ jobs:
             -- -max_total_time=900 2>&1 | tee target/validation/pgs-fuzz.log
       - name: Upload PGS fuzz evidence
         if: always()
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: nightly-pgs-fuzz-evidence
           path: |
@@ -231,7 +231,7 @@ jobs:
           exit 0
       - name: Upload mutation evidence
         if: always()
-        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: nightly-mutation-evidence
           path: target/mutants
