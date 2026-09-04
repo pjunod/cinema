@@ -708,6 +708,13 @@ class OperationsContractCase(unittest.TestCase):
             "PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             apple,
         )
+        effort_apple = workflow_job_blocks(".github/workflows/effort-ci.yml")[
+            "apple_compile"
+        ]
+        self.assertIn(
+            "PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            effort_apple,
+        )
 
         coverage = workflow.split("  coverage:", 1)[1].split("\n  build:", 1)[0]
         self.assertIn("if: github.ref == 'refs/heads/main'", coverage)

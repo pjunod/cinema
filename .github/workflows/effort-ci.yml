@@ -121,6 +121,7 @@ jobs:
     timeout-minutes: 10
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
       - name: Verify the pinned Apple toolchain
