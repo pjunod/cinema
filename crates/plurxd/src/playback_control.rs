@@ -3174,7 +3174,25 @@ impl ControlState {
         if owner_epoch < self.owner_epoch {
             return Err(ControlStateError::OwnerChanged);
         }
-        if owner_epoch > self.owner_epoch {
+        let rollover_preparation = if owner_epoch > self.owner_epoch {
+            // A preparation executor is fenced by the predecessor owner
+            // epoch. Once that epoch advances, no task holding the old token
+            // may finish even an already reserved commit. Transfer liveness
+            // to this accepted new-owner exchange by turning every inherited
+            // slot into an abort directive that its settlement admission will
+            // execute with the new epoch. Conservatively discarding a staged
+            // successor is safe; leaving Staged, Committing, or Aborting here
+            // would orphan it once the old deadline/settlement task is fenced.
+            let inherited = if self.owner_epoch > 0 {
+                self.preparation.staged_incarnation_id().map(str::to_owned)
+            } else {
+                None
+            };
+            if let Some(staged_incarnation_id) = &inherited {
+                self.preparation = PreparationSlot::Aborting {
+                    staged_incarnation_id: staged_incarnation_id.clone(),
+                };
+            }
             self.owner_epoch = owner_epoch;
             self.client_instance_id = None;
             self.client_platform = None;
@@ -3189,7 +3207,13 @@ impl ControlState {
             // would let the same staged incarnation mint a second action id.
             self.last_selection = None;
             self.last_capabilities = None;
-        }
+            inherited.map(|staged_incarnation_id| PreparationDirective::Abort {
+                staged_incarnation_id,
+                acknowledgement_rejected: false,
+            })
+        } else {
+            None
+        };
         match self.client_instance_id {
             None => {
                 if sequence != 1 {
@@ -3247,8 +3271,9 @@ impl ControlState {
                 ));
             }
         }
-        let terminal_directive =
-            self.record_terminal_preparation_acknowledgement(acknowledgement.as_ref(), now_unix_ms);
+        let terminal_directive = rollover_preparation.or_else(|| {
+            self.record_terminal_preparation_acknowledgement(acknowledgement.as_ref(), now_unix_ms)
+        });
         let (action, suppressed) = if terminal_directive.is_some() {
             // A bound terminal acknowledgement is sufficient authority for
             // the actor decision. A redundant Store observation may be
@@ -14541,7 +14566,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_owner_epoch_cannot_settle_a_new_owner_preparation_slot() {
+    fn owner_epoch_rollover_aborts_the_inherited_reservation_and_fences_the_old_owner() {
         let request = request();
         let mut state = ControlState::default();
         let started = Instant::now();
@@ -14574,7 +14599,21 @@ mod tests {
             .expect("epoch two");
         assert!(!state.reject_preparation_commit_for_owner("successor-1", 1));
         assert!(!state.settle_preparation_for_owner("successor-1", 1));
-        assert!(state.may_commit_preparation_for_owner("successor-1", 2));
+        assert_eq!(
+            state.preparation_directive(),
+            Some(PreparationDirective::Abort {
+                staged_incarnation_id: "successor-1".to_owned(),
+                acknowledgement_rejected: false,
+            })
+        );
+        assert!(state.begin_abort_preparation_for_owner("successor-1", 2));
+        assert!(state.settle_preparation_for_owner("successor-1", 2));
+        assert!(state.stage_preparation_for_owner(
+            "successor-2".to_owned(),
+            request.generation,
+            i64::MAX,
+            2,
+        ));
     }
 
     #[test]

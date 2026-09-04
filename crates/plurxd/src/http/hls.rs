@@ -4209,6 +4209,9 @@ impl PreparationSettlementReceipt {
 struct ActivePreparationSettlement {
     request_fingerprint: String,
     receipt: PreparationSettlementReceipt,
+    /// `None` while the owner is running; completed canonical responses stay
+    /// joinable through the same durable replay window as their Store row.
+    replay_until: Option<std::time::Instant>,
 }
 
 fn preparation_settlements(
@@ -4261,12 +4264,10 @@ fn consume_preparation_settlement_fault(incarnation_id: &str) -> bool {
 
 struct DurablePreparationSettlementAdmission {
     state: AppState,
-    gate: Arc<dyn crate::playback_control::PreparationGate>,
     route: MediaSessionRoute,
     start: StartResponse,
     recipe: RemoteStartRequest,
     request: crate::playback_control::ControlRequestV1,
-    status: crate::transcode::HlsSessionInfo,
     serving_generation: Option<u64>,
     receipt: std::sync::Mutex<Option<PreparationSettlementReceipt>>,
 }
@@ -4306,6 +4307,12 @@ impl crate::playback_control::PreparationSettlementAdmission
         let mut operations = preparation_settlements()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = std::time::Instant::now();
+        operations.retain(|_, operation| {
+            operation
+                .replay_until
+                .is_none_or(|replay_until| replay_until > now)
+        });
         if let Some(active) = operations.get(&key) {
             if active.request_fingerprint == request_fingerprint {
                 *self
@@ -4323,6 +4330,7 @@ impl crate::playback_control::PreparationSettlementAdmission
             ActivePreparationSettlement {
                 request_fingerprint,
                 receipt: receipt.clone(),
+                replay_until: None,
             },
         );
         *self
@@ -4332,31 +4340,62 @@ impl crate::playback_control::PreparationSettlementAdmission
         drop(operations);
 
         let state = self.state.clone();
-        let gate = Arc::clone(&self.gate);
         let route = self.route.clone();
         let start = self.start.clone();
         let recipe = self.recipe.clone();
         let request = self.request.clone();
-        let status = self.status.clone();
         let serving_generation = self.serving_generation;
         tokio::spawn(async move {
-            let result = settle_preparation_control(
-                &state,
-                gate,
-                &route,
-                &start,
-                &recipe,
-                &request,
-                status,
-                serving_generation,
-                outcome,
-            )
-            .await;
+            // Admission itself is synchronous with the actor transition, but
+            // resolving the engine-local gate and response snapshot must not
+            // extend that critical section. The owned state/route keep this
+            // continuation cancellation-independent; an epoch-rollover abort
+            // can therefore be admitted even when the new request carried no
+            // acknowledgement of its own.
+            let result = match (
+                state
+                    .transcode
+                    .session_preparation_gate(&route.session_id)
+                    .await,
+                state
+                    .transcode
+                    .hls_session_status_publication(&route.session_id)
+                    .await
+                    .and_then(|publication| publication.result.ok()),
+            ) {
+                (Some(gate), Some(status)) => {
+                    settle_preparation_control(
+                        &state,
+                        gate,
+                        &route,
+                        &start,
+                        &recipe,
+                        &request,
+                        status,
+                        serving_generation,
+                        outcome,
+                    )
+                    .await
+                }
+                _ => PreparationSettlement::Unavailable,
+            };
+            let retain = !matches!(result, PreparationSettlement::Unavailable);
             sender.send_replace(Some(result));
-            preparation_settlements()
+            let mut operations = preparation_settlements()
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&key);
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if retain {
+                if let Some(operation) = operations.get_mut(&key) {
+                    operation.replay_until = Some(
+                        std::time::Instant::now()
+                            + Duration::from_millis(
+                                crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS as u64,
+                            ),
+                    );
+                }
+            } else {
+                operations.remove(&key);
+            }
         });
     }
 }
@@ -5568,61 +5607,19 @@ async fn control_local_inner(
                 faults: None,
             }) as Arc<dyn crate::playback_control::TerminalControlCommitter>
         });
-    let preparation_admission = if matches!(
-        request.acknowledgement.as_ref().map(|ack| ack.state),
-        Some(
-            crate::playback_control::AcknowledgementState::Committed
-                | crate::playback_control::AcknowledgementState::Failed
-                | crate::playback_control::AcknowledgementState::Aborted
-        )
-    ) {
-        let Some(gate) = state
-            .transcode
-            .session_preparation_gate(&route.session_id)
-            .await
-        else {
-            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
-            return control_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "control_unavailable",
-                "the preparation owner disappeared before acknowledgement admission",
-                Some(route.incarnation_id.clone()),
-                Some(owner_epoch),
-                Some(500),
-                None,
-            );
-        };
-        let Some(status) = state
-            .transcode
-            .hls_session_status_publication(&route.session_id)
-            .await
-            .and_then(|publication| publication.result.ok())
-        else {
-            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
-            return control_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "control_unavailable",
-                "the preparation response snapshot was unavailable",
-                Some(route.incarnation_id.clone()),
-                Some(owner_epoch),
-                Some(500),
-                None,
-            );
-        };
-        Some(Arc::new(DurablePreparationSettlementAdmission {
-            state: state.clone(),
-            gate,
-            route: route.clone(),
-            start: start.clone(),
-            recipe: recipe.clone(),
-            request: request.clone(),
-            status,
-            serving_generation: state.serving.authority().admit(),
-            receipt: std::sync::Mutex::new(None),
-        }))
-    } else {
-        None
-    };
+    // Constructing this holder is cheap and side-effect free. It must be
+    // present even on a request without an acknowledgement: an owner-epoch
+    // rollover can itself produce the abort directive that transfers an
+    // inherited preparation away from the now-fenced old executor.
+    let preparation_admission = Some(Arc::new(DurablePreparationSettlementAdmission {
+        state: state.clone(),
+        route: route.clone(),
+        start: start.clone(),
+        recipe: recipe.clone(),
+        request: request.clone(),
+        serving_generation: state.serving.authority().admit(),
+        receipt: std::sync::Mutex::new(None),
+    }));
     let preparation_admission_trait = preparation_admission.as_ref().map(|admission| {
         Arc::clone(admission) as Arc<dyn crate::playback_control::PreparationSettlementAdmission>
     });
@@ -15494,6 +15491,113 @@ mod tests {
                 .expect("successor is current")
                 .incarnation_id,
             staged_incarnation_id,
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_exact_acknowledgement_joins_the_completed_canonical_settlement() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+        )
+        .await;
+        let staged_incarnation_id = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged")
+            .staged_incarnation_id;
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec![
+            crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned()
+        ]);
+        let (prepare_status, prepare_body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(prepare_status, StatusCode::OK);
+        let action_id = prepare_body["action"]["action_id"]
+            .as_str()
+            .expect("Prepare action id")
+            .to_owned();
+        tokio::time::sleep(Duration::from_millis(260)).await;
+        request.sequence = 2;
+        request.capabilities = None;
+        request.acknowledgement = Some(crate::playback_control::ActionAcknowledgement {
+            action_id,
+            state: crate::playback_control::AcknowledgementState::Committed,
+            buffered_through_ms: None,
+            first_frame_unix_ms: Some(unix_ms()),
+        });
+
+        let (first_status, first_body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(first_status, StatusCode::OK);
+
+        // Model a second request that already crossed ingress with this
+        // active-predecessor snapshot before the first Store call committed,
+        // but reaches settlement after the first owner completed. It must
+        // join the retained receipt instead of manufacturing new timestamps.
+        let retry = DurablePreparationSettlementAdmission {
+            state: fixture.state.clone(),
+            route: route.clone(),
+            start: control_start_response(&route).expect("control start"),
+            recipe: serde_json::from_str(&route.recipe_json).expect("control recipe"),
+            request: request.clone(),
+            serving_generation: fixture.state.serving.authority().admit(),
+            receipt: std::sync::Mutex::new(None),
+        };
+        crate::playback_control::PreparationSettlementAdmission::accepted(
+            &retry,
+            crate::playback_control::PreparationControlOutcome {
+                disposition: crate::playback_control::ControlDisposition::Replay,
+                accepted_sequence: request.sequence,
+                action: crate::playback_control::ControlAction::None,
+                action_suppressed: false,
+                preparation_directive: crate::playback_control::PreparationDirective::Commit {
+                    staged_incarnation_id,
+                },
+                platform: crate::playback_control::ClientPlatform::Web,
+                lease_expires_at_unix_ms: unix_ms().saturating_add(10_000),
+                lease_timeout_ms: 10_000,
+                lease_state: "active",
+                selection: crate::playback_control::SelectionObservation::default(),
+            },
+        );
+        let replayed = retry
+            .receipt()
+            .expect("late retry joined retained receipt")
+            .wait_before(unix_ms().saturating_add(4_000))
+            .await
+            .expect("retained settlement");
+        let PreparationSettlement::Committed(retry_response) = replayed else {
+            panic!("late exact retry must receive the committed response");
+        };
+        assert_eq!(
+            serde_json::to_value(*retry_response).expect("retry response JSON"),
+            first_body
         );
     }
 
