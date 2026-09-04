@@ -1136,7 +1136,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # redirect/size server, stalled-body server, and stalled fetch are test-only.
 # The first is joined by each caller; the stall pair is explicitly aborted or
 # awaited after the absolute deadline. None ships or owns a media producer.
-expected_occurrences = 392
+# 392 -> 394 with the HDHomeRun review regressions. One joined fake-body server
+# proves a truncated device response is URL-redacted; one joined caller task
+# per admitted forced-refresh slot proves the cache shares exactly one device
+# operation. Every handle is awaited before its test returns, neither task is
+# shipped, and neither owns an FFmpeg or tuner process.
+expected_occurrences = 394
 
 [[module_structures]]
 id = "method-spawn"
@@ -1235,7 +1240,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # deadline, the synthetic FFmpeg readiness graph has a twenty-second bound,
 # and the stalled-body fixture advances one test-only sleep. The child is
 # kill-on-drop and the fixture tasks settle before their runtimes end.
-expected_occurrences = 554
+# 554 -> 555 with the forced-refresh single-flight regression's 100 ms
+# test-only sleep. It holds the synthetic first refresh in flight while the
+# bounded followers enter, and every joined task completes before the test.
+expected_occurrences = 555
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1338,7 +1346,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # one. In-process; they launch nothing and own nothing.
 # +3 for HDHomeRun: two HTTP status reads enforce the no-redirect/success
 # contract and one `.output()` awaits the bounded synthetic FFmpeg graph.
-expected_occurrences = 219
+# 219 -> 220 with the quorum-fence regression reading `Response::status()` on
+# the in-process signed snapshot refusal. It launches no child and is the
+# assertion that device/FFmpeg work is unreachable after authority loss.
+expected_occurrences = 220
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1363,7 +1374,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # calls coordinate test tasks before the leading fetch is released. They are
 # in-process synchronization and do not address or reap an operating-system
 # process.
-expected_occurrences = 306
+# 306 -> 308: the forced-refresh cache regression's two syntactic Barrier
+# waits release the joined callers together. They are in-process test
+# synchronization and never act on an operating-system process.
+expected_occurrences = 308
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
