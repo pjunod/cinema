@@ -239,7 +239,7 @@ transcode and stream tests spawn ffmpeg for real. CI installs them for the same
 reason.
 
 ```bash
-git clone https://github.com/pjunod/plurx && cd plurx
+git clone http://192.168.4.7:3000/noirr/plurx.git && cd plurx
 make run          # build + serve http://localhost:32400  (cargo run -p plurxd)
 make check        # history + operations + catalog + Rust — mandatory baseline
 make history-check # audit every corrective commit against current evidence

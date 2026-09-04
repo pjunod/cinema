@@ -726,6 +726,11 @@ class OperationsContractCase(unittest.TestCase):
         )
         self.assertIn("/raw/branch/badges/coverage.svg", readme)
         self.assertIn("http://192.168.4.7:3000/noirr/plurx/actions", readme)
+        self.assertIn(
+            "git clone http://192.168.4.7:3000/noirr/plurx.git",
+            readme,
+        )
+        self.assertNotIn("git clone https://github.com/pjunod/plurx", readme)
         self.assertNotIn("img.shields.io/endpoint", readme)
         self.assertNotIn("raw.githubusercontent.com/pjunod/plurx/badges", readme)
 
