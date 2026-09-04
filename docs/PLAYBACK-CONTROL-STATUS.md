@@ -751,7 +751,7 @@ refuses an occupied slot and a terminal playback, `may_commit_preparation`
 still refuses a forgotten successor, and `terminate` still aborts what it
 holds. The exchange proposes; the actor disposes.
 
-### §3.4 stage is merged; `Prepare` is in review — 2026-09-04
+### §3.4 stage and `Prepare` are merged; acknowledgement settlement is in review — 2026-09-04
 
 [#894](https://github.com/pjunod/plurx/pull/894) stages the successor without
 starting an encoder and arms the owner-local deadline cleanup. The staged
@@ -793,11 +793,12 @@ with the extraction map in §3.2.1):
 4. ~~stage on `Prepare`~~ — **done**, as
    [#894](https://github.com/pjunod/plurx/pull/894); action announcement is
    [#901](https://github.com/pjunod/plurx/pull/901);
-5. the commit trigger — **next and unblocked**. It was frozen because
-   `first_frame_ready`'s Apple instrument could not separate a codec change
-   from no change; the corrective pass requires the copied pixel buffer's PTS
-   to fall at or beyond the commit boundary, and the two cases now separate
-   (Apple TV 21–239 ms same-codec against 230–327 ms codec/HDR).
+5. the commit trigger — **implemented in the current slice**. A matching,
+   timely `committed` acknowledgement reserves the actor slot and advances the
+   durable pointer through the owner/deadline-fenced Store CAS; `failed` and
+   `aborted` acknowledgements tear the staged row down. This remains an
+   integration-only mechanism until the real successor worker and qualified
+   client path exist.
 
 **The disconnect-does-not-imply-commit property is already covered**, in
 `plurx-core`'s own contract suite on three voters

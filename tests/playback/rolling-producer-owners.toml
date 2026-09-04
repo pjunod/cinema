@@ -649,7 +649,11 @@ pattern = "media_session_route_for_playback"
 # detached stage and later announcement still did not move the pointer.
 # 13 -> 14 with the failed-acknowledgement acceptance: one test-only read proves
 # abort keeps the predecessor current while deleting the staged successor.
-expected_occurrences = 14
+# 14 -> 16 after settlement review: the VOD commit acceptance and detached
+# timeout/replay acceptance each read the current pointer to prove the
+# production HTTP path, not a helper, produced the durable outcome. Both are
+# test-only witnesses; pointer authority remains exclusively in the Store CAS.
+expected_occurrences = 16
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -859,7 +863,10 @@ pattern = "terminal_reason"
 # there because an empty preparation ledger is satisfied by a row that was
 # never created as much as by one that was torn down, and only the cause tells
 # the two apart. No new writer of a terminal cause.
-expected_occurrences = 20
+# 20 -> 21 after settlement review: the public post-retirement replay test
+# asserts the predecessor's durable `superseded` cause before exercising the
+# retained exact response. This is a test-only read of the existing writer.
+expected_occurrences = 21
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -1149,7 +1156,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # one preparation slot and its durable row together. Without it the first
 # successful stage is the last one for the life of the session. It owns no
 # producer and starts no process — it only settles a slot the actor holds.
-expected_occurrences = 389
+# 389 -> 390 after settlement review: HTTP commit/abort settlement runs in one
+# detached task so cancellation of the request waiter cannot cancel an already
+# authorized Store mutation or release its serving guard early. The task owns
+# that guard until the bounded Store operation finishes; it owns no producer
+# or process, and the durable receipt makes completion replayable.
+expected_occurrences = 390
 
 [[module_structures]]
 id = "method-spawn"
@@ -1255,7 +1267,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # calls bound the commit and abort Store operations by the inherited exchange
 # deadline, and two test-only sleeps cross the control exchange floor before a
 # commit or failed acknowledgement. Every timer is awaited and owns no worker.
-expected_occurrences = 561
+# 561 -> 563 after settlement review: one production `timeout_at` bounds only
+# the wait for the detached settlement result, while the Store task retains the
+# serving guard to completion; one test-only sleep creates a deterministic
+# over-deadline completion and is awaited before fixture teardown.
+expected_occurrences = 563
 
 [[module_structures]]
 id = "bare-time-constructor"
