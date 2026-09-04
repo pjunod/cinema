@@ -3174,6 +3174,18 @@ impl ControlState {
         if owner_epoch < self.owner_epoch {
             return Err(ControlStateError::OwnerChanged);
         }
+        if owner_epoch > self.owner_epoch {
+            // Validate the first packet of the new sequence space before it
+            // can fence the old executor or consume the rollover directive.
+            // A rejected sequence-2 packet must leave epoch 1 untouched so a
+            // later valid sequence-1 packet can transfer cleanup ownership.
+            if sequence != 1 {
+                return Err(ControlStateError::StaleSequence);
+            }
+            if platform.is_none() {
+                return Err(ControlStateError::StaleClient);
+            }
+        }
         let rollover_preparation = if owner_epoch > self.owner_epoch {
             // A preparation executor is fenced by the predecessor owner
             // epoch. Once that epoch advances, no task holding the old token
@@ -14587,6 +14599,18 @@ mod tests {
             )
             .expect("epoch one");
         assert!(state.reserve_preparation_commit("successor-1", 1));
+        assert_eq!(
+            state.accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                2,
+                &uuid::Uuid::new_v4().to_string(),
+                2,
+                ControlAcceptance::new(Some(ClientPlatform::Apple), None),
+            ),
+            Err(ControlStateError::StaleSequence),
+            "an invalid first packet cannot consume the epoch rollover"
+        );
         state
             .accept_at(
                 started + MIN_CONTROL_INTERVAL,
