@@ -22,12 +22,12 @@ permissions:
   contents: read
 
 env:
-  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
+  REGISTRY_IMAGE: 192.168.4.7:3000/noirr/plurxd
 
 jobs:
   resolve:
     name: resolve immutable release source
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 5
     outputs:
       commit_sha: ${{ steps.release.outputs.commit_sha }}
@@ -41,7 +41,7 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
@@ -85,12 +85,14 @@ jobs:
           echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
           echo "release_minor=${release_version%.*}" >> "$GITHUB_OUTPUT"
           echo "packaging_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: https://github.com/docker/setup-buildx-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+      - uses: https://github.com/docker/login-action@v3
+        with:
+          registry: 192.168.4.7:3000
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Detect an existing immutable version index
         id: registry
         env:
@@ -119,7 +121,7 @@ jobs:
     if: >-
       always() && needs.resolve.result == 'success' &&
       needs.resolve.outputs.version_exists != 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 90
     permissions:
       contents: read
@@ -134,12 +136,12 @@ jobs:
             target: aarch64-unknown-linux-gnu
     steps:
       - name: Check out the trusted packaging tool
-        uses: actions/checkout@v4
+        uses: https://data.forgejo.org/actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.packaging_sha }}
           path: trusted-packaging
       - name: Check out the exact tagged source
-        uses: actions/checkout@v4
+        uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ needs.resolve.outputs.commit_sha }}
@@ -149,15 +151,17 @@ jobs:
           PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging"
           python3 -m validation.release_dockerfile --binary-export
           release-source/Dockerfile release-source/Dockerfile.binaries
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: https://github.com/docker/setup-qemu-action@v3
+      - uses: https://github.com/docker/setup-buildx-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+      - uses: https://github.com/docker/login-action@v3
+        with:
+          registry: 192.168.4.7:3000
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Compile and export the exact tagged binaries
-        uses: docker/build-push-action@v6
+        uses: https://github.com/docker/build-push-action@v6
         with:
           context: release-source
           file: release-source/Dockerfile.binaries
@@ -197,7 +201,7 @@ jobs:
           )
       - name: Build and push the untagged platform manifest
         id: build
-        uses: docker/build-push-action@v6
+        uses: https://github.com/docker/build-push-action@v6
         with:
           context: release-source
           file: release-source/Dockerfile.release
@@ -206,7 +210,7 @@ jobs:
           sbom: false
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ needs.resolve.outputs.commit_sha }}
             org.opencontainers.image.version=${{ needs.resolve.outputs.release_version }}
             tv.plurx.packaging-revision=${{ github.sha }}
@@ -217,7 +221,7 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
           SOURCE_SHA: ${{ needs.resolve.outputs.commit_sha }}
-          SOURCE_URL: https://github.com/${{ github.repository }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           set -euo pipefail
           image_ref="$REGISTRY_IMAGE@$DIGEST"
@@ -237,7 +241,7 @@ jobs:
           release-source/scripts/container-smoke "$image_ref"
           mkdir -p digests
           printf '%s\n' "$DIGEST" > "digests/$ARCH"
-      - uses: actions/upload-artifact@v4
+      - uses: https://data.forgejo.org/actions/upload-artifact@v4
         with:
           name: release-image-digest-${{ matrix.arch }}
           path: digests
@@ -245,7 +249,7 @@ jobs:
           retention-days: 1
       - name: Retain the exact tagged binary receipt for one day
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/actions/upload-artifact@v4
         with:
           name: release-binary-receipt-${{ matrix.arch }}
           path: release-source/release-bin
@@ -257,7 +261,7 @@ jobs:
     name: verify existing release (${{ matrix.arch }})
     needs: resolve
     if: needs.resolve.outputs.version_exists == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 20
     permissions:
       contents: read
@@ -267,23 +271,25 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.commit_sha }}
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: https://github.com/docker/setup-qemu-action@v3
+      - uses: https://github.com/docker/setup-buildx-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+      - uses: https://github.com/docker/login-action@v3
+        with:
+          registry: 192.168.4.7:3000
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Verify architecture binding, labels, version, and runtime
         env:
           ARCH: ${{ matrix.arch }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
           SOURCE_SHA: ${{ needs.resolve.outputs.commit_sha }}
-          SOURCE_URL: https://github.com/${{ github.repository }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           set -euo pipefail
           version_ref="$REGISTRY_IMAGE:$RELEASE_VERSION"
@@ -315,7 +321,7 @@ jobs:
           test "$current_digest" = "$index_digest"
           mkdir -p verified-index
           printf '%s\n' "$index_digest" > "verified-index/$ARCH"
-      - uses: actions/upload-artifact@v4
+      - uses: https://data.forgejo.org/actions/upload-artifact@v4
         with:
           name: verified-release-index-${{ matrix.arch }}
           path: verified-index
@@ -328,7 +334,7 @@ jobs:
       always() && needs.resolve.result == 'success' &&
       ((needs.resolve.outputs.version_exists == 'true' && needs.reuse.result == 'success') ||
        (needs.resolve.outputs.version_exists != 'true' && needs.image.result == 'success'))
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 30
     concurrency:
       group: publish-release-aliases
@@ -337,29 +343,31 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ needs.resolve.outputs.packaging_sha }}
-      - uses: actions/download-artifact@v4
+      - uses: https://data.forgejo.org/actions/download-artifact@v4
         if: needs.resolve.outputs.version_exists != 'true'
         with:
           pattern: release-image-digest-*
           path: digests
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: https://data.forgejo.org/actions/download-artifact@v4
         if: needs.resolve.outputs.version_exists == 'true'
         with:
           pattern: verified-release-index-*
           path: verified-index
           merge-multiple: true
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: https://github.com/docker/setup-qemu-action@v3
+      - uses: https://github.com/docker/setup-buildx-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+      - uses: https://github.com/docker/login-action@v3
+        with:
+          registry: 192.168.4.7:3000
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Reconfirm the remote tag has not moved
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
@@ -405,7 +413,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
           RELEASE_MINOR: ${{ needs.resolve.outputs.release_minor }}
           VERSION_EXISTS: ${{ needs.resolve.outputs.version_exists }}
-          SOURCE_URL: https://github.com/${{ github.repository }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           set -euo pipefail
           shopt -s inherit_errexit

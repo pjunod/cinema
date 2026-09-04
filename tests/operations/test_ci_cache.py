@@ -91,8 +91,8 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertIn("plurx-ci", prepare)
         self.assertIn("toolchain=$(rustc -Vv", action)
         self.assertIn("CARGO_INCREMENTAL=0", action)
-        self.assertIn("uses: Swatinem/rust-cache@v2", action)
-        self.assertNotIn("uses: Swatinem/rust-cache@v2", workflow)
+        self.assertIn("uses: https://github.com/Swatinem/rust-cache@v2", action)
+        self.assertNotIn("uses: https://github.com/Swatinem/rust-cache@v2", workflow)
         self.assertIn("needs.scope.outputs.execution_mode", workflow)
         self.assertNotIn('$CARGO_TARGET_DIR/${{ matrix.target }}', workflow)
         self.assertEqual(

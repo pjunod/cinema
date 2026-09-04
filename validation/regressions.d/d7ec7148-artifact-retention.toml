@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d7ec7148"]
+points = ["operations.packaging"]
+checks = ["operations-contract"]
+reason = "The operations contract requires an explicit retention period for every uploaded artifact, keeps cross-built binaries at one day, and retains only the small qualification receipt for fourteen days. The GitHub-specific pruning workflow is retired, while this current check still prevents the unbounded artifact accumulation that the corrective commit addressed."
