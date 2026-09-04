@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f94ce00c"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained exact-retry regression joins a canonical completed settlement after its first waiter returns, while the owner-rollover regression requires the new epoch to abort and free every inherited preparation reservation after fencing the old executor."

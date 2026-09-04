@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9eff1341"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained playback-control and HLS regressions require actor-accepted preparation settlement to outlive a dropped HTTP waiter, join concurrent exact acknowledgements, retry transient Store errors with one canonical receipt, fence stale owner epochs, and replay the committed receipt through the internal relay."
