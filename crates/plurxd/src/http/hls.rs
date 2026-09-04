@@ -4156,7 +4156,13 @@ fn local_control_response(
     // rule two call sites have to remember.
     let action =
         crate::playback_control::resolve_action(&result.action, &response.delivery, request);
-    crate::playback_control::record_action(&action, &response.delivery, request, result.platform);
+    crate::playback_control::record_action(
+        &action,
+        &response.delivery,
+        request,
+        result.platform,
+        result.action_suppressed,
+    );
     crate::playback_control::ControlResponseV1 { action, ..response }
 }
 
@@ -4706,6 +4712,125 @@ fn control_start_response(route: &MediaSessionRoute) -> Option<StartResponse> {
         .filter(|response| response.control.is_some())
 }
 
+#[cfg(test)]
+fn staged_read_faults() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static FAULTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    FAULTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(test)]
+fn fail_next_staged_read(incarnation_id: &str) {
+    staged_read_faults()
+        .lock()
+        .expect("staged read faults")
+        .insert(incarnation_id.to_owned());
+}
+
+/// Resolve the staged successor this predecessor may announce now.
+///
+/// The ledger is the wanted-work authority: a route at the publication
+/// sentinel is not enough, because commit and abort both remove the ledger
+/// row. The owner-local [`crate::playback_control::ControlState`] checks the
+/// matching preparation slot once more when it accepts the exchange; this
+/// read therefore proposes an action but cannot create a second authority.
+async fn staged_successor_action(
+    state: &AppState,
+    predecessor: &MediaSessionRoute,
+) -> Result<Option<crate::playback_control::PreparedSuccessorAction>, ()> {
+    #[cfg(test)]
+    if staged_read_faults()
+        .lock()
+        .expect("staged read faults")
+        .remove(&predecessor.incarnation_id)
+    {
+        return Err(());
+    }
+    let Some(staged) = state
+        .store
+        .staged_media_session_for_playback(predecessor.user_id, &predecessor.playback_id)
+        .await
+        .map_err(|error| {
+            tracing::warn!(?error, "staged playback generation read failed");
+        })?
+    else {
+        return Ok(None);
+    };
+    if staged.expected_predecessor_incarnation_id != predecessor.incarnation_id {
+        tracing::warn!("staged playback generation names the wrong predecessor");
+        return Err(());
+    }
+    if staged.deadline_ms <= unix_ms() {
+        return Ok(None);
+    }
+    let successor = state
+        .store
+        .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+        .await
+        .map_err(|error| {
+            tracing::warn!(?error, "staged media-session route read failed");
+        })?
+        .ok_or_else(|| {
+            tracing::warn!("staged playback generation has no media-session route");
+        })?;
+    if successor.incarnation_id != staged.staged_incarnation_id
+        || successor.user_id != predecessor.user_id
+        || successor.playback_id != predecessor.playback_id
+        || successor.owner_node_id != state.node_id
+        || successor.owner_epoch != 1
+        || successor.state != "active"
+        || successor.publication_ready_at_ms
+            != plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+    {
+        tracing::warn!("staged media-session route failed its authority checks");
+        return Err(());
+    }
+    let start = control_start_response(&successor).ok_or_else(|| {
+        tracing::warn!("staged media-session response is unreadable");
+    })?;
+    let recipe =
+        serde_json::from_str::<RemoteStartRequest>(&successor.recipe_json).map_err(|_| {
+            tracing::warn!("staged media-session recipe is unreadable");
+        })?;
+    if !recipe.is_valid()
+        || recipe.incarnation_id != successor.incarnation_id
+        || recipe.user_id != successor.user_id
+        || recipe.request.playback_id != successor.playback_id
+        || start.session_id != successor.session_id
+        || start.media_origin_ms != Some(successor.media_origin_ms)
+        || !crate::playback_control::is_node_relative_playlist(
+            &start.playlist_url,
+            &successor.session_id,
+        )
+    {
+        tracing::warn!("staged media-session payload failed its identity checks");
+        return Err(());
+    }
+    let prepared = crate::playback_control::PreparedSuccessorAction {
+        staged_incarnation_id: staged.staged_incarnation_id,
+        deadline_ms: staged.deadline_ms,
+        session_id: successor.session_id,
+        playlist_url: start.playlist_url,
+        media_origin_ms: successor.media_origin_ms,
+        effective_selection: crate::playback_control::EffectiveSelection::from_recipe(
+            &recipe,
+            start.height,
+            start.delivered_dynamic_range,
+        ),
+    };
+    if !crate::playback_control::prepared_payload_is_valid(
+        None,
+        &prepared.session_id,
+        &prepared.playlist_url,
+        prepared.media_origin_ms,
+        &prepared.effective_selection,
+    ) {
+        tracing::warn!("staged media-session action payload is invalid");
+        return Err(());
+    }
+    Ok(Some(prepared))
+}
+
 pub(crate) fn control_error(
     status: StatusCode,
     code: &'static str,
@@ -4931,6 +5056,22 @@ async fn control_local_inner(
             None,
         );
     }
+    // Staging is detached from the exchange that requested it, so only a
+    // later exchange can see the durable result. End never announces new
+    // work: its owner-local transaction aborts any slot the session held.
+    let prepared_successor = if request.demand == crate::playback_control::PlaybackDemand::End {
+        crate::playback_control::PreparedSuccessorObservation::Inactive
+    } else if !request.accepts(crate::playback_control::PREPARE_REPLACEMENT_ACTION) {
+        crate::playback_control::PreparedSuccessorObservation::NotRequested
+    } else {
+        match staged_successor_action(state, route).await {
+            Ok(Some(successor)) => {
+                crate::playback_control::PreparedSuccessorObservation::Ready(successor)
+            }
+            Ok(None) => crate::playback_control::PreparedSuccessorObservation::Absent,
+            Err(()) => crate::playback_control::PreparedSuccessorObservation::Unavailable,
+        }
+    };
     let terminal_committer =
         (request.demand == crate::playback_control::PlaybackDemand::End).then(|| {
             Arc::new(DurableTerminalCommitter {
@@ -4953,6 +5094,7 @@ async fn control_local_inner(
                 client_instance_id: &request.client_instance_id,
                 sequence: request.sequence,
                 snapshot: crate::playback_control::PlaybackDemandSnapshot::from(&request),
+                prepared_successor,
             },
             deadline_unix_ms,
             terminal_committer,
@@ -5184,9 +5326,9 @@ async fn control_local_inner(
         );
         // Spawned, never awaited: see the function's own doc. The exchange has
         // spent its deadline by here and the response is already built.
-        tokio::spawn(record_preparation_shadow(
+        tokio::spawn(process_preparation_candidate(
             state.clone(),
-            PreparationShadowInputs {
+            PreparationCandidateInputs {
                 session_id: route.session_id.clone(),
                 route: route.clone(),
                 recipe: recipe.clone(),
@@ -5220,20 +5362,36 @@ async fn control_local_inner(
         .into_response()
 }
 
-/// Shadow measurements in flight, bounding the detached fan-out.
+/// Detached preparation candidates in flight, bounding production fan-out.
 ///
 /// The gate is *this selection differs from the last accepted one*, so a
 /// client alternating between two selections trips it on every exchange —
 /// four a second, against the server's own 250 ms floor. That is adversarial
 /// rather than likely, but a detached task per exchange per client with a
-/// store read inside it is not a shape to leave unbounded for the sake of a
-/// number. Over the cap the measurement is skipped, which it already is on any
-/// failed read: this is best-effort by construction.
-static PREPARATION_SHADOWS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+/// store read inside it is not a shape to leave unbounded. Over the cap the
+/// candidate fails safe and no successor is staged; the accepted exchange is
+/// already complete and remains valid.
+static PREPARATION_CANDIDATES_IN_FLIGHT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
-/// Enough for every node in the fleet to be measuring several clients at once,
-/// and far below the point where the store notices.
-const MAX_PREPARATION_SHADOWS: usize = 32;
+/// Enough for every node in the fleet to evaluate several clients at once,
+/// and far below the point where detached Store work becomes competing load.
+const MAX_PREPARATION_CANDIDATES: usize = 32;
+
+#[cfg(test)]
+fn completed_preparation_candidates() -> &'static std::sync::Mutex<std::collections::HashSet<String>>
+{
+    static COMPLETED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    COMPLETED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(test)]
+fn take_preparation_candidate_completion(incarnation_id: &str) -> bool {
+    completed_preparation_candidates()
+        .lock()
+        .expect("preparation candidate completions")
+        .remove(incarnation_id)
+}
 
 /// Last delivered selection of each *playback*, so a session that replaces
 /// another can be measured against the one it replaced.
@@ -5369,12 +5527,12 @@ fn remember_delivered_selection(
     replaced
 }
 
-/// Everything one exchange said, gathered for the shadow measurement.
+/// Everything one exchange said, gathered for the detached preparation path.
 ///
 /// A struct rather than eight parameters: these are all *one exchange's*
 /// answer, they are always passed together, and the spawned task has no reason
 /// to be able to take them from different exchanges.
-struct PreparationShadowInputs {
+struct PreparationCandidateInputs {
     /// The live session this exchange belongs to. Staging needs it twice: to
     /// reach the actor that owns the one successor slot, and to name the
     /// predecessor the commit CAS will fence against.
@@ -5389,25 +5547,24 @@ struct PreparationShadowInputs {
     platform: crate::playback_control::ClientPlatform,
 }
 
-/// Record what M6 would have done about this exchange's selection change.
+/// Evaluate and, when admitted, durably stage this selection change.
 ///
-/// **Shadow: nothing is staged and nothing about the response depends on it.**
-/// `PREPARED_AXIS` and the throughput floor are arguments until this runs on
-/// real traffic — in particular nothing but production can say whether
-/// `throughput_unproven` refuses so often that the prepared path would never
-/// fire, which that rule's own doc names as its open residual.
+/// The response never waits for this work: the accepted exchange has already
+/// been built, and a later exchange observes the durable successor. The
+/// decision is nevertheless production authority, not shadow measurement;
+/// its actor slot and durable ledger are the only way this path can stage.
 ///
 /// Called only when the engine reports the selection moved, and spawned rather
 /// than awaited: the exchange is under an absolute deadline it has *already
 /// spent* by this point, the response is fully built, and a store read that
-/// ran long would turn a completed exchange into a 503 — after its accepted
-/// metric had been recorded. A measurement is never worth that.
+/// ran long would turn a completed exchange into a 503 after the accepted
+/// transaction had already been recorded.
 ///
-/// Measured against **the response this exchange actually sent**: the client
-/// was told a height and a rate, and a shadow measuring different ones would
-/// answer a question nobody asked.
-async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowInputs) {
-    let PreparationShadowInputs {
+/// Decided against **the response this exchange actually sent**: the client
+/// was told a height and a rate, so staging from different values would build
+/// a transition the client never requested.
+async fn process_preparation_candidate(state: AppState, exchange: PreparationCandidateInputs) {
+    let PreparationCandidateInputs {
         session_id,
         route,
         recipe,
@@ -5418,23 +5575,36 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
         capabilities,
         platform,
     } = exchange;
+    #[cfg(test)]
+    struct Completion(String);
+    #[cfg(test)]
+    impl Drop for Completion {
+        fn drop(&mut self) {
+            completed_preparation_candidates()
+                .lock()
+                .expect("preparation candidate completions")
+                .insert(self.0.clone());
+        }
+    }
+    #[cfg(test)]
+    let _completion = Completion(route.incarnation_id.clone());
     // Released on every exit below, including the early one.
     struct InFlight;
     impl Drop for InFlight {
         fn drop(&mut self) {
-            PREPARATION_SHADOWS_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            PREPARATION_CANDIDATES_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    if PREPARATION_SHADOWS_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        >= MAX_PREPARATION_SHADOWS
+    if PREPARATION_CANDIDATES_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        >= MAX_PREPARATION_CANDIDATES
     {
-        PREPARATION_SHADOWS_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        PREPARATION_CANDIDATES_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         return;
     }
     let _in_flight = InFlight;
     let Ok(source) = state.store.get_file(recipe.request.file_id).await else {
-        // Best-effort: a read that fails is a measurement not taken, never an
-        // exchange that fails. Nothing above this depends on the result.
+        // Detached failure is fail-safe: no candidate is staged, and the
+        // already-completed exchange remains valid.
         return;
     };
     // Only a *manual* ask needs resolving, and this is the whole reason the
@@ -5498,12 +5668,10 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
         conditions,
     );
     crate::playback_control::record_preparation_decision(platform, decision);
-    // All three clients hardcode the capability `false`, so the counter above
-    // books every single-axis transition as `client_cannot_prepare` and can
-    // say nothing about the axis rule or the throughput floor. This is the
-    // same transition decided as if that literal had already flipped — the
-    // only way, short of shipping a client, to learn whether the prepared path
-    // would ever fire.
+    // Apple now advertises the measured capability; web and Android remain
+    // false. Keep the counterfactual beside the production decision so the
+    // remaining rollout cost can still be read without pretending those
+    // clients can safely hold two pipelines.
     //
     // Expect `throughput_unreported` to dominate it at first, and read that as
     // a statement about the *inputs*: the native clients send no
@@ -12334,6 +12502,8 @@ mod tests {
                     client_instance_id: client,
                     sequence,
                     snapshot,
+                    prepared_successor:
+                        crate::playback_control::PreparedSuccessorObservation::NotRequested,
                 })
                 .await
                 .expect("the storm session is local")
@@ -13612,6 +13782,57 @@ mod tests {
             .await
             .expect("staging user");
         let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let predecessor_request = crate::transcode::SessionRequest {
+            control_sequence: None,
+            file_id: fixture.file_id(),
+            playback_id: "stage-player".to_owned(),
+            request_id: Some(incarnation_id.clone()),
+            automatic: true,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: crate::transcode::SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: crate::transcode::Presentation::Vod,
+            block_budget_secs: None,
+        };
+        let predecessor_recipe = RemoteStartRequest {
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
+            incarnation_id: incarnation_id.clone(),
+            user_id: user.id,
+            source_size: 1,
+            source_mtime: 1,
+            typeless_playlist: false,
+            request: predecessor_request.clone(),
+        };
+        let predecessor_start = StartResponse {
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            duration_ms: Some(6_000_000),
+            start_seconds: 0.0,
+            media_origin_ms: Some(0),
+            height: 2160,
+            encoder: "test".to_owned(),
+            vod: false,
+            ladder: Vec::new(),
+            prior_kbps: None,
+            delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
+            control: crate::playback_control::ControlBootstrap::new(
+                &session_id,
+                &incarnation_id,
+                1,
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            ),
+            plan_notes: Vec::new(),
+        };
         let route = activate_ready(
             &fixture.store,
             MediaSessionActivation {
@@ -13622,11 +13843,11 @@ mod tests {
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
                 request_id: None,
-                request_fingerprint: "c".repeat(64),
+                request_fingerprint: predecessor_request.durable_intent_fingerprint(user.id),
                 owner_node_id: fixture.state.node_id.clone(),
                 lease_expires_at_ms: unix_ms().saturating_add(900_000),
-                recipe_json: "{}".to_owned(),
-                response_json: "{}".to_owned(),
+                recipe_json: serde_json::to_string(&predecessor_recipe).expect("recipe"),
+                response_json: serde_json::to_string(&predecessor_start).expect("response"),
                 publication_ready_at_ms: 0,
                 media_origin_ms: 0,
                 now_ms: unix_ms(),
@@ -13690,13 +13911,370 @@ mod tests {
         );
     }
 
-    /// The wiring, not the helper. A first version of this change tested
-    /// `stage_prepared_successor` directly, and a mutation deleting the call
-    /// that fires it survived the whole suite — the decision would have been
-    /// counted and nothing staged, which is precisely the shadow behaviour
-    /// §3.4 exists to replace. This drives the seam.
+    /// M6 §3.4c's acceptance at the actual control seam. The stage happens
+    /// outside the exchange that requested it; the next exchange reads the
+    /// durable row, has the same owner-local slot authorize it, and returns a
+    /// transaction whose identity survives an exact replay.
     #[tokio::test]
-    async fn a_prepare_decision_at_the_seam_reaches_the_ledger() {
+    async fn a_staged_successor_is_announced_without_moving_the_pointer_and_replays_exactly() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+        )
+        .await;
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged");
+        let staged_route = fixture
+            .state
+            .store
+            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+            .await
+            .expect("staged route read")
+            .expect("the ledger names a route");
+
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let first = serde_json::from_value::<crate::playback_control::ControlResponseV1>(body)
+            .expect("control response");
+        assert_eq!(
+            first.delivery.presentation, "vod",
+            "the acceptance must run through the engine public sessions use",
+        );
+        let crate::playback_control::ControlAction::Prepare {
+            action_id,
+            session_id: announced_session_id,
+            playlist_url,
+            media_origin_ms,
+            effective_selection,
+        } = &first.action
+        else {
+            panic!("the next exchange must announce the staged successor");
+        };
+        assert!(uuid::Uuid::parse_str(action_id).is_ok());
+        assert_eq!(announced_session_id, &staged_route.session_id);
+        assert_eq!(media_origin_ms, &staged_route.media_origin_ms);
+        let start = control_start_response(&staged_route).expect("staged response");
+        let recipe = serde_json::from_str::<RemoteStartRequest>(&staged_route.recipe_json)
+            .expect("staged recipe");
+        assert_eq!(playlist_url, &start.playlist_url);
+        assert_eq!(
+            effective_selection,
+            &crate::playback_control::EffectiveSelection::from_recipe(
+                &recipe,
+                start.height,
+                start.delivered_dynamic_range,
+            ),
+        );
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("current route")
+                .expect("the predecessor remains current")
+                .incarnation_id,
+            route.incarnation_id,
+            "announcing a preparation must not advance the pointer",
+        );
+
+        let mut replay_request = request;
+        replay_request.supported_actions = None;
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                replay_request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "control_unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_local_prepare_rejects_an_unsafe_durable_playlist_url() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        let gate = fixture
+            .state
+            .transcode
+            .session_preparation_gate(&session_id)
+            .await
+            .expect("live predecessor gate");
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        let staged_session_id = uuid::Uuid::new_v4().to_string();
+        let mut staged_request = staged_candidate_request();
+        staged_request.file_id = fixture.file_id();
+        staged_request.request_id = Some(staged_incarnation_id.clone());
+        let response = StartResponse {
+            session_id: staged_session_id.clone(),
+            playlist_url: format!("//attacker.invalid/{staged_session_id}/index.m3u8"),
+            duration_ms: Some(6_000_000),
+            start_seconds: 0.0,
+            media_origin_ms: Some(0),
+            height: 1080,
+            encoder: "staged".to_owned(),
+            vod: true,
+            ladder: Vec::new(),
+            prior_kbps: None,
+            delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
+            control: crate::playback_control::ControlBootstrap::new(
+                &staged_session_id,
+                &staged_incarnation_id,
+                1,
+                crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            ),
+            plan_notes: Vec::new(),
+        };
+        let now_ms = unix_ms();
+        let preparation = plurx_core::domain::MediaSessionPreparation {
+            incarnation_id: staged_incarnation_id.clone(),
+            session_id: staged_session_id,
+            user_id: route.user_id,
+            playback_id: route.playback_id.clone(),
+            expected_predecessor_incarnation_id: route.incarnation_id.clone(),
+            request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
+            owner_node_id: fixture.state.node_id.clone(),
+            recipe_json: serde_json::to_string(&RemoteStartRequest {
+                protocol_version: crate::media_pool::PROTOCOL_VERSION,
+                incarnation_id: staged_incarnation_id,
+                user_id: route.user_id,
+                source_size: 1,
+                source_mtime: 1,
+                typeless_playlist: false,
+                request: staged_request,
+            })
+            .expect("recipe"),
+            response_json: serde_json::to_string(&response).expect("response"),
+            media_origin_ms: 0,
+            now_ms,
+            deadline_ms: now_ms.saturating_add(30_000),
+        };
+        let executor = crate::playback_control::PreparationExecutor::new(
+            Arc::clone(&fixture.state.store),
+            gate,
+            route.user_id,
+            route.playback_id.clone(),
+        );
+        assert!(executor
+            .stage(&preparation)
+            .await
+            .expect("stage hostile row"));
+
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "control_unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_transient_staged_read_failure_does_not_advance_or_rotate_the_action() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+        )
+        .await;
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let first = serde_json::from_value::<crate::playback_control::ControlResponseV1>(body)
+            .expect("first response");
+        assert!(matches!(
+            first.action,
+            crate::playback_control::ControlAction::Prepare { .. }
+        ));
+
+        fail_next_staged_read(&route.incarnation_id);
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let replay = serde_json::from_value::<crate::playback_control::ControlResponseV1>(body)
+            .expect("cached exact replay");
+        assert_eq!(replay.accepted_sequence, first.accepted_sequence);
+        assert_eq!(replay.action, first.action);
+
+        tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+        request.sequence = 2;
+        fail_next_staged_read(&route.incarnation_id);
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "control_unavailable");
+
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let recovered = serde_json::from_value::<crate::playback_control::ControlResponseV1>(body)
+            .expect("recovered response");
+        assert_eq!(recovered.accepted_sequence, 2);
+        assert_eq!(recovered.action, first.action);
+    }
+
+    #[tokio::test]
+    async fn a_client_without_prepare_vocabulary_skips_the_staged_store_read() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+        )
+        .await;
+
+        let mut request = control_request(route.incarnation_id.clone());
+        fail_next_staged_read(&route.incarnation_id);
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let passive = serde_json::from_value::<crate::playback_control::ControlResponseV1>(body)
+            .expect("passive response");
+        assert_eq!(passive.action, crate::playback_control::ControlAction::None);
+
+        tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+        request.sequence = 2;
+        request.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "control_unavailable");
+
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let prepared = serde_json::from_value::<crate::playback_control::ControlResponseV1>(body)
+            .expect("prepared response");
+        assert!(matches!(
+            prepared.action,
+            crate::playback_control::ControlAction::Prepare { .. }
+        ));
+    }
+
+    /// The detached decision boundary stages an admitted candidate and leaves
+    /// the predecessor pointer alone. The production control-to-boundary
+    /// wiring is covered separately below.
+    #[tokio::test]
+    async fn an_admitted_preparation_candidate_reaches_the_ledger() {
         let dir = crate::test_tempdir().expect("state dir");
         let (fixture, session_id, route) = staging_fixture(dir.path()).await;
         // The seam reads the source, and staging refuses without a snapshot.
@@ -13724,9 +14302,9 @@ mod tests {
         assert_eq!(delivered.codec, "source", "the predecessor direct-plays");
         let asked_height = 1080;
 
-        record_preparation_shadow(
+        process_preparation_candidate(
             fixture.state.clone(),
-            PreparationShadowInputs {
+            PreparationCandidateInputs {
                 session_id: session_id.clone(),
                 route: route.clone(),
                 recipe: RemoteStartRequest {
@@ -13794,64 +14372,182 @@ mod tests {
         );
     }
 
-    /// The same seam with the capability the client actually ships today.
-    /// Nothing stages, which is what says the gate is the retained field and
-    /// not the platform.
+    /// The complete production seam: an accepted selection change schedules
+    /// the detached stage, and the next accepted sequence announces the row.
+    /// Capabilities are omitted after sequence one exactly as shipped clients
+    /// do, proving the actor-retained document is the one used.
+    #[tokio::test]
+    async fn an_accepted_selection_change_is_staged_and_announced_on_the_next_exchange() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, _session_id, route) = staging_fixture(dir.path()).await;
+        fixture.set_delivered_bps_for_test(10_000_000);
+
+        let mut first = control_request(route.incarnation_id.clone());
+        first.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
+        first.observed_download_bps = Some(100_000_000);
+        first.capabilities = Some(crate::playback_control::DynamicCapabilities {
+            platform: crate::playback_control::ClientPlatform::Web,
+            max_height: 2160,
+            codecs: vec![crate::playback_control::CodecPolicy::H264],
+            dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+            dual_player_preparation: true,
+        });
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                first.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+        let mut changed = first.clone();
+        changed.sequence = 2;
+        changed.capabilities = None;
+        changed.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                changed.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let changed_response =
+            serde_json::from_value::<crate::playback_control::ControlResponseV1>(body)
+                .expect("selection-change response");
+        assert_eq!(
+            changed_response.action,
+            crate::playback_control::ControlAction::None
+        );
+
+        let staged = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(staged) = fixture
+                    .state
+                    .store
+                    .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                    .await
+                    .expect("ledger read")
+                {
+                    break staged;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached production seam staged the successor");
+
+        tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+        changed.sequence = 3;
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                changed,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let announced = serde_json::from_value::<crate::playback_control::ControlResponseV1>(body)
+            .expect("announcement response");
+        let staged_route = fixture
+            .state
+            .store
+            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+            .await
+            .expect("staged route read")
+            .expect("staged route");
+        assert!(matches!(
+            announced.action,
+            crate::playback_control::ControlAction::Prepare { ref session_id, .. }
+                if staged_route.session_id == *session_id
+        ));
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("current route")
+                .expect("predecessor remains current")
+                .incarnation_id,
+            route.incarnation_id,
+        );
+    }
+
+    /// The production seam with a client that cannot safely hold two players.
+    /// Nothing stages, which proves the retained capability reaches the
+    /// detached decision rather than being re-derived from the platform.
     #[tokio::test]
     async fn a_client_that_cannot_prepare_stages_nothing_at_the_seam() {
         let dir = crate::test_tempdir().expect("state dir");
-        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
-        let source = staging_source(&fixture).await;
+        let (fixture, _session_id, route) = staging_fixture(dir.path()).await;
+        fixture.set_delivered_bps_for_test(10_000_000);
 
-        let mut recipe = staged_candidate_request();
-        recipe.file_id = source.id;
-        recipe.kind = crate::transcode::SessionKind::Copy {
-            aac: false,
-            preserve_dolby_vision: false,
-            convert_dolby_vision: false,
-        };
-        let delivered =
-            crate::playback_control::EffectiveSelection::from_request(&recipe, 2160, None);
-
-        record_preparation_shadow(
-            fixture.state.clone(),
-            PreparationShadowInputs {
-                session_id,
-                route: route.clone(),
-                recipe: RemoteStartRequest {
-                    protocol_version: crate::media_pool::PROTOCOL_VERSION,
-                    incarnation_id: route.incarnation_id.clone(),
-                    user_id: route.user_id,
-                    source_size: 0,
-                    source_mtime: 0,
-                    typeless_playlist: false,
-                    request: recipe,
-                },
-                selection: crate::playback_control::ClientSelection {
-                    quality: crate::playback_control::QualitySelection::Manual { height: 1080 },
-                    audio_track: None,
-                    subtitle: crate::playback_control::SubtitleSelection {
-                        mode: crate::playback_control::SubtitleMode::Off,
-                        track: None,
-                    },
-                    audio_offset_ms: 0,
-                    codec: crate::playback_control::CodecPolicy::Auto,
-                    dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
-                },
-                observed_download_bps: Some(100_000_000),
-                delivered,
-                delivered_bps: Some(10_000_000),
-                capabilities: Some(crate::playback_control::DynamicCapabilities {
-                    platform: crate::playback_control::ClientPlatform::Apple,
-                    max_height: 2160,
-                    codecs: vec![crate::playback_control::CodecPolicy::H264],
-                    dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
-                    dual_player_preparation: false,
-                }),
-                platform: crate::playback_control::ClientPlatform::Apple,
-            },
+        let mut first = control_request(route.incarnation_id.clone());
+        first.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
+        first.observed_download_bps = Some(100_000_000);
+        first.capabilities = Some(crate::playback_control::DynamicCapabilities {
+            platform: crate::playback_control::ClientPlatform::Web,
+            max_height: 2160,
+            codecs: vec![crate::playback_control::CodecPolicy::H264],
+            dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+            dual_player_preparation: false,
+        });
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                first.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
         )
         .await;
+        assert_eq!(status, StatusCode::OK);
+
+        tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+        first.sequence = 2;
+        first.capabilities = None;
+        first.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                first,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The candidate runs detached. Wait for the completion marker keyed
+        // to this exact predecessor, rather than inferring completion from a
+        // process-global in-flight count that may still be zero before the
+        // spawned future receives its first poll.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if take_preparation_candidate_completion(&route.incarnation_id) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached preparation decision completed");
 
         assert!(
             fixture
