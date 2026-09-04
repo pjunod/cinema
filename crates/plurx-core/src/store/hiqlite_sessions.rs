@@ -3386,6 +3386,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                       LEFT JOIN media_sessions session
                         ON session.incarnation_id = preparation.staged_incarnation_id
                       WHERE session.incarnation_id IS NULL OR session.state != 'active')
+                    OR EXISTS (SELECT 1 FROM media_session_preparations
+                      WHERE deadline_ms <= $2)
                     OR EXISTS (SELECT 1 FROM media_session_requests
                       WHERE state = 'starting' AND claim_expires_at_ms <= $2)
                     OR EXISTS (SELECT 1 FROM media_session_requests
@@ -3417,6 +3419,17 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(());
         }
         let statements = vec![
+            // A preparation expires on its own deadline; see the SQLite
+            // backend's maintenance for why nothing else enforces it.
+            (
+                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = $1,
+                        publication_ready_at_ms = $2, updated_at_ms = $1
+                  WHERE incarnation_id IN (
+                    SELECT staged.staged_incarnation_id FROM media_session_preparations staged
+                     WHERE staged.deadline_ms <= $1
+                     ORDER BY staged.deadline_ms, staged.staged_incarnation_id LIMIT $3)",
+                params!(now_ms, MEDIA_SESSION_PUBLICATION_BLOCKED, MAINTENANCE_BATCH),
+            ),
             (
                 "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = $1,
                         publication_ready_at_ms = $2, updated_at_ms = $1
