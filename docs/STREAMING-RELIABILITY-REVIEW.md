@@ -749,8 +749,8 @@ frozen effort candidate.
 | Cold transcode/burn play | immutable VOD; first frame p95 ≤ 5.0 s, max ≤ 8.0 s on a qualified hardware path; an unqualified node refuses placement |
 | 20 then 100 distant seeks | same playback/session where recipe is unchanged; final target first frame p95 ≤ 1.0 s, max ≤ 2.0 s; landing error ≤ 250 ms; zero poisoned renditions |
 | Manual same-codec quality change | 20 down and 20 up per platform; zero stall/reopen; film-position error ≤ 250 ms; video frame gap p95 ≤ 100 ms and max ≤ 250 ms; audio gap max ≤ 100 ms; runway never below 2.0 s |
-| Auto 8 → 1.5 Mb/s cliff | one downgrade begins within 10 s and reaches a sustainable rung; runway remains above 1.0 s; no second move for 60 s |
-| Codec/grade/burn change | 20 per supported tuple; prepare/ready/commit or explicit pre-change refusal; predecessor survives every pre-commit failure; position error ≤ 250 ms |
+| Auto 8 → 1.5 Mb/s cliff | one downgrade begins within 10 s and reaches a sustainable rung; zero stall/reopen; runway remains above 1.0 s; film-position error ≤ 250 ms; video frame gap p95 ≤ 100 ms and max ≤ 250 ms; audio gap max ≤ 100 ms; no second move for 60 s |
+| Codec/grade/burn change | every supported and qualified tuple commits successfully 20/20; predecessor survives every pre-commit failure; position error ≤ 250 ms; explicitly unsupported or admission-constrained tuples are a separate matrix and refuse before changing playback |
 | Open-ended network freeze | urgent recovery starts by 12 s after established playback (30 s before first establishment); one recovery or terminal result by 45 s |
 | Frozen decoder with buffered media | recovery starts by 12 s; advisory hold cannot defer it past 20 s; one recovery or terminal result by 45 s |
 | Owner loss | already-playing immutable media continues and a prepared owner commits before reported runway is exhausted; terminal is an interim limitation, not acceptance |

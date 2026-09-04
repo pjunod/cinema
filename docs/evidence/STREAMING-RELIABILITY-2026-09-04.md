@@ -55,6 +55,32 @@ validated, while Main10/HDR capability differed by node; for example, some QSV
 Main10/HDR graphs failed or were explicitly refused. These are capability
 observations, not playback passes.
 
+The bounded collection command was:
+
+```bash
+ssh -i /Users/pjunod/code/plurx-agent/.ssh-deploy-key HOST \
+  'docker logs plurxd 2>&1 | head -n 24'
+```
+
+The retained projection was limited to encoder capability lines. It reported
+`Cannot load libcuda.so.1` for NVENC on each node, validated basic QSV and
+VAAPI, and included node-specific QSV Main10/HDR rejection. Raw logs were not
+committed because they contain dynamic infrastructure detail; the exact
+command above reproduces the bounded view.
+
+The queue snapshot came from the unauthenticated local metrics surface:
+
+```bash
+ssh -i /Users/pjunod/code/plurx-agent/.ssh-deploy-key nynuc \
+  'curl -sS --max-time 5 http://127.0.0.1:32400/metrics | \
+   grep -E "plurx_analysis_queue_depth.*component=\"fragment_index\""'
+```
+
+At collection it contained 2 claimed background jobs, 218 normal-background
+and 11 forced-admin jobs in `retry_wait`, 1,141 published rows, and 3,367
+failed rows across the reported fragment-index labels. These are durable state
+depths, not 24-hour event counts; the repair must not present them as rates.
+
 ## Seven-day aggregate playback telemetry
 
 The node-local query, with the same projection on each SQLite-capable host:
@@ -121,6 +147,24 @@ case started with `Chrome not found`. The workflow action had installed
 Playwright Chromium, but the Make targets passed no executable to the lab. The
 same wiring fault affected the inspected window; later repair evidence must
 record both a green workflow and positive proof that playback cases started.
+
+## Existing VOD acceptance receipts
+
+The failing evidence is already retained in repository handoffs:
+
+- [VOD-STEADY-ACCEPTANCE-HANDOFF.md](../VOD-STEADY-ACCEPTANCE-HANDOFF.md)
+  records run 32943477931 / job 98105071882: four visible hitches, a cold-start
+  `bufferStalledError`, 0.165× presentation with 21.3 seconds buffered, and
+  serving-authority expiry. Its exact focused rerun command is retained there.
+- [VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md](../VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md)
+  records run 32929741906 / job 98059637890: all 20 seeks used one session,
+  but nine visible hitches, about 0.1 seconds of runway, and authority expiry.
+- [VOD-STALL-ACCEPTANCE-HANDOFF.md](../VOD-STALL-ACCEPTANCE-HANDOFF.md)
+  records run 32918531993 / job 98032989197: the shaped case timed out before
+  first frame after Auto selected a VOD transcode rung that the server refused.
+
+Those handoffs contain some now-stale architectural prose about the live engine;
+this evidence file retains only their run IDs, observed results, and commands.
 
 ## Pull-request review evidence
 
