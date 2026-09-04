@@ -1201,8 +1201,11 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("plurx-apple-silicon-heavy", apple)
         self.assertIn("cancel-in-progress: false", package)
         self.assertIn("cancel-in-progress: false", apple)
-        self.assertIn("queue: max", package)
-        self.assertIn("queue: max", apple)
+        # Forgejo supports the standard concurrency group and cancellation
+        # policy, but rejects the non-standard `queue` mapping key during
+        # workflow schema validation before a runner can start.
+        self.assertNotIn("queue:", package)
+        self.assertNotIn("queue:", apple)
 
     def test_ci_caches_are_keyed_to_what_they_cache(self):
         workflow = read(".github/workflows/ci.yml")
@@ -1427,13 +1430,24 @@ class OperationsContractCase(unittest.TestCase):
             "name: Retain candidate binaries for push, tag, and qualification runs",
             build,
         )
+        self.assertIn(
+            "name: Retain candidate binaries for non-qualification push and tag runs",
+            build,
+        )
         self.assertIn("needs.scope.outputs.qualification == 'true'", build)
         self.assertIn("name: Retain the exact package receipt", build)
         self.assertIn("release-bin/*.sha256", build)
-        self.assertIn(
-            "continue-on-error: ${{ needs.scope.outputs.qualification != 'true' }}",
-            build,
+        blocking_upload = workflow_step_blocks(build)[
+            "Retain candidate binaries for push, tag, and qualification runs"
+        ]
+        advisory_upload = workflow_step_blocks(build)[
+            "Retain candidate binaries for non-qualification push and tag runs"
+        ]
+        self.assertNotIn("continue-on-error:", blocking_upload)
+        self.assertEqual(
+            workflow_step_scalar(advisory_upload, "continue-on-error"), "true"
         )
+        self.assertIn("github.event_name == 'push'", advisory_upload)
         self.assertIn("name: package-smoke-binaries-${{ matrix.arch }}", build)
         self.assertIn("retention-days: 1", build)
         self.assertIn("retention-days: 14", build)
