@@ -767,6 +767,11 @@ Twenty-run p95 uses nearest-rank sample 19; the max bound still applies to every
 run. A skipped case, missing browser/device, absent timestamp, or operation that
 never entered playback is a failed evidence run, not a pass.
 
+Until the nightly Auto cliff has a retained multi-run rollup, its one observed
+transition must individually stay at or below 100 ms. This is deliberately
+stricter than applying only the 250 ms absolute ceiling and prevents a visible
+200 ms hitch from passing while the final p95 qualification remains pending.
+
 ### Failure and race matrix
 
 Tests must inject: rapid A → B → C selection, seek during prime, pause during

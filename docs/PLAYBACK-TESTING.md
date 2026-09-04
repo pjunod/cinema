@@ -137,6 +137,15 @@ and media time. A quality change must first expose the exact target state and
 then present a later target-tagged frame; an outgoing frame cannot satisfy the
 handoff. Page-lifetime stall and hitch totals increment where the player records
 the fault, so replacing `PLAYER` between polls cannot erase the last failure.
+API presence alone is not frame evidence: Auto trusts this oracle only after a
+finite post-cliff callback. If no callback arrives, sampled media-clock gaps are
+authoritative; if callbacks stop, the open gap continues to the final sample.
+Browsers that expose the callback must also produce an outgoing baseline before
+a manual transition begins. The Auto ledger is joined to the first target-tagged
+presented frame, which must land within 250 ms of the recorded handoff position.
+Because the nightly cliff currently observes one downshift, that transition must
+itself satisfy the 100 ms p95 budget; 250 ms remains the absolute maximum for a
+future multi-run distribution rather than an excuse for a 200 ms nightly hitch.
 
 **How to read it:** a fallback is a failure even when the rescue transcode
 plays. The viewer got pixels, but the requested path broke — exactly the Safari
