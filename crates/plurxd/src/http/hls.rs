@@ -5676,11 +5676,11 @@ async fn control_local_with_settlement_capacity(
         .session_preparation_gate(&route.session_id)
         .await
     else {
-        crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
         return control_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "control_unavailable",
-            "the preparation owner disappeared before control admission",
+            StatusCode::TOO_EARLY,
+            "owner_transition",
+            "the durable route is active but its local worker is not yet available",
             Some(route.incarnation_id.clone()),
             Some(owner_epoch),
             Some(500),
@@ -14704,6 +14704,23 @@ mod tests {
             "announcing a preparation must not advance the pointer",
         );
 
+        let (status, replay_body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let replay =
+            serde_json::from_value::<crate::playback_control::ControlResponseV1>(replay_body)
+                .expect("exact replay response");
+        assert_eq!(replay.action, first.action);
+        assert_eq!(replay.accepted_sequence, first.accepted_sequence);
+
         let mut replay_request = request;
         replay_request.supported_actions = None;
         let (status, body) = control_body(
@@ -14716,8 +14733,8 @@ mod tests {
             .await,
         )
         .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body["code"], "control_unavailable");
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "stale_control");
     }
 
     #[tokio::test]
@@ -16658,42 +16675,22 @@ mod tests {
             .await
             .expect("ledger read")
             .expect("a successor is staged");
-        let gate = fixture
-            .state
-            .transcode
-            .session_preparation_gate(&session_id)
-            .await
-            .expect("gate");
-        crate::playback_control::PreparationExecutor::new(
-            Arc::clone(&fixture.state.store),
-            gate,
-            route.user_id,
-            route.playback_id.clone(),
-            route.owner_node_id.clone(),
-            route.owner_epoch,
-        )
-        .commit(
-            &staged.staged_incarnation_id,
-            unix_ms(),
-            unix_ms() + 900_000,
-            None,
-        )
-        .await
-        .expect("commit");
-
-        let committed = fixture
+        // Frontier selection is established by staging. A commit requires a
+        // separately accepted client acknowledgement, which this test does
+        // not supply; inspecting the staged route proves the actual contract.
+        let successor = fixture
             .state
             .store
-            .media_session_route_for_playback(route.user_id, &route.playback_id)
+            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
             .await
-            .expect("committed route")
-            .expect("current");
+            .expect("staged route")
+            .expect("successor");
         assert_eq!(
-            committed.media_origin_ms, 2_490_000,
+            successor.media_origin_ms, 2_490_000,
             "origin is the predecessor's origin plus what the client fetched"
         );
         let recipe =
-            serde_json::from_str::<RemoteStartRequest>(&committed.recipe_json).expect("recipe");
+            serde_json::from_str::<RemoteStartRequest>(&successor.recipe_json).expect("recipe");
         assert!(
             (recipe.request.start_seconds - 2_490.0).abs() < 0.001,
             "the successor starts at the frontier, not at {}",

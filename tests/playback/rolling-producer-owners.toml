@@ -663,7 +663,9 @@ pattern = "media_session_route_for_playback"
 # the durable route only to prove that the production path reached its one
 # canonical outcome. They add no read-then-act authority.
 # 20 -> 21: serving-loss settlement regression witnesses the final pointer.
-expected_occurrences = 21
+# 21 -> 20: the frontier fixture reads its staged route directly instead of
+# pretending an unacknowledged preparation can be committed.
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"

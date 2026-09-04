@@ -15631,7 +15631,10 @@ mod tests {
     /// able to advance the pointer to an incarnation the actor has forgotten.
     #[test]
     fn only_the_successor_the_slot_holds_may_commit() {
-        let (actor, _) = staged_actor();
+        let (mut actor, _) = staged_actor();
+        assert!(!actor.control.may_commit_preparation("successor-1"));
+        assert!(!actor.control.reserve_preparation_commit("successor-2", 0));
+        assert!(actor.control.reserve_preparation_commit("successor-1", 0));
         assert!(actor.control.may_commit_preparation("successor-1"));
         assert!(!actor.control.may_commit_preparation("successor-2"));
     }
@@ -15647,7 +15650,7 @@ mod tests {
             RollingTerminalCause::LeaseExpired,
         ] {
             let (mut actor, _) = staged_actor();
-            assert!(actor.control.may_commit_preparation("successor-1"));
+            assert!(!actor.control.may_commit_preparation("successor-1"));
 
             let outcome = actor.terminate(cause);
             assert!(matches!(outcome, RollingTerminalOutcome::Won(_)));
@@ -15660,6 +15663,7 @@ mod tests {
                 !actor.control.may_commit_preparation("successor-1"),
                 "{cause:?} must refuse a late commit"
             );
+            assert!(!actor.control.reserve_preparation_commit("successor-1", 0));
         }
     }
 
