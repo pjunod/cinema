@@ -100,6 +100,6 @@ runs:
 
     - name: Restore the hosted Cargo cache
       if: steps.configure.outputs.local != 'true'
-      uses: Swatinem/rust-cache@v2
+      uses: https://github.com/Swatinem/rust-cache@v2
       with:
         key: ${{ inputs.lane }}

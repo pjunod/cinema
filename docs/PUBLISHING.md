@@ -1,7 +1,7 @@
 # Publishing the apps — TestFlight, the App Store, and Google Play
 
 Companion to [RELEASING.md](RELEASING.md) (the server's version numbers and the
-GHCR image) — this is *how the two client apps get onto a device that isn't
+local Forgejo image) — this is *how the two client apps get onto a device that isn't
 yours*. Building them for yourself is already covered where they live:
 [clients/apple/README.md](../clients/apple/README.md) and
 [clients/android/README.md](../clients/android/README.md). This doc starts where

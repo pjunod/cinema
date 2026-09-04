@@ -20,9 +20,9 @@
 //!   before the drop returns.
 //! - **N waiters on one segment are one unit of demand.** Ten viewers parked
 //!   on `(rendition, 512)` do not ask the producer for ten things; they ask
-//!   for segment 512 once. Coalescing is [`WaitPool::blocked_on`] returning
-//!   the *lowest* blocked index per rendition — the single number that feeds
-//!   `prodsched::Demand::waiting_on` — not ten entries in a queue.
+//!   for segment 512 once. [`WaitPool::demands`] preserves every distinct
+//!   session/index so scheduling can use the session's accepted playback
+//!   intent, rather than mistake the lowest old request for the playhead.
 //! - **Every wait ends through exactly one named path** (review B4 deleted
 //!   the escape hatch): the segment lands ([`WaitOutcome::Ready`]), the
 //!   deadline expires ([`WaitOutcome::Deadline`] → typed retryable 503), the
@@ -91,6 +91,9 @@ struct Waiter {
 #[derive(Default)]
 struct State {
     waiters: HashMap<WaitKey, Vec<Waiter>>,
+    /// Retention outlives the notification: a just-woken request still has
+    /// to open its file before eviction can safely unlink it.
+    retained: HashMap<u64, WaitKey>,
     per_session: HashMap<String, usize>,
     total: usize,
     next_id: u64,
@@ -109,17 +112,11 @@ impl State {
         self.total -= 1;
     }
 
-    /// Remove every waiter on `key` and hand them back for waking. Cap slots
-    /// are released here, under the lock, so `len()` never counts a waiter
-    /// that has already been answered.
+    /// Remove pending demand and hand the senders back for waking. Admission
+    /// slots remain owned through the caller's file open, bounding retention
+    /// as well as the number of parked notification receivers.
     fn drain_key(&mut self, key: &WaitKey) -> Vec<Waiter> {
-        let Some(waiters) = self.waiters.remove(key) else {
-            return Vec::new();
-        };
-        for w in &waiters {
-            self.release(&w.session);
-        }
-        waiters
+        self.waiters.remove(key).unwrap_or_default()
     }
 }
 
@@ -136,8 +133,11 @@ struct SlotGuard {
 impl Drop for SlotGuard {
     fn drop(&mut self) {
         let mut state = self.state.lock().expect(POISONED);
-        // Already answered (satisfy/fail/close removed us first)? Then the
-        // answering side released the slots and there is nothing to do.
+        if state.retained.remove(&self.id).is_some() {
+            state.release(&self.session);
+        }
+        // The caller now has its file or has abandoned the request. If the
+        // notification already arrived, only its pin/slot needed releasing.
         let Some(waiters) = state.waiters.get_mut(&self.key) else {
             return;
         };
@@ -148,8 +148,33 @@ impl Drop for SlotGuard {
         if waiters.is_empty() {
             state.waiters.remove(&self.key);
         }
-        state.release(&self.session);
     }
+}
+
+/// A bounded, admitted request. Keep this owner until the caller has opened
+/// the response file; dropping it releases both pending demand and retention.
+pub struct RegisteredWait {
+    _guard: SlotGuard,
+    rx: oneshot::Receiver<WaitOutcome>,
+}
+
+impl RegisteredWait {
+    pub async fn wait(&mut self, deadline: Duration) -> WaitOutcome {
+        match tokio::time::timeout(deadline, &mut self.rx).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => WaitOutcome::Gone,
+            Err(_) => self.rx.try_recv().unwrap_or(WaitOutcome::Deadline),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaitDemand {
+    pub session: String,
+    pub index: u32,
+    /// First admitted request still waiting for this session/index. A later
+    /// prefetch cannot continually jump ahead of an older viewer's request.
+    pub arrival_order: u64,
 }
 
 /// The pool itself. Shared via `Arc` between the segment GET handler (which
@@ -178,6 +203,7 @@ impl WaitPool {
     /// a refused wait touches no state. The wait future deregisters itself
     /// when dropped (client disconnect cancels the wait and releases both
     /// caps), and ends through exactly one of the four named outcomes.
+    #[cfg(test)]
     pub async fn wait(
         &self,
         key: WaitKey,
@@ -186,28 +212,10 @@ impl WaitPool {
     ) -> Result<WaitOutcome, WaitRefused> {
         // Registration is synchronous — no await between the cap check and
         // the guard existing — so a cancellation can never strand a slot.
-        let (_guard, mut rx) = self.register(key, session)?;
-        match tokio::time::timeout(deadline, &mut rx).await {
-            Ok(Ok(outcome)) => Ok(outcome),
-            // The sender only drops without sending if the pool's state is
-            // torn down while a waiter is parked, which cannot happen while
-            // the pool that admitted the waiter is alive. Answer Gone rather
-            // than panic: a terminal answer is the truthful degraded mode.
-            Ok(Err(_)) => Ok(WaitOutcome::Gone),
-            Err(_elapsed) => Ok(match rx.try_recv() {
-                // The answer landed in the same instant the deadline fired;
-                // it already cost the producer the work, so serve it.
-                Ok(outcome) => outcome,
-                Err(_) => WaitOutcome::Deadline,
-            }),
-        }
+        Ok(self.register(key, session)?.wait(deadline).await)
     }
 
-    fn register(
-        &self,
-        key: WaitKey,
-        session: &str,
-    ) -> Result<(SlotGuard, oneshot::Receiver<WaitOutcome>), WaitRefused> {
+    pub fn register(&self, key: WaitKey, session: &str) -> Result<RegisteredWait, WaitRefused> {
         let mut state = self.lock();
         if state.per_session.get(session).copied().unwrap_or(0) >= self.per_session_cap {
             return Err(WaitRefused::SessionBusy);
@@ -223,6 +231,7 @@ impl WaitPool {
             session: session.to_string(),
             tx,
         });
+        state.retained.insert(id, key.clone());
         *state.per_session.entry(session.to_string()).or_insert(0) += 1;
         state.total += 1;
         drop(state);
@@ -232,11 +241,25 @@ impl WaitPool {
             id,
             session: session.to_string(),
         };
-        Ok((guard, rx))
+        Ok(RegisteredWait { _guard: guard, rx })
     }
 
     /// A segment materialized: wake every waiter on `(rendition, index)`.
     pub fn satisfy(&self, rendition: &str, index: u32) {
+        self.wake_key(rendition, index, WaitOutcome::Ready);
+    }
+
+    /// A demanded entry missed its service deadline. That is not evidence
+    /// that another entry or the rendition's producer has failed.
+    pub fn fail_entry(&self, rendition: &str, index: u32, cause: &str) {
+        self.wake_key(
+            rendition,
+            index,
+            WaitOutcome::ProducerFailed(cause.to_owned()),
+        );
+    }
+
+    fn wake_key(&self, rendition: &str, index: u32, outcome: WaitOutcome) {
         let key = WaitKey {
             rendition: rendition.to_string(),
             index,
@@ -245,7 +268,7 @@ impl WaitPool {
         for w in waiters {
             // A receiver gone mid-send is a disconnect that raced the
             // wakeup; its guard already ran or is about to find nothing.
-            let _ = w.tx.send(WaitOutcome::Ready);
+            let _ = w.tx.send(outcome.clone());
         }
     }
 
@@ -279,10 +302,9 @@ impl WaitPool {
         }
     }
 
-    /// The lowest plan index anyone is blocked on for this rendition, if
-    /// any. This is what feeds `prodsched::Demand::waiting_on` — ten waiters
-    /// on one index are ONE demand, and coalescing is this method returning
-    /// one index, not ten entries.
+    /// A diagnostic lowest blocked index. Lifecycle code uses its presence
+    /// to distinguish owed work from speculative completion; the scheduler
+    /// uses `demands()` because this projection loses session ownership.
     pub fn blocked_on(&self, rendition: &str) -> Option<u32> {
         self.lock()
             .waiters
@@ -290,6 +312,47 @@ impl WaitPool {
             .filter(|k| k.rendition == rendition)
             .map(|k| k.index)
             .min()
+    }
+
+    pub fn demands(&self, rendition: &str) -> Vec<WaitDemand> {
+        let mut coalesced = HashMap::new();
+        let state = self.lock();
+        for (key, waiters) in state
+            .waiters
+            .iter()
+            .filter(|(key, _)| key.rendition == rendition)
+        {
+            for waiter in waiters {
+                let order = coalesced
+                    .entry((waiter.session.clone(), key.index))
+                    .or_insert(waiter.id);
+                *order = (*order).min(waiter.id);
+            }
+        }
+        let mut demands = coalesced
+            .into_iter()
+            .map(|((session, index), arrival_order)| WaitDemand {
+                session,
+                index,
+                arrival_order,
+            })
+            .collect::<Vec<_>>();
+        demands.sort_unstable_by(|a, b| (&a.session, a.index).cmp(&(&b.session, b.index)));
+        demands.dedup();
+        demands
+    }
+
+    pub fn retained(&self, rendition: &str) -> Vec<u32> {
+        let mut indexes = self
+            .lock()
+            .retained
+            .values()
+            .filter(|key| key.rendition == rendition)
+            .map(|key| key.index)
+            .collect::<Vec<_>>();
+        indexes.sort_unstable();
+        indexes.dedup();
+        indexes
     }
 
     /// Number of registered waiters (for telemetry and tests).
@@ -330,6 +393,51 @@ mod tests {
         F: Future + Unpin,
     {
         std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *fut).poll(cx))).await
+    }
+
+    #[tokio::test]
+    async fn a_notified_request_keeps_its_bounded_pin_until_the_file_is_open() {
+        let pool = WaitPool::new(4, 1);
+        let mut request = pool.register(key(5), "viewer").expect("admitted");
+        pool.satisfy("abcd1234", 5);
+        assert!(pool.demands("abcd1234").is_empty());
+        assert_eq!(request.wait(secs(1)).await, WaitOutcome::Ready);
+        assert_eq!(pool.retained("abcd1234"), vec![5]);
+        assert_eq!(
+            pool.wait(key(6), "viewer", secs(1)).await,
+            Err(WaitRefused::SessionBusy)
+        );
+        drop(request);
+        assert!(pool.retained("abcd1234").is_empty());
+        assert!(pool.is_empty());
+    }
+
+    #[tokio::test]
+    async fn entry_deadline_does_not_fail_other_demand_and_cancellation_removes_exactly_one() {
+        let pool = WaitPool::new(4, 4);
+        let mut old = pool.register(key(3), "viewer").expect("old admitted");
+        let target = pool.register(key(90), "viewer").expect("target admitted");
+        let other = pool
+            .register(key(8), "other")
+            .expect("other viewer admitted");
+        assert_eq!(pool.demands("abcd1234").len(), 3);
+        pool.fail_entry("abcd1234", 3, "deadline");
+        assert_eq!(
+            old.wait(secs(1)).await,
+            WaitOutcome::ProducerFailed("deadline".into())
+        );
+        assert_eq!(pool.demands("abcd1234").len(), 2);
+        drop(target);
+        assert_eq!(
+            pool.demands("abcd1234"),
+            vec![WaitDemand {
+                session: "other".into(),
+                index: 8,
+                arrival_order: 2,
+            }]
+        );
+        drop((old, other));
+        assert!(pool.is_empty());
     }
 
     #[tokio::test]
