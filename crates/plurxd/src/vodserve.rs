@@ -1608,6 +1608,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
         &'a self,
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
+        deadline_ms: i64,
     ) -> crate::playback_control::GateAnswer<'a> {
         Box::pin(async move {
             let mut sessions = self.shared.sessions.lock().await;
@@ -1625,7 +1626,11 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 .control
                 .lock()
                 .expect("control lock")
-                .stage_preparation(staged_incarnation_id, predecessor_incarnation_id);
+                .stage_preparation(
+                    staged_incarnation_id,
+                    predecessor_incarnation_id,
+                    deadline_ms,
+                );
             staged
         })
     }
@@ -3520,7 +3525,8 @@ impl VodServe {
                     control.sequence,
                     control.snapshot.platform(),
                 );
-                let Some((_, accepted_sequence, action, platform)) = replay else {
+                let Some((_, accepted_sequence, action, platform, action_suppressed)) = replay
+                else {
                     return Some(Err(
                         crate::playback_control::ControlStateError::SessionEnded,
                     ));
@@ -3546,6 +3552,7 @@ impl VodServe {
                 debug_assert_eq!(result.accepted_sequence, accepted_sequence);
                 debug_assert_eq!(result.action, action);
                 debug_assert_eq!(result.platform, platform);
+                debug_assert_eq!(result.action_suppressed, action_suppressed);
                 result.disposition = crate::playback_control::ControlDisposition::Replay;
                 // One viewer action is one measurement: a stored result
                 // carries the observation of the exchange that produced it,
@@ -3614,6 +3621,7 @@ impl VodServe {
                 disposition: crate::playback_control::ControlDisposition,
                 accepted_sequence: u64,
                 action: crate::playback_control::ControlAction,
+                action_suppressed: bool,
                 platform: crate::playback_control::ClientPlatform,
                 selection: crate::playback_control::SelectionObservation,
                 lease_expires_at_unix_ms: i64,
@@ -3652,6 +3660,7 @@ impl VodServe {
                     control.client_instance_id,
                     control.sequence,
                     control.snapshot.platform(),
+                    &control.prepared_successor,
                 );
                 // Only for an accepted exchange: a replay is the same exchange
                 // arriving twice, and it changed the selection the first time
@@ -3669,10 +3678,11 @@ impl VodServe {
                 };
                 (accepted, observation)
             };
-            let (disposition, accepted_sequence, action, platform) = match accepted {
-                Ok(outcome) => outcome,
-                Err(error) => return Some(Err(error)),
-            };
+            let (disposition, accepted_sequence, action, platform, action_suppressed) =
+                match accepted {
+                    Ok(outcome) => outcome,
+                    Err(error) => return Some(Err(error)),
+                };
             if disposition == crate::playback_control::ControlDisposition::Accepted
                 && control.snapshot.demand != crate::playback_control::PlaybackDemand::End
             {
@@ -3705,6 +3715,7 @@ impl VodServe {
                     disposition,
                     accepted_sequence,
                     action,
+                    action_suppressed,
                     lease_expires_at_unix_ms: crate::media_sessions::unix_ms(),
                     lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
                     lease_state: "ended",
@@ -3759,6 +3770,7 @@ impl VodServe {
                     disposition,
                     accepted_sequence,
                     action,
+                    action_suppressed,
                     platform,
                     selection: selection.clone(),
                     lease_expires_at_unix_ms: crate::media_sessions::unix_ms()
@@ -3787,6 +3799,7 @@ impl VodServe {
             disposition,
             accepted_sequence,
             action,
+            action_suppressed,
             platform,
             selection,
             lease_expires_at_unix_ms,
@@ -3818,6 +3831,7 @@ impl VodServe {
                 disposition,
                 accepted_sequence,
                 action,
+                action_suppressed,
                 platform,
                 selection,
                 lease_expires_at_unix_ms,
@@ -3826,6 +3840,7 @@ impl VodServe {
                 disposition,
                 accepted_sequence,
                 action,
+                action_suppressed,
                 platform,
                 selection,
                 lease_expires_at_unix_ms,
@@ -3856,6 +3871,7 @@ impl VodServe {
             disposition,
             accepted_sequence,
             action,
+            action_suppressed,
             lease_expires_at_unix_ms,
             lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
             lease_state: "active",
@@ -8622,7 +8638,7 @@ mod tests {
         let successor = uuid::Uuid::new_v4().to_string();
         let predecessor = uuid::Uuid::new_v4().to_string();
         assert!(
-            gate.stage_preparation(successor.clone(), predecessor.clone())
+            gate.stage_preparation(successor.clone(), predecessor.clone(), i64::MAX)
                 .await
         );
         assert!(gate.may_commit_preparation(&successor).await);
@@ -8631,7 +8647,7 @@ mod tests {
         // engine that believed in two could commit the wrong one.
         assert!(
             !gate
-                .stage_preparation(uuid::Uuid::new_v4().to_string(), predecessor)
+                .stage_preparation(uuid::Uuid::new_v4().to_string(), predecessor, i64::MAX)
                 .await
         );
         assert!(gate.settle_preparation(&successor, true).await);
@@ -8657,8 +8673,12 @@ mod tests {
 
         let abandoned = uuid::Uuid::new_v4().to_string();
         assert!(
-            gate.stage_preparation(abandoned.clone(), uuid::Uuid::new_v4().to_string())
-                .await
+            gate.stage_preparation(
+                abandoned.clone(),
+                uuid::Uuid::new_v4().to_string(),
+                i64::MAX,
+            )
+            .await
         );
         assert!(gate.settle_preparation(&abandoned, false).await);
         assert!(
@@ -8671,6 +8691,7 @@ mod tests {
             gate.stage_preparation(
                 uuid::Uuid::new_v4().to_string(),
                 uuid::Uuid::new_v4().to_string(),
+                i64::MAX,
             )
             .await
         );
@@ -8703,6 +8724,7 @@ mod tests {
                 .stage_preparation(
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
+                    i64::MAX,
                 )
                 .await,
             "the stale gate must not take the replacement's slot",
@@ -8715,6 +8737,7 @@ mod tests {
                 .stage_preparation(
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
+                    i64::MAX,
                 )
                 .await
         );
@@ -8737,7 +8760,7 @@ mod tests {
         let gate = serve.preparation_gate(&session_id).await.expect("gate");
         let staged = uuid::Uuid::new_v4().to_string();
         assert!(
-            gate.stage_preparation(staged.clone(), uuid::Uuid::new_v4().to_string())
+            gate.stage_preparation(staged.clone(), uuid::Uuid::new_v4().to_string(), i64::MAX,)
                 .await
         );
 
@@ -8784,6 +8807,7 @@ mod tests {
                 .stage_preparation(
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
+                    i64::MAX,
                 )
                 .await,
             "a tombstoned session takes no successor",
@@ -8799,6 +8823,7 @@ mod tests {
                 .stage_preparation(
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
+                    i64::MAX,
                 )
                 .await,
             "nor does a gate outliving its session",
@@ -10374,6 +10399,7 @@ mod tests {
             snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Apple,
             ),
+            prepared_successor: crate::playback_control::PreparedSuccessorObservation::NotRequested,
         };
 
         let accepted = serve
@@ -10469,6 +10495,8 @@ mod tests {
                 client_instance_id: &client,
                 sequence,
                 snapshot,
+                prepared_successor:
+                    crate::playback_control::PreparedSuccessorObservation::NotRequested,
             }
         };
 
@@ -10554,6 +10582,7 @@ mod tests {
             snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Apple,
             ),
+            prepared_successor: crate::playback_control::PreparedSuccessorObservation::NotRequested,
         };
         assert!(matches!(
             serve.control(active_same_sequence).await,
@@ -10714,6 +10743,8 @@ mod tests {
                             client_instance_id: &client,
                             sequence: 1,
                             snapshot,
+                            prepared_successor:
+                                crate::playback_control::PreparedSuccessorObservation::NotRequested,
                         },
                         i64::MAX,
                         Some(committer),
@@ -10772,6 +10803,8 @@ mod tests {
                         client_instance_id: &client,
                         sequence: 1,
                         snapshot,
+                        prepared_successor:
+                            crate::playback_control::PreparedSuccessorObservation::NotRequested,
                     })
                     .await
             })
@@ -10827,6 +10860,7 @@ mod tests {
             client_instance_id: "00000000-0000-4000-8000-000000000005",
             sequence,
             snapshot,
+            prepared_successor: crate::playback_control::PreparedSuccessorObservation::NotRequested,
         };
         let key = |index| WaitKey {
             rendition: rendition.key.clone(),
@@ -10979,6 +11013,8 @@ mod tests {
                         client_instance_id: "00000000-0000-4000-8000-000000000006",
                         sequence: 1,
                         snapshot,
+                        prepared_successor:
+                            crate::playback_control::PreparedSuccessorObservation::NotRequested,
                     })
                     .await
             })
@@ -11006,6 +11042,8 @@ mod tests {
                 client_instance_id: "00000000-0000-4000-8000-000000000006",
                 sequence: 1,
                 snapshot,
+                prepared_successor:
+                    crate::playback_control::PreparedSuccessorObservation::NotRequested,
             })
             .await
             .expect("VOD session")

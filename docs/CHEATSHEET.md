@@ -60,7 +60,7 @@ surfaces receive their own checks too (bypass one commit with
 selection, evidence, and why the UI “golden” is a reviewed structural answer
 key rather than a screenshot. Pushing a version tag
 (`git tag v0.1.0 && git push --tags`) builds and publishes a multi-arch image
-to `ghcr.io/pjunod/plurx`.
+to `192.168.4.7:3000/noirr/plurxd`.
 
 Large projects use one temporary integration branch so each task pays for
 compilation rather than release qualification. The full operating contract is
