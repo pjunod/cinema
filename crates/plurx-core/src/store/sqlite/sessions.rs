@@ -2357,6 +2357,22 @@ impl MediaSessionStore for SqliteStore {
                           WHERE incarnation_id = ?6 AND owner_node_id = ?4 AND owner_epoch = ?5
                             AND state = 'active' AND lease_expires_at_ms > ?2
                             AND publication_ready_at_ms != ?7
+                            -- A staged successor's deadline is its whole life,
+                            -- and renewing it would be the one thing that can
+                            -- make that deadline never arrive. The ledger's
+                            -- reaper below says the retirement sweep ends a
+                            -- staged row whose deadline passed like any other
+                            -- active row — true only while nothing renews it.
+                            -- The owner node holds a real VOD session for the
+                            -- successor, so it is in `renewable_session_ids`
+                            -- and would otherwise be pushed forward every tick
+                            -- for as long as the node lives, holding an encoder
+                            -- and an admission slot nobody will ever commit.
+                            -- Keyed on the ledger row, which commit deletes, so
+                            -- a committed successor renews normally from its
+                            -- first tick after the commit.
+                            AND NOT EXISTS (SELECT 1 FROM media_session_preparations staged
+                              WHERE staged.staged_incarnation_id = media_sessions.incarnation_id)
                             AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                               WHERE request.user_id = media_sessions.user_id
                                 AND request.incarnation_id = media_sessions.incarnation_id
