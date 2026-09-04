@@ -630,6 +630,36 @@ are retained in
 | P3-2 | Stale comments at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L5392); stale milestone/current-state claims in [PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md); false cutover claim in [VOD-CUTOVER.md](VOD-CUTOVER.md) |
 | P3-3 | Progressive pace parser and ffmpeg argument use in [`http/stream.rs`](../crates/plurxd/src/http/stream.rs#L79) |
 
+## Client correction review — races found after the first repair
+
+The first client repair was not accepted on its initial review. An independent
+adversarial pass followed the code through delayed responses, superseded seeks,
+node failover, paused playback, and presentation callbacks. The following
+matrix records every finding and the production boundary used to close it; it
+is intentionally more specific than the one-row history-audit anchor, which
+can associate a corrective commit with only one source/test pair.
+
+| Priority | Adversarial finding | Implemented correction | Regression boundary |
+|---|---|---|---|
+| P1 | Android could retire a new seek from an outgoing or pre-render frame callback | Removed the pre-render metadata hook; each executed destination arms one post-mutation output listener carrying its exact intent sequence, and failover re-arms only an already-executed destination | `Controller.armVideoPresentation`; `capturedFrameGenerationCannotSettleItsExecutedSuccessor` |
+| P1 | Repeated Android ±10-second commands collapsed onto the stale player clock | Relative commands accumulate against the newest optimistic destination before the 100 ms coalescer runs | `Controller.seekBy` / `PlaybackIntent.beginRelativeSeek`; `rapidRelativeSeeksAccumulateAgainstTheOptimisticDestination` |
+| P1 | Android failover inherited the failed attempt's owner/deadline and forced paused playback to resume | Failover invalidates the old request generation, starts a fresh playback attempt, preserves the stall budget, retains the prior `playWhenReady`, and rebinds pending presentation | `Controller.retryMediaOnNextNode`; `transportFailoverInvalidatesAWaitingStallWithoutResettingItsBudget` |
+| P1 | Apple/web could overshoot the 20-second control deferral by another poll or ask window | Apple sleeps to the earlier of its cadence and the absolute monotonic deadline; web skips a new ask at or beyond that boundary | `recoveryPollDelayMs` and `persistentWait`; exact-boundary timer tests on both clients |
+| P1 | Apple excluded an executed-but-unpresented destination from recovery and could wait forever for presentation | Executed destinations remain stall-eligible; the presentation monitor has an eight-second absolute deadline and generation-fenced recovery | `PlayerSeekState.allowsStallRecovery` / `beginSeekPresentationMonitor`; seek-state and deadline tests |
+| P1 | Apple quality and audio replacements had no authoritative target or presentation settlement | Each command synchronously publishes an exact film target and generation before any await, then the attached destination must present | production `selectQuality`, `selectOriginalQuality`, and `selectAudio`; `testQualityAndAudioCommandsCreateANewPresentationDestinationSynchronously` |
+| P1 | Apple bitmap-overlay selection changed visible output before urgent intent publication | Overlay teardown/installation moved behind the control publication and stale-action check | `applySubtitleSelection`; production-source contract assertion |
+| P1 | Apple native seek completion was not fenced to the item/open generation | The seek captures both and rejects a completion from any replaced item or newer open | native arm of `seek`; source-level generation contract plus seek-state presentation tests |
+| P1 | A late terminal response could re-arm a verdict and stop reporting after viewer intent was cleared | Android, Apple, and web tag pending/retry requests with a local intent generation; storage and reporter shutdown both require the current generation | each `PlaybackControlReporter`/session; delayed-terminal tests on all three clients |
+| P1 | Android Original copy bodies omitted both height and Auto intent, so the server inferred Auto | Every new Android session sends `quality_auto`; Original explicitly sends false while legacy omitted bodies retain compatibility | `subtitleSessionBody`; wire serialization test and server `CreateSession` conversion test |
+| P1 | Android audio settlement accepted a single proximity sample | Audio-only settlement now requires execution, one target landing, and a later strictly advancing clock sample | `PlaybackIntent.presentedAudio`; `audioSettlementRequiresLandingThenPostExecutionClockAdvance` |
+| P2 | Android/Apple terminal leases used wall time | Lease age now uses monotonic uptime on both platforms | verdict-store lease tests plus production monotonic clock anchors |
+| P2 | Earlier evidence mapped helper behavior rather than the user command/race seams | Tests now invoke production quality/audio commands or load shipped web functions, and this matrix names every production seam explicitly | `tests/client-fixes.toml`, `AppleClientTests`, and the shipped-source web harness |
+
+The corrections are committed as `78223cef`. Focused Android JVM, Apple
+simulator, web shipped-source, and pinned-Rust regressions are green. The exact
+head remains unmergeable until its second adversarial pass approves these
+closures and the one post-fix task suite passes.
+
 ## Target architecture — immutable renditions plus one replacement transaction
 
 The target has one media model and two transition mechanisms:

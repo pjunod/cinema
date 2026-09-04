@@ -700,3 +700,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.k
 source_anchor = "fun presentedVideoFrame("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
 test_anchor = "departingAndPreExecutionFramesCannotSettleANewSeek"
+
+[[fixes]]
+id = "clients.production-intent-generation-review-fixes"
+commits = ["78223cef"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func selectQuality(_ height: Int?)"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testQualityAndAudioCommandsCreateANewPresentationDestinationSynchronously"
