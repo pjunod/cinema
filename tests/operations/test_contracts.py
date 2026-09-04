@@ -7,6 +7,7 @@ import re
 import runpy
 import subprocess
 import tempfile
+import textwrap
 import tomllib
 import unittest
 
@@ -181,6 +182,47 @@ class OperationsContractCase(unittest.TestCase):
         libraries = script.index("for name, kind, share in LIBRARIES:", seed)
 
         self.assertLess(pinned, libraries)
+
+    def test_store_verdict_handles_unused_forgejo_workflow_without_weakening_required_lane(self):
+        verdict = workflow_job_blocks(".github/workflows/ci.yml")["cluster_store"]
+        step = workflow_step_blocks(verdict)["Select the required Store graph"]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        states = ("success", "skipped", "failure", "cancelled", "", "unknown")
+        for mode in ("legacy", "shadow", "accelerated", "", "unknown"):
+            for legacy in states:
+                for shard in states:
+                    expected = (
+                        mode in ("legacy", "shadow")
+                        and legacy == "success"
+                        and shard in ("skipped", "success")
+                    ) or (
+                        mode == "accelerated"
+                        and legacy == "skipped"
+                        and shard == "success"
+                    )
+                    with self.subTest(mode=mode, legacy=legacy, shard=shard):
+                        result = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", script],
+                            env={**os.environ, "EXECUTION_MODE": mode,
+                                 "LEGACY_RESULT": legacy, "SHARD_RESULT": shard},
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(result.returncode == 0, expected, result.stdout + result.stderr)
+
+    def test_ui_baseline_reserves_distinct_http_raft_and_api_ports(self):
+        script = read("scripts/ui-baseline")
+        contract = runpy.run_path(
+            str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_port_contract"
+        )
+        ports = contract["free_ports"](0, 3)
+
+        self.assertEqual(len(ports), 3)
+        self.assertEqual(len(set(ports)), 3)
+        self.assertTrue(all(port > 0 for port in ports))
+        self.assertIn("self.port, self.raft_port, self.api_port = free_ports", script)
+        self.assertIn('raft_bind = "127.0.0.1:{self.raft_port}"', script)
+        self.assertIn('api_bind = "127.0.0.1:{self.api_port}"', script)
 
     def test_ui_baseline_releases_players_and_narrowly_retries_root_attachment(self):
         script = read("scripts/ui-baseline")
@@ -1110,7 +1152,7 @@ class OperationsContractCase(unittest.TestCase):
         for contract in (
             'test "$LEGACY_RESULT" = success',
             'test "$LEGACY_RESULT" = skipped',
-            'test "$SHARD_RESULT" = skipped',
+            'skipped|success) ;;',
             'test "$SHARD_RESULT" = success',
             'echo "Store shadow evidence is intentionally outside this gate"',
         ):
