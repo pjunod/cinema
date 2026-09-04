@@ -1084,20 +1084,30 @@ unreachable from every real client. All three now go through one function, and
 each also folds the publication fence into the same classification rather than
 answering it unconditionally, which is what the media plane already does.
 
-**One of the three is not pinned by a test that drives it.** The public-ingress
-gate is, by an exchange posted at a durable EVENT route whose lease has
-expired; `verify_authority`'s is, through a real store. The owner side of the
-relay needs a signed internal request, and signing one needs a replicated
-membership fixture that does not exist — so it is recorded as untested rather
-than assumed.
+**All three are now pinned by tests that drive them**, though the third took a
+second pass. The public-ingress gate is covered by an exchange posted at a
+durable EVENT route whose lease has expired, and `verify_authority`'s through a
+real store. The relay's owner-side gate was recorded as untested when this
+first landed, because reaching it meant signing an internal request and signing
+one needs a live replicated membership — a hiqlite client no unit fixture has.
 
-What was done instead of testing it is to leave it nothing to get wrong: the
-gate's *condition* moved into `control_owner_refusal` alongside its answer, so
-both call sites are a single `if let Some(refusal) = …` with no logic of their
-own. The remaining failure mode there is deleting the call, not answering
-differently from the plane next door — and the ingress site, which is tested,
-proves the shared function. A harness for signed internal requests would close
-it properly and would pay for itself the next time anything touches the relay. And the control plane deliberately carries **no** resume
+The way through was not to build that fixture. `control_inner` now does one
+thing before delegating: it proves the peer signature, then calls
+`control_authorized` with the request. Everything the relay decides on the
+owner's behalf lives in that second function, which a test can call directly,
+and the only line the split leaves uncovered is the `authorize` call itself —
+which the router's own auth tests already prove. **A whole owner-side request
+path went from unreachable by `cargo test` to covered by moving one guard.**
+
+The two tests that closes are the ingress/owner race in the flesh: ingress read
+a live lease and relayed, and by the time the owner re-read its own route the
+lease had run out. One asserts the EVENT route answers `owner_lost` with no
+hint; the other that a rolling route a survivor could still claim keeps its
+425. Reverting that gate to the old inline 425, or deleting it, now fails both.
+
+The condition also lives in `control_owner_refusal` beside the answer, so all
+three call sites are a single `if let Some(refusal) = …` with no logic of their
+own — belt and braces, but the braces are the tests. And the control plane deliberately carries **no** resume
 fields: `ControlErrorBody` is `deny_unknown_fields` and the relay validates a
 peer's body against a strict `(status, code)` allowlist, so new fields would be
 a mixed-fleet parse hazard for a position the client already receives from the

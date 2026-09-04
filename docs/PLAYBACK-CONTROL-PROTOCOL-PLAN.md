@@ -387,8 +387,8 @@ owner either way; a committed replacement holds one through its whole
 publication window.
 
 Three gates apply that rule — public ingress, the owner side of the relay, and
-`verify_authority`'s re-read — because each returns before the next runs. Only
-the third is pinned by a test that drives it; see the status doc.
+`verify_authority`'s re-read — because each returns before the next runs. Each
+is pinned by a test that drives it.
 
 The media plane answers the same durable state with 503
 `media_owner_transition` or 410 `media_owner_lost`, and carries
