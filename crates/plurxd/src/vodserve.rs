@@ -3552,6 +3552,7 @@ impl VodServe {
                     control.client_instance_id,
                     control.sequence,
                     control.snapshot.platform(),
+                    control.prepared_successor.as_ref(),
                 );
                 // Only for an accepted exchange: a replay is the same exchange
                 // arriving twice, and it changed the selection the first time
@@ -10062,6 +10063,7 @@ mod tests {
             snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Apple,
             ),
+            prepared_successor: None,
         };
 
         let accepted = serve
@@ -10157,6 +10159,7 @@ mod tests {
                 client_instance_id: &client,
                 sequence,
                 snapshot,
+                prepared_successor: None,
             }
         };
 
@@ -10242,6 +10245,7 @@ mod tests {
             snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Apple,
             ),
+            prepared_successor: None,
         };
         assert!(matches!(
             serve.control(active_same_sequence).await,
@@ -10402,6 +10406,7 @@ mod tests {
                             client_instance_id: &client,
                             sequence: 1,
                             snapshot,
+                            prepared_successor: None,
                         },
                         i64::MAX,
                         Some(committer),
@@ -10460,6 +10465,7 @@ mod tests {
                         client_instance_id: &client,
                         sequence: 1,
                         snapshot,
+                        prepared_successor: None,
                     })
                     .await
             })

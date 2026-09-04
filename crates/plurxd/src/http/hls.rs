@@ -4706,6 +4706,67 @@ fn control_start_response(route: &MediaSessionRoute) -> Option<StartResponse> {
         .filter(|response| response.control.is_some())
 }
 
+/// Resolve the staged successor this predecessor may announce now.
+///
+/// The ledger is the wanted-work authority: a route at the publication
+/// sentinel is not enough, because commit and abort both remove the ledger
+/// row. The owner-local [`crate::playback_control::ControlState`] checks the
+/// matching preparation slot once more when it accepts the exchange; this
+/// read therefore proposes an action but cannot create a second authority.
+async fn staged_successor_action(
+    state: &AppState,
+    predecessor: &MediaSessionRoute,
+) -> Option<crate::playback_control::PreparedSuccessorAction> {
+    let staged = state
+        .store
+        .staged_media_session_for_playback(predecessor.user_id, &predecessor.playback_id)
+        .await
+        .ok()??;
+    if staged.expected_predecessor_incarnation_id != predecessor.incarnation_id
+        || staged.deadline_ms <= unix_ms()
+    {
+        return None;
+    }
+    let successor = state
+        .store
+        .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+        .await
+        .ok()??;
+    if successor.incarnation_id != staged.staged_incarnation_id
+        || successor.user_id != predecessor.user_id
+        || successor.playback_id != predecessor.playback_id
+        || successor.owner_node_id != state.node_id
+        || successor.owner_epoch != 1
+        || successor.state != "active"
+        || successor.publication_ready_at_ms
+            != plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+    {
+        return None;
+    }
+    let start = control_start_response(&successor)?;
+    let recipe = serde_json::from_str::<RemoteStartRequest>(&successor.recipe_json).ok()?;
+    if !recipe.is_valid()
+        || recipe.incarnation_id != successor.incarnation_id
+        || recipe.user_id != successor.user_id
+        || recipe.request.playback_id != successor.playback_id
+        || start.session_id != successor.session_id
+        || start.media_origin_ms != Some(successor.media_origin_ms)
+    {
+        return None;
+    }
+    Some(crate::playback_control::PreparedSuccessorAction {
+        staged_incarnation_id: staged.staged_incarnation_id,
+        session_id: successor.session_id,
+        playlist_url: start.playlist_url,
+        media_origin_ms: successor.media_origin_ms,
+        effective_selection: crate::playback_control::EffectiveSelection::from_recipe(
+            &recipe,
+            start.height,
+            start.delivered_dynamic_range,
+        ),
+    })
+}
+
 pub(crate) fn control_error(
     status: StatusCode,
     code: &'static str,
@@ -4931,6 +4992,14 @@ async fn control_local_inner(
             None,
         );
     }
+    // Staging is detached from the exchange that requested it, so only a
+    // later exchange can see the durable result. End never announces new
+    // work: its owner-local transaction aborts any slot the session held.
+    let prepared_successor = if request.demand == crate::playback_control::PlaybackDemand::End {
+        None
+    } else {
+        staged_successor_action(state, route).await
+    };
     let terminal_committer =
         (request.demand == crate::playback_control::PlaybackDemand::End).then(|| {
             Arc::new(DurableTerminalCommitter {
@@ -4953,6 +5022,7 @@ async fn control_local_inner(
                 client_instance_id: &request.client_instance_id,
                 sequence: request.sequence,
                 snapshot: crate::playback_control::PlaybackDemandSnapshot::from(&request),
+                prepared_successor,
             },
             deadline_unix_ms,
             terminal_committer,
@@ -12334,6 +12404,7 @@ mod tests {
                     client_instance_id: client,
                     sequence,
                     snapshot,
+                    prepared_successor: None,
                 })
                 .await
                 .expect("the storm session is local")
@@ -13612,6 +13683,53 @@ mod tests {
             .await
             .expect("staging user");
         let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let predecessor_request = crate::transcode::SessionRequest {
+            control_sequence: None,
+            file_id: fixture.file_id(),
+            playback_id: "stage-player".to_owned(),
+            request_id: Some(incarnation_id.clone()),
+            automatic: true,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: crate::transcode::SessionKind::Transcode { height: 720 },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: crate::transcode::Presentation::Vod,
+            block_budget_secs: None,
+        };
+        let predecessor_recipe = RemoteStartRequest {
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
+            incarnation_id: incarnation_id.clone(),
+            user_id: user.id,
+            source_size: 1,
+            source_mtime: 1,
+            typeless_playlist: false,
+            request: predecessor_request.clone(),
+        };
+        let predecessor_start = StartResponse {
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            duration_ms: Some(6_000_000),
+            start_seconds: 0.0,
+            media_origin_ms: Some(0),
+            height: 720,
+            encoder: "test".to_owned(),
+            vod: false,
+            ladder: Vec::new(),
+            prior_kbps: None,
+            delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
+            control: crate::playback_control::ControlBootstrap::new(
+                &session_id,
+                &incarnation_id,
+                1,
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            ),
+            plan_notes: Vec::new(),
+        };
         let route = activate_ready(
             &fixture.store,
             MediaSessionActivation {
@@ -13622,11 +13740,11 @@ mod tests {
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
                 request_id: None,
-                request_fingerprint: "c".repeat(64),
+                request_fingerprint: predecessor_request.durable_intent_fingerprint(user.id),
                 owner_node_id: fixture.state.node_id.clone(),
                 lease_expires_at_ms: unix_ms().saturating_add(900_000),
-                recipe_json: "{}".to_owned(),
-                response_json: "{}".to_owned(),
+                recipe_json: serde_json::to_string(&predecessor_recipe).expect("recipe"),
+                response_json: serde_json::to_string(&predecessor_start).expect("response"),
                 publication_ready_at_ms: 0,
                 media_origin_ms: 0,
                 now_ms: unix_ms(),
@@ -13687,6 +13805,121 @@ mod tests {
                 .incarnation_id,
             route.incarnation_id,
             "staging must not advance the pointer — `activate_media_session` would have",
+        );
+    }
+
+    /// M6 §3.4c's acceptance at the actual control seam. The stage happens
+    /// outside the exchange that requested it; the next exchange reads the
+    /// durable row, has the same owner-local slot authorize it, and returns a
+    /// transaction whose identity survives an exact replay.
+    #[tokio::test]
+    async fn a_staged_successor_is_announced_without_moving_the_pointer_and_replays_exactly() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+        )
+        .await;
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged");
+        let staged_route = fixture
+            .state
+            .store
+            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+            .await
+            .expect("staged route read")
+            .expect("the ledger names a route");
+
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let first = serde_json::from_value::<crate::playback_control::ControlResponseV1>(body)
+            .expect("control response");
+        assert_eq!(
+            first.delivery.presentation, "vod",
+            "the acceptance must run through the engine public sessions use",
+        );
+        let crate::playback_control::ControlAction::Prepare {
+            action_id,
+            session_id: announced_session_id,
+            playlist_url,
+            media_origin_ms,
+            effective_selection,
+        } = &first.action
+        else {
+            panic!("the next exchange must announce the staged successor");
+        };
+        assert!(uuid::Uuid::parse_str(action_id).is_ok());
+        assert_eq!(announced_session_id, &staged_route.session_id);
+        assert_eq!(media_origin_ms, &staged_route.media_origin_ms);
+        let start = control_start_response(&staged_route).expect("staged response");
+        let recipe = serde_json::from_str::<RemoteStartRequest>(&staged_route.recipe_json)
+            .expect("staged recipe");
+        assert_eq!(playlist_url, &start.playlist_url);
+        assert_eq!(
+            effective_selection,
+            &crate::playback_control::EffectiveSelection::from_recipe(
+                &recipe,
+                start.height,
+                start.delivered_dynamic_range,
+            ),
+        );
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("current route")
+                .expect("the predecessor remains current")
+                .incarnation_id,
+            route.incarnation_id,
+            "announcing a preparation must not advance the pointer",
+        );
+
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let replay = serde_json::from_value::<crate::playback_control::ControlResponseV1>(body)
+            .expect("replayed control response");
+        assert_eq!(replay.accepted_sequence, first.accepted_sequence);
+        assert_eq!(
+            replay.action, first.action,
+            "the replay returns the first action id rather than minting another",
         );
     }
 

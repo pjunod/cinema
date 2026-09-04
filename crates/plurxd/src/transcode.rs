@@ -21644,6 +21644,7 @@ pub(crate) mod tests {
             snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Web,
             ),
+            prepared_successor: None,
         };
 
         let accepted = fixture
@@ -21857,6 +21858,7 @@ pub(crate) mod tests {
                 client_instance_id: &client,
                 sequence,
                 snapshot,
+                prepared_successor: None,
             }
         };
         let retry_pause = Arc::new(tokio::sync::Barrier::new(2));
@@ -22085,6 +22087,7 @@ pub(crate) mod tests {
                 client_instance_id: &client,
                 sequence,
                 snapshot,
+                prepared_successor: None,
             }
         };
 
@@ -22209,6 +22212,7 @@ pub(crate) mod tests {
                         client_instance_id: &client,
                         sequence: 1,
                         snapshot,
+                        prepared_successor: None,
                     })
                     .await
             })
@@ -22249,6 +22253,7 @@ pub(crate) mod tests {
                 client_instance_id: &client,
                 sequence: 1,
                 snapshot,
+                prepared_successor: None,
             })
             .await
             .expect("live session")
@@ -22300,6 +22305,7 @@ pub(crate) mod tests {
                         snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
                             crate::playback_control::ClientPlatform::Web,
                         ),
+                        prepared_successor: None,
                     })
                     .await
             })

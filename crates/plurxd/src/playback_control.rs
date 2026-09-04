@@ -1672,6 +1672,52 @@ pub(crate) enum ControlAction {
     },
 }
 
+/// The durable successor an exchange may announce to its client.
+///
+/// Kept separate from [`ControlAction`] because `action_id` is not a property
+/// of the stored route. The first accepted exchange that sees this exact
+/// staged successor mints the id inside [`ControlState`]; later accepted
+/// exchanges and exact-sequence replays reuse it while the same preparation
+/// slot remains occupied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedSuccessorAction {
+    /// The actor-slot identity. Never sent to the client; the public session
+    /// id and the action id are its capabilities on the wire.
+    pub staged_incarnation_id: String,
+    pub session_id: String,
+    pub playlist_url: String,
+    pub media_origin_ms: i64,
+    pub effective_selection: EffectiveSelection,
+}
+
+impl PreparedSuccessorAction {
+    fn names_same_action(&self, action: &ControlAction) -> bool {
+        matches!(
+            action,
+            ControlAction::Prepare {
+                session_id,
+                playlist_url,
+                media_origin_ms,
+                effective_selection,
+                ..
+            } if session_id == &self.session_id
+                && playlist_url == &self.playlist_url
+                && media_origin_ms == &self.media_origin_ms
+                && effective_selection == &self.effective_selection
+        )
+    }
+
+    fn into_action(self) -> ControlAction {
+        ControlAction::Prepare {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            session_id: self.session_id,
+            playlist_url: self.playlist_url,
+            media_origin_ms: self.media_origin_ms,
+            effective_selection: self.effective_selection,
+        }
+    }
+}
+
 impl ControlAction {
     /// The one action a passive client is always safe to receive.
     pub(crate) fn is_passive(&self) -> bool {
@@ -1694,10 +1740,12 @@ impl ControlAction {
 ///
 /// Two sources, deliberately ordered. An action the actor decided is a
 /// transaction: it has identity, it is fenced by `prior_action`, and it
-/// replays exactly. It always wins. Only when the actor has nothing to say
-/// does the advisory hold get derived from the delivery the response is
-/// already carrying, so the action and `delivery.hold_reason` can never
-/// disagree — they are the same fact read once.
+/// replays exactly. When the client declared that action, it wins. An
+/// undeclared decided action is suppressed rather than replaced by a
+/// lower-ranked advisory action. Only when the actor has nothing to say does
+/// the advisory hold get derived from the delivery the response is already
+/// carrying, so the action and `delivery.hold_reason` can never disagree —
+/// they are the same fact read once.
 /// Whether a relayed playlist URL addresses this node and this session.
 ///
 /// Three separate things, and each has a way to be wrong on its own:
@@ -1885,7 +1933,10 @@ pub(crate) fn resolve_action(
     request: &ControlRequestV1,
 ) -> ControlAction {
     if !decided.is_passive() {
-        return decided.clone();
+        return decided
+            .vocabulary_name()
+            .filter(|name| request.accepts(name))
+            .map_or(ControlAction::None, |_| decided.clone());
     }
     // Ranked, and the order is the point. A verdict that trying again cannot
     // help outranks one that says wait, which outranks one that says this
@@ -2592,6 +2643,10 @@ pub(crate) struct LocalControlRequest<'a> {
     pub client_instance_id: &'a str,
     pub sequence: u64,
     pub snapshot: PlaybackDemandSnapshot,
+    /// A staged successor already present when this exchange began. The
+    /// owner-local control state still checks its own slot before announcing
+    /// it, so a durable row is evidence, not a second preparation authority.
+    pub prepared_successor: Option<PreparedSuccessorAction>,
 }
 
 /// The bounded client facts accepted with one control sequence.
@@ -2841,6 +2896,24 @@ impl Default for ControlState {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ControlAcceptance<'a> {
+    platform: Option<ClientPlatform>,
+    prepared_successor: Option<&'a PreparedSuccessorAction>,
+}
+
+impl<'a> ControlAcceptance<'a> {
+    fn new(
+        platform: Option<ClientPlatform>,
+        prepared_successor: Option<&'a PreparedSuccessorAction>,
+    ) -> Self {
+        Self {
+            platform,
+            prepared_successor,
+        }
+    }
+}
+
 impl ControlState {
     /// Apply the second, owner-local fence after ingress or relay has proved
     /// the same tuple against the durable route. Advancing an epoch resets the
@@ -2852,6 +2925,7 @@ impl ControlState {
         client_instance_id: &str,
         sequence: u64,
         platform: Option<ClientPlatform>,
+        prepared_successor: Option<&PreparedSuccessorAction>,
     ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform), ControlStateError> {
         self.accept_at(
             Instant::now(),
@@ -2859,7 +2933,7 @@ impl ControlState {
             owner_epoch,
             client_instance_id,
             sequence,
-            platform,
+            ControlAcceptance::new(platform, prepared_successor),
         )
     }
 
@@ -2870,8 +2944,12 @@ impl ControlState {
         owner_epoch: u64,
         client_instance_id: &str,
         sequence: u64,
-        platform: Option<ClientPlatform>,
+        acceptance: ControlAcceptance<'_>,
     ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform), ControlStateError> {
+        let ControlAcceptance {
+            platform,
+            prepared_successor,
+        } = acceptance;
         let client_instance_id = uuid::Uuid::parse_str(client_instance_id)
             .map_err(|_| ControlStateError::StaleClient)?;
         match self.generation.as_deref() {
@@ -2936,7 +3014,19 @@ impl ControlState {
         }
         self.last_sequence = sequence;
         self.last_accepted_at = Some(now);
-        self.prior_action = ControlAction::None;
+        self.prior_action = prepared_successor
+            .filter(|successor| {
+                self.preparation
+                    .may_commit(&successor.staged_incarnation_id)
+            })
+            .map(|successor| {
+                if successor.names_same_action(&self.prior_action) {
+                    self.prior_action.clone()
+                } else {
+                    successor.clone().into_action()
+                }
+            })
+            .unwrap_or(ControlAction::None);
         Ok((
             ControlDisposition::Accepted,
             self.last_sequence,
@@ -5418,6 +5508,7 @@ struct OwnedLocalControlRequest {
     client_instance_id: String,
     sequence: u64,
     snapshot: PlaybackDemandSnapshot,
+    prepared_successor: Option<PreparedSuccessorAction>,
 }
 
 enum RollingControlCommand {
@@ -7012,7 +7103,10 @@ impl RollingControlActor {
             request.owner_epoch,
             &request.client_instance_id,
             request.sequence,
-            request.snapshot.platform(),
+            ControlAcceptance::new(
+                request.snapshot.platform(),
+                request.prepared_successor.as_ref(),
+            ),
         )?;
         let accepted_end = disposition == ControlDisposition::Accepted
             && request.snapshot.demand == PlaybackDemand::End;
@@ -10271,6 +10365,7 @@ impl RollingControlHandle {
             client_instance_id: request.client_instance_id.to_owned(),
             sequence: request.sequence,
             snapshot: request.snapshot,
+            prepared_successor: request.prepared_successor,
         };
         let (reply, response) = tokio::sync::oneshot::channel();
         self.enqueue_command(RollingControlCommand::Control {
@@ -10990,7 +11085,8 @@ pub(crate) fn record_action(
     // called it rolled out would hide that.
     let complete = request.accepts(HOLD_ACTION)
         && request.accepts(TERMINAL_ACTION)
-        && request.accepts(RETRY_RESOURCE_ACTION);
+        && request.accepts(RETRY_RESOURCE_ACTION)
+        && request.accepts(PREPARE_REPLACEMENT_ACTION);
     CONTROL_VOCABULARY[usize::from(complete)][platform].fetch_add(1, Ordering::Relaxed);
 }
 
@@ -12142,6 +12238,7 @@ mod tests {
             HOLD_ACTION.to_owned(),
             TERMINAL_ACTION.to_owned(),
             RETRY_RESOURCE_ACTION.to_owned(),
+            PREPARE_REPLACEMENT_ACTION.to_owned(),
         ]);
         request
     }
@@ -12433,6 +12530,11 @@ mod tests {
             action_metrics(&prepare, &delivery, &asking).action,
             ActionKind::Prepare,
             "and it occupies its own metric slot rather than another's",
+        );
+        assert_eq!(
+            resolve_action(&prepare, &delivery, &request()),
+            ControlAction::None,
+            "a client that did not declare the transaction is not handed it",
         );
     }
 
@@ -12798,7 +12900,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                Some(ClientPlatform::Web),
+                ControlAcceptance::new(Some(ClientPlatform::Web), None),
             ),
             Ok((
                 ControlDisposition::Accepted,
@@ -12814,7 +12916,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Ok((
                 ControlDisposition::Replay,
@@ -12830,7 +12932,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 0,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Err(ControlStateError::StaleSequence)
         );
@@ -12841,9 +12943,72 @@ mod tests {
                 1,
                 &uuid::Uuid::new_v4().to_string(),
                 2,
-                Some(ClientPlatform::Apple),
+                ControlAcceptance::new(Some(ClientPlatform::Apple), None),
             ),
             Err(ControlStateError::StaleClient)
+        );
+    }
+
+    #[test]
+    fn a_prepared_successor_gets_one_action_identity_and_replays_it_exactly() {
+        let request = request();
+        let mut state = ControlState::default();
+        let started = Instant::now();
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        assert!(state.stage_preparation(staged_incarnation_id.clone(), request.generation.clone(),));
+        let prepared_session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id,
+            session_id: prepared_session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{prepared_session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+
+        let accepted = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor)),
+            )
+            .expect("accepted preparation action");
+        let ControlAction::Prepare { action_id, .. } = &accepted.2 else {
+            panic!("the occupied preparation slot must announce its successor");
+        };
+        assert!(uuid::Uuid::parse_str(action_id).is_ok());
+
+        let replay = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(None, None),
+            )
+            .expect("exact replay");
+        assert_eq!(replay.0, ControlDisposition::Replay);
+        assert_eq!(
+            replay.2, accepted.2,
+            "a missed row read cannot alter a replay"
+        );
+
+        let next = state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(None, Some(&successor)),
+            )
+            .expect("next accepted exchange");
+        assert_eq!(
+            next.2, accepted.2,
+            "the action id belongs to the staging, not to one exchange",
         );
     }
 
@@ -12859,7 +13024,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                Some(ClientPlatform::Web),
+                ControlAcceptance::new(Some(ClientPlatform::Web), None),
             )
             .expect("epoch one");
         state
@@ -12869,7 +13034,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 8,
-                None,
+                ControlAcceptance::new(None, None),
             )
             .expect("epoch one advance");
         let successor_client = uuid::Uuid::new_v4().to_string();
@@ -12880,7 +13045,7 @@ mod tests {
                 2,
                 &successor_client,
                 1,
-                Some(ClientPlatform::Apple),
+                ControlAcceptance::new(Some(ClientPlatform::Apple), None),
             ),
             Ok((
                 ControlDisposition::Accepted,
@@ -12896,7 +13061,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 9,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Err(ControlStateError::OwnerChanged)
         );
@@ -12914,7 +13079,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 2,
-                Some(ClientPlatform::Web),
+                ControlAcceptance::new(Some(ClientPlatform::Web), None),
             ),
             Err(ControlStateError::StaleSequence)
         );
@@ -12925,7 +13090,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                Some(ClientPlatform::Web),
+                ControlAcceptance::new(Some(ClientPlatform::Web), None),
             )
             .expect("first sequence");
         assert!(matches!(
@@ -12935,7 +13100,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 2,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Err(ControlStateError::RateLimited(_))
         ));
@@ -12946,7 +13111,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 2,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Ok((
                 ControlDisposition::Accepted,
@@ -12969,7 +13134,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Err(ControlStateError::StaleClient)
         );
@@ -12980,7 +13145,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                Some(ClientPlatform::Web),
+                ControlAcceptance::new(Some(ClientPlatform::Web), None),
             )
             .expect("capability snapshot");
         assert_eq!(
@@ -12990,7 +13155,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 2,
-                Some(ClientPlatform::Apple),
+                ControlAcceptance::new(Some(ClientPlatform::Apple), None),
             ),
             Err(ControlStateError::StaleClient)
         );
@@ -13015,6 +13180,7 @@ mod tests {
             client_instance_id: request.client_instance_id.clone(),
             sequence: request.sequence,
             snapshot: PlaybackDemandSnapshot::from(request),
+            prepared_successor: None,
         }
     }
 
@@ -13963,6 +14129,7 @@ mod tests {
             client_instance_id: &end.client_instance_id,
             sequence: end.sequence,
             snapshot: PlaybackDemandSnapshot::from(&end),
+            prepared_successor: None,
         };
 
         let accepted = handle.control(local()).await.expect("accepted end");
@@ -13996,6 +14163,7 @@ mod tests {
                     client_instance_id: &active_same_sequence.client_instance_id,
                     sequence: active_same_sequence.sequence,
                     snapshot: PlaybackDemandSnapshot::from(&active_same_sequence),
+                    prepared_successor: None,
                 })
                 .await,
             Err(ControlStateError::SessionEnded),
@@ -14014,6 +14182,7 @@ mod tests {
                     client_instance_id: &end.client_instance_id,
                     sequence: end.sequence,
                     snapshot: PlaybackDemandSnapshot::from(&end),
+                    prepared_successor: None,
                 })
                 .await,
             Err(ControlStateError::SessionEnded),
@@ -15717,6 +15886,7 @@ mod tests {
                 client_instance_id: &request.client_instance_id,
                 sequence: request.sequence,
                 snapshot: PlaybackDemandSnapshot::from(&request),
+                prepared_successor: None,
             })
             .await
             .expect("post-deadline control remains compatibility-passive");
@@ -16474,6 +16644,7 @@ mod tests {
                 client_instance_id: &request.client_instance_id,
                 sequence: request.sequence,
                 snapshot: PlaybackDemandSnapshot::from(&request),
+                prepared_successor: None,
             })
             .await
             .expect("explicit mode accepted");
@@ -16594,6 +16765,7 @@ mod tests {
             client_instance_id: &request.client_instance_id,
             sequence: request.sequence,
             snapshot: PlaybackDemandSnapshot::from(&request),
+            prepared_successor: None,
         });
         drop(never_polled);
         assert_eq!(
@@ -16623,6 +16795,7 @@ mod tests {
                 client_instance_id: &request.client_instance_id,
                 sequence: request.sequence,
                 snapshot: PlaybackDemandSnapshot::from(&request),
+                prepared_successor: None,
             })
             .await
             .expect("request remains admissible");
@@ -16685,6 +16858,7 @@ mod tests {
                 client_instance_id: &end.client_instance_id,
                 sequence: end.sequence,
                 snapshot: PlaybackDemandSnapshot::from(&end),
+                prepared_successor: None,
             })
             .await
             .expect("lost terminal response is exactly replayable");

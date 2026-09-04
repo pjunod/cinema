@@ -637,7 +637,11 @@ pattern = "media_session_route_for_playback"
 # prove the staged row is usable rather than merely present. The pointer
 # assertions are what say `prepare_media_session` is the entry point rather
 # than `activate_media_session`, which would have advanced it.
-expected_occurrences = 11
+# 11 -> 12 with M6 §3.4c's Prepare announcement: the integration assertion
+# reads the pointer after the action is emitted to prove it still names the
+# predecessor. Test-only; it witnesses the existing pointer authority and
+# neither writes nor competes with it.
+expected_occurrences = 12
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -717,7 +721,11 @@ pattern = "publication_ready_at_ms"
 # 77 -> 78 with M6 §3.4: one test-only activation standing up a live route for
 # the staging fixture. It confirms to zero like any ordinary first activation
 # and moves no shipped fence.
-expected_occurrences = 78
+# 78 -> 79 with M6 §3.4c's staged-row reader: the shipped read checks that the
+# proposed successor is still held at the blocked publication fence before
+# asking the existing actor slot to authorize its announcement. It writes no
+# fence and creates no publication authority.
+expected_occurrences = 79
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -744,7 +752,10 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # `m4-activation-publication-handoff-fence` above.
 # 23 -> 24 with the relay-gate harness: its shared activation helper names the
 # blocked sentinel once, the way every other activation fixture does.
-expected_occurrences = 24
+# 24 -> 25 with M6 §3.4c's staged-row reader, for the same read-only validation
+# described in `m4-activation-publication-handoff-fence` above. The actor slot
+# remains the sole authority that decides whether the row may be announced.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
