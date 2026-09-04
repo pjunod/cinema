@@ -13,6 +13,7 @@ fn summary_value(
     summary: plurx_core::store::AnalysisStatusSummary,
     enabled: bool,
     now_ms: i64,
+    queue_health: Option<crate::state::AnalysisQueueHealthReport>,
 ) -> serde_json::Value {
     serde_json::json!({
         "available": true,
@@ -35,6 +36,19 @@ fn summary_value(
             "file_id": summary.latest_error_file_id.to_string(),
             "updated_at_ms": summary.latest_error_updated_at_ms,
         })),
+        // Absent until this node has taken its first Store sample. A verdict
+        // with nothing behind it would read as `idle`, which is a claim.
+        "health": queue_health.map(|report| serde_json::json!({
+            "verdict": report.verdict.as_str(),
+            "ready_24h": report.health.ready_24h,
+            "attempt_limit_24h": report.health.attempt_limit_24h,
+            "claimed_24h": report.health.claimed_24h,
+            "claimable": report.health.claimable,
+            "running_past_lease": report.health.running_past_lease,
+            "last_ready_at_ms": report.health.last_ready_at_ms,
+            "claims_since_start": report.claims_since_start,
+            "lease_losses_since_start": report.lease_losses_since_start,
+        })),
     })
 }
 
@@ -48,6 +62,7 @@ pub(crate) async fn activity_summary(state: &AppState) -> Result<serde_json::Val
         summary,
         state.jobs.analysis_queue_enabled().await,
         now_ms,
+        state.store_metrics.snapshot().queue_health,
     ))
 }
 
@@ -446,6 +461,14 @@ fn history_row_value(row: plurx_core::store::AnalysisHistoryRow) -> serde_json::
         "not_before_ms": row.not_before_ms,
         "request_error_code": row.request_error_code,
         "job_error_code": row.job_error_code,
+        // The code each charged attempt ended with, oldest first. The row's
+        // own `job_error_code` is the terminal one, which for an exhausted
+        // budget is always `attempt_limit` and says nothing.
+        "job_attempt_errors": row
+            .job_attempt_errors
+            .split(',')
+            .filter(|code| !code.is_empty())
+            .collect::<Vec<_>>(),
         "created_at_ms": row.created_at_ms,
         "updated_at_ms": row.updated_at_ms,
         "pipeline_version": row.pipeline_version,
@@ -487,6 +510,7 @@ async fn request_value(
     let mut claim_expires_at_ms = request.lease_expires_ms;
     let mut not_before_ms = request.not_before_ms;
     let mut last_error_code = request.last_error_code.clone();
+    let mut attempt_errors = Vec::new();
     let mut updated_at_ms = request.updated_at_ms;
     let mut phase = request_phase.to_owned();
     if request.component == "fragment_index" && !request.result_cache_key.is_empty() {
@@ -519,6 +543,16 @@ async fn request_value(
             if !worker.last_error_code.is_empty() {
                 last_error_code = worker.last_error_code;
             }
+            // The job's own history. `analysis_attempts` is fenced by request,
+            // and a job can exist without a request at all — playback's
+            // foreground enqueue makes one — so the detail view has to read
+            // this from the job or it shows nothing for exactly those rows.
+            attempt_errors = worker
+                .attempt_errors
+                .split(',')
+                .filter(|code| !code.is_empty())
+                .map(str::to_owned)
+                .collect();
             updated_at_ms = updated_at_ms.max(worker.updated_at_ms);
             phase = match storage_state.as_str() {
                 "queued" => "claimed",
@@ -555,6 +589,7 @@ async fn request_value(
         "force": request.force_rebuild,
         "generation": request.result_cache_key,
         "last_error_code": last_error_code,
+        "job_attempt_errors": attempt_errors,
         "created_at_ms": request.created_at_ms,
         "updated_at_ms": updated_at_ms,
         "phase": phase,
@@ -697,6 +732,189 @@ pub async fn retry_job(
     Ok(Json(request_value(&state, retried, now_ms).await?))
 }
 
+/// What a caller may ask `reopen` to do, and what it defaults to when they
+/// ask for nothing.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisReopenParams {
+    /// Report what would be reopened and change nothing. Defaults to `true`:
+    /// the destructive reading of an empty body is the one an operator did
+    /// not ask for, and a bulk reopen after an outage can put four figures of
+    /// work back on the queue.
+    dry_run: Option<bool>,
+    /// Ceiling on **distinct source files** touched, not requests. A file
+    /// with a failed fragment index and a failed marker pass is one file an
+    /// operator is choosing to re-run, and a limit that counted requests
+    /// would silently do twice what it said.
+    limit: Option<i64>,
+    /// Restrict to one component (`fragment_index`, `skip_markers`, …).
+    component: Option<String>,
+}
+
+/// The largest bulk reopen one call will perform.
+///
+/// A cap rather than a page: the queue this feeds is the one that just came
+/// back from an outage, and a caller who wants five thousand files re-run can
+/// say so five hundred at a time and watch the verdict between calls.
+const ANALYSIS_REOPEN_MAX_FILES: i64 = 500;
+/// Rows read looking for those files. Two per file is generous — the two
+/// components a file can have — and the store clamps its own reads anyway.
+const ANALYSIS_REOPEN_SCAN_LIMIT: i64 = ANALYSIS_REOPEN_MAX_FILES * 2;
+/// Active-request headroom this action refuses to consume.
+///
+/// `enqueue_analysis_request` refuses every producer once the active table
+/// reaches [`plurx_core::store::MAX_ACTIVE_ANALYSIS_REQUESTS`], and
+/// `retry_analysis_request_admin` does not check that ceiling at all. A bulk
+/// reopen that filled the table would take discovery, playback's foreground
+/// enqueue and the operator's own single-row Retry down with it.
+const ANALYSIS_REOPEN_HEADROOM: i64 = 512;
+
+/// POST /api/v1/analysis/reopen — put terminal analysis work back on the
+/// queue in bulk.
+///
+/// The single-row retry already existed and is the right tool for one bad
+/// file. It is the wrong tool for the shape this came from: a queue that
+/// failed every job it claimed for three days, leaving four figures of rows
+/// terminal because the queue was broken and not because the sources were.
+///
+/// What makes it safe to press twice is the store's own definition of
+/// reopenable (`reopenable_analysis_requests`): a terminal row counts only
+/// while no request for the same source, component and target is `queued`,
+/// `running`, `submitted` or `ready`. A failed row is never deleted, so
+/// without that predicate a file repaired on Monday would still be offered
+/// on Friday and re-forced on a library that is already indexed.
+///
+/// It skips loudly rather than refusing. A row whose successor cannot be
+/// created — the file changed underneath it, or another actor inserted a
+/// successor between this call's read and its write — is counted in
+/// `skipped_unavailable` and left for discovery. Standalone cluster jobs with
+/// no operator request behind them are outside this endpoint entirely; they
+/// belong to discovery's own retry.
+pub async fn reopen(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Json(params): Json<AnalysisReopenParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let dry_run = params.dry_run.unwrap_or(true);
+    let limit = params.limit.unwrap_or(50);
+    if !(1..=ANALYSIS_REOPEN_MAX_FILES).contains(&limit) {
+        return Err(ApiError::BadRequest(format!(
+            "analysis reopen limit must be between 1 and {ANALYSIS_REOPEN_MAX_FILES} files"
+        )));
+    }
+    if let Some(component) = params.component.as_deref() {
+        if !matches!(component, "fragment_index" | "skip_markers") {
+            return Err(ApiError::BadRequest(
+                "invalid analysis component".to_owned(),
+            ));
+        }
+    }
+    if !dry_run && !state.jobs.analysis_queue_enabled().await {
+        return Err(ApiError::Conflict(
+            "analysis queue is paused; reopened work would sit unclaimed".to_owned(),
+        ));
+    }
+    let now_ms = crate::state::clock_ms();
+    let summary = state.store.analysis_status_summary().await?;
+    // Everything this action can insert has to fit under the ceiling every
+    // other producer shares, with room left over for them.
+    let headroom = (plurx_core::store::MAX_ACTIVE_ANALYSIS_REQUESTS
+        - ANALYSIS_REOPEN_HEADROOM
+        - summary.working)
+        .max(0);
+    let candidates = state
+        .store
+        .reopenable_analysis_requests(params.component.as_deref(), ANALYSIS_REOPEN_SCAN_LIMIT)
+        .await?;
+    let considered = candidates.len() as u64;
+
+    let mut files: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    let mut reopened: Vec<serde_json::Value> = Vec::new();
+    let mut skipped_unavailable = 0_u64;
+    let mut stopped_at_headroom = false;
+
+    for request in candidates {
+        // A new file starts a new unit of the operator's limit; a second
+        // component on a file already inside it rides along, which is the
+        // point of counting files.
+        if !files.contains(&request.file_id)
+            && i64::try_from(files.len()).unwrap_or(i64::MAX) >= limit
+        {
+            break;
+        }
+        if i64::try_from(reopened.len()).unwrap_or(i64::MAX) >= headroom {
+            stopped_at_headroom = true;
+            break;
+        }
+        if dry_run {
+            files.insert(request.file_id);
+            reopened.push(reopen_row_value(&request, None));
+            continue;
+        }
+        let successor_id = uuid::Uuid::new_v4().to_string();
+        let Some(retried) = state
+            .store
+            .retry_analysis_request_admin(&request.request_id, &successor_id, now_ms)
+            .await?
+        else {
+            // Either the source moved under the request — its identity is no
+            // longer reachable, so this is discovery's job — or somebody
+            // inserted a successor between the read above and this write.
+            // Both mean "not ours to reopen", and neither is worth failing
+            // the whole call over.
+            skipped_unavailable += 1;
+            continue;
+        };
+        files.insert(request.file_id);
+        reopened.push(reopen_row_value(&request, Some(&retried.request_id)));
+    }
+
+    if !dry_run && !reopened.is_empty() {
+        kick_analysis_queue(&state);
+        tracing::info!(
+            reopened = reopened.len(),
+            files = files.len(),
+            skipped_unavailable,
+            stopped_at_headroom,
+            "analysis work reopened in bulk"
+        );
+    }
+    Ok(Json(serde_json::json!({
+        "dry_run": dry_run,
+        "limit": limit,
+        // Reopenable rows this call actually read. Equal to the scan ceiling
+        // means the backlog is larger than one call can see, so a caller who
+        // wants it drained runs the action again.
+        "considered": considered,
+        "scan_limit": ANALYSIS_REOPEN_SCAN_LIMIT,
+        "scan_truncated": considered >= u64::try_from(ANALYSIS_REOPEN_SCAN_LIMIT).unwrap_or(u64::MAX),
+        // True when the active-request ceiling stopped this call short rather
+        // than the operator's own limit. More work is waiting; run it again
+        // once the queue has drained some.
+        "stopped_at_headroom": stopped_at_headroom,
+        "files": files.len(),
+        "reopened": reopened.len(),
+        "skipped_unavailable": skipped_unavailable,
+        "rows": reopened,
+    })))
+}
+
+fn reopen_row_value(
+    request: &plurx_core::store::AnalysisRequest,
+    successor_id: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "request_id": request.request_id,
+        "successor_id": successor_id,
+        "file_id": request.file_id.to_string(),
+        "component": request.component,
+        "state": if request.state == "cancelled" { "canceled" } else { &request.state },
+        "error_code": request.last_error_code,
+        "attempts": request.attempts,
+        "updated_at_ms": request.updated_at_ms,
+    })
+}
+
 /// DELETE /api/v1/analysis/jobs/{job} — durable cooperative cancellation.
 pub async fn cancel_job(
     _admin: AdminUser,
@@ -751,6 +969,7 @@ mod tests {
             not_before_ms: 0,
             request_error_code: String::new(),
             job_error_code: "source_superseded".to_owned(),
+            job_attempt_errors: String::new(),
             created_at_ms: 1,
             updated_at_ms: 1,
             pipeline_version: "v1".to_owned(),

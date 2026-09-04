@@ -838,6 +838,18 @@
   .analysis-error.warn b{color:var(--warn)}
   .analysis-error p{margin:4px 0 0;color:var(--prose);font-size:12px;line-height:1.48}
   .analysis-error code{display:inline-block;margin-top:6px;color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}
+  .analysis-verdict{margin-bottom:10px;border-left:3px solid var(--muted);padding:2px 0 2px 10px}
+  .analysis-verdict b{display:block;font-size:13px;line-height:1.35;color:var(--text)}
+  .analysis-verdict p{margin:2px 0 0;color:var(--prose);font-size:12px;line-height:1.45}
+  .analysis-verdict.bad{border-left-color:var(--bad)} .analysis-verdict.bad b{color:var(--bad)}
+  .analysis-verdict.warn{border-left-color:var(--warn)} .analysis-verdict.warn b{color:var(--warn)}
+  .analysis-verdict.ready{border-left-color:var(--good)} .analysis-verdict.ready b{color:var(--good)}
+  .analysis-verdict.cancelled{border-left-color:var(--muted)} .analysis-verdict.cancelled b{color:var(--muted)}
+  .analysis-attempts-head{margin-top:8px;color:var(--muted);font-size:11px;letter-spacing:.04em;text-transform:uppercase}
+  .analysis-attempts{margin:3px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:3px;max-width:580px;color:var(--prose);font-size:11.5px;line-height:1.45}
+  .analysis-attempts li{display:flex;align-items:baseline;gap:6px}
+  .analysis-attempts li span{flex:none;min-width:14px;color:var(--muted);font-variant-numeric:tabular-nums;text-align:right}
+  .analysis-attempts li code{color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}
   .analysis-diag{margin-top:8px;color:var(--muted);font-size:11.5px}
   .analysis-diag summary{cursor:pointer;list-style:none;color:var(--accent);font-weight:600}
   .analysis-diag summary::-webkit-details-marker{display:none}
@@ -11317,7 +11329,11 @@ function analysisErrorInfo(code){
     invalid_cache_identity:["Invalid cache identity","The server could not derive a safe content-addressed key for this source.","Inspect server logs; retry after correcting the source metadata.","bad"],
     queue_write_failed:["Queue update failed","The analysis request could not be handed to the shared index queue.","Check database or cluster health; the request will retry automatically.","bad"],
     queue_full_or_busy:["Analysis queue is busy","The shared index queue could not accept another handoff yet.","No action is needed; this request retries automatically.","warn"],
-    attempt_limit:["Retry limit reached","Repeated source or store failures exhausted the automatic retry budget.","Resolve the underlying error shown in earlier attempts, then retry manually.","bad"],
+    job_terminal:["The index job for this file already failed","A worker job for exactly this source and pipeline is already terminal, so this request cannot hand off to it. Repeating would retry forever without ever getting further.","Read the attempt history on that job for what it hit, fix that, then reopen the failed work in bulk from the Attention filter.","bad"],
+    lease_expired:["The claim lapsed","The node that claimed this work stopped renewing its lease before it finished.","Another node reclaims it automatically; repeated lapses mean the owner is overloaded, restarting, or losing the store.","warn"],
+    queue_expired:["Waited too long for a slot","The job sat queued past its eligibility window without any node claiming it.","Check that the target node is up and indexing is enabled there, then retry.","warn"],
+    node_local_refusal:["Returned by the node that held it","This node could not reach the source, so it handed the claim back without spending a retry.","No action: another node with the mount will take it. Persisting means no node can read the file.","warn"],
+    attempt_limit:["Retry limit reached","Repeated source or store failures exhausted the automatic retry budget.","Every attempt is listed below; resolve what those codes name, then retry manually.","bad"],
     unsupported:["VOD analysis is not supported","The file’s codec or fragment structure cannot produce a safe VOD HLS index.","Live HLS can be used only when live recovery is enabled in Playback settings; rebuilding will not help unless the source changes.","bad"],
     truncated:["Index output was incomplete","Analysis ended before it could describe the complete file timeline.","Check the source for damage or truncation, then retry after replacing it.","bad"],
     encode_failed:["Index encoding failed","The index was built but could not be serialized into the cache artifact.","Inspect server logs and retry; repeated failures need a server fix.","bad"],
@@ -11338,6 +11354,41 @@ function analysisCounts(value){
   const summary=value&&value.summary?value.summary:(value||{});
   return {...summary,active:summary.active??summary.working??0,attention:summary.attention??summary.failed??0,expected:summary.expected??0};
 }
+// The queue's own verdict, in one sentence, before any of the counts.
+//
+// The counts have always been here. What was missing is the thing that turns
+// "12,193 claims, 9,915 lost leases, nothing built in three days" into a
+// sentence somebody reads: a queue that fails every job it claims looks, in a
+// list of jobs, exactly like a queue with a lot of history.
+// Every figure here is fleet-wide: the jobs table is replicated and carries
+// no record of which node watched a transition, so every node renders the same
+// sentence. Saying "this node" would send an operator to restart the one
+// machine they happen to be looking at.
+function analysisVerdictLine(value){
+  const health=value&&value.health;
+  if(!health||!health.verdict) return "";
+  const ready=health.ready_24h||0, claimed=health.claimed_24h||0, waiting=health.claimable||0;
+  const age=health.last_ready_at_ms?fmtAgo(Math.floor(health.last_ready_at_ms/1000)):"never";
+  const plural=(n,word)=>`${n} ${word}${n===1?'':'s'}`;
+  // A queue that never got as far as a claim and a queue that claims and
+  // fails are the same outage wearing different faces. Name whichever one the
+  // numbers actually show, because they point at different first moves.
+  const deadDetail=claimed===0&&waiting>0
+    ? `${plural(waiting,'job')} waiting and nothing picked up in 24 hours. Last index built ${age}.`
+    : `${plural(claimed,'job')} picked up in 24 hours and nothing finished. Last index built ${age}.`;
+  const said={
+    dead:["bad","The index queue is not producing",deadDetail],
+    degraded:["warn","The index queue is struggling",
+      `${ready} built in the last 24 hours against ${plural(claimed,'job')} picked up, with ${plural(health.lease_losses_since_start||0,'lost lease')} and ${health.attempt_limit_24h||0} out of retries. Last index built ${age}.`],
+    healthy:["ready","The index queue is producing",
+      `${ready} built in the last 24 hours. Last index built ${age}.`],
+    idle:["cancelled","The index queue is idle",
+      "Nothing waiting, nothing picked up and nothing built in 24 hours — either the library is fully indexed or discovery is turned off."],
+  }[health.verdict];
+  if(!said) return "";
+  const [tone,title,detail]=said;
+  return `<div class="analysis-verdict ${tone}"><b>${esc(title)}</b><p>${esc(detail)}</p></div>`;
+}
 function analysisSummaryCard(value,context="activity"){
   const s=analysisCounts(value), attention=s.attention||0, active=s.active||0, expected=s.expected||0;
   const headline=s.available===false?"Analysis status is unavailable"
@@ -11352,7 +11403,7 @@ function analysisSummaryCard(value,context="activity"){
     :s.ready?`${s.ready} recent file${s.ready===1?' is':'s are'} ready for VOD HLS. The workspace retains the full searchable history.`
     :"This compact summary covers active work and recent terminal results; open the workspace for exact retained history.";
   const latest=s.latest_error&&s.latest_error.code?analysisErrorInfo(s.latest_error.code):null;
-  return `<div class="analysis-brief"><div class="analysis-brief-head"><div><h2>${esc(headline)}</h2><p>${esc(detail)}</p></div>
+  return `<div class="analysis-brief">${analysisVerdictLine(value&&value.summary?value.summary:value)}<div class="analysis-brief-head"><div><h2>${esc(headline)}</h2><p>${esc(detail)}</p></div>
       <div class="analysis-actions"><a class="ghost sm" href="#/analysis">Open workspace</a>${context==="activity"?`<button class="ghost sm" onclick="openAnalysisSettings()">Settings</button>`:""}</div></div>
     <div class="analysis-brief-status">
       <span class="analysis-state running">${active} working</span>
@@ -11410,6 +11461,22 @@ function analysisDisposition(row){
   return "attention";
 }
 function analysisErrors(row){ return [row.request_error_code?{stage:"Request",code:row.request_error_code}:null,row.job_error_code?{stage:"Index build",code:row.job_error_code}:null].filter(Boolean); }
+// The code each charged attempt ended with, oldest first. `job_error_code` is
+// only the terminal one, and for an exhausted budget that is always
+// `attempt_limit`, which names no cause at all.
+function analysisAttemptHistory(row){
+  const history=row&&row.job_attempt_errors;
+  return Array.isArray(history)?history.filter(Boolean):[];
+}
+function analysisAttemptHistoryHtml(row){
+  const history=analysisAttemptHistory(row);
+  if(!history.length) return "";
+  const items=history.map((code,index)=>`<li><span>${index+1}</span><code>${esc(code)}</code> ${esc(analysisErrorInfo(code).title)}</li>`).join("");
+  // The heading is not decoration: a row that eventually succeeded still
+  // carries the attempts it took, and an unlabelled list under a green Ready
+  // badge reads as a live failure.
+  return `<div class="analysis-attempts-head">Attempts so far</div><ol class="analysis-attempts">${items}</ol>`;
+}
 function analysisAction(row){
   if(row.action) return row.action;
   const code=row.job_error_code||row.request_error_code||"";
@@ -11456,6 +11523,7 @@ function analysisDiagnosticText(row,names){
     row.pipeline_version?`Pipeline: ${row.pipeline_version}`:null,
     `Attempts: ${row.attempts||0}`,
     ...analysisErrors(row).map(error=>`${error.stage} error: ${error.code}`),
+    analysisAttemptHistory(row).length?`Attempt history: ${analysisAttemptHistory(row).join(", ")}`:null,
   ].filter(Boolean).join("\n");
 }
 async function copyAnalysisDetails(key,btn){
@@ -11481,6 +11549,34 @@ async function retryFailedAnalysis(){
   }
   toast(`${queued} of ${rows.length} ${queued===1?'item':'items'} queued`);
   await renderAnalysis(PAGE_RENDER_GENERATION,true);
+}
+// Bulk reopen, in two steps, because the destructive step is the second one.
+//
+// "Retry this page" walks the rows already painted and is bounded by what the
+// operator can see. This is the tool for the other case: an outage left four
+// figures of rows terminal for a reason that has since been fixed, and none of
+// them are on this page. The server defaults to a dry run for the same reason
+// this asks twice — the count comes back before anything moves.
+async function reopenFailedAnalysis(btn){
+  const label=btn&&btn.textContent;
+  if(btn){btn.disabled=true;btn.textContent="Checking…";}
+  try{
+    const preview=await api("/analysis/reopen",{method:"POST",body:{dry_run:true,limit:500}});
+    const files=preview.files||0, rows=preview.reopened||0;
+    // Nothing reopenable is the normal answer once the queue has recovered:
+    // a file whose successor is queued or already built is not offered again,
+    // which is what makes this safe to press twice.
+    if(!files){ toast("Nothing left to reopen"); return; }
+    const more=preview.scan_truncated?" There is more waiting than one run can take; run it again afterwards.":"";
+    if(!confirm(`Reopen ${rows} analysis ${rows===1?'item':'items'} across ${files} ${files===1?'file':'files'}?${more}`)) return;
+    if(btn) btn.textContent="Reopening…";
+    const done=await api("/analysis/reopen",{method:"POST",body:{dry_run:false,limit:500}});
+    const unavailable=done.skipped_unavailable||0;
+    const held=done.stopped_at_headroom?", stopped early to leave queue room":"";
+    toast(`${done.reopened||0} reopened${unavailable?`, ${unavailable} no longer requestable`:""}${held}`);
+    await renderAnalysis(PAGE_RENDER_GENERATION,true);
+  }catch(error){ toast(error.message||"Couldn’t reopen analysis"); }
+  finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }
 }
 async function actOnAnalysisRow(key,btn){
   const row=ANALYSIS_ROW_LOOKUP.get(key); if(!row) return;
@@ -11541,7 +11637,7 @@ function paintAnalysis(snapshot){
     const errorHtml=analysisErrors(row).map(error=>analysisErrorHtml(error.code,error.stage)).join("");
     return `<tr>
       <td><span class="analysis-file">${title}</span><div class="analysis-sub">File ${row.file_id} · Priority ${esc(priorityLabel)} · Trigger ${esc(triggerLabel)}${pipeline}</div></td>
-      <td><span class="analysis-state ${esc(displayState)}">${esc(analysisStateLabel(displayState))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}
+      <td><span class="analysis-state ${esc(displayState)}">${esc(analysisStateLabel(displayState))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}${analysisAttemptHistoryHtml(row)}
         <details class="analysis-diag" data-analysis-key="${esc(key)}"${open.has(key)?" open":""}><summary data-analysis-focus="details:${esc(key)}">Technical details</summary><div class="analysis-diag-grid">
           ${details.map(([label,value])=>`<b>${esc(label)}</b><span>${esc(value)}</span>`).join("")}
           <b>Disposition</b><span>${esc(analysisDisposition(row))}</span><b>Attempts</b><span>${attempt}</span><b>Updated</b><span>${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</span>
@@ -11562,7 +11658,7 @@ function paintAnalysis(snapshot){
     <div class="analysis-sub">Summary metrics include all active work and up to ${counts.terminal_window||8192} recent terminal worker results. The selected filter count below is exact across retained history.</div>
     <div class="analysis-controls"><div class="analysis-search"><input id="analysis-search" data-analysis-focus="search" aria-label="Search analysis work" placeholder="Search title, file, node id, or error…" value="${esc(ANALYSIS_VIEW.query)}" oninput="setAnalysisQuery(this.value)"></div>
       <div class="analysis-filters">${filterButton("all","All")}${filterButton("working","Working")}${filterButton("attention","Attention")}${filterButton("expected","Expected")}${filterButton("ready","Ready")}</div>
-      ${ANALYSIS_VIEW.filter==="attention"&&pageRows.some(analysisCanRetry)?`<button class="ghost sm" data-analysis-focus="retry-page" onclick="retryFailedAnalysis()">Retry this page</button>`:`<span></span>`}</div>
+      ${ANALYSIS_VIEW.filter==="attention"&&pageRows.some(analysisCanRetry)?`<button class="ghost sm" data-analysis-focus="retry-page" onclick="retryFailedAnalysis()">Retry this page</button><button class="ghost sm" data-analysis-focus="reopen-all" onclick="reopenFailedAnalysis(this)">Reopen everything failed…</button>`:`<span></span>`}</div>
     ${rows?`<div class="analysis-table-wrap"><table class="analysis-table"><thead><tr><th scope="col">File</th><th scope="col">Analysis</th><th scope="col">Node / updated</th><th scope="col">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
       :`<div class="empty">${ANALYSIS_VIEW.query||ANALYSIS_VIEW.filter!=="all"?"No analysis work matches these filters.":"Nothing has been queued yet. Use Analyze now on a video’s detail page."}</div>`}
     <div class="analysis-pages"><span>Showing ${shownFrom}–${shownTo} of ${filteredTotal}</span><div class="row"><label>Rows <select data-analysis-focus="page-size" onchange="setAnalysisPageSize(this.value)">${[10,25,50,100].map(size=>`<option value="${size}"${ANALYSIS_VIEW.pageSize===size?' selected':''}>${size}</option>`).join("")}</select></label><button class="ghost sm" data-analysis-focus="previous" ${ANALYSIS_VIEW.page<=1?'disabled':''} onclick="setAnalysisPage(${ANALYSIS_VIEW.page-1})">Previous</button><span>Page ${ANALYSIS_VIEW.page} of ${pages}</span><button class="ghost sm" data-analysis-focus="next" ${!snapshot.next_cursor?'disabled':''} onclick="setAnalysisPage(${ANALYSIS_VIEW.page+1})">Next</button></div></div>`;

@@ -1129,7 +1129,10 @@ mod tests {
         let connection = rusqlite::Connection::open(&path).expect("fixture");
         SqliteStore::apply_migrations_for_test(
             &connection,
-            crate::store::SQLITE_SCHEMA_VERSION - 2,
+            // v42 exactly. Derived from head, this silently became v43 the
+            // moment another migration landed, and the step the test is named
+            // for stopped being covered.
+            42,
         )
         .expect("v42 schema");
         drop(connection);
@@ -1170,7 +1173,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("v43-malformed-guard.db");
         let connection = rusqlite::Connection::open(&path).expect("fixture");
-        // Stop one short of the guard migration itself, whatever the newest schema is.
+        // v43 exactly: the version before the guard ledger this test is about.
+        // Deriving it from the current head made it drift the moment another
+        // migration landed on top — which it has, twice, since.
         SqliteStore::apply_migrations_for_test(&connection, 43).expect("v43 schema");
         connection
             .execute_batch(
@@ -1191,6 +1196,7 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
+        // The refusal leaves the database exactly where it was: still v43.
         assert_eq!(version, 43);
         let columns: i64 = connection
             .query_row(
@@ -1242,11 +1248,15 @@ mod tests {
         connection
             .execute_batch(
                 // Everything v44 and later built has to go, or the replayed
-                // migration meets its own leftovers instead of a v43 database.
+                // migration meets its own leftovers instead of a v43 database:
+                // v44's recovery guards, v45's negative index, v46's attempt
+                // history. Leaving any of them makes the replay fail on a
+                // column or table that is already there.
                 "DROP INDEX dv_conversions_recovery_guard;
                  DROP TABLE dv_recovery_guards;
                  DROP TABLE IF EXISTS fragment_index_outcomes;
                  ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
+                 ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors;
                  PRAGMA user_version = 43;",
             )
             .expect("construct unrecoverable v43 commit");
@@ -1332,7 +1342,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 1] = ["fragment_index_outcomes"];
+        const DROPPED_BY_THE_FIXTURE: [&str; 2] = ["fragment_index_outcomes", "attempt_errors"];
 
         assert!(
             crate::store::sqlite::MIGRATIONS[GUARD_SCHEMA_VERSION as usize - 1]

@@ -3707,6 +3707,106 @@ The compact Prometheus alert shape is: membership sample valid · leader known �
 heartbeat quorum available · apply lag zero. `/readyz` remains the final active
 serving check because the metrics are deliberately passive and cached.
 
+### Reading the index queue's verdict
+
+`plurx_analysis_queue_health{verdict="…"}` is one series set to `1` and the
+rest to `0`. The same answer is the first line of **Settings → Content
+analysis** and the `health` block of `GET /api/v1/analysis/summary`, and a
+`dead` or `degraded` node repeats it as a `WARN` once an hour.
+
+| Verdict | What it means | What to do |
+|---|---|---|
+| `healthy` | Indexes were built in the last 24 hours and most claims finished. | Nothing. |
+| `idle` | Nothing waiting, nothing picked up, nothing built, no lapsed lease. There is genuinely nothing to judge. | Nothing, unless you expected work: check that `vod_index_mins` is not `0` and that the library is not already fully indexed. |
+| `degraded` | Producing, but losing a quarter of the claims this process watched, or a tenth of the jobs it picked up are exhausting their retry budget, or a row has sat `running` past its lease across two samples. | Read `attempt_errors` on the failing rows in the workspace — it names what each attempt actually hit. A standing `running_past_lease` means the claim sweep is not running: check that a node is draining the queue at all. |
+| `dead` | Nothing built in 24 hours, and either twenty or more jobs were picked up in that window, or twenty or more are sitting claimable and **none** were picked up at all. | This is the shape of the 2026-08-31 outage. The two halves point different ways: jobs picked up and none finished is a worker or source fault — check the daemon log for `analysis lease` warnings, then `plurx_analysis_lease_total{event="renew_failed"}`, since a renewal that always errors is a store or statement fault. A backlog nobody touched means no node is claiming: check that a daemon is running the queue at all. |
+
+`plurx_analysis_queue_claimed_24h` and `plurx_analysis_queue_claimable` are the
+two figures the verdict actually divides by, and both come from
+`cluster_fragment_index_jobs` over the same 24 hours as
+`plurx_analysis_queue_ready_24h`. Read those before the `_since_start` pair.
+
+The two `_since_start` figures — `plurx_analysis_queue_claims_since_start` and
+`plurx_analysis_queue_lease_losses_since_start` — are deltas taken against this
+process's first sample, so they reset when the daemon restarts, and they count
+`skip_markers` work alongside fragment-index work because the store keeps one
+lifecycle counter for both. Only the lease-loss ratio uses them, and only once
+there are at least eight claims to divide, because the jobs table cannot say how
+many leases were lost. Treat them as this process's own observation, not as a
+fleet total.
+
+**The verdict is fleet-wide, not per node.** `cluster_fragment_index_jobs` is
+replicated and has no column recording which node watched a transition, so every
+node in a cluster computes the same verdict from the same rows. A node reading
+`dead` is not a claim about that node; do not restart the machine you happen to
+be looking at on the strength of it.
+
+The whole `plurx_analysis_queue_*` family is **absent**, not zero, until the
+daemon has taken its first store sample — a verdict with nothing behind it would
+publish as `idle`, which is an assertion. Alert on
+`absent(plurx_analysis_queue_health)` separately from
+`plurx_analysis_queue_health{verdict="dead"} == 1`; a scrape that returns no
+verdict at all means the store sampler is not completing, which
+`plurx_store_metrics_sample_valid` and `plurx_store_metrics_sample_errors_total`
+will confirm.
+
+A `dead` or `degraded` verdict warns at most once an hour, and the hour only
+re-arms after the verdict has been clean for several consecutive samples — a
+queue that flaps between `degraded` and `healthy` logs on the hour, not on every
+sample.
+
+### Putting a failed queue back to work
+
+When the verdict turns green again after an outage, the work that failed during
+it is still terminal. Nothing reopens it on its own: a `failed` row is a durable
+statement that the queue tried and stopped, and the queue is right not to
+re-litigate it. Retrying four figures of rows one at a time through **Settings →
+Content analysis** is not a repair anybody performs, so there is a bulk action:
+
+```
+POST /api/v1/analysis/reopen
+{"dry_run": true, "limit": 50}
+```
+
+**An empty body is a dry run.** It reports what it would do and changes nothing;
+`dry_run: false` is the only thing that requeues. `limit` is a count of
+**distinct source files**, not of requests, so a file with a failed index and a
+failed marker pass counts once and both are reopened together — the number in
+the confirmation is the number of files you are choosing to re-run. The ceiling
+is 500 files per call; a larger backlog is several calls, which is deliberate:
+read the verdict between them rather than putting the whole backlog back onto a
+queue that may still be broken.
+
+**It is safe to press twice.** A terminal row counts as reopenable only while
+no request for the same source, component and target is `queued`, `running`,
+`submitted` or `ready`. Reopening creates a *successor* and leaves the failed
+row in place as history, so without that rule the repaired file would still be
+offered tomorrow and every later press would re-force a library that is already
+indexed. "Nothing left to reopen" is the healthy answer, not an error.
+
+Two things it does not cover, on purpose. **Forced generations** are excluded:
+a forced request is somebody's deliberate one-off, not a queue fault to repair.
+**Standalone cluster jobs** with no operator request behind them — playback's
+foreground enqueue makes those — are outside this endpoint entirely and belong
+to discovery's own retry.
+
+The response says what stopped it. `skipped_unavailable` counts rows whose
+successor could not be created: the file changed underneath the request, so its
+identity is no longer reachable and discovery owns it now, or another actor
+inserted a successor between this call's read and its write.
+`stopped_at_headroom` means the active-request table was close enough to its
+4,096-row ceiling that continuing would have started refusing *every other*
+producer — discovery, playback's foreground enqueue, your own single-row Retry —
+so the call stopped early; run it again once the queue has drained.
+`scan_truncated` means more is reopenable than one call reads, so run it again.
+
+A reopen into a paused queue is refused (`409`) rather than silently piling up
+work nothing will claim.
+
+**Settings → Content analysis → Attention** exposes the same thing as *Reopen
+everything failed…*, which previews first and then asks. *Retry this page* beside
+it is the bounded version: it walks only the rows currently painted.
+
 ## Hardware transcode & recent Intel GPUs
 
 The Docker image defaults to **jellyfin-ffmpeg**, which bundles a current Intel

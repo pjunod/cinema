@@ -400,6 +400,26 @@ pub(crate) async fn read_local_blob(
     Ok(Some(blob))
 }
 
+/// Drop this node's copy of a cached fragment index and the claim it made
+/// about holding it.
+///
+/// For the case where the bytes on disk are not the artifact they say they
+/// are: keeping them would make every later hydration of that key fail the
+/// same way, and keeping the location row would send peers here for them.
+pub(crate) async fn discard_local_blob(
+    store: &dyn Store,
+    node_id: &str,
+    root: &Path,
+    cache_key: &str,
+) {
+    if let Some(path) = cache_path(root, cache_key) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    let _ = store
+        .forget_cluster_fragment_index_location(cache_key, node_id)
+        .await;
+}
+
 pub(crate) async fn install_local_blob(
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,

@@ -953,6 +953,18 @@ const MIGRATIONS: &[&str] = &[
     // was spent every pass while `vodserve` answered `vod_index_pending`
     // forever for a title that was never going to have an index.
     crate::store::fragindex::FRAGMENT_INDEX_OUTCOMES_SCHEMA,
+    // v46: the code each charged fragment-index attempt ended with, oldest
+    // first. `last_error_code` is wiped on every claim and overwritten by the
+    // terminal `attempt_limit`, so a row that exhausts its budget says only
+    // that it did. The operator text in the Analysis view already promised a
+    // history — "resolve the underlying error shown in earlier attempts" —
+    // that the row did not keep.
+    //
+    // This entry was v45 on the effort branch and moved when
+    // `FRAGMENT_INDEX_OUTCOMES_SCHEMA` reached `main` first. Position in this
+    // list *is* the version, so the two are ordered by which one shipped
+    // rather than by which was written first.
+    crate::store::fragment_index_cluster::ANALYSIS_ATTEMPT_ERRORS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1234,6 +1246,40 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Whether v46's attempt-history column is already installed.
+    fn attempt_errors_column_exists(conn: &Connection) -> Result<bool, StoreError> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
+              WHERE name = 'attempt_errors'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count == 1)
+    }
+
+    /// Whether v45's negative fragment index is already installed.
+    ///
+    /// A replay guard is normally about a crash between a migration's commit
+    /// and its `user_version` bump. This one is also about a renumbering: the
+    /// attempt-history column shipped as v45 on an effort branch and became
+    /// v46 when the negative index reached `main` first. A database written
+    /// by one of those pre-merge builds sits at v45 with the *column* and
+    /// without the *table*, so a guard keyed only on `current` would skip
+    /// straight to v46 and leave `fragment_index_outcomes` missing forever —
+    /// and every outcome read then errors, which the background pass treats
+    /// as a reason to stop building fragment indexes at all. Guarding on the
+    /// object rather than on the counter is what makes the version number a
+    /// hint instead of a promise.
+    fn fragment_index_outcomes_table_exists(conn: &Connection) -> Result<bool, StoreError> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+              WHERE type = 'table' AND name = 'fragment_index_outcomes'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count == 1)
+    }
+
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let target = SQLITE_SCHEMA_VERSION;
@@ -1243,6 +1289,17 @@ impl SqliteStore {
                  refusing to open a database from a newer plurx"
             )));
         }
+        // A database written by a pre-merge effort build sits at v45 with the
+        // attempt-history column and without the negative fragment index,
+        // because those two migrations swapped numbers when they met. Rewind
+        // the counter to just below v45 so the loop offers that migration
+        // again; its own guard below makes the replay a no-op wherever the
+        // table is genuinely there.
+        let current = if current == 45 && !Self::fragment_index_outcomes_table_exists(conn)? {
+            44
+        } else {
+            current
+        };
         for (index, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
             let version = index as i64 + 1;
             // Foreign keys are off for the duration of a migration. A table
@@ -1252,7 +1309,15 @@ impl SqliteStore {
             // out here. Integrity is re-checked below instead of enforced
             // statement by statement.
             conn.pragma_update(None, "foreign_keys", "OFF")?;
-            let applied = if version == 41 && Self::analysis_component_schema_is_current(conn)? {
+            // A migration commits its own transaction and only then bumps
+            // `user_version`, so a crash in that window leaves the shape
+            // applied and the version behind. `ADD COLUMN` is not idempotent,
+            // so the replay would fail on a column that is already there —
+            // permanently. v41 has carried this guard since it landed.
+            let applied = if (version == 41 && Self::analysis_component_schema_is_current(conn)?)
+                || (version == 45 && Self::fragment_index_outcomes_table_exists(conn)?)
+                || (version == 46 && Self::attempt_errors_column_exists(conn)?)
+            {
                 Ok(())
             } else {
                 conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
@@ -1539,7 +1604,28 @@ impl MetricsStore for SqliteStore {
                     (SELECT COALESCE(json_group_array(json_object(
                         'event', counter.event, 'reason', counter.reason,
                         'count', counter.count)), '[]')
-                       FROM analysis_lifecycle_counters counter)
+                       FROM analysis_lifecycle_counters counter),
+                    -- What the queue has actually produced lately. `?2` is
+                    -- Unix seconds here; the jobs table keeps milliseconds.
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'ready' AND updated_at_ms >= (?2 - 86400) * 1000),
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'failed' AND last_error_code = 'attempt_limit'
+                        AND updated_at_ms >= (?2 - 86400) * 1000),
+                    -- `attempts` is charged on claim, so any row with one was
+                    -- picked up. Scoped to this table on purpose: the shared
+                    -- `('claim','all')` counter also carries skip-marker work.
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE attempts > 0
+                        AND updated_at_ms >= (?2 - 86400) * 1000),
+                    -- Work the queue could claim right now and has not.
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'queued' AND not_before_ms <= ?2 * 1000),
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state = 'running'
+                        AND COALESCE(lease_expires_ms, 0) < ?2 * 1000),
+                    (SELECT COALESCE(MAX(updated_at_ms), 0)
+                       FROM cluster_fragment_index_jobs WHERE state = 'ready')
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],
                 |row| {
@@ -1563,6 +1649,14 @@ impl MetricsStore for SqliteStore {
                             &row.get::<_, String>(15)?,
                             &row.get::<_, String>(16)?,
                             &row.get::<_, String>(17)?,
+                            super::AnalysisQueueHealth {
+                                ready_24h: row.get(18)?,
+                                attempt_limit_24h: row.get(19)?,
+                                claimed_24h: row.get(20)?,
+                                claimable: row.get(21)?,
+                                running_past_lease: row.get(22)?,
+                                last_ready_at_ms: row.get(23)?,
+                            },
                         ),
                     })
                 },
@@ -2013,7 +2107,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 45,
+            version, 46,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

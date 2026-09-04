@@ -4,9 +4,50 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The fragment-index queue built nothing for three days
+
+**PR [#873](https://github.com/pjunod/plurx/pull/873) — merged as `d90ca299`
+into `effort/fragment-index-queue-repair`, 2026-09-03, and being qualified
+into `main` now.** Milestones M0–M5.1 of the queue-repair handoff. M0 — the outage fix — is already on `main`: out-of-order `$N`
+placeholders in the replicated renew and yield statements, refused by
+`validate_parameter_order` before any I/O, so every lease heartbeat failed on
+its first tick and every claimed job lost its lease.
+
+Since then, on this branch. **M2**: the row remembers the code every charged
+attempt ended with, so a failure keeps its history instead of only its last
+line. **M3**: the queue can say in one word whether it is producing, and every
+figure the verdict divides by now comes from the same table over the same 24
+hours — the first cut divided a 24-hour window by a per-process counter that
+reset on restart and was shared with the marker pipeline, so every daemon
+restart reported `degraded` and a busy marker pass could vouch for a dead index
+queue. **M4**: failed work can be reopened in bulk, previewing first, and only
+while nothing for that source is already queued or built — without that rule
+the button re-forces an already-indexed library on every press. **M5.1**: a
+voter that claims a job whose artifact another voter already published settles
+it by hydration instead of rebuilding, which on a four-voter fleet is three
+full bitstream passes over each file that nobody needed to run.
+
+Two things are written down rather than built. **M5.2** — one background
+request per copy-video identity, which is why no converting Dolby Vision index
+exists anywhere on the fleet — needs a column on `analysis_requests` to scope
+the forced-successor cancellation, and that is a schema bump on both backends
+and therefore a stop-the-fleet deploy. Paul's call; the analysis is in
+`docs/CONTENT-ANALYSIS-INDEX-HANDOFF.md` §5.9 so the call is informed.
+**M5.4** cannot be measured until M5.2 exists.
+
+Every milestone got an adversarial review before merge and every review found
+real defects — the M3 and M4 reviews each found a fault that would have
+misled an operator in production. The fixes are in the PR comments beside what
+they were.
+
+**Wants deploying** once merged, and wants deploying before or alongside the
+attestation change: the reopen endpoint is how the rows stranded by the outage
+come back.
+
 ## Source attestation was hashing whole films to answer a question about their inode
 
-**Branch `agent/sampled-source-attestation` — in review.** Executes Paul's
+**PR [#877](https://github.com/pjunod/plurx/pull/877) — merged to `main` as
+`d0e5c630`, 2026-09-03.** Executes Paul's
 2026-09-03 ruling on `DV-P7-ATTESTATION-TIMEOUT-FINDINGS.md` §9. Every
 fragment-index build attested its source by reading every byte of it into a
 SHA-256. On a 43 GB Dolby Vision title at the fleet's measured 27 MB/s that

@@ -51,6 +51,8 @@ const BORROWED = [
   "analysisRowKey",
   "analysisDisposition",
   "analysisErrors",
+  "analysisAttemptHistory",
+  "analysisAttemptHistoryHtml",
   "analysisAction",
   "analysisCanRetry",
   "analysisDiagnosticText",

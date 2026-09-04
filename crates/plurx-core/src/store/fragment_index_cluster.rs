@@ -517,6 +517,24 @@ BEGIN
 END;
 "#;
 
+/// SQLite v46 / replicated v26: the code each *charged* attempt ended with.
+///
+/// A job row keeps one `last_error_code`, wiped on every claim and overwritten
+/// by the terminal `attempt_limit`, so the row that dies carries no trace of
+/// why. 1,933 rows died that way in three days and the cause had to be
+/// recovered from the aggregate lifecycle counters. This is a column rather
+/// than rows in `analysis_attempts` because a job can exist without a request
+/// — playback's foreground enqueue makes one — and that table is keyed by
+/// request fence.
+///
+/// Bounded by `MAX_ANALYSIS_MAX_ATTEMPTS` entries of `MAX_ERROR_CODE_BYTES`:
+/// only charged attempts append, so an uncharged yield cannot grow it without
+/// limit, and every reopen that resets `attempts` resets the history with it.
+pub const ANALYSIS_ATTEMPT_ERRORS_SCHEMA: &str = r#"
+ALTER TABLE cluster_fragment_index_jobs
+    ADD COLUMN attempt_errors TEXT NOT NULL DEFAULT '';
+"#;
+
 pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_ANALYSIS_MAX_ATTEMPTS: i64 = 5;
 pub const MAX_ANALYSIS_MAX_ATTEMPTS: i64 = 20;
@@ -663,6 +681,7 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
               THEN job.not_before_ms ELSE request.not_before_ms END AS not_before_ms,
          COALESCE(request.last_error_code, '') AS request_error_code,
          CASE WHEN request.cache_rank = 1 THEN COALESCE(job.last_error_code, '') ELSE '' END AS job_error_code,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.attempt_errors, '') ELSE '' END AS job_attempt_errors,
          request.created_at_ms AS created_at_ms,
          CASE WHEN request.cache_rank = 1 AND COALESCE(job.updated_at_ms, 0) > request.updated_at_ms
               THEN job.updated_at_ms ELSE request.updated_at_ms END AS updated_at_ms,
@@ -699,6 +718,7 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
          COALESCE(job.lease_expires_ms, 0) AS lease_expires_ms,
          job.attempts AS attempts, job.not_before_ms AS not_before_ms,
          '' AS request_error_code, COALESCE(job.last_error_code, '') AS job_error_code,
+         COALESCE(job.attempt_errors, '') AS job_attempt_errors,
          job.created_at_ms AS created_at_ms, job.updated_at_ms AS updated_at_ms,
          SUBSTR(job.pipeline_sha256, 1, 12) AS pipeline_version,
          job.cache_key AS requested_generation,
@@ -874,6 +894,11 @@ pub struct ClusterFragmentIndexJob {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub last_error_code: String,
+    /// The code each *charged* attempt ended with, oldest first, comma
+    /// separated. Never cleared by a claim; reset only where the retry budget
+    /// itself resets. `last_error_code` is the terminal code the UI and the
+    /// lifecycle triggers key on — this is the history behind it.
+    pub attempt_errors: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1002,6 +1027,10 @@ pub struct AnalysisHistoryRow {
     pub cancel_requested: bool,
     pub phase: String,
     pub source_size: i64,
+    /// The code each charged attempt of the joined job ended with, oldest
+    /// first. Empty for a request with no job, and for the non-current
+    /// generations of one.
+    pub job_attempt_errors: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1010,6 +1039,11 @@ pub struct AnalysisHistoryPage {
     pub filtered_total: i64,
     pub next_cursor: Option<AnalysisHistoryCursor>,
 }
+
+/// The ceiling `enqueue_analysis_request` refuses at. Exposed so a bulk
+/// operator action can leave headroom rather than filling the table every
+/// other producer needs to be able to enqueue into at all.
+pub const MAX_ACTIVE_ANALYSIS_REQUESTS: i64 = 4_096;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalysisStatusSummary {
@@ -1129,6 +1163,28 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ) -> Result<u64, StoreError>;
 
     async fn analysis_requests(&self, limit: i64) -> Result<Vec<AnalysisRequest>, StoreError>;
+
+    /// Terminal requests that a bulk reopen should actually act on.
+    ///
+    /// Narrower than "everything failed", and the difference is what makes a
+    /// bulk reopen safe to press twice. A row is reopenable only when no
+    /// other request for the same source identity, component and target is
+    /// `queued`, `running`, `submitted` or `ready` — so a file that a previous
+    /// reopen already repaired, or whose successor is still in flight, is not
+    /// offered again. Without that predicate the failed row stays in the
+    /// operator's attention list forever after its successor succeeds, and
+    /// every later press re-forces a library that is already indexed.
+    ///
+    /// Forced requests are excluded: a forced generation is somebody's
+    /// deliberate one-off, not a queue fault to repair.
+    ///
+    /// Rows are ordered oldest-terminal first, so paging through a backlog
+    /// makes progress rather than re-offering the same head.
+    async fn reopenable_analysis_requests(
+        &self,
+        component: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AnalysisRequest>, StoreError>;
 
     async fn analysis_request(
         &self,
@@ -1265,6 +1321,34 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ) -> Result<bool, StoreError>;
 
     async fn complete_cluster_fragment_index(
+        &self,
+        job: &ClusterFragmentIndexJob,
+        artifact: &ClusterFragmentIndexArtifact,
+        location: &ClusterFragmentIndexLocation,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Settle a claimed job from an artifact another node already built.
+    ///
+    /// Discovery on each voter targets itself, so four voters queue four jobs
+    /// for one `cache_key` and, on a healthy queue, four full passes over the
+    /// same file produce one artifact. Once any of them has published it, the
+    /// rest need only the bytes and a location row.
+    ///
+    /// This exists rather than reusing [`ClusterFragmentIndexStore::complete_cluster_fragment_index`]
+    /// because that one requires `artifact.built_by_node_id == job.owner_node_id`
+    /// — correct, for a build. Relabelling a hydrated artifact to get past it
+    /// would appear to work only because the artifact insert is
+    /// `ON CONFLICT DO NOTHING`, which is a trick and not a contract: the
+    /// stored row would keep its real builder while the caller lied about it.
+    ///
+    /// So the artifact here is required to already exist, byte for byte, and
+    /// is never written. Every other guard is the build path's: the same
+    /// running/owner/fence/lease check, the same source-identity check, the
+    /// same head advance. Settling from inside the claimed job is what keeps
+    /// the request fence intact — the reason the older comment gave for
+    /// submitting an ordinary worker instead of hydrating.
+    async fn complete_cluster_fragment_index_by_hydration(
         &self,
         job: &ClusterFragmentIndexJob,
         artifact: &ClusterFragmentIndexArtifact,

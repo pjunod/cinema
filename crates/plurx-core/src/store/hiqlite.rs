@@ -71,7 +71,8 @@ const ANALYSIS_COMPONENT_SCHEMA_VERSION: i64 = 22;
 const STAGED_GENERATION_SCHEMA_VERSION: i64 = 23;
 const DV_CONVERSIONS_SCHEMA_VERSION: i64 = 24;
 const DV_RECOVERY_GUARDS_SCHEMA_VERSION: i64 = 25;
-pub const AUTH_SCHEMA_VERSION: i64 = DV_RECOVERY_GUARDS_SCHEMA_VERSION;
+const ATTEMPT_ERRORS_SCHEMA_VERSION: i64 = 26;
+pub const AUTH_SCHEMA_VERSION: i64 = ATTEMPT_ERRORS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -94,6 +95,7 @@ const ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE: i64 = TIMELINE_MANUAL_OVERRIDE
 const STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_COMPONENT_SCHEMA_VERSION;
 const DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE: i64 = STAGED_GENERATION_SCHEMA_VERSION;
 const DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE: i64 = DV_CONVERSIONS_SCHEMA_VERSION;
+const ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE: i64 = DV_RECOVERY_GUARDS_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1417,7 +1419,9 @@ impl HiqliteAuthStore {
             .client()
             .query_consistent_map::<CountRow, _>(sql, params!())
             .await?;
-        Ok(rows.len() == 1 && rows[0].count == 15)
+        Ok(rows.len() == 1
+            && rows[0].count
+                == super::hiqlite_fragment_index_cluster::ANALYSIS_COMPONENT_SCHEMA_OBJECTS)
     }
 
     async fn migrate_schema(&self) -> Result<(), StoreError> {
@@ -1981,6 +1985,29 @@ impl HiqliteAuthStore {
                         attempt,
                     )
                     .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements =
+                        super::hiqlite_fragment_index_cluster::analysis_attempt_errors_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            ATTEMPT_ERRORS_SCHEMA_VERSION,
+                            now,
+                            ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    // `ADD COLUMN` is not idempotent, and two voters can
+                    // observe the same predecessor before either transaction
+                    // commits. `settle_migration_attempt` is what turns the
+                    // loser's duplicate-column failure into an observation
+                    // that the step is already done.
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
@@ -2768,7 +2795,24 @@ impl MetricsStore for HiqliteAuthStore {
                     (SELECT COALESCE(json_group_array(json_object( \
                         'event', counter.event, 'reason', counter.reason, \
                         'count', counter.count)), '[]') \
-                       FROM analysis_lifecycle_counters counter) AS analysis_lifecycle_json \
+                       FROM analysis_lifecycle_counters counter) AS analysis_lifecycle_json, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE state = 'ready' \
+                        AND updated_at_ms >= ($2 - 86400) * 1000) AS analysis_ready_24h, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE state = 'failed' AND last_error_code = 'attempt_limit' \
+                        AND updated_at_ms >= ($2 - 86400) * 1000) AS analysis_attempt_limit_24h, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE attempts > 0 \
+                        AND updated_at_ms >= ($2 - 86400) * 1000) AS analysis_claimed_24h, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE state = 'queued' \
+                        AND not_before_ms <= $2 * 1000) AS analysis_claimable, \
+                    (SELECT COUNT(*) FROM cluster_fragment_index_jobs \
+                      WHERE state = 'running' \
+                        AND COALESCE(lease_expires_ms, 0) < $2 * 1000) AS analysis_running_past_lease, \
+                    (SELECT COALESCE(MAX(updated_at_ms), 0) FROM cluster_fragment_index_jobs \
+                      WHERE state = 'ready') AS analysis_last_ready_at_ms \
                  FROM offline_packages WHERE node_id = $1",
                 params!(node_id, now),
             )
@@ -3403,7 +3447,8 @@ fn schema_migration_action(
         | ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE
         | STAGED_GENERATION_SCHEMA_MIGRATION_SOURCE
         | DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE
-        | DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE => {
+        | DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE
+        | ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -3519,6 +3564,12 @@ struct PrometheusStoreRow {
     analysis_queue_json: String,
     analysis_marker_json: String,
     analysis_lifecycle_json: String,
+    analysis_ready_24h: i64,
+    analysis_attempt_limit_24h: i64,
+    analysis_claimed_24h: i64,
+    analysis_claimable: i64,
+    analysis_running_past_lease: i64,
+    analysis_last_ready_at_ms: i64,
 }
 
 impl From<&mut Row<'_>> for PrometheusStoreRow {
@@ -3542,6 +3593,12 @@ impl From<&mut Row<'_>> for PrometheusStoreRow {
             analysis_queue_json: row.get("analysis_queue_json"),
             analysis_marker_json: row.get("analysis_marker_json"),
             analysis_lifecycle_json: row.get("analysis_lifecycle_json"),
+            analysis_ready_24h: row.get("analysis_ready_24h"),
+            analysis_attempt_limit_24h: row.get("analysis_attempt_limit_24h"),
+            analysis_claimed_24h: row.get("analysis_claimed_24h"),
+            analysis_claimable: row.get("analysis_claimable"),
+            analysis_running_past_lease: row.get("analysis_running_past_lease"),
+            analysis_last_ready_at_ms: row.get("analysis_last_ready_at_ms"),
         }
     }
 }
@@ -3568,6 +3625,14 @@ impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
                 &row.analysis_queue_json,
                 &row.analysis_marker_json,
                 &row.analysis_lifecycle_json,
+                super::AnalysisQueueHealth {
+                    ready_24h: row.analysis_ready_24h,
+                    attempt_limit_24h: row.analysis_attempt_limit_24h,
+                    claimed_24h: row.analysis_claimed_24h,
+                    claimable: row.analysis_claimable,
+                    running_past_lease: row.analysis_running_past_lease,
+                    last_ready_at_ms: row.analysis_last_ready_at_ms,
+                },
             ),
         }
     }
@@ -5111,9 +5176,18 @@ mod tests {
             "v24 must advance exactly one step to the recovery-guard schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 20,
+            ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE, DV_RECOVERY_GUARDS_SCHEMA_VERSION,
+            "the attempt-history migration must start from the exact v25 shape"
+        );
+        assert_eq!(
+            ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE + 1,
+            ATTEMPT_ERRORS_SCHEMA_VERSION,
+            "v25 must advance exactly one step to the attempt-history schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 21,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v25 step"
+            "this implementation contains every additive v5→v26 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

@@ -393,6 +393,83 @@ The three tokens move together. `ANALYSIS_ATTESTATION_GENERATION` reopens the
 would otherwise short-circuit to; `SAMPLE_DOMAIN` separates the *digest*.
 Changing the layout while moving only one of them is a silent no-op.
 
+### 5.9 One build per identity — where it stands
+
+**Done (M5.1).** A voter that claims a job whose artifact another voter has
+already published settles it by hydration instead of rebuilding
+(`complete_cluster_fragment_index_by_hydration`). Discovery on each voter
+targets itself, so N voters queue N jobs for one `cache_key`; before this,
+that was N full bitstream passes over the same file for one artifact.
+
+**Also done, because M5.2 cannot deploy without it.** A `submit` refused
+because the `(cache_key, target)` job is already terminal used to map to
+`queue_full_or_busy` with an *uncharged* retry — an infinite loop at two
+claims per tick per node, because a terminal job is still terminal next tick.
+It now settles the request as `job_terminal`.
+
+**Not done (M5.2): one request per identity.** A request resolves *one*
+identity — the first one lacking a v1 index — and background discovery never
+issues a second request for the same file, because the first request row is
+the dedup tombstone. So a Dolby Vision file gets its stripped identity from
+the background and never its preserved or converting one; only a play attempt
+or an admin request can ask for those. That is the "P7 has never been reached"
+half of the DV-P7 findings, and it is why a converting fragment index does not
+exist anywhere on the fleet.
+
+The fix is to put the identity's argv fingerprint into the background
+`requested_generation`, so one file yields one request per identity it lacks.
+Two of its three consequences have answers that need no schema change:
+
+- *Re-requesting the library.* Moving the generation re-requests every file
+  over successive discovery passes. That is the intended effect, and the
+  `job_terminal` fix above is what stops it becoming an uncharged infinite
+  retry against files whose jobs are already dead.
+- *Deriving the identity at resolve time.* `resolve_analysis_request` must not
+  keep picking "first identity lacking an index", or three requests with
+  distinct generations resolve to the same job and two settle `ready` falsely.
+  It does not need a stored fingerprint to avoid that: a file has one to three
+  identities, so the resolver can enumerate them, compute each one's candidate
+  generation, and take the one equal to `request.requested_generation`. A
+  reverse lookup over an enumerated set, not a stored column.
+
+**The third consequence is the blocker, and it needs a ruling.** The
+forced-successor cancellation in `enqueue_analysis_request` cancels every
+active non-forced request for the file and pipeline version *regardless of
+generation*, so forcing one identity would cancel the other two — and
+`cancelled` is terminal, so their generations are then refused for good.
+Scoping that cancellation to a generation requires the forced request to say
+which generation it supersedes, and nothing on the row can carry that:
+
+- `requested_generation` on a forced request is a fresh UUID, by design.
+- `pipeline_version` is the engine digest and the resolver compares it
+  directly (`pipeline_version_unavailable`); the store also uses it for
+  dedup, forced cancellation and pruning. Overloading it is the same class of
+  trick as relabelling a hydrated artifact's builder — it appears to work
+  because of what another statement happens not to check.
+- `expected_predecessor_generation` is the heads CAS token. Same objection.
+
+So M5.2 needs a real column on `analysis_requests`, which is a schema bump on
+both backends, which `schema_migration_action` makes a **stop-the-fleet**
+deploy. That is a deployment-coordination decision rather than an
+implementation one, which is why it is written down here rather than built.
+
+**M5.3 — rate, measured rather than tuned.** `INDEX_MAX_PER_PASS = 4` per
+voter on a fifteen-minute `vod_index_mins` is 384 files/day/voter. With M5.1
+the voters stop duplicating, so the *effective* library rate is roughly the
+sum rather than four copies of one. The other half of the old bottleneck is
+gone independently: attestation used to cost a whole-file SHA-256 on a memo
+miss under a ten-minute deadline, and now costs a bounded 64 MiB sample
+(§5.8). Both of those change the constant's meaning, so raising
+`INDEX_MAX_PER_PASS` or `MAX_REQUESTS_PER_PASS` now would be tuning against
+numbers that no longer apply. Leave them, deploy, and read
+`plurx_analysis_queue_ready_24h` against `plurx_analysis_queue_claimable`
+before touching either.
+
+**M5.4 — priority for a converting identity.** Deferred as designed. It needs
+an ordering key the jobs table does not have (`pipeline_sha256` is opaque and
+`forced` also means `force_rebuild`, so it cannot be borrowed), and the need
+cannot be measured until M5.2 has made the identities requestable at all.
+
 ## 6. Non-goals and guardrails
 
 Each of these has cost someone something, or is load-bearing for work in flight.

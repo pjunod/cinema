@@ -22,7 +22,7 @@ const MAX_ERROR_CODE_BYTES: usize = 64;
 const MAX_LOCAL_EXCLUSIONS: usize = MAX_ACTIVE_JOBS as usize;
 const CLAIM_SCAN_LIMIT: i64 = MAX_ACTIVE_JOBS;
 const QUEUE_ELIGIBILITY_MS: i64 = 6 * 60 * 60 * 1_000;
-const MAX_ANALYSIS_REQUESTS: i64 = 4_096;
+use super::super::MAX_ACTIVE_ANALYSIS_REQUESTS as MAX_ANALYSIS_REQUESTS;
 const MAX_LIST_ROWS: i64 = 500;
 const MAX_ATTEMPT_HISTORY_PER_REQUEST: i64 = 64;
 
@@ -63,7 +63,7 @@ const JOB_COLS: &str = "cache_key, file_id, source_size, source_mtime, source_sh
     pipeline_sha256, priority, trigger, target_node_id,
     state, COALESCE(owner_node_id, ''), fence,
     COALESCE(lease_expires_ms, 0), attempts, not_before_ms, created_at_ms, updated_at_ms,
-    COALESCE(last_error_code, '')";
+    COALESCE(last_error_code, ''), attempt_errors";
 
 fn job_from_row(row: &Row<'_>) -> rusqlite::Result<ClusterFragmentIndexJob> {
     Ok(ClusterFragmentIndexJob {
@@ -85,6 +85,7 @@ fn job_from_row(row: &Row<'_>) -> rusqlite::Result<ClusterFragmentIndexJob> {
         created_at_ms: row.get(15)?,
         updated_at_ms: row.get(16)?,
         last_error_code: row.get(17)?,
+        attempt_errors: row.get(18)?,
     })
 }
 
@@ -100,7 +101,7 @@ const HISTORY_COLS: &str = "row_key, request_id, job_id, file_id, item_id, title
     component, force_rebuild, target_node_id, request_state, job_state, state, disposition,
     action, owner_node_id, claim_epoch, lease_expires_ms, attempts, not_before_ms, request_error_code,
     job_error_code, created_at_ms, updated_at_ms, pipeline_version, requested_generation,
-    priority, trigger, cancel_requested, phase, source_size";
+    priority, trigger, cancel_requested, phase, source_size, job_attempt_errors";
 
 const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.request_id, '') AS request_id, COALESCE(page.job_id, '') AS job_id,
@@ -124,7 +125,8 @@ const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.priority, '') AS priority, COALESCE(page.trigger, '') AS trigger,
     COALESCE(page.cancel_requested, 0) AS cancel_requested,
     COALESCE(page.phase, '') AS phase,
-    COALESCE(page.source_size, 0) AS source_size";
+    COALESCE(page.source_size, 0) AS source_size,
+    COALESCE(page.job_attempt_errors, '') AS job_attempt_errors";
 
 fn request_from_row(row: &Row<'_>) -> rusqlite::Result<AnalysisRequest> {
     Ok(AnalysisRequest {
@@ -218,13 +220,14 @@ fn history_from_row(
         cancel_requested: row.get::<_, i64>(27)? != 0,
         phase: row.get(28)?,
         source_size: row.get(29)?,
+        job_attempt_errors: row.get(30)?,
     };
     let cursor = AnalysisHistoryCursor {
-        sort_rank: row.get(30)?,
+        sort_rank: row.get(31)?,
         updated_at_ms: history.updated_at_ms,
         row_key: history.row_key.clone(),
     };
-    Ok((history, cursor, row.get(31)?))
+    Ok((history, cursor, row.get(32)?))
 }
 
 fn analysis_filter_code(filter: AnalysisHistoryFilter) -> i64 {
@@ -862,6 +865,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                       ELSE cluster_fragment_index_jobs.attempts END,
+                    attempt_errors = CASE WHEN ?12 = 1 THEN ''
+                      WHEN cluster_fragment_index_jobs.state = 'cancelled'
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                        OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
+                      ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = excluded.not_before_ms,
                     created_at_ms = excluded.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms, last_error_code = NULL
@@ -1197,6 +1205,37 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     updated_at_ms DESC, request_id LIMIT ?1"
             ))?;
             let rows = statement.query_map(params![limit], request_from_row)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn reopenable_analysis_requests(
+        &self,
+        component: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AnalysisRequest>, StoreError> {
+        let limit = limit.clamp(1, MAX_LIST_ROWS);
+        let component = component.map(str::to_owned);
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare(&format!(
+                // Numbered to match the replicated twin, which must bind
+                // `$1` before `$2` or `validate_parameter_order` refuses it.
+                "SELECT {REQUEST_COLS} FROM analysis_requests terminal
+                  WHERE terminal.state IN ('failed', 'cancelled')
+                    AND terminal.force_rebuild = 0
+                    AND (?1 IS NULL OR terminal.component = ?1)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM analysis_requests successor
+                       WHERE successor.file_id = terminal.file_id
+                         AND successor.source_size = terminal.source_size
+                         AND successor.source_mtime = terminal.source_mtime
+                         AND successor.component = terminal.component
+                         AND successor.target_node_id = terminal.target_node_id
+                         AND successor.state IN ('queued','running','submitted','ready'))
+                  ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT ?2"
+            ))?;
+            let rows = statement.query_map(params![component, limit], request_from_row)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
         .await
@@ -1826,7 +1865,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
                         last_error_code = CASE WHEN state = 'running'
-                          THEN 'attempt_limit' ELSE 'queue_expired' END
+                          THEN 'attempt_limit' ELSE 'queue_expired' END,
+                            attempt_errors = CASE WHEN state = 'running'
+                              THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
+                                    ELSE attempt_errors || ',lease_expired' END)
+                              ELSE attempt_errors END
                   WHERE (state = 'queued' AND created_at_ms < ?2)
                      OR (state = 'running' AND attempts >= ?3
                        AND COALESCE(lease_expires_ms, 0) <= ?1)",
@@ -1864,6 +1907,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                           OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                           OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                         ELSE cluster_fragment_index_jobs.attempts END,
+                    attempt_errors = CASE
+                        WHEN cluster_fragment_index_jobs.state = 'cancelled'
+                          OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                          OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
+                        ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = CASE
                         WHEN cluster_fragment_index_jobs.state = 'queued'
                         THEN MIN(cluster_fragment_index_jobs.not_before_ms, excluded.not_before_ms)
@@ -1934,7 +1982,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
                         last_error_code = CASE WHEN state = 'running'
-                          THEN 'attempt_limit' ELSE 'queue_expired' END
+                          THEN 'attempt_limit' ELSE 'queue_expired' END,
+                            attempt_errors = CASE WHEN state = 'running'
+                              THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
+                                    ELSE attempt_errors || ',lease_expired' END)
+                              ELSE attempt_errors END
                   WHERE (state = 'queued' AND created_at_ms < ?2)
                      OR (state = 'running' AND attempts >= ?3
                        AND COALESCE(lease_expires_ms, 0) <= ?1)",
@@ -1953,7 +2005,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                              + unicode(substr(cache_key || ':' || target_node_id, 1, 1)) * 31
                              + unicode(substr(cache_key || ':' || target_node_id, -1, 1)) * 13
                              + attempts * 7) % 51))) / 100), ?3),
-                        last_error_code = 'lease_expired', updated_at_ms = ?1
+                        last_error_code = 'lease_expired',
+                            attempt_errors = CASE WHEN attempt_errors = ''
+                              THEN 'lease_expired'
+                              ELSE attempt_errors || ',lease_expired' END,
+                            updated_at_ms = ?1
                   WHERE state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1
                     AND attempts < ?4",
                 params![now_ms, backoff_base_ms, backoff_max_ms, max_attempts],
@@ -2040,7 +2096,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
                         last_error_code = CASE WHEN state = 'running'
-                          THEN 'attempt_limit' ELSE 'queue_expired' END
+                          THEN 'attempt_limit' ELSE 'queue_expired' END,
+                            attempt_errors = CASE WHEN state = 'running'
+                              THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
+                                    ELSE attempt_errors || ',lease_expired' END)
+                              ELSE attempt_errors END
                   WHERE (state = 'queued' AND created_at_ms < ?2)
                      OR (state = 'running' AND attempts >= ?3
                        AND COALESCE(lease_expires_ms, 0) <= ?1)",
@@ -2073,6 +2133,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                       ELSE cluster_fragment_index_jobs.attempts END,
+                    attempt_errors = CASE
+                      WHEN cluster_fragment_index_jobs.state = 'ready'
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                        OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
+                      ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = excluded.not_before_ms,
                     created_at_ms = excluded.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms,
@@ -2351,6 +2416,176 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
+    async fn complete_cluster_fragment_index_by_hydration(
+        &self,
+        job: &ClusterFragmentIndexJob,
+        artifact: &ClusterFragmentIndexArtifact,
+        location: &ClusterFragmentIndexLocation,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if artifact.cache_key != job.cache_key
+            || artifact.file_id != job.file_id
+            || artifact.source_size != job.source_size
+            || artifact.source_mtime != job.source_mtime
+            || artifact.source_sha256 != job.source_sha256
+            || artifact.pipeline_sha256 != job.pipeline_sha256
+            || location.cache_key != job.cache_key
+            // Deliberately not `artifact.built_by_node_id == job.owner_node_id`:
+            // hydration settles from somebody else's build. The location row
+            // is still this node's own claim.
+            || location.node_id != job.owner_node_id
+            || artifact.bytes <= 0
+            || location.bytes != artifact.bytes
+            || !valid_hex_digest(&artifact.blob_sha256)
+        {
+            return Err(StoreError::Task(
+                "invalid cluster fragment-index hydration".to_owned(),
+            ));
+        }
+        let job = job.clone();
+        let artifact = artifact.clone();
+        let location = location.clone();
+        let logical_cache_key = cluster_fragment_index_key(
+            artifact.file_id,
+            artifact.source_size,
+            artifact.source_mtime,
+            &artifact.source_sha256,
+            &artifact.pipeline_sha256,
+        )
+        .ok_or_else(|| StoreError::Task("invalid fragment-index logical key".to_owned()))?;
+        self.with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let current: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cluster_fragment_index_jobs
+                  WHERE cache_key = ?1 AND target_node_id = ?11
+                    AND state = 'running' AND owner_node_id = ?2
+                    AND fence = ?3 AND lease_expires_ms > ?4
+                    AND file_id = ?5 AND source_size = ?6 AND source_mtime = ?7
+                    AND source_sha256 = ?8 AND pipeline_sha256 = ?9
+                    AND EXISTS (SELECT 1 FROM files current_file
+                      WHERE current_file.id = ?5 AND current_file.size = ?6
+                        AND current_file.mtime = ?7)
+                    AND (?10 = ?1 OR EXISTS (
+                      SELECT 1 FROM analysis_requests
+                       WHERE component = 'fragment_index' AND state = 'submitted'
+                         AND result_cache_key = ?1 AND target_node_id = ?11) OR EXISTS (
+                      SELECT 1 FROM cluster_fragment_index_heads
+                       WHERE logical_cache_key = ?10 AND generation_cache_key = ?1)))",
+                params![
+                    job.cache_key,
+                    job.owner_node_id,
+                    job.fence,
+                    now_ms,
+                    job.file_id,
+                    job.source_size,
+                    job.source_mtime,
+                    job.source_sha256,
+                    job.pipeline_sha256,
+                    logical_cache_key,
+                    job.target_node_id,
+                ],
+                |row| row.get(0),
+            )?;
+            if !current {
+                transaction.commit()?;
+                return Ok(false);
+            }
+            // The artifact is somebody else's and is never written here. It
+            // has to already be there, byte for byte, or this node has
+            // hydrated something that is not what the job asked for.
+            let matching: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cluster_fragment_index_artifacts
+                  WHERE cache_key = ?1 AND source_sha256 = ?2 AND pipeline_sha256 = ?3
+                    AND blob_sha256 = ?4 AND bytes = ?5)",
+                params![
+                    artifact.cache_key,
+                    artifact.source_sha256,
+                    artifact.pipeline_sha256,
+                    artifact.blob_sha256,
+                    artifact.bytes,
+                ],
+                |row| row.get(0),
+            )?;
+            if !matching {
+                return Err(StoreError::Database(
+                    "hydrated fragment index does not match the published artifact".to_owned(),
+                ));
+            }
+            transaction.execute(
+                "INSERT INTO cluster_fragment_index_locations
+                    (cache_key, node_id, bytes, verified_at_ms, last_seen_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(cache_key, node_id) DO UPDATE SET
+                    bytes = excluded.bytes, verified_at_ms = excluded.verified_at_ms,
+                    last_seen_at_ms = excluded.last_seen_at_ms",
+                params![
+                    location.cache_key,
+                    location.node_id,
+                    location.bytes,
+                    location.verified_at_ms,
+                    location.last_seen_at_ms,
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO cluster_fragment_index_heads
+                    (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+                 SELECT ?1, ?2, request_id, ?3 FROM analysis_requests
+                  WHERE component = 'fragment_index' AND state = 'submitted'
+                    AND result_cache_key = ?2
+                    AND target_node_id = ?4
+                    AND (force_rebuild = 1 OR expected_predecessor_generation = '')
+                    AND expected_predecessor_generation = COALESCE((
+                      SELECT generation_cache_key FROM cluster_fragment_index_heads
+                       WHERE logical_cache_key = ?1
+                    ), '')
+                    AND NOT EXISTS (
+                      SELECT 1 FROM analysis_requests newer
+                       WHERE newer.file_id = analysis_requests.file_id
+                         AND newer.source_size = analysis_requests.source_size
+                         AND newer.source_mtime = analysis_requests.source_mtime
+                         AND newer.component = 'fragment_index'
+                         AND newer.target_node_id = analysis_requests.target_node_id
+                         AND (newer.created_at_ms > analysis_requests.created_at_ms
+                           OR (newer.created_at_ms = analysis_requests.created_at_ms
+                             AND newer.request_id > analysis_requests.request_id))
+                         AND newer.state IN ('queued','running','submitted','ready'))
+                 ON CONFLICT(logical_cache_key) DO UPDATE SET
+                    generation_cache_key = excluded.generation_cache_key,
+                    request_id = excluded.request_id,
+                    updated_at_ms = excluded.updated_at_ms
+                  WHERE cluster_fragment_index_heads.generation_cache_key = (
+                    SELECT expected_predecessor_generation FROM analysis_requests
+                     WHERE request_id = excluded.request_id)",
+                params![logical_cache_key, job.cache_key, now_ms, job.target_node_id],
+            )?;
+            transaction.execute(
+                "INSERT INTO cluster_fragment_index_heads
+                    (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+                 SELECT ?1, ?2, '', ?3 WHERE ?1 = ?2
+                 ON CONFLICT(logical_cache_key) DO NOTHING",
+                params![logical_cache_key, job.cache_key, now_ms],
+            )?;
+            let changed = transaction.execute(
+                "UPDATE cluster_fragment_index_jobs
+                    SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
+                        last_error_code = NULL, updated_at_ms = ?1
+                  WHERE cache_key = ?2 AND target_node_id = ?5
+                    AND state = 'running' AND owner_node_id = ?3
+                    AND fence = ?4 AND lease_expires_ms > ?1",
+                params![
+                    now_ms,
+                    job.cache_key,
+                    job.owner_node_id,
+                    job.fence,
+                    job.target_node_id
+                ],
+            )?;
+            transaction.commit()?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
     async fn fail_cluster_fragment_index(
         &self,
         cache_key: &str,
@@ -2362,8 +2597,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
         now_ms: i64,
         retry_at_ms: i64,
     ) -> Result<bool, StoreError> {
+        // The comma is the attempt history's delimiter, so a code carrying one
+        // would read back as two attempts with codes nobody wrote.
         if error_code.is_empty()
             || error_code.len() > MAX_ERROR_CODE_BYTES
+            || error_code.contains(',')
             || (retryable && retry_at_ms <= now_ms)
         {
             return Err(StoreError::Task(
@@ -2383,6 +2621,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         owner_node_id = NULL, lease_expires_ms = NULL,
                         last_error_code = CASE WHEN ?7 = 1 AND attempts >= ?8
                               THEN 'attempt_limit' ELSE ?1 END,
+                        attempt_errors = CASE WHEN attempt_errors = ''
+                              THEN ?1 ELSE attempt_errors || ',' || ?1 END,
                         not_before_ms = ?2, updated_at_ms = ?3
                   WHERE cache_key = ?4 AND target_node_id = ?9
                     AND state = 'running' AND owner_node_id = ?5
@@ -2622,6 +2862,52 @@ impl ClusterFragmentIndexStore for SqliteStore {
 
 #[cfg(test)]
 mod tests {
+
+    /// No statement may reset `attempts` without resetting `attempt_errors`
+    /// on exactly the same conditions.
+    ///
+    /// Three upserts reopen a job row, each with its own reset conditions. A
+    /// reset that misses the history leaves a row carrying the codes of a
+    /// budget it no longer has — a history that disagrees with the count
+    /// printed beside it. Two of the three are reachable from the
+    /// backend-neutral Store contract; the forced hand-off is not, because
+    /// reaching it twice needs two active forced requests for one identity,
+    /// which a unique index forbids. So the rule is asserted on the
+    /// statements themselves, by deriving the history reset from the budget
+    /// reset it has to mirror.
+    #[test]
+    fn every_attempts_reset_resets_the_attempt_history() {
+        const SOURCE: &str = include_str!("fragment_index_cluster.rs");
+        let production = SOURCE
+            .split_once("\n#[cfg(test)]")
+            .map_or(SOURCE, |(source, _)| source);
+        let squeeze = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        const CLOSE: &str = "cluster_fragment_index_jobs.attempts END";
+        let mut resets = 0;
+        // Keyed on the close, not the open: `attempts = CASE` also appears on
+        // `analysis_requests`, which has no history to keep.
+        for (close, _) in production.match_indices(CLOSE) {
+            let open = production[..close]
+                .rfind("attempts = CASE")
+                .expect("every reset of this column opens a CASE");
+            let budget = &production[open..close + CLOSE.len()];
+            // The history reset is the budget reset with the column and the
+            // reset value swapped. Anything else is a different rule.
+            let expected = squeeze(budget)
+                .replace("attempts", "attempt_errors")
+                .replace("THEN 0", "THEN ''");
+            let tail = &production[open..(close + CLOSE.len() + 900).min(production.len())];
+            let window = squeeze(tail);
+            assert!(
+                window.contains(&expected),
+                "an `attempts` reset without the matching `attempt_errors` reset:\n  \
+                 wanted {expected}"
+            );
+            resets += 1;
+        }
+        assert_eq!(resets, 3, "three upserts reopen a job row");
+    }
+
     use std::collections::HashSet;
 
     use super::*;

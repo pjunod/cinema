@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["2bdb1f02"]
+points = []
+checks = []
+reason = "Documentation only: a read-only fleet-verification handoff for the queue repair, plus the STATUS entry describing work that already landed on this branch. No runtime behavior changes."
+ignore = true
