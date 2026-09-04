@@ -14,7 +14,21 @@ pub(crate) async fn snapshot(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<([(HeaderName, &'static str); 1], Json<LiveTvSnapshot>), StatusCode> {
+    // This is a process-local atomic read and `/readyz` already exposes the
+    // same fact. Put it before signature work so a fenced owner cannot reach
+    // configuration, network, or FFmpeg code under any authentication shape.
+    if !state.serving.is_ready() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     authorize(&state, &headers, &body).await?;
+    if !state
+        .membership
+        .live_tv_protocol_pending_nodes()
+        .await
+        .is_ok_and(|nodes| nodes.is_empty())
+    {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let request =
         serde_json::from_slice::<SnapshotRequest>(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let config = state
@@ -27,7 +41,7 @@ pub(crate) async fn snapshot(
     }
     let snapshot = state
         .live_tv
-        .local_snapshot(&config, request.force)
+        .local_snapshot(&config, request.force, request.probe_graph)
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Ok((

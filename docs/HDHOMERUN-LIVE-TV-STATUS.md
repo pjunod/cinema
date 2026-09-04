@@ -13,18 +13,26 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 | Milestone | State | PR | Evidence |
 |---|---|---|---|
 | M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
-| M1 device/settings/lineup | in progress | pending | branch `codex/hdhomerun-device-api` |
+| M1 device/settings/lineup | review fixes validating | [#906](https://github.com/pjunod/plurx/pull/906) | first effort gate passed; eight attack-review findings fixed locally |
 | M2 live HLS and cluster relay | not started | — | — |
 | M3 web client | not started | — | — |
 | M4 Apple and Android | not started | — | — |
 | M5 docs, hardware, promotion | not started | — | — |
 
-## Current work — design before bytes
+## Current work — close the M1 attack review
 
-M0 merged to the effort. M1 is implementing the always-compiled runtime
-settings, safe device/document boundary, owner capability/snapshot relay,
-readiness, and sanitized lineup API. It deliberately does not open a tuner
-stream or start FFmpeg; those lifecycle invariants land together in M2.
+M0 is merged to the effort. M1's first exact head passed its pinned compile
+loop and effort gate, then adversarial review requested eight changes. The
+working fix linearizes enablement against joins and the owner voter, rejects
+older joiners while enabled, fences all tuner access on serving authority,
+redacts device failures, isolates malformed lineup rows, makes FFmpeg probing
+admin-only and rate-bounded, rejects mixed aggregate settings writes, and
+makes replicated generation parsing fail closed. The focused race, rollback,
+quorum-loss, parser, socket, and backend-parity tests pass locally; exact-head
+Rust 1.97.1 proof, the effort gate, and re-review are next.
+
+M1 still does not open a tuner stream or start a playback FFmpeg process; those
+lifecycle invariants land together in M2.
 
 ## Evidence — exact commands and trees
 
@@ -36,6 +44,9 @@ stream or start FFmpeg; those lifecycle invariants land together in M2.
 | 2026-09-04 | `b1bf0375` | PR [#904](https://github.com/pjunod/plurx/pull/904) | opened to the effort branch; exact-diff review requested |
 | 2026-09-04 | `8e6eaafa` | adversarial PR review | approved; no actionable diff findings |
 | 2026-09-04 | `a79c4927` | PR [#904](https://github.com/pjunod/plurx/pull/904) | current-head review approved; effort gate passed; merged as `e3f05f2e` |
+| 2026-09-04 | `807d8318` | PR [#906](https://github.com/pjunod/plurx/pull/906) | Rust 1.97.1 fmt/check/clippy and focused tests passed; effort gate passed |
+| 2026-09-04 | `807d8318` | first M1 adversarial review | one critical, five high, and two medium findings; merge held |
+| 2026-09-04 | working M1 fixes | focused local validation | join/activation races, rollback capability, canonical replicated CAS, quorum fence, URL redaction, malformed-row isolation, and Live TV HTTP tests passed |
 
 ## Decisions made while the owner is away
 

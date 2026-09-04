@@ -1965,6 +1965,66 @@ pub struct UpdateSettings {
     pub genre_backfill: Option<bool>,
 }
 
+impl UpdateSettings {
+    /// Live TV is protected by its own generation CAS. Mixing it into the
+    /// legacy aggregate PATCH would let an unrelated setting commit before a
+    /// losing CAS reports 409, so the API makes that transaction boundary
+    /// explicit.
+    fn has_non_live_tv_update(&self) -> bool {
+        self.server_name.is_some()
+            || self.tmdb_api_key.is_some()
+            || self.omdb_api_key.is_some()
+            || self.trakt_client_id.is_some()
+            || self.trakt_client_secret.is_some()
+            || self.monarr_url.is_some()
+            || self.monarr_api_key.is_some()
+            || self.monarr_watched_sync.is_some()
+            || self.vod_presentation.is_some()
+            || self.vod_live_recovery.is_some()
+            || self.playback_control_protocol_v1.is_some()
+            || self.vod_working_set_bytes.is_some()
+            || self.vod_block_budget_secs.is_some()
+            || self.vod_materialize_budget_secs.is_some()
+            || self.vod_index_mins.is_some()
+            || self.vod_index_cluster_cache.is_some()
+            || self.analysis_max_attempts.is_some()
+            || self.analysis_lease_secs.is_some()
+            || self.analysis_backoff_base_secs.is_some()
+            || self.analysis_backoff_max_secs.is_some()
+            || self.subtitle_window_secs.is_some()
+            || self.default_audio_lang.is_some()
+            || self.default_sub_lang.is_some()
+            || self.sub_mode.is_some()
+            || self.stream_readrate.is_some()
+            || self.transcode_rate_mode.is_some()
+            || self.transcode_quality.is_some()
+            || self.hls_readrate.is_some()
+            || self.hls_burst_secs.is_some()
+            || self.hls_ahead_max_secs.is_some()
+            || self.hls_ahead_max_bytes.is_some()
+            || self.hls_scratch_max_bytes.is_some()
+            || self.hls_typeless_sliding.is_some()
+            || self.cluster_media_pool_enabled.is_some()
+            || self.cluster_session_takeover_enabled.is_some()
+            || self.probe_retry_mins.is_some()
+            || self.artwork_retry_mins.is_some()
+            || self.transcode_cleanup_mins.is_some()
+            || self.cache_produce_mins.is_some()
+            || self.cache_max_gb.is_some()
+            || self.telemetry_retain_days.is_some()
+            || self.playback_network_priors.is_some()
+            || self.playback_auto_abr.is_some()
+            || self.offline_enabled.is_some()
+            || self.offline_max_gb.is_some()
+            || self.offline_max_gb_per_user.is_some()
+            || self.offline_max_rows_per_user.is_some()
+            || self.scan_on_startup.is_some()
+            || self.dv_disk_keep_original.is_some()
+            || self.dv_disk_convert_parallel.is_some()
+            || self.genre_backfill.is_some()
+    }
+}
+
 /// Preserve the distinction between an absent PATCH-style field and an
 /// explicit JSON null. Serde's ordinary `Option<Option<T>>` collapses both;
 /// the harness needs null to restore an originally-unset quality override.
@@ -1992,6 +2052,12 @@ pub async fn update_settings(
         || req.live_tv_owner_node_id.is_some()
         || req.live_tv_max_sessions.is_some()
         || req.live_tv_output_height.is_some();
+    if live_tv_requested && req.has_non_live_tv_update() {
+        return Err(ApiError::BadRequest(
+            "Live TV settings must be saved in a separate request so their generation CAS is atomic"
+                .into(),
+        ));
+    }
     let live_tv_update = if live_tv_requested {
         let expected_generation = req.live_tv_config_generation.ok_or_else(|| {
             ApiError::Conflict(
@@ -2065,7 +2131,7 @@ pub async fn update_settings(
                     .map(|address| address.to_string())
                     .unwrap_or_default(),
             ),
-            (keys::LIVE_TV_OWNER_NODE_ID, candidate.owner_node_id),
+            (keys::LIVE_TV_OWNER_NODE_ID, candidate.owner_node_id.clone()),
             (
                 keys::LIVE_TV_MAX_SESSIONS,
                 candidate.max_sessions.to_string(),
@@ -2076,7 +2142,12 @@ pub async fn update_settings(
             ),
             (keys::LIVE_TV_CONFIG_GENERATION, next_generation.to_string()),
         ];
-        Some((expected_generation, values))
+        Some((
+            expected_generation,
+            values,
+            candidate.enabled,
+            candidate.owner_node_id,
+        ))
     } else if req.live_tv_config_generation.is_some() {
         return Err(ApiError::BadRequest(
             "live_tv_config_generation is only valid with a Live TV setting".into(),
@@ -2462,22 +2533,36 @@ pub async fn update_settings(
             .collect::<Vec<_>>();
         state.store.put_settings(&borrowed).await?;
     }
-    if let Some((expected_generation, values)) = &live_tv_update {
+    if let Some((expected_generation, values, enabling, owner_node_id)) = &live_tv_update {
         let borrowed = values
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
             .collect::<Vec<_>>();
-        if !state
-            .store
-            .put_settings_if_generation(
-                keys::LIVE_TV_CONFIG_GENERATION,
-                *expected_generation,
-                &borrowed,
-            )
-            .await?
-        {
+        let updated = if *enabling && state.membership.is_replicated() {
+            state
+                .membership
+                .activate_live_tv_settings_if_ready(
+                    keys::LIVE_TV_CONFIG_GENERATION,
+                    *expected_generation,
+                    owner_node_id,
+                    &borrowed,
+                )
+                .await
+                .map_err(super::cluster::api_error)?
+        } else {
+            state
+                .store
+                .put_settings_if_generation(
+                    keys::LIVE_TV_CONFIG_GENERATION,
+                    *expected_generation,
+                    &borrowed,
+                )
+                .await?
+        };
+        if !updated {
             return Err(ApiError::Conflict(
-                "Live TV settings changed on another node; reload and try again".into(),
+                "Live TV activation lost its generation, compatible-fleet, join, or owner-voter fence; reload readiness and try again"
+                    .into(),
             ));
         }
     }

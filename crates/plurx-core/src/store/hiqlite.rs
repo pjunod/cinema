@@ -2852,6 +2852,12 @@ impl MetricsStore for HiqliteAuthStore {
     }
 }
 
+const CANONICAL_SETTINGS_GENERATION_PREDICATE: &str = "(\
+    (NOT EXISTS (SELECT 1 FROM settings WHERE key = $4) AND $5 = 0) \
+    OR EXISTS (SELECT 1 FROM settings WHERE key = $4 \
+      AND value = CAST($5 AS TEXT) AND CAST(value AS INTEGER) = $5)\
+  )";
+
 #[async_trait]
 impl SettingsStore for HiqliteAuthStore {
     async fn ping(&self) -> Result<(), StoreError> {
@@ -3028,13 +3034,13 @@ impl SettingsStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         validate_generated_settings(generation_key, expected_generation, values)?;
         let now = self.now()?;
-        let sql = "INSERT INTO settings (key, value, updated_at) \
-                   SELECT $1, $2, $3 WHERE COALESCE((\
-                     SELECT CAST(value AS INTEGER) FROM settings WHERE key = $4\
-                   ), 0) = $5 \
-                   ON CONFLICT(key) DO UPDATE SET \
-                   value = excluded.value, updated_at = excluded.updated_at";
-        validate_sql(sql)?;
+        let sql = format!(
+            "INSERT INTO settings (key, value, updated_at) \
+             SELECT $1, $2, $3 WHERE {CANONICAL_SETTINGS_GENERATION_PREDICATE} \
+             ON CONFLICT(key) DO UPDATE SET \
+             value = excluded.value, updated_at = excluded.updated_at"
+        );
+        validate_sql(&sql)?;
         let mut ordered = values
             .iter()
             .filter(|(key, _)| *key != generation_key)
@@ -3050,7 +3056,7 @@ impl SettingsStore for HiqliteAuthStore {
             .client()
             .txn(ordered.iter().map(|(key, value)| {
                 (
-                    sql.to_owned(),
+                    sql.clone(),
                     params!(*key, *value, now, generation_key, expected_generation),
                 )
             }))
@@ -3970,6 +3976,45 @@ mod tests {
 
     static TEST_STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
         LazyLock::new(StoreOperationMetrics::default);
+
+    #[test]
+    fn replicated_generation_guard_matches_only_canonical_integer_state() {
+        let connection = rusqlite::Connection::open_in_memory().expect("open SQLite evaluator");
+        connection
+            .execute(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+                [],
+            )
+            .expect("schema");
+        let matches = |expected: i64| {
+            connection
+                .query_row(
+                    &format!("SELECT {CANONICAL_SETTINGS_GENERATION_PREDICATE}"),
+                    rusqlite::params!["generation", expected],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("evaluate replicated predicate")
+        };
+        assert!(matches(0), "an absent generation starts at zero");
+        for corrupt in ["garbage", "00", "-0", "+0", " 0"] {
+            connection
+                .execute(
+                    "INSERT INTO settings (key, value) VALUES ('generation', ?1) \
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [corrupt],
+                )
+                .expect("inject state");
+            assert!(!matches(0), "{corrupt:?} must fail closed");
+        }
+        connection
+            .execute(
+                "UPDATE settings SET value = '0' WHERE key = 'generation'",
+                [],
+            )
+            .expect("canonical zero");
+        assert!(matches(0));
+        assert!(!matches(1));
+    }
 
     #[test]
     fn media_session_dump_retains_terminal_and_publication_fence_fields() {

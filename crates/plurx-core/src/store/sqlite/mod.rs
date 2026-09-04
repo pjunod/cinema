@@ -2092,6 +2092,24 @@ mod tests {
                 .map(String::as_str),
             Some("1")
         );
+
+        store
+            .put_setting("live_tv.config_generation", "garbage")
+            .await
+            .expect("inject corrupt generation");
+        let next = [("live_tv.enabled", "1"), ("live_tv.config_generation", "1")];
+        assert!(store
+            .put_settings_if_generation("live_tv.config_generation", 0, &next)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .get_setting("live_tv.config_generation")
+                .await
+                .expect("corrupt generation remains")
+                .as_deref(),
+            Some("garbage")
+        );
     }
 
     #[tokio::test]

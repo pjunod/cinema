@@ -25,6 +25,8 @@ const MAX_GUIDE_NAME_BYTES: usize = 256;
 const MAX_DEVICE_FIELD_BYTES: usize = 256;
 const SNAPSHOT_TTL: Duration = Duration::from_secs(30);
 const STALE_TTL: Duration = Duration::from_secs(5 * 60);
+const GRAPH_PROBE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const GRAPH_PROBE_MIN_INTERVAL: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const DOCUMENT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -180,6 +182,9 @@ pub(crate) struct LiveTvSnapshot {
 pub(crate) struct SnapshotRequest {
     pub(crate) generation: i64,
     pub(crate) force: bool,
+    /// Only an administrator-facing readiness request may ask the owner to
+    /// exercise an encoder. Ordinary lineup readers always send false.
+    pub(crate) probe_graph: bool,
 }
 
 #[derive(Debug)]
@@ -209,6 +214,14 @@ struct CachedSnapshot {
     snapshot: LiveTvSnapshot,
 }
 
+#[derive(Clone)]
+struct CachedGraphProbe {
+    height: u16,
+    encoder: Encoder,
+    observed: tokio::time::Instant,
+    result: (bool, String),
+}
+
 pub(crate) struct LiveTvManager {
     store: Arc<dyn Store>,
     client: Result<reqwest::Client, String>,
@@ -216,6 +229,7 @@ pub(crate) struct LiveTvManager {
     node_id: String,
     scratch_root: PathBuf,
     cache: tokio::sync::Mutex<Option<CachedSnapshot>>,
+    graph_cache: tokio::sync::Mutex<Option<CachedGraphProbe>>,
 }
 
 impl LiveTvManager {
@@ -237,6 +251,7 @@ impl LiveTvManager {
             node_id,
             scratch_root,
             cache: tokio::sync::Mutex::new(None),
+            graph_cache: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -251,6 +266,7 @@ impl LiveTvManager {
         &self,
         config: &LiveTvConfig,
         force: bool,
+        probe_graph: bool,
     ) -> Result<LiveTvSnapshot, LiveTvError> {
         config.validate_static()?;
         if config.owner_node_id != self.node_id {
@@ -265,7 +281,11 @@ impl LiveTvManager {
                 cached.generation == config.generation
                     && now.duration_since(cached.observed) <= SNAPSHOT_TTL
             }) {
-                return Ok(with_age(cached, now, SnapshotFreshness::Fresh, None));
+                let snapshot = with_age(cached, now, SnapshotFreshness::Fresh, None);
+                drop(cache);
+                return Ok(self
+                    .with_graph_probe(snapshot, config, force, probe_graph)
+                    .await);
             }
         }
         let address = config.device_ipv4.ok_or_else(|| {
@@ -282,19 +302,26 @@ impl LiveTvManager {
                     observed,
                     snapshot: snapshot.clone(),
                 });
-                Ok(snapshot)
+                drop(cache);
+                Ok(self
+                    .with_graph_probe(snapshot, config, force, probe_graph)
+                    .await)
             }
             Err(error) => {
                 if let Some(cached) = cache.as_ref().filter(|cached| {
                     cached.generation == config.generation
                         && now.duration_since(cached.observed) <= STALE_TTL
                 }) {
-                    return Ok(with_age(
+                    let snapshot = with_age(
                         cached,
                         now,
                         SnapshotFreshness::Stale,
                         Some(sanitize_error(&error.to_string())),
-                    ));
+                    );
+                    drop(cache);
+                    return Ok(self
+                        .with_graph_probe(snapshot, config, force, probe_graph)
+                        .await);
                 }
                 Err(error)
             }
@@ -319,10 +346,8 @@ impl LiveTvManager {
             )));
         }
         let lineup_url = lineup_url(address, discover.lineup_url.as_deref())?;
-        let rows: Vec<LineupDocument> = fetch_json(client, lineup_url).await?;
+        let rows: Vec<serde_json::Value> = fetch_json(client, lineup_url).await?;
         let channels = validate_lineup(rows)?;
-        let (ffmpeg_graph_ready, ffmpeg_graph_message) =
-            self.probe_graph(config.output_height).await;
         Ok(LiveTvSnapshot {
             generation: config.generation,
             device,
@@ -331,19 +356,61 @@ impl LiveTvManager {
             age_seconds: 0,
             last_success_at: unix_seconds(),
             refresh_error: None,
-            ffmpeg_graph_ready,
-            ffmpeg_graph_message,
+            ffmpeg_graph_ready: false,
+            ffmpeg_graph_message:
+                "Run the Developer readiness check to test the live-TV FFmpeg graph".to_owned(),
         })
     }
 
-    async fn probe_graph(&self, height: u16) -> (bool, String) {
+    async fn with_graph_probe(
+        &self,
+        mut snapshot: LiveTvSnapshot,
+        config: &LiveTvConfig,
+        force: bool,
+        probe_graph: bool,
+    ) -> LiveTvSnapshot {
+        if probe_graph {
+            let (ready, message) = self.probe_graph(config.output_height, force).await;
+            snapshot.ffmpeg_graph_ready = ready;
+            snapshot.ffmpeg_graph_message = message;
+        } else if let Some(cached) = self.graph_cache.lock().await.as_ref() {
+            if cached.height == config.output_height {
+                snapshot.ffmpeg_graph_ready = cached.result.0;
+                snapshot.ffmpeg_graph_message = cached.result.1.clone();
+            }
+        }
+        snapshot
+    }
+
+    async fn probe_graph(&self, height: u16, force: bool) -> (bool, String) {
+        let encoder = self.system.encoders.choose(&self.system.hwaccel_pref);
+        let now = tokio::time::Instant::now();
+        let mut cache = self.graph_cache.lock().await;
+        if let Some(cached) = cache.as_ref().filter(|cached| {
+            cached.height == height
+                && cached.encoder == encoder
+                && (now.duration_since(cached.observed) <= GRAPH_PROBE_MIN_INTERVAL
+                    || (!force && now.duration_since(cached.observed) <= GRAPH_PROBE_TTL))
+        }) {
+            return cached.result.clone();
+        }
+        let result = self.run_graph_probe(height, encoder).await;
+        *cache = Some(CachedGraphProbe {
+            height,
+            encoder,
+            observed: tokio::time::Instant::now(),
+            result: result.clone(),
+        });
+        result
+    }
+
+    async fn run_graph_probe(&self, height: u16, encoder: Encoder) -> (bool, String) {
         if self.system.ffmpeg.trim().is_empty() {
             return (
                 false,
                 "FFmpeg is not configured on the tuner owner".to_owned(),
             );
         }
-        let encoder = self.system.encoders.choose(&self.system.hwaccel_pref);
         let probe_dir = self
             .scratch_root
             .join(format!("live-tv-readiness-{}", uuid::Uuid::new_v4()));
@@ -437,7 +504,7 @@ struct LineupDocument {
     url: Option<String>,
 }
 
-fn validate_lineup(rows: Vec<LineupDocument>) -> Result<Vec<LiveTvChannel>, LiveTvError> {
+fn validate_lineup(rows: Vec<serde_json::Value>) -> Result<Vec<LiveTvChannel>, LiveTvError> {
     if rows.len() > MAX_CHANNELS {
         return Err(LiveTvError::InvalidResponse(format!(
             "HDHomeRun lineup exceeds {MAX_CHANNELS} channels"
@@ -445,7 +512,10 @@ fn validate_lineup(rows: Vec<LineupDocument>) -> Result<Vec<LiveTvChannel>, Live
     }
     let mut seen = HashSet::with_capacity(rows.len());
     let mut channels = Vec::with_capacity(rows.len());
-    for row in rows {
+    for raw_row in rows {
+        let Ok(row) = serde_json::from_value::<LineupDocument>(raw_row) else {
+            continue;
+        };
         let Some(guide_number) = row.guide_number.as_deref() else {
             continue;
         };
@@ -586,7 +656,7 @@ fn pinned_url(address: Ipv4Addr, port: u16, path: &str) -> Result<reqwest::Url, 
         .map_err(|_| LiveTvError::InvalidConfig("could not construct HDHomeRun URL".to_owned()))
 }
 
-async fn fetch_json<T: serde::de::DeserializeOwned>(
+pub(crate) async fn fetch_json<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     url: reqwest::Url,
 ) -> Result<T, LiveTvError> {
@@ -595,7 +665,8 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
         .await
         .map_err(|_| LiveTvError::DeviceUnavailable("HDHomeRun request timed out".to_owned()))?
         .map_err(|error| {
-            LiveTvError::DeviceUnavailable(format!("HDHomeRun request failed: {error}"))
+            tracing::warn!(error = %error, "HDHomeRun document request failed on the tuner owner");
+            LiveTvError::DeviceUnavailable("HDHomeRun device request failed".to_owned())
         })?;
     if !response.status().is_success() {
         return Err(LiveTvError::DeviceUnavailable(format!(
@@ -617,7 +688,8 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
             .await
             .map_err(|_| LiveTvError::DeviceUnavailable("HDHomeRun body timed out".to_owned()))?
             .map_err(|error| {
-                LiveTvError::DeviceUnavailable(format!("reading HDHomeRun response: {error}"))
+                tracing::warn!(error = %error, "HDHomeRun response body failed on the tuner owner");
+                LiveTvError::DeviceUnavailable("HDHomeRun response body failed".to_owned())
             })?;
         let Some(chunk) = chunk else { break };
         if body.len().saturating_add(chunk.len()) > MAX_DOCUMENT_BYTES {
@@ -787,10 +859,12 @@ mod tests {
 
     #[test]
     fn lineup_drops_bad_rows_and_fails_closed_on_duplicates_and_urls() {
-        let rows = serde_json::from_str::<Vec<LineupDocument>>(
+        let rows = serde_json::from_str::<Vec<serde_json::Value>>(
             r#"[
               {"GuideNumber":"7.1","GuideName":"WABC","Tags":"favorite"},
               {"GuideNumber":"oops/../","GuideName":"bad"},
+              {"GuideNumber":"8.1","GuideName":42},
+              "not-an-object",
               {"GuideNumber":"10","GuideName":"Ten","Tags":"DRM"}
             ]"#,
         )
@@ -801,7 +875,7 @@ mod tests {
         assert!(channels[0].favorite);
         assert_eq!(channels[1].support, LiveTvChannelSupport::DrmUnsupported);
 
-        let duplicate = serde_json::from_str::<Vec<LineupDocument>>(
+        let duplicate = serde_json::from_str::<Vec<serde_json::Value>>(
             r#"[
               {"GuideNumber":"7.1","GuideName":"A"},
               {"GuideNumber":"7.1","GuideName":"B"}
@@ -810,7 +884,7 @@ mod tests {
         .expect("duplicate");
         assert!(validate_lineup(duplicate).is_err());
 
-        let hostile = serde_json::from_str::<Vec<LineupDocument>>(
+        let hostile = serde_json::from_str::<Vec<serde_json::Value>>(
             r#"[{"GuideNumber":"7.1","GuideName":"A","URL":"http://169.254.169.254/latest/meta-data?x=1"}]"#,
         )
         .expect("hostile");

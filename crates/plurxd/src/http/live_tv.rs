@@ -74,7 +74,20 @@ pub(crate) async fn channels(
             "Live TV is disabled; an administrator can enable it in Settings → Developer",
         ));
     }
-    let snapshot = owner_snapshot(&state, &config, false)
+    let protocol_ready = state
+        .membership
+        .live_tv_protocol_pending_nodes()
+        .await
+        .map(|nodes| nodes.is_empty())
+        .unwrap_or(false);
+    if !protocol_ready {
+        return Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live_tv_protocol_unready",
+            "Live TV is paused until every active cluster node runs the compatible protocol",
+        ));
+    }
+    let snapshot = owner_snapshot(&state, &config, false, false)
         .await
         .map_err(api_error)?;
     Ok(Json(LiveTvChannelsResponse {
@@ -91,7 +104,7 @@ pub(crate) async fn readiness_for_config(
     config: &LiveTvConfig,
     force: bool,
 ) -> LiveTvReadiness {
-    let mut checks = Vec::with_capacity(6);
+    let mut checks = Vec::with_capacity(7);
     let static_result = config.validate_static();
     checks.push(LiveTvReadinessCheck {
         id: "configuration",
@@ -119,7 +132,18 @@ pub(crate) async fn readiness_for_config(
         },
     });
 
-    if static_result.is_err() {
+    let serving_ready = state.serving.is_ready();
+    checks.push(LiveTvReadinessCheck {
+        id: "serving_authority",
+        ready: serving_ready,
+        message: if serving_ready {
+            "This node currently holds quorum serving authority".to_owned()
+        } else {
+            crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned()
+        },
+    });
+
+    if static_result.is_err() || !serving_ready {
         return LiveTvReadiness {
             ready: false,
             enabled: config.enabled,
@@ -130,7 +154,7 @@ pub(crate) async fn readiness_for_config(
         };
     }
 
-    let snapshot = owner_snapshot(state, config, force).await;
+    let snapshot = owner_snapshot(state, config, force, true).await;
     let owner_ready = snapshot.is_ok();
     checks.push(LiveTvReadinessCheck {
         id: "owner_network",
@@ -199,7 +223,13 @@ async fn owner_snapshot(
     state: &AppState,
     config: &LiveTvConfig,
     force: bool,
+    probe_graph: bool,
 ) -> Result<LiveTvSnapshot, LiveTvError> {
+    if !state.serving.is_ready() {
+        return Err(LiveTvError::OwnerUnavailable(
+            crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
+        ));
+    }
     if config.owner_node_id == state.node_id {
         if state.membership.is_replicated()
             && !state
@@ -212,7 +242,10 @@ async fn owner_snapshot(
                 "the selected owner is not a committed voter".to_owned(),
             ));
         }
-        return state.live_tv.local_snapshot(config, force).await;
+        return state
+            .live_tv
+            .local_snapshot(config, force, probe_graph)
+            .await;
     }
     if !state.membership.is_replicated() {
         return Err(LiveTvError::OwnerUnavailable(
@@ -236,6 +269,7 @@ async fn owner_snapshot(
     let body = serde_json::to_vec(&SnapshotRequest {
         generation: config.generation,
         force,
+        probe_graph,
     })
     .map_err(|error| LiveTvError::InvalidResponse(error.to_string()))?;
     let response = PeerTransport::new(state.membership.clone())
@@ -286,14 +320,28 @@ pub(crate) fn api_error(error: LiveTvError) -> ApiError {
             ApiError::typed(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "owner_unavailable",
-                message,
+                sanitize_public_error(&message),
             )
         }
     }
 }
 
+fn sanitize_public_error(message: &str) -> String {
+    if message.contains("http://") || message.contains("https://") {
+        "The HDHomeRun owner could not complete the request; see owner logs for details".to_owned()
+    } else {
+        message
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(512)
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
 
     #[test]
@@ -302,5 +350,76 @@ mod tests {
             peer_error(PeerTransportError::TimedOut).to_string(),
             "the tuner owner timed out"
         );
+    }
+
+    #[test]
+    fn public_device_errors_never_disclose_the_private_url() {
+        let error = api_error(LiveTvError::DeviceUnavailable(
+            "request failed for http://192.168.4.20/discover.json".to_owned(),
+        ));
+        let ApiError::Typed {
+            message: rendered, ..
+        } = error
+        else {
+            panic!("expected typed owner error");
+        };
+        assert!(!rendered.contains("192.168.4.20"), "{rendered}");
+        assert!(!rendered.contains("http://"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn public_error_mapping_redacts_connection_and_body_failures() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve refused address");
+        let refused = listener.local_addr().expect("refused address");
+        drop(listener);
+        let refused_url =
+            reqwest::Url::parse(&format!("http://{refused}/discover.json")).expect("refused URL");
+        let connection_error = crate::live_tv::fetch_json::<serde_json::Value>(
+            &reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("client"),
+            refused_url,
+        )
+        .await
+        .expect_err("connection must fail");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("body listener");
+        let address = listener.local_addr().expect("body address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("body connection");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.expect("request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n20\r\n{}",
+                )
+                .await
+                .expect("truncated body");
+        });
+        let body_url =
+            reqwest::Url::parse(&format!("http://{address}/lineup.json")).expect("body URL");
+        let body_error = crate::live_tv::fetch_json::<serde_json::Value>(
+            &reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("client"),
+            body_url,
+        )
+        .await
+        .expect_err("truncated body must fail");
+        server.await.expect("body server");
+
+        for error in [connection_error, body_error] {
+            let ApiError::Typed { message, .. } = api_error(error) else {
+                panic!("expected typed owner failure");
+            };
+            assert!(!message.contains("127.0.0.1"), "{message}");
+            assert!(!message.contains("http://"), "{message}");
+        }
     }
 }
