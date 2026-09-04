@@ -41,8 +41,8 @@ or call a green unit suite physical playback evidence.
 
 | Workstream | State | Current evidence | Exit condition |
 |---|---|---|---|
-| Last-seven-days change review | **Running** | 1,193 commits · 217 first-parent changes · 512 files · 220,101 insertions · 50,655 deletions since 2026-08-28 | Every playback-affecting subsystem and cross-cutting cluster/storage change is dispositioned in the findings document |
-| End-to-end architecture review | **Draft complete** | Independent server, client, and operations passes converge on the missing prepare/commit transaction, incomplete VOD recipe coverage, and unbounded client freezes | Exact-head adversarial pass agrees with the final document and no cited claim is stale |
+| Last-seven-days change review | **Complete** | 1,193 commits · 217 first-parent changes · 512 files · 220,101 insertions · 50,655 deletions since 2026-08-28; method and disposition are in the findings document | Exact-head review verifies scope and evidence |
+| End-to-end architecture review | **Adversarial findings returned** | Independent server, client, and operations passes converge on the missing prepare/commit transaction, incomplete VOD recipe coverage, and unbounded client freezes; exact-head review found eight document defects now being addressed | Exact-head re-review approves the corrected document |
 | Review and status PR | **Open — [#903](https://github.com/pjunod/plurx/pull/903)** | Ranked findings, current/target architecture, repair order, SLOs, race matrix, and saved questions are written | Adversarial exact-head approval and focused documentation contracts green |
 | Corrective task PRs | **Waiting on review** | No implementation claim yet | Every accepted finding has code, a regression, or an explicit evidence-only disposition |
 | Final qualification | **Not started** | The candidate is not frozen | Current `main` merged into the effort; unit suite and full promotion gate green once on the final fixed tree; qualification receipt inspected |
@@ -98,5 +98,6 @@ or call a green unit suite physical playback evidence.
 
 | At (America/New_York) | State change |
 |---|---|
+| 2026-09-04 | PR #903 exact-head adversarial review found eight documentation/architecture defects: adaptation authority, seek intent, owner-loss acceptance, gated-feature inventory, numerical SLOs, retained evidence, completion scope, and inconsistent status. All eight were corrected for re-review. |
 | 2026-09-04 | Opened draft review PR [#903](https://github.com/pjunod/plurx/pull/903); completed independent client, server, and operations passes; recorded four P0 blockers and the target immutable-rendition/transaction architecture. |
 | 2026-09-04 | Created isolated clone and `effort/streaming-reliability`; confirmed authenticated GitHub access and the pinned Rust 1.97.1 toolchain; began independent server, client, and operations/architecture reviews. |

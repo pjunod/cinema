@@ -43,7 +43,7 @@ then make the clients use it.
 | Priority | Count | Meaning |
 |---|---:|---|
 | P0 | 4 | A viewer can remain frozen indefinitely, or a core playback class cannot be served |
-| P1 | 12 | A transition can lose position, choose stale state, poison a rendition, or interrupt healthy playback |
+| P1 | 13 | A transition can lose position, choose stale state, poison a rendition, or interrupt healthy playback |
 | P2 | 10 | Tests, operations, telemetry, or enablement can certify or present the wrong thing |
 | P3 | 3 | Input, protocol-conformance, and documentation drift invite the next defect |
 
@@ -411,6 +411,20 @@ recovery, retire stale demand generations, and return a retryable/terminal
 decision if space cannot be made. A condition that needs external state change
 is not a healthy pacing hold.
 
+### P1-13 — clients do not preserve an authoritative pending seek target
+
+The future transaction depends on accepted playhead/seek evidence, but Android
+infers seeking only while Media3 is buffering and `currentPosition` differs
+from `contentPosition`; ordinary same-content seeks generally keep those equal.
+It then reports the current position rather than a separately retained target.
+Web clears its preview before invoking `seekTo`, and the non-VOD path begins
+destructive teardown without first publishing an urgent seek snapshot.
+
+**Required correction:** retain an explicit pending target above player/item
+lifetime, publish it before media mutation, coalesce by control sequence, and
+clear it only when the new position is rendered or the intent is superseded.
+Rapid seeks must publish and execute only the final target.
+
 ### P2-1 — Android reports the wrong selection identity
 
 Android creates sessions using the current quality preference, but its control
@@ -435,6 +449,15 @@ the operator asked for. Show current readiness per server/web/Apple/Android,
 required physical evidence, known limitations, restart/app-version scope, and
 the exact behaviors activation enables. Do not add compile-time gates or
 secret secondary flags.
+
+The same disposition applies to two adjacent gates. The default-off typeless
+sliding setting exists because growing EVENT playlists can change semantic
+shape under one URL and stall AVPlayer after pruning; it must be qualified and
+graduated or removed with the live fallback, not left as a permanent hidden
+mitigation. `playback.auto_abr` is also default-off and implemented only by
+web; it moves into the same readiness surface until all installed clients have
+an executable adaptation owner, then graduates rather than remaining a
+forever-preview switch.
 
 ### P2-3 — capability advertisement contradicts executable vocabulary
 
@@ -552,7 +575,8 @@ Examples call preparation passive or say nothing is staged while production
 does write a durable staged row; comments say every client advertises no
 preparation while Apple says true; status refers to a
 `playback.prepared_handoff` setting that does not exist; and the HTML status
-still describes live recovery removed by the VOD cutover.
+describes the live recovery that the VOD cutover document incorrectly claims
+was removed.
 
 **Required correction:** keep one generated capability/readiness matrix as the
 current truth and archive milestone chronology as history. Operator-facing
@@ -565,6 +589,46 @@ positive infinity, which can be passed into ffmpeg argument construction.
 
 **Required correction:** accept only finite values within an explicit sane
 range, with zero retaining its documented unpaced meaning.
+
+## Finding evidence index — baseline source and retained observations
+
+Links and symbols below name the reviewed `48615baf` implementation. The
+de-identified commands, fleet aggregates, deployed build, and nightly run IDs
+are retained in
+[evidence/STREAMING-RELIABILITY-2026-09-04.md](evidence/STREAMING-RELIABILITY-2026-09-04.md).
+
+| Finding | Source or executable evidence |
+|---|---|
+| P0-1 | [`BufferingStallTracker.sample`](../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt#L265), [`Controller.onStall`](../clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt#L931), and `PlaybackTelemetryTest`'s threshold-without-result case |
+| P0-2 | Web `persistentWait` hold branch in [`index.html`](../crates/plurxd/src/web/index.html#L3614); Apple [`applyStallVerdict` and `holdMayDecideStall`](../clients/apple/Sources/PlayerController.swift#L3557); `AppleClientTests.testAHeldWedgeSpendsNothingAndSaysNothingSoTheReopenCanAnswer`; retained `m6` aggregate/detail query |
+| P0-3 | Default feature in [`crates/plurxd/Cargo.toml`](../crates/plurxd/Cargo.toml#L9); production/test default split in [`TranscodeManager::live_hls_recovery_enabled`](../crates/plurxd/src/transcode.rs#L13570); VOD refusal in [`VodServe::try_create_with_release_fence`](../crates/plurxd/src/vodserve.rs#L2307) |
+| P0-4 | Response-before-stage in [`control_session_local`](../crates/plurxd/src/http/hls.rs#L5116); placeholder stage in [`stage_prepared_successor`](../crates/plurxd/src/http/hls.rs#L5549); client vocabularies in [`playback-control.js`](../crates/plurxd/src/web/playback-control.js#L14), [`PlaybackControlReporter.swift`](../clients/apple/Sources/PlaybackControlReporter.swift#L316), and [`PlaybackControlReporter.kt`](../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt#L335); [M6 caller handoff](M6-CALLER-HANDOFF.md) §3.4–3.5 |
+| P1-1 | Watchdog/frontier before admission in [`VodServe::segment`](../crates/plurxd/src/vodserve.rs#L4112); pool cancellation in [`waitpool.rs`](../crates/plurxd/src/waitpool.rs#L126); sticky failure in [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L4299); isolated `WaitPool` storm test at `waitpool.rs:405` |
+| P1-2 | VOD mapping in [`DeliveryView::from_status`](../crates/plurxd/src/playback_control.rs#L836); action resolution at `playback_control.rs:1882`; VOD failure status at [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L3315); HTTP 502 mapping at `http/hls.rs:8851` |
+| P1-3 | `delivered_bps: None` at [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L847); `has_throughput_headroom` refusal at `playback_control.rs:1120`; impossible injected test rate at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L13727) |
+| P1-4 | Detached spawn at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L5181); asynchronous candidate reads at `http/hls.rs:5409`; preparation slot identity at [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L2418) |
+| P1-5 | SQLite commit at [`sessions.rs`](../crates/plurx-core/src/store/sqlite/sessions.rs#L1623), Hiqlite commit at [`hiqlite_sessions.rs`](../crates/plurx-core/src/store/hiqlite_sessions.rs#L1750), and best-effort timer at `http/hls.rs:5707` |
+| P1-6 | Resume calculation in [`stage_prepared_successor`](../crates/plurxd/src/http/hls.rs#L5593); fetched-end caveat in [`media_sessions.rs`](../crates/plurxd/src/media_sessions.rs#L2497); current test `a_staged_successor_resumes_at_the_frontier_not_the_original_start` |
+| P1-7 | Web teardown in [`play`/`seekTo`](../crates/plurxd/src/web/index.html#L7807); Apple pause/replace in [`PlayerController`](../clients/apple/Sources/PlayerController.swift#L2601); Android reload/dispose in [`PlayerScreen`](../clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt#L469); predecessor Store end at `sessions.rs:923` |
+| P1-8 | Takeover exclusion in [`media_sessions.rs`](../crates/plurxd/src/media_sessions.rs#L2450); 410/reopen response in [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L8697); [OPERATIONS.md](OPERATIONS.md) §“VOD continuity limits” |
+| P1-9 | Refresh/timeout/lease constants in [`migration.rs`](../crates/plurx-core/src/cluster/migration.rs#L5750); sequential sampling at `migration.rs:6517`; fence readiness in [`serving_fence.rs`](../crates/plurxd/src/serving_fence.rs#L364); VOD steady/seek acceptance receipts |
+| P1-10 | Post-operation baseline reset in [`scripts/playback-lab`](../scripts/playback-lab#L2745); scoring at `playback-lab:2175`; operation manifest in [`cases.json`](../tests/playback/cases.json#L64) |
+| P1-11 | Historical max frontier in [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L465); driver use at `vodserve.rs:4993`; continuous protected range at `vodserve.rs:6157` and [`titlestore.rs`](../crates/plurxd/src/titlestore.rs#L55) |
+| P1-12 | `Hold::NoRoom` in [`prodsched.rs`](../crates/plurxd/src/prodsched.rs#L284); VOD hold projection at `vodserve.rs:3318`; resolver at [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L1869); `a_vod_seek_past_a_hole_is_judged_by_the_media_ahead_of_the_client` |
+| P1-13 | Android seek inference in [`Controller.playbackControlObservation`](../clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt#L1454); mapper target in [`PlaybackControlSnapshotMapper.kt`](../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSnapshotMapper.kt#L51); web preview clear and teardown in [`index.html`](../crates/plurxd/src/web/index.html#L9593) and `index.html:9852` |
+| P2-1 | New playback ID at [`Controller`](../clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt#L365); actual quality in the session request at `Controller.kt:1085`; hard-coded Auto snapshot at `Controller.kt:1489` |
+| P2-2 | Settings defaults in [`http/system.rs`](../crates/plurxd/src/http/system.rs#L1811); web-only Auto use at [`index.html`](../crates/plurxd/src/web/index.html#L9211); Developer copy and typeless setting at `index.html:12753`; mutable envelope caveat at [`transcode.rs`](../crates/plurxd/src/transcode.rs#L896) |
+| P2-3 | Apple capability in [`Caps.swift`](../clients/apple/Sources/Caps.swift#L256); rejection test `PlaybackControlReporterTests.testUnknownActionIsAProtocolError`; web/Android false capabilities at `index.html:6668` and `PlaybackControlSnapshotMapper.kt:268` |
+| P2-4 | Explicit CI exclusions in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml#L523); nightly install in [`validation-nightly.yml`](../.github/workflows/validation-nightly.yml#L18); browser lookup in [`scripts/playback-lab`](../scripts/playback-lab#L281); eight retained run IDs |
+| P2-5 | Control metric families in [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L11090); post-restart zero action/preparation snapshot and node-local telemetry query |
+| P2-6 | Four-node `03379035` version query, redacted startup capability logs, and fragment-index queue aggregate retained in the evidence companion |
+| P2-7 | Web verdict arm/clear in [`index.html`](../crates/plurxd/src/web/index.html#L7031); Apple lifetime in [`PlaybackControlSession.swift`](../clients/apple/Sources/PlaybackControlSession.swift#L130); Android lifetime in [`PlaybackControlSession.kt`](../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt#L120) |
+| P2-8 | Old-owner ask floors in [`PlaybackControlSession.swift`](../clients/apple/Sources/PlaybackControlSession.swift#L269), [`PlaybackControlSession.kt`](../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt#L195), and web `askForAction` at `index.html:6886` |
+| P2-9 | Range parser in [`http/stream.rs`](../crates/plurxd/src/http/stream.rs#L2448), response mapping at `stream.rs:2480`, and parser-only tests at `stream.rs:3632` |
+| P2-10 | Hard-coded wait caps in [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L114), pool refusal in [`waitpool.rs`](../crates/plurxd/src/waitpool.rs#L177), and promised configuration in [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) §2.3 |
+| P3-1 | Server validation in [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L363); Apple validation in [`PlaybackControlReporter.swift`](../clients/apple/Sources/PlaybackControlReporter.swift#L176); Android validation in [`PlaybackControlReporter.kt`](../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt#L195); web validation at `playback-control.js:52` |
+| P3-2 | Stale comments at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L5392); stale milestone/current-state claims in [PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md); false cutover claim in [VOD-CUTOVER.md](VOD-CUTOVER.md) |
+| P3-3 | Progressive pace parser and ffmpeg argument use in [`http/stream.rs`](../crates/plurxd/src/http/stream.rs#L79) |
 
 ## Target architecture — immutable renditions plus one replacement transaction
 
@@ -601,21 +665,28 @@ seek ---------->| immutable VOD  |                 |       |
    never change after publication.
 4. Demand is reference-counted and generation-fenced. Disconnect or
    supersession cannot leave a poison watchdog behind.
-5. For same-codec/grade quality rungs, a multivariant master exposes aligned
-   immutable renditions. hls.js, AVPlayer, and Media3 can use their native ABR
-   and manual variant selection without replacing the player. Lazy start and a
-   short two-rendition overlap preserve the one-encoder steady state.
+5. Quality adaptation has exactly one owner. The first implementation is the
+   sequenced control transaction below, because it can prove admission and
+   media readiness before telling a player to move. A later multivariant
+   optimization is allowed only under one of two explicit contracts:
+   client-owned adaptation where every advertised variant already meets the
+   immediate segment-availability SLO and reports the actual selected rung, or
+   server-owned adaptation where only a fully primed candidate is exposed and
+   selected. An unprimed lazy rendition is never advertised to native ABR.
 
-Multivariant HLS is now recommended, not optional. The previous decision gate
-assumed a visible restart might be acceptable. The stated product requirement
-is transparent quality change, and the control transaction has independently
-proven that a whole-player swap is both complex and incomplete. Native variant
-switching is the smaller runtime state machine for the common same-codec case.
+This ruling changes the earlier draft recommendation. Native players may ask
+for any advertised variant immediately; they do not participate in the
+prepare/ready/CAS protocol merely because the playlist is multivariant. Lazy
+start without a readiness contract would move the stall from player
+replacement to the first segment of the new rung. Keeping every rung hot would
+violate the one-encoder steady state. Prepared handoff is therefore the
+correctness path for quality as well as codec/grade, with multivariant HLS a
+later optimization after availability and authority are proved.
 
 ### Control plane
 
-Prepared replacement remains necessary for changes a variant switch cannot
-carry: codec/grade, burn recipe, audio topology, and node ownership.
+Prepared replacement owns every recipe change initially: quality, codec/grade,
+burn recipe, audio topology, and node ownership.
 
 | Phase | Authority | Required invariant |
 |---|---|---|
@@ -651,12 +722,12 @@ spending a token, or changing an observable condition.
 |---:|---|---|---|
 | 1 | Review, status, and acceptance contract | P2-2, scope for all | docs/static contracts + adversarial approval |
 | 2 | Truthful playback harness and nightly browser | P1-10, P2-4 | transition scoring + quality operations; requested-case proof; nightly resolves installed Chromium |
-| 3 | Finite client stall recovery and identity | P0-1, P0-2, P2-1, P2-7, P2-8 | web + Apple + Android units; source-level player contract; focused builds |
+| 3 | Finite client stall recovery, playback identity, and seek intent | P0-1, P0-2, P1-13, P2-1, P2-7, P2-8 | web + Apple + Android units; source-level player contract; focused builds |
 | 4 | Serving-authority liveness | P1-9 | delayed-observer/term-change tests; immutable-read drain; focused cluster gate |
 | 5 | VOD demand generations, fairness, and failure actions | P1-1, P1-2, P1-11, P1-12, P2-10 | HTTP seek reversal/storm/disconnect tests; typed failure action |
 | 6 | Real VOD transcode/burn rendition | P0-3, P1-8 foundation | copy/transcode/burn lifecycle; far seek; production-default configuration |
-| 7 | Aligned multivariant quality | P1-7 common path | manual and Auto changes with zero player replacement and bounded overlap |
-| 8 | Prepared replacement transaction | P0-4, P1-3 through P1-6, P2-3 | stale/deadline/race matrix plus web/Apple/Android handoff tests |
+| 7 | Prepared quality replacement | P0-4 quality slice, P1-3 through P1-7 | cold-candidate/admission/oscillation matrix; 20 uninterrupted down/up changes per platform |
+| 8 | Remaining prepared replacement axes | P0-4, P1-4 through P1-8, P2-3 | stale/deadline/race matrix plus codec/grade/burn/audio/owner handoff tests |
 | 9 | Developer enablement and durable rollout evidence | P2-2, P2-5, P2-6 | settings/API/UI tests; restart-persistent action ledger; readiness refusal |
 | 10 | Cluster VOD continuity and input hardening | P1-8, P2-9, P3-1, P3-3 | node-loss drill; shared conformance vectors; HTTP range/input tests |
 | 11 | Acceptance restoration and final qualification | all | HTTP VOD matrix, browser matrix, native device evidence, unit suite, promotion gate |
@@ -674,16 +745,27 @@ frozen effort candidate.
 
 | Operation | Required result |
 |---|---|
-| Cold copy/remux play | first frame; no playlist mutation; no fatal media error |
-| Cold transcode/burn play | immutable VOD; startup within measured per-platform budget |
-| 20 distant seeks | same playback/session where recipe is unchanged; final target wins; no poisoned rendition |
-| Manual same-codec quality change | no player teardown; no position loss; no black/loading interval above one segment |
-| Auto bandwidth cliff | one move to a sustainable rung; old media remains until new rendition is ready |
-| Codec/grade/burn change | prepare/ready/commit or explicit refusal; predecessor survives every pre-commit failure |
-| Open-ended network freeze | finite reconnect or terminal result on all clients |
-| Frozen decoder with buffered media | finite item/decoder recovery; producer hold cannot defer forever |
-| Owner loss | bounded prepared move or explicit terminal message; never an unexplained spinner |
-| Pause/background/resume | no duplicate producer; same film position; lease state remains finite |
+| Cold copy/remux play | first decoded frame p95 ≤ 2.0 s, max ≤ 3.0 s on LAN; zero stalls, reopens, or fatal media errors |
+| Cold transcode/burn play | immutable VOD; first frame p95 ≤ 5.0 s, max ≤ 8.0 s on a qualified hardware path; an unqualified node refuses placement |
+| 20 then 100 distant seeks | same playback/session where recipe is unchanged; final target first frame p95 ≤ 1.0 s, max ≤ 2.0 s; landing error ≤ 250 ms; zero poisoned renditions |
+| Manual same-codec quality change | 20 down and 20 up per platform; zero stall/reopen; film-position error ≤ 250 ms; video frame gap p95 ≤ 100 ms and max ≤ 250 ms; audio gap max ≤ 100 ms; runway never below 2.0 s |
+| Auto 8 → 1.5 Mb/s cliff | one downgrade begins within 10 s and reaches a sustainable rung; runway remains above 1.0 s; no second move for 60 s |
+| Codec/grade/burn change | 20 per supported tuple; prepare/ready/commit or explicit pre-change refusal; predecessor survives every pre-commit failure; position error ≤ 250 ms |
+| Open-ended network freeze | urgent recovery starts by 12 s after established playback (30 s before first establishment); one recovery or terminal result by 45 s |
+| Frozen decoder with buffered media | recovery starts by 12 s; advisory hold cannot defer it past 20 s; one recovery or terminal result by 45 s |
+| Owner loss | already-playing immutable media continues and a prepared owner commits before reported runway is exhausted; terminal is an interim limitation, not acceptance |
+| Pause/background/resume | first decoded frame ≤ 1.5 s after foreground play intent; position error ≤ 250 ms; no duplicate producer |
+| Two-hour 4K/NAS soak | media-clock ratio 0.98–1.02; zero stalls, reopens, fatals, or frame gaps > 250 ms; dropped-video-frame rate < 0.1% |
+
+The lab measures from the monotonic sample immediately before the operation,
+not from a reset after it. “First frame” is the first newly decoded/presented
+video frame at the target generation; video gaps use consecutive presented-
+frame timestamps, audio gaps use the platform audio-render timestamp, position
+error compares reported film time at commit with the first presented successor
+frame, and runway is the contiguous buffered interval ahead of that film time.
+Twenty-run p95 uses nearest-rank sample 19; the max bound still applies to every
+run. A skipped case, missing browser/device, absent timestamp, or operation that
+never entered playback is a failed evidence run, not a pass.
 
 ### Failure and race matrix
 
@@ -724,6 +806,20 @@ must show:
 - known unsupported transitions and the exact fallback/refusal behavior;
 - whether activation affects new sessions only and how to disable safely.
 
+The section inventories and disposes every existing playback gate:
+
+- `playback.control_protocol_v1`: enable reporting/advisory actions only when
+  the installed client vocabulary is compatible; enable prepared replacement
+  only when that executable action version and the readiness matrix pass;
+- `playback.auto_abr`: show that it is currently web-only; fold it into the
+  controller's adaptation owner and remove the separate preview switch after
+  cross-client qualification;
+- `playback.hls_typeless_sliding`: keep only while growing live recovery
+  exists, qualify its prune-boundary behavior, then remove it with that engine;
+- `playback.vod_live_recovery`: remove the Cargo feature gate, move the runtime
+  emergency control out of ordinary Playback, default it off, and delete it
+  when immutable transcode/burn coverage lands.
+
 The enable control must refuse when a hard prerequisite is false and explain
 which one. Warnings may be acknowledged only for evidence debt that does not
 make the executable contract false. Enabling advisory control before prepared
@@ -749,9 +845,9 @@ counters after restart prove neither rollout nor correctness.
 
 1. **Keep immutable VOD; finish its recipe coverage.** Returning to mutable
    live playlists would trade known architectural bugs for old ones.
-2. **Use native variants for ordinary quality changes.** A whole-player
-   transaction is reserved for changes that actually require a new decoder or
-   owner.
+2. **Use the prepared transaction for ordinary quality changes first.** Native
+   variants become an optimization only after one adaptation owner and
+   immediate advertised-rendition availability are proved.
 3. **Treat fetched media as delivery evidence, never presentation position.**
    The client playhead/settled seek chooses film time.
 4. **A server hold is advisory to renderer recovery.** It can conserve future
@@ -778,9 +874,10 @@ default unless changed later.
 
 ## Completion rule
 
-This review is complete when every accepted P0/P1 finding is either fixed and
-proved at its user-visible boundary or explicitly reclassified with new
-evidence; every repair PR has an incorporated adversarial review; the frozen
-effort includes current `main`; the unit suite and one full promotion
-qualification are green on that exact tree; and post-merge status points to the
-qualification receipt and remaining physical evidence without overstating it.
+This review is complete when every accepted finding, at every priority, is
+fixed and proved at its user-visible boundary or explicitly reclassified or
+deferred with new evidence, a named owner, and a written rationale; every
+repair PR has an incorporated adversarial review; the frozen effort includes
+current `main`; the unit suite and one full promotion qualification are green
+on that exact tree; and post-merge status points to the qualification receipt
+and remaining physical evidence without overstating it.
