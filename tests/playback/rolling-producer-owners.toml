@@ -1345,7 +1345,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `Response::status()` off an in-process control refusal, which is the whole
 # assertion — that the owner side answers 410 without a retry hint, or 425 with
 # one. In-process; they launch nothing and own nothing.
-expected_occurrences = 216
+# +5 for direct-file range reliability: one production Response::status()
+# classifies successful GETs before playback bookkeeping; four test call sites
+# assert exact raw-file/HEAD/If-Range response codes. All read HTTP metadata.
+# They create no task, process, timer, or rolling-producer owner. The fixtures
+# own only temporary files and consume their response bodies before return.
+expected_occurrences = 221
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
