@@ -102,8 +102,16 @@ class PlaybackControlTransport(
  * "the player changed" rather than in reporters, transports, identities and
  * deadlines.
  */
-class PlaybackControlSession(private val scope: CoroutineScope) {
+class PlaybackControlSession(
+    private val scope: CoroutineScope,
+    private val dispatchSubtitleReady: (() -> Unit) -> Unit = { callback ->
+        scope.launch { callback() }
+    },
+) {
     private var reporter: PlaybackControlReporter? = null
+    // Session departure stops callbacks immediately, while a replacement's
+    // create still needs the predecessor's final ordering counter.
+    private var orderingSource: PlaybackControlReporter? = null
     private var observe: (() -> PlayerControlObservation?)? = null
 
     /**
@@ -125,7 +133,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
      * the safe direction. Null before the first exchange.
      */
     suspend fun controlSequence(): Long? =
-        reporter?.status()?.sequence?.takeIf { it > 0L }
+        orderingSource?.status()?.sequence?.takeIf { it > 0L }
 
     /**
      * Every exchange's action, tagged with the sequence of the request it
@@ -325,7 +333,18 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                     }
                 }
                 if (subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)) {
-                    scope.launch { onSubtitleReady() }
+                    dispatchSubtitleReady {
+                        // The callback can be queued while begin/end replaces
+                        // the reporter. Check ownership when it executes, not
+                        // when the response merely schedules it.
+                        synchronized(verdictLock) {
+                            if (generation == verdictGeneration &&
+                                exchange.intentGeneration == verdictIntentGeneration
+                            ) {
+                                onSubtitleReady()
+                            }
+                        }
+                    }
                 }
                 val action = exchange.response?.action
                 if (action != null &&
@@ -345,6 +364,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             },
         ) ?: return
         reporter = subject
+        orderingSource = subject
         scope.launch { subject.start(scope) }
     }
 
@@ -388,6 +408,13 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     }
 
     fun end() {
+        // Stopping the coroutine is asynchronous. Invalidate every callback
+        // synchronously, including an exchange already returning from HTTP.
+        val generation = synchronized(verdictLock) { ++verdictGeneration }
+        synchronized(answerLock) {
+            answerGeneration = generation
+            ownerChangesSeen += 1
+        }
         val subject = reporter
         reporter = null
         observe = null

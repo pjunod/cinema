@@ -13,6 +13,7 @@ import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
@@ -96,6 +97,25 @@ class PlaybackControlAskTest {
                     .build()
             },
         ).build()
+        return PlaybackControlTransport("https://cinema.example", client, json)
+    }
+
+    private fun subtitleReadinessTransport(sequence: AtomicLong): PlaybackControlTransport {
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val accepted = sequence.incrementAndGet()
+            val readiness = if (accepted == 1L) "pending" else "ready"
+            val body = """{"protocol":"${PlaybackControl.PROTOCOL}",""" +
+                """"generation":"$GENERATION","control_epoch":7,""" +
+                """"accepted_sequence":$accepted,"action":{"type":"none"},""" +
+                """"delivery":{"subtitle_readiness":"$readiness"}}"""
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(body.toResponseBody("application/json".toMediaType()))
+                .build()
+        }.build()
         return PlaybackControlTransport("https://cinema.example", client, json)
     }
 
@@ -285,6 +305,63 @@ class PlaybackControlAskTest {
             assertNull(session.terminalVerdict, "the old viewer intent must not re-arm")
         } finally {
             releaseTerminal.countDown()
+            session.end()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `queued subtitle readiness belongs only to its current session and intent`() = runBlocking {
+        // This drives the real session/reporter/HTTP response path and holds
+        // only the final UI dispatch, the window in which the race occurred.
+        for (transition in listOf("current", "replacement", "end", "new-intent")) {
+            val scope = scope()
+            val callbacks = LinkedBlockingQueue<() -> Unit>()
+            val session = PlaybackControlSession(scope) { callbacks.add(it) }
+            val sequence = AtomicLong(0)
+            var retries = 0
+            try {
+                session.begin(
+                    bootstrap(),
+                    ::observation,
+                    subtitleReadinessTransport(sequence),
+                    onSubtitleReady = { retries += 1 },
+                )
+                awaitFirstExchange(sequence)
+                session.reportIntent()
+                val queued = callbacks.poll(5, TimeUnit.SECONDS)
+                assertTrue(queued != null, "subtitle readiness never queued for $transition")
+
+                when (transition) {
+                    "replacement" -> session.begin(bootstrap(), ::observation, transport("none"))
+                    "end" -> session.end()
+                    "new-intent" -> session.clearVerdict()
+                }
+                queued()
+                assertEquals(if (transition == "current") 1 else 0, retries, transition)
+            } finally {
+                session.end()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun `ending reporting preserves the predecessor ordering for replacement`() = runBlocking {
+        val scope = scope()
+        val session = PlaybackControlSession(scope)
+        try {
+            val sequence = AtomicLong(0)
+            session.begin(bootstrap(), ::observation, transport("none", sequence = sequence))
+            awaitFirstExchange(sequence)
+            val before = session.controlSequence()
+            session.end()
+
+            assertFalse(session.isReporting)
+            assertTrue(before != null && before > 0)
+            assertEquals(before, session.controlSequence())
+            assertNull(session.reportIntent(), "ended reporting cannot enqueue onto its predecessor")
+        } finally {
             session.end()
             scope.cancel()
         }

@@ -459,6 +459,9 @@ fun PlayerScreen(
         mutableStateOf(if (startMs > 0) "resume" else "cold-start")
     }
     var attemptOpenedAtMs by remember(itemId, fileId) { mutableLongStateOf(monotonicNowMs()) }
+    var requestedQuality by remember(itemId, fileId) {
+        mutableStateOf(vm.preferences.value.playbackQuality)
+    }
     // Survives the plan, like the A/V correction beside it: a quality change
     // reloads the plan and rebuilds the controller, and the viewer's audio and
     // subtitle picks must come back with them.
@@ -491,7 +494,7 @@ fun PlayerScreen(
                 itemId,
                 fileId,
                 PreplayTracks(audio = playbackAudio, subtitle = playbackSubtitle),
-                requestedQuality = vm.preferences.value.playbackQuality,
+                requestedQuality = requestedQuality,
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -543,9 +546,10 @@ fun PlayerScreen(
                 onAudioChanged = { playbackAudio = it },
                 retainedSubtitle = playbackSubtitle,
                 onSubtitleChanged = { playbackSubtitle = SubtitleChoice(it) },
-                onReload = { position, reason ->
+                onReload = { position, reason, quality ->
                     resumeAt = position
                     startReason = reason
+                    requestedQuality = quality
                     plan = null
                     generation++
                 },
@@ -647,11 +651,12 @@ private fun PlayerContent(
     onAudioChanged: (Long) -> Unit,
     retainedSubtitle: SubtitleChoice?,
     onSubtitleChanged: (Long?) -> Unit,
-    onReload: (Long, String) -> Unit,
+    onReload: (Long, String, PlaybackQuality) -> Unit,
     onPlayNext: (PlaybackTarget) -> Unit,
     onExit: () -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val playbackLifecycleOwner = LocalLifecycleOwner.current
     val activity = androidx.activity.compose.LocalActivity.current
     val componentActivity = activity as? ComponentActivity
     val canUsePip = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -686,7 +691,7 @@ private fun PlayerContent(
     var positionMs by remember { mutableLongStateOf(startMs) }
     var pendingMs by remember(controller) { mutableStateOf<Long?>(null) }
     var timelineFocused by remember { mutableStateOf(false) }
-    var isPlaying by remember { mutableStateOf(true) }
+    var isPlaying by remember(controller) { mutableStateOf(playbackIntent.playbackRequested) }
     var buffering by remember { mutableStateOf(true) }
     var controlsVisible by remember { mutableStateOf(true) }
     // Height of the bottom control block as it was last laid out. The info
@@ -956,6 +961,16 @@ private fun PlayerContent(
     // value instead of being rebuilt for it.
     val autoplayNext by rememberUpdatedState(preferences.autoplayNext)
     val playNext by rememberUpdatedState(onPlayNext)
+    DisposableEffect(controller, playbackLifecycleOwner) {
+        val lifecycle = playbackLifecycleOwner.lifecycle
+        fun updateForeground() {
+            controller.setPresentationForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+        }
+        val observer = LifecycleEventObserver { _, _ -> updateForeground() }
+        lifecycle.addObserver(observer)
+        updateForeground()
+        onDispose { lifecycle.removeObserver(observer) }
+    }
     DisposableEffect(controller) {
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
@@ -1341,14 +1356,13 @@ private fun PlayerContent(
                 qualityOptions = qualityOptions(plan.ladder),
                 audioOffsetMs = controller.audioOffsetMs,
                 declaredOffsetMs = plan.declaredOffsetMs,
-                currentPosition = controller::realPosition,
+                currentPosition = controller::positionForPlaybackIntent,
                 onReload = { position, reason, quality ->
                     // Publish the new quality and destination on the old
                     // reporter before Compose tears its player down. The next
                     // controller inherits the same intent and identity.
-                    scope.launch {
-                        controller.prepareReplacement(position, quality)
-                        onReload(position, reason)
+                    controller.prepareReplacement(position, quality) { preparedPosition, preparedQuality ->
+                        onReload(preparedPosition, reason, preparedQuality)
                     }
                 },
                 onAudioOffset = {
@@ -1384,7 +1398,9 @@ private fun PlayerContent(
         playFailure?.let { message ->
             PlaybackFailed(
                 message = message,
-                onRetry = { onReload(controller.realPosition(), "fallback") },
+                onRetry = {
+                    onReload(controller.positionForPlaybackIntent(), "fallback", playbackIntent.desiredQuality)
+                },
                 onExit = onExit,
             )
         }

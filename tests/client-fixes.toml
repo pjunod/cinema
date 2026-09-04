@@ -1,6 +1,14 @@
 version = 1
 enforce_after = "e8a910f"
 
+[[fixes]]
+id = "apple.composed-presentation-demand"
+commits = ["c50b6025"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "mutating func observePresentationDemand("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPresentationDeadlineCountsOnlyActiveDemandAndRejectsStaleGenerations"
+
 # Client corrections need a durable bridge from the production symbol to the
 # test that rejects its regression. `commits` lets the history audit distinguish
 # that evidence from an unrelated test edit in the same patch.

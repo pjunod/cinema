@@ -132,6 +132,7 @@ class Controller(
 
     /** Immutable quality of this exact decision; pending intent is separate. */
     private val activeQuality = plan.requestedQuality
+    private val planReplacement = PlaybackPlanReplacement(activeQuality)
 
     private val progressiveMediaOrigin = builtPlayer.progressiveMediaOrigin
     val observedBitsPerSecond: Long? get() = progressiveMediaOrigin.currentObservedBitsPerSecond()
@@ -365,6 +366,10 @@ class Controller(
         emit = { event -> postPlaybackClientLog(scope, event) },
     )
     private val stallWatchdogJob: Job
+    private val targetPresentationWatchdogJob: Job
+    private val targetPresentationDeadline = PlaybackTargetDeadline()
+    private var presentationForeground = true
+    private var mediaMutationEpoch = 0L
     private var statusPollingJob: Job? = null
     var playbackStallCount by mutableIntStateOf(0)
         private set
@@ -376,6 +381,7 @@ class Controller(
      * on it: a server that offers no bootstrap leaves it silent.
      */
     private val playbackControl = PlaybackControlSession(scope)
+    private val playbackControlBootstrapFence = PlaybackControlBootstrapFence()
 
     /**
      * When the player began buffering, or null while it is not. The protocol
@@ -598,15 +604,29 @@ class Controller(
             pgsOverlay.reconcile()
         }
 
-        override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) =
+        override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
+            settleAudioPlaybackIntentIfPresented()
             pgsOverlay.reconcile()
+        }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            settleAudioPlaybackIntentIfPresented()
             if (isPlaying && plan.videoCodec == null) {
                 establishedPlayback = true
                 openStallTracker.reset()
             }
             pgsOverlay.reconcile()
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (!playbackControlBootstrapFence.isActive()) return
+            // Includes MediaSession transport controls. Internal replacement
+            // writes always apply this same latest value; transient buffering
+            // and audio-focus suppression do not replace viewer intent.
+            if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
+                playbackIntent.setPlaybackRequested(playWhenReady)
+            }
+            sampleTargetPresentationDeadline()
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -639,9 +659,26 @@ class Controller(
         player.addListener(captured)
     }
 
+    private fun markIntentExecuted(sequence: Long) {
+        if (playbackIntent.markExecuted(
+                sequence,
+                observedAtMs = monotonicNowMs(),
+                playbackActive = player.isPlaying,
+                playbackRate = player.playbackParameters.speed.toDouble(),
+            )
+        ) armVideoPresentation(sequence)
+    }
+
     init {
+        player.playWhenReady = playbackIntent.playbackRequested
         player.addListener(listener)
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
+        targetPresentationWatchdogJob = scope.launch {
+            while (isActive) {
+                sampleTargetPresentationDeadline()
+                delay(targetPresentationDeadline.nextSampleDelayMs(monotonicNowMs()))
+            }
+        }
         stallWatchdogJob = scope.launch {
             while (isActive) {
                 settleAudioPlaybackIntentIfPresented()
@@ -651,7 +688,8 @@ class Controller(
                 // duration, but recovery is owned by the open deadline below.
                 playbackTelemetry.sampleStall(establishedPlayback, observedAtMs)
                 val openStall = openStallTracker.sample(
-                    playbackRequested = player.playWhenReady,
+                    playbackRequested = player.playWhenReady && presentationForeground &&
+                        playbackIntent.pendingSeek == null,
                     playbackEnded = player.playbackState == Player.STATE_ENDED,
                     establishedPlayback = establishedPlayback,
                     positionMs = realPosition(),
@@ -694,6 +732,10 @@ class Controller(
         )
     }
 
+    /** The viewer's newest film target, even while the predecessor still renders. */
+    fun positionForPlaybackIntent(): Long =
+        playbackIntent.positionForPlaybackIntent(realPosition())
+
     private fun beginPlaybackAttempt(
         reason: String,
         observedAtMs: Long = monotonicNowMs(),
@@ -716,26 +758,51 @@ class Controller(
     }
 
     private fun enqueueSeek(begin: () -> PlaybackIntent.PendingSeek) {
+        if (!playbackControlBootstrapFence.isActive()) return
         stallGuard.viewerSeek {
             playbackControl.clearVerdict()
             val pending = begin()
+            sampleTargetPresentationDeadline()
+            val publicationEpoch = mediaMutationEpoch
             seekJob?.cancel()
             seekJob = scope.launch {
-                playbackIntent.retainControlSequence(playbackControl.reportIntent())
+                if (!publishIntent(pending, publicationEpoch = publicationEpoch)) return@launch
                 delay(SEEK_COALESCE_MS)
-                if (!playbackIntent.isCurrent(pending.sequence)) return@launch
+                if (!playbackControlBootstrapFence.isActive() ||
+                    mediaMutationEpoch != publicationEpoch ||
+                    !playbackIntent.isCurrent(pending.sequence)
+                ) return@launch
                 executeSeek(pending.targetMs, pending.sequence)
             }
         }
     }
 
+    private suspend fun publishIntent(
+        pending: PlaybackIntent.PendingSeek,
+        quality: PlaybackQuality = playbackIntent.desiredQuality,
+        publicationEpoch: Long,
+    ): Boolean {
+        return publishReplacementIntent(
+            playbackIntent,
+            pending,
+            quality,
+            isActive = {
+                playbackControlBootstrapFence.isActive() && mediaMutationEpoch == publicationEpoch
+            },
+            publish = playbackControl::reportIntent,
+        )
+    }
+
     /** Execute only the final target after its immutable intent was enqueued. */
     private fun executeSeek(t: Long, sequence: Long) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        mediaMutationEpoch += 1
+        if (planReplacement.route(playbackIntent)) return
         when {
             directTransport -> {
                 beginPlaybackAttempt("seek")
                 player.seekTo(t)
-                if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
+                markIntentExecuted(sequence)
             }
             subtitleDelivery.usesPlanTransport && planMode == "remux" -> {
                 val attempt = beginPlaybackAttempt("seek")
@@ -746,10 +813,10 @@ class Controller(
                 activeMediaPath = relativeMediaPath(uri)
                 progressiveMediaOrigin.begin(uri, t)
                 player.setMediaItem(MediaItem.fromUri(uri))
-                if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
+                markIntentExecuted(sequence)
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = true
+                player.playWhenReady = playbackIntent.playbackRequested
                 armTrackSelections()
             }
             // A cached session holds the whole stream: native seeking, no
@@ -757,7 +824,7 @@ class Controller(
             sessionIsVod -> {
                 beginPlaybackAttempt("seek")
                 player.seekTo(t)
-                if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
+                markIntentExecuted(sequence)
             }
             else -> {
                 val attempt = beginPlaybackAttempt("seek")
@@ -767,23 +834,45 @@ class Controller(
     }
 
     /** Publish a screen-owned replacement before Compose disposes this controller. */
-    suspend fun prepareReplacement(positionMs: Long, quality: PlaybackQuality) {
+    fun prepareReplacement(
+        positionMs: Long,
+        quality: PlaybackQuality,
+        onPrepared: (Long, PlaybackQuality) -> Unit,
+    ) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        planReplacement.retain(onPrepared)
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
-        playbackIntent.beginSeek(positionMs, realPosition(), quality)
-        playbackIntent.retainControlSequence(playbackControl.reportIntent())
+        val pending = playbackIntent.beginSeek(
+            playbackIntent.positionForPlaybackIntent(positionMs),
+            realPosition(),
+            quality,
+        )
+        sampleTargetPresentationDeadline()
+        val publicationEpoch = mediaMutationEpoch
+        scope.launch {
+            val current = publishIntent(pending, quality, publicationEpoch)
+            if (current) planReplacement.route(playbackIntent, force = true)
+        }
     }
 
     fun playPause() {
+        if (!playbackControlBootstrapFence.isActive()) return
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
-        player.playWhenReady = !player.playWhenReady
+        playbackIntent.setPlaybackRequested(!playbackIntent.playbackRequested)
+        player.playWhenReady = playbackIntent.playbackRequested
         playbackControl.playerChanged()
     }
 
     fun release() {
+        if (!playbackControlBootstrapFence.isActive()) return
+        playbackControlBootstrapFence.release()
         seekJob?.cancel()
         stallWatchdogJob.cancel()
+        targetPresentationWatchdogJob.cancel()
+        targetPresentationDeadline.reset()
+        planReplacement.release()
         clearStatusPolling()
         pgsOverlay.release()
         stallGuard.invalidateForUserAction()
@@ -806,15 +895,17 @@ class Controller(
     }
 
     fun switchAudio(index: Long) {
+        if (!playbackControlBootstrapFence.isActive()) return
         if (index == selectedAudio) return
-        val position = realPosition()
+        val position = positionForPlaybackIntent()
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
         selectedAudio = index
         val pending = playbackIntent.beginSeek(position, position)
+        sampleTargetPresentationDeadline()
+        val publicationEpoch = mediaMutationEpoch
         scope.launch {
-            playbackIntent.retainControlSequence(playbackControl.reportIntent())
-            if (playbackIntent.isCurrent(pending.sequence)) restartAt(position, "audio")
+            if (publishIntent(pending, publicationEpoch = publicationEpoch)) restartAt(position, "audio")
         }
     }
 
@@ -827,6 +918,7 @@ class Controller(
      * track the server can hand over as a WebVTT rendition for free.
      */
     fun switchSubtitle(index: Long?): Boolean {
+        if (!playbackControlBootstrapFence.isActive()) return false
         val track = index?.let(::trackFor)
         // An index the decision never listed cannot be routed, and guessing
         // here means guessing "burn". Ignore it instead.
@@ -836,29 +928,36 @@ class Controller(
             return false
         }
         playbackNotice = null
-        // Read the position before the state moves: which timeline the player
-        // is on depends on the delivery about to change.
-        val position = realPosition()
+        // Keep an executed seek's optimistic film target even while the
+        // predecessor item still exposes its old clock.
+        val position = positionForPlaybackIntent()
+        val inheritedSeek = playbackIntent.needsSeekForInPlaceSelection()
         val route = routeSubtitle(track, subtitleDelivery)
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
         selectedSubtitle = index
         subtitleDelivery = route.delivery
         val pending = playbackIntent.beginSeek(position, position)
+        sampleTargetPresentationDeadline()
+        val publicationEpoch = mediaMutationEpoch
         scope.launch {
-            playbackIntent.retainControlSequence(playbackControl.reportIntent())
-            if (!playbackIntent.isCurrent(pending.sequence)) return@launch
+            if (!publishIntent(pending, publicationEpoch = publicationEpoch)) return@launch
+            if (planReplacement.route(playbackIntent)) return@launch
             pgsOverlay.select(index.takeIf { route.delivery == SubtitleDelivery.BitmapOverlay })
             if (route.reopen) {
                 restartAt(position, "quality")
             } else {
-                // No reopen means the same media item, so its tracks are already
-                // published and this lands now — which is what makes switching
-                // between two text tracks cost nothing.
-                playbackIntent.markExecuted(pending.sequence)
+                // A subtitle change supersedes the coalesced seek command, so
+                // it must execute that destination itself. Only a track-only
+                // change can settle without a new target frame.
+                if (inheritedSeek) {
+                    executeSeek(position, pending.sequence)
+                } else {
+                    playbackIntent.markExecuted(pending.sequence)
+                }
                 armTrackSelections()
                 applyTextSelection()
-                if (playbackIntent.presentedInPlace(pending.sequence)) {
+                if (!inheritedSeek && playbackIntent.presentedInPlace(pending.sequence)) {
                     playbackControl.playerChanged()
                 }
             }
@@ -878,7 +977,8 @@ class Controller(
 
     /** Apply an A/V correction to this controller only and reopen in place. */
     fun setAudioOffset(offsetMs: Long) {
-        val position = realPosition()
+        if (!playbackControlBootstrapFence.isActive()) return
+        val position = positionForPlaybackIntent()
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
         audioOffsetMs = offsetMs.coerceIn(-15_000, 15_000)
@@ -888,9 +988,10 @@ class Controller(
         subtitleDelivery =
             routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
         val pending = playbackIntent.beginSeek(position, position)
+        sampleTargetPresentationDeadline()
+        val publicationEpoch = mediaMutationEpoch
         scope.launch {
-            playbackIntent.retainControlSequence(playbackControl.reportIntent())
-            if (playbackIntent.isCurrent(pending.sequence)) restartAt(position, "audio")
+            if (publishIntent(pending, publicationEpoch = publicationEpoch)) restartAt(position, "audio")
         }
     }
 
@@ -899,6 +1000,9 @@ class Controller(
         reason: String,
         observedAtMs: Long = monotonicNowMs(),
     ) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        mediaMutationEpoch += 1
+        if (planReplacement.route(playbackIntent, retry = reason == "presentation-recovery")) return
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
         stallGuard.invalidateForUserAction()
@@ -914,11 +1018,11 @@ class Controller(
                 activeMediaPath = relativeMediaPath(plan.playUrl)
                 player.setMediaItem(MediaItem.fromUri(plan.playUrl), positionMs)
                 executionSequence?.let { sequence ->
-                    if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
+                    markIntentExecuted(sequence)
                 }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = true
+                player.playWhenReady = playbackIntent.playbackRequested
                 armTrackSelections()
             }
             planMode == "remux" -> {
@@ -929,11 +1033,11 @@ class Controller(
                 progressiveMediaOrigin.begin(uri, positionMs)
                 player.setMediaItem(MediaItem.fromUri(uri))
                 executionSequence?.let { sequence ->
-                    if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
+                    markIntentExecuted(sequence)
                 }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = true
+                player.playWhenReady = playbackIntent.playbackRequested
                 armTrackSelections()
             }
             else -> openSession(positionMs, attempt, executionSequence)
@@ -954,6 +1058,7 @@ class Controller(
         executionSequence: Long? = playbackIntent.pendingSeek?.sequence,
     ) {
         val requestVersion = stallGuard.beginRequest()
+        endPlaybackControl()
         sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
         clearStatusPolling()
@@ -1019,11 +1124,11 @@ class Controller(
                 timeline.attachPositionMs,
             )
             executionSequence?.let { sequence ->
-                if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
+                markIntentExecuted(sequence)
             }
             player.prepare()
             playbackTelemetry.prepared(attempt)
-            player.playWhenReady = true
+            player.playWhenReady = playbackIntent.playbackRequested
             armTrackSelections()
         }
     }
@@ -1123,6 +1228,7 @@ class Controller(
         // that invalidated the guard, all leave the id alone.
         if (sessionId != session) return
         if (!stallGuard.isCurrent(requestVersion)) return
+        if (!playbackControlBootstrapFence.isActive() || !presentationForeground) return
         if (!player.playWhenReady || player.playbackState == Player.STATE_ENDED) return
         if (kotlin.math.abs(realPosition() - positionMs) >= 250L) return
         if (verdict != null && applyStallVerdict(verdict, event)) return
@@ -1162,6 +1268,7 @@ class Controller(
         // server validates previous_session_id against a live session
         // map.  Session creation supersedes and kills the predecessor
         // atomically.
+        endPlaybackControl()
         sessionId = null
         clearStatusPolling()
         encoder = null
@@ -1252,7 +1359,7 @@ class Controller(
             )
             player.prepare()
             playbackTelemetry.prepared(attempt)
-            player.playWhenReady = true
+            player.playWhenReady = playbackIntent.playbackRequested
             armTrackSelections()
         }
     }
@@ -1400,6 +1507,7 @@ class Controller(
 
     private fun leaveSessionPlayback() {
         stallGuard.invalidateForUserAction()
+        endPlaybackControl()
         sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
         clearStatusPolling()
@@ -1456,9 +1564,9 @@ class Controller(
     /** Retry the exact delivery URL through another advertised ingress. The
      * media recipe, session capability, and compatibility flags do not move. */
     private fun retryMediaOnNextNode(error: PlaybackException): Boolean {
+        if (!playbackControlBootstrapFence.isActive()) return false
         val path = activeMediaPath ?: return false
         val next = Session.nextMediaFailoverUrl(path) ?: return false
-        val resumesPlayback = player.playWhenReady
         val presentationSequence = playbackIntent.executedSequence()
         val attachPosition = if (progressiveTransport) 0L else player.currentPosition.coerceAtLeast(0)
         playbackTelemetry.report(
@@ -1484,10 +1592,10 @@ class Controller(
         }
         player.setMediaItem(MediaItem.fromUri(next), attachPosition)
         presentationSequence?.let { sequence ->
-            if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
+            markIntentExecuted(sequence)
         }
         player.prepare()
-        player.playWhenReady = resumesPlayback
+        player.playWhenReady = playbackIntent.playbackRequested
         armTrackSelections()
         return true
     }
@@ -1523,6 +1631,7 @@ class Controller(
      * does not depend on the control plane and never should.
      */
     private fun beginPlaybackControl(hls: HlsStart) {
+        endPlaybackControl()
         // The override describes the session that just ended. Carrying it into
         // the replacement would make its very first exchange — a session that
         // has rendered nothing yet — report a stall belonging to another.
@@ -1531,9 +1640,9 @@ class Controller(
         controlObservationOverride = null
         controlRenderOverride = null
         controlEvidencePositionMs = null
+        val claim = playbackControlBootstrapFence.claim(hls.session_id)
         val bootstrap = hls.control
         if (bootstrap == null || !bootstrap.isValid) {
-            playbackControl.end()
             return
         }
         // Capabilities are the one input that has to be probed rather than
@@ -1542,12 +1651,18 @@ class Controller(
         // the reporter has nothing complete to say.
         scope.launch {
             controlCapabilityProbe.join()
+            if (!playbackControlBootstrapFence.isCurrent(claim, sessionId)) return@launch
             playbackControl.begin(
                 bootstrap = bootstrap,
                 observe = ::playbackControlObservation,
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
             )
         }
+    }
+
+    private fun endPlaybackControl() {
+        playbackControlBootstrapFence.invalidate()
+        playbackControl.end()
     }
 
     /**
@@ -1558,6 +1673,10 @@ class Controller(
     private fun retryNativeSubtitleAfterReadiness() {
         val index = selectedSubtitle ?: return
         if (subtitleDelivery != SubtitleDelivery.NativeSession) return
+        val session = sessionId ?: return
+        val claim = playbackControlBootstrapFence.snapshot(session)
+        val intentGeneration = playbackIntent.generation()
+        if (!playbackControlBootstrapFence.isCurrent(claim, sessionId)) return
         textSelectionArmed = false
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_TEXT)
@@ -1566,6 +1685,8 @@ class Controller(
         scope.launch {
             kotlinx.coroutines.yield()
             if (
+                playbackControlBootstrapFence.isCurrent(claim, sessionId) &&
+                playbackIntent.generation() == intentGeneration &&
                 selectedSubtitle == index &&
                 subtitleDelivery == SubtitleDelivery.NativeSession
             ) {
@@ -1709,8 +1830,53 @@ class Controller(
 
     /** Audio-only playback has no video-frame callback; an advancing active clock is presentation. */
     private fun settleAudioPlaybackIntentIfPresented() {
-        if (plan.videoCodec != null || !establishedPlayback || !player.isPlaying) return
-        if (playbackIntent.presentedAudio(realPosition())) playbackControl.playerChanged()
+        if (plan.videoCodec != null) return
+        if (playbackIntent.presentedAudio(
+                realPosition(),
+                observedAtMs = monotonicNowMs(),
+                playbackActive = player.isPlaying,
+                playbackRate = player.playbackParameters.speed.toDouble(),
+            )
+        ) playbackControl.playerChanged()
+    }
+
+    /** STARTED includes visible PiP; stopped/background activities suspend this deadline. */
+    fun setPresentationForeground(foreground: Boolean) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        presentationForeground = foreground
+        sampleTargetPresentationDeadline()
+    }
+
+    private fun sampleTargetPresentationDeadline() {
+        if (!playbackControlBootstrapFence.isActive()) return
+        val now = monotonicNowMs()
+        val event = targetPresentationDeadline.sample(
+            pending = playbackIntent.pendingSeek,
+            playbackRequested = player.playWhenReady && player.playbackState != Player.STATE_ENDED,
+            foreground = presentationForeground,
+            nowMs = now,
+        ) ?: return
+        if (!playbackIntent.isCurrent(event.sequence)) return
+        // This deadline is about the requested output. Progress on a departed
+        // timeline cannot cancel it, and a control hold cannot extend it.
+        seekJob?.cancel()
+        mediaMutationEpoch += 1
+        stallGuard.invalidateForPlaybackAttempt()
+        reportControlEvidence(
+            ClientObservation(decoderState = DecoderState.STARVED),
+            render = RenderState.STALLED,
+        )
+        playbackTelemetry.report(
+            event = "playback_target_timeout",
+            level = "warn",
+            message = "The requested playback destination did not present.",
+            detail = "target_ms=${event.targetMs} terminal=${event.terminal}",
+        )
+        if (event.terminal) {
+            onError("Playback couldn't reach the requested position after retrying. Your place is saved.")
+        } else if (targetPresentationDeadline.recover(event, now)) {
+            restartAt(event.targetMs, "presentation-recovery", now)
+        }
     }
 
     private fun refreshControlWaiting() {
