@@ -2922,9 +2922,11 @@ final class AppleClientTests: XCTestCase {
 
         controller.selectQuality(720)
         let quality = controller.pendingPlaybackIntentForTesting
+        let qualityRecipe = controller.recipeRevision.desired
         XCTAssertEqual(quality.targetMs, 0)
 
         controller.selectOriginalQuality()
+        XCTAssertGreaterThan(controller.recipeRevision.desired, qualityRecipe)
         let original = controller.pendingPlaybackIntentForTesting
         XCTAssertEqual(original.targetMs, 0)
         XCTAssertGreaterThan(original.generation, quality.generation)
@@ -2938,6 +2940,55 @@ final class AppleClientTests: XCTestCase {
         let subtitle = controller.pendingPlaybackIntentForTesting
         XCTAssertEqual(subtitle.targetMs, 0)
         XCTAssertGreaterThan(subtitle.generation, audio.generation)
+    }
+
+    @MainActor
+    func testNewerSeekAndPauseRetainTheRequestedRecipeUntilItActuallyAttaches() throws {
+        var recipe = PlayerRecipeRevision()
+        recipe.didAttach(recipe.desired)
+        XCTAssertFalse(recipe.needsReopen)
+        recipe.change()
+        let quality = recipe.desired
+        XCTAssertTrue(recipe.needsReopen)
+        recipe.change()
+        recipe.didAttach(quality)
+        XCTAssertTrue(recipe.needsReopen, "an older same-position open cannot acknowledge the newer recipe")
+        recipe.didAttach(recipe.desired)
+        XCTAssertFalse(recipe.needsReopen)
+        recipe.clear()
+        XCTAssertTrue(recipe.needsReopen)
+
+        let controller = PlayerController()
+        controller.selectQuality(720)
+        let generation = controller.recipeRevision.desired
+        controller.seek(toMs: 90_000)
+        controller.togglePlayPause()
+        XCTAssertFalse(controller.wantsPlayback)
+        XCTAssertEqual(controller.recipeRevision.desired, generation)
+        XCTAssertTrue(controller.recipeRevision.needsReopen)
+        XCTAssertEqual(controller.pendingPlaybackIntentForTesting.targetMs, 90_000)
+        let source = try playerControllerSource()
+        XCTAssertTrue(source.contains("if recipeRevision.needsReopen {\n                await reopen(at: target)"))
+        XCTAssertTrue(source.contains("recipeRevision.didAttach(requestedRecipeRevision)"))
+        XCTAssertFalse(source.contains("let resumesPlayback = wantsPlayback"),
+                       "transport restoration after an await must read the live desired state")
+    }
+
+    func testPresentationRecoveryAndSubtitleReadinessKeepTheirExactOwners() throws {
+        let source = try playerControllerSource()
+        let monitor = try XCTUnwrap(source.range(of: "private func beginSeekPresentationMonitor"))
+        let monitorEnd = try XCTUnwrap(source.range(of: "private func sampleSeekPresentationClocks", range: monitor.upperBound..<source.endIndex))
+        let monitorSource = String(source[monitor.lowerBound..<monitorEnd.lowerBound])
+        XCTAssertTrue(monitorSource.contains("consultControl: false"),
+                      "the exhausted target deadline cannot transfer ownership to a deferral cancelled by the wrong clock")
+        XCTAssertTrue(monitorSource.contains("!(self.seekPresentationBackgrounded && hasVideo)"))
+        let readiness = try XCTUnwrap(source.range(of: "private func retryNativeSubtitleAfterReadiness"))
+        let readinessEnd = try XCTUnwrap(source.range(of: "func playbackControlObservation", range: readiness.upperBound..<source.endIndex))
+        let readinessSource = String(source[readiness.lowerBound..<readinessEnd.lowerBound])
+        XCTAssertEqual(readinessSource.components(separatedBy: "expectedActionEpoch: actionEpoch").count - 1, 2)
+        XCTAssertTrue(readinessSource.contains("self.selectedSubtitle == index"))
+        XCTAssertTrue(source.contains("if applied, Self.subtitleMutationIsCurrent("),
+                      "failed native disabling cannot settle a bitmap subtitle command")
     }
 
     func testInPlaceSubtitleSettlementRequiresItsExactExecutedGeneration() {

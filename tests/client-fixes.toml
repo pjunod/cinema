@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "android.composed-destination-and-playback-demand"
+commits = ["0248fa68"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun sampleTargetPresentationDeadline()"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTargetDeadlineTest.kt"
+test_anchor = "advancingWrongTimelineCannotHideADestinationTimeoutAndOnlyOneRecoveryIsAllowed"
+
+[[fixes]]
 id = "apple.composed-presentation-demand"
 commits = ["c50b6025"]
 source = "clients/apple/Sources/PlayerController.swift"
