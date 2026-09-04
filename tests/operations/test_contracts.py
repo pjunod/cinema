@@ -1897,6 +1897,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertEqual(len(re.findall(r'docker port "\$name" 32400/tcp', smoke)), 2)
         self.assertIn('curl -fsS "$base/readyz"', smoke)
         self.assertIn('curl -fsS "$base/metrics"', smoke)
+        self.assertNotRegex(smoke, r"curl [^\n]+\| grep -q")
         self.assertIn('test "$instance_before" = "$instance_after"', smoke)
 
     def test_perf_report_counts_copy_video_as_a_real_session(self):
