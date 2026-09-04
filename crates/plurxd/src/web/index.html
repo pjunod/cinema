@@ -12759,6 +12759,7 @@ function playbackPanel(settings){
 function developerPanel(settings){
   const preview=setCard(`${cardHead("Playback control protocol","The additive control endpoint clients use to report what they are playing and ask for changes. Off by default until every client has a passive reporter.")}
       ${togRow("pcpv1",`Advertise playback control protocol v1 <span class="pill">preview</span>`,"New sessions advertise the control endpoint. Passive on its own: the server measures what a quality change would cost, and takes no automatic action.",settings.playback_control_protocol_v1)}
+      ${togRow("pph",`Prepared quality handoffs <span class="pill warn">spends an encoder</span>`,"When a client that supports it changes quality, start the replacement stream first so playback does not stop. The prepared stream is a second real transcode, warmed from the end of what the viewer has already buffered, and it counts against that viewer\'s session limit until it is used or released a minute later. Needs the control protocol above, and a client that asks for it — no shipped client does yet.",settings.playback_prepared_handoff)}
       <div class="err" id="dverr"></div>
       ${setCardFoot("saveDeveloper")}`);
   const experimental=setCard(`${cardHead("Experimental delivery","Changes the shape of the stream itself. Applies to new sessions only.")}
@@ -14203,7 +14204,8 @@ async function saveDeveloper(btn){
   if(btn) btn.disabled=true;
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
-      playback_control_protocol_v1:document.getElementById("pcpv1").checked}}));
+      playback_control_protocol_v1:document.getElementById("pcpv1").checked,
+      playback_prepared_handoff:document.getElementById("pph").checked}}));
     toast("Developer settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }

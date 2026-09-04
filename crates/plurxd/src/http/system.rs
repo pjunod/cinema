@@ -1553,6 +1553,7 @@ pub struct SettingsDto {
     /// Additive, behavior-neutral playback-control v1 advertisement. Off by
     /// default until clients ship passive reporters.
     pub playback_control_protocol_v1: bool,
+    pub playback_prepared_handoff: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -1814,6 +1815,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_live_recovery: setting(keys::VOD_LIVE_RECOVERY).as_deref() != Some("0"),
         playback_control_protocol_v1: setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1).as_deref()
             == Some("1"),
+        playback_prepared_handoff: setting(keys::PLAYBACK_PREPARED_HANDOFF).as_deref() == Some("1"),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
@@ -1879,6 +1881,7 @@ pub struct UpdateSettings {
     pub vod_presentation: Option<bool>,
     pub vod_live_recovery: Option<bool>,
     pub playback_control_protocol_v1: Option<bool>,
+    pub playback_prepared_handoff: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
@@ -2423,6 +2426,12 @@ pub async fn update_settings(
                 keys::PLAYBACK_CONTROL_PROTOCOL_V1,
                 if on { "1" } else { "0" },
             )
+            .await?;
+    }
+    if let Some(on) = req.playback_prepared_handoff {
+        state
+            .store
+            .put_setting(keys::PLAYBACK_PREPARED_HANDOFF, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.vod_index_cluster_cache {

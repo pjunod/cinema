@@ -212,7 +212,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   // no longer writes them: a card that saves a field it does not show can turn
   // something back on that an operator deliberately turned off.
   const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "serr"];
-  const developer = ["pcpv1", "dverr"];
+  const developer = ["pcpv1", "pph", "dverr"];
   const experimental = ["phs", "dxerr"];
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
@@ -226,7 +226,9 @@ test("Playback saves per card, and each card writes only its own fields", () => 
       "stream_readrate", "vod_block_budget_secs", "vod_live_recovery",
       "vod_materialize_budget_secs", "vod_presentation", "vod_working_set_bytes",
     ]);
-    assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1"]);
+    assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), [
+      "playback_control_protocol_v1", "playback_prepared_handoff",
+    ]);
     assert.deepEqual(Object.keys(writes.saveExperimental.body).sort(), ["hls_typeless_sliding"]);
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
@@ -246,8 +248,8 @@ test("Developer is where the switches that cost something live", () => {
     (fn) => `FOOT:${fn}`,
     esc,
   );
-  const html = panel({ playback_control_protocol_v1: true, hls_typeless_sliding: false });
-  for (const id of ["pcpv1", "phs"]) {
+  const html = panel({ playback_control_protocol_v1: true, playback_prepared_handoff: false, hls_typeless_sliding: false });
+  for (const id of ["pcpv1", "pph", "phs"]) {
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
   }
   assert.match(html, /FOOT:saveDeveloper/);
@@ -255,6 +257,9 @@ test("Developer is where the switches that cost something live", () => {
   // The section says what it is for, so a switch that costs something has
   // somewhere honest to land rather than being buried under Streaming.
   assert.match(html, /off on purpose/);
+  // A switch that costs something has to say so on the row.
+  assert.match(html, /spends an encoder/, "the handoff switch must name its price");
+  assert.match(html, /counts against that viewer/);
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {

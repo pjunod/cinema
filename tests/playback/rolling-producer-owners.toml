@@ -605,12 +605,28 @@ expected_occurrences = 14
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
 pattern = "commit_guard_before"
-expected_occurrences = 13
+# 14 with M6's prepared successor. `stage_prepared_successor` writes a durable
+# media-session row and a job lease naming this node as owner, *after*
+# `create_cluster_session_scoped` has returned — so the generation that call
+# checked is already stale when the write lands. A node that lost authority in
+# between must not claim a playback it no longer serves, which is what every
+# other fenced write in this module holds a guard for. It is taken against its
+# own `PREPARED_WRITE_BUDGET` rather than the start's leftovers, the staging
+# call it wraps is bounded by `timeout_at`, and the guard is **dropped before
+# any teardown** — `abort_started_session` takes the VOD registry lock and then
+# kills a process with no deadline, while `try_create_with_release_fence` takes
+# those two in the opposite order.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
 pattern = "admitted_serving_generation"
-expected_occurrences = 24
+# 26 with M6's prepared successor: `stage_prepared_successor` takes one
+# admission and threads it into `create_cluster_session_scoped`, which re-checks
+# it around the replacement gate exactly as the ingress start does. The token is
+# not minted here — `authority.admit()` is the same one every start uses — so
+# this adds a caller of the existing fence, not a second authority.
+expected_occurrences = 26
 
 [[module_symbols]]
 id = "m4-owner-bound-status-publication"
@@ -1118,7 +1134,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # the job heartbeat and the request heartbeat still spawn exactly one task
 # apiece, now running the same loop instead of two copies of it. Neither owns
 # a producer, a process, or a recipe.
-expected_occurrences = 388
+# 389 with M6's prepared successor: `spawn_prepared_release` schedules the
+# reclamation of a successor nobody committed. It owns no producer and starts
+# none — it sleeps until the deadline the staging call wrote, asks the slot
+# whether anyone still wants the successor, and if not calls
+# `PreparationExecutor::abort` and then ends the worker. It exists because
+# nothing else can reach the *in-memory* half: the VOD idle reap removes an
+# unclaimed successor without a tombstone by design, so
+# `Session::abort_staged_preparation` never runs for it and the predecessor's
+# slot would stay `Staged` for the rest of its life.
+expected_occurrences = 389
 
 [[module_structures]]
 id = "method-spawn"
@@ -1211,7 +1236,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `all-async-sleeps` above. Same call, counted once in each sentinel. The two
 # efforts moved this number from the same base independently, so the merged
 # count is both deltas rather than either one.
-expected_occurrences = 549
+# 551 with M6's prepared successor: one `tokio::time::timeout_at` bounding
+# `PreparationExecutor::stage` while the serving commit guard is held, and one
+# `tokio::time::sleep` in `spawn_prepared_release` waiting out the preparation
+# window. Neither bounds a producer — they select no recipe, publish no response
+# and start no process; the process this path starts is bounded separately by
+# `PREPARED_START_BUDGET` inside `create_cluster_session_scoped`. The timeout
+# exists because the guard is a read lock whose write side the quorum-loss
+# publisher needs.
+expected_occurrences = 551
 
 [[module_structures]]
 id = "bare-time-constructor"

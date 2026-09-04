@@ -7415,6 +7415,53 @@ pub struct StartInfo {
 
 /// A cluster worker and the process-local replacement gate that must remain
 /// held until the ingress has durably accepted or rejected that worker.
+/// Which replacement gate a cluster start serializes on.
+///
+/// The gate exists so two *replacements* for one player cannot race. A
+/// speculative M6 preparation is not a replacement: it supersedes nothing and
+/// moves no pointer, and what keeps it from racing a real start is the store's
+/// CAS on `expected_predecessor_incarnation_id` — a real start moves the
+/// pointer, and the preparation's commit then loses, which is the designed
+/// outcome.
+///
+/// So a preparation takes a gate of its own. Sharing the viewer's would mean a
+/// speculative warm-up holding it for the length of a process start while that
+/// viewer's own stall recovery waits `CLUSTER_REPLACEMENT_GATE_WAIT` and then
+/// takes a capacity error — a real interruption caused by the mechanism whose
+/// entire purpose is removing one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClusterStartScope {
+    /// A start the viewer is waiting on.
+    Replacement,
+    /// A speculative M6 successor nobody is waiting on yet.
+    Preparation,
+}
+
+impl ClusterStartScope {
+    fn gate_suffix(self) -> &'static str {
+        match self {
+            Self::Replacement => "replacement",
+            Self::Preparation => "preparation",
+        }
+    }
+
+    /// The replacement-gate key for one player in this scope.
+    ///
+    /// One builder for every caller, because the first version of this split
+    /// added a suffix to `create_cluster_session` and left
+    /// `acquire_cluster_takeover_replacement` on the old two-element key — so a
+    /// takeover and an ordinary replacement for the same player stopped
+    /// contending entirely, and both could spawn a provisional worker. Two
+    /// encoders for one player is exactly what this gate exists to prevent, and
+    /// the only thing standing between the two sites was that they happened to
+    /// format the same string.
+    fn gate_key(self, user_id: i64, playback_id: &str) -> String {
+        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        serde_json::json!([supersession_user.as_str(), playback_id, self.gate_suffix(),])
+            .to_string()
+    }
+}
+
 pub(crate) struct ClusterSessionStart {
     pub(crate) info: StartInfo,
     pub(crate) replacement: ClusterReplacementGuard,
@@ -13271,14 +13318,38 @@ impl TranscodeManager {
         deadline: tokio::time::Instant,
         admitted_serving_generation: u64,
     ) -> Result<ClusterSessionStart, String> {
+        self.create_cluster_session_scoped(
+            req,
+            user_id,
+            user_name,
+            deadline,
+            admitted_serving_generation,
+            ClusterStartScope::Replacement,
+        )
+        .await
+    }
+
+    /// Start a cluster-owned session in a named replacement scope.
+    ///
+    /// The scope only chooses which replacement gate the start serializes on,
+    /// and there are exactly two because there are two kinds of start.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn create_cluster_session_scoped(
+        &self,
+        req: &SessionRequest,
+        user_id: i64,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+        admitted_serving_generation: u64,
+        scope: ClusterStartScope,
+    ) -> Result<ClusterSessionStart, String> {
         let serving_admission = ClusterServingAdmission {
             generation: admitted_serving_generation,
             deadline,
         };
         self.require_cluster_serving_authority(serving_admission)?;
         let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
-        let gate_key =
-            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str(),]).to_string();
+        let gate_key = scope.gate_key(user_id, &req.playback_id);
         let replacement = self
             .acquire_cluster_replacement_gate(
                 gate_key,
@@ -13336,9 +13407,9 @@ impl TranscodeManager {
         user_id: i64,
         deadline: tokio::time::Instant,
     ) -> Result<ClusterReplacementGuard, String> {
-        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
-        let gate_key =
-            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
+        // The same scope an ordinary replacement uses, and through the same
+        // builder: a takeover *is* a replacement, and the two must contend.
+        let gate_key = ClusterStartScope::Replacement.gate_key(user_id, &req.playback_id);
         self.acquire_cluster_replacement_gate(
             gate_key,
             req.previous_session_id.as_deref(),
@@ -16635,6 +16706,24 @@ impl TranscodeManager {
     > {
         self.hls_session_control_with_terminal(control, i64::MAX, None)
             .await
+    }
+
+    /// The preparation gate for one session, from whichever engine serves it.
+    ///
+    /// Routed in the same order as [`Self::hls_session_control_with_terminal`]:
+    /// VOD first, because `into_request` sets `Presentation::Vod` for every
+    /// create and that engine therefore holds nearly every session, then the
+    /// rolling actor. `None` means neither is serving it — a session that has
+    /// ended — and is never a reason to stage against the other engine.
+    pub(crate) async fn preparation_gate(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Option<std::sync::Arc<dyn crate::playback_control::PreparationGate>> {
+        if let Some(gate) = self.vod.preparation_gate(session_id).await {
+            return Some(gate);
+        }
+        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        Some(std::sync::Arc::new(session.control.clone()))
     }
 
     pub(crate) async fn hls_session_control_with_terminal(
@@ -34808,6 +34897,93 @@ pub(crate) mod tests {
             )
             .await
             .is_err());
+    }
+
+    /// A takeover and an ordinary replacement for one player contend; a
+    /// preparation does not.
+    ///
+    /// The gate exists so two *replacements* cannot both spawn a provisional
+    /// worker — `stop_session_until`'s own doc names the failure: "since a
+    /// takeover deliberately supersedes nothing, the result is two encoders for
+    /// one player." The first version of the scope split gave
+    /// `create_cluster_session` a key suffix and left the takeover site on the
+    /// old two-element key, so the two stopped contending entirely and nothing
+    /// caught it: the existing gate tests pass raw key strings, so they are
+    /// blind to a key-shape change by construction. This one asks the scopes
+    /// for their keys, which is the only way to notice.
+    #[tokio::test]
+    async fn a_takeover_and_a_replacement_share_one_gate_and_a_preparation_does_not() {
+        let replacement = ClusterStartScope::Replacement.gate_key(42, "scoped-player");
+        let preparation = ClusterStartScope::Preparation.gate_key(42, "scoped-player");
+        assert_ne!(
+            replacement, preparation,
+            "a speculative warm-up must not be able to make a viewer's own start wait",
+        );
+        // A different player, and a different user on the same player, are
+        // different gates in every scope — the key carries both.
+        assert_ne!(
+            replacement,
+            ClusterStartScope::Replacement.gate_key(42, "other-player")
+        );
+        assert_ne!(
+            replacement,
+            ClusterStartScope::Replacement.gate_key(43, "scoped-player")
+        );
+
+        // And the takeover path really does contend with an ordinary
+        // replacement, asserted by taking one gate and watching the other wait
+        // for it — not by comparing strings, since two sites formatting the
+        // same string by hand is precisely how they drifted apart.
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let request = SessionRequest {
+            control_sequence: None,
+            file_id: 1,
+            playback_id: "scoped-player".into(),
+            request_id: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Transcode { height: 720 },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
+        };
+        let held = mgr
+            .acquire_cluster_replacement_gate(
+                replacement.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("an ordinary replacement owns its gate");
+        assert!(
+            mgr.acquire_cluster_takeover_replacement(&request, 42, tokio::time::Instant::now())
+                .await
+                .is_err(),
+            "a takeover must wait behind an ordinary replacement for the same player",
+        );
+        // A preparation for that same player is unaffected, which is the whole
+        // reason the scopes exist.
+        mgr.acquire_cluster_replacement_gate(
+            preparation,
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .expect("a preparation must never wait on a viewer's replacement");
+        drop(held);
     }
 
     #[tokio::test]
