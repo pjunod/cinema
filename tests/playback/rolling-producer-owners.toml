@@ -605,7 +605,10 @@ expected_occurrences = 14
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
 pattern = "commit_guard_before"
-expected_occurrences = 13
+# 13 -> 14 with M6's acknowledgement settlement. The new guard bounds the
+# exact commit-or-abort Store mutation authorized by the actor; it is held only
+# across the bounded executor call and never across worker teardown.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
@@ -644,7 +647,9 @@ pattern = "media_session_route_for_playback"
 # 12 -> 13 after adversarial review replaced helper-only coverage with the
 # actual accepted selection-change seam. Its final assertion proves that the
 # detached stage and later announcement still did not move the pointer.
-expected_occurrences = 13
+# 13 -> 14 with the failed-acknowledgement acceptance: one test-only read proves
+# abort keeps the predecessor current while deleting the staged successor.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -1246,7 +1251,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 555 -> 557 after adversarial review: the incapable-client production-seam
 # regression adds one exchange-floor sleep and one bounded wait for its
 # detached decision to finish. Both are test-only and awaited.
-expected_occurrences = 557
+# 557 -> 561 with M6 acknowledgement settlement: two production `timeout_at`
+# calls bound the commit and abort Store operations by the inherited exchange
+# deadline, and two test-only sleeps cross the control exchange floor before a
+# commit or failed acknowledgement. Every timer is awaited and owns no worker.
+expected_occurrences = 561
 
 [[module_structures]]
 id = "bare-time-constructor"
