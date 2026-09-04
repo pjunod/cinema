@@ -2000,8 +2000,8 @@ catalog|settings@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|settings@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|settings@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|8
-catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|4
+catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|settings@1280x860|dom|svg.px-ico[aria-hidden=true] > path|6
 catalog|settings@1280x860|dom|svg.px-ico[aria-hidden=true] > rect|4
@@ -2050,20 +2050,21 @@ catalog|settings@1280x860|focus|012|button.settab "Users"
 catalog|settings@1280x860|focus|013|button.settab "System"
 catalog|settings@1280x860|focus|014|button.settab "Cluster"
 catalog|settings@1280x860|focus|015|button.settab "Integrations"
-catalog|settings@1280x860|focus|016|button.ghost.sm "Scan every library for new & changed files"
-catalog|settings@1280x860|focus|017|button.ghost.sm "Re-fetch metadata & artwork for every libra
-catalog|settings@1280x860|focus|018|button.sm "+ Add library"
-catalog|settings@1280x860|focus|019|a "Add a free key in Metadata"
-catalog|settings@1280x860|focus|020|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|021|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|022|button.ghost.sm "Configure ⌄"
-catalog|settings@1280x860|focus|023|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|024|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|025|button.ghost.sm "Configure ⌄"
-catalog|settings@1280x860|focus|026|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|027|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|028|button.ghost.sm "Configure ⌄"
-catalog|settings@1280x860|focus|029|<wrap>
+catalog|settings@1280x860|focus|016|button.settab "Developer"
+catalog|settings@1280x860|focus|017|button.ghost.sm "Scan every library for new & changed files"
+catalog|settings@1280x860|focus|018|button.ghost.sm "Re-fetch metadata & artwork for every libra
+catalog|settings@1280x860|focus|019|button.sm "+ Add library"
+catalog|settings@1280x860|focus|020|a "Add a free key in Metadata"
+catalog|settings@1280x860|focus|021|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|023|button.ghost.sm "Configure ⌄"
+catalog|settings@1280x860|focus|024|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|026|button.ghost.sm "Configure ⌄"
+catalog|settings@1280x860|focus|027|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|029|button.ghost.sm "Configure ⌄"
+catalog|settings@1280x860|focus|030|<wrap>
 catalog|settings@1280x860|req|GET /api/v1/activity|2
 catalog|settings@1280x860|req|GET /api/v1/dv-conversions|1
 catalog|settings@1280x860|req|GET /api/v1/libraries|1
@@ -2135,8 +2136,8 @@ catalog|settings@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|settings@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|settings@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|settings@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-catalog|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|8
-catalog|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|4
+catalog|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+catalog|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|settings@390x780|dom|svg.px-ico[aria-hidden=true] > path|6
 catalog|settings@390x780|dom|svg.px-ico[aria-hidden=true] > rect|4
@@ -2182,24 +2183,25 @@ catalog|settings@390x780|focus|009|button.settab "Users"
 catalog|settings@390x780|focus|010|button.settab "System"
 catalog|settings@390x780|focus|011|button.settab "Cluster"
 catalog|settings@390x780|focus|012|button.settab "Integrations"
-catalog|settings@390x780|focus|013|button.ghost.sm "Scan every library for new & changed files"
-catalog|settings@390x780|focus|014|button.ghost.sm "Re-fetch metadata & artwork for every libra
-catalog|settings@390x780|focus|015|button.sm "+ Add library"
-catalog|settings@390x780|focus|016|a "Add a free key in Metadata"
-catalog|settings@390x780|focus|017|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|018|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|019|button.ghost.sm "Configure ⌄"
-catalog|settings@390x780|focus|020|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|021|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|022|button.ghost.sm "Configure ⌄"
-catalog|settings@390x780|focus|023|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|024|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|025|button.ghost.sm "Configure ⌄"
-catalog|settings@390x780|focus|026|a.px-tab "Home"
-catalog|settings@390x780|focus|027|button.px-tab "Libraries"
-catalog|settings@390x780|focus|028|button.px-tab "Search"
-catalog|settings@390x780|focus|029|a.px-tab "Activity"
-catalog|settings@390x780|focus|030|<wrap>
+catalog|settings@390x780|focus|013|button.settab "Developer"
+catalog|settings@390x780|focus|014|button.ghost.sm "Scan every library for new & changed files"
+catalog|settings@390x780|focus|015|button.ghost.sm "Re-fetch metadata & artwork for every libra
+catalog|settings@390x780|focus|016|button.sm "+ Add library"
+catalog|settings@390x780|focus|017|a "Add a free key in Metadata"
+catalog|settings@390x780|focus|018|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|019|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|020|button.ghost.sm "Configure ⌄"
+catalog|settings@390x780|focus|021|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|023|button.ghost.sm "Configure ⌄"
+catalog|settings@390x780|focus|024|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|026|button.ghost.sm "Configure ⌄"
+catalog|settings@390x780|focus|027|a.px-tab "Home"
+catalog|settings@390x780|focus|028|button.px-tab "Libraries"
+catalog|settings@390x780|focus|029|button.px-tab "Search"
+catalog|settings@390x780|focus|030|a.px-tab "Activity"
+catalog|settings@390x780|focus|031|<wrap>
 catalog|settings@390x780|req|GET /api/v1/activity|2
 catalog|settings@390x780|req|GET /api/v1/dv-conversions|1
 catalog|settings@390x780|req|GET /api/v1/libraries|1
@@ -3632,8 +3634,8 @@ classic|settings@1280x860|dom|main#main > div.setlayout|1
 classic|settings@1280x860|dom|nav > a.active[text]|1
 classic|settings@1280x860|dom|nav > a[text]|2
 classic|settings@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-classic|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|8
-classic|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|4
+classic|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+classic|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings@1280x860|dom|table > tbody|1
 classic|settings@1280x860|dom|table > thead|1
 classic|settings@1280x860|dom|tbody > tr#librow-1|1
@@ -3679,20 +3681,21 @@ classic|settings@1280x860|focus|012|button.settab "Users"
 classic|settings@1280x860|focus|013|button.settab "System"
 classic|settings@1280x860|focus|014|button.settab "Cluster"
 classic|settings@1280x860|focus|015|button.settab "Integrations"
-classic|settings@1280x860|focus|016|button.ghost.sm "Scan every library for new & changed files"
-classic|settings@1280x860|focus|017|button.ghost.sm "Re-fetch metadata & artwork for every libra
-classic|settings@1280x860|focus|018|button.sm "+ Add library"
-classic|settings@1280x860|focus|019|a "Add a free key in Metadata"
-classic|settings@1280x860|focus|020|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|021|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|022|button.ghost.sm "Configure ⌄"
-classic|settings@1280x860|focus|023|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|024|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|025|button.ghost.sm "Configure ⌄"
-classic|settings@1280x860|focus|026|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|027|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|028|button.ghost.sm "Configure ⌄"
-classic|settings@1280x860|focus|029|<wrap>
+classic|settings@1280x860|focus|016|button.settab "Developer"
+classic|settings@1280x860|focus|017|button.ghost.sm "Scan every library for new & changed files"
+classic|settings@1280x860|focus|018|button.ghost.sm "Re-fetch metadata & artwork for every libra
+classic|settings@1280x860|focus|019|button.sm "+ Add library"
+classic|settings@1280x860|focus|020|a "Add a free key in Metadata"
+classic|settings@1280x860|focus|021|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|023|button.ghost.sm "Configure ⌄"
+classic|settings@1280x860|focus|024|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|026|button.ghost.sm "Configure ⌄"
+classic|settings@1280x860|focus|027|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|029|button.ghost.sm "Configure ⌄"
+classic|settings@1280x860|focus|030|<wrap>
 classic|settings@1280x860|req|GET /api/v1/activity|2
 classic|settings@1280x860|req|GET /api/v1/dv-conversions|1
 classic|settings@1280x860|req|GET /api/v1/libraries|1
@@ -3741,8 +3744,8 @@ classic|settings@390x780|dom|main#main > div.setlayout|1
 classic|settings@390x780|dom|nav > a.active[text]|1
 classic|settings@390x780|dom|nav > a[text]|2
 classic|settings@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-classic|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|8
-classic|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|4
+classic|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+classic|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings@390x780|dom|table > tbody|1
 classic|settings@390x780|dom|table > thead|1
 classic|settings@390x780|dom|tbody > tr#librow-1|1
@@ -3788,20 +3791,21 @@ classic|settings@390x780|focus|012|button.settab "Users"
 classic|settings@390x780|focus|013|button.settab "System"
 classic|settings@390x780|focus|014|button.settab "Cluster"
 classic|settings@390x780|focus|015|button.settab "Integrations"
-classic|settings@390x780|focus|016|button.ghost.sm "Scan every library for new & changed files"
-classic|settings@390x780|focus|017|button.ghost.sm "Re-fetch metadata & artwork for every libra
-classic|settings@390x780|focus|018|button.sm "+ Add library"
-classic|settings@390x780|focus|019|a "Add a free key in Metadata"
-classic|settings@390x780|focus|020|button.ghost.sm "Scan"
-classic|settings@390x780|focus|021|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|022|button.ghost.sm "Configure ⌄"
-classic|settings@390x780|focus|023|button.ghost.sm "Scan"
-classic|settings@390x780|focus|024|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|025|button.ghost.sm "Configure ⌄"
-classic|settings@390x780|focus|026|button.ghost.sm "Scan"
-classic|settings@390x780|focus|027|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|028|button.ghost.sm "Configure ⌄"
-classic|settings@390x780|focus|029|<wrap>
+classic|settings@390x780|focus|016|button.settab "Developer"
+classic|settings@390x780|focus|017|button.ghost.sm "Scan every library for new & changed files"
+classic|settings@390x780|focus|018|button.ghost.sm "Re-fetch metadata & artwork for every libra
+classic|settings@390x780|focus|019|button.sm "+ Add library"
+classic|settings@390x780|focus|020|a "Add a free key in Metadata"
+classic|settings@390x780|focus|021|button.ghost.sm "Scan"
+classic|settings@390x780|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|023|button.ghost.sm "Configure ⌄"
+classic|settings@390x780|focus|024|button.ghost.sm "Scan"
+classic|settings@390x780|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|026|button.ghost.sm "Configure ⌄"
+classic|settings@390x780|focus|027|button.ghost.sm "Scan"
+classic|settings@390x780|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|029|button.ghost.sm "Configure ⌄"
+classic|settings@390x780|focus|030|<wrap>
 classic|settings@390x780|req|GET /api/v1/activity|2
 classic|settings@390x780|req|GET /api/v1/dv-conversions|1
 classic|settings@390x780|req|GET /api/v1/libraries|1
@@ -5303,8 +5307,8 @@ theater|settings@1280x860|dom|header.th-top > span#activity.activity|1
 theater|settings@1280x860|dom|header.th-top > span.spacer|1
 theater|settings@1280x860|dom|main#main > div.setlayout|1
 theater|settings@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-theater|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|8
-theater|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|4
+theater|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+theater|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 theater|settings@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|2
 theater|settings@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
@@ -5354,20 +5358,21 @@ theater|settings@1280x860|focus|012|button.settab "Users"
 theater|settings@1280x860|focus|013|button.settab "System"
 theater|settings@1280x860|focus|014|button.settab "Cluster"
 theater|settings@1280x860|focus|015|button.settab "Integrations"
-theater|settings@1280x860|focus|016|button.ghost.sm "Scan every library for new & changed files"
-theater|settings@1280x860|focus|017|button.ghost.sm "Re-fetch metadata & artwork for every libra
-theater|settings@1280x860|focus|018|button.sm "+ Add library"
-theater|settings@1280x860|focus|019|a "Add a free key in Metadata"
-theater|settings@1280x860|focus|020|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|021|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|022|button.ghost.sm "Configure ⌄"
-theater|settings@1280x860|focus|023|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|024|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|025|button.ghost.sm "Configure ⌄"
-theater|settings@1280x860|focus|026|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|027|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|028|button.ghost.sm "Configure ⌄"
-theater|settings@1280x860|focus|029|<wrap>
+theater|settings@1280x860|focus|016|button.settab "Developer"
+theater|settings@1280x860|focus|017|button.ghost.sm "Scan every library for new & changed files"
+theater|settings@1280x860|focus|018|button.ghost.sm "Re-fetch metadata & artwork for every libra
+theater|settings@1280x860|focus|019|button.sm "+ Add library"
+theater|settings@1280x860|focus|020|a "Add a free key in Metadata"
+theater|settings@1280x860|focus|021|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|023|button.ghost.sm "Configure ⌄"
+theater|settings@1280x860|focus|024|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|026|button.ghost.sm "Configure ⌄"
+theater|settings@1280x860|focus|027|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|029|button.ghost.sm "Configure ⌄"
+theater|settings@1280x860|focus|030|<wrap>
 theater|settings@1280x860|req|GET /api/v1/activity|2
 theater|settings@1280x860|req|GET /api/v1/dv-conversions|1
 theater|settings@1280x860|req|GET /api/v1/libraries|1
@@ -5415,8 +5420,8 @@ theater|settings@390x780|dom|header.th-top > span#activity.activity|1
 theater|settings@390x780|dom|header.th-top > span.spacer|1
 theater|settings@390x780|dom|main#main > div.setlayout|1
 theater|settings@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-theater|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|8
-theater|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|4
+theater|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|9
+theater|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 theater|settings@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings@390x780|dom|nav.th-nav[aria-label=*] > a[text]|2
 theater|settings@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
@@ -5463,23 +5468,24 @@ theater|settings@390x780|focus|009|button.settab "Users"
 theater|settings@390x780|focus|010|button.settab "System"
 theater|settings@390x780|focus|011|button.settab "Cluster"
 theater|settings@390x780|focus|012|button.settab "Integrations"
-theater|settings@390x780|focus|013|button.ghost.sm "Scan every library for new & changed files"
-theater|settings@390x780|focus|014|button.ghost.sm "Re-fetch metadata & artwork for every libra
-theater|settings@390x780|focus|015|button.sm "+ Add library"
-theater|settings@390x780|focus|016|a "Add a free key in Metadata"
-theater|settings@390x780|focus|017|button.ghost.sm "Scan"
-theater|settings@390x780|focus|018|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|019|button.ghost.sm "Configure ⌄"
-theater|settings@390x780|focus|020|button.ghost.sm "Scan"
-theater|settings@390x780|focus|021|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|022|button.ghost.sm "Configure ⌄"
-theater|settings@390x780|focus|023|button.ghost.sm "Scan"
-theater|settings@390x780|focus|024|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|025|button.ghost.sm "Configure ⌄"
-theater|settings@390x780|focus|026|a "Home"
-theater|settings@390x780|focus|027|a "Activity"
-theater|settings@390x780|focus|028|a.on "Settings"
-theater|settings@390x780|focus|029|<wrap>
+theater|settings@390x780|focus|013|button.settab "Developer"
+theater|settings@390x780|focus|014|button.ghost.sm "Scan every library for new & changed files"
+theater|settings@390x780|focus|015|button.ghost.sm "Re-fetch metadata & artwork for every libra
+theater|settings@390x780|focus|016|button.sm "+ Add library"
+theater|settings@390x780|focus|017|a "Add a free key in Metadata"
+theater|settings@390x780|focus|018|button.ghost.sm "Scan"
+theater|settings@390x780|focus|019|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|020|button.ghost.sm "Configure ⌄"
+theater|settings@390x780|focus|021|button.ghost.sm "Scan"
+theater|settings@390x780|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|023|button.ghost.sm "Configure ⌄"
+theater|settings@390x780|focus|024|button.ghost.sm "Scan"
+theater|settings@390x780|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|026|button.ghost.sm "Configure ⌄"
+theater|settings@390x780|focus|027|a "Home"
+theater|settings@390x780|focus|028|a "Activity"
+theater|settings@390x780|focus|029|a.on "Settings"
+theater|settings@390x780|focus|030|<wrap>
 theater|settings@390x780|req|GET /api/v1/activity|2
 theater|settings@390x780|req|GET /api/v1/dv-conversions|1
 theater|settings@390x780|req|GET /api/v1/libraries|1

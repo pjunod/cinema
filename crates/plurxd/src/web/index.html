@@ -12251,6 +12251,7 @@ const SET_GROUPS=[
   ["Playback",[["playback","Playback"],["analysis","Analysis"]]],
   ["Server",[["maintenance","Maintenance"],["users","Users"],["system","System"],["cluster","Cluster"]]],
   ["Outside",[["integrations","Integrations"]]],
+  ["Developer",[["developer","Developer"]]],
 ];
 const SET_TABS=SET_GROUPS.flatMap(([,tabs])=>tabs);
 // Every section is a route: #/settings/<section>. The bare #/settings (and
@@ -12302,6 +12303,7 @@ function settingsPanel(tab,d){
   if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
+  if(tab==="developer")    return developerPanel(d.settings);
   return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
 }
 // The section header: name, one line of summary, the section's bulk actions.
@@ -12739,9 +12741,6 @@ function playbackPanel(settings){
         <div><label for="phr">Then pace at</label><select id="phr" style="min-width:200px">${presetOpts([["1.5","1.5× — gentlest"],["2","2× — recommended"],["4","4×"],["0","Unlimited"]], settings.hls_readrate, v=>`${v}×`)}</select></div>
         <div><label for="pha">Buffer limit</label><select id="pha" style="min-width:200px">${presetOpts([["60","1 minute"],["180","3 minutes — recommended"],["600","10 minutes"],["0","No limit — needs disk"]], settings.hls_ahead_max_secs, v=>`${v} seconds`)}</select></div>
       </div>
-      <h2 class="section">Previews</h2>
-      ${togRow("pcpv1",`Advertise playback control protocol v1 <span class="pill">preview</span>`,"Passive; no automatic actions yet.",settings.playback_control_protocol_v1)}
-      ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison. Applies to new sessions.",settings.hls_typeless_sliding)}
       <div class="err" id="serr"></div>
       ${setCardFoot("saveStreaming")}`);
   const local=setCard(`${cardHead("This browser only","Saved in this browser. Nothing here reaches the server or another viewer.",`<span class="pill acc">local</span>`)}
@@ -12749,6 +12748,23 @@ function playbackPanel(settings){
       <div class="tog"><span>Measured playback limits<small>When an original stream loses visible frames, this browser remembers that exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets <b>Auto</b> transcode it next time instead of stuttering first. A measurement expires after 30 days; <b>Quality → Original</b> always bypasses it.</small></span></div>
       <div class="row" id="dlrow">${decodeLimitsSummary()}</div>`,{local:true});
   return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${streaming}${local}`;
+}
+// Everything that is off on purpose, in one place.
+//
+// These are switches with a cost or an unfinished half, not preferences: each
+// one names what it spends and what is still missing, because "experimental"
+// on its own tells an operator nothing about whether turning it on will cost
+// them a stream.
+function developerPanel(settings){
+  const preview=setCard(`${cardHead("Playback control protocol","The additive control endpoint clients use to report what they are playing and ask for changes. Off by default until every client has a passive reporter.")}
+      ${togRow("pcpv1",`Advertise playback control protocol v1 <span class="pill">preview</span>`,"New sessions advertise the control endpoint. Passive on its own: the server measures what a quality change would cost, and takes no automatic action.",settings.playback_control_protocol_v1)}
+      <div class="err" id="dverr"></div>
+      ${setCardFoot("saveDeveloper")}`);
+  const experimental=setCard(`${cardHead("Experimental delivery","Changes the shape of the stream itself. Applies to new sessions only.")}
+      ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
+      <div class="err" id="dxerr"></div>
+      ${setCardFoot("saveExperimental")}`);
+  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${preview}${experimental}`;
 }
 function usersPanel(users){
   const admins=users.filter(u=>u.is_admin).length;
@@ -14172,15 +14188,31 @@ async function saveStreaming(btn){
       hls_readrate:document.getElementById("phr").value,
       hls_burst_secs:document.getElementById("phb").value,
       hls_ahead_max_secs:document.getElementById("pha").value,
-      hls_typeless_sliding:document.getElementById("phs").checked,
       vod_presentation:document.getElementById("pvod").checked,
       vod_live_recovery:document.getElementById("pvlr").checked,
-      playback_control_protocol_v1:document.getElementById("pcpv1").checked,
       vod_working_set_bytes:document.getElementById("pvws").value,
       vod_block_budget_secs:"8",
       vod_materialize_budget_secs:document.getElementById("pvmb").value}}));
     if(SERVER) SERVER.playback_auto_abr=SETTINGS.playback_auto_abr;
     toast("Streaming settings saved"); if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function saveDeveloper(btn){
+  const err=document.getElementById("dverr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      playback_control_protocol_v1:document.getElementById("pcpv1").checked}}));
+    toast("Developer settings saved"); if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function saveExperimental(btn){
+  const err=document.getElementById("dxerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      hls_typeless_sliding:document.getElementById("phs").checked}}));
+    toast("Experimental settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 function monarrCardHtml(){
