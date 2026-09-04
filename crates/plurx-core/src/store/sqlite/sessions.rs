@@ -2894,6 +2894,34 @@ impl MediaSessionStore for SqliteStore {
             let failed_cutoff = now_ms.saturating_sub(FAILED_RETENTION_MS);
             let retained_cutoff = now_ms.saturating_sub(RESOLVED_RETENTION_MS);
             let retire_before = now_ms.saturating_sub(TAKEOVER_RECOVERY_MS);
+            // A preparation expires on **its own deadline**, and this is the
+            // only thing that enforces it.
+            //
+            // A staged row sits at the publication sentinel — deliberately, so
+            // takeover inventory never mistakes a successor nobody waited for
+            // for a serving route. But `owned_media_sessions` and
+            // `expired_media_sessions` both exclude that sentinel, so a staged
+            // successor is invisible to the lease loop *and* to the retirement
+            // sweep below. Nothing renews it and nothing reaps it: it would
+            // simply wait for the generic retirement to notice its lease, which
+            // is `now - TAKEOVER_RECOVERY_MS` on a five-minute tick — minutes
+            // after the deadline the operator was promised, holding the
+            // playback's one-preparation slot and one of the user's active rows
+            // the whole time.
+            //
+            // Keyed on the ledger's `deadline_ms` rather than on the lease,
+            // because that column *is* the contract: the owner wrote it, the
+            // owner cannot renew past it, and a successor still wanted at that
+            // moment has been committed already — commit deletes this row.
+            tx.execute(
+                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = ?1,
+                        publication_ready_at_ms = ?3, updated_at_ms = ?1
+                  WHERE incarnation_id IN (
+                    SELECT staged.staged_incarnation_id FROM media_session_preparations staged
+                     WHERE staged.deadline_ms <= ?1
+                     ORDER BY staged.deadline_ms, staged.staged_incarnation_id LIMIT ?2)",
+                params![now_ms, MAINTENANCE_BATCH, MEDIA_SESSION_PUBLICATION_BLOCKED],
+            )?;
             tx.execute(
                 "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = ?1,
                         publication_ready_at_ms = ?4, updated_at_ms = ?1

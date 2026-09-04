@@ -837,7 +837,19 @@ fn staged_preparation(
 
 /// Acceptance 1, 2, 3 and 4 — everything a prepare must leave alone.
 ///
-/// An uncommitted successor cannot renew its way past its own deadline.
+/// A staged successor is not renewable — belt and braces, not the enforcement.
+///
+/// **Read this with `a_staged_successor_expires_on_its_own_deadline`, which is
+/// the one that matters.** The refusal below is real, but a staged row sits at
+/// the publication sentinel and `owned_media_sessions` excludes that value, so
+/// in production a staged successor is never offered for renewal in the first
+/// place. This test has to arm the handoff to reach the predicate at all — and
+/// arming is the one thing a real staged successor never does, because it is
+/// what turns a successor into an ordinary serving session.
+///
+/// So this pins a guard, not a behaviour: if some future path ever does arm a
+/// row while its preparation is still outstanding, it must not thereby buy
+/// itself an unbounded life.
 ///
 /// The ledger's reaper is keyed on the successor's state, never on the
 /// deadline, and its comment says the retirement sweep already ended any
@@ -949,6 +961,115 @@ async fn a_staged_successor_cannot_renew_past_its_deadline() {
             .unwrap_or_else(|| {
                 panic!("{backend}: the reaped preparation must not hold the slot forever")
             });
+    })
+    .await;
+}
+
+/// An uncommitted successor expires on its own deadline, exactly as staged.
+///
+/// **Nothing else enforces it, and the reason is a deliberate design choice
+/// two layers away.** A staged row sits at the publication sentinel so takeover
+/// inventory never mistakes a successor nobody waited for for a serving route —
+/// and both `owned_media_sessions` and `expired_media_sessions` exclude that
+/// sentinel. So a staged successor is invisible to the lease loop *and* to the
+/// retirement sweep. It is not renewable, which sounds like safety and is not:
+/// nothing was pushing its deadline forward, and nothing was arriving at it
+/// either. Left alone it waits for the generic retirement to notice a lease at
+/// `now - TAKEOVER_RECOVERY_MS` on a five-minute tick, minutes past the moment
+/// its owner promised, holding the playback's one-preparation slot and one of
+/// the user's active rows throughout.
+///
+/// This test deliberately does **not** arm the handoff first. Arming moves the
+/// row off the sentinel, which is the one state a real staged successor never
+/// reaches — and a test that armed it would be measuring a session that had
+/// already become an ordinary serving one.
+#[tokio::test]
+async fn a_staged_successor_expires_on_its_own_deadline() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-deadline-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create staged-deadline user: {error}"));
+        let playback = "staged-deadline-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fa01";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fa02",
+            backend,
+        )
+        .await;
+        let staged = "00000000-0000-4000-8000-00000000fa03";
+        let preparation = staged_preparation(
+            user.id,
+            playback,
+            staged,
+            "00000000-0000-4000-8000-00000000fa04",
+            predecessor,
+        );
+        store
+            .prepare_media_session(&preparation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: prepare must win"));
+
+        // One tick before the deadline changes nothing: a live preparation must
+        // survive maintenance, or an owner would lose a successor it is still
+        // warming.
+        store
+            .maintain_media_sessions(preparation.deadline_ms - 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: early maintenance: {error}"));
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(staged)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: staged route: {error}"))
+                .map(|route| route.state),
+            Some("active".to_owned()),
+            "{backend}: a preparation inside its window is still wanted"
+        );
+
+        // At the deadline it ends — without waiting for the retirement sweep's
+        // own `now - TAKEOVER_RECOVERY_MS`, which is the whole point.
+        store
+            .maintain_media_sessions(preparation.deadline_ms)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: deadline maintenance: {error}"));
+        let expired = store
+            .media_session_route_by_incarnation(staged)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: expired route: {error}"));
+        assert!(
+            expired.is_none_or(|route| route.state != "active"),
+            "{backend}: a successor past its deadline must not still be active"
+        );
+
+        // The viewer's own session is untouched throughout — an abandoned
+        // preparation is not allowed to be visible to them at all.
+        let current = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route after maintenance: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the playback still has a pointer"));
+        assert_eq!(current.incarnation_id, predecessor, "{backend}");
+        assert_eq!(current.state, "active", "{backend}");
+
+        // And the slot is free again, which is what makes the viewer's next
+        // quality change able to prepare at all.
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                "00000000-0000-4000-8000-00000000fa05",
+                "00000000-0000-4000-8000-00000000fa06",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the expired preparation must not hold the slot"));
     })
     .await;
 }

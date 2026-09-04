@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1d55c976"]
+points = ["core.media", "cluster.auth", "cluster.page-reads"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "A staged media session sits at MEDIA_SESSION_PUBLICATION_BLOCKED so takeover inventory never mistakes it for a serving route, and both owned_media_sessions and expired_media_sessions exclude that sentinel — so nothing renewed a staged successor and nothing reaped it at its deadline either. It waited for the generic retirement at now - TAKEOVER_RECOVERY_MS on a five-minute maintenance tick, two to seven minutes past the deadline its owner wrote, holding the playback's one-preparation slot and one of the user's active rows. a_staged_successor_expires_on_its_own_deadline reproduces it without arming the handoff, which is the state a real staged successor is in: reverting the deadline-keyed reap leaves the successor active past its deadline and fails the test. It also pins that a preparation one tick before its deadline survives, so an owner cannot lose a successor it is still warming."
