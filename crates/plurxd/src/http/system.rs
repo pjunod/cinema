@@ -1489,6 +1489,14 @@ const DELIVERY_FAILURE_EVENTS: [&str; 3] = ["stream_rejected", "playback_failed"
 pub struct SettingsDto {
     /// Replicated logical name shared by every voter.
     pub server_name: String,
+    /// Always-compiled HDHomeRun integration. The switch is runtime-only and
+    /// remains off until the separate readiness endpoint is green.
+    pub live_tv_enabled: bool,
+    pub live_tv_device_ipv4: String,
+    pub live_tv_owner_node_id: String,
+    pub live_tv_max_sessions: u8,
+    pub live_tv_output_height: u16,
+    pub live_tv_config_generation: i64,
     pub tmdb_configured: bool,
     /// The stored TMDB key itself. This endpoint is admin-only and the key is
     /// low-sensitivity (read-only metadata), so the admin who set it can see
@@ -1647,6 +1655,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     // for this node's cache ownership when a cache location is configured.
     let settings = state.store.settings_snapshot().await?;
     let setting = |key: &str| settings.get(key).cloned();
+    let live_tv = crate::live_tv::LiveTvConfig::from_snapshot(&settings, &state.node_id);
     let server_name = setting(keys::SERVER_NAME).unwrap_or_else(|| state.server_name.clone());
     let tmdb_api_key = setting(keys::TMDB_API_KEY).unwrap_or_default();
     let omdb_api_key = setting(keys::OMDB_API_KEY).unwrap_or_default();
@@ -1786,6 +1795,15 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     );
     Ok(SettingsDto {
         server_name,
+        live_tv_enabled: live_tv.enabled,
+        live_tv_device_ipv4: live_tv
+            .device_ipv4
+            .map(|address| address.to_string())
+            .unwrap_or_default(),
+        live_tv_owner_node_id: live_tv.owner_node_id,
+        live_tv_max_sessions: live_tv.max_sessions,
+        live_tv_output_height: live_tv.output_height,
+        live_tv_config_generation: live_tv.generation,
         tmdb_configured: !tmdb_api_key.is_empty(),
         tmdb_api_key,
         omdb_configured: !omdb_api_key.is_empty(),
@@ -1862,6 +1880,14 @@ pub struct UpdateSettings {
     /// Rename the logical server on every voter. Configuration is only the
     /// bootstrap seed and is not edited by this operation.
     pub server_name: Option<String>,
+    /// HDHomeRun settings are a generation-CAS tuple. Save the address/owner
+    /// while disabled, run readiness, then enable in a separate request.
+    pub live_tv_enabled: Option<bool>,
+    pub live_tv_device_ipv4: Option<String>,
+    pub live_tv_owner_node_id: Option<String>,
+    pub live_tv_max_sessions: Option<u8>,
+    pub live_tv_output_height: Option<u16>,
+    pub live_tv_config_generation: Option<i64>,
     /// Set the TMDB API key. Empty string clears it. Absent leaves it as-is.
     pub tmdb_api_key: Option<String>,
     /// Set the OMDb API key. Empty string clears it. Absent leaves it as-is.
@@ -1961,6 +1987,104 @@ pub async fn update_settings(
     // write, so a later bad field cannot leave an earlier policy change in
     // force despite returning 400/409. This matters especially for destructive
     // policies such as `dv_disk_keep_original = false`.
+    let live_tv_requested = req.live_tv_enabled.is_some()
+        || req.live_tv_device_ipv4.is_some()
+        || req.live_tv_owner_node_id.is_some()
+        || req.live_tv_max_sessions.is_some()
+        || req.live_tv_output_height.is_some();
+    let live_tv_update = if live_tv_requested {
+        let expected_generation = req.live_tv_config_generation.ok_or_else(|| {
+            ApiError::Conflict(
+                "live_tv_config_generation is required when changing Live TV settings".into(),
+            )
+        })?;
+        let settings = state.store.settings_snapshot().await?;
+        let current = crate::live_tv::LiveTvConfig::from_snapshot(&settings, &state.node_id);
+        if expected_generation != current.generation {
+            return Err(ApiError::Conflict(
+                "Live TV settings changed on another node; reload and try again".into(),
+            ));
+        }
+        let non_enable_change = req.live_tv_device_ipv4.is_some()
+            || req.live_tv_owner_node_id.is_some()
+            || req.live_tv_max_sessions.is_some()
+            || req.live_tv_output_height.is_some();
+        if non_enable_change && (current.enabled || req.live_tv_enabled == Some(true)) {
+            return Err(ApiError::Conflict(
+                "disable Live TV before changing its device, owner, limit, or output; save and test the new configuration before enabling"
+                    .into(),
+            ));
+        }
+        let device_ipv4 = match req.live_tv_device_ipv4.as_deref() {
+            Some(value) => {
+                crate::live_tv::parse_device_ipv4(value).map_err(super::live_tv::api_error)?
+            }
+            None => current.device_ipv4,
+        };
+        let owner_node_id = req
+            .live_tv_owner_node_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or(&current.owner_node_id)
+            .to_owned();
+        let candidate = crate::live_tv::LiveTvConfig {
+            enabled: req.live_tv_enabled.unwrap_or(current.enabled),
+            device_ipv4,
+            owner_node_id,
+            max_sessions: req.live_tv_max_sessions.unwrap_or(current.max_sessions),
+            output_height: req.live_tv_output_height.unwrap_or(current.output_height),
+            // Readiness is against the currently stored generation. The CAS
+            // increments only after every precondition succeeds.
+            generation: current.generation,
+        };
+        candidate
+            .validate_static()
+            .map_err(super::live_tv::api_error)?;
+        if req.live_tv_enabled == Some(true) {
+            let readiness = super::live_tv::readiness_for_config(&state, &candidate, true).await;
+            if !readiness.ready {
+                return Err(ApiError::Conflict(
+                    "Live TV cannot be enabled until every Developer readiness check is green"
+                        .into(),
+                ));
+            }
+        }
+        let next_generation = current
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| ApiError::Conflict("Live TV settings generation is exhausted".into()))?;
+        let values = vec![
+            (
+                keys::LIVE_TV_ENABLED,
+                if candidate.enabled { "1" } else { "0" }.to_owned(),
+            ),
+            (
+                keys::LIVE_TV_DEVICE_IPV4,
+                candidate
+                    .device_ipv4
+                    .map(|address| address.to_string())
+                    .unwrap_or_default(),
+            ),
+            (keys::LIVE_TV_OWNER_NODE_ID, candidate.owner_node_id),
+            (
+                keys::LIVE_TV_MAX_SESSIONS,
+                candidate.max_sessions.to_string(),
+            ),
+            (
+                keys::LIVE_TV_OUTPUT_HEIGHT,
+                candidate.output_height.to_string(),
+            ),
+            (keys::LIVE_TV_CONFIG_GENERATION, next_generation.to_string()),
+        ];
+        Some((expected_generation, values))
+    } else if req.live_tv_config_generation.is_some() {
+        return Err(ApiError::BadRequest(
+            "live_tv_config_generation is only valid with a Live TV setting".into(),
+        ));
+    } else {
+        None
+    };
+
     if req
         .dv_disk_convert_parallel
         .is_some_and(|parallel| !(1..=8).contains(&parallel))
@@ -2337,6 +2461,25 @@ pub async fn update_settings(
             .map(|(key, value)| (*key, value.as_str()))
             .collect::<Vec<_>>();
         state.store.put_settings(&borrowed).await?;
+    }
+    if let Some((expected_generation, values)) = &live_tv_update {
+        let borrowed = values
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        if !state
+            .store
+            .put_settings_if_generation(
+                keys::LIVE_TV_CONFIG_GENERATION,
+                *expected_generation,
+                &borrowed,
+            )
+            .await?
+        {
+            return Err(ApiError::Conflict(
+                "Live TV settings changed on another node; reload and try again".into(),
+            ));
+        }
     }
     if let Some(seconds) = req.subtitle_window_secs {
         state

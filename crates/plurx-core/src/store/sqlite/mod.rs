@@ -36,7 +36,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
-use super::{keys, ArtworkRepairFence, MetricsStore, PrometheusStoreSnapshot, SettingsStore};
+use super::{
+    keys, validate_generated_settings, ArtworkRepairFence, MetricsStore, PrometheusStoreSnapshot,
+    SettingsStore,
+};
 use crate::cluster::coordination::Lease;
 use crate::domain::{DolbyVisionFacts, Item, ItemKind, MediaFile, OfflinePackageStats, User};
 use crate::error::StoreError;
@@ -1881,6 +1884,53 @@ impl SettingsStore for SqliteStore {
         .await
     }
 
+    async fn put_settings_if_generation(
+        &self,
+        generation_key: &str,
+        expected_generation: i64,
+        values: &[(&str, &str)],
+    ) -> Result<bool, StoreError> {
+        validate_generated_settings(generation_key, expected_generation, values)?;
+        let generation_key = generation_key.to_owned();
+        let values = values
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect::<Vec<_>>();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let current = tx
+                .query_row(
+                    "SELECT value FROM settings WHERE key = ?1",
+                    params![generation_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|value| value.parse::<i64>())
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::InvalidParameterName(format!(
+                        "invalid settings generation: {error}"
+                    ))
+                })?
+                .unwrap_or(0);
+            if current != expected_generation {
+                return Ok(false);
+            }
+            for (key, value) in values {
+                tx.execute(
+                    "INSERT INTO settings (key, value, updated_at)
+                     VALUES (?1, ?2, unixepoch())
+                     ON CONFLICT(key) DO UPDATE
+                        SET value = excluded.value, updated_at = unixepoch()",
+                    params![key, value],
+                )?;
+            }
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
     async fn instance_id(&self) -> Result<String, StoreError> {
         self.get_setting(keys::INSTANCE_ID).await?.ok_or_else(|| {
             StoreError::Database("instance.id missing — migration invariant broken".to_owned())
@@ -2003,6 +2053,44 @@ mod tests {
                 .await
                 .expect("get pair"),
             (Some("quality".to_owned()), Some("22".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_settings_compare_and_swap_the_complete_tuple() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let first = [
+            ("live_tv.enabled", "0"),
+            ("live_tv.device_ipv4", "192.168.4.20"),
+            ("live_tv.config_generation", "1"),
+        ];
+        assert!(store
+            .put_settings_if_generation("live_tv.config_generation", 0, &first)
+            .await
+            .expect("first CAS"));
+        let stale = [
+            ("live_tv.enabled", "1"),
+            ("live_tv.device_ipv4", "192.168.4.21"),
+            ("live_tv.config_generation", "1"),
+        ];
+        assert!(!store
+            .put_settings_if_generation("live_tv.config_generation", 0, &stale)
+            .await
+            .expect("stale CAS"));
+        let snapshot = store.settings_snapshot().await.expect("snapshot");
+        assert_eq!(
+            snapshot.get("live_tv.enabled").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            snapshot.get("live_tv.device_ipv4").map(String::as_str),
+            Some("192.168.4.20")
+        );
+        assert_eq!(
+            snapshot
+                .get("live_tv.config_generation")
+                .map(String::as_str),
+            Some("1")
         );
     }
 

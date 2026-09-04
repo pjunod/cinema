@@ -621,9 +621,14 @@ depends_on = ["core.media", "server.api", "library.catalog"]
 [[points]]
 id = "live-tv.integration"
 title = "HDHomeRun live television"
-contract = "One configured HDHomeRun supplies a bounded non-DRM channel lineup and live HLS session through one cluster owner, while every ingress and first-party client preserves capability, cleanup, and finite-file-state boundaries."
-paths = ["docs/HDHOMERUN-LIVE-TV-*.md"]
-checks = ["operations-contract"]
+contract = "The always-compiled Live TV runtime accepts only an explicit private or link-local IPv4 device, ignores advertised hostnames, refuses proxies and redirects, bounds device and peer documents, publishes one generation-fenced settings tuple, and obtains readiness plus a sanitized non-DRM channel lineup from one committed voter owner. Live HLS sessions preserve capability, cleanup, and finite-file-state boundaries through every ingress and first-party client."
+paths = [
+  "crates/plurxd/src/live_tv.rs",
+  "crates/plurxd/src/http/live_tv.rs",
+  "crates/plurxd/src/http/internal_live_tv.rs",
+  "docs/HDHOMERUN-LIVE-TV-*.md",
+]
+checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract"]
 depends_on = ["server.api", "identity.access", "playback.pipeline"]
 
 [[points]]

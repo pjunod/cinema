@@ -25,8 +25,8 @@ use sha2::{Digest, Sha256};
 use super::replicated::ReplicatedSql;
 use super::telemetry::NodeLocalTelemetry;
 use super::{
-    keys, ApiKeyStore, ArtworkRepairFence, MetricsStore, NetworkPriorStore, PlaybackTelemetryStore,
-    PrometheusStoreSnapshot, SettingsStore, UserStore,
+    keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence, MetricsStore,
+    NetworkPriorStore, PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore, UserStore,
 };
 use crate::domain::{
     ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
@@ -3018,6 +3018,48 @@ impl SettingsStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
         Ok(())
+    }
+
+    async fn put_settings_if_generation(
+        &self,
+        generation_key: &str,
+        expected_generation: i64,
+        values: &[(&str, &str)],
+    ) -> Result<bool, StoreError> {
+        validate_generated_settings(generation_key, expected_generation, values)?;
+        let now = self.now()?;
+        let sql = "INSERT INTO settings (key, value, updated_at) \
+                   SELECT $1, $2, $3 WHERE COALESCE((\
+                     SELECT CAST(value AS INTEGER) FROM settings WHERE key = $4\
+                   ), 0) = $5 \
+                   ON CONFLICT(key) DO UPDATE SET \
+                   value = excluded.value, updated_at = excluded.updated_at";
+        validate_sql(sql)?;
+        let mut ordered = values
+            .iter()
+            .filter(|(key, _)| *key != generation_key)
+            .copied()
+            .collect::<Vec<_>>();
+        ordered.extend(
+            values
+                .iter()
+                .filter(|(key, _)| *key == generation_key)
+                .copied(),
+        );
+        let results = self
+            .client()
+            .txn(ordered.iter().map(|(key, value)| {
+                (
+                    sql.to_owned(),
+                    params!(*key, *value, now, generation_key, expected_generation),
+                )
+            }))
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(!results.is_empty() && results.into_iter().all(|changed| changed == 1))
     }
 
     async fn instance_id(&self) -> Result<String, StoreError> {

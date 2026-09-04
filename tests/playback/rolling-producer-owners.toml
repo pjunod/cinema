@@ -1132,7 +1132,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # one preparation slot and its durable row together. Without it the first
 # successful stage is the last one for the life of the session. It owns no
 # producer and starts no process — it only settles a slot the actor holds.
-expected_occurrences = 389
+# 389 -> 392 with HDHomeRun document-boundary fixtures: the one-response
+# redirect/size server, stalled-body server, and stalled fetch are test-only.
+# The first is joined by each caller; the stall pair is explicitly aborted or
+# awaited after the absolute deadline. None ships or owns a media producer.
+expected_occurrences = 392
 
 [[module_structures]]
 id = "method-spawn"
@@ -1227,7 +1231,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # count is both deltas rather than either one.
 # 549 -> 550 with M6 §3.4: the `Duration::from_millis` that timer sleeps for.
 # It is the preparation deadline, not a playback-progress watchdog.
-expected_occurrences = 550
+# +4 for HDHomeRun: two request/body reads share one absolute ten-second
+# deadline, the synthetic FFmpeg readiness graph has a twenty-second bound,
+# and the stalled-body fixture advances one test-only sleep. The child is
+# kill-on-drop and the fixture tasks settle before their runtimes end.
+expected_occurrences = 554
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1264,7 +1272,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # returns. It owns no rolling producer, outlives no await, and never runs in a
 # shipped binary — it exists so the argv pin has a real Dolby-Vision-shaped
 # HEVC source to copy.
-expected_occurrences = 67
+# +1: the HDHomeRun readiness probe constructs the exact synthetic FFmpeg HLS
+# graph, awaits its output behind a hard deadline, and marks it kill-on-drop.
+expected_occurrences = 68
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1326,7 +1336,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `Response::status()` off an in-process control refusal, which is the whole
 # assertion — that the owner side answers 410 without a retry hint, or 425 with
 # one. In-process; they launch nothing and own nothing.
-expected_occurrences = 216
+# +3 for HDHomeRun: two HTTP status reads enforce the no-redirect/success
+# contract and one `.output()` awaits the bounded synthetic FFmpeg graph.
+expected_occurrences = 219
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1369,7 +1381,8 @@ pattern = "kill_on_drop\\s*\\("
 # +1: the chapter probe is dropped by cancellation or deadline selection and
 # must not leave ffprobe holding a NAS file or the queue's global media slot.
 # +1 with the bounded subtitle window: its kill_on_drop, for the same reason the whole-track extractor has one.
-expected_occurrences = 37
+# +1: the HDHomeRun graph probe cannot survive cancellation or its deadline.
+expected_occurrences = 38
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

@@ -12,8 +12,8 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 
 | Milestone | State | PR | Evidence |
 |---|---|---|---|
-| M0 plan and adversarial review | effort gate | [#904](https://github.com/pjunod/plurx/pull/904) | exact-PR review approved at `8e6eaafa`; gate pending |
-| M1 device/settings/lineup | not started | — | — |
+| M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
+| M1 device/settings/lineup | in progress | pending | branch `codex/hdhomerun-device-api` |
 | M2 live HLS and cluster relay | not started | — | — |
 | M3 web client | not started | — | — |
 | M4 Apple and Android | not started | — | — |
@@ -21,17 +21,10 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 
 ## Current work — design before bytes
 
-PR #904 is open from `codex/hdhomerun-plan` to
-`effort/hdhomerun-live-tv`. Architecture and protocol pre-reviews rejected
-adapting the finite-file VOD engine and rejected per-node tuner capacity. A
-third adversarial review found three critical and eleven high/medium gaps. The
-plan now closes them with a proxy-free one-GET byte pump, configuration/quorum
-fencing, idempotent provisional start/activation, owner-authoritative lineup,
-mixed-version capability proof, independent producer watchdog, exact FFmpeg
-graph readiness, typed bounded resources, `omit_endlist`, no-feature-gate
-tests, client recovery, and per-PR review/status gates. The reviewer approved
-the amended plan with no remaining findings. The exact PR diff at `8e6eaafa`
-also received an Approve verdict with no actionable findings.
+M0 merged to the effort. M1 is implementing the always-compiled runtime
+settings, safe device/document boundary, owner capability/snapshot relay,
+readiness, and sanitized lineup API. It deliberately does not open a tuner
+stream or start FFmpeg; those lifecycle invariants land together in M2.
 
 ## Evidence — exact commands and trees
 
@@ -42,6 +35,7 @@ also received an Approve verdict with no actionable findings.
 | 2026-09-04 | staged `codex/hdhomerun-plan` | `make validate-staged` | 115 catalog, 1,294 history, and 160 operations checks passed after review fixes |
 | 2026-09-04 | `b1bf0375` | PR [#904](https://github.com/pjunod/plurx/pull/904) | opened to the effort branch; exact-diff review requested |
 | 2026-09-04 | `8e6eaafa` | adversarial PR review | approved; no actionable diff findings |
+| 2026-09-04 | `a79c4927` | PR [#904](https://github.com/pjunod/plurx/pull/904) | current-head review approved; effort gate passed; merged as `e3f05f2e` |
 
 ## Decisions made while the owner is away
 

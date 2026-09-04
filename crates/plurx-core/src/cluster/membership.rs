@@ -109,6 +109,10 @@ const LEARNER_PROTOCOL_CAPABILITY: &str = "learner_protocol_v5";
 /// Proof that every active member understands readiness-gated routing and the
 /// promotion/removal intent rows introduced by the complete worker lifecycle.
 const LEARNER_LIFECYCLE_CAPABILITY: &str = "learner_lifecycle_v1";
+/// All live-TV HTTP/settings code is always compiled. A fresh heartbeat row
+/// proves the running process understands the v1 owner/snapshot protocol;
+/// runtime enablement remains off until every active node proves it.
+pub const LIVE_TV_CAPABILITY: &str = "live_tv_v1";
 /// Minimum unreserved capacity required before a learner may be promoted.
 /// This is deliberately independent of media-cache headroom: a voter must
 /// always retain room for Raft WAL growth, a received snapshot, and SQLite's
@@ -3552,6 +3556,14 @@ impl MembershipManager {
                     now
                 ),
             ),
+            (
+                "INSERT INTO cluster_node_capabilities \
+                     (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT(node_id, capability) DO UPDATE SET \
+                       last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(inner.identity.node_id.as_str(), LIVE_TV_CAPABILITY, now),
+            ),
         ];
         // Same transaction, same timestamp, same coupling: a protocol-5
         // capability row can only carry this heartbeat's `last_seen_at` if this
@@ -6785,6 +6797,16 @@ impl MembershipManager {
         capability: &str,
     ) -> Result<Vec<String>, MembershipError> {
         self.unready_nodes(capability, Read::Quorum).await
+    }
+
+    /// Active nodes whose current binary has not published the always-compiled
+    /// live-TV v1 owner/snapshot protocol. An unclustered server is the whole
+    /// serving set and supports the protocol by construction.
+    pub async fn live_tv_protocol_pending_nodes(&self) -> Result<Vec<String>, MembershipError> {
+        if !self.is_replicated() {
+            return Ok(Vec::new());
+        }
+        self.nodes_missing_capability(LIVE_TV_CAPABILITY).await
     }
 
     async fn unready_nodes(
