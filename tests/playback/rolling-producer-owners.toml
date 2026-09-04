@@ -605,12 +605,27 @@ expected_occurrences = 14
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
 pattern = "commit_guard_before"
-expected_occurrences = 13
+# 14 with M6's prepared successor. `stage_prepared_successor` writes a durable
+# media-session row and a job lease naming this node as owner, *after*
+# `create_cluster_session` has returned — so the generation that call checked is
+# already stale when the write lands. A node that lost authority in between must
+# not claim a playback it no longer serves, which is what every other fenced
+# write in this module holds a guard for. Taken immediately before
+# `PreparationExecutor::stage`, released when it returns, and the staging call
+# it wraps is itself bounded by `timeout_at` so the guard cannot be held across
+# a stalled Raft proposal. A refused guard aborts the started worker rather than
+# leaving it running behind a fence.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
 pattern = "admitted_serving_generation"
-expected_occurrences = 24
+# 26 with M6's prepared successor: `stage_prepared_successor` takes one
+# admission and threads it into `create_cluster_session_scoped`, which re-checks
+# it around the replacement gate exactly as the ingress start does. The token is
+# not minted here — `authority.admit()` is the same one every start uses — so
+# this adds a caller of the existing fence, not a second authority.
+expected_occurrences = 26
 
 [[module_symbols]]
 id = "m4-owner-bound-status-publication"
@@ -1211,7 +1226,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `all-async-sleeps` above. Same call, counted once in each sentinel. The two
 # efforts moved this number from the same base independently, so the merged
 # count is both deltas rather than either one.
-expected_occurrences = 549
+# 550 with M6's prepared successor: one `tokio::time::timeout_at` bounding
+# `PreparationExecutor::stage` while the serving-authority commit guard is held.
+# It bounds a durable write, not a producer — it selects no recipe, publishes no
+# response and starts no process; the process this path starts is bounded
+# separately by `PREPARED_START_BUDGET` inside `create_cluster_session`. The
+# reason it exists is the guard: that is a read lock whose write side the
+# quorum-loss publisher needs, so an unbounded proposal would block
+# authority-loss publication for the whole node.
+expected_occurrences = 550
 
 [[module_structures]]
 id = "bare-time-constructor"
