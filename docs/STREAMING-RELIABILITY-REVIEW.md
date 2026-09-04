@@ -354,6 +354,28 @@ Both recorded VOD acceptance failures coincided with authority expiry. A
 single delayed observer is not evidence of split brain, yet it can currently
 fence media reads and terminate mutable sessions.
 
+**Refinement from the integrated-source audit:** new GETs/publications and
+mutable producer work are fenced; already-open exact HLS segment bodies can
+drain within their existing no-progress and maximum-body deadlines. Their EOF
+bookkeeping rechecks the authority generation and discards stale completion.
+The problem is not that every in-flight immutable body is immediately killed.
+Raw direct-file bodies are lazy, drop-owned file streams; this pass has not
+demonstrated an orphan requiring an HLS-sized total-transfer timeout, which
+would itself break legitimate long progressive playback.
+
+Two distinct liveness defects need separate proof. Sequential sampling must
+budget `max(refresh, previous sample duration) + next sample duration + jitter`
+inside the lease; simply comparing the 500 ms refresh with a one-second lease
+misses consecutive valid 750 ms observations. Separately, replacing a still-
+eligible proof with a newer committed index before local apply catches up can
+create an irreversible serving-loss generation. Retain eligible serving
+evidence only until its **original** request-start expiry, while preserving
+the latest observed watermark/apply lag as truthful diagnostics. Any such
+projection must invalidate on term, leader, or observation-epoch change and
+must not change bounded-replica-read semantics. The previous release's
+1,500 ms election floor remains a mixed-version constraint; the current
+2,400 ms floor is not by itself permission to lengthen the lease.
+
 **Required correction:** separate inability to refresh an observation from a
 confirmed term/quorum change. Refuse new mutations and publications when
 authority is uncertain, but allow already-admitted immutable bytes to drain.
