@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["cba9bf34"]
+points = []
+checks = []
+reason = "Documentation only: records that M5.2 landed and that deploying it moves the replicated schema to v27, which schema_migration_action makes a stop-the-fleet upgrade. No runtime behavior changes."
+ignore = true
