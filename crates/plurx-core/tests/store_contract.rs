@@ -835,6 +835,33 @@ fn staged_preparation(
     }
 }
 
+fn preparation_commit_request(
+    staged_incarnation_id: &str,
+    now_ms: i64,
+    lease_expires_at_ms: i64,
+) -> plurx_core::domain::MediaSessionPreparationCommitRequest {
+    plurx_core::domain::MediaSessionPreparationCommitRequest {
+        staged_incarnation_id: staged_incarnation_id.to_owned(),
+        expected_predecessor_owner_node_id: "staged-node".to_owned(),
+        expected_predecessor_owner_epoch: 1,
+        now_ms,
+        lease_expires_at_ms,
+        control_receipt: None,
+    }
+}
+
+fn preparation_abort_request(
+    staged_incarnation_id: &str,
+    now_ms: i64,
+) -> plurx_core::domain::MediaSessionPreparationAbortRequest {
+    plurx_core::domain::MediaSessionPreparationAbortRequest {
+        staged_incarnation_id: staged_incarnation_id.to_owned(),
+        expected_predecessor_owner_node_id: "staged-node".to_owned(),
+        expected_predecessor_owner_epoch: 1,
+        now_ms,
+    }
+}
+
 /// Acceptance 1, 2, 3 and 4 — everything a prepare must leave alone.
 ///
 /// A staged successor is not renewable — belt and braces, not the enforcement.
@@ -1387,7 +1414,11 @@ async fn media_session_rejoin_loses_safely_after_the_occupied_slot_commits() {
             .unwrap_or_else(|error| panic!("{backend}: prepare occupied slot: {error}"))
             .unwrap_or_else(|| panic!("{backend}: occupied preparation must win"));
         store
-            .commit_media_session_preparation(user.id, playback, occupied, 3_000, 900_000)
+            .commit_media_session_preparation(
+                user.id,
+                playback,
+                &preparation_commit_request(occupied, 3_000, 900_000),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: commit occupied slot: {error}"))
             .unwrap_or_else(|| panic!("{backend}: occupied preparation must commit"));
@@ -1877,7 +1908,11 @@ async fn hiqlite_media_session_rejoin_cannot_resurrect_an_aborted_preparation() 
         .expect("stale rejoin reaches ledger-read seam")
         .expect("stale rejoin publishes ledger-read seam");
     store
-        .abort_media_session_preparation(user.id, playback, occupied, merged.now_ms)
+        .abort_media_session_preparation(
+            user.id,
+            playback,
+            &preparation_abort_request(occupied, merged.now_ms),
+        )
         .await
         .expect("winning abort")
         .expect("winning abort retires the occupied preparation");
@@ -1984,7 +2019,11 @@ async fn hiqlite_media_session_rejoin_survives_a_post_proposal_commit() {
         .expect("rejoin reaches post-proposal seam")
         .expect("rejoin publishes post-proposal seam");
     let committed = store
-        .commit_media_session_preparation(user.id, playback, &merged.incarnation_id, 3_000, 900_000)
+        .commit_media_session_preparation(
+            user.id,
+            playback,
+            &preparation_commit_request(&merged.incarnation_id, 3_000, 900_000),
+        )
         .await
         .expect("commit merged replacement")
         .expect("merged replacement commits while rejoin projection is paused");
@@ -2074,7 +2113,11 @@ async fn hiqlite_media_session_rejoin_classifies_a_post_proposal_abort() {
         .expect("rejoin reaches post-proposal abort seam")
         .expect("rejoin publishes post-proposal abort seam");
     let aborted = store
-        .abort_media_session_preparation(user.id, playback, &merged.incarnation_id, 3_000)
+        .abort_media_session_preparation(
+            user.id,
+            playback,
+            &preparation_abort_request(&merged.incarnation_id, 3_000),
+        )
         .await
         .expect("abort merged replacement")
         .expect("merged replacement aborts while rejoin projection is paused");
@@ -2153,7 +2196,11 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
             .unwrap_or_else(|| panic!("{backend}: prepare must win"));
 
         let commit = store
-            .commit_media_session_preparation(user.id, playback, staged, 3_000, 900_000)
+            .commit_media_session_preparation(
+                user.id,
+                playback,
+                &preparation_commit_request(staged, 3_000, 900_000),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: commit: {error}"))
             .unwrap_or_else(|| panic!("{backend}: commit must win"));
@@ -2187,7 +2234,11 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
 
         // Once. A replay reads the same rather than reaping a second time.
         let replay = store
-            .commit_media_session_preparation(user.id, playback, staged, 4_000, 900_000)
+            .commit_media_session_preparation(
+                user.id,
+                playback,
+                &preparation_commit_request(staged, 4_000, 900_000),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: commit replay: {error}"))
             .unwrap_or_else(|| panic!("{backend}: a replay reads back the committed route"));
@@ -2253,7 +2304,11 @@ async fn media_session_commit_against_a_moved_pointer_aborts_the_successor() {
 
         assert!(
             store
-                .commit_media_session_preparation(user.id, playback, staged, 5_000, 900_000)
+                .commit_media_session_preparation(
+                    user.id,
+                    playback,
+                    &preparation_commit_request(staged, 5_000, 900_000),
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale commit: {error}"))
                 .is_none(),
@@ -2329,7 +2384,11 @@ async fn media_session_abort_removes_only_the_staged_successor() {
             .unwrap_or_else(|| panic!("{backend}: prepare must win"));
 
         let aborted = store
-            .abort_media_session_preparation(user.id, playback, staged, 6_000)
+            .abort_media_session_preparation(
+                user.id,
+                playback,
+                &preparation_abort_request(staged, 6_000),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: abort: {error}"))
             .unwrap_or_else(|| panic!("{backend}: abort must win"));
@@ -2351,7 +2410,11 @@ async fn media_session_abort_removes_only_the_staged_successor() {
         // Idempotent, and it releases the slot so a later prepare can run.
         assert!(
             store
-                .abort_media_session_preparation(user.id, playback, staged, 7_000)
+                .abort_media_session_preparation(
+                    user.id,
+                    playback,
+                    &preparation_abort_request(staged, 7_000),
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: abort replay: {error}"))
                 .is_some_and(|route| route.state == "ended"),
@@ -2402,8 +2465,7 @@ async fn media_session_abort_cannot_end_a_session_it_never_staged() {
                 .abort_media_session_preparation(
                     user.id,
                     "a-playback-it-does-not-belong-to",
-                    stranger,
-                    9_000,
+                    &preparation_abort_request(stranger, 9_000),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stranger abort: {error}"))
@@ -2461,14 +2523,22 @@ async fn media_session_abort_after_commit_leaves_the_promoted_successor_alone() 
             .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
             .unwrap_or_else(|| panic!("{backend}: prepare must win"));
         store
-            .commit_media_session_preparation(user.id, playback, staged, 3_000, 900_000)
+            .commit_media_session_preparation(
+                user.id,
+                playback,
+                &preparation_commit_request(staged, 3_000, 900_000),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: commit: {error}"))
             .unwrap_or_else(|| panic!("{backend}: commit must win"));
 
         assert!(
             store
-                .abort_media_session_preparation(user.id, playback, staged, 4_000)
+                .abort_media_session_preparation(
+                    user.id,
+                    playback,
+                    &preparation_abort_request(staged, 4_000),
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: late abort: {error}"))
                 .is_none(),
@@ -2484,6 +2554,230 @@ async fn media_session_abort_after_commit_leaves_the_promoted_successor_alone() 
             current.state, "active",
             "{backend}: a pointer naming an ended row is how a playback loses \
              its pointer entirely on the next maintenance pass"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn media_session_commit_rejects_an_expired_preparation_in_the_store_cas() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-expired-commit-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "staged-expired-commit-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fa01";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fa02",
+            backend,
+        )
+        .await;
+        let staged = "00000000-0000-4000-8000-00000000fa03";
+        let mut preparation = staged_preparation(
+            user.id,
+            playback,
+            staged,
+            "00000000-0000-4000-8000-00000000fa04",
+            predecessor,
+        );
+        preparation.deadline_ms = 2_500;
+        store
+            .prepare_media_session(&preparation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: preparation must win"));
+
+        assert!(store
+            .commit_media_session_preparation(
+                user.id,
+                playback,
+                &preparation_commit_request(staged, 2_500, 900_000),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: expired commit: {error}"))
+            .is_none());
+        assert_eq!(
+            store
+                .media_session_route_for_playback(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: current route: {error}"))
+                .map(|route| route.incarnation_id),
+            Some(predecessor.to_owned()),
+            "{backend}: the expired successor cannot become current"
+        );
+        assert!(store
+            .staged_media_session_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: ledger: {error}"))
+            .is_none());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn media_session_commit_atomically_retains_its_control_receipt() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-receipt-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "staged-receipt-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fc01";
+        let predecessor_activation = current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fc02",
+            backend,
+        )
+        .await;
+        let staged = "00000000-0000-4000-8000-00000000fc03";
+        store
+            .prepare_media_session(&staged_preparation(
+                user.id,
+                playback,
+                staged,
+                "00000000-0000-4000-8000-00000000fc04",
+                predecessor,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: preparation must win"));
+        let receipt = MediaSessionTerminalAck {
+            incarnation_id: predecessor.to_owned(),
+            session_id: predecessor_activation.session_id,
+            owner_node_id: "staged-node".to_owned(),
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-00000000fc05".to_owned(),
+            sequence: 2,
+            request_fingerprint: "e".repeat(64),
+            response_json: "{\"action\":\"none\"}".to_owned(),
+            expires_at_ms: 60_000,
+            updated_at_ms: 3_000,
+        };
+        let mut commit = preparation_commit_request(staged, 3_000, 900_000);
+        commit.control_receipt = Some(receipt.clone());
+        let first = store
+            .commit_media_session_preparation(user.id, playback, &commit)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: commit: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: commit must win"));
+        assert!(
+            first.predecessor.is_some(),
+            "{backend}: first commit is fresh"
+        );
+        assert_eq!(
+            store
+                .media_session_terminal_ack(&receipt.session_id, 3_001)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: receipt read: {error}")),
+            Some(receipt.clone()),
+            "{backend}: pointer advance and receipt are one outcome"
+        );
+        let replay = store
+            .commit_media_session_preparation(user.id, playback, &commit)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay commit: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: replay must remain visible"));
+        assert!(
+            replay.predecessor.is_none(),
+            "{backend}: replay is classified"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn stale_predecessor_owner_cannot_commit_or_abort_a_preparation() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("staged-owner-fence-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "staged-owner-fence-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fb01";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fb02",
+            backend,
+        )
+        .await;
+        let staged = "00000000-0000-4000-8000-00000000fb03";
+        let mut preparation = staged_preparation(
+            user.id,
+            playback,
+            staged,
+            "00000000-0000-4000-8000-00000000fb04",
+            predecessor,
+        );
+        preparation.deadline_ms = 1_800_000;
+        store
+            .prepare_media_session(&preparation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: preparation must win"));
+        store
+            .claim_media_session_takeover(&MediaSessionTakeover {
+                incarnation_id: predecessor.to_owned(),
+                expected_owner_node_id: "staged-node".to_owned(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "successor-owner".to_owned(),
+                now_ms: 900_001,
+                lease_expires_at_ms: 1_800_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: takeover: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: takeover must win"));
+
+        assert!(store
+            .commit_media_session_preparation(
+                user.id,
+                playback,
+                &preparation_commit_request(staged, 900_002, 1_800_000),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale commit: {error}"))
+            .is_none());
+        assert!(store
+            .abort_media_session_preparation(
+                user.id,
+                playback,
+                &preparation_abort_request(staged, 900_003),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale abort: {error}"))
+            .is_none());
+        assert!(store
+            .staged_media_session_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retained ledger: {error}"))
+            .is_some());
+
+        let cleaned = store
+            .abort_media_session_preparation(
+                user.id,
+                playback,
+                &plurx_core::domain::MediaSessionPreparationAbortRequest {
+                    staged_incarnation_id: staged.to_owned(),
+                    expected_predecessor_owner_node_id: "successor-owner".to_owned(),
+                    expected_predecessor_owner_epoch: 2,
+                    now_ms: 900_004,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: successor-owner abort: {error}"));
+        assert!(
+            cleaned.is_some(),
+            "{backend}: the current owner can clean up"
         );
     })
     .await;
@@ -2526,7 +2820,11 @@ async fn media_session_a_committed_successor_can_renew_and_outlives_its_preparat
             .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
             .unwrap_or_else(|| panic!("{backend}: prepare must win"));
         let commit = store
-            .commit_media_session_preparation(user.id, playback, staged, 3_000, 5_000_000)
+            .commit_media_session_preparation(
+                user.id,
+                playback,
+                &preparation_commit_request(staged, 3_000, 5_000_000),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: commit: {error}"))
             .unwrap_or_else(|| panic!("{backend}: commit must win"));
@@ -2615,7 +2913,11 @@ async fn media_session_commit_replay_survives_a_later_preparation() {
             .unwrap_or_else(|error| panic!("{backend}: first prepare: {error}"))
             .unwrap_or_else(|| panic!("{backend}: first prepare must win"));
         store
-            .commit_media_session_preparation(user.id, playback, first, 3_000, 900_000)
+            .commit_media_session_preparation(
+                user.id,
+                playback,
+                &preparation_commit_request(first, 3_000, 900_000),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: first commit: {error}"))
             .unwrap_or_else(|| panic!("{backend}: first commit must win"));
@@ -2632,7 +2934,11 @@ async fn media_session_commit_replay_survives_a_later_preparation() {
             .unwrap_or_else(|| panic!("{backend}: second prepare must win"));
 
         let replay = store
-            .commit_media_session_preparation(user.id, playback, first, 4_000, 900_000)
+            .commit_media_session_preparation(
+                user.id,
+                playback,
+                &preparation_commit_request(first, 4_000, 900_000),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: commit replay: {error}"))
             .unwrap_or_else(|| {
@@ -2751,7 +3057,11 @@ async fn media_session_commit_of_an_ended_successor_releases_the_slot() {
 
         assert!(
             store
-                .commit_media_session_preparation(user.id, playback, staged, 3_000, 900_000)
+                .commit_media_session_preparation(
+                    user.id,
+                    playback,
+                    &preparation_commit_request(staged, 3_000, 900_000),
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: commit an ended successor: {error}"))
                 .is_none(),

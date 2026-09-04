@@ -252,6 +252,11 @@ impl ControlRequestV1 {
         }
         if let Some(acknowledgement) = &self.acknowledgement {
             acknowledgement.validate()?;
+            if self.demand == PlaybackDemand::End
+                && acknowledgement.state == AcknowledgementState::Committed
+            {
+                return Err("acknowledgement.state");
+            }
         }
         if let Some(actions) = &self.supported_actions {
             // Bounded because it is attacker-controlled input on an
@@ -1644,15 +1649,17 @@ pub(crate) enum ControlAction {
         after_ms: u32,
         reason: ProducerDecisionReason,
     },
-    /// A successor is staged and priming; hold a second pipeline on it.
+    /// A successor is staged; a qualified client may hold a second pipeline
+    /// on its unpublished route once a real preparation worker exists.
     ///
     /// **The first action that is a transaction rather than a report.** Hold,
     /// terminal and retry describe what production is already doing, so a
     /// replay recomputes them from current delivery — a hold that has since
     /// lifted must not be replayed as though it were still in force. This one
     /// describes something the server *did*: a durable row exists, the actor's
-    /// slot is taken, and a second pipeline is being primed against a real
-    /// session. Recomputing that on a replay would either stage it twice or
+    /// slot is taken, and an unpublished session route exists. This slice
+    /// deliberately starts no worker behind that route. Recomputing the
+    /// transaction on a replay would either stage it twice or
     /// silently drop the one already staged, so it is recorded on
     /// `ControlState::prior_action` and replayed exactly.
     ///
@@ -2480,6 +2487,11 @@ pub(crate) trait PreparationGate: Send + Sync {
     /// transaction.
     fn may_commit_preparation<'a>(&'a self, staged_incarnation_id: &'a str) -> GateAnswer<'a>;
 
+    /// Atomically reserve abort authority. A commit acknowledgement that has
+    /// already moved the slot to `Committing` makes this return false, and the
+    /// caller must not touch the durable row.
+    fn begin_abort_preparation<'a>(&'a self, staged_incarnation_id: &'a str) -> GateAnswer<'a>;
+
     /// Report a preparation's durable outcome and free the slot.
     fn settle_preparation<'a>(
         &'a self,
@@ -2505,6 +2517,13 @@ impl PreparationGate for RollingControlHandle {
 
     fn may_commit_preparation<'a>(&'a self, staged_incarnation_id: &'a str) -> GateAnswer<'a> {
         Box::pin(RollingControlHandle::may_commit_preparation(
+            self,
+            staged_incarnation_id,
+        ))
+    }
+
+    fn begin_abort_preparation<'a>(&'a self, staged_incarnation_id: &'a str) -> GateAnswer<'a> {
+        Box::pin(RollingControlHandle::begin_abort_preparation(
             self,
             staged_incarnation_id,
         ))
@@ -2997,8 +3016,16 @@ struct PreparedActionBinding {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PreparationDirective {
-    Commit { staged_incarnation_id: String },
-    Abort { staged_incarnation_id: String },
+    Commit {
+        staged_incarnation_id: String,
+    },
+    Abort {
+        staged_incarnation_id: String,
+        /// The client claimed a commit after the actor's deadline/abort fence
+        /// had already won. Cleanup is still durable, but the HTTP response
+        /// must not report the rejected acknowledgement as success.
+        acknowledgement_rejected: bool,
+    },
 }
 
 impl ControlState {
@@ -3120,75 +3147,67 @@ impl ControlState {
                 ));
             }
         }
-        let preparation_directive =
-            self.record_preparation_acknowledgement(acknowledgement.as_ref());
-        let (action, suppressed) = match &prepared_successor {
-            PreparedSuccessorObservation::Ready(successor)
-                if self.preparation.may_announce(
-                    &successor.staged_incarnation_id,
-                    successor.deadline_ms,
-                    now_unix_ms,
-                ) =>
-            {
-                let action = match &self.prepared_action {
-                    Some(binding) if binding.successor == *successor => binding.action.clone(),
-                    Some(binding)
-                        if binding.successor.staged_incarnation_id
-                            == successor.staged_incarnation_id =>
-                    {
-                        // Durable route contents are immutable. A different
-                        // payload under the same staged identity is corruption,
-                        // not authority to rotate the transaction.
-                        return Err(ControlStateError::Unavailable);
-                    }
-                    Some(_) => return Err(ControlStateError::Unavailable),
-                    None => {
-                        let action = successor.clone().into_action();
-                        self.prepared_action = Some(PreparedActionBinding {
-                            successor: successor.clone(),
-                            action: action.clone(),
-                            acknowledgement: None,
-                        });
-                        action
-                    }
-                };
-                (action, false)
-            }
-            PreparedSuccessorObservation::Ready(successor) => {
-                if self.prepared_action.as_ref().is_some_and(|binding| {
-                    binding.successor.staged_incarnation_id == successor.staged_incarnation_id
-                }) {
-                    self.prepared_action = None;
-                }
-                (ControlAction::None, false)
-            }
-            PreparedSuccessorObservation::Absent => {
-                self.prepared_action = None;
-                (ControlAction::None, false)
-            }
-            PreparedSuccessorObservation::Unavailable => {
-                return Err(ControlStateError::Unavailable)
-            }
-            PreparedSuccessorObservation::Inactive => (ControlAction::None, false),
-            PreparedSuccessorObservation::NotRequested => (
-                ControlAction::None,
-                request_can_suppress_preparation(&self.preparation, now_unix_ms),
-            ),
-        };
-        let (action, suppressed) = if preparation_directive.is_some() {
-            // A terminal acknowledgement settles this transaction. Repeating
-            // the Prepare in the acknowledgement response would invite the
-            // client to begin the same handoff again while the durable CAS is
-            // still completing.
+        let terminal_directive =
+            self.record_terminal_preparation_acknowledgement(acknowledgement.as_ref(), now_unix_ms);
+        let (action, suppressed) = if terminal_directive.is_some() {
+            // A bound terminal acknowledgement is sufficient authority for
+            // the actor decision. A redundant Store observation may be
+            // unavailable, but must not make the mutation half-land and lose
+            // the replayable directive.
             (ControlAction::None, false)
         } else {
-            (action, suppressed)
+            match &prepared_successor {
+                PreparedSuccessorObservation::Ready(successor)
+                    if self.preparation.may_announce(
+                        &successor.staged_incarnation_id,
+                        successor.deadline_ms,
+                        now_unix_ms,
+                    ) =>
+                {
+                    let action = match &self.prepared_action {
+                        Some(binding) if binding.successor == *successor => binding.action.clone(),
+                        Some(binding)
+                            if binding.successor.staged_incarnation_id
+                                == successor.staged_incarnation_id =>
+                        {
+                            // Durable route contents are immutable. A different
+                            // payload under the same staged identity is corruption,
+                            // not authority to rotate the transaction.
+                            return Err(ControlStateError::Unavailable);
+                        }
+                        Some(_) => return Err(ControlStateError::Unavailable),
+                        None => {
+                            let action = successor.clone().into_action();
+                            self.prepared_action = Some(PreparedActionBinding {
+                                successor: successor.clone(),
+                                action: action.clone(),
+                                acknowledgement: None,
+                            });
+                            action
+                        }
+                    };
+                    (action, false)
+                }
+                PreparedSuccessorObservation::Ready(_) => (ControlAction::None, false),
+                PreparedSuccessorObservation::Absent => (ControlAction::None, false),
+                PreparedSuccessorObservation::Unavailable => {
+                    return Err(ControlStateError::Unavailable)
+                }
+                PreparedSuccessorObservation::Inactive => (ControlAction::None, false),
+                PreparedSuccessorObservation::NotRequested => (
+                    ControlAction::None,
+                    request_can_suppress_preparation(&self.preparation, now_unix_ms),
+                ),
+            }
         };
+        if terminal_directive.is_none() {
+            self.record_preparation_progress(acknowledgement.as_ref());
+        }
         self.last_sequence = sequence;
         self.last_accepted_at = Some(now);
         self.prior_action = action;
         self.prior_action_suppressed = suppressed;
-        self.prior_preparation_directive = preparation_directive;
+        self.prior_preparation_directive = terminal_directive;
         Ok((
             ControlDisposition::Accepted,
             self.last_sequence,
@@ -3201,10 +3220,10 @@ impl ControlState {
     /// Record an acknowledgement only when it names the Prepare returned for
     /// the preceding accepted sequence. Unknown action IDs belong to an older
     /// staging and are deliberately harmless.
-    fn record_preparation_acknowledgement(
-        &mut self,
+    fn bound_preparation_acknowledgement(
+        &self,
         acknowledgement: Option<&ActionAcknowledgement>,
-    ) -> Option<PreparationDirective> {
+    ) -> Option<String> {
         let acknowledgement = acknowledgement?;
         let ControlAction::Prepare { action_id, .. } = &self.prior_action else {
             return None;
@@ -3212,7 +3231,7 @@ impl ControlState {
         if acknowledgement.action_id != *action_id {
             return None;
         }
-        let binding = self.prepared_action.as_mut()?;
+        let binding = self.prepared_action.as_ref()?;
         let ControlAction::Prepare {
             action_id: bound_action_id,
             ..
@@ -3224,35 +3243,75 @@ impl ControlState {
             return None;
         }
         let staged_incarnation_id = binding.successor.staged_incarnation_id.clone();
+        Some(staged_incarnation_id)
+    }
+
+    fn record_preparation_progress(&mut self, acknowledgement: Option<&ActionAcknowledgement>) {
+        let Some(acknowledgement) = acknowledgement else {
+            return;
+        };
+        if self
+            .bound_preparation_acknowledgement(Some(acknowledgement))
+            .is_none()
+        {
+            return;
+        }
+        let prior = self
+            .prepared_action
+            .as_ref()
+            .and_then(|binding| binding.acknowledgement.as_ref());
         let records_progress = match acknowledgement.state {
-            AcknowledgementState::MetadataReady => binding
-                .acknowledgement
-                .as_ref()
-                .is_none_or(|prior| prior.state == AcknowledgementState::MetadataReady),
-            AcknowledgementState::BufferReady => {
-                binding.acknowledgement.as_ref().is_none_or(|prior| {
-                    matches!(
-                        prior.state,
-                        AcknowledgementState::MetadataReady | AcknowledgementState::BufferReady
-                    )
-                })
+            AcknowledgementState::MetadataReady => {
+                prior.is_none_or(|prior| prior.state == AcknowledgementState::MetadataReady)
             }
+            AcknowledgementState::BufferReady => prior.is_none_or(|prior| {
+                matches!(
+                    prior.state,
+                    AcknowledgementState::MetadataReady | AcknowledgementState::BufferReady
+                )
+            }),
             AcknowledgementState::Committed
             | AcknowledgementState::Failed
             | AcknowledgementState::Aborted => true,
         };
         if records_progress {
-            binding.acknowledgement = Some(acknowledgement.clone());
+            if let Some(binding) = self.prepared_action.as_mut() {
+                binding.acknowledgement = Some(acknowledgement.clone());
+            }
         }
+    }
+
+    fn record_terminal_preparation_acknowledgement(
+        &mut self,
+        acknowledgement: Option<&ActionAcknowledgement>,
+        now_unix_ms: i64,
+    ) -> Option<PreparationDirective> {
+        let acknowledgement = acknowledgement?;
+        let staged_incarnation_id =
+            self.bound_preparation_acknowledgement(Some(acknowledgement))?;
         match acknowledgement.state {
             AcknowledgementState::MetadataReady | AcknowledgementState::BufferReady => None,
-            AcknowledgementState::Committed => Some(PreparationDirective::Commit {
-                staged_incarnation_id,
-            }),
+            AcknowledgementState::Committed => {
+                if self.reserve_preparation_commit(&staged_incarnation_id, now_unix_ms) {
+                    if let Some(binding) = self.prepared_action.as_mut() {
+                        binding.acknowledgement = Some(acknowledgement.clone());
+                    }
+                    Some(PreparationDirective::Commit {
+                        staged_incarnation_id,
+                    })
+                } else {
+                    self.abort_preparation(&staged_incarnation_id);
+                    Some(PreparationDirective::Abort {
+                        staged_incarnation_id,
+                        acknowledgement_rejected: true,
+                    })
+                }
+            }
             AcknowledgementState::Failed | AcknowledgementState::Aborted => {
                 self.abort_preparation(&staged_incarnation_id);
                 Some(PreparationDirective::Abort {
                     staged_incarnation_id,
+                    acknowledgement_rejected: false,
                 })
             }
         }
@@ -3345,8 +3404,57 @@ impl ControlState {
         self.preparation = PreparationSlot::Aborting {
             staged_incarnation_id: staged_incarnation_id.to_owned(),
         };
-        self.prepared_action = None;
         !already
+    }
+
+    fn reserve_preparation_commit(
+        &mut self,
+        staged_incarnation_id: &str,
+        now_unix_ms: i64,
+    ) -> bool {
+        match &self.preparation {
+            PreparationSlot::Staged {
+                staged_incarnation_id: staged,
+                deadline_ms,
+                ..
+            } if staged == staged_incarnation_id && now_unix_ms < *deadline_ms => {
+                self.preparation = PreparationSlot::Committing {
+                    staged_incarnation_id: staged_incarnation_id.to_owned(),
+                    deadline_ms: *deadline_ms,
+                };
+                true
+            }
+            PreparationSlot::Committing {
+                staged_incarnation_id: staged,
+                ..
+            } if staged == staged_incarnation_id => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn begin_abort_preparation(&mut self, staged_incarnation_id: &str) -> bool {
+        match &self.preparation {
+            PreparationSlot::Staged {
+                staged_incarnation_id: staged,
+                ..
+            } if staged == staged_incarnation_id => self.abort_preparation(staged_incarnation_id),
+            PreparationSlot::Aborting {
+                staged_incarnation_id: staged,
+            } if staged == staged_incarnation_id => true,
+            PreparationSlot::Empty
+                if matches!(
+                    &self.prior_preparation_directive,
+                    Some(PreparationDirective::Abort {
+                        staged_incarnation_id: staged,
+                        ..
+                    }) if staged == staged_incarnation_id
+                ) =>
+            {
+                true
+            }
+            PreparationSlot::Committing { .. } | PreparationSlot::Empty => false,
+            _ => false,
+        }
     }
 
     /// Clear the slot once its durable outcome is known.
@@ -3362,7 +3470,11 @@ impl ControlState {
             return false;
         }
         self.preparation = PreparationSlot::Empty;
-        self.prepared_action = None;
+        // Keep the action binding as a tombstone until the next successor is
+        // staged. A client may acknowledge the Prepare after deadline cleanup
+        // has durably aborted it; retaining the binding lets us recognize that
+        // late Commit and return the durable rejection instead of treating the
+        // action id as unrelated.
         true
     }
 
@@ -3375,6 +3487,12 @@ impl ControlState {
     /// Whether this exact successor may still be committed.
     pub(crate) fn may_commit_preparation(&self, staged_incarnation_id: &str) -> bool {
         self.preparation.may_commit(staged_incarnation_id)
+            || matches!(
+                &self.prior_preparation_directive,
+                Some(PreparationDirective::Commit {
+                    staged_incarnation_id: staged,
+                }) if staged == staged_incarnation_id
+            )
     }
 
     /// Recover the immutable result for the exact accepted identity/sequence
@@ -3910,11 +4028,21 @@ pub(crate) struct ActionProposal {
 /// asked as late as possible and told as soon as an answer exists. The window
 /// between them is exactly why `settle` re-checks identity rather than
 /// trusting the gate's earlier `true`.
+#[derive(Clone)]
 pub(crate) struct PreparationExecutor {
     store: std::sync::Arc<dyn plurx_core::store::Store>,
     control: std::sync::Arc<dyn PreparationGate>,
     user_id: i64,
     playback_id: String,
+    expected_predecessor_owner_node_id: String,
+    expected_predecessor_owner_epoch: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreparationCommitOutcome {
+    Committed,
+    Replayed,
+    Refused,
 }
 
 impl PreparationExecutor {
@@ -3923,12 +4051,16 @@ impl PreparationExecutor {
         control: std::sync::Arc<dyn PreparationGate>,
         user_id: i64,
         playback_id: String,
+        expected_predecessor_owner_node_id: String,
+        expected_predecessor_owner_epoch: i64,
     ) -> Self {
         Self {
             store,
             control,
             user_id,
             playback_id,
+            expected_predecessor_owner_node_id,
+            expected_predecessor_owner_epoch,
         }
     }
 
@@ -3968,8 +4100,14 @@ impl PreparationExecutor {
             .abort_media_session_preparation(
                 self.user_id,
                 &self.playback_id,
-                &preparation.incarnation_id,
-                preparation.now_ms,
+                &plurx_core::domain::MediaSessionPreparationAbortRequest {
+                    staged_incarnation_id: preparation.incarnation_id.clone(),
+                    expected_predecessor_owner_node_id: self
+                        .expected_predecessor_owner_node_id
+                        .clone(),
+                    expected_predecessor_owner_epoch: self.expected_predecessor_owner_epoch,
+                    now_ms: preparation.now_ms,
+                },
             )
             .await;
         Ok(false)
@@ -3988,51 +4126,41 @@ impl PreparationExecutor {
         staged_incarnation_id: &str,
         now_ms: i64,
         lease_expires_at_ms: i64,
-    ) -> Result<bool, plurx_core::error::StoreError> {
+        control_receipt: Option<plurx_core::domain::MediaSessionTerminalAck>,
+    ) -> Result<PreparationCommitOutcome, plurx_core::error::StoreError> {
         if !self
             .control
             .may_commit_preparation(staged_incarnation_id)
             .await
         {
-            return Ok(false);
+            return Ok(PreparationCommitOutcome::Refused);
         }
         let committed = self
             .store
             .commit_media_session_preparation(
                 self.user_id,
                 &self.playback_id,
-                staged_incarnation_id,
-                now_ms,
-                lease_expires_at_ms,
-            )
-            .await?
-            .is_some();
-        if !committed {
-            // The pointer moved. On both backends the store's own lost-CAS
-            // branch has already run `abort_staged_generation` before
-            // returning `Ok(None)`, so this call is normally a guaranteed
-            // no-op — every write inside that helper is gated on the ledger
-            // row it has just deleted. It is kept, and kept idempotent, for
-            // the branch the store documents as unreachable (a committed
-            // projection that cannot be read back rolls its transaction
-            // *back*, restoring the ledger row) and so a backend that ever
-            // stopped tearing down on its own does not silently leave a row
-            // the actor has already forgotten. Do not read it as the
-            // teardown: the store's is.
-            let _ = self
-                .store
-                .abort_media_session_preparation(
-                    self.user_id,
-                    &self.playback_id,
-                    staged_incarnation_id,
+                &plurx_core::domain::MediaSessionPreparationCommitRequest {
+                    staged_incarnation_id: staged_incarnation_id.to_owned(),
+                    expected_predecessor_owner_node_id: self
+                        .expected_predecessor_owner_node_id
+                        .clone(),
+                    expected_predecessor_owner_epoch: self.expected_predecessor_owner_epoch,
                     now_ms,
-                )
-                .await;
-        }
+                    lease_expires_at_ms,
+                    control_receipt,
+                },
+            )
+            .await?;
+        let outcome = match committed.as_ref() {
+            Some(commit) if commit.predecessor.is_some() => PreparationCommitOutcome::Committed,
+            Some(_) => PreparationCommitOutcome::Replayed,
+            None => PreparationCommitOutcome::Refused,
+        };
         self.control
-            .settle_preparation(staged_incarnation_id, committed)
+            .settle_preparation(staged_incarnation_id, committed.is_some())
             .await;
-        Ok(committed)
+        Ok(outcome)
     }
 
     /// Discard a staged successor and leave the current stream authoritative.
@@ -4045,19 +4173,36 @@ impl PreparationExecutor {
         &self,
         staged_incarnation_id: &str,
         now_ms: i64,
-    ) -> Result<(), plurx_core::error::StoreError> {
-        self.store
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        if !self
+            .control
+            .begin_abort_preparation(staged_incarnation_id)
+            .await
+        {
+            return Ok(false);
+        }
+        let aborted = self
+            .store
             .abort_media_session_preparation(
                 self.user_id,
                 &self.playback_id,
-                staged_incarnation_id,
-                now_ms,
+                &plurx_core::domain::MediaSessionPreparationAbortRequest {
+                    staged_incarnation_id: staged_incarnation_id.to_owned(),
+                    expected_predecessor_owner_node_id: self
+                        .expected_predecessor_owner_node_id
+                        .clone(),
+                    expected_predecessor_owner_epoch: self.expected_predecessor_owner_epoch,
+                    now_ms,
+                },
             )
-            .await?;
-        self.control
-            .settle_preparation(staged_incarnation_id, false)
-            .await;
-        Ok(())
+            .await?
+            .is_some();
+        if aborted {
+            self.control
+                .settle_preparation(staged_incarnation_id, false)
+                .await;
+        }
+        Ok(aborted)
     }
 }
 
@@ -4093,6 +4238,13 @@ pub(crate) enum PreparationSlot {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
     },
+    /// A matching, timely client acknowledgement won the actor race. Deadline
+    /// and terminal cleanup may no longer abort this successor; the Store CAS
+    /// is now the only authority that decides whether it becomes current.
+    Committing {
+        staged_incarnation_id: String,
+        deadline_ms: i64,
+    },
     /// The successor is being torn down. Terminal for this slot: an abort that
     /// is under way cannot become a commit, or a disconnect could publish a
     /// successor nobody asked for.
@@ -4104,6 +4256,10 @@ impl PreparationSlot {
         match self {
             Self::Empty => None,
             Self::Staged {
+                staged_incarnation_id,
+                ..
+            }
+            | Self::Committing {
                 staged_incarnation_id,
                 ..
             }
@@ -4122,7 +4278,7 @@ impl PreparationSlot {
     pub(crate) fn may_commit(&self, staged_incarnation_id: &str) -> bool {
         matches!(
             self,
-            Self::Staged {
+            Self::Committing {
                 staged_incarnation_id: staged,
                 ..
             } if staged == staged_incarnation_id
@@ -4155,7 +4311,15 @@ impl PreparationSlot {
     /// already under way is idempotent — an owner retrying after a crash must
     /// read back the same outcome rather than a spurious loss.
     pub(crate) fn may_abort(&self, staged_incarnation_id: &str) -> bool {
-        self.staged_incarnation_id() == Some(staged_incarnation_id)
+        matches!(
+            self,
+            Self::Staged {
+                staged_incarnation_id: staged,
+                ..
+            } | Self::Aborting {
+                staged_incarnation_id: staged,
+            } if staged == staged_incarnation_id
+        )
     }
 }
 
@@ -5800,6 +5964,16 @@ enum RollingControlCommand {
         staged_incarnation_id: String,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
+    #[cfg(test)]
+    ReservePreparationCommit {
+        staged_incarnation_id: String,
+        now_unix_ms: i64,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    BeginAbortPreparation {
+        staged_incarnation_id: String,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     /// Report a preparation's durable outcome. `committed` false covers both a
     /// completed abort and a lost commit CAS — the store returning `Ok(None)`
     /// because the pointer no longer names the recorded predecessor. Both free
@@ -5928,7 +6102,9 @@ impl RollingControlCommand {
             Self::ApplyProducerFlow { .. } => Some(19),
             Self::SettleProducerFlowSignal { .. } => Some(20),
             Self::StagePreparation { .. } => Some(21),
-            Self::MayCommitPreparation { .. } => Some(22),
+            Self::MayCommitPreparation { .. } | Self::BeginAbortPreparation { .. } => Some(22),
+            #[cfg(test)]
+            Self::ReservePreparationCommit { .. } => None,
             Self::SettlePreparation { .. } => Some(23),
             Self::ObservePublication { .. } => Some(4),
             Self::CommitMedia { .. } => Some(5),
@@ -9318,6 +9494,24 @@ impl RollingControlActor {
                 } => {
                     let _ = reply.send(self.control.may_commit_preparation(&staged_incarnation_id));
                 }
+                #[cfg(test)]
+                RollingControlCommand::ReservePreparationCommit {
+                    staged_incarnation_id,
+                    now_unix_ms,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        self.control
+                            .reserve_preparation_commit(&staged_incarnation_id, now_unix_ms),
+                    );
+                }
+                RollingControlCommand::BeginAbortPreparation {
+                    staged_incarnation_id,
+                    reply,
+                } => {
+                    let _ =
+                        reply.send(self.control.begin_abort_preparation(&staged_incarnation_id));
+                }
                 RollingControlCommand::SettlePreparation {
                     staged_incarnation_id,
                     committed,
@@ -10676,6 +10870,42 @@ impl RollingControlHandle {
         if self
             .enqueue_command(RollingControlCommand::MayCommitPreparation {
                 staged_incarnation_id: staged_incarnation_id.to_owned(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
+    pub(crate) async fn begin_abort_preparation(&self, staged_incarnation_id: &str) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command(RollingControlCommand::BeginAbortPreparation {
+                staged_incarnation_id: staged_incarnation_id.to_owned(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    async fn reserve_preparation_commit_for_test(
+        &self,
+        staged_incarnation_id: &str,
+        now_unix_ms: i64,
+    ) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command(RollingControlCommand::ReservePreparationCommit {
+                staged_incarnation_id: staged_incarnation_id.to_owned(),
+                now_unix_ms,
                 reply,
             })
             .await
@@ -13509,6 +13739,10 @@ mod tests {
                 staged_incarnation_id: staged_incarnation_id.clone(),
             })
         );
+        assert!(
+            !state.begin_abort_preparation(&staged_incarnation_id),
+            "the accepted Commit reservation wins over deadline cleanup"
+        );
 
         let replay = state
             .accept_at(
@@ -13585,6 +13819,7 @@ mod tests {
             state.preparation_directive(),
             Some(PreparationDirective::Abort {
                 staged_incarnation_id: staged_incarnation_id.clone(),
+                acknowledgement_rejected: false,
             })
         );
         assert_eq!(
@@ -13592,6 +13827,170 @@ mod tests {
             PreparationSlot::Aborting {
                 staged_incarnation_id,
             }
+        );
+    }
+
+    #[test]
+    fn committed_acknowledgement_cannot_share_an_end_exchange() {
+        let mut request = request();
+        request.demand = PlaybackDemand::End;
+        request.playback_rate = 0.0;
+        request.acknowledgement = Some(ActionAcknowledgement {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            state: AcknowledgementState::Committed,
+            buffered_through_ms: None,
+            first_frame_unix_ms: Some(1),
+        });
+        assert_eq!(request.validate(None, 6_000), Err("acknowledgement.state"));
+    }
+
+    #[test]
+    fn expired_or_abort_won_commit_acknowledgement_is_rejected_and_replayed() {
+        let request = request();
+        for abort_wins_first in [false, true] {
+            let mut state = ControlState::default();
+            let started = Instant::now();
+            let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+            let preparation_deadline = 10_000;
+            assert!(state.stage_preparation(
+                staged_incarnation_id.clone(),
+                request.generation.clone(),
+                preparation_deadline,
+            ));
+            let prepared_session_id = uuid::Uuid::new_v4().to_string();
+            let successor = PreparedSuccessorAction {
+                staged_incarnation_id: staged_incarnation_id.clone(),
+                deadline_ms: preparation_deadline,
+                session_id: prepared_session_id.clone(),
+                playlist_url: format!("/api/v1/hls/{prepared_session_id}/index.m3u8"),
+                media_origin_ms: 42_000,
+                effective_selection: prepared_selection(),
+            };
+            let first = state
+                .accept_at(
+                    started,
+                    &request.generation,
+                    1,
+                    &request.client_instance_id,
+                    1,
+                    ControlAcceptance::new(Some(ClientPlatform::Apple), Some(&successor))
+                        .at_unix_ms(preparation_deadline - 1),
+                )
+                .expect("Prepare is announced");
+            let ControlAction::Prepare { action_id, .. } = first.2 else {
+                panic!("expected Prepare");
+            };
+            if abort_wins_first {
+                assert!(state.begin_abort_preparation(&staged_incarnation_id));
+            }
+            let accepted = state
+                .accept_at(
+                    started + MIN_CONTROL_INTERVAL,
+                    &request.generation,
+                    1,
+                    &request.client_instance_id,
+                    2,
+                    ControlAcceptance::unavailable(None)
+                        .at_unix_ms(preparation_deadline)
+                        .acknowledging(ActionAcknowledgement {
+                            action_id,
+                            state: AcknowledgementState::Committed,
+                            buffered_through_ms: None,
+                            first_frame_unix_ms: Some(preparation_deadline),
+                        }),
+                )
+                .expect("bound terminal acknowledgement does not need another Store read");
+            assert_eq!(accepted.2, ControlAction::None);
+            assert_eq!(
+                state.preparation_directive(),
+                Some(PreparationDirective::Abort {
+                    staged_incarnation_id: staged_incarnation_id.clone(),
+                    acknowledgement_rejected: true,
+                })
+            );
+            let replay = state
+                .accept_at(
+                    started + MIN_CONTROL_INTERVAL,
+                    &request.generation,
+                    1,
+                    &request.client_instance_id,
+                    2,
+                    ControlAcceptance::unavailable(None),
+                )
+                .expect("rejected commit replay");
+            assert_eq!(replay.0, ControlDisposition::Replay);
+            assert_eq!(
+                state.preparation_directive(),
+                Some(PreparationDirective::Abort {
+                    staged_incarnation_id,
+                    acknowledgement_rejected: true,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn settled_deadline_abort_still_rejects_its_late_commit_acknowledgement() {
+        let request = request();
+        let mut state = ControlState::default();
+        let started = Instant::now();
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        let preparation_deadline = 10_000;
+        assert!(state.stage_preparation(
+            staged_incarnation_id.clone(),
+            request.generation.clone(),
+            preparation_deadline,
+        ));
+        let prepared_session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id: staged_incarnation_id.clone(),
+            deadline_ms: preparation_deadline,
+            session_id: prepared_session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{prepared_session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+        let first = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Apple), Some(&successor))
+                    .at_unix_ms(preparation_deadline - 1),
+            )
+            .expect("Prepare is announced");
+        let ControlAction::Prepare { action_id, .. } = first.2 else {
+            panic!("expected Prepare");
+        };
+
+        assert!(state.begin_abort_preparation(&staged_incarnation_id));
+        assert!(state.settle_preparation(&staged_incarnation_id));
+        let accepted = state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::unavailable(None)
+                    .at_unix_ms(preparation_deadline + 1)
+                    .acknowledging(ActionAcknowledgement {
+                        action_id,
+                        state: AcknowledgementState::Committed,
+                        buffered_through_ms: None,
+                        first_frame_unix_ms: Some(preparation_deadline + 1),
+                    }),
+            )
+            .expect("late bound acknowledgement is rejected without another Store read");
+        assert_eq!(accepted.2, ControlAction::None);
+        assert_eq!(
+            state.preparation_directive(),
+            Some(PreparationDirective::Abort {
+                staged_incarnation_id,
+                acknowledgement_rejected: true,
+            })
         );
     }
 
@@ -19505,6 +19904,8 @@ mod tests {
             Arc::new(control.clone()),
             7,
             "player-a".to_owned(),
+            "node-a".to_owned(),
+            1,
         );
         (predecessor, store, control, executor)
     }
@@ -19548,10 +19949,16 @@ mod tests {
         );
 
         assert!(
+            control
+                .reserve_preparation_commit_for_test(&successor, now_ms + 200)
+                .await
+        );
+        assert_eq!(
             executor
-                .commit(&successor, now_ms + 200, 900_000)
+                .commit(&successor, now_ms + 200, 900_000, None)
                 .await
                 .expect("commit"),
+            PreparationCommitOutcome::Committed,
             "the pointer still names the recorded predecessor, so the CAS wins"
         );
         assert_eq!(
@@ -19659,10 +20066,16 @@ mod tests {
             .expect("the advance is confirmed");
 
         assert!(
-            !executor
-                .commit(&successor, now_ms + 200, 900_000)
+            control
+                .reserve_preparation_commit_for_test(&successor, now_ms + 175)
+                .await
+        );
+        assert_eq!(
+            executor
+                .commit(&successor, now_ms + 200, 900_000, None)
                 .await
                 .expect("commit"),
+            PreparationCommitOutcome::Refused,
             "the pointer no longer names the recorded predecessor",
         );
         assert_eq!(
@@ -19776,8 +20189,14 @@ mod tests {
             "a stale settle must not free a slot holding a replacement",
         );
         assert!(
+            control
+                .reserve_preparation_commit_for_test(&replacement, now_ms + 400)
+                .await,
+            "the replacement is still the staged successor the actor can reserve",
+        );
+        assert!(
             control.may_commit_preparation(&replacement).await,
-            "and the replacement is still the successor the actor holds",
+            "and the reservation, not mere staging, authorizes its Store CAS",
         );
     }
 
@@ -19805,11 +20224,12 @@ mod tests {
         assert!(control.settle_preparation(&successor, false).await);
         assert!(!control.may_commit_preparation(&successor).await);
 
-        assert!(
-            !executor
-                .commit(&successor, now_ms + 200, 900_000)
+        assert_eq!(
+            executor
+                .commit(&successor, now_ms + 200, 900_000, None)
                 .await
                 .expect("commit"),
+            PreparationCommitOutcome::Refused,
             "the gate refuses before the store is asked",
         );
         assert_eq!(
@@ -19853,6 +20273,8 @@ mod tests {
             Arc::new(RollingControlHandle::unavailable_for_test()),
             7,
             "player-a".to_owned(),
+            "node-a".to_owned(),
+            1,
         );
 
         let successor = uuid::Uuid::new_v4().to_string();

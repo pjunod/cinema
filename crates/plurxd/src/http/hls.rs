@@ -4466,6 +4466,59 @@ pub(crate) async fn terminal_ack_replay(
         .ok_or(())
 }
 
+async fn preparation_ack_replay(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    request: &crate::playback_control::ControlRequestV1,
+    deadline_unix_ms: i64,
+) -> Result<Option<TerminalAckReplay>, ()> {
+    if route.state != "ended"
+        || route.terminal_reason.as_deref() != Some("superseded")
+        || !matches!(
+            request.acknowledgement.as_ref().map(|ack| ack.state),
+            Some(crate::playback_control::AcknowledgementState::Committed)
+        )
+    {
+        return Ok(None);
+    }
+    let Some(receipt) = state
+        .store
+        .media_session_terminal_ack(&route.session_id, unix_ms())
+        .await
+        .map_err(|_| ())?
+    else {
+        return Ok(None);
+    };
+    if receipt.incarnation_id != route.incarnation_id
+        || receipt.owner_node_id != route.owner_node_id
+        || receipt.owner_epoch != route.owner_epoch
+        || receipt.client_instance_id != request.client_instance_id
+        || u64::try_from(receipt.sequence).ok() != Some(request.sequence)
+        || request.fingerprint().as_deref() != Some(receipt.request_fingerprint.as_str())
+    {
+        return Ok(None);
+    }
+    let retained =
+        serde_json::from_str::<RetainedTerminalResponse>(&receipt.response_json).map_err(|_| ())?;
+    let relay = crate::playback_control::ControlRelayRequest {
+        session_id: route.session_id.clone(),
+        generation: route.incarnation_id.clone(),
+        expected_owner_node_id: route.owner_node_id.clone(),
+        expected_owner_epoch: route.owner_epoch,
+        deadline_unix_ms,
+        control: request.clone(),
+    };
+    retained
+        .response
+        .is_valid_for(&relay)
+        .then_some(TerminalAckReplay {
+            response: retained.response,
+            platform: Some(retained.platform),
+        })
+        .map(Some)
+        .ok_or(())
+}
+
 pub(crate) fn terminal_ack_response(replay: TerminalAckReplay) -> Response {
     crate::playback_control::record(crate::playback_control::MetricOutcome::Replay);
     if let Some(platform) = replay.platform {
@@ -4645,6 +4698,22 @@ async fn control_inner(
             );
         }
     }
+    match preparation_ack_replay(&state, &route, &request, deadline_unix_ms).await {
+        Ok(Some(replay)) => return terminal_ack_response(replay),
+        Ok(None) => {}
+        Err(()) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the preparation acknowledgement replay is temporarily unavailable",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+    }
     if let Err(retry_after_ms) = state.media_sessions.admit_control(&session) {
         crate::playback_control::record(crate::playback_control::MetricOutcome::RateLimited);
         return control_error(
@@ -4725,6 +4794,23 @@ fn fail_next_staged_read(incarnation_id: &str) {
         .lock()
         .expect("staged read faults")
         .insert(incarnation_id.to_owned());
+}
+
+#[cfg(test)]
+fn preparation_settlement_delays(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, Duration>> {
+    static DELAYS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Duration>>,
+    > = std::sync::OnceLock::new();
+    DELAYS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn delay_next_preparation_settlement(incarnation_id: &str, delay: Duration) {
+    preparation_settlement_delays()
+        .lock()
+        .expect("preparation settlement delays")
+        .insert(incarnation_id.to_owned(), delay);
 }
 
 /// Resolve the staged successor this predecessor may announce now.
@@ -5178,6 +5264,7 @@ async fn control_local_inner(
             );
         }
     };
+    let mut retained_preparation_response = None;
     if let Some(directive) = result.preparation_directive.clone() {
         let Some(gate) = state
             .transcode
@@ -5226,7 +5313,7 @@ async fn control_local_inner(
         let deadline = Instant::now()
             .checked_add(remaining)
             .unwrap_or_else(Instant::now);
-        let Some(_serving_commit) = authority
+        let Some(serving_commit) = authority
             .commit_guard_before(serving_generation, deadline)
             .await
         else {
@@ -5246,31 +5333,111 @@ async fn control_local_inner(
             gate,
             route.user_id,
             route.playback_id.clone(),
+            route.owner_node_id.clone(),
+            route.owner_epoch,
         );
-        let settled = match directive {
-            crate::playback_control::PreparationDirective::Commit {
-                staged_incarnation_id,
-            } => tokio::time::timeout_at(
-                tokio::time::Instant::from_std(deadline),
-                executor.commit(
-                    &staged_incarnation_id,
-                    crate::media_sessions::unix_ms(),
-                    result.lease_expires_at_unix_ms,
-                ),
-            )
-            .await
-            .map(|outcome| outcome.map(|_| ())),
-            crate::playback_control::PreparationDirective::Abort {
-                staged_incarnation_id,
-            } => {
-                tokio::time::timeout_at(
-                    tokio::time::Instant::from_std(deadline),
-                    executor.abort(&staged_incarnation_id, crate::media_sessions::unix_ms()),
-                )
-                .await
-            }
+        let control_receipt = if matches!(
+            &directive,
+            crate::playback_control::PreparationDirective::Commit { .. }
+        ) {
+            let response =
+                local_control_response(route, &start, &recipe, &request, &result, unix_ms(), None);
+            let Some(request_fingerprint) = request.fingerprint() else {
+                return control_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "control_unavailable",
+                    "the preparation acknowledgement could not be retained",
+                    Some(route.incarnation_id.clone()),
+                    Some(owner_epoch),
+                    Some(500),
+                    None,
+                );
+            };
+            let response_json = match serde_json::to_string(&RetainedTerminalResponse {
+                platform: result.platform,
+                response: response.clone(),
+            }) {
+                Ok(response_json) => response_json,
+                Err(_) => {
+                    return control_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "control_unavailable",
+                        "the preparation acknowledgement could not be retained",
+                        Some(route.incarnation_id.clone()),
+                        Some(owner_epoch),
+                        Some(500),
+                        None,
+                    )
+                }
+            };
+            retained_preparation_response = Some(response);
+            Some(plurx_core::domain::MediaSessionTerminalAck {
+                incarnation_id: route.incarnation_id.clone(),
+                session_id: route.session_id.clone(),
+                owner_node_id: route.owner_node_id.clone(),
+                owner_epoch: route.owner_epoch,
+                client_instance_id: request.client_instance_id.clone(),
+                sequence: i64::try_from(request.sequence).unwrap_or(i64::MAX),
+                request_fingerprint,
+                response_json,
+                expires_at_ms: unix_ms()
+                    .saturating_add(crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS),
+                updated_at_ms: unix_ms(),
+            })
+        } else {
+            None
         };
-        if !matches!(settled, Ok(Ok(()))) {
+        let acknowledgement_rejected = matches!(
+            &directive,
+            crate::playback_control::PreparationDirective::Abort {
+                acknowledgement_rejected: true,
+                ..
+            }
+        );
+        let lease_expires_at_unix_ms = result.lease_expires_at_unix_ms;
+        #[cfg(test)]
+        let settlement_delay = preparation_settlement_delays()
+            .lock()
+            .expect("preparation settlement delays")
+            .remove(&route.incarnation_id);
+        #[cfg(not(test))]
+        let settlement_delay: Option<Duration> = None;
+        let settlement = tokio::spawn(async move {
+            let _serving_commit = serving_commit;
+            if let Some(delay) = settlement_delay {
+                tokio::time::sleep(delay).await;
+            }
+            match directive {
+                crate::playback_control::PreparationDirective::Commit {
+                    staged_incarnation_id,
+                } => executor
+                    .commit(
+                        &staged_incarnation_id,
+                        crate::media_sessions::unix_ms(),
+                        lease_expires_at_unix_ms,
+                        control_receipt,
+                    )
+                    .await
+                    .map(|outcome| {
+                        matches!(
+                            outcome,
+                            crate::playback_control::PreparationCommitOutcome::Committed
+                                | crate::playback_control::PreparationCommitOutcome::Replayed
+                        )
+                    }),
+                crate::playback_control::PreparationDirective::Abort {
+                    staged_incarnation_id,
+                    ..
+                } => {
+                    executor
+                        .abort(&staged_incarnation_id, crate::media_sessions::unix_ms())
+                        .await
+                }
+            }
+        });
+        let settled =
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), settlement).await;
+        if !matches!(settled, Ok(Ok(Ok(true)))) {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
             return control_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -5282,8 +5449,22 @@ async fn control_local_inner(
                 None,
             );
         }
+        if acknowledgement_rejected {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Stale);
+            return control_error(
+                StatusCode::CONFLICT,
+                "stale_control",
+                "the preparation acknowledgement lost its commit or deadline fence",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                None,
+                None,
+            );
+        }
     }
-    let response = if result.lease_state == "ended" {
+    let response = if let Some(response) = retained_preparation_response {
+        response
+    } else if result.lease_state == "ended" {
         if request.demand != crate::playback_control::PlaybackDemand::End {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
             return control_error(
@@ -5918,6 +6099,8 @@ async fn stage_prepared_successor(
         gate,
         route.user_id,
         route.playback_id.clone(),
+        route.owner_node_id.clone(),
+        route.owner_epoch,
     );
     let preparation = plurx_core::domain::MediaSessionPreparation {
         incarnation_id: staged_incarnation_id,
@@ -14180,6 +14363,8 @@ mod tests {
             gate,
             route.user_id,
             route.playback_id.clone(),
+            route.owner_node_id.clone(),
+            route.owner_epoch,
         );
         assert!(executor
             .stage(&preparation)
@@ -14745,6 +14930,12 @@ mod tests {
     async fn a_staged_successor_commits_into_a_usable_route() {
         let dir = crate::test_tempdir().expect("state dir");
         let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
         // The predecessor was itself opened as a stall reopen. `candidate` is
         // its request with only the selection overwritten, so without an
         // explicit clear the successor would stage claiming to be a reopen of
@@ -14801,6 +14992,7 @@ mod tests {
             buffered_through_ms: None,
             first_frame_unix_ms: Some(unix_ms()),
         });
+        let committed_request = request.clone();
         let (status, committed_body) = control_body(
             control_local_inner(
                 &fixture.state,
@@ -14813,6 +15005,27 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(committed_body["action"]["type"], "none");
+        assert_eq!(
+            committed_body["delivery"]["presentation"], "vod",
+            "the commit acknowledgement must propagate through the public VOD engine"
+        );
+        let (replay_status, replay_body) = control_body(
+            control_inner(
+                fixture.state.clone(),
+                session_id.clone(),
+                Bytes::from(
+                    serde_json::to_vec(&committed_request).expect("serialize committed replay"),
+                ),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(replay_status, StatusCode::OK);
+        assert_eq!(
+            replay_body, committed_body,
+            "the durable receipt must replay the exact response after the predecessor retires"
+        );
 
         let committed = fixture
             .state
@@ -14872,9 +15085,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_timed_out_settlement_finishes_detached_and_replays_durably() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+        )
+        .await;
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged");
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec![
+            crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned()
+        ]);
+        let (status, prepare_body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let action_id = prepare_body["action"]["action_id"]
+            .as_str()
+            .expect("Prepare action id")
+            .to_owned();
+
+        tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+        request.sequence = 2;
+        request.capabilities = None;
+        request.acknowledgement = Some(crate::playback_control::ActionAcknowledgement {
+            action_id,
+            state: crate::playback_control::AcknowledgementState::Committed,
+            buffered_through_ms: None,
+            first_frame_unix_ms: Some(unix_ms()),
+        });
+        delay_next_preparation_settlement(&route.incarnation_id, Duration::from_millis(700));
+        let request_body =
+            Bytes::from(serde_json::to_vec(&request).expect("serialize timed-out acknowledgement"));
+        let (failed_status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(500),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(failed_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("pointer after failed settlement")
+                .expect("the predecessor stays current")
+                .incarnation_id,
+            route.incarnation_id
+        );
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let (retry_status, _) = control_body(
+            control_inner(
+                fixture.state.clone(),
+                session_id,
+                request_body,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(retry_status, StatusCode::OK);
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("pointer after retry")
+                .expect("the successor is current")
+                .incarnation_id,
+            staged.staged_incarnation_id
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_preparation_acknowledgement_aborts_and_frees_the_slot() {
         let dir = crate::test_tempdir().expect("state dir");
         let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
         stage_prepared_successor(
             &fixture.state,
             &session_id,
@@ -14934,6 +15259,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["action"]["type"], "none");
+        assert_eq!(
+            body["delivery"]["presentation"], "vod",
+            "the abort acknowledgement must propagate through the public VOD engine"
+        );
         assert_eq!(
             fixture
                 .state
@@ -15011,11 +15340,14 @@ mod tests {
             gate,
             route.user_id,
             route.playback_id.clone(),
+            route.owner_node_id.clone(),
+            route.owner_epoch,
         )
         .commit(
             &staged.staged_incarnation_id,
             unix_ms(),
             unix_ms() + 900_000,
+            None,
         )
         .await
         .expect("commit");

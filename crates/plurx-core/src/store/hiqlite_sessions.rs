@@ -9,9 +9,10 @@ use super::MediaSessionStore;
 use crate::cluster::coordination::removed_job_owner_key;
 use crate::domain::{
     MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionActivationSettlement,
-    MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor,
-    MediaSessionTerminalAck, OwnedMediaSessionLease, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+    MediaSessionEnd, MediaSessionPreparationAbortRequest, MediaSessionPreparationCommitRequest,
+    MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
+    MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor, MediaSessionTerminalAck,
+    OwnedMediaSessionLease, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
     MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use crate::error::StoreError;
@@ -553,6 +554,8 @@ fn abort_statements(
     user_id: i64,
     playback_id: &str,
     staged_incarnation_id: &str,
+    expected_owner_node_id: &str,
+    expected_owner_epoch: i64,
     now_ms: i64,
 ) -> Vec<(&'static str, hiqlite::Params)> {
     let lease_resource = format!("session:{staged_incarnation_id}");
@@ -564,8 +567,25 @@ fn abort_statements(
                 AND EXISTS (SELECT 1 FROM media_session_preparations
                   WHERE user_id = $3 AND playback_id = $4
                     AND staged_incarnation_id = $2)
+                AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
+                  JOIN media_session_preparations preparation
+                    ON preparation.user_id = pointer.user_id
+                   AND preparation.playback_id = pointer.playback_id
+                  JOIN media_sessions predecessor
+                    ON predecessor.incarnation_id = pointer.current_incarnation_id
+                 WHERE preparation.user_id = $3 AND preparation.playback_id = $4
+                   AND preparation.staged_incarnation_id = $2
+                   AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
+                   AND (predecessor.owner_node_id != $5 OR predecessor.owner_epoch != $6))
               RETURNING incarnation_id",
-            params!(now_ms, staged_incarnation_id, user_id, playback_id),
+            params!(
+                now_ms,
+                staged_incarnation_id,
+                user_id,
+                playback_id,
+                expected_owner_node_id,
+                expected_owner_epoch
+            ),
         ),
         (
             "DELETE FROM cache_consumer_pins
@@ -574,8 +594,25 @@ fn abort_statements(
                   WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)
                 AND EXISTS (SELECT 1 FROM media_session_preparations
                   WHERE user_id = $3 AND playback_id = $4
-                    AND staged_incarnation_id = $1)",
-            params!(staged_incarnation_id, now_ms, user_id, playback_id),
+                    AND staged_incarnation_id = $1)
+                AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
+                  JOIN media_session_preparations preparation
+                    ON preparation.user_id = pointer.user_id
+                   AND preparation.playback_id = pointer.playback_id
+                  JOIN media_sessions predecessor
+                    ON predecessor.incarnation_id = pointer.current_incarnation_id
+                 WHERE preparation.user_id = $3 AND preparation.playback_id = $4
+                   AND preparation.staged_incarnation_id = $1
+                   AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
+                   AND (predecessor.owner_node_id != $5 OR predecessor.owner_epoch != $6))",
+            params!(
+                staged_incarnation_id,
+                now_ms,
+                user_id,
+                playback_id,
+                expected_owner_node_id,
+                expected_owner_epoch
+            ),
         ),
         (
             "UPDATE job_leases
@@ -587,19 +624,47 @@ fn abort_statements(
                   WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)
                 AND EXISTS (SELECT 1 FROM media_session_preparations
                   WHERE user_id = $4 AND playback_id = $5
-                    AND staged_incarnation_id = $3)",
+                    AND staged_incarnation_id = $3)
+                AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
+                  JOIN media_session_preparations preparation
+                    ON preparation.user_id = pointer.user_id
+                   AND preparation.playback_id = pointer.playback_id
+                  JOIN media_sessions predecessor
+                    ON predecessor.incarnation_id = pointer.current_incarnation_id
+                 WHERE preparation.user_id = $4 AND preparation.playback_id = $5
+                   AND preparation.staged_incarnation_id = $3
+                   AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
+                   AND (predecessor.owner_node_id != $6 OR predecessor.owner_epoch != $7))",
             params!(
                 now_ms,
                 lease_resource.as_str(),
                 staged_incarnation_id,
                 user_id,
-                playback_id
+                playback_id,
+                expected_owner_node_id,
+                expected_owner_epoch
             ),
         ),
         (
             "DELETE FROM media_session_preparations
-              WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3",
-            params!(user_id, playback_id, staged_incarnation_id),
+              WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3
+                AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
+                  JOIN media_session_preparations preparation
+                    ON preparation.user_id = pointer.user_id
+                   AND preparation.playback_id = pointer.playback_id
+                  JOIN media_sessions predecessor
+                    ON predecessor.incarnation_id = pointer.current_incarnation_id
+                 WHERE preparation.user_id = $1 AND preparation.playback_id = $2
+                   AND preparation.staged_incarnation_id = $3
+                   AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
+                   AND (predecessor.owner_node_id != $4 OR predecessor.owner_epoch != $5))",
+            params!(
+                user_id,
+                playback_id,
+                staged_incarnation_id,
+                expected_owner_node_id,
+                expected_owner_epoch
+            ),
         ),
     ]
 }
@@ -1511,13 +1576,25 @@ impl MediaSessionStore for HiqliteAuthStore {
             // with nobody left who would ever commit or abort it. The SQLite
             // twin reaches the same durable state by rolling back.
             if staged_is_ours {
-                self.abort_media_session_preparation(
-                    preparation.user_id,
-                    &preparation.playback_id,
-                    &preparation.incarnation_id,
-                    preparation.now_ms,
+                if let Some(predecessor) = route_by(
+                    self,
+                    "incarnation_id",
+                    &preparation.expected_predecessor_incarnation_id,
                 )
-                .await?;
+                .await?
+                {
+                    self.abort_media_session_preparation(
+                        preparation.user_id,
+                        &preparation.playback_id,
+                        &MediaSessionPreparationAbortRequest {
+                            staged_incarnation_id: preparation.incarnation_id.clone(),
+                            expected_predecessor_owner_node_id: predecessor.owner_node_id,
+                            expected_predecessor_owner_epoch: predecessor.owner_epoch,
+                            now_ms: preparation.now_ms,
+                        },
+                    )
+                    .await?;
+                }
             }
             return Ok(None);
         };
@@ -1576,10 +1653,24 @@ impl MediaSessionStore for HiqliteAuthStore {
         // Hiqlite executes this ordered vector as one Raft proposal. The
         // preparation's pointer/admission/empty-ledger predicates therefore
         // observe the abort statements that precede them.
+        let Some(predecessor) = route_by(
+            self,
+            "incarnation_id",
+            &existing
+                .as_ref()
+                .expect("named occupied slot was checked above")
+                .expected_predecessor_incarnation_id,
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
         let mut statements = abort_statements(
             preparation.user_id,
             &preparation.playback_id,
             staged_incarnation_id,
+            &predecessor.owner_node_id,
+            predecessor.owner_epoch,
             preparation.now_ms,
         );
         // Rejoin may release the ledger only after the named active row was
@@ -1751,21 +1842,30 @@ impl MediaSessionStore for HiqliteAuthStore {
         &self,
         user_id: i64,
         playback_id: &str,
-        staged_incarnation_id: &str,
-        now_ms: i64,
-        lease_expires_at_ms: i64,
+        request: &MediaSessionPreparationCommitRequest,
     ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError> {
         if user_id <= 0
             || playback_id.is_empty()
             || playback_id.len() > 128
-            || !valid_uuid(staged_incarnation_id)
-            || now_ms <= 0
-            || lease_expires_at_ms <= now_ms
+            || !valid_uuid(&request.staged_incarnation_id)
+            || request.expected_predecessor_owner_node_id.is_empty()
+            || request.expected_predecessor_owner_node_id.len() > 256
+            || request.expected_predecessor_owner_epoch <= 0
+            || request.now_ms <= 0
+            || request.lease_expires_at_ms <= request.now_ms
+            || request.control_receipt.as_ref().is_some_and(|receipt| {
+                !valid_terminal_ack(receipt)
+                    || receipt.owner_node_id != request.expected_predecessor_owner_node_id
+                    || receipt.owner_epoch != request.expected_predecessor_owner_epoch
+            })
         {
             return Err(StoreError::Task(
                 "invalid media-session preparation commit".to_owned(),
             ));
         }
+        let staged_incarnation_id = request.staged_incarnation_id.as_str();
+        let now_ms = request.now_ms;
+        let lease_expires_at_ms = request.lease_expires_at_ms;
         let Some(staged) = staged_row(self, user_id, playback_id).await? else {
             // No ledger row. Either it was never staged, or an earlier commit
             // already consumed it — and the pointer is the discriminator.
@@ -1783,6 +1883,46 @@ impl MediaSessionStore for HiqliteAuthStore {
         let predecessor_incarnation = staged.expected_predecessor_incarnation_id.clone();
         let lease_resource = format!("session:{predecessor_incarnation}");
         let staged_lease_resource = format!("session:{}", staged.staged_incarnation_id);
+        let receipt_session_id = request
+            .control_receipt
+            .as_ref()
+            .map_or("", |receipt| receipt.session_id.as_str());
+        let receipt_incarnation_id = request
+            .control_receipt
+            .as_ref()
+            .map_or("", |receipt| receipt.incarnation_id.as_str());
+        let receipt_owner_node_id = request
+            .control_receipt
+            .as_ref()
+            .map_or("", |receipt| receipt.owner_node_id.as_str());
+        let receipt_owner_epoch = request
+            .control_receipt
+            .as_ref()
+            .map_or(0, |receipt| receipt.owner_epoch);
+        let receipt_client_instance_id = request
+            .control_receipt
+            .as_ref()
+            .map_or("", |receipt| receipt.client_instance_id.as_str());
+        let receipt_sequence = request
+            .control_receipt
+            .as_ref()
+            .map_or(0, |receipt| receipt.sequence);
+        let receipt_request_fingerprint = request
+            .control_receipt
+            .as_ref()
+            .map_or("", |receipt| receipt.request_fingerprint.as_str());
+        let receipt_response_json = request
+            .control_receipt
+            .as_ref()
+            .map_or("", |receipt| receipt.response_json.as_str());
+        let receipt_expires_at_ms = request
+            .control_receipt
+            .as_ref()
+            .map_or(0, |receipt| receipt.expires_at_ms);
+        let receipt_updated_at_ms = request
+            .control_receipt
+            .as_ref()
+            .map_or(0, |receipt| receipt.updated_at_ms);
         // The pointer advance and the predecessor's retirement in one
         // transaction, both fenced on the exact recorded predecessor. Nothing
         // here reads the pointer to decide what to reap; a pointer that no
@@ -1794,15 +1934,45 @@ impl MediaSessionStore for HiqliteAuthStore {
                     SET current_incarnation_id = $1, updated_at_ms = $2
                   WHERE user_id = $3 AND playback_id = $4
                     AND current_incarnation_id = $5
+                    AND EXISTS (SELECT 1 FROM media_sessions predecessor
+                      WHERE predecessor.incarnation_id = $5
+                        AND predecessor.owner_node_id = $6
+                        AND predecessor.owner_epoch = $7
+                        AND predecessor.state = 'active')
+                    AND EXISTS (SELECT 1 FROM media_session_preparations preparation
+                      WHERE preparation.user_id = $3 AND preparation.playback_id = $4
+                        AND preparation.staged_incarnation_id = $1
+                        AND preparation.deadline_ms > $2)
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = $1 AND user_id = $3 AND playback_id = $4
-                        AND state = 'active')",
+                        AND state = 'active')
+                    AND ($8 = ''
+                      OR NOT EXISTS (SELECT 1 FROM media_session_terminal_acks
+                        WHERE session_id = $8)
+                      OR EXISTS (SELECT 1 FROM media_session_terminal_acks
+                        WHERE session_id = $8 AND incarnation_id = $9
+                          AND owner_node_id = $10 AND owner_epoch = $11
+                          AND client_instance_id = $12 AND sequence = $13
+                          AND request_fingerprint = $14 AND response_json = $15
+                          AND expires_at_ms = $16 AND updated_at_ms = $17))",
                 params!(
                     staged.staged_incarnation_id.as_str(),
                     now_ms,
                     user_id,
                     playback_id,
-                    predecessor_incarnation.as_str()
+                    predecessor_incarnation.as_str(),
+                    request.expected_predecessor_owner_node_id.as_str(),
+                    request.expected_predecessor_owner_epoch,
+                    receipt_session_id,
+                    receipt_incarnation_id,
+                    receipt_owner_node_id,
+                    receipt_owner_epoch,
+                    receipt_client_instance_id,
+                    receipt_sequence,
+                    receipt_request_fingerprint,
+                    receipt_response_json,
+                    receipt_expires_at_ms,
+                    receipt_updated_at_ms
                 ),
             ),
             (
@@ -1889,6 +2059,38 @@ impl MediaSessionStore for HiqliteAuthStore {
                 params!(user_id, playback_id, staged.staged_incarnation_id.as_str()),
             ),
         ];
+        let mut statements = statements;
+        if let Some(receipt) = &request.control_receipt {
+            if receipt.incarnation_id != predecessor_incarnation {
+                return Ok(None);
+            }
+            statements.push((
+                "INSERT INTO media_session_terminal_acks
+                    (incarnation_id, session_id, owner_node_id, owner_epoch,
+                     client_instance_id, sequence, request_fingerprint, response_json,
+                     expires_at_ms, updated_at_ms)
+                 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+                  WHERE EXISTS (SELECT 1 FROM media_playback_pointers
+                    WHERE user_id = $11 AND playback_id = $12
+                      AND current_incarnation_id = $13)
+                 ON CONFLICT(session_id) DO NOTHING",
+                params!(
+                    receipt.incarnation_id.as_str(),
+                    receipt.session_id.as_str(),
+                    receipt.owner_node_id.as_str(),
+                    receipt.owner_epoch,
+                    receipt.client_instance_id.as_str(),
+                    receipt.sequence,
+                    receipt.request_fingerprint.as_str(),
+                    receipt.response_json.as_str(),
+                    receipt.expires_at_ms,
+                    receipt.updated_at_ms,
+                    user_id,
+                    playback_id,
+                    staged.staged_incarnation_id.as_str()
+                ),
+            ));
+        }
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
@@ -1928,8 +2130,14 @@ impl MediaSessionStore for HiqliteAuthStore {
             self.abort_media_session_preparation(
                 user_id,
                 playback_id,
-                &staged.staged_incarnation_id,
-                now_ms,
+                &MediaSessionPreparationAbortRequest {
+                    staged_incarnation_id: staged.staged_incarnation_id.clone(),
+                    expected_predecessor_owner_node_id: request
+                        .expected_predecessor_owner_node_id
+                        .clone(),
+                    expected_predecessor_owner_epoch: request.expected_predecessor_owner_epoch,
+                    now_ms,
+                },
             )
             .await?;
             return Ok(None);
@@ -1941,6 +2149,14 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(None);
         };
         let predecessor = route_by(self, "incarnation_id", &predecessor_incarnation).await?;
+        if let Some(receipt) = &request.control_receipt {
+            let retained = self
+                .media_session_terminal_ack(&receipt.session_id, request.now_ms)
+                .await?;
+            if retained.as_ref() != Some(receipt) {
+                return Ok(None);
+            }
+        }
         Ok(Some(crate::domain::MediaSessionPreparationCommit {
             route,
             predecessor,
@@ -1951,14 +2167,16 @@ impl MediaSessionStore for HiqliteAuthStore {
         &self,
         user_id: i64,
         playback_id: &str,
-        staged_incarnation_id: &str,
-        now_ms: i64,
+        request: &MediaSessionPreparationAbortRequest,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
         if user_id <= 0
             || playback_id.is_empty()
             || playback_id.len() > 128
-            || !valid_uuid(staged_incarnation_id)
-            || now_ms <= 0
+            || !valid_uuid(&request.staged_incarnation_id)
+            || request.expected_predecessor_owner_node_id.is_empty()
+            || request.expected_predecessor_owner_node_id.len() > 256
+            || request.expected_predecessor_owner_epoch <= 0
+            || request.now_ms <= 0
         {
             return Err(StoreError::Task(
                 "invalid media-session preparation abort".to_owned(),
@@ -1967,7 +2185,14 @@ impl MediaSessionStore for HiqliteAuthStore {
         // Ledger-scoped in every statement, which is the safety property:
         // without a ledger row naming it, this cannot end an incarnation. An
         // abort aimed at a successor that already committed ends nothing.
-        let statements = abort_statements(user_id, playback_id, staged_incarnation_id, now_ms);
+        let statements = abort_statements(
+            user_id,
+            playback_id,
+            &request.staged_incarnation_id,
+            &request.expected_predecessor_owner_node_id,
+            request.expected_predecessor_owner_epoch,
+            request.now_ms,
+        );
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
@@ -1982,21 +2207,23 @@ impl MediaSessionStore for HiqliteAuthStore {
         // replay and must read the same as the first one.
         if staged_row(self, user_id, playback_id)
             .await?
-            .is_some_and(|staged| staged.staged_incarnation_id == staged_incarnation_id)
+            .is_some_and(|staged| staged.staged_incarnation_id == request.staged_incarnation_id)
         {
             return Ok(None);
         }
         // The same predicate the SQLite twin uses, and it has to be: this
         // reports success only for a row that is ended, carries the abort's
         // own terminal cause, and belongs to the playback the caller named.
-        Ok(route_by(self, "incarnation_id", staged_incarnation_id)
-            .await?
-            .filter(|route| {
-                route.state == "ended"
-                    && route.terminal_reason.as_deref() == Some("replaced")
-                    && route.user_id == user_id
-                    && route.playback_id == playback_id
-            }))
+        Ok(
+            route_by(self, "incarnation_id", &request.staged_incarnation_id)
+                .await?
+                .filter(|route| {
+                    route.state == "ended"
+                        && route.terminal_reason.as_deref() == Some("replaced")
+                        && route.user_id == user_id
+                        && route.playback_id == playback_id
+                }),
+        )
     }
 
     async fn settle_media_session_activation(

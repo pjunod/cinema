@@ -1579,6 +1579,24 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
         })
     }
 
+    fn begin_abort_preparation<'a>(
+        &'a self,
+        staged_incarnation_id: &'a str,
+    ) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                return false;
+            };
+            let reserved = session
+                .control
+                .lock()
+                .expect("control lock")
+                .begin_abort_preparation(staged_incarnation_id);
+            reserved
+        })
+    }
+
     fn settle_preparation<'a>(
         &'a self,
         staged_incarnation_id: &'a str,
