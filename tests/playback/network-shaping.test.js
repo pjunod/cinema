@@ -1240,6 +1240,61 @@ test("a clean recovery passes", () => {
   assert.equal(score.outcome, "passed");
 });
 
+test("Auto acceptance requires one seamless downshift inside ten seconds", () => {
+  const criteria = {
+    ...CRITERIA,
+    maximum_automatic_restarts: 0,
+    minimum_downshifts: 1,
+    maximum_downshifts: 1,
+    maximum_downshift_ms: 10_000,
+    minimum_post_switch_runway_seconds: 1,
+    maximum_video_gap_ms: 250,
+    maximum_wait_events: 0,
+  };
+  const timeline = Array.from({ length: 451 }, (_, index) => sample(index * 100, {
+    height: index < 50 ? 720 : 360,
+    runway_seconds: 2,
+    sampled_at_ms: 20_000 + index * 100,
+    media_event_seq: 0,
+    media_events: [],
+  }));
+  const transitionStart = {
+    sampled_at_ms: 20_000,
+    media_event_seq: 0,
+    media_events: [],
+  };
+  const clean = lab.scoreRecovery(criteria, observation({ timeline, transition_start: transitionStart }));
+  assert.deepEqual(clean.errors, []);
+  assert.equal(clean.metrics.downshifts, 1);
+  assert.equal(clean.metrics.restarts, 0);
+
+  const destructive = timeline.map((row, index) => ({
+    ...row,
+    attempt_id: index < 50 ? "a1" : "a2",
+    player_generation: index < 50 ? 1 : 2,
+  }));
+  const reopened = lab.scoreRecovery(criteria, observation({
+    timeline: destructive,
+    transition_start: transitionStart,
+  }));
+  assert.ok(reopened.errors.some((error) => /automatic restarts/.test(error)));
+
+  const gapped = timeline.map((row, index) => index === timeline.length - 1 ? {
+    ...row,
+    media_event_seq: 2,
+    media_events: [
+      { seq: 1, event: "waiting", at_ms: 21_000 },
+      { seq: 2, event: "playing", at_ms: 21_400 },
+    ],
+  } : row);
+  const discontinuous = lab.scoreRecovery(criteria, observation({
+    timeline: gapped,
+    transition_start: transitionStart,
+  }));
+  assert.ok(discontinuous.errors.some((error) => /video gap 400 ms/.test(error)));
+  assert.ok(discontinuous.errors.some((error) => /transition wait events/.test(error)));
+});
+
 test("a cliff that was never applied fails as a shaping fault, not a player fault", () => {
   const score = lab.scoreRecovery(CRITERIA, observation({
     shaping: { cliff_applied_at_ms: null, stages: observation().shaping.stages },
@@ -1478,6 +1533,7 @@ test("too many restarts and too many upgrades each fail on their own", () => {
     ...row,
     height: [360, 480, 720][index % 3],
     ttff_ms: 500 + (index % 3),
+    attempt_id: `a${index + 1}`,
   }));
   const score = lab.scoreRecovery(CRITERIA, observation({ timeline: churn }));
   assert.ok(score.errors.some((error) => /automatic restarts/.test(error)), score.errors.join("; "));
@@ -1485,14 +1541,16 @@ test("too many restarts and too many upgrades each fail on their own", () => {
   assert.equal(score.outcome, "recovery");
 });
 
-test("one downgrade is one restart, counted once even though TTFF also resets", () => {
+test("a seamless downgrade is not mislabeled as a player restart", () => {
   const stepped = healthyTimeline().map((row, index) =>
     index < 5 ? { ...row, height: 720, ttff_ms: 400 } : { ...row, height: 360, ttff_ms: 900 });
   const events = lab.rungHistory(stepped);
-  assert.equal(events.length, 1, "a height change and its TTFF reset are one restart");
+  assert.equal(events.length, 1, "the rung transition remains observable");
   assert.equal(events[0].direction, "down");
   assert.equal(events[0].from_height, 720);
   assert.equal(events[0].to_height, 360);
+  assert.equal(events[0].restart_count, 0,
+    "an unchanged attempt identity proves the player did not reopen");
 });
 
 test("a new player attempt is a restart even when its rung and TTFF match", () => {
@@ -1789,6 +1847,11 @@ test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => 
   assert.equal(cases.length, 1);
   assert.equal(cases[0].operation, "shaped-cliff");
   assert.ok(cases[0].recovery.recovery_deadline_seconds > 0, "the criteria are in the manifest, not the code");
+  assert.equal(cases[0].recovery.maximum_automatic_restarts, 0);
+  assert.equal(cases[0].recovery.minimum_downshifts, 1);
+  assert.equal(cases[0].recovery.maximum_downshifts, 1);
+  assert.equal(cases[0].recovery.maximum_downshift_ms, 10_000);
+  assert.equal(cases[0].recovery.maximum_video_gap_ms, 250);
   assert.ok(
     cases[0].recovery.recovery_observe_seconds
       >= cases[0].recovery.recovery_deadline_seconds
@@ -1800,13 +1863,97 @@ test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => 
   const full = lab.expandCases(manifest, "full");
   assert.equal(full.some((testCase) => testCase.fixture === "shaping-mpeg4-mp3-720"), false);
   assert.equal(lab.expandCases(manifest, "smoke").length, 11, "the smoke suite is unchanged");
-  assert.equal(full.length, 44, "the full suite is unchanged");
+  assert.equal(full.length, 45, "the full suite includes one explicit quality transition");
+  const quality = full.find((testCase) => testCase.operation === "quality-cycle");
+  assert.deepEqual(quality.switches, ["720", "original"]);
+  assert.equal(quality.repetitions, 20);
+  assert.equal(quality.require_same_session, true);
+  assert.equal(quality.transition.maximum_reopen_events, 0);
 
   const ordinaryCorpus = lab.fixturesForBuild(manifest);
   assert.equal(ordinaryCorpus.some((fixture) => fixture.id === "shaping-mpeg4-mp3-720"), false,
     "the general fixtures command does not pay for the 120-second opt-in source");
   const shapedCorpus = lab.fixturesForBuild(manifest, new Set(["shaping-mpeg4-mp3-720"]));
   assert.deepEqual(shapedCorpus.map((fixture) => fixture.id), ["shaping-mpeg4-mp3-720"]);
+});
+
+test("the CI-provisioned Chromium path is a first-class browser candidate", async () => {
+  await withTempDir(async (directory) => {
+    const chromium = path.join(directory, "headless-shell");
+    await fsp.writeFile(chromium, "fixture", "utf8");
+    const previous = process.env.PLURX_PLAYBACK_CHROME;
+    process.env.PLURX_PLAYBACK_CHROME = chromium;
+    try {
+      assert.equal(lab.findChrome(), chromium);
+    } finally {
+      if (previous === undefined) delete process.env.PLURX_PLAYBACK_CHROME;
+      else process.env.PLURX_PLAYBACK_CHROME = previous;
+    }
+  });
+});
+
+test("transition scoring retains gaps and reopens that precede the steady window", () => {
+  const event = (seq, name, at) => ({ seq, event: name, at_ms: at });
+  const snapshot = (overrides = {}) => ({
+    sampled_at_ms: 0,
+    media_event_seq: 0,
+    media_events: [],
+    started: true,
+    decided_method: "remux",
+    method: "remux",
+    tried_fallback: false,
+    copy_hls: false,
+    vod: false,
+    stalls: 0,
+    hitches: {},
+    ttff_ms: 100,
+    session_id: "session-1",
+    player_generation: 1,
+    video: {
+      error: null, current_time: 10, absolute_time: 10, height: 1080,
+      width: 1920, runway: 3, dropped: 0, total: 300,
+    },
+    ...overrides,
+  });
+  const continuityStart = snapshot();
+  const operationEnd = snapshot({
+    sampled_at_ms: 500,
+    media_event_seq: 3,
+    media_events: [event(1, "pause", 100), event(2, "emptied", 110), event(3, "playing", 500)],
+  });
+  const end = snapshot({
+    sampled_at_ms: 8_500,
+    media_event_seq: 3,
+    media_events: operationEnd.media_events,
+    video: { ...operationEnd.video, current_time: 18, absolute_time: 18 },
+  });
+  const score = lab.scoreCase(
+    { thresholds: { minimum_clock_rate: 0.9, maximum_hitches: 2, maximum_stalls: 0 } },
+    {
+      quality: "original",
+      operation: "quality-cycle",
+      switches: ["720", "original"],
+      repetitions: 1,
+      transition: { maximum_video_gap_ms: 250, maximum_wait_events: 0, maximum_reopen_events: 0 },
+    },
+    { method: "remux", delivery: { mode: "progressive" } },
+    operationEnd,
+    end,
+    8,
+    { changes: [{ quality: "720", ready_ms: 100, landing_error_seconds: 0 }] },
+    continuityStart,
+  );
+  assert.match(score.errors.join("; "), /transition video gap 400 ms/);
+  assert.match(score.errors.join("; "), /destructive reopen events/);
+  assert.match(score.errors.join("; "), /1\/2 quality switches completed/);
+});
+
+test("a requested case can never disappear behind a skipped status", () => {
+  const testCase = { name: "fixture :: auto :: steady", quality: "auto", operation: "steady" };
+  const result = lab.enforceCaseResult(testCase, { id: "fixture" }, { status: "skipped" });
+  assert.equal(result.status, "failed");
+  assert.equal(result.outcome, "harness");
+  assert.match(result.errors[0], /non-terminal status "skipped"/);
 });
 
 test("the VOD suite makes native seeking and resume invariants executable", () => {

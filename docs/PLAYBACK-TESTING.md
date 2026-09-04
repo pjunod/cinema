@@ -37,7 +37,7 @@ passed with `--geckodriver`); it adds no package to plurx or the harness.
 make playback-doctor       # check codecs, filters, browser, and the debug server
 make playback-fixtures     # build + ffprobe the corpus; cached under target/
 make playback-smoke        # 11 risk-weighted Chrome cases, about 2–4 minutes
-make playback-full         # 44 Chrome cases: every fixture × quality + restarts
+make playback-full         # 45 Chrome cases: source × quality + operations
 
 # Film-addressed VOD: steady play, 20 seeks, and suspend/resume.
 scripts/playback-lab run --suite vod --json out/vod.json
@@ -82,7 +82,7 @@ source × quality product, then targeted operations where they are meaningful.
 | Container | MP4 · MKV · WebM · AVI |
 | Resolution | 720p · 1080p · 2160p |
 | Quality | Auto · Original · Original one-stream · 1080p · 720p · 480p |
-| Operation | cold play · seek/restart · 20 native VOD seeks · VOD suspend/resume · audio switch · text-subtitle toggle |
+| Operation | cold play · seek/restart · 20 native VOD seeks · VOD suspend/resume · audio switch · text-subtitle toggle · 20 manual 720p/down-to-Original quality cycles |
 | Browser state | reported codecs · HDR display · MSE · native HLS |
 
 Running every operation against every source adds minutes without adding a new
@@ -123,6 +123,14 @@ A case fails on any of these:
 - a direct/remux path rejected by the browser and rescued by fallback;
 - a quality rung decoding above its requested height;
 - `Original · one stream` accidentally using copy-HLS.
+
+Operation cases keep two clocks. The post-operation snapshot measures steady
+playback rate without counting a seek as spontaneous clock progress. A separate
+page-lifetime event sequence begins before the operation and survives PLAYER
+replacement, so waits, gaps, aborts, and destructive reopens during the switch
+cannot disappear when the steady window begins. Requested cases have only two
+valid terminal states: `passed` and `failed`; `skipped`, a missing result, or a
+missing tool in a strict validation profile is a harness failure.
 
 **How to read it:** a fallback is a failure even when the rescue transcode
 plays. The viewer got pixels, but the requested path broke — exactly the Safari
@@ -427,26 +435,26 @@ describe adaptation. Every artifact therefore carries an `outcome`:
 | `harness` | The observation was too short to outlast banked runway, or the run itself failed before it could produce a playback verdict. |
 
 The criteria live in `tests/playback/cases.json` beside the case, not in the
-script: restarts, upgrades per 60 s, the recovery deadline, and the sustained
-window are review material. The player gives every attempt a globally
-monotonic identity, while its raw stall counter carries across in-place
+script: zero reopens, exactly one downshift by ten seconds, no wait event, at
+most a 250 ms video gap, more than one second of post-switch runway, upgrades
+per 60 s, and the sustained window are review material. The player gives every
+attempt a globally monotonic identity, while its raw stall counter carries across in-place
 `newAttempt()` changes and resets only when `play()` creates a new player
 object. The harness samples both identities. Attempt transitions therefore
 count same-reason restarts directly; a player-object transition records a
 `counter_rebase` and rebases the raw counter before deciding whether a window
-was stall-free. The current `stall-recovery` case restarts the live object, so
-its counter remains exact at any poll rate. A future case that can replace one
-or more player objects between samples needs a player-owned monotonic total
-before it can claim the same evidence; intermediate counters would otherwise
-be unobservable.
+was stall-free. Height changes and attempt changes are separate: an in-place
+rung move is not mislabeled as a restart, while any changed attempt identity
+spends the zero-restart budget. A page-lifetime sequenced media-event trace
+keeps waits and destructive reopens visible across PLAYER replacement and
+invalidates the run if its bounded retained window was insufficient.
 
 **What it deliberately does not do.** It injects no probe onto the play path,
 changes no rate control, and does not steer the player. Choosing a rung in
-response to the cliff is the N4 controller's job; this harness only creates the
-condition and records the answer. Until that controller lands, a
-`stall-recovery` run is *expected* to fail with `outcome: recovery` — that
-recorded failure is the baseline the controller has to move, which is why the
-suite is not part of `make validate`.
+response to the cliff is the controller's job; this harness only creates the
+condition and records the answer. The suite is expected to fail until the
+controller performs a seamless move; that is a product failure, not permission
+to omit the case from nightly validation.
 
 **Comparing runs.** `scripts/playback-lab normalize --json <artifact>` reduces
 a report to its behavioral shape with UUIDs, ports, wall-clock, temporary
@@ -467,9 +475,10 @@ scripts/playback-lab normalize --json out/head.json --out out/head.trace.json
 diff -u out/base.trace.json out/head.trace.json
 ```
 
-The shaping fixture is opt-in: it is built only for the suite that plays it,
-and it is excluded from `full`'s source × quality product, so the existing
-suites keep exactly their previous cases and corpus.
+The shaping fixture is opt-in: it is built only for the suite that plays it and
+is excluded from `full`'s source × quality product. The full suite adds one
+explicit manual quality cycle because transition behavior is not represented
+by a steady-state Cartesian product.
 
 ## Reports keep enough evidence to reproduce the failing layer
 
@@ -497,6 +506,9 @@ to browser decode. Use the JSON when the one-line cause is not enough.
 the browser's built-in DevTools protocol. They run headless unless `--headed`
 is passed and need no downloaded driver. Chrome never silently substitutes
 Edge, or vice versa, so a green browser name means that browser actually ran.
+The pinned CI provisioning action exports its exact Chromium executable as
+`PLURX_PLAYBACK_CHROME`; raw-CDP runs launched later through Make inherit that
+path. A missing executable is a failed requested case, never a green skip.
 
 **Safari:** `--browser safari` uses macOS's built-in WebDriver and performs a
 real element click to satisfy autoplay policy. It is headed because Safari has

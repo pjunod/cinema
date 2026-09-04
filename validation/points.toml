@@ -132,7 +132,7 @@ command = "make playback-smoke"
 profiles = ["full", "nightly"]
 platforms = ["darwin", "linux"]
 requires = ["cargo", "ffmpeg", "node"]
-missing = "skip"
+missing = "fail"
 timeout_seconds = 3600
 
 # The browser matrix above needs ffmpeg, a server build, and Chrome, so it only
