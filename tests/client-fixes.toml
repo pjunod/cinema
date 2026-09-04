@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "apple.title-and-native-selection-continuations"
+commits = ["856d9a0a"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func seekWhenReady(_ item: AVPlayerItem, ms: Int, owner: SeekPreparationOwner)"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testPreparedSeekRejectsANewerDestinationBeforeMutatingThePlayer"
+
+[[fixes]]
 id = "android.requested-and-attached-media-recipe"
 commits = ["c5504641"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
@@ -441,7 +449,7 @@ test_anchor = "viewerSeekResetsExhaustedBudgetBeforeReplacement"
 id = "android.stall-response-invalidation-race"
 commits = ["038ee8f"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/StallReopen.kt"
-source_anchor = ".takeIf { isCurrent() }"
+source_anchor = "private fun retainIfCurrent(hls: HlsStart, isCurrent: () -> Boolean)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/StallBudgetTest.kt"
 test_anchor = "newerUserCreateIsTheFinalServerMutationAfterInFlightFallback"
 

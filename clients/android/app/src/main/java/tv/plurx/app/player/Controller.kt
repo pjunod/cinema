@@ -204,8 +204,8 @@ class Controller(
     private var sameHdrRetryUsed = false
 
     private val stallReopenBudget = StallReopenBudget()
-    private val stallGuard = ControllerStallGuard(stallReopenBudget)
     private val openStallTracker = OpenPlaybackStallTracker()
+    private val stallGuard = ControllerStallGuard(stallReopenBudget, openStallTracker)
     private var sessionlessStallRecoveryUsed = false
     private var sessionlessStallRecoveryPositionMs: Long? = null
     private var seekJob: Job? = null
@@ -219,6 +219,7 @@ class Controller(
         createSession = { body -> vm.createHlsSession(plan.fileId, body) },
         isBadRequest = { failure -> failure is HttpException && failure.code() == 400 },
         freshRequestId = { UUID.randomUUID().toString() },
+        releaseSession = vm::endHlsSession,
     )
 
     /**
@@ -491,6 +492,11 @@ class Controller(
 
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
+            if (!playbackControlBootstrapFence.isActive()) return
+            // The departing item's failure does not own a newer requested
+            // recipe (or seek create). That create and its target deadline
+            // still own success/failure; failover must not steal the request.
+            if (stallGuard.defersPredecessorRecovery(recipeOwnership.needsMediaReplacement(currentRecipe()))) return
             val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
             // Only a transport failure can be answered by another node. A
             // terminal answer — an ended session's 404, a refused
@@ -949,10 +955,10 @@ class Controller(
 
     fun playPause() {
         if (!playbackControlBootstrapFence.isActive()) return
-        stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
-        playbackIntent.setPlaybackRequested(!playbackIntent.playbackRequested)
-        player.playWhenReady = playbackIntent.playbackRequested
+        stallGuard.setPlaybackRequested(playbackIntent, !playbackIntent.playbackRequested) {
+            player.playWhenReady = it
+        }
         playbackControl.playerChanged()
     }
 
@@ -1159,69 +1165,71 @@ class Controller(
         encoder = null
         sessionIsVod = false
         scope.launch {
-            val hls = try {
-                sessionCreateCoordinator.create(
-                    body = createBody.copy(control_sequence = playbackIntent.orderedControlSequence(playbackControl.controlSequence())),
-                    isCurrent = { stallGuard.isCurrent(requestVersion) },
-                ) ?: return@launch
-            } catch (cancelled: CancellationException) {
-                // The screen left composition (or a newer request superseded
-                // this one) — the caller saying stop, not the server failing.
-                // Swallowing it here would show a failure state for a stream
-                // nobody is waiting for any more.
-                throw cancelled
-            } catch (error: Exception) {
-                if (stallGuard.isCurrent(requestVersion)) {
-                    playbackTelemetry.report(
-                        event = "playback_error",
-                        level = "error",
-                        message = "session create failed before Media3 started",
-                        code = (error as? HttpException)?.code(),
-                        detail = redactedFailureDetail("session_create", error),
-                        attempt = attempt,
-                    )
-                    playbackTelemetry.cancel(attempt)
-                    Log.w(
-                        "PlurxPlayback",
-                        "session create failed ${redactedFailureDetail("session_create", error)}",
-                    )
-                    onError("The server couldn't start this stream.")
+            try {
+                val hls = try {
+                    sessionCreateCoordinator.create(
+                        body = createBody.copy(control_sequence = playbackIntent.orderedControlSequence(playbackControl.controlSequence())),
+                        isCurrent = { stallGuard.isCurrent(requestVersion) },
+                    ) ?: return@launch
+                } catch (cancelled: CancellationException) {
+                    // The screen left composition (or a newer request superseded
+                    // this one) — the caller saying stop, not the server failing.
+                    // Swallowing it here would show a failure state for a stream
+                    // nobody is waiting for any more.
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (stallGuard.isCurrent(requestVersion)) {
+                        playbackTelemetry.report(
+                            event = "playback_error",
+                            level = "error",
+                            message = "session create failed before Media3 started",
+                            code = (error as? HttpException)?.code(),
+                            detail = redactedFailureDetail("session_create", error),
+                            attempt = attempt,
+                        )
+                        playbackTelemetry.cancel(attempt)
+                        Log.w(
+                            "PlurxPlayback",
+                            "session create failed ${redactedFailureDetail("session_create", error)}",
+                        )
+                        onError("The server couldn't start this stream.")
+                    }
+                    return@launch
                 }
-                return@launch
+                // A later seek or track switch won while this request was in
+                // flight. Release this now-stale server session instead of letting
+                // its older timeline replace the current one.
+                sessionCreateCoordinator.attachIfCurrent(hls, { stallGuard.isCurrent(requestVersion) }) { hls ->
+                    sessionId = hls.session_id
+                    beginPlaybackControl(hls)
+                    startStatusPolling(hls.session_id)
+                    // Save this session's resolved height so the stall-reopen budget
+                    // can compare each stall response against the predecessor rung.
+                    stallReopenBudget.seed(hls.height)
+                    encoder = hls.encoder
+                    sessionIsVod = hls.vod
+                    adoptSessionDelivery(hls)
+                    // A cached session is the whole stream on disk: its timeline
+                    // starts at zero and the player seeks, exactly like direct play.
+                    val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
+                    baseMs = timeline.baseMs
+                    activeMediaPath = relativeMediaPath(hls.playlist_url)
+                    player.setMediaItem(
+                        MediaItem.fromUri(Session.url(hls.playlist_url)),
+                        timeline.attachPositionMs,
+                    )
+                    attachRecipe(recipe)
+                    executionSequence?.let { sequence ->
+                        markIntentExecuted(sequence, recipe)
+                    }
+                    player.prepare()
+                    playbackTelemetry.prepared(attempt)
+                    player.playWhenReady = playbackIntent.playbackRequested
+                    armTrackSelections()
+                }
+            } finally {
+                stallGuard.finishRequest(requestVersion)
             }
-            // A later seek or track switch won while this request was in
-            // flight. Release this now-stale server session instead of letting
-            // its older timeline replace the current one.
-            if (!stallGuard.isCurrent(requestVersion)) {
-                vm.endHlsSession(hls.session_id)
-                return@launch
-            }
-            sessionId = hls.session_id
-            beginPlaybackControl(hls)
-            startStatusPolling(hls.session_id)
-            // Save this session's resolved height so the stall-reopen budget
-            // can compare each stall response against the predecessor rung.
-            stallReopenBudget.seed(hls.height)
-            encoder = hls.encoder
-            sessionIsVod = hls.vod
-            adoptSessionDelivery(hls)
-            // A cached session is the whole stream on disk: its timeline
-            // starts at zero and the player seeks, exactly like direct play.
-            val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
-            baseMs = timeline.baseMs
-            activeMediaPath = relativeMediaPath(hls.playlist_url)
-            player.setMediaItem(
-                MediaItem.fromUri(Session.url(hls.playlist_url)),
-                timeline.attachPositionMs,
-            )
-            attachRecipe(recipe)
-            executionSequence?.let { sequence ->
-                markIntentExecuted(sequence, recipe)
-            }
-            player.prepare()
-            playbackTelemetry.prepared(attempt)
-            player.playWhenReady = playbackIntent.playbackRequested
-            armTrackSelections()
         }
     }
 
@@ -1277,6 +1285,7 @@ class Controller(
      * session stays on that rung without further reopen attempts.
      */
     private suspend fun onStall(event: OpenPlaybackStallTracker.Event) {
+        if (stallGuard.defersPredecessorRecovery(recipeOwnership.needsMediaReplacement(currentRecipe()))) return
         val positionMs = event.positionMs
         // The ask goes before the budget is consulted, and before anything
         // else this function does. The evidence is published from INSIDE it,
@@ -1285,13 +1294,10 @@ class Controller(
         // floor one too high and rejects the very exchange that carried this
         // stall's evidence.
         val session = sessionId
-        // The token is taken BEFORE the ask, not after, and it is the token
-        // the reopen goes on to use. A VOD seek or an in-place subtitle change
-        // invalidates through `stallGuard` and changes no session id, so a
-        // token minted after the wait would not merely miss the viewer's
-        // action — `beginRequest` increments the version, so it would
-        // overwrite the invalidation and make a stale stall current again.
-        val requestVersion = stallGuard.beginRequest()
+        // Capture media AND transport ownership before the ask. Pause must
+        // reject this evidence even after Resume, but must not revoke an
+        // already admitted replacement carrying the viewer's recipe.
+        val observation = stallGuard.observeStall()
         // Measured before the wait, so the stall-recovery beacon includes the
         // time this ask itself costs. M5.5 exists to measure exactly that, and
         // an instrument that excludes it cannot.
@@ -1319,7 +1325,7 @@ class Controller(
         // transport failover that started on the same session, or any seek
         // that invalidated the guard, all leave the id alone.
         if (sessionId != session) return
-        if (!stallGuard.isCurrent(requestVersion)) return
+        if (!stallGuard.isCurrent(observation)) return
         if (!playbackControlBootstrapFence.isActive() || !presentationForeground) return
         if (!player.playWhenReady || player.playbackState == Player.STATE_ENDED) return
         if (kotlin.math.abs(realPosition() - positionMs) >= 250L) return
@@ -1349,6 +1355,7 @@ class Controller(
         val reason = "stall"
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
         val recipe = currentRecipe()
+        val requestVersion = stallGuard.beginRequest()
         // Use the stall-specific session body that carries the predecessor
         // info. `sessionBody` is also called for seeks and track switches;
         // those paths must NOT carry stall fields.
@@ -1367,94 +1374,96 @@ class Controller(
         encoder = null
         sessionIsVod = false
         scope.launch {
-            val body = bindDecisionPlan(
-                body = subtitleSessionBody(
-                    playbackId = playbackIntent.playbackId,
-                    requestId = UUID.randomUUID().toString(),
-                    controlSequence = playbackIntent.orderedControlSequence(
-                        playbackControl.controlSequence(),
+            try {
+                val body = bindDecisionPlan(
+                    body = subtitleSessionBody(
+                        playbackId = playbackIntent.playbackId,
+                        requestId = UUID.randomUUID().toString(),
+                        controlSequence = playbackIntent.orderedControlSequence(
+                            playbackControl.controlSequence(),
+                        ),
+                        startSeconds = positionMs / 1000.0,
+                        delivery = recipe.recipe.subtitleDelivery,
+                        subtitleIndex = recipe.recipe.subtitleIndex,
+                        copyableVideo = recipe.recipe.mode != "transcode",
+                        aac = plan.aac,
+                        preserveDolbyVision = plan.preserveDolbyVision,
+                        audioIndex = recipe.recipe.audioIndex,
+                        audioOffsetMs = recipe.recipe.audioOffsetMs,
+                        quality = recipe.recipe.quality,
+                        sourceHeight = plan.sourceHeight,
+                        deliveredDynamicRange = deliveredRange,
+                        previousSessionId = prevId,
+                        reopenReason = ReopenReason.Stall,
                     ),
-                    startSeconds = positionMs / 1000.0,
-                    delivery = recipe.recipe.subtitleDelivery,
-                    subtitleIndex = recipe.recipe.subtitleIndex,
-                    copyableVideo = recipe.recipe.mode != "transcode",
-                    aac = plan.aac,
-                    preserveDolbyVision = plan.preserveDolbyVision,
-                    audioIndex = recipe.recipe.audioIndex,
-                    audioOffsetMs = recipe.recipe.audioOffsetMs,
-                    quality = recipe.recipe.quality,
-                    sourceHeight = plan.sourceHeight,
-                    deliveredDynamicRange = deliveredRange,
-                    previousSessionId = prevId,
-                    reopenReason = ReopenReason.Stall,
-                ),
-                caps = decisionCaps,
-                requestHDR10 = sessionHDR10Request(
-                    decisionMode = plan.mode,
-                    deliveredDynamicRange = plan.deliveredDynamicRange,
-                    compatibilityTranscode = recipe.recipe.compatibilityTranscode,
-                    delivery = recipe.recipe.subtitleDelivery,
-                ),
-            )
-            val hls = try {
-                sessionCreateCoordinator.reopenAfterStall(
-                    body = body,
-                    isCurrent = { stallGuard.isCurrent(requestVersion) },
-                ) ?: return@launch
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                if (stallGuard.isCurrent(requestVersion)) {
-                    playbackTelemetry.report(
-                        event = "playback_error",
-                        level = "error",
-                        message = "session reopen failed before Media3 started",
-                        code = (error as? HttpException)?.code(),
-                        detail = redactedFailureDetail("session_reopen", error),
-                        attempt = attempt,
-                    )
-                    playbackTelemetry.cancel(attempt)
-                    Log.w(
-                        "PlurxPlayback",
-                        "session reopen failed ${redactedFailureDetail("session_reopen", error)}",
-                    )
-                    onError(
-                        playbackControl.terminalVerdict?.message
-                            ?: "The stream stalled and recovery failed.",
-                    )
+                    caps = decisionCaps,
+                    requestHDR10 = sessionHDR10Request(
+                        decisionMode = plan.mode,
+                        deliveredDynamicRange = plan.deliveredDynamicRange,
+                        compatibilityTranscode = recipe.recipe.compatibilityTranscode,
+                        delivery = recipe.recipe.subtitleDelivery,
+                    ),
+                )
+                val hls = try {
+                    sessionCreateCoordinator.reopenAfterStall(
+                        body = body,
+                        isCurrent = { stallGuard.isCurrent(requestVersion) },
+                    ) ?: return@launch
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (stallGuard.isCurrent(requestVersion)) {
+                        playbackTelemetry.report(
+                            event = "playback_error",
+                            level = "error",
+                            message = "session reopen failed before Media3 started",
+                            code = (error as? HttpException)?.code(),
+                            detail = redactedFailureDetail("session_reopen", error),
+                            attempt = attempt,
+                        )
+                        playbackTelemetry.cancel(attempt)
+                        Log.w(
+                            "PlurxPlayback",
+                            "session reopen failed ${redactedFailureDetail("session_reopen", error)}",
+                        )
+                        onError(
+                            playbackControl.terminalVerdict?.message
+                                ?: "The stream stalled and recovery failed.",
+                        )
+                    }
+                    return@launch
                 }
-                return@launch
+                sessionCreateCoordinator.attachIfCurrent(hls, { stallGuard.isCurrent(requestVersion) }) { hls ->
+                    // Update the same-rung budget: the budget counts consecutive
+                    // reopen responses that do NOT resolve a strictly lower rung than
+                    // the predecessor (same rung, absent/zero height, or a higher
+                    // rung).  A genuine strict downgrade resets the count.
+                    // Absent or zero height counts as no step down — it is the server
+                    // saying "this session is already at its answer" without a rung
+                    // the client can compare.
+                    stallReopenBudget.record(hls.height)
+                    sessionId = hls.session_id
+                    beginPlaybackControl(hls)
+                    startStatusPolling(hls.session_id)
+                    encoder = hls.encoder
+                    sessionIsVod = hls.vod
+                    adoptSessionDelivery(hls)
+                    val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
+                    baseMs = timeline.baseMs
+                    activeMediaPath = relativeMediaPath(hls.playlist_url)
+                    player.setMediaItem(
+                        MediaItem.fromUri(Session.url(hls.playlist_url)),
+                        timeline.attachPositionMs,
+                    )
+                    attachRecipe(recipe)
+                    player.prepare()
+                    playbackTelemetry.prepared(attempt)
+                    player.playWhenReady = playbackIntent.playbackRequested
+                    armTrackSelections()
+                }
+            } finally {
+                stallGuard.finishRequest(requestVersion)
             }
-            if (!stallGuard.isCurrent(requestVersion)) {
-                vm.endHlsSession(hls.session_id)
-                return@launch
-            }
-            // Update the same-rung budget: the budget counts consecutive
-            // reopen responses that do NOT resolve a strictly lower rung than
-            // the predecessor (same rung, absent/zero height, or a higher
-            // rung).  A genuine strict downgrade resets the count.
-            // Absent or zero height counts as no step down — it is the server
-            // saying "this session is already at its answer" without a rung
-            // the client can compare.
-            stallReopenBudget.record(hls.height)
-            sessionId = hls.session_id
-            beginPlaybackControl(hls)
-            startStatusPolling(hls.session_id)
-            encoder = hls.encoder
-            sessionIsVod = hls.vod
-            adoptSessionDelivery(hls)
-            val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
-            baseMs = timeline.baseMs
-            activeMediaPath = relativeMediaPath(hls.playlist_url)
-            player.setMediaItem(
-                MediaItem.fromUri(Session.url(hls.playlist_url)),
-                timeline.attachPositionMs,
-            )
-            attachRecipe(recipe)
-            player.prepare()
-            playbackTelemetry.prepared(attempt)
-            player.playWhenReady = playbackIntent.playbackRequested
-            armTrackSelections()
         }
     }
 
@@ -1955,6 +1964,7 @@ class Controller(
     /** STARTED includes visible PiP; stopped/background activities suspend this deadline. */
     fun setPresentationForeground(foreground: Boolean) {
         if (!playbackControlBootstrapFence.isActive()) return
+        if (presentationForeground != foreground) stallGuard.invalidateObservation()
         presentationForeground = foreground
         sampleTargetPresentationDeadline()
     }

@@ -180,6 +180,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "fresh-request" },
+            releaseSession = {},
         )
 
         val result = coordinator.reopenAfterStall(stallBody())
@@ -204,6 +205,7 @@ class StallBudgetTest {
             },
             isBadRequest = { false },
             freshRequestId = { "unused" },
+            releaseSession = {},
         )
 
         try {
@@ -228,6 +230,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "unused" },
+            releaseSession = {},
         )
 
         // Use budget.userActionSequence as the isCurrent source — same
@@ -255,6 +258,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "unused" },
+            releaseSession = {},
         )
 
         // Stall captures current sequence. A user action advances the
@@ -297,6 +301,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "fallback-request" },
+            releaseSession = {},
         )
 
         // Stall starts: 400 triggers fallback which holds the mutex
@@ -394,6 +399,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "fresh-request-id" },
+            releaseSession = {},
         )
 
         val freshBody = CreateSessionReq(
@@ -442,6 +448,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "fallback-req" },
+            releaseSession = {},
         )
 
         // Phase 1: budget exhausted, then user action resets

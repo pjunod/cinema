@@ -76,21 +76,58 @@ internal class StallReopenBudget(private val maxNonDowngrades: Int = 3) {
  */
 internal class ControllerStallGuard(
     private val budget: StallReopenBudget,
+    private val stallTracker: OpenPlaybackStallTracker = OpenPlaybackStallTracker(),
 ) {
     private var requestVersion = 0L
+    private var transportVersion = 0L
+    private var pendingRequest: Long? = null
 
-    fun beginRequest(): Long = ++requestVersion
+    data class Observation(val request: Long, val transport: Long)
+
+    /** Observing a stall must not revoke a viewer's in-flight media create. */
+    fun observeStall(): Observation = Observation(requestVersion, transportVersion)
+
+    fun isCurrent(observation: Observation): Boolean =
+        observation.request == requestVersion && observation.transport == transportVersion
+
+    /** Pause cancels old stall evidence, not the requested media recipe. */
+    fun setPlaybackRequested(intent: PlaybackIntent, requested: Boolean, apply: (Boolean) -> Unit) {
+        invalidateObservation()
+        intent.setPlaybackRequested(requested)
+        apply(intent.playbackRequested)
+    }
+
+    /** The sampling coroutine can be suspended in an ask while visibility or
+     * transport changes twice. Rearm synchronously; sampling may miss both. */
+    fun invalidateObservation() {
+        transportVersion++
+        stallTracker.reset()
+    }
+
+    fun beginRequest(): Long = (++requestVersion).also { pendingRequest = it }
+
+    fun finishRequest(version: Long) {
+        if (pendingRequest == version) {
+            pendingRequest = null
+            if (isCurrent(version)) stallTracker.reset()
+        }
+    }
+
+    fun defersPredecessorRecovery(recipeReplacementPending: Boolean): Boolean =
+        recipeReplacementPending || pendingRequest == requestVersion
 
     fun isCurrent(version: Long): Boolean = version == requestVersion
 
     fun invalidateForUserAction() {
         budget.resetForUserAction()
         requestVersion++
+        stallTracker.reset()
     }
 
     /** Invalidate stale recovery ownership without resetting its retry budget. */
     fun invalidateForPlaybackAttempt() {
         requestVersion++
+        stallTracker.reset()
     }
 
     fun viewerSeek(action: () -> Unit) {
@@ -112,6 +149,7 @@ internal class SessionCreateCoordinator(
     private val createSession: suspend (CreateSessionReq) -> HlsStart,
     private val isBadRequest: (Throwable) -> Boolean,
     private val freshRequestId: () -> String,
+    private val releaseSession: (String) -> Unit,
 ) {
     private val createMutex = Mutex()
 
@@ -119,7 +157,18 @@ internal class SessionCreateCoordinator(
         body: CreateSessionReq,
         isCurrent: () -> Boolean = { true },
     ): HlsStart? = createMutex.withLock {
-        if (isCurrent()) callCreate(body) else null
+        if (isCurrent()) retainIfCurrent(callCreate(body), isCurrent) else null
+    }
+
+    private fun retainIfCurrent(hls: HlsStart, isCurrent: () -> Boolean): HlsStart? =
+        if (isCurrent()) hls else {
+            releaseSession(hls.session_id)
+            null
+        }
+
+    /** The last ownership check and attachment mutation share one turn. */
+    fun attachIfCurrent(hls: HlsStart, isCurrent: () -> Boolean, attach: (HlsStart) -> Unit) {
+        retainIfCurrent(hls, isCurrent)?.let(attach)
     }
 
     /**
@@ -141,17 +190,20 @@ internal class SessionCreateCoordinator(
         createMutex.withLock {
             if (!isCurrent()) return@withLock null
             try {
-                callCreate(body).takeIf { isCurrent() }
+                retainIfCurrent(callCreate(body), isCurrent)
             } catch (failure: Throwable) {
                 if (!isBadRequest(failure)) throw failure
                 if (!isCurrent()) return@withLock null
-                callCreate(
-                    body.copy(
-                        request_id = freshRequestId(),
-                        previous_session_id = null,
-                        reopen_reason = null,
+                retainIfCurrent(
+                    callCreate(
+                        body.copy(
+                            request_id = freshRequestId(),
+                            previous_session_id = null,
+                            reopen_reason = null,
+                        ),
                     ),
-                ).takeIf { isCurrent() }
+                    isCurrent,
+                )
             }
         }
 }
