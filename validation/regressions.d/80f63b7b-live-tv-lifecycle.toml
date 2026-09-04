@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["80f63b7b"]
+points = ["live-tv.integration", "cluster.membership", "server.api"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "resource-bounds", "operations-contract"]
+reason = "Retained Rust regressions protect every M2 adversarial correction: the finite-media orphan sweep cannot enter Live TV's reserved namespace; the Live TV sweep retains registered and claimed scratch; stop and generation drain acknowledge only after registry and physical scratch cleanup; an end-to-end fake tuner and fake FFmpeg fixture proves one tuner GET through atomic HLS publication, voter/source-generation-bound activation, playlist and segment delivery, socket close, process exit, admission release, and scratch removal; ten moving windows keep manifest bytes and current/deletion-lag inventory atomic; declared and chunked relays fail at their byte ceiling; route matrices keep existing capabilities usable while refusing new work during maintenance and prevent learners from minting sessions; foreground admission cancellation releases its yield signal; deinterlacing is limited to interlaced frames; stale device metrics reset; and request failures log a bounded class rather than the tuner URL. Workspace check and Clippy cover shutdown, owner-transition, restart-admission, and internal voter-authority wiring across their production call sites."
