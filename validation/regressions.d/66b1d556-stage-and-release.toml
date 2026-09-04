@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["66b1d556"]
+points = ["playback.pipeline", "core.media", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "web-static"]
+reason = "M6 §3.4's first production caller for PreparationExecutor, with the release path that makes staging safe. an_abandoned_successor_gives_the_slot_back pins the property the slice was held for: nothing durable clears ControlState.preparation, and the VOD idle reap removes an unclaimed successor without a tombstone by design, so abort_staged_preparation never runs and the slot would stay Staged for the predecessor's whole life — one preparation per session, forever. a_committed_successor_is_not_released pins the other direction, that a settled slot tells the release path to stand down. a_takeover_and_a_replacement_share_one_gate_and_a_preparation_does_not catches the regression the scope split introduced, where the takeover site kept formatting the old two-element key by hand and the two stopped contending; it takes one gate and watches the other wait rather than comparing strings, and reverting the shared builder fails it. the_rolling_slot_answers_the_advisory_read and the staging counter tests pin the engine-labelled metric, without which a caller wired to the rolling actor reads identically to one that is not firing."
