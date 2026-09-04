@@ -631,7 +631,13 @@ pattern = "media_session_route_for_playback"
 # to it. The single shipped read is unchanged and still the only one — the
 # executor itself never reads the pointer, which is the point: the store's
 # CAS decides, and a read-then-act here would be a second authority.
-expected_occurrences = 7
+# 7 -> 11 with M6 §3.4's first production caller: four test-only reads of
+# `media_session_route_for_playback` — two asserting the pointer still names
+# the predecessor after staging, two reading the committed successor back to
+# prove the staged row is usable rather than merely present. The pointer
+# assertions are what say `prepare_media_session` is the entry point rather
+# than `activate_media_session`, which would have advanced it.
+expected_occurrences = 11
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -708,7 +714,10 @@ pattern = "publication_ready_at_ms"
 # a durable route this node owns whose lease has already run out, so the relay's
 # own owner gate can be driven at all. Each sets the blocked sentinel and then
 # confirms to zero like any ordinary first activation; no shipped fence moves.
-expected_occurrences = 77
+# 77 -> 78 with M6 §3.4: one test-only activation standing up a live route for
+# the staging fixture. It confirms to zero like any ordinary first activation
+# and moves no shipped fence.
+expected_occurrences = 78
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1118,7 +1127,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # the job heartbeat and the request heartbeat still spawn exactly one task
 # apiece, now running the same loop instead of two copies of it. Neither owns
 # a producer, a process, or a recipe.
-expected_occurrences = 388
+# 388 -> 389 with M6 §3.4's preparation deadline: one `tokio::spawn` that
+# sleeps to the staged successor's deadline and then aborts it, freeing the
+# one preparation slot and its durable row together. Without it the first
+# successful stage is the last one for the life of the session. It owns no
+# producer and starts no process — it only settles a slot the actor holds.
+expected_occurrences = 389
 
 [[module_structures]]
 id = "method-spawn"
@@ -1211,7 +1225,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `all-async-sleeps` above. Same call, counted once in each sentinel. The two
 # efforts moved this number from the same base independently, so the merged
 # count is both deltas rather than either one.
-expected_occurrences = 549
+# 549 -> 550 with M6 §3.4: the `Duration::from_millis` that timer sleeps for.
+# It is the preparation deadline, not a playback-progress watchdog.
+expected_occurrences = 550
 
 [[module_structures]]
 id = "bare-time-constructor"

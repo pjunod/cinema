@@ -633,6 +633,56 @@ the staged path would fire at all once the literal flips.
 a resolution-and-delivery-method change with headroom, the ledger holds a
 staged successor and the pointer still names the predecessor.
 
+**Built 2026-09-04**, and the release path the note above demands is part of
+it: a timer armed at stage time calls the executor's `abort`, which is the
+`settle_preparation(id, false)` that frees the slot on the unhappy path.
+Without it the first successful stage would be the last one for the life of the
+session, and every later selection change would pay a durable
+create-and-abort round trip for a successor that can never exist. The deadline
+is keyed off `VOD_LEASE_TIMEOUT_MS` — the lease that actually applies to these
+sessions — because the store's own maintenance would not reap the row for
+several minutes past it and would never free the in-memory slot at all.
+
+Stage only: the second of §5.1's eight phases — propose · **stage** · reserve
+and prime · prepare · commit · commit durability · retire · abort. Nothing
+commits, and nothing is primed.
+
+Four things the first version of this got wrong, each caught by review rather
+than by its own tests:
+
+- **The gate is resolved through both engines, VOD first.** Every public create
+  is `Presentation::Vod` and lives in `VodServe`'s registry; the rolling
+  registry holds only incident-recovery sessions. Asking the rolling actor
+  alone is the exact failure `PreparationGate`'s own doc predicts — *"a gate
+  that existed only on the actor would let M6 stage successors on a path
+  viewers do not take, and its acceptance would pass while the feature fired on
+  nothing."* It did, and the acceptance did, because the test fixture registers
+  into the rolling map. No live session in either engine means no slot, and
+  that case is **counted as a refusal** rather than returning silently: an
+  uncounted return is what made the broken version indistinguishable from "no
+  transitions were admitted".
+- **The staged row has to be committable, not merely present.** Its
+  `response_json` is a real `StartResponse` with a control bootstrap, because
+  every reader parses it as one and `control_start_response` filters on the
+  bootstrap — a row without it answers 404 `session_gone` on the successor's
+  first exchange. The staged-row read carries neither field, so a test that
+  only checks a row exists cannot see any of this; the acceptance now commits
+  the successor and reads what it became.
+- **The source snapshot is the file's real size and mtime.** `0/0` is this
+  codebase's "the placement never read the file" sentinel, and
+  `takeover_source_matches` refuses a takeover on it forever.
+- **The successor starts at the predecessor's frontier.**
+  `candidate_request` clones the predecessor's request and overwrites only the
+  selection, so its `start_seconds` is the *original* start — committing that
+  restarts the film for a viewer forty minutes in. `media_origin_ms` follows
+  the same number rather than the predecessor's origin.
+
+`plurx_playback_preparation_staged_total{outcome}` counts whether a `Prepare`
+decision reached the ledger, separately from the decision counter: the two
+differ whenever the slot is taken, the admission cap refuses, or no engine
+resolved a gate — none of them failures, and none visible from the decision
+alone.
+
 ### 3.5 The commit trigger
 
 **§3.4 does not ship without this, and that is the finding, not an

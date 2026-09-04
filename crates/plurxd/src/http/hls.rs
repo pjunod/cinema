@@ -5187,6 +5187,8 @@ async fn control_local_inner(
         tokio::spawn(record_preparation_shadow(
             state.clone(),
             PreparationShadowInputs {
+                session_id: route.session_id.clone(),
+                route: route.clone(),
                 recipe: recipe.clone(),
                 selection: request.selection.clone(),
                 observed_download_bps: request.observed_download_bps,
@@ -5373,6 +5375,11 @@ fn remember_delivered_selection(
 /// answer, they are always passed together, and the spawned task has no reason
 /// to be able to take them from different exchanges.
 struct PreparationShadowInputs {
+    /// The live session this exchange belongs to. Staging needs it twice: to
+    /// reach the actor that owns the one successor slot, and to name the
+    /// predecessor the commit CAS will fence against.
+    session_id: String,
+    route: MediaSessionRoute,
     recipe: RemoteStartRequest,
     selection: crate::playback_control::ClientSelection,
     observed_download_bps: Option<u64>,
@@ -5401,6 +5408,8 @@ struct PreparationShadowInputs {
 /// answer a question nobody asked.
 async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowInputs) {
     let PreparationShadowInputs {
+        session_id,
+        route,
         recipe,
         selection,
         observed_download_bps,
@@ -5482,15 +5491,13 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
         observed_download_bps,
         delivered_bps,
     };
-    crate::playback_control::record_preparation_decision(
-        platform,
-        crate::playback_control::decide_preparation(
-            delivered_view,
-            proposed_view,
-            capabilities.as_ref(),
-            conditions,
-        ),
+    let decision = crate::playback_control::decide_preparation(
+        delivered_view,
+        proposed_view,
+        capabilities.as_ref(),
+        conditions,
     );
+    crate::playback_control::record_preparation_decision(platform, decision);
     // All three clients hardcode the capability `false`, so the counter above
     // books every single-axis transition as `client_cannot_prepare` and can
     // say nothing about the axis rule or the throughput floor. This is the
@@ -5510,6 +5517,204 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
             conditions,
         ),
     );
+    if let crate::playback_control::PreparationDecision::Prepare { .. } = decision {
+        stage_prepared_successor(
+            &state,
+            &session_id,
+            &route,
+            &recipe,
+            &candidate,
+            source.as_ref(),
+        )
+        .await;
+    }
+}
+
+/// How long a staged successor may sit unclaimed.
+///
+/// Keyed off `VOD_LEASE_TIMEOUT_MS`, because every session this fires on is
+/// VOD: a client is allowed that long between exchanges before it is even
+/// nominally late, so a shorter window would expire successors for clients
+/// behaving exactly as the protocol permits. One lease plus a margin covers a
+/// slow client without covering a gone one.
+///
+/// **This bound is enforced here, not by the store.** Maintenance retires an
+/// expired row only `TAKEOVER_RECOVERY_MS` after its lease lapses and ticks
+/// every five minutes, so waiting for it would hold a successor's admission
+/// slot and the playback's one preparation slot for several minutes past the
+/// deadline — and would never free the actor's slot at all, because nothing
+/// in that path settles it. The timer armed at stage time does both.
+const PREPARATION_DEADLINE_MS: i64 = crate::playback_control::VOD_LEASE_TIMEOUT_MS as i64 + 30_000;
+
+/// M6 §3.4 — stage the successor the decision just admitted.
+///
+/// **Stage only.** This is the second of §5.1's eight phases — propose ·
+/// stage · reserve and prime · prepare · commit · commit durability · retire ·
+/// abort — and it is: a durable row and the
+/// actor's one successor slot, nothing produced yet. The pointer is untouched
+/// by construction — `prepare_media_session` is the entry point that neither
+/// runs the supersession reap nor advances `media_playback_pointers`, which is
+/// why a preparation cannot be built on `activate_media_session`.
+///
+/// Best-effort, like the measurement it runs beside. A staged successor that
+/// fails to appear costs the viewer nothing: the fallback replacement they
+/// would have taken before M6 is still exactly what happens. A staged
+/// successor that appears when it should not costs a saturated user real
+/// admission headroom, which is why every refusal below returns rather than
+/// retries.
+async fn stage_prepared_successor(
+    state: &AppState,
+    session_id: &str,
+    route: &MediaSessionRoute,
+    predecessor: &RemoteStartRequest,
+    candidate: &crate::transcode::SessionRequest,
+    source: Option<&plurx_core::domain::MediaFile>,
+) {
+    // The actor owns the slot. No live local worker means no slot to take, and
+    // an expired, remote-owned or retired playback stages nothing.
+    let Some(gate) = state.transcode.session_preparation_gate(session_id).await else {
+        // Counted, not silent: a decision that never reached a gate is
+        // exactly what the first version of this did on every production
+        // session, and an uncounted return made that indistinguishable from
+        // "nothing was admitted".
+        crate::playback_control::record_preparation_staged(false);
+        return;
+    };
+    // The source snapshot has to be the file's real one. `0/0` is this
+    // codebase's documented "this placement never read the file" sentinel, and
+    // `takeover_source_matches` refuses a takeover on it forever — so writing
+    // it as a placeholder would poison the successor the moment it committed.
+    let Some(source) = source else {
+        return;
+    };
+    let now_ms = crate::media_sessions::unix_ms();
+    let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+    let staged_session_id = uuid::Uuid::new_v4().to_string();
+    // Where the successor actually begins: the frontier the predecessor has
+    // reached, not the position it was created at. `candidate` is the
+    // predecessor's request with the selection fields overwritten, so its
+    // `start_seconds` is the *original* start — committing that would restart
+    // the film for a viewer forty minutes in.
+    let resume_ms = route
+        .media_origin_ms
+        .saturating_add(route.fetched_through_ms.max(0));
+    let staged_request = crate::transcode::SessionRequest {
+        request_id: Some(staged_incarnation_id.clone()),
+        start_seconds: resume_ms as f64 / 1_000.0,
+        // A successor is its own generation, not a reopen of the one it
+        // replaces. Carrying these across would stage a row claiming to be a
+        // stall reopen of a session that is still playing.
+        previous_session_id: None,
+        reopen_reason: None,
+        control_sequence: None,
+        ..candidate.clone()
+    };
+    let Ok(recipe_json) = serde_json::to_string(&RemoteStartRequest {
+        protocol_version: crate::media_pool::PROTOCOL_VERSION,
+        incarnation_id: staged_incarnation_id.clone(),
+        user_id: route.user_id,
+        source_size: source.size,
+        source_mtime: source.mtime,
+        // Read from the predecessor rather than assumed: this decides whether
+        // anything may ever take the successor over.
+        typeless_playlist: predecessor.typeless_playlist,
+        request: staged_request.clone(),
+    }) else {
+        return;
+    };
+    // A real `StartResponse`, because every reader of a route's
+    // `response_json` parses it as one — and `control_start_response` filters
+    // on the bootstrap being present, so a row without it answers 404
+    // `session_gone` on the successor's first exchange after commit.
+    let Ok(response_json) = serde_json::to_string(&StartResponse {
+        session_id: staged_session_id.clone(),
+        playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
+        duration_ms: source.duration_ms,
+        start_seconds: resume_ms as f64 / 1_000.0,
+        media_origin_ms: Some(resume_ms),
+        height: match staged_request.kind {
+            crate::transcode::SessionKind::Transcode { height } => height,
+            crate::transcode::SessionKind::Copy { .. } => source.height.unwrap_or_default(),
+        },
+        encoder: "staged".to_owned(),
+        vod: staged_request.presentation == crate::transcode::Presentation::Vod,
+        ladder: Vec::new(),
+        prior_kbps: None,
+        delivered_dynamic_range: None,
+        delivered_dolby_vision_profile: None,
+        control: crate::playback_control::ControlBootstrap::new(
+            &staged_session_id,
+            &staged_incarnation_id,
+            1,
+            crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+        ),
+        plan_notes: Vec::new(),
+    }) else {
+        return;
+    };
+    let executor = crate::playback_control::PreparationExecutor::new(
+        Arc::clone(&state.store),
+        gate,
+        route.user_id,
+        route.playback_id.clone(),
+    );
+    let preparation = plurx_core::domain::MediaSessionPreparation {
+        incarnation_id: staged_incarnation_id,
+        session_id: staged_session_id,
+        user_id: route.user_id,
+        playback_id: route.playback_id.clone(),
+        // Recorded now rather than read fresh at commit, so a lost CAS aborts
+        // this successor and never reaps a newer player generation.
+        expected_predecessor_incarnation_id: route.incarnation_id.clone(),
+        // The successor's own intent, not the predecessor's: the
+        // fingerprint encodes `kind` and `start_seconds`, both of which this
+        // row deliberately changes.
+        request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
+        owner_node_id: state.node_id.clone(),
+        recipe_json,
+        response_json,
+        media_origin_ms: resume_ms,
+        now_ms,
+        deadline_ms: now_ms.saturating_add(PREPARATION_DEADLINE_MS),
+    };
+    match executor.stage(&preparation).await {
+        Ok(true) => {
+            crate::playback_control::record_preparation_staged(true);
+            arm_preparation_deadline(
+                executor,
+                preparation.incarnation_id,
+                PREPARATION_DEADLINE_MS,
+            );
+        }
+        Ok(false) | Err(_) => crate::playback_control::record_preparation_staged(false),
+    }
+}
+
+/// Free the slot and the row when nobody claims the successor.
+///
+/// Without this the first successful stage is the last one for the life of the
+/// session: `ControlState::stage_preparation` refuses a non-empty slot, and
+/// the slot is cleared only by a commit or an abort — neither of which has a
+/// caller until §3.5. Every later selection change would then pay a durable
+/// create-and-abort round trip for a successor that can never exist.
+///
+/// The roadmap states the invariant this keeps: *"after the preparation lease
+/// expires the actor aborts the successor and keeps the current generation if
+/// healthy."* Aborting is idempotent against a successor that has already
+/// committed — the store's abort names an incarnation that is no longer
+/// staged and changes nothing — so the timer does not race the commit path
+/// §3.5 will add.
+fn arm_preparation_deadline(
+    executor: crate::playback_control::PreparationExecutor,
+    staged_incarnation_id: String,
+    deadline_ms: i64,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(deadline_ms.max(0) as u64)).await;
+        let _ = executor
+            .abort(&staged_incarnation_id, crate::media_sessions::unix_ms())
+            .await;
+    });
 }
 
 async fn status_local_before(
@@ -13390,6 +13595,624 @@ mod tests {
             observation: None,
             acknowledgement: None,
             supported_actions: None,
+        }
+    }
+
+    /// A live local worker and a durable route naming it — both halves are
+    /// needed, because staging takes the actor's slot *and* writes a row
+    /// fenced on the route's current generation.
+    async fn staging_fixture(
+        dir: &std::path::Path,
+    ) -> (HlsDeliveryFixture, String, MediaSessionRoute) {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir, &session_id).await;
+        let user = fixture
+            .store
+            .create_user("stage-on-prepare", "hash", false)
+            .await
+            .expect("staging user");
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let route = activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                incarnation_id,
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "stage-player".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "c".repeat(64),
+                owner_node_id: fixture.state.node_id.clone(),
+                lease_expires_at_ms: unix_ms().saturating_add(900_000),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: unix_ms(),
+            },
+        )
+        .await;
+        (fixture, session_id, route)
+    }
+
+    /// M6 §3.4's acceptance, stated in the handoff: *"with a test client
+    /// reporting `dual_player_preparation: true` on a resolution-and-delivery-
+    /// method change with headroom, the ledger holds a staged successor and
+    /// the pointer still names the predecessor."*
+    ///
+    /// Both halves matter and the second is the one that would go wrong
+    /// quietly. `activate_media_session` — the call every other durable
+    /// successor in this codebase goes through — reaps the predecessor and
+    /// advances the pointer unconditionally, so a preparation built on it
+    /// would retire the stream the viewer is still watching. This asserts the
+    /// pointer is untouched, which is what says `prepare_media_session` is the
+    /// entry point actually being used.
+    #[tokio::test]
+    async fn a_prepared_transition_stages_a_successor_and_leaves_the_pointer_alone() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+        )
+        .await;
+
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged");
+        assert_eq!(
+            staged.expected_predecessor_incarnation_id, route.incarnation_id,
+            "the commit CAS is fenced on the generation that was current when it staged"
+        );
+        assert_ne!(staged.staged_incarnation_id, route.incarnation_id);
+
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("route while staged")
+                .expect("the playback still has a pointer")
+                .incarnation_id,
+            route.incarnation_id,
+            "staging must not advance the pointer — `activate_media_session` would have",
+        );
+    }
+
+    /// The wiring, not the helper. A first version of this change tested
+    /// `stage_prepared_successor` directly, and a mutation deleting the call
+    /// that fires it survived the whole suite — the decision would have been
+    /// counted and nothing staged, which is precisely the shadow behaviour
+    /// §3.4 exists to replace. This drives the seam.
+    #[tokio::test]
+    async fn a_prepare_decision_at_the_seam_reaches_the_ledger() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        // The seam reads the source, and staging refuses without a snapshot.
+        // Its 2160 height is also load-bearing: it is what makes the viewer's
+        // 1080 ask cross the delivery method as well as the resolution.
+        let source = staging_source(&fixture).await;
+
+        // A 2160p copy being delivered, and the viewer asks for 1080p: the
+        // copy becomes a transcode, so height and delivery method move
+        // together — the one pair with a hardware receipt.
+        let mut recipe = staged_candidate_request();
+        recipe.file_id = source.id;
+        recipe.kind = crate::transcode::SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        // 2160 is what is being *delivered*; the source row's own height is
+        // deliberately not required. `candidate_request` turns a copy into a
+        // transcode whenever the asked height is not the source's, and an
+        // unprobed source is `None`, so the copy → transcode arm fires either
+        // way — which is the delivery-method half of the transition.
+        let delivered =
+            crate::playback_control::EffectiveSelection::from_request(&recipe, 2160, None);
+        assert_eq!(delivered.codec, "source", "the predecessor direct-plays");
+        let asked_height = 1080;
+
+        record_preparation_shadow(
+            fixture.state.clone(),
+            PreparationShadowInputs {
+                session_id: session_id.clone(),
+                route: route.clone(),
+                recipe: RemoteStartRequest {
+                    protocol_version: crate::media_pool::PROTOCOL_VERSION,
+                    incarnation_id: route.incarnation_id.clone(),
+                    user_id: route.user_id,
+                    source_size: 0,
+                    source_mtime: 0,
+                    typeless_playlist: false,
+                    request: recipe,
+                },
+                selection: crate::playback_control::ClientSelection {
+                    quality: crate::playback_control::QualitySelection::Manual {
+                        height: asked_height,
+                    },
+                    audio_track: None,
+                    subtitle: crate::playback_control::SubtitleSelection {
+                        mode: crate::playback_control::SubtitleMode::Off,
+                        track: None,
+                    },
+                    audio_offset_ms: 0,
+                    codec: crate::playback_control::CodecPolicy::Auto,
+                    dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+                },
+                // Ten times the delivered rate: well clear of the floor the
+                // 2026-09-03 run had to be re-run to satisfy.
+                observed_download_bps: Some(100_000_000),
+                delivered: delivered.clone(),
+                delivered_bps: Some(10_000_000),
+                capabilities: Some(crate::playback_control::DynamicCapabilities {
+                    platform: crate::playback_control::ClientPlatform::Apple,
+                    max_height: 2160,
+                    codecs: vec![crate::playback_control::CodecPolicy::H264],
+                    dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                    // The retained field, read rather than re-derived.
+                    dual_player_preparation: true,
+                }),
+                platform: crate::playback_control::ClientPlatform::Apple,
+            },
+        )
+        .await;
+
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("the seam staged a successor");
+        assert_eq!(
+            staged.expected_predecessor_incarnation_id,
+            route.incarnation_id
+        );
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("route while staged")
+                .expect("the playback still has a pointer")
+                .incarnation_id,
+            route.incarnation_id,
+            "and the viewer's own generation is still the current one",
+        );
+    }
+
+    /// The same seam with the capability the client actually ships today.
+    /// Nothing stages, which is what says the gate is the retained field and
+    /// not the platform.
+    #[tokio::test]
+    async fn a_client_that_cannot_prepare_stages_nothing_at_the_seam() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        let source = staging_source(&fixture).await;
+
+        let mut recipe = staged_candidate_request();
+        recipe.file_id = source.id;
+        recipe.kind = crate::transcode::SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        let delivered =
+            crate::playback_control::EffectiveSelection::from_request(&recipe, 2160, None);
+
+        record_preparation_shadow(
+            fixture.state.clone(),
+            PreparationShadowInputs {
+                session_id,
+                route: route.clone(),
+                recipe: RemoteStartRequest {
+                    protocol_version: crate::media_pool::PROTOCOL_VERSION,
+                    incarnation_id: route.incarnation_id.clone(),
+                    user_id: route.user_id,
+                    source_size: 0,
+                    source_mtime: 0,
+                    typeless_playlist: false,
+                    request: recipe,
+                },
+                selection: crate::playback_control::ClientSelection {
+                    quality: crate::playback_control::QualitySelection::Manual { height: 1080 },
+                    audio_track: None,
+                    subtitle: crate::playback_control::SubtitleSelection {
+                        mode: crate::playback_control::SubtitleMode::Off,
+                        track: None,
+                    },
+                    audio_offset_ms: 0,
+                    codec: crate::playback_control::CodecPolicy::Auto,
+                    dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+                },
+                observed_download_bps: Some(100_000_000),
+                delivered,
+                delivered_bps: Some(10_000_000),
+                capabilities: Some(crate::playback_control::DynamicCapabilities {
+                    platform: crate::playback_control::ClientPlatform::Apple,
+                    max_height: 2160,
+                    codecs: vec![crate::playback_control::CodecPolicy::H264],
+                    dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                    dual_player_preparation: false,
+                }),
+                platform: crate::playback_control::ClientPlatform::Apple,
+            },
+        )
+        .await;
+
+        assert!(
+            fixture
+                .state
+                .store
+                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("ledger read")
+                .is_none(),
+            "a client that cannot hold two pipelines is not given a successor"
+        );
+    }
+
+    /// A second `Prepare` on the same playback finds the actor's one slot
+    /// already taken. It is refused rather than queued, and refusing is
+    /// counted separately from deciding, because the two answer different
+    /// questions and only the second says whether the ledger moved.
+    #[tokio::test]
+    async fn a_second_prepared_transition_is_refused_by_the_one_successor_slot() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+        )
+        .await;
+        let first = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("the first staged")
+            .staged_incarnation_id;
+
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+        )
+        .await;
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("ledger read")
+                .expect("still exactly one")
+                .staged_incarnation_id,
+            first,
+            "the second is refused rather than replacing the first"
+        );
+    }
+
+    /// A playback with no live local worker has no slot to take. Staging a row
+    /// the actor never holds would leave it for the maintenance backstop while
+    /// it counted against the user's admission cap the whole time.
+    #[tokio::test]
+    async fn a_playback_with_no_live_worker_stages_nothing() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, _session_id, route) = staging_fixture(dir.path()).await;
+
+        stage_prepared_successor(
+            &fixture.state,
+            &uuid::Uuid::new_v4().to_string(),
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+        )
+        .await;
+        assert!(
+            fixture
+                .state
+                .store
+                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("ledger read")
+                .is_none(),
+            "the ledger is untouched"
+        );
+    }
+
+    /// The staged row has to be **usable**, not merely present. Every reader of
+    /// a route's `response_json` parses it as a `StartResponse`, and
+    /// `control_start_response` filters on the bootstrap being present — so a
+    /// row without one answers 404 `session_gone` on the successor's first
+    /// exchange the moment §3.5 commits it. A first version of this change
+    /// wrote three loose fields and no test noticed, because the staged-row
+    /// read carries no recipe or response at all. This commits the successor
+    /// and reads what it became.
+    #[tokio::test]
+    async fn a_staged_successor_commits_into_a_usable_route() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        // The predecessor was itself opened as a stall reopen. `candidate` is
+        // its request with only the selection overwritten, so without an
+        // explicit clear the successor would stage claiming to be a reopen of
+        // a session that is still playing.
+        let candidate = crate::transcode::SessionRequest {
+            previous_session_id: Some(uuid::Uuid::new_v4().to_string()),
+            reopen_reason: Some(crate::transcode::ReopenReason::Stall),
+            ..staged_candidate_request()
+        };
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &candidate,
+            Some(&staged_source_file()),
+        )
+        .await;
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged");
+
+        let gate = fixture
+            .state
+            .transcode
+            .session_preparation_gate(&session_id)
+            .await
+            .expect("the fixture session has a gate");
+        let executor = crate::playback_control::PreparationExecutor::new(
+            Arc::clone(&fixture.state.store),
+            gate,
+            route.user_id,
+            route.playback_id.clone(),
+        );
+        assert!(
+            executor
+                .commit(
+                    &staged.staged_incarnation_id,
+                    unix_ms(),
+                    unix_ms() + 900_000
+                )
+                .await
+                .expect("commit"),
+            "the pointer still names the recorded predecessor"
+        );
+
+        let committed = fixture
+            .state
+            .store
+            .media_session_route_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("committed route")
+            .expect("the successor is now current");
+        assert_eq!(committed.incarnation_id, staged.staged_incarnation_id);
+
+        let response = serde_json::from_str::<StartResponse>(&committed.response_json)
+            .expect("the staged response must parse as the type every reader uses");
+        assert!(
+            response.control.is_some(),
+            "without a bootstrap the successor's first control exchange is a 404"
+        );
+        assert_eq!(response.session_id, committed.session_id);
+
+        let recipe = serde_json::from_str::<RemoteStartRequest>(&committed.recipe_json)
+            .expect("the staged recipe must parse");
+        let file = staged_source_file();
+        assert_eq!(
+            (recipe.source_size, recipe.source_mtime),
+            (file.size, file.mtime),
+            "`0/0` is the sentinel that refuses this successor a takeover forever"
+        );
+        assert_eq!(
+            recipe.request.request_id.as_deref(),
+            Some(recipe.incarnation_id.as_str()),
+            "the envelope validator requires exactly this"
+        );
+        assert!(
+            recipe.request.previous_session_id.is_none() && recipe.request.reopen_reason.is_none(),
+            "a successor is its own generation, not a reopen of the one it replaces"
+        );
+    }
+
+    /// The successor resumes where the viewer is, not where the predecessor
+    /// started. `candidate_request` clones the predecessor's request and
+    /// overwrites only the selection, so its `start_seconds` is the *original*
+    /// start — committing that restarts the film for a viewer forty minutes
+    /// in.
+    #[tokio::test]
+    async fn a_staged_successor_resumes_at_the_frontier_not_the_original_start() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, mut route) = staging_fixture(dir.path()).await;
+        route.media_origin_ms = 90_000;
+        route.fetched_through_ms = 2_400_000;
+
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+        )
+        .await;
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged");
+        let gate = fixture
+            .state
+            .transcode
+            .session_preparation_gate(&session_id)
+            .await
+            .expect("gate");
+        crate::playback_control::PreparationExecutor::new(
+            Arc::clone(&fixture.state.store),
+            gate,
+            route.user_id,
+            route.playback_id.clone(),
+        )
+        .commit(
+            &staged.staged_incarnation_id,
+            unix_ms(),
+            unix_ms() + 900_000,
+        )
+        .await
+        .expect("commit");
+
+        let committed = fixture
+            .state
+            .store
+            .media_session_route_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("committed route")
+            .expect("current");
+        assert_eq!(
+            committed.media_origin_ms, 2_490_000,
+            "origin is the predecessor's origin plus what the client fetched"
+        );
+        let recipe =
+            serde_json::from_str::<RemoteStartRequest>(&committed.recipe_json).expect("recipe");
+        assert!(
+            (recipe.request.start_seconds - 2_490.0).abs() < 0.001,
+            "the successor starts at the frontier, not at {}",
+            staged_candidate_request().start_seconds,
+        );
+    }
+
+    /// A VOD session — which is what every public create actually is — has a
+    /// gate. The first version of this change resolved only the rolling
+    /// registry, so it staged nothing in production while its own tests
+    /// passed against a registry viewers never enter.
+    #[tokio::test]
+    async fn a_vod_session_resolves_a_preparation_gate() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (_app, state) = super::super::tests::test_app_with_state();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        assert!(
+            state
+                .transcode
+                .session_preparation_gate(&session_id)
+                .await
+                .is_none(),
+            "a session neither engine knows has no slot to take"
+        );
+
+        state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+        assert!(
+            state
+                .transcode
+                .session_preparation_gate(&session_id)
+                .await
+                .is_some(),
+            "the VOD engine serves every public session and must answer here"
+        );
+    }
+
+    /// The fixture's own source row. The seam reads it, and staging refuses
+    /// without a snapshot — `0/0` is the sentinel that would refuse the
+    /// successor a takeover forever.
+    async fn staging_source(fixture: &HlsDeliveryFixture) -> plurx_core::domain::MediaFile {
+        fixture
+            .store
+            .get_file(fixture.file_id())
+            .await
+            .expect("fixture file lookup")
+            .expect("the fixture has a source")
+    }
+
+    fn staged_predecessor_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
+        RemoteStartRequest {
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
+            incarnation_id: route.incarnation_id.clone(),
+            user_id: route.user_id,
+            source_size: 4_096,
+            source_mtime: 1_700_000_000,
+            typeless_playlist: false,
+            request: staged_candidate_request(),
+        }
+    }
+
+    /// The real source snapshot the seam reads. `0/0` is the codebase's
+    /// "this placement never saw the file" sentinel and would refuse the
+    /// successor a takeover forever, so the fixture carries a readable one.
+    fn staged_source_file() -> plurx_core::domain::MediaFile {
+        plurx_core::domain::MediaFile {
+            id: 11,
+            item_id: 1,
+            path: std::path::PathBuf::from("/library/staged.mkv"),
+            size: 4_096,
+            mtime: 1_700_000_000,
+            duration_ms: Some(3_600_000),
+            container: Some("mkv".into()),
+            video_codec: Some("h264".into()),
+            video_profile: None,
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            bitrate: Some(18_183_000),
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 0,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        }
+    }
+
+    fn staged_candidate_request() -> crate::transcode::SessionRequest {
+        crate::transcode::SessionRequest {
+            control_sequence: None,
+            file_id: 11,
+            playback_id: "stage-player".to_owned(),
+            request_id: None,
+            automatic: true,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: crate::transcode::SessionKind::Transcode { height: 1080 },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: crate::transcode::Presentation::Vod,
+            block_budget_secs: None,
         }
     }
 
