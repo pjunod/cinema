@@ -72,7 +72,7 @@ internal class StallReopenBudget(private val maxNonDowngrades: Int = 3) {
  * The budget sequence is deliberately not the request token: session opens and
  * stall reopens also consume tokens, so copying the smaller budget sequence can
  * make an old token current again.  The path-specific helpers keep the VOD-seek
- * and in-place subtitle actions directly regression-testable.
+ * and viewer-seek action directly regression-testable.
  */
 internal class ControllerStallGuard(
     private val budget: StallReopenBudget,
@@ -88,17 +88,7 @@ internal class ControllerStallGuard(
         requestVersion++
     }
 
-    fun vodSeek(action: () -> Unit) {
-        invalidateForUserAction()
-        action()
-    }
-
-    fun liveSessionSeek(action: () -> Unit) {
-        invalidateForUserAction()
-        action()
-    }
-
-    fun inPlaceSubtitleChange(action: () -> Unit) {
+    fun viewerSeek(action: () -> Unit) {
         invalidateForUserAction()
         action()
     }

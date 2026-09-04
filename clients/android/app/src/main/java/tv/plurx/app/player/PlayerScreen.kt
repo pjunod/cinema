@@ -187,7 +187,7 @@ private data class Plan(
     val itemDurationMs: Long?,
     val nextAudiobookPartId: Long?,
     /** Quality captured by the exact request that produced this plan. */
-    val requestedQuality: PlaybackQuality,
+    override val requestedQuality: PlaybackQuality,
 ) : PlanLike {
     fun globalPosition(localPositionMs: Long): Long =
         audiobookGlobalPosition(localPositionMs, progressOffsetMs)
@@ -1342,12 +1342,14 @@ private fun PlayerContent(
                 audioOffsetMs = controller.audioOffsetMs,
                 declaredOffsetMs = plan.declaredOffsetMs,
                 currentPosition = controller::realPosition,
-                onReload = { position, reason ->
+                onReload = { position, reason, quality ->
                     // Publish the new quality and destination on the old
                     // reporter before Compose tears its player down. The next
                     // controller inherits the same intent and identity.
-                    controller.prepareReplacement(position, preferences.playbackQuality)
-                    onReload(position, reason)
+                    scope.launch {
+                        controller.prepareReplacement(position, quality)
+                        onReload(position, reason)
+                    }
                 },
                 onAudioOffset = {
                     controller.setAudioOffset(it)
@@ -1735,7 +1737,7 @@ private fun PlayerSettings(
     audioOffsetMs: Long,
     declaredOffsetMs: Long?,
     currentPosition: () -> Long,
-    onReload: (Long, String) -> Unit,
+    onReload: (Long, String, PlaybackQuality) -> Unit,
     onAudioOffset: (Long) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1761,7 +1763,7 @@ private fun PlayerSettings(
             ) {
                 val position = currentPosition()
                 vm.setPlaybackQuality(quality)
-                onReload(position, "quality")
+                onReload(position, "quality", quality)
             }
         }
         Text("Audio sync", color = Muted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 12.dp))

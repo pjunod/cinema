@@ -12,6 +12,9 @@ The live progress ledger is
 scope, verified facts, task PRs, adversarial findings, test evidence, and the
 autonomous decisions made while Paul is away. The effort does not reach
 `main` until its final fixed tree has one full qualification receipt.
+Current writes, reviews, and merges use Forgejo (`noirr/plurx`); GitHub is a
+read-only historical remote. Client-recovery corrections are in local
+verification after the first adversarial pass rejected nine correctness gaps.
 
 ## The fragment-index queue built nothing for three days
 

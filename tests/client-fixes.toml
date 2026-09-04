@@ -329,7 +329,7 @@ test_anchor = "test_repository_build_claims_match_release_inputs"
 id = "android.bound-stall-downgrade"
 commits = ["c54f9411"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "private suspend fun onStall(event: OpenBufferingStallTracker.Event)"
+source_anchor = "private suspend fun onStall(event: OpenPlaybackStallTracker.Event)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/StallBudgetTest.kt"
 test_anchor = "budgetStopsAfterThreeSameRungAnswers"
 
@@ -393,9 +393,9 @@ test_anchor = "resetForUserActionResetsBudgetAndAdvancesSequence"
 id = "android.live-session-seek-stall-reset"
 commits = ["229a0f1f"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "stallGuard.liveSessionSeek { openSession(t, attempt) }"
+source_anchor = "stallGuard.viewerSeek {"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/StallBudgetTest.kt"
-test_anchor = "liveSessionSeekResetsExhaustedBudgetBeforeReopen"
+test_anchor = "viewerSeekResetsExhaustedBudgetBeforeReplacement"
 
 [[fixes]]
 id = "android.stall-response-invalidation-race"
@@ -411,7 +411,7 @@ commits = ["7482d42"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/StallReopen.kt"
 source_anchor = "class ControllerStallGuard("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/StallBudgetTest.kt"
-test_anchor = "vodSeekResetsBudgetAndCannotReuseAStallRequestToken"
+test_anchor = "viewerSeekResetsBudgetAndCannotReuseAStallRequestToken"
 
 [[fixes]]
 id = "android.stall-budget-subtitle-test-fix"
@@ -689,6 +689,6 @@ test_anchor = "testTheCloseButtonsRunTheCloseControlAndNeverTheBackKey"
 id = "android.open-buffering-recovery-deadline"
 commits = ["19e1642c"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
-source_anchor = "internal class OpenBufferingStallTracker("
+source_anchor = "internal class OpenPlaybackStallTracker("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
 test_anchor = "openBufferingFiresWhileStillFrozenAndControlGetsOnlyOneBoundedDeferral"

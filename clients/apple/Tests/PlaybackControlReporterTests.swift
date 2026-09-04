@@ -329,6 +329,20 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(harness.exchanges.first?.response?.acceptedSequence, 1)
     }
 
+    func testUrgentIntentReturnsTheNextRequestOrderingFloor() async throws {
+        let harness = Harness()
+        harness.holdExchanges()
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.waitUntil { harness.requests.count == 1 })
+
+        harness.setSnapshot(snapshot(position: 9_000, render: .seeking))
+        let floor = await reporter.notifyUrgently()
+
+        XCTAssertEqual(floor, 2)
+        await reporter.stop()
+    }
+
     func testUnchangedCapabilitiesAreSentOnceAndAChangeResendsThem() async throws {
         let harness = Harness()
         let reporter = try XCTUnwrap(makeReporter(harness))
@@ -806,6 +820,16 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertFalse(value.isValid)
         value.selection.quality = .manual(height: 1_080)
         XCTAssertTrue(value.isValid)
+    }
+
+    func testOriginalQualityHasAnExplicitWireRepresentation() throws {
+        var value = snapshot()
+        value.selection.quality = .original
+        XCTAssertTrue(value.isValid)
+        let json = try XCTUnwrap(
+            String(data: try PlaybackControl.encoder.encode(value.selection), encoding: .utf8)
+        )
+        XCTAssertTrue(json.contains("\"mode\":\"original\""))
     }
 
     func testCapabilitiesMustNameAtLeastOneCodecAndRange() {

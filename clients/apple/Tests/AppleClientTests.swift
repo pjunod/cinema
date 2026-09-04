@@ -2543,11 +2543,13 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(state.pendingMs, 70_000)
 
         XCTAssertFalse(
-            state.complete(generation: first.generation),
+            state.markExecuted(generation: first.generation, targetMs: first.target),
             "a cancelled native seek cannot clear a newer target"
         )
         XCTAssertEqual(state.pendingMs, 70_000)
-        XCTAssertTrue(state.complete(generation: third.generation))
+        XCTAssertTrue(state.markExecuted(generation: third.generation, targetMs: third.target))
+        XCTAssertFalse(state.presentedVideo(positionMs: 70_400, generation: third.generation))
+        XCTAssertTrue(state.presentedVideo(positionMs: 70_200, generation: third.generation))
         XCTAssertNil(state.pendingMs)
 
         XCTAssertEqual(
@@ -2857,14 +2859,29 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
-    func testLiveSeekTargetClearsOnlyAfterTheAttachedReopen() {
+    func testLiveSeekTargetClearsOnlyAfterTheAttachedReopenPresentsAFrame() {
         var state = PlayerSeekState()
-        _ = state.absolute(90_000, durationMs: 600_000)
+        let request = state.absolute(90_000, durationMs: 600_000)
 
-        state.completeReopen(at: 60_000)
+        XCTAssertFalse(state.markExecuted(generation: request.generation, targetMs: 60_000))
         XCTAssertEqual(state.pendingMs, 90_000)
+        XCTAssertFalse(
+            state.presentedVideo(positionMs: 90_000, generation: request.generation),
+            "a target-looking predecessor frame is not proof before execution"
+        )
+        XCTAssertTrue(state.markExecuted(generation: request.generation, targetMs: 90_000))
+        XCTAssertEqual(state.pendingMs, 90_000, "open completion is not presentation")
+        XCTAssertTrue(state.presentedVideo(positionMs: 90_000, generation: request.generation))
+        XCTAssertNil(state.pendingMs)
+    }
 
-        state.completeReopen(at: 90_000)
+    func testAudioOnlySeekRequiresAnAdvancingPostExecutionClock() {
+        var state = PlayerSeekState()
+        let request = state.absolute(30_000, durationMs: 600_000)
+        XCTAssertTrue(state.markExecuted(generation: request.generation, targetMs: request.target))
+        XCTAssertFalse(state.presentedAudio(positionMs: 30_000, generation: request.generation))
+        XCTAssertFalse(state.presentedAudio(positionMs: 30_000, generation: request.generation))
+        XCTAssertTrue(state.presentedAudio(positionMs: 30_050, generation: request.generation))
         XCTAssertNil(state.pendingMs)
     }
 
@@ -2876,7 +2893,7 @@ final class AppleClientTests: XCTestCase {
 
         XCTAssertNil(state.pendingMs)
         XCTAssertFalse(
-            state.complete(generation: request.generation),
+            state.markExecuted(generation: request.generation, targetMs: request.target),
             "a seek scheduled before stop() must not fire into the next playback"
         )
     }

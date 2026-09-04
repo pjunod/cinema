@@ -250,6 +250,17 @@ final class PlaybackControlSession {
         Task { await reporter.notifyUrgently() }
     }
 
+    /// Publish an interactive intent before the media mutation it authorizes.
+    /// Snapshot capture happens synchronously on MainActor; awaiting only
+    /// queues that immutable value and returns the request-ordering floor.
+    func reportIntent() async -> UInt64? {
+        publish()
+        guard let reporter,
+              let floor = await reporter.notifyUrgently()
+        else { return nil }
+        return UInt64(floor)
+    }
+
     /// Publish what a recovery owner is about to act on, then wait — briefly —
     /// for the verdict that evidence earns.
     ///
@@ -353,9 +364,9 @@ final class PlaybackControlSession {
 
     func end() {
         latest.store(nil)
+        observe = nil
         guard let reporter else { return }
         self.reporter = nil
-        observe = nil
         Task { await reporter.stop() }
     }
 

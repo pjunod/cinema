@@ -136,10 +136,12 @@ enum ClientErrorCode: String, Codable, Equatable {
     case network, manifest, media, decoder, drm, unknown
 }
 
-/// `{"mode": "auto"}` or `{"mode": "manual", "height": 1080}` — the server's
+/// `{"mode": "auto"}`, `{"mode": "original"}`, or
+/// `{"mode": "manual", "height": 1080}` — the server's
 /// internally tagged `QualitySelection`.
 enum QualitySelection: Codable, Equatable {
     case auto
+    case original
     case manual(height: Int)
 
     private enum CodingKeys: String, CodingKey { case mode, height }
@@ -148,6 +150,7 @@ enum QualitySelection: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         switch try container.decode(String.self, forKey: .mode) {
         case "auto": self = .auto
+        case "original": self = .original
         case "manual": self = .manual(height: try container.decode(Int.self, forKey: .height))
         default:
             throw DecodingError.dataCorruptedError(
@@ -161,6 +164,8 @@ enum QualitySelection: Codable, Equatable {
         switch self {
         case .auto:
             try container.encode("auto", forKey: .mode)
+        case .original:
+            try container.encode("original", forKey: .mode)
         case .manual(let height):
             try container.encode("manual", forKey: .mode)
             try container.encode(height, forKey: .height)
@@ -485,11 +490,19 @@ actor PlaybackControlReporter {
     /// the old pump exits at its next iteration instead of racing this one.
     /// An exchange already in flight is left alone — `run()` picks up
     /// `pending` immediately after it, without sleeping.
-    func notifyUrgently(_ value: PlaybackControlSnapshot? = nil) {
+    @discardableResult
+    func notifyUrgently(_ value: PlaybackControlSnapshot? = nil) -> Int? {
         notify(value)
-        guard !stopped, !inFlight, pending != nil else { return }
-        pump?.cancel()
-        pump = Task { [weak self] in await self?.run() }
+        guard !stopped, pending != nil else { return nil }
+        // A retry can replay the current sequence, but it cannot consume the
+        // next new request. A replacement retains this floor even if ending
+        // this reporter cancels the pump before it reaches the server.
+        let floor = sequence + 1
+        if !inFlight {
+            pump?.cancel()
+            pump = Task { [weak self] in await self?.run() }
+        }
+        return floor
     }
 
     func stop() {

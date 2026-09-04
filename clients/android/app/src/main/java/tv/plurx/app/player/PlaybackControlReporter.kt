@@ -185,6 +185,10 @@ sealed class QualitySelection {
     data object Auto : QualitySelection()
 
     @Serializable
+    @SerialName("original")
+    data object Original : QualitySelection()
+
+    @Serializable
     @SerialName("manual")
     data class Manual(val height: Int) : QualitySelection()
 
@@ -521,20 +525,28 @@ class PlaybackControlReporter private constructor(
     suspend fun notifyUrgently(
         scope: CoroutineScope,
         value: PlaybackControlSnapshot? = null,
-    ) {
+    ): Long? {
         notify(value)
         // The swap is one critical section on purpose. Releasing the lock
         // between clearing `pump` and setting it would let a concurrent
         // `start()` — whose guard is `pump != null` — launch a second run
         // loop, and `stop()` can only cancel the one it can see. `launch`
         // does not suspend, so holding the mutex across it is safe.
+        var floor: Long? = null
         val stale = mutex.withLock {
-            if (stopped || inFlight || pending == null) return
+            if (stopped || pending == null) return@withLock null
+            // This queued snapshot will be the next new request. A retry may
+            // replay the current sequence first, but it cannot consume this
+            // floor. Returning it lets a replacement session retain ordering
+            // even when disposing this reporter cancels the pump.
+            floor = sequence + 1
+            if (inFlight) return@withLock null
             val running = pump
             pump = scope.launch { run() }
             running
         }
         stale?.cancel()
+        return floor
     }
 
     suspend fun stop() {

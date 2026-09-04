@@ -93,14 +93,14 @@ class StallBudgetTest {
     }
 
     @Test
-    fun vodSeekResetsBudgetAndCannotReuseAStallRequestToken() {
+    fun viewerSeekResetsBudgetAndCannotReuseAStallRequestToken() {
         val budget = StallReopenBudget()
         val guard = ControllerStallGuard(budget)
         guard.beginRequest() // initial session
         val staleStall = guard.beginRequest()
         var sought = false
 
-        guard.vodSeek { sought = true }
+        guard.viewerSeek { sought = true }
         val newerRequest = guard.beginRequest()
 
         assertTrue(sought)
@@ -110,7 +110,7 @@ class StallBudgetTest {
     }
 
     @Test
-    fun liveSessionSeekResetsExhaustedBudgetBeforeReopen() {
+    fun viewerSeekResetsExhaustedBudgetBeforeReplacement() {
         val budget = StallReopenBudget()
         budget.seed(240)
         repeat(3) { budget.record(240) }
@@ -118,10 +118,10 @@ class StallBudgetTest {
         val staleStall = guard.beginRequest()
         var reopened = false
 
-        // Controller.seekTo's non-VOD HLS branch routes through this helper
-        // before openSession. The reset and invalidation therefore happen
-        // exactly once before the replacement request starts.
-        guard.liveSessionSeek { reopened = true }
+        // Controller.seekTo routes every transport through this helper before
+        // native execution or replacement. The reset and invalidation happen
+        // exactly once before the destination starts.
+        guard.viewerSeek { reopened = true }
         val replacement = guard.beginRequest()
 
         assertTrue(reopened)
@@ -134,14 +134,15 @@ class StallBudgetTest {
     }
 
     @Test
-    fun inPlaceSubtitleChangeResetsBudgetAndCannotReuseAStallRequestToken() {
+    fun explicitViewerActionResetsBudgetAndCannotReuseAStallRequestToken() {
         val budget = StallReopenBudget()
         val guard = ControllerStallGuard(budget)
         guard.beginRequest() // initial session
         val staleStall = guard.beginRequest()
         var selectionApplied = false
 
-        guard.inPlaceSubtitleChange { selectionApplied = true }
+        guard.invalidateForUserAction()
+        selectionApplied = true
         val newerRequest = guard.beginRequest()
 
         assertTrue(selectionApplied)

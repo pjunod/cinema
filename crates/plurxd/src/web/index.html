@@ -3535,7 +3535,8 @@ function beginWait(v){
   p.waitReported=false;
   const began=p.waitAt;
   const generation=p._seekToken||0;
-  p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation).catch(()=>{}),PERSISTENT_STALL_MS);
+  const actionGeneration=p.controlIntentGeneration||0;
+  p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation,actionGeneration).catch(()=>{}),PERSISTENT_STALL_MS);
 }
 function noteAutoStall(p,kind,episodeAtMs){
   const abr=p&&p.abr; if(!abr||!(kind==='supply'||kind==='decode')) return;
@@ -3582,12 +3583,10 @@ function endWait(resumed){
 // only reporter and therefore never ran. Record it at a fixed deadline, then
 // make one method-aware attempt. Auto remuxes move to a smaller transcode;
 // explicit quality choices and already-compatible streams simply reconnect.
-async function persistentWait(v,p,began,generation){
+async function persistentWait(v,p,began,generation,actionGeneration){
   if(PLAYER!==p || p.waitAt!==began || !p.started ||
-     (p._seekToken||0)!==generation || v.paused || v.seeking) return;
-  // The ask itself consumes frozen-picture time. Re-read the absolute age
-  // after it settles so a slow control response cannot extend the deadline.
-  const controlElapsedMs=Math.round(performance.now()-began);
+     (p._seekToken||0)!==generation ||
+     (p.controlIntentGeneration||0)!==actionGeneration || v.paused || v.seeking) return;
   p.waitTimer=null;
   const ms=Math.round(performance.now()-began), runway=p.waitRunway;
   const kind=(runway!=null && runway<SUPPLY_RUNWAY_SECS)?"supply":"decode";
@@ -3611,7 +3610,11 @@ async function persistentWait(v,p,began,generation){
   // the await on their own — acting on a stale generation here would reopen
   // a stream the viewer already left.
   if(PLAYER!==p || p.waitAt!==began || !p.started ||
-     (p._seekToken||0)!==generation || v.paused || v.seeking) return;
+     (p._seekToken||0)!==generation ||
+     (p.controlIntentGeneration||0)!==actionGeneration || v.paused || v.seeking) return;
+  // The ask itself consumes frozen-picture time. Re-read the absolute age
+  // after it settles so a slow control response cannot extend the deadline.
+  const controlElapsedMs=Math.round(performance.now()-began);
   if(verdict&&verdict.type==="terminal"){
     // Ruling D1: the verdict is armed, not executed. Everything this player
     // had buffered is already spent — that is what a persistent wait means —
@@ -3658,7 +3661,7 @@ async function persistentWait(v,p,began,generation){
           `<button onclick="retryPlayback()">Try again</button>`+
           `<button onclick="closePlayer()">Close</button>`);
       }
-      p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation).catch(()=>{}),
+      p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation,actionGeneration).catch(()=>{}),
         Math.min(PERSISTENT_STALL_MS,CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs));
       return;
     }else{
@@ -3680,7 +3683,7 @@ async function persistentWait(v,p,began,generation){
       message:`server paces this stall (${verdict.reason}) — waiting ${(again/1000).toFixed(1)}s`+
         ` (${p.stallDeferrals}/${CONTROL_DEFER_LIMIT})`,
       control_trigger:controlTrigger});
-    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation).catch(()=>{}),
+    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation,actionGeneration).catch(()=>{}),
       Math.min(again,CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs));
     return;
   }
@@ -3719,7 +3722,7 @@ async function persistentWait(v,p,began,generation){
     `resuming from ${clockFromSec(position)}`);
   if(action==='transcode') startTranscodeFallback("stall-recovery",
     `switched to a transcode after a persistent ${kind} stall`);
-  else seekTo(position,true,recoveryHeight);
+  else seekTo(position,true,recoveryHeight,false);
 }
 function finishStallRecovery(outcome,note){
   const p=PLAYER, r=p&&p.recoveringStall; if(!r) return false;
@@ -6706,11 +6709,12 @@ function playbackControlCapabilities(){
 }
 function playbackControlSelection(p){
   const requested=playQuality();
-  const sourceHeight=Math.round(Number(p&&p.source&&p.source.height)||0);
-  const manualHeight=/^\d+$/.test(String(requested||""))?Number(requested)
-    :["original","nomse"].includes(requested)&&sourceHeight>=144?sourceHeight:null;
-  const quality=manualHeight!=null
-    ? {mode:"manual",height:Math.max(144,Math.min(2160,manualHeight))} : {mode:"auto"};
+  const manualHeight=/^\d+$/.test(String(requested||""))?Number(requested):null;
+  const quality=["original","nomse"].includes(requested)
+    ? {mode:"original"}
+    : manualHeight!=null
+      ? {mode:"manual",height:Math.max(144,Math.min(2160,manualHeight))}
+      : {mode:"auto"};
   const selected=(p&&p.curSub>=0)?p.curSub:null;
   const subtitle=selected==null ? {mode:"off",track:null}
     : {mode:p.burnedSub!=null?"burn":"native",track:selected};
@@ -6886,6 +6890,17 @@ function controlVerdictText(message){
   const text=String(message==null?"":message).replace(/[\r\n\0]+/g," ").trim();
   if(!text) return "Playback stopped.";
   return text.length>160?text.slice(0,159)+"\u2026":text;
+}
+// A terminal answer belongs to the intent that earned it. Automatic recovery
+// may carry it across a replacement of that same intent; any viewer command
+// retires it and every ask that was waiting on the previous action epoch.
+function supersedePlaybackControlIntent(p){
+  if(!p) return 0;
+  p.controlIntentGeneration=(p.controlIntentGeneration||0)+1;
+  p.controlVerdict=null;
+  p.controlVerdictExpiresAt=null;
+  clearPlaybackControlWaiters(p);
+  return p.controlIntentGeneration;
 }
 function armedPlaybackControlVerdict(p){
   if(!p||!p.controlVerdict) return null;
@@ -7156,7 +7171,9 @@ async function openSession(fileId, opts){
   // either way; this saves the server the work rather than the client the
   // confusion. Omitted when no exchange has been accepted yet — a first play
   // has no earlier ask to be stale against.
-  const acceptedSequence=player&&player.controlReporter&&Number(player.controlReporter.sequence);
+  const acceptedSequence=player&&Math.max(
+    Number(player.controlReporter&&player.controlReporter.sequence)||0,
+    Number(player.controlSequenceFloor)||0);
   if(Number.isFinite(acceptedSequence)&&acceptedSequence>0) body.control_sequence=acceptedSequence;
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
@@ -7208,6 +7225,7 @@ function attachSession(v, t, info, wantSec){
   t.controlPositionHintSec=(t.offset||0)+into;
   attachHls(v, info.playlist_url, into);
   startPlaybackControl(v,t,info.control||null);
+  markPlaybackControlSeekExecuted(t,wantSec||0);
   return into + (t.offset||0);
 }
 // Tell the server we are finished with a stream. Without this the encoder
@@ -7763,6 +7781,16 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
         outgoingEstimateBps:PLAYER.hls&&PLAYER.hls.bandwidthEstimate,
         priorKbps:PLAYER.priorKbps})
     : null;
+  const continuingPlayback=!!(PLAYER&&PLAYER.fileId===fileId);
+  const replacementControlSeek=continuingPlayback&&PLAYER.controlSeek
+    ? Object.assign({},PLAYER.controlSeek,{executed:false,frameFloor:0,audioPositionMs:null})
+    : null;
+  const replacementControlSequenceFloor=continuingPlayback
+    ? Math.max(Number(PLAYER.controlSequenceFloor)||0,
+        Number(PLAYER.controlReporter&&PLAYER.controlReporter.sequence)||0)
+    : 0;
+  const replacementControlIntentGeneration=continuingPlayback
+    ? (PLAYER.controlIntentGeneration||0) : 0;
   // The track choice this playback runs with: the detail screen's pickers on a
   // cold start, what is already playing on an internal reopen.
   const selection=playbackSelection(PLAYER, fileId);
@@ -7923,7 +7951,12 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
       failedHeights:new Set()},
     waitAt:null, waitRunway:null, waitTimer:null, waitReported:false,
     stallsByKind:null, stallRecoveries:0, recoveringStall:null, stallPrompt:false,
-    burnedSub:preBurn, vod:false, openToken:openAttempt.token, };
+    burnedSub:preBurn, vod:false, openToken:openAttempt.token,
+    controlSeek:replacementControlSeek,
+    controlSeekSequence:replacementControlSeek?replacementControlSeek.sequence:0,
+    controlIntentGeneration:replacementControlIntentGeneration,
+    controlSequenceFloor:replacementControlSequenceFloor,
+    controlPresentedFrames:0,controlHasFrameCallbacks:false, };
   const openedPlayer=PLAYER;
   const openIsAttached=()=>openIsCurrent()&&PLAYER===openedPlayer
     &&PLAYER.openToken===openAttempt.token;
@@ -8042,6 +8075,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
       armStall(startSec);
     }
     video.src=url;
+    markPlaybackControlSeekExecuted(PLAYER,startSec);
     video.onloadedmetadata=()=>{ video.onloadedmetadata=null;
       if(!isRemux && startSec>0){ try{video.currentTime=startSec}catch(e){} } };
     video.play().catch(()=>{});
@@ -8329,8 +8363,9 @@ async function refreshSegTimes(){
   }catch(e){}
 }
 function armHitchDetector(v){
-  if(!v.requestVideoFrameCallback) return;
   const p=PLAYER; if(!p) return;
+  p.controlHasFrameCallbacks=!!v.requestVideoFrameCallback;
+  if(!p.controlHasFrameCallbacks) return;
   p.hitches={back:0, held:0, late:0, gap:0, drop:0, slow:0, worst:0, last:null, at:[], fps:null,
              n:0, near:{}, flushEdge:null, skewMax:0, skewAt:null, decodeMs:null, frames:0,
              rate:null, renderedFps:null};
@@ -8401,6 +8436,8 @@ function armHitchDetector(v){
     // Bail the moment this playback is replaced, or the callback outlives its
     // PLAYER and starts recording another stream's frames as this one's.
     if(PLAYER!==p) return;
+    p.controlPresentedFrames=(p.controlPresentedFrames||0)+1;
+    settlePlaybackControlSeek(v,p,meta.mediaTime,p.controlPresentedFrames);
     p.hitches.frames++;
     if(v.paused || v.seeking){
       // Clear the MEASUREMENT with the window: a rate left standing after a
@@ -9017,6 +9054,8 @@ async function startTranscodeFallback(reason, note){
   if(!PLAYER || !PLAYER.fileId || !v) return;
   const startSec=(PLAYER.offset||0)+(v.currentTime||0);
   endWait(false);
+  beginPlaybackControlSeek(PLAYER,startSec,
+    reason==="stall-manual"||reason==="stall-terminal");
   // Bump the generation: this is a restart like any other. `PLAYER===me` alone
   // was not enough — a seek mutates PLAYER in place rather than replacing it, so
   // an identity check still passed and both streams attached.
@@ -9182,6 +9221,7 @@ async function switchAutoRung(currentHeight,decision){
   if(!claimAutoFallback(p)) return;
   try{
     const pos=(p.offset||0)+(v.currentTime||0);
+    beginPlaybackControlSeek(p,pos,false);
     const track=p.audio&&p.audio[p.curAudio], aidx=track?track.index:(p.curAudio||0);
     const {me,live}=streamGeneration();
     me.abr.switching=true;
@@ -9512,19 +9552,64 @@ function pbShownSec(){ const p=pbPosSec(), t=pbTotalSec(); return t>0?Math.min(p
 // `_seekPreview` is only pointer UI and is cleared before seekTo(); this is the
 // control-plane intent, monotonically superseded by later seeks and cleared
 // only after the requested timeline is actually presenting.
-function beginPlaybackControlSeek(p,targetSec){
+function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true){
   if(!p) return null;
+  const intentGeneration=supersedeIntent
+    ? supersedePlaybackControlIntent(p) : (p.controlIntentGeneration||0);
   const sequence=(p.controlSeekSequence||0)+1;
   p.controlSeekSequence=sequence;
-  p.controlSeek={sequence,targetMs:Math.max(0,Math.round(targetSec*1000))};
-  notifyPlaybackControl();
+  let frameFloor=Number(p.controlPresentedFrames)||0;
+  if(!p.controlHasFrameCallbacks){
+    try{
+      const q=document.getElementById("video")?.getVideoPlaybackQuality?.();
+      if(q&&Number.isFinite(q.totalVideoFrames)) frameFloor=q.totalVideoFrames;
+    }catch(e){}
+  }
+  p.controlSeek={sequence,intentGeneration,
+    targetMs:Math.max(0,Math.round(targetSec*1000)),
+    executed:false,frameFloor,audioPositionMs:null};
+  const reporter=p.controlReporter;
+  const predicted=reporter&&!reporter.stopped?(Number(reporter.sequence)||0)+1:null;
+  const reported=notifyPlaybackControl();
+  if(reported&&predicted!=null){
+    p.controlSequenceFloor=Math.max(Number(p.controlSequenceFloor)||0,
+      predicted,Number(reporter.sequence)||0);
+  }
   return p.controlSeek;
 }
-function settlePlaybackControlSeek(v,p){
+function markPlaybackControlSeekExecuted(p,targetSec){
   const pending=p&&p.controlSeek;
-  if(!pending||!v||!p.started||v.seeking||v.readyState<2) return false;
-  const positionMs=Math.max(0,Math.round(((p.offset||0)+(v.currentTime||0))*1000));
-  if(Math.abs(positionMs-pending.targetMs)>2500) return false;
+  const targetMs=Math.max(0,Math.round(Number(targetSec||0)*1000));
+  if(!pending||pending.targetMs!==targetMs) return false;
+  pending.executed=true;
+  pending.frameFloor=Number(p.controlPresentedFrames)||pending.frameFloor||0;
+  pending.audioPositionMs=null;
+  return true;
+}
+function settlePlaybackControlSeek(v,p,presentedMediaTime,presentedFrameSequence){
+  const pending=p&&p.controlSeek;
+  if(!pending||!pending.executed||!v||!p.started||v.seeking) return false;
+  const hasVideo=!!(p.source&&p.source.video_codec);
+  let positionMs=null, frameSequence=null;
+  if(presentedMediaTime!=null&&Number.isFinite(Number(presentedMediaTime))){
+    positionMs=Math.max(0,Math.round(((p.offset||0)+Number(presentedMediaTime))*1000));
+    frameSequence=Number(presentedFrameSequence);
+  }else if(!p.controlHasFrameCallbacks&&hasVideo){
+    try{
+      const q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
+      if(q&&Number.isFinite(q.totalVideoFrames)) frameSequence=q.totalVideoFrames;
+    }catch(e){}
+    positionMs=Math.max(0,Math.round(((p.offset||0)+(v.currentTime||0))*1000));
+  }else if(!hasVideo && !v.paused){
+    positionMs=Math.max(0,Math.round(((p.offset||0)+(v.currentTime||0))*1000));
+    if(Math.abs(positionMs-pending.targetMs)>250) return false;
+    const previous=pending.audioPositionMs;
+    pending.audioPositionMs=positionMs;
+    if(previous==null||previous===positionMs) return false;
+    frameSequence=pending.frameFloor+1;
+  }else return false;
+  if(!Number.isFinite(frameSequence)||frameSequence<=pending.frameFloor) return false;
+  if(Math.abs(positionMs-pending.targetMs)>250) return false;
   p.controlSeek=null;
   notifyPlaybackControl();
   return true;
@@ -9569,10 +9654,12 @@ function replayEnded(){
 }
 function togglePlay(){
   const v=document.getElementById("video"); if(!v) return;
+  supersedePlaybackControlIntent(PLAYER);
   if(v.ended) replayEnded();
   else if(v.paused) v.play().catch(()=>{});
   else v.pause();
   playerActivity();
+  notifyPlaybackControl();
 }
 // Directional nudges coalesce: accumulate against a frozen base, preview live
 // on the scrubber, and fire ONE seekTo after a short quiet — so mashing a
@@ -9863,7 +9950,7 @@ function skipMarker(m,automatic=false){
 }
 // Seek that works for every method: direct play seeks natively; remux/transcode
 // restart the server-side stream at the new offset (the stream is one-directional).
-async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null){
+async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
   targetSec=Math.max(0,targetSec);
   const markerEnd=Number(PLAYER._lastMarkerSkipEndMs)||0;
@@ -9896,11 +9983,17 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null){
   // Publish the destination while the old media and reporter still exist.
   // Everything below can detach a source, destroy hls.js, or replace the
   // server session; none of those operations is allowed to erase the intent.
-  beginPlaybackControlSeek(PLAYER,targetSec);
+  const seekIntent=beginPlaybackControlSeek(PLAYER,targetSec,viewerInitiated);
   endWait(false);
+  // One execution for a scrub burst, including native/VOD seeks. The earlier
+  // implementation coalesced only UI nudges, so two independent inputs still
+  // issued two media mutations and let their completion events race.
+  await new Promise(done=>setTimeout(done,100));
+  if(!PLAYER||PLAYER.controlSeek!==seekIntent) return;
   // Direct play and film-addressed VOD seek without opening a new session.
   if(!forceReopen && (PLAYER.method==='direct_play' || PLAYER.vod)){
     try{ v.currentTime=Math.max(0,targetSec-(PLAYER.offset||0)); }catch(e){}
+    markPlaybackControlSeekExecuted(PLAYER,targetSec);
     playerActivity(); return;
   }
   // A retry must reconnect, not repeat the local seek that ordinary direct and
@@ -9920,7 +10013,8 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null){
     if(!live()) return;
     v.onloadedmetadata=()=>{ v.onloadedmetadata=null;
       if(live()&&targetSec>0){ try{v.currentTime=targetSec}catch(e){} } };
-    v.src=url; armStall(targetSec,20000); v.play().catch(()=>{});
+    v.src=url; markPlaybackControlSeekExecuted(me,targetSec);
+    armStall(targetSec,20000); v.play().catch(()=>{});
     return;
   }
   // Every non-direct seek restarts the server stream, so overlapping seeks (a
@@ -9969,7 +10063,8 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null){
     resetMediaSource(v);
     if(!live()) return;
     PLAYER.probeUrl=`/api/v1/files/${PLAYER.fileId}/stream.mp4`;
-    v.src=url; armStall(targetSec,20000); v.play().catch(()=>{});
+    v.src=url; markPlaybackControlSeekExecuted(PLAYER,targetSec);
+    armStall(targetSec,20000); v.play().catch(()=>{});
   }
   if(curSub>=0) setTimeout(()=>{ if(live()) setSub(curSub); },400);
 }
@@ -10053,6 +10148,7 @@ const ENDED_SLACK_SEC=15;
 // stream marked a film watched permanently and told Trakt so.
 async function handleEnded(fileId){
   const p=PLAYER, generation=(PLAYER&&PLAYER._seekToken)||0;
+  const actionGeneration=(PLAYER&&PLAYER.controlIntentGeneration)||0;
   const total=pbTotalSec(), pos=pbPosSec();
   if(PLAYER&&PLAYER.bookParts&&PLAYER.bookParts.length){
     const i=PLAYER.bookParts.findIndex(p=>p.id===PLAYER.fileId);
@@ -10091,7 +10187,7 @@ async function handleEnded(fileId){
   // position, which is what `endedTries` counts, so two overlapping
   // invocations would both see it unchanged. Identity and the seek token are
   // the checks that hold.
-  if(!endedStillOurs(p,generation,fileId,pos)) return;
+  if(!endedStillOurs(p,generation,actionGeneration,fileId,pos)) return;
   if(verdict&&verdict.type==="terminal"){
     // Ruling D1: the verdict is armed, not executed. The stream is already
     // over — the only thing this changes is whether the viewer reads the
@@ -10145,9 +10241,9 @@ async function handleEnded(fileId){
     const after=Math.min(Math.max(verdict.after_ms,CONTROL_MIN_EXCHANGE_MS),PERSISTENT_STALL_MS);
     await new Promise((done)=>setTimeout(done,after));
     // The same window, again: the viewer had `after` milliseconds to leave.
-    if(!endedStillOurs(p,generation,fileId,pos)) return;
+    if(!endedStillOurs(p,generation,actionGeneration,fileId,pos)) return;
   }
-  seekTo(pos);
+  seekTo(pos,false,null,false);
 }
 // Is the player this `handleEnded` was entered for still the one on screen,
 // still on the same file, still on the same stream generation, and still
@@ -10157,10 +10253,12 @@ async function handleEnded(fileId){
 // own. Identity rather than file id, because `seekTo` and `attachSession`
 // reuse the same PLAYER object, and the seek token because a viewer who
 // scrubbed away must not be dragged back to a truncation they have left.
-function endedStillOurs(p,generation,fileId,pos){
+function endedStillOurs(p,generation,actionGeneration,fileId,pos){
   const v=document.getElementById("video");
   return !!p && PLAYER===p && p.fileId===fileId && p.endedAt===pos
-    && (p._seekToken||0)===generation && !!v && !v.seeking;
+    && (p._seekToken||0)===generation
+    && (p.controlIntentGeneration||0)===actionGeneration
+    && !!v && !v.seeking;
 }
 
 // ---- audio-language + subtitle menus --------------------------------------
@@ -10397,6 +10495,7 @@ function setQuality(q){
     PENDING_ATTEMPT_REASON="quality";
     const v=document.getElementById("video");
     const pos=(PLAYER.offset||0)+((v&&v.currentTime)||0);
+    beginPlaybackControlSeek(PLAYER,pos);
     play(PLAYER.fileId, PLAYER.title||"", Math.round(pos*1000), PLAYER.knownDur||0, PLAYER.meta);
   }
 }
@@ -10493,6 +10592,15 @@ async function setSub(index){
     toast("That subtitle requires an SDR burn-in. HDR playback was kept unchanged.");
     return false;   // nothing changed, so nothing to remember
   }
+  const video=document.getElementById("video");
+  const position=(me.offset||0)+((video&&video.currentTime)||0);
+  me.curSub=index;
+  if(burnAction==="burn"||me.burnedSub!=null){
+    beginPlaybackControlSeek(me,position);
+  }else{
+    supersedePlaybackControlIntent(me);
+    notifyPlaybackControl();
+  }
   rememberPlaybackSelection("subtitle", index);
   if(burnAction==="burn"){ await burnSub(index); return true; }
   if(me.burnedSub!=null){
@@ -10500,8 +10608,7 @@ async function setSub(index){
     // "off" also has to be a restart.
     return burnSub(index>=0?index:null);
   }
-  me.curSub=index;
-  const v=document.getElementById("video"); if(!v) return;
+  const v=video; if(!v) return;
   pbSyncSubIcon();
   clearSubs(v);
   notifyPlaybackControl();
@@ -10633,6 +10740,7 @@ async function switchAudio(idx){
   const pos=(PLAYER.offset||0)+(v.currentTime||0);
   const track=PLAYER.audio[idx]; const aidx=track?track.index:idx;
   rememberPlaybackSelection("audio", aidx);
+  beginPlaybackControlSeek(PLAYER,pos);
   // Same generation counter as seekTo: this also restarts the server stream, so
   // a seek landing mid-switch (or a second switch) must win outright instead of
   // both attaching.
@@ -10658,6 +10766,7 @@ async function switchAudio(idx){
     // Switching audio forces a remux so the chosen track is the one delivered.
     PLAYER.method='remux'; PLAYER.offset=pos;
     v.src=remuxUrl(`/api/v1/files/${PLAYER.fileId}/stream.mp4`, aidx, pos);
+    markPlaybackControlSeekExecuted(me,pos);
     v.play().catch(()=>{});
   }
   toast("Audio: "+(langName(track&&track.language)||("Track "+(idx+1))));
@@ -11051,6 +11160,7 @@ function closePlayer(){
   // including the automatic one when a film ends with nothing queued after it.
   exitPresentationModes();
   if(PLAYER.fileId) reportProgress(PLAYER.fileId);
+  supersedePlaybackControlIntent(PLAYER);
   // Bump the generation so a seek or audio switch still awaiting its
   // hls/start finds itself superseded and doesn't attach a stream to a player
   // the user has already closed. Closing doesn't replace PLAYER, so the
@@ -11063,7 +11173,7 @@ function closePlayer(){
   // Disarm the pending seek as well as clearing it: a skip's self-commit is a
   // timer, and PLAYER survives the close, so an armed one would have fired
   // seekTo on a player the viewer had already left.
-  if(PLAYER){ PLAYER.aoffset=0; PLAYER._seekDragging=false; cancelPendingSeek(); }
+  if(PLAYER){ PLAYER.aoffset=0; PLAYER._seekDragging=false; PLAYER.controlSeek=null; cancelPendingSeek(); }
   // Same reason, same scope: the track choice was this playback's, and this
   // playback is over. PLAYER survives the close, so leaving `preplay` set would
   // make playbackSelection() keep matching on the next cold start of the same

@@ -268,19 +268,23 @@ internal data class StallMeasurement(
  * [BufferingStallTracker] intentionally measures the completed interruption;
  * using that retrospective instrument to own recovery made an open-ended
  * Media3 wait invisible forever. This tracker has the opposite contract: one
- * advisory event at [thresholdMs], then — only when control explicitly asks
- * the client to wait — one non-deferrable event at [maximumDeferralMs]. Real
- * progress, pause, startup, or an explicit reset cancels the episode.
+ * advisory event at [establishedThresholdMs], then — only when control
+ * explicitly asks the client to wait — one non-deferrable event at
+ * [maximumDeferralMs]. Startup/replacement gets its own finite
+ * [startupDeadlineMs]. Media3's BUFFERING/READY labels do not reset this clock:
+ * only actual playhead progress, pause/end, or an explicit reset can do that.
  */
-internal class OpenBufferingStallTracker(
-    private val thresholdMs: Long = 8_000,
+internal class OpenPlaybackStallTracker(
+    private val establishedThresholdMs: Long = 8_000,
     private val maximumDeferralMs: Long = 20_000,
+    private val startupDeadlineMs: Long = 30_000,
     private val progressThresholdMs: Long = 250,
 ) {
     data class Event(
         val durationMs: Long,
         val positionMs: Long,
         val controlMayDefer: Boolean,
+        val establishedPlayback: Boolean,
     )
 
     private var baselinePositionMs: Long? = null
@@ -289,13 +293,13 @@ internal class OpenBufferingStallTracker(
     private var deferred = false
 
     fun sample(
-        buffering: Boolean,
         playbackRequested: Boolean,
+        playbackEnded: Boolean,
         establishedPlayback: Boolean,
         positionMs: Long,
         observedAtMs: Long,
     ): Event? {
-        if (!buffering || !playbackRequested || !establishedPlayback) {
+        if (!playbackRequested || playbackEnded) {
             reset()
             return null
         }
@@ -309,10 +313,19 @@ internal class OpenBufferingStallTracker(
         }
         if (fired) return null
         val durationMs = (observedAtMs - (stagnantSinceMs ?: observedAtMs)).coerceAtLeast(0)
-        val deadline = if (deferred) maximumDeferralMs else thresholdMs
+        val deadline = when {
+            !establishedPlayback -> startupDeadlineMs
+            deferred -> maximumDeferralMs
+            else -> establishedThresholdMs
+        }
         if (durationMs < deadline) return null
         fired = true
-        return Event(durationMs, positionMs, controlMayDefer = !deferred)
+        return Event(
+            durationMs,
+            positionMs,
+            controlMayDefer = establishedPlayback && !deferred,
+            establishedPlayback = establishedPlayback,
+        )
     }
 
     /**
@@ -328,11 +341,30 @@ internal class OpenBufferingStallTracker(
         return true
     }
 
+    /** Wake on the exact active deadline, but never spin or poll slower than 1 s. */
+    fun nextSampleDelayMs(observedAtMs: Long, establishedPlayback: Boolean): Long {
+        val since = stagnantSinceMs ?: return MAX_SAMPLE_DELAY_MS
+        if (fired) return MAX_SAMPLE_DELAY_MS
+        val deadline = when {
+            !establishedPlayback -> startupDeadlineMs
+            deferred -> maximumDeferralMs
+            else -> establishedThresholdMs
+        }
+        val remaining = deadline - (observedAtMs - since).coerceAtLeast(0)
+        return remaining.coerceIn(MIN_SAMPLE_DELAY_MS, MAX_SAMPLE_DELAY_MS)
+    }
+
     fun reset() {
         baselinePositionMs = null
         stagnantSinceMs = null
         fired = false
         deferred = false
+    }
+
+
+    private companion object {
+        const val MIN_SAMPLE_DELAY_MS = 1L
+        const val MAX_SAMPLE_DELAY_MS = 1_000L
     }
 }
 

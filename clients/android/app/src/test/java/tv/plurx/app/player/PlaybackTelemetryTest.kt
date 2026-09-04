@@ -9,6 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import tv.plurx.app.data.Net
+import tv.plurx.app.data.PlaybackQuality
 
 class PlaybackTelemetryTest {
 
@@ -24,6 +25,7 @@ class PlaybackTelemetryTest {
     private val fakePlan = object : PlanLike {
         override val title = "Wiring Fixture"
         override val videoCodec = "hevc"
+        override val requestedQuality = PlaybackQuality.Auto
         override val fileId = 42L
         override val playUrl = "http://plurx.test/video"
         override val mode = "transcode"
@@ -148,17 +150,18 @@ class PlaybackTelemetryTest {
 
     @Test
     fun openBufferingFiresWhileStillFrozenAndControlGetsOnlyOneBoundedDeferral() {
-        val tracker = OpenBufferingStallTracker()
+        val tracker = OpenPlaybackStallTracker()
 
-        assertNull(tracker.sample(true, true, true, 12_000, 0))
-        assertNull(tracker.sample(true, true, true, 12_000, 7_999))
-        val first = tracker.sample(true, true, true, 12_000, 8_000)
+        assertNull(tracker.sample(true, false, true, 12_000, 0))
+        assertNull(tracker.sample(true, false, true, 12_000, 7_999))
+        val first = tracker.sample(true, false, true, 12_000, 8_000)
         assertEquals(8_000L, first?.durationMs)
         assertTrue(first?.controlMayDefer == true)
         assertTrue("the first verdict may defer inside the absolute cap", tracker.defer(9_500))
 
-        assertNull(tracker.sample(true, true, true, 12_000, 19_999))
-        val deadline = tracker.sample(true, true, true, 12_000, 20_000)
+        assertNull(tracker.sample(true, false, true, 12_000, 19_999))
+        assertEquals(1L, tracker.nextSampleDelayMs(19_999, establishedPlayback = true))
+        val deadline = tracker.sample(true, false, true, 12_000, 20_000)
         assertEquals(20_000L, deadline?.durationMs)
         assertFalse(deadline?.controlMayDefer ?: true)
         assertFalse("control cannot restart the twenty-second clock", tracker.defer(20_000))
@@ -166,14 +169,36 @@ class PlaybackTelemetryTest {
 
     @Test
     fun progressPauseAndStartupCancelAnOpenBufferingDeadline() {
-        val tracker = OpenBufferingStallTracker()
-        assertNull(tracker.sample(true, true, true, 5_000, 0))
-        assertNull("real progress rearms", tracker.sample(true, true, true, 5_300, 7_000))
-        assertNull("pause cancels", tracker.sample(true, false, true, 5_300, 20_000))
-        assertNull("startup is not a stall", tracker.sample(true, true, false, 5_300, 40_000))
-        assertNull(tracker.sample(true, true, true, 5_300, 41_000))
-        assertNull(tracker.sample(true, true, true, 5_300, 48_999))
-        assertEquals(8_000L, tracker.sample(true, true, true, 5_300, 49_000)?.durationMs)
+        val tracker = OpenPlaybackStallTracker()
+        assertNull(tracker.sample(true, false, true, 5_000, 0))
+        assertNull("real progress rearms", tracker.sample(true, false, true, 5_300, 7_000))
+        assertNull("pause cancels", tracker.sample(false, false, true, 5_300, 20_000))
+        assertNull(tracker.sample(true, false, true, 5_300, 41_000))
+        assertNull(tracker.sample(true, false, true, 5_300, 48_999))
+        assertEquals(8_000L, tracker.sample(true, false, true, 5_300, 49_000)?.durationMs)
+    }
+
+    @Test
+    fun startupReadyFreezeAndStateFlapsHaveFiniteDeadlines() {
+        val tracker = OpenPlaybackStallTracker()
+
+        assertNull(tracker.sample(true, false, false, 0, 0))
+        // No Media3 state is an input: READY/BUFFERING flaps cannot reset the
+        // monotonic no-progress episode.
+        assertNull(tracker.sample(true, false, false, 0, 29_999))
+        val startup = tracker.sample(true, false, false, 0, 30_000)
+        assertEquals(30_000L, startup?.durationMs)
+        assertFalse(startup?.controlMayDefer ?: true)
+        assertFalse(startup?.establishedPlayback ?: true)
+    }
+
+    @Test
+    fun endedPlaybackCancelsAnOpenDeadline() {
+        val tracker = OpenPlaybackStallTracker()
+        assertNull(tracker.sample(true, false, true, 5_000, 0))
+        assertNull(tracker.sample(true, true, true, 5_000, 20_000))
+        assertNull(tracker.sample(true, false, true, 5_000, 21_000))
+        assertNull(tracker.sample(true, false, true, 5_000, 28_999))
     }
 
     @Test

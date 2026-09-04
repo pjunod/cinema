@@ -542,24 +542,30 @@ async function main() {
   player.controlSeek=null;
   const seekIntentAdapter=new Function([
     "let PLAYER=null; let notifications=0;",
+    "function clearPlaybackControlWaiters(){}",
     "function notifyPlaybackControl(){notifications+=1;}",
+    shippedSource("supersedePlaybackControlIntent"),
     shippedSource("beginPlaybackControlSeek"),
+    shippedSource("markPlaybackControlSeekExecuted"),
     shippedSource("settlePlaybackControlSeek"),
-    "return {begin:beginPlaybackControlSeek,settle:settlePlaybackControlSeek,"+
+    "return {begin:beginPlaybackControlSeek,mark:markPlaybackControlSeekExecuted,"+
+      "settle:settlePlaybackControlSeek,"+
       "notifications:()=>notifications};",
   ].join("\n"))();
-  const intentPlayer={started:true,offset:0};
+  const intentPlayer={started:true,offset:0,source:{video_codec:"h264"},
+    controlPresentedFrames:0,controlHasFrameCallbacks:true};
   const intentVideo={currentTime:10,seeking:false,readyState:4};
   const firstIntent=seekIntentAdapter.begin(intentPlayer,30);
   const finalIntent=seekIntentAdapter.begin(intentPlayer,90);
   assert.equal(finalIntent.sequence,firstIntent.sequence+1,"later seeks supersede monotonically");
-  intentVideo.currentTime=30;
-  assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer),false,
-    "an old destination cannot clear the newest intent");
+  assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer,90,1),false,
+    "a target-looking frame before execution cannot settle the intent");
   assert.equal(intentPlayer.controlSeek.targetMs,90_000);
-  intentVideo.currentTime=90.4;
-  assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer),true,
-    "the presented destination clears its own intent");
+  assert.equal(seekIntentAdapter.mark(intentPlayer,90),true);
+  assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer,90.4,1),false,
+    "the old loose landing tolerance is not accepted");
+  assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer,90.2,1),true,
+    "a new presented frame at the destination clears its own intent");
   assert.equal(intentPlayer.controlSeek,null);
   assert.equal(seekIntentAdapter.notifications(),3,
     "both intents and the presented landing are published");
@@ -729,11 +735,12 @@ async function main() {
     "close releases a session whose open completed late");
 
   let replayClicks=0,elementPlays=0,activities=0;
-  const endedToggle=new Function("document","replayEnded","playerActivity",[
-    shippedSource("togglePlay"),"togglePlay();",
+  const endedToggle=new Function("document","replayEnded","playerActivity",
+    "supersedePlaybackControlIntent","notifyPlaybackControl",[
+    "let PLAYER={};",shippedSource("togglePlay"),"togglePlay();",
   ].join("\n"))(
     {getElementById:()=>({ended:true,paused:true,play:()=>{elementPlays+=1;},pause:()=>{}})},
-    ()=>{replayClicks+=1;},()=>{activities+=1;},
+    ()=>{replayClicks+=1;},()=>{activities+=1;},()=>{},()=>{},
   );
   assert.equal(endedToggle,undefined);
   assert.equal(replayClicks,1);
@@ -965,7 +972,7 @@ async function main() {
         "   return startPlaybackControl(video,player,bootstrap);},",
         " detach(player){PLAYER=player; stopPlaybackControl(player); PLAYER=null;},",
         " stall(player,video,began,generation){PLAYER=player;",
-        "   return persistentWait(video,player,began,generation);},",
+        "   return persistentWait(video,player,began,generation,player.controlIntentGeneration||0);},",
         " verdictText:controlVerdictText,",
         " askProbe(player){PLAYER=player;",
         "  try{ const a=askPlaybackControl('stalled',{decoder_state:'starved'});",
@@ -1167,6 +1174,19 @@ async function main() {
       "a repeated hold cannot own a decode freeze past the absolute deadline");
     assert.equal(player.waitTimer, null, "the deadline cannot be restarted");
     assert.ok(h.log.some((entry) => entry.detail === "fallthrough:hold_deadline"));
+  }
+
+  {
+    const { h, player } = await askWith({ type: "hold", reason: "no_room" }, {
+      // The real reporter needs about 320 ms to settle its next admitted
+      // exchange. Starting just inside the boundary proves that the ask time
+      // counts against the same absolute frozen-picture deadline.
+      began: performance.now()-19_900,
+      player: { waitRunway: 8 },
+    });
+    assert.equal(h.reopened.length, 1,
+      "an ask that crosses the deadline cannot earn another deferral");
+    assert.equal(player.waitTimer, null);
   }
 
   // retry_resource paces to the server's interval, clamped, and bounded: a

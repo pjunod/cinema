@@ -104,6 +104,7 @@ class PlaybackControlTransport(
  */
 class PlaybackControlSession(private val scope: CoroutineScope) {
     private var reporter: PlaybackControlReporter? = null
+    private var observe: (() -> PlayerControlObservation?)? = null
 
     /**
      * One identity per player instance, not per session: a reopen is the same
@@ -275,6 +276,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         onSubtitleReady: () -> Unit = {},
     ) {
         end()
+        this.observe = observe
         // A generation, not a reset. `end()` stops the old reporter in a
         // launched coroutine, so the stop does not necessarily land before
         // this begin — and an old in-flight exchange completing in that window
@@ -368,15 +370,21 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
      * replaced. The pending target lives in [PlaybackIntent], so the snapshot
      * remains truthful when the replacement reporter starts as well.
      */
-    fun reportIntent() {
-        val subject = reporter ?: return
-        scope.launch { subject.notifyUrgently(scope) }
+    suspend fun reportIntent(): Long? {
+        // Read and map on the caller before the first suspension. Controller
+        // actions await this enqueue before touching Media3, so neither a
+        // dispatcher hop nor composition teardown can turn "before" into
+        // "after". The reporter receives an immutable snapshot value.
+        val snapshot = observe?.invoke()?.let(PlaybackControlMapping::snapshot) ?: return null
+        val subject = reporter ?: return null
+        return subject.notifyUrgently(scope, snapshot)
     }
 
     fun end() {
-        val subject = reporter ?: return
+        val subject = reporter
         reporter = null
-        scope.launch { subject.stop() }
+        observe = null
+        if (subject != null) scope.launch { subject.stop() }
     }
 
     private companion object {

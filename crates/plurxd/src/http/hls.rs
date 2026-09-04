@@ -5450,6 +5450,10 @@ async fn record_preparation_shadow(state: AppState, exchange: PreparationShadowI
     // invent a server-driven change and attribute it to the viewer.
     let height = match selection.quality {
         crate::playback_control::QualitySelection::Auto => delivered.height,
+        crate::playback_control::QualitySelection::Original => source
+            .as_ref()
+            .and_then(|file| file.height)
+            .unwrap_or(delivered.height),
         crate::playback_control::QualitySelection::Manual { height } => {
             resolve_height(
                 &state,
