@@ -90,6 +90,16 @@ test("every section is a route, grouped in the rail's order", () => {
       assert.ok(panel.includes(`if(tab==="${id}") `) && panel.includes(dispatch[id]),
         `${id} routes to ${dispatch[id]}`);
   }
+  // Every routable section must also declare what data it needs. A section
+  // that routes and dispatches but has no manifest entry renders
+  // "Cannot read properties of undefined (reading 'required')" — the page is
+  // reachable from the rail and broken on arrival, and every other assertion
+  // in this file still passes. That shipped once.
+  const manifest = shippedConst("SETTINGS_MANIFEST");
+  for (const [id] of r.SET_TABS) {
+    assert.match(manifest, new RegExp(`\\b${id}\\s*:\\s*\\{\\s*required:`),
+      `${id} routes but declares no SETTINGS_MANIFEST entry`);
+  }
   assert.equal(r.settingsRouteTab("#/settings/nothere"), null, "an unknown section is not a route");
   assert.equal(r.settingsRouteTab("#/settings/"), null);
   assert.equal(r.settingsRouteTab("#/settings/Playback"), null, "routes are lower-case");

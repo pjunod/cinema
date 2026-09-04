@@ -12100,6 +12100,7 @@ const SETTINGS_MANIFEST={
   system:{required:["sys"],secondary:["playbackEvents"]},
   cluster:{required:["cluster"],secondary:["clusterOps"]},
   integrations:{required:["settings","trakt"],secondary:[]},
+  developer:{required:["settings"],secondary:[]},
 };
 function cacheSettings(value){
   SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
