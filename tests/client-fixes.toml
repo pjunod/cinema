@@ -692,3 +692,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetr
 source_anchor = "internal class OpenPlaybackStallTracker("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
 test_anchor = "openBufferingFiresWhileStillFrozenAndControlGetsOnlyOneBoundedDeferral"
+
+[[fixes]]
+id = "clients.control-intent-presentation-review-fixes"
+commits = ["3b5387e5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "fun presentedVideoFrame("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "departingAndPreExecutionFramesCannotSettleANewSeek"
