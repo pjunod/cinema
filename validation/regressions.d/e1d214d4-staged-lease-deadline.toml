@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e1d214d4"]
+points = ["core.media", "cluster.auth", "cluster.page-reads"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "renew_media_sessions renewed a staged successor like any other active session, because the owner node holds a real session for it and live_or_preparing_session_ids puts it in renewable_session_ids. Each renewal pushed lease_expires_at_ms forward, so the preparation deadline never arrived, the retirement sweep never ended the row, and the ledger reaper keyed on state != 'active' never matched — leaving an encoder, a job_leases fence and an undiscounted admission slot held for the life of the node. a_staged_successor_cannot_renew_past_its_deadline reproduces it on both backends: it arms the publication fence first so the staged row itself is the only thing left refusing, and reverting either backend's predicate fails it. The existing committed-successor test pins the other half, that commit deletes the ledger row and renewal resumes."
