@@ -1257,6 +1257,7 @@ mod tests {
                  DROP TABLE IF EXISTS fragment_index_outcomes;
                  ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors;
+                 ALTER TABLE analysis_requests DROP COLUMN video_identity;
                  PRAGMA user_version = 43;",
             )
             .expect("construct unrecoverable v43 commit");
@@ -1342,7 +1343,11 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 2] = ["fragment_index_outcomes", "attempt_errors"];
+        const DROPPED_BY_THE_FIXTURE: [&str; 3] = [
+            "fragment_index_outcomes",
+            "attempt_errors",
+            "video_identity",
+        ];
 
         assert!(
             crate::store::sqlite::MIGRATIONS[GUARD_SCHEMA_VERSION as usize - 1]

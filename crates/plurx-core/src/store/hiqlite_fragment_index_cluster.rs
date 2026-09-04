@@ -623,6 +623,14 @@ pub(super) fn analysis_attempt_errors_migration_statements(
     migration_statements(ANALYSIS_ATTEMPT_ERRORS_STATEMENTS)
 }
 
+const ANALYSIS_REQUEST_IDENTITY_STATEMENTS: &[&str] =
+    &["ALTER TABLE analysis_requests ADD COLUMN video_identity TEXT NOT NULL DEFAULT ''"];
+
+pub(super) fn analysis_request_identity_migration_statements(
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    migration_statements(ANALYSIS_REQUEST_IDENTITY_STATEMENTS)
+}
+
 /// Whether the complete v22 analysis shape is already installed.
 ///
 /// The bootstrap schema transaction lands before `cluster_meta` is seeded. A
@@ -688,6 +696,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     statements.extend(analysis_history_index_migration_statements()?);
     statements.extend(analysis_component_migration_statements()?);
     statements.extend(analysis_attempt_errors_migration_statements()?);
+    statements.extend(analysis_request_identity_migration_statements()?);
     client
         .txn(statements)
         .await
@@ -734,7 +743,7 @@ impl From<&mut Row<'_>> for JobRow {
 }
 
 const REQUEST_COLS: &str = "request_id, file_id, source_size, source_mtime, component,
-    pipeline_version, requested_generation, expected_predecessor_generation,
+    pipeline_version, video_identity, requested_generation, expected_predecessor_generation,
     priority, trigger, force_rebuild,
     target_node_id, state, COALESCE(owner_node_id, '') AS owner_node_id,
     fence, COALESCE(lease_expires_ms, 0) AS lease_expires_ms, attempts, not_before_ms,
@@ -753,6 +762,7 @@ impl From<&mut Row<'_>> for RequestRow {
             source_mtime: row.get("source_mtime"),
             component: row.get("component"),
             pipeline_version: row.get("pipeline_version"),
+            video_identity: row.get("video_identity"),
             requested_generation: row.get("requested_generation"),
             expected_predecessor_generation: row.get("expected_predecessor_generation"),
             priority: row.get("priority"),

@@ -2341,24 +2341,68 @@ async fn fragment_index_video_identities(
 /// Dolby Vision title it would re-derive the pipeline that already exists.
 /// The file would sit at `partial` through every click of a button that ran a
 /// whole-file hash to change nothing.
+/// Every copy-video identity this node would build for a file, paired with the
+/// argv fingerprint that names it.
+async fn fragment_index_video_identity_options(
+    store: &dyn Store,
+    file: &MediaFile,
+    have_dovi: bool,
+    convert: bool,
+) -> Result<Vec<(plurx_core::transcode::CopyVideoOptions, String)>, StoreError> {
+    let probe_json = store.get_file_probe_json(file.id).await?;
+    Ok(
+        crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi, convert)
+            .into_iter()
+            .map(|video| {
+                let fingerprint = crate::fragindex::identity_for(file, video).argv_fingerprint;
+                (video, fingerprint)
+            })
+            .collect(),
+    )
+}
+
+/// Which identity a request is asking for.
+///
+/// A request that names one gets exactly that: three requests with distinct
+/// identities must resolve to three different jobs, or two of them settle
+/// `ready` against work they never did. A request that names none is either
+/// pre-column or `skip_markers`, and keeps the old rule — the first identity
+/// still lacking an index.
 async fn fragment_index_requested_video_options(
     store: &dyn Store,
     file: &MediaFile,
     have_dovi: bool,
     convert: bool,
+    requested_identity: &str,
 ) -> Result<plurx_core::transcode::CopyVideoOptions, StoreError> {
-    let probe_json = store.get_file_probe_json(file.id).await?;
-    let videos =
-        crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi, convert);
-    for video in &videos {
-        let identity = crate::fragindex::identity_for(file, *video);
-        if store.fragment_index(file.id, &identity).await?.is_none() {
+    let identities = fragment_index_video_identity_options(store, file, have_dovi, convert).await?;
+    if !requested_identity.is_empty() {
+        if let Some((video, _)) = identities
+            .iter()
+            .find(|(_, fingerprint)| fingerprint == requested_identity)
+        {
+            return Ok(*video);
+        }
+        // The request names an identity this node no longer emits — a
+        // pipeline change, or a file whose probe facts moved. Superseded, not
+        // "build something else and call it that".
+        return Err(StoreError::Task(
+            "requested copy-video identity is no longer produced for this source".to_owned(),
+        ));
+    }
+    for (video, fingerprint) in &identities {
+        if store
+            .fragment_index(file.id, &crate::fragindex::identity_for(file, *video))
+            .await?
+            .is_none()
+        {
+            let _ = fingerprint;
             return Ok(*video);
         }
     }
-    Ok(videos
+    Ok(identities
         .first()
-        .copied()
+        .map(|(video, _)| *video)
         .unwrap_or_else(|| plurx_core::transcode::CopyVideoOptions::new(have_dovi, false)))
 }
 
@@ -3659,6 +3703,25 @@ impl JobManager {
         component: &str,
         trigger: &str,
     ) -> Result<(AnalysisRequest, bool), StoreError> {
+        self.request_file_analysis_for_identity(file_id, force_rebuild, component, trigger, "")
+            .await
+    }
+
+    /// Request one copy-video identity of a file, rather than whichever one
+    /// happens to lack an index first.
+    ///
+    /// An empty `video_identity` is the old behaviour and stays the default:
+    /// the resolver picks the next identity that needs building. Background
+    /// discovery names one, so a file with three identities yields three
+    /// requests instead of one that permanently tombstones the other two.
+    pub async fn request_file_analysis_for_identity(
+        &self,
+        file_id: i64,
+        force_rebuild: bool,
+        component: &str,
+        trigger: &str,
+        video_identity: &str,
+    ) -> Result<(AnalysisRequest, bool), StoreError> {
         if !matches!(component, "fragment_index" | "skip_markers") {
             return Err(StoreError::Task(
                 "unsupported analysis component".to_owned(),
@@ -3699,6 +3762,10 @@ impl JobManager {
                 } else {
                     String::new()
                 },
+                // The identity is part of the generation, which is what lets
+                // one file hold one request per identity instead of one
+                // request that tombstones the rest.
+                video_identity.to_owned(),
             ])
         };
         let request = self
@@ -3710,6 +3777,7 @@ impl JobManager {
                 source_mtime: file.mtime,
                 component: component.to_owned(),
                 pipeline_version,
+                video_identity: video_identity.to_owned(),
                 requested_generation,
                 priority: if force_rebuild { "forced" } else { "normal" }.to_owned(),
                 trigger: trigger.to_owned(),
@@ -6292,14 +6360,59 @@ impl JobManager {
                 continue;
             }
             attempted += 1;
-            match self
-                .request_file_analysis(file_id, false, "fragment_index", "background")
-                .await
+            // One request per copy-video identity this file lacks, rather
+            // than one request for whichever identity happened to be first.
+            //
+            // The old shape is why no converting Dolby Vision index exists
+            // anywhere on the fleet: a request resolved the first identity
+            // missing an index, and its row then became the dedup tombstone
+            // that stopped discovery ever asking for the others. A P7 title
+            // got its stripped identity and never its converting one, so
+            // only a play attempt or an admin request could reach it.
+            //
+            // `attempted` still counts files, so the per-pass budget means
+            // what it always meant: this widens what one file asks for, not
+            // how many files a pass walks.
+            let identities = match fragment_index_video_identity_options(
+                self.store.as_ref(),
+                &file,
+                transcode.dv_strippable(),
+                transcode.dv_convertible(),
+            )
+            .await
             {
-                Ok((_, false)) => enqueued += 1,
-                Ok((_, true)) => {}
+                Ok(identities) => identities,
                 Err(error) => {
-                    tracing::warn!(file_id, %error, "queueing background fragment analysis");
+                    tracing::warn!(file_id, %error, "listing copy-video identities to index");
+                    continue;
+                }
+            };
+            for (video, fingerprint) in identities {
+                if self
+                    .store
+                    .fragment_index(file_id, &crate::fragindex::identity_for(&file, video))
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
+                    continue;
+                }
+                match self
+                    .request_file_analysis_for_identity(
+                        file_id,
+                        false,
+                        "fragment_index",
+                        "background",
+                        &fingerprint,
+                    )
+                    .await
+                {
+                    Ok((_, false)) => enqueued += 1,
+                    Ok((_, true)) => {}
+                    Err(error) => {
+                        tracing::warn!(file_id, %error, "queueing background fragment analysis");
+                    }
                 }
             }
         }
@@ -6742,17 +6855,29 @@ impl JobManager {
                 "pipeline_version_unavailable",
             ));
         }
-        let video = fragment_index_requested_video_options(
+        let video = match fragment_index_requested_video_options(
             self.store.as_ref(),
             &file,
             have_dovi,
             transcode.dv_convertible(),
+            &request.video_identity,
         )
         .await
-        .map_err(|_| AnalysisResolutionError::Retry {
-            code: "source_catalog_read_failed",
-            charge_attempt: true,
-        })?;
+        {
+            Ok(video) => video,
+            // A request that names an identity this node no longer emits is
+            // superseded, not retryable: the pipeline or the probe facts
+            // moved, and no number of retries brings the old identity back.
+            Err(StoreError::Task(_)) => {
+                return Err(AnalysisResolutionError::Terminal("pipeline_superseded"))
+            }
+            Err(_) => {
+                return Err(AnalysisResolutionError::Retry {
+                    code: "source_catalog_read_failed",
+                    charge_attempt: true,
+                })
+            }
+        };
         let object_version = crate::fragment_index_cluster::inspect_source(&file)
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
