@@ -5322,6 +5322,9 @@ impl Session {
         request: crate::playback_control::LocalControlRequest<'_>,
         deadline_unix_ms: i64,
         terminal_admission: Option<Arc<dyn crate::playback_control::RollingTerminalAdmission>>,
+        preparation_admission: Option<
+            Arc<dyn crate::playback_control::PreparationSettlementAdmission>,
+        >,
     ) -> Option<
         Result<
             (
@@ -5347,7 +5350,12 @@ impl Session {
     > {
         let outcome = match self
             .control
-            .control_before(request, deadline_unix_ms, terminal_admission)
+            .control_before(
+                request,
+                deadline_unix_ms,
+                terminal_admission,
+                preparation_admission,
+            )
             .await
         {
             Ok(outcome) => outcome,
@@ -16639,7 +16647,7 @@ impl TranscodeManager {
             crate::playback_control::ControlStateError,
         >,
     > {
-        self.hls_session_control_with_terminal(control, i64::MAX, None)
+        self.hls_session_control_with_terminal(control, i64::MAX, None, None)
             .await
     }
 
@@ -16648,6 +16656,9 @@ impl TranscodeManager {
         control: crate::playback_control::LocalControlRequest<'_>,
         deadline_unix_ms: i64,
         terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+        preparation_admission: Option<
+            Arc<dyn crate::playback_control::PreparationSettlementAdmission>,
+        >,
     ) -> Option<
         Result<
             crate::playback_control::LocalControlResult,
@@ -16681,6 +16692,7 @@ impl TranscodeManager {
                 control.clone(),
                 deadline_unix_ms,
                 terminal_committer.clone(),
+                preparation_admission.clone(),
             )
             .await
         {
@@ -16750,7 +16762,12 @@ impl TranscodeManager {
             lease_state,
             acknowledged_end,
         ) = match session
-            .accept_control(control, deadline_unix_ms, terminal_admission)
+            .accept_control(
+                control,
+                deadline_unix_ms,
+                terminal_admission,
+                preparation_admission,
+            )
             .await?
         {
             Ok(outcome) => outcome,
@@ -21893,7 +21910,7 @@ pub(crate) mod tests {
         let accepted = fixture
             .state
             .transcode
-            .hls_session_control_with_terminal(request(1), i64::MAX, Some(committer.clone()))
+            .hls_session_control_with_terminal(request(1), i64::MAX, Some(committer.clone()), None)
             .await
             .expect("local worker")
             .expect("end accepted");
@@ -21951,11 +21968,13 @@ pub(crate) mod tests {
                 request(1),
                 i64::MAX,
                 Some(committer.clone()),
+                None,
             ),
             fixture.state.transcode.hls_session_control_with_terminal(
                 request(1),
                 i64::MAX,
                 Some(committer.clone()),
+                None,
             ),
             async {
                 // The first replay has marked the one shared receipt running

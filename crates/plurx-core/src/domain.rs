@@ -1040,6 +1040,10 @@ pub struct MediaSessionPreparationAbortRequest {
 pub struct MediaSessionPreparationCommit {
     pub route: MediaSessionRoute,
     pub predecessor: Option<MediaSessionRoute>,
+    /// The one response receipt committed with the pointer. Replays return
+    /// these exact bytes rather than minting a second response for the same
+    /// client sequence.
+    pub control_receipt: Option<MediaSessionTerminalAck>,
 }
 
 /// Persisted sentinel for a committed successor whose safety boundary has not

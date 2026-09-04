@@ -1522,11 +1522,12 @@ impl VodPreparationGate {
 }
 
 impl crate::playback_control::PreparationGate for VodPreparationGate {
-    fn stage_preparation<'a>(
+    fn stage_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        expected_owner_epoch: i64,
     ) -> crate::playback_control::GateAnswer<'a> {
         Box::pin(async move {
             let mut sessions = self.shared.sessions.lock().await;
@@ -1544,18 +1545,20 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 .control
                 .lock()
                 .expect("control lock")
-                .stage_preparation(
+                .stage_preparation_for_owner(
                     staged_incarnation_id,
                     predecessor_incarnation_id,
                     deadline_ms,
+                    expected_owner_epoch,
                 );
             staged
         })
     }
 
-    fn may_commit_preparation<'a>(
+    fn may_commit_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: &'a str,
+        expected_owner_epoch: i64,
     ) -> crate::playback_control::GateAnswer<'a> {
         Box::pin(async move {
             let mut sessions = self.shared.sessions.lock().await;
@@ -1574,14 +1577,15 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 .control
                 .lock()
                 .expect("control lock")
-                .may_commit_preparation(staged_incarnation_id);
+                .may_commit_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
             may
         })
     }
 
-    fn begin_abort_preparation<'a>(
+    fn begin_abort_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: &'a str,
+        expected_owner_epoch: i64,
     ) -> crate::playback_control::GateAnswer<'a> {
         Box::pin(async move {
             let mut sessions = self.shared.sessions.lock().await;
@@ -1592,15 +1596,35 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 .control
                 .lock()
                 .expect("control lock")
-                .begin_abort_preparation(staged_incarnation_id);
+                .begin_abort_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
             reserved
         })
     }
 
-    fn settle_preparation<'a>(
+    fn reject_preparation_commit_for_owner<'a>(
+        &'a self,
+        staged_incarnation_id: &'a str,
+        expected_owner_epoch: i64,
+    ) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                return false;
+            };
+            let rejected = session
+                .control
+                .lock()
+                .expect("control lock")
+                .reject_preparation_commit_for_owner(staged_incarnation_id, expected_owner_epoch);
+            rejected
+        })
+    }
+
+    fn settle_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: &'a str,
         committed: bool,
+        expected_owner_epoch: i64,
     ) -> crate::playback_control::GateAnswer<'a> {
         Box::pin(async move {
             let mut sessions = self.shared.sessions.lock().await;
@@ -1612,9 +1636,11 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
             };
             let mut control = session.control.lock().expect("control lock");
             if !committed {
-                control.abort_preparation(staged_incarnation_id);
+                control
+                    .begin_abort_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
             }
-            let settled = control.settle_preparation(staged_incarnation_id);
+            let settled =
+                control.settle_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
             drop(control);
             settled
         })
@@ -3406,7 +3432,8 @@ impl VodServe {
             crate::playback_control::ControlStateError,
         >,
     > {
-        self.control_with_terminal(control, i64::MAX, None).await
+        self.control_with_terminal(control, i64::MAX, None, None)
+            .await
     }
 
     pub(crate) async fn control_with_terminal(
@@ -3414,6 +3441,9 @@ impl VodServe {
         control: crate::playback_control::LocalControlRequest<'_>,
         deadline_unix_ms: i64,
         terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+        preparation_admission: Option<
+            Arc<dyn crate::playback_control::PreparationSettlementAdmission>,
+        >,
     ) -> Option<
         Result<
             crate::playback_control::LocalControlResult,
@@ -3582,6 +3612,7 @@ impl VodServe {
                         control.snapshot.platform(),
                         &control.prepared_successor,
                         control.snapshot.acknowledgement.as_ref(),
+                        control.snapshot.request_fingerprint.as_deref(),
                     ),
                 );
                 // Only for an accepted exchange: a replay is the same exchange
@@ -3667,6 +3698,29 @@ impl VodServe {
                 }
                 let remaining = SESSION_IDLE_TTL.saturating_sub(last_touch.elapsed());
                 let remaining_ms = i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX);
+                let lease_expires_at_unix_ms =
+                    crate::media_sessions::unix_ms().saturating_add(remaining_ms);
+                if let (Some(admission), Some(directive)) = (
+                    preparation_admission.as_ref(),
+                    preparation_directive.clone(),
+                ) {
+                    // Transfer durable ownership while the accepted sequence
+                    // and its preparation directive are still under the VOD
+                    // lifecycle/control fence. The HTTP future may disappear
+                    // immediately after this scope without stranding the slot.
+                    admission.accepted(crate::playback_control::PreparationControlOutcome {
+                        disposition,
+                        accepted_sequence,
+                        action: action.clone(),
+                        action_suppressed,
+                        preparation_directive: directive,
+                        platform,
+                        lease_expires_at_unix_ms,
+                        lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+                        lease_state: "active",
+                        selection: selection.clone(),
+                    });
+                }
                 Ok(AppliedControl::Live {
                     disposition,
                     accepted_sequence,
@@ -3675,8 +3729,7 @@ impl VodServe {
                     preparation_directive: preparation_directive.map(Box::new),
                     platform,
                     selection: selection.clone(),
-                    lease_expires_at_unix_ms: crate::media_sessions::unix_ms()
-                        .saturating_add(remaining_ms),
+                    lease_expires_at_unix_ms,
                     marker_prewarm: marker_prewarm.map(Box::new),
                 })
             }
@@ -8357,7 +8410,10 @@ mod tests {
             gate.stage_preparation(successor.clone(), predecessor.clone(), i64::MAX)
                 .await
         );
-        assert!(gate.may_commit_preparation(&successor).await);
+        assert!(
+            !gate.may_commit_preparation(&successor).await,
+            "staging alone is not commit authority; a client acknowledgement must reserve it"
+        );
         // One per playback, and the second ask is refused rather than
         // replacing the first: the store's primary key would reject it, and an
         // engine that believed in two could commit the wrong one.
@@ -10228,7 +10284,7 @@ mod tests {
         });
         let committer_weak = Arc::downgrade(&committer);
         let accepted = serve
-            .control_with_terminal(request(1), i64::MAX, Some(committer.clone()))
+            .control_with_terminal(request(1), i64::MAX, Some(committer.clone()), None)
             .await
             .expect("VOD registry owner")
             .expect("end accepted");
@@ -10464,6 +10520,7 @@ mod tests {
                         },
                         i64::MAX,
                         Some(committer),
+                        None,
                     )
                     .await
             })
