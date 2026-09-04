@@ -5620,6 +5620,10 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
     // invent a server-driven change and attribute it to the viewer.
     let height = match selection.quality {
         crate::playback_control::QualitySelection::Auto => delivered.height,
+        crate::playback_control::QualitySelection::Original => source
+            .as_ref()
+            .and_then(|file| file.height)
+            .unwrap_or(delivered.height),
         crate::playback_control::QualitySelection::Manual { height } => {
             resolve_height(
                 &state,
@@ -16680,8 +16684,25 @@ mod tests {
             serde_json::from_value(manual_without_height).expect("create body");
         assert!(!create.into_request(17, 720).automatic);
 
-        // Every shipped client omits the field, so the old inference has to
-        // survive untouched in both of its arms.
+        // Android Original+copy has no height by design. Its explicit false
+        // must override the legacy heightless-body inference or the server
+        // silently changes the viewer's mode back to Auto.
+        let original_copy = serde_json::json!({
+            "playback_id": "android-player",
+            "copy": true,
+            "quality_auto": false,
+        });
+        let create: CreateSession =
+            serde_json::from_value(original_copy).expect("original copy body");
+        let request = create.into_request(17, 2160);
+        assert!(!request.automatic);
+        assert!(matches!(
+            request.kind,
+            crate::transcode::SessionKind::Copy { .. }
+        ));
+
+        // Legacy clients omit the field, so the old inference has to survive
+        // untouched in both of its arms.
         let silent_auto = serde_json::json!({ "playback_id": "apple-player" });
         let create: CreateSession = serde_json::from_value(silent_auto).expect("create body");
         assert!(create.into_request(17, 720).automatic);

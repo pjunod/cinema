@@ -1,6 +1,70 @@
 version = 1
 enforce_after = "e8a910f"
 
+[[fixes]]
+id = "web.bounded-preparation-and-retained-observers"
+commits = ["0a70d6fb"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "function playbackOwnsAttachedMedia(p)"
+test = "tests/playback/web-control.test.js"
+test_anchor = "HLS callbacks cannot replace the original preparation deadline"
+
+[[fixes]]
+id = "android.media-request-and-transport-ownership"
+commits = ["310a226b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/StallReopen.kt"
+source_anchor = "fun setPlaybackRequested(intent: PlaybackIntent, requested: Boolean, apply: (Boolean) -> Unit)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackRequestOwnershipTest.kt"
+test_anchor = "delayedRecipeCreateSurvivesPauseAndAttachesPausedBeforeResume"
+
+[[fixes]]
+id = "apple.title-and-native-selection-continuations"
+commits = ["856d9a0a"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func seekWhenReady(_ item: AVPlayerItem, ms: Int, owner: SeekPreparationOwner)"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testPreparedSeekRejectsANewerDestinationBeforeMutatingThePlayer"
+
+[[fixes]]
+id = "android.requested-and-attached-media-recipe"
+commits = ["c5504641"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "class PlaybackRecipeOwnership"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackRecipeOwnershipTest.kt"
+test_anchor = "seekAfterUnpublishedAudioOffsetOrBurnCarriesTheWholeMediaRecipe"
+
+[[fixes]]
+id = "web.composed-playback-and-attachment-intent"
+commits = ["ca0913c1"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "function beginPlaybackMediaAttachment(p)"
+test = "tests/playback/web-control.test.js"
+test_anchor = "a seek during manifest loading cannot suppress playback startup"
+
+[[fixes]]
+id = "apple.requested-and-attached-recipe"
+commits = ["96065b89"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct PlayerRecipeRevision"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testNewerSeekAndPauseRetainTheRequestedRecipeUntilItActuallyAttaches"
+
+[[fixes]]
+id = "android.composed-destination-and-playback-demand"
+commits = ["0248fa68"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun sampleTargetPresentationDeadline()"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTargetDeadlineTest.kt"
+test_anchor = "advancingWrongTimelineCannotHideADestinationTimeoutAndOnlyOneRecoveryIsAllowed"
+
+[[fixes]]
+id = "apple.composed-presentation-demand"
+commits = ["c50b6025"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "mutating func observePresentationDemand("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPresentationDeadlineCountsOnlyActiveDemandAndRejectsStaleGenerations"
+
 # Client corrections need a durable bridge from the production symbol to the
 # test that rejects its regression. `commits` lets the history audit distinguish
 # that evidence from an unrelated test edit in the same patch.
@@ -329,7 +393,7 @@ test_anchor = "test_repository_build_claims_match_release_inputs"
 id = "android.bound-stall-downgrade"
 commits = ["c54f9411"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "private suspend fun onStall(positionMs: Long)"
+source_anchor = "private suspend fun onStall(event: OpenPlaybackStallTracker.Event)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/StallBudgetTest.kt"
 test_anchor = "budgetStopsAfterThreeSameRungAnswers"
 
@@ -393,15 +457,15 @@ test_anchor = "resetForUserActionResetsBudgetAndAdvancesSequence"
 id = "android.live-session-seek-stall-reset"
 commits = ["229a0f1f"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "stallGuard.liveSessionSeek { openSession(t, attempt) }"
+source_anchor = "stallGuard.viewerSeek {"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/StallBudgetTest.kt"
-test_anchor = "liveSessionSeekResetsExhaustedBudgetBeforeReopen"
+test_anchor = "viewerSeekResetsExhaustedBudgetBeforeReplacement"
 
 [[fixes]]
 id = "android.stall-response-invalidation-race"
 commits = ["038ee8f"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/StallReopen.kt"
-source_anchor = ".takeIf { isCurrent() }"
+source_anchor = "private fun retainIfCurrent(hls: HlsStart, isCurrent: () -> Boolean)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/StallBudgetTest.kt"
 test_anchor = "newerUserCreateIsTheFinalServerMutationAfterInFlightFallback"
 
@@ -411,7 +475,7 @@ commits = ["7482d42"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/StallReopen.kt"
 source_anchor = "class ControllerStallGuard("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/StallBudgetTest.kt"
-test_anchor = "vodSeekResetsBudgetAndCannotReuseAStallRequestToken"
+test_anchor = "viewerSeekResetsBudgetAndCannotReuseAStallRequestToken"
 
 [[fixes]]
 id = "android.stall-budget-subtitle-test-fix"
@@ -684,3 +748,27 @@ source = "clients/apple/Sources/PlayerInputRouting.swift"
 source_anchor = "static func closeSteps(state: PlayerInputState) -> [PlayerInputOutcome]"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testTheCloseButtonsRunTheCloseControlAndNeverTheBackKey"
+
+[[fixes]]
+id = "android.open-buffering-recovery-deadline"
+commits = ["19e1642c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "internal class OpenPlaybackStallTracker("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "openBufferingFiresWhileStillFrozenAndControlGetsOnlyOneBoundedDeferral"
+
+[[fixes]]
+id = "clients.control-intent-presentation-review-fixes"
+commits = ["3b5387e5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "fun presentedVideoFrame("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "departingAndPreExecutionFramesCannotSettleANewSeek"
+
+[[fixes]]
+id = "clients.production-intent-generation-review-fixes"
+commits = ["78223cef"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func selectQuality(_ height: Int?)"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously"

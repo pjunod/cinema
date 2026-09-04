@@ -829,6 +829,12 @@ class PlaybackControlWireTest {
     }
 
     @Test
+    fun `original is explicit even when source dimensions are unavailable`() {
+        val encoded = json.encodeToString(QualitySelection.serializer(), QualitySelection.Original)
+        assertEquals("{\"mode\":\"original\"}", encoded)
+    }
+
+    @Test
     fun `the bootstrap decodes the server's field names`() {
         val decoded = json.decodeFromString(
             ControlBootstrap.serializer(),
@@ -925,7 +931,7 @@ class PlaybackControlUrgentNotifyTest {
         )
         harness.current = snapshot(observation = evidence)
 
-        subject.notifyUrgently(this)
+        assertEquals(2L, subject.notifyUrgently(this), "the replacement can retain this request floor")
         advanceTimeBy(PlaybackControl.MIN_EXCHANGE_MS + 1)
         runCurrent()
 
@@ -950,7 +956,7 @@ class PlaybackControlUrgentNotifyTest {
         harness.current = snapshot(position = 2_000)
         subject.notifyUrgently(this)
         subject.start(this)
-        subject.notifyUrgently(this)
+        assertNotNull(subject.notifyUrgently(this))
         advanceTimeBy(PlaybackControl.MIN_EXCHANGE_MS * 2)
         runCurrent()
         subject.stop()
@@ -978,7 +984,7 @@ class PlaybackControlUrgentNotifyTest {
         val before = harness.requests.size
         subject.stop()
 
-        subject.notifyUrgently(this)
+        assertNull(subject.notifyUrgently(this))
         advanceTimeBy(60_000)
         runCurrent()
         assertEquals(before, harness.requests.size)

@@ -126,6 +126,7 @@ import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.Marker
 import tv.plurx.app.data.MediaFileDto
 import tv.plurx.app.data.PlaybackSessionStatus
+import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.Rung
 import tv.plurx.app.data.Session
 import tv.plurx.app.data.SubTrack
@@ -185,6 +186,8 @@ private data class Plan(
     val progressOffsetMs: Long,
     val itemDurationMs: Long?,
     val nextAudiobookPartId: Long?,
+    /** Quality captured by the exact request that produced this plan. */
+    override val requestedQuality: PlaybackQuality,
 ) : PlanLike {
     fun globalPosition(localPositionMs: Long): Long =
         audiobookGlobalPosition(localPositionMs, progressOffsetMs)
@@ -209,13 +212,16 @@ private suspend fun loadPlan(
     itemId: Long,
     fileId: Long,
     tracks: PreplayTracks,
+    requestedQuality: PlaybackQuality,
 ): Plan {
     val detail = planLoadStage("item_detail") { vm.itemDetail(itemId) }
     // The pre-play choice reaches the *first* decision, so the plan that comes
     // back already carries it. Starting on the policy default and switching
     // afterwards is what criterion 4 forbids: it is a visible re-buffer to
     // apply something the viewer chose before playback began.
-    val playbackDecision = planLoadStage("decision") { vm.playbackDecision(fileId, tracks) }
+    val playbackDecision = planLoadStage("decision") {
+        vm.playbackDecision(fileId, tracks, requestedQuality)
+    }
     val decision: Decision = playbackDecision.decision
     val file = detail.files.firstOrNull { it.id == fileId } ?: detail.files.firstOrNull()
     val mode = decision.delivery?.mode ?: when (decision.method) {
@@ -264,6 +270,7 @@ private suspend fun loadPlan(
             nextAudiobookPartId = if (detail.item.isAudiobook) {
                 nextAudiobookPartId(detail.files, fileId)
             } else null,
+            requestedQuality = requestedQuality,
         )
     }
 }
@@ -452,6 +459,9 @@ fun PlayerScreen(
         mutableStateOf(if (startMs > 0) "resume" else "cold-start")
     }
     var attemptOpenedAtMs by remember(itemId, fileId) { mutableLongStateOf(monotonicNowMs()) }
+    var requestedQuality by remember(itemId, fileId) {
+        mutableStateOf(vm.preferences.value.playbackQuality)
+    }
     // Survives the plan, like the A/V correction beside it: a quality change
     // reloads the plan and rebuilds the controller, and the viewer's audio and
     // subtitle picks must come back with them.
@@ -462,6 +472,12 @@ fun PlayerScreen(
     var playbackAudio by remember(itemId, fileId) { mutableStateOf(preplayTracks.audio) }
     var playbackSubtitle by remember(itemId, fileId) {
         mutableStateOf(preplayTracks.subtitle)
+    }
+    // Identity and outstanding destination belong to the presentation. A
+    // quality change replaces both the plan and Controller, but not the viewer
+    // or the seek that caused the replacement.
+    val playbackIntent = remember(itemId, fileId) {
+        PlaybackIntent(initialQuality = vm.preferences.value.playbackQuality)
     }
 
     ImmersivePlaybackEffect()
@@ -478,6 +494,7 @@ fun PlayerScreen(
                 itemId,
                 fileId,
                 PreplayTracks(audio = playbackAudio, subtitle = playbackSubtitle),
+                requestedQuality = requestedQuality,
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -519,6 +536,7 @@ fun PlayerScreen(
                 startMs = resumeAt,
                 startReason = startReason,
                 attemptOpenedAtMs = attemptOpenedAtMs,
+                playbackIntent = playbackIntent,
                 audioOffsetMs = playbackAudioOffset,
                 onAudioOffsetChanged = { playbackAudioOffset = it },
                 // The plan's own answer wins over the request that produced it:
@@ -528,9 +546,10 @@ fun PlayerScreen(
                 onAudioChanged = { playbackAudio = it },
                 retainedSubtitle = playbackSubtitle,
                 onSubtitleChanged = { playbackSubtitle = SubtitleChoice(it) },
-                onReload = { position, reason ->
+                onReload = { position, reason, quality ->
                     resumeAt = position
                     startReason = reason
+                    requestedQuality = quality
                     plan = null
                     generation++
                 },
@@ -625,17 +644,19 @@ private fun PlayerContent(
     startMs: Long,
     startReason: String,
     attemptOpenedAtMs: Long,
+    playbackIntent: PlaybackIntent,
     audioOffsetMs: Long,
     onAudioOffsetChanged: (Long) -> Unit,
     retainedAudio: Long?,
     onAudioChanged: (Long) -> Unit,
     retainedSubtitle: SubtitleChoice?,
     onSubtitleChanged: (Long?) -> Unit,
-    onReload: (Long, String) -> Unit,
+    onReload: (Long, String, PlaybackQuality) -> Unit,
     onPlayNext: (PlaybackTarget) -> Unit,
     onExit: () -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val playbackLifecycleOwner = LocalLifecycleOwner.current
     val activity = androidx.activity.compose.LocalActivity.current
     val componentActivity = activity as? ComponentActivity
     val canUsePip = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -644,12 +665,16 @@ private fun PlayerContent(
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     var playFailure by remember { mutableStateOf<String?>(null) }
     val controller = remember(plan) {
+        // The decision and its session body must describe the same quality,
+        // even if the stored preference changes between request and compose.
+        playbackIntent.adoptQuality(plan.requestedQuality)
         Controller(
             context,
             buildPlayer(context, vm),
             plan,
             plan.legacyCaps,
             plan.decisionCaps,
+            playbackIntent,
             vm,
             scope,
             initialAudioOffsetMs = audioOffsetMs,
@@ -666,7 +691,7 @@ private fun PlayerContent(
     var positionMs by remember { mutableLongStateOf(startMs) }
     var pendingMs by remember(controller) { mutableStateOf<Long?>(null) }
     var timelineFocused by remember { mutableStateOf(false) }
-    var isPlaying by remember { mutableStateOf(true) }
+    var isPlaying by remember(controller) { mutableStateOf(playbackIntent.playbackRequested) }
     var buffering by remember { mutableStateOf(true) }
     var controlsVisible by remember { mutableStateOf(true) }
     // Height of the bottom control block as it was last laid out. The info
@@ -936,6 +961,16 @@ private fun PlayerContent(
     // value instead of being rebuilt for it.
     val autoplayNext by rememberUpdatedState(preferences.autoplayNext)
     val playNext by rememberUpdatedState(onPlayNext)
+    DisposableEffect(controller, playbackLifecycleOwner) {
+        val lifecycle = playbackLifecycleOwner.lifecycle
+        fun updateForeground() {
+            controller.setPresentationForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+        }
+        val observer = LifecycleEventObserver { _, _ -> updateForeground() }
+        lifecycle.addObserver(observer)
+        updateForeground()
+        onDispose { lifecycle.removeObserver(observer) }
+    }
     DisposableEffect(controller) {
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
@@ -1255,8 +1290,8 @@ private fun PlayerContent(
                     }
                 },
                 onPlayPause = { controller.playPause(); poke() },
-                onSeekBack = { seekWithMarkerUndo(controller.realPosition() - 10_000); poke() },
-                onSeekForward = { seekWithMarkerUndo(controller.realPosition() + 10_000); poke() },
+                onSeekBack = { controller.seekBy(-10_000); poke() },
+                onSeekForward = { controller.seekBy(10_000); poke() },
                 onScrub = { pendingMs = it.coerceIn(0L, plan.durationMs.coerceAtLeast(0L)) },
                 onScrubEnd = {
                     pendingMs?.let(::seekWithMarkerUndo)
@@ -1321,8 +1356,15 @@ private fun PlayerContent(
                 qualityOptions = qualityOptions(plan.ladder),
                 audioOffsetMs = controller.audioOffsetMs,
                 declaredOffsetMs = plan.declaredOffsetMs,
-                currentPosition = controller::realPosition,
-                onReload = onReload,
+                currentPosition = controller::positionForPlaybackIntent,
+                onReload = { position, reason, quality ->
+                    // Publish the new quality and destination on the old
+                    // reporter before Compose tears its player down. The next
+                    // controller inherits the same intent and identity.
+                    controller.prepareReplacement(position, quality) { preparedPosition, preparedQuality ->
+                        onReload(preparedPosition, reason, preparedQuality)
+                    }
+                },
                 onAudioOffset = {
                     controller.setAudioOffset(it)
                     onAudioOffsetChanged(it)
@@ -1356,7 +1398,9 @@ private fun PlayerContent(
         playFailure?.let { message ->
             PlaybackFailed(
                 message = message,
-                onRetry = { onReload(controller.realPosition(), "fallback") },
+                onRetry = {
+                    onReload(controller.prepareViewerRetry(), "fallback", playbackIntent.desiredQuality)
+                },
                 onExit = onExit,
             )
         }
@@ -1709,7 +1753,7 @@ private fun PlayerSettings(
     audioOffsetMs: Long,
     declaredOffsetMs: Long?,
     currentPosition: () -> Long,
-    onReload: (Long, String) -> Unit,
+    onReload: (Long, String, PlaybackQuality) -> Unit,
     onAudioOffset: (Long) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1735,7 +1779,7 @@ private fun PlayerSettings(
             ) {
                 val position = currentPosition()
                 vm.setPlaybackQuality(quality)
-                onReload(position, "quality")
+                onReload(position, "quality", quality)
             }
         }
         Text("Audio sync", color = Muted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 12.dp))

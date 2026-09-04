@@ -345,7 +345,13 @@ impl ClientSelection {
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum QualitySelection {
     Auto,
-    Manual { height: i64 },
+    /// Preserve the source representation and never grant the server
+    /// automatic rung authority. Kept distinct from a manual height because
+    /// sources without probed dimensions still have an explicit Original.
+    Original,
+    Manual {
+        height: i64,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -997,10 +1003,11 @@ pub(crate) fn candidate_request(
         (SessionKind::Transcode { .. }, _) => {
             candidate.kind = SessionKind::Transcode { height };
         }
-        // Auto leaves a copy copying, and a source-height ask is a copy's own
+        // Auto and Original leave a copy copying, and a source-height ask is a copy's own
         // delivery asked for by name. Both leave `kind` exactly as it was,
         // which is what carries `convert_dolby_vision` through.
         (SessionKind::Copy { .. }, QualitySelection::Auto) => {}
+        (SessionKind::Copy { .. }, QualitySelection::Original) => {}
         (SessionKind::Copy { .. }, QualitySelection::Manual { height: asked })
             if Some(asked) == source_height => {}
         (SessionKind::Copy { .. }, QualitySelection::Manual { .. }) => {
@@ -13062,6 +13069,19 @@ mod tests {
     }
 
     #[test]
+    fn original_quality_is_explicit_even_without_a_height() {
+        let original: QualitySelection = serde_json::from_value(serde_json::json!({
+            "mode": "original"
+        }))
+        .expect("explicit Original selection");
+        assert_eq!(original, QualitySelection::Original);
+        assert_eq!(
+            serde_json::to_value(original).expect("serialize Original"),
+            serde_json::json!({"mode": "original"})
+        );
+    }
+
+    #[test]
     fn strict_request_validation_rejects_unknown_and_non_finite_values() {
         let mut json = serde_json::to_value(request()).expect("request json");
         json.as_object_mut()
@@ -18650,6 +18670,19 @@ mod tests {
             ),
             PreparationDecision::Unchanged,
         );
+    }
+
+    #[test]
+    fn original_keeps_a_copy_and_revokes_automatic_authority() {
+        let current = converting_copy();
+        let candidate = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Original),
+            2160,
+            None,
+        );
+        assert_eq!(candidate.kind, current.kind);
+        assert!(!candidate.automatic);
     }
 
     /// A copy has no rung, so a manual rung that is not the source's own is a

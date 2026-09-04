@@ -788,11 +788,8 @@ data class CreateSessionReq(
      */
     val reopen_reason: ReopenReason? = null,
     /**
-     * When true, signals this session's height is a promise (the viewer is on
-     * Auto), so the server must not treat the posted height as a sticky manual
-     * pick. Every Auto viewer that sends a promise-height — an otherwise-
-     * copyable burn or Original — must carry this flag, or the server can
-     * never step that session down.
+     * Explicit viewer mode. New clients send true for Auto and false for every
+     * sticky manual/Original choice; null exists only for legacy decoding.
      */
     val quality_auto: Boolean? = null,
     /** Immutable film-addressed HLS is the only supported presentation. */
