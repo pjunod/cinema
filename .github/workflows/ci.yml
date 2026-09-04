@@ -606,7 +606,6 @@ jobs:
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false
-      queue: max
     timeout-minutes: 30
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -867,7 +866,6 @@ jobs:
     concurrency:
       group: ${{ matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy' || format('plurx-package-{0}-{1}', github.run_id, matrix.arch) }}
       cancel-in-progress: false
-      queue: max
     needs: [scope, preflight]
     if: needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true'
     timeout-minutes: 90
@@ -976,8 +974,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Retain candidate binaries for push, tag, and qualification runs
-        if: github.event_name == 'push' || needs.scope.outputs.qualification == 'true'
-        continue-on-error: ${{ needs.scope.outputs.qualification != 'true' }}
+        if: needs.scope.outputs.qualification == 'true'
+        uses: https://data.forgejo.org/actions/upload-artifact@v4
+        with:
+          name: package-smoke-binaries-${{ matrix.arch }}
+          path: |
+            release-bin/plurxd
+            release-bin/plurx-cluster-check
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain candidate binaries for non-qualification push and tag runs
+        if: github.event_name == 'push' && needs.scope.outputs.qualification != 'true'
+        continue-on-error: true
         uses: https://data.forgejo.org/actions/upload-artifact@v4
         with:
           name: package-smoke-binaries-${{ matrix.arch }}
