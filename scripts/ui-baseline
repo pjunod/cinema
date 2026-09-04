@@ -1231,36 +1231,60 @@ def stress_long_track_containment(page, name, layout_id):
       if (!version || !value) return null;
       const beforeDocumentOverflow = document.documentElement.scrollWidth
         - document.documentElement.clientWidth;
+      value.textContent = "FallbackAudioTrackIdentifierWithoutAnyNaturalBreakOpportunity0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      const fallbackRange = document.createRange();
+      fallbackRange.selectNodeContents(value);
+      const fallbackDocumentOverflow = document.documentElement.scrollWidth
+        - document.documentElement.clientWidth;
+      const fallbackInternalOverflow = value.scrollWidth - value.clientWidth;
+      const fallbackLines = fallbackRange.getClientRects().length;
       value.innerHTML = `<details class="trkfold"><summary>
         <span class="trk on">English · DTS · 5.1 · DTS-HD Master Audio / 5.1 / 48 kHz / 3409 kbps / 24-bit · <span class="tdef">plays by default</span></span>
         <span class="trkmore">1 more</span>
-      </summary><div class="trks trkrest"><span class="trk">Commentary-with-one-deliberately-unbroken-track-title</span></div></details>`;
+      </summary><div class="trks trkrest"><span class="trk"><span class="stress-token">CommentaryTrackIdentifierWithoutAnyNaturalBreakOpportunity0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ</span></span></div></details>`;
       const details = value.querySelector("details");
       const summary = value.querySelector("summary");
       const chip = value.querySelector("summary .trk");
+      details.open = true;
+      const restChip = value.querySelector(".trkrest .trk");
+      const token = value.querySelector(".stress-token");
       const ownerBox = version.getBoundingClientRect();
       const valueBox = value.getBoundingClientRect();
       const summaryBox = summary.getBoundingClientRect();
       const chipBox = chip.getBoundingClientRect();
-      details.open = true;
-      const restChipBox = value.querySelector(".trkrest .trk").getBoundingClientRect();
+      const restChipBox = restChip.getBoundingClientRect();
+      const tokenRange = document.createRange();
+      tokenRange.selectNodeContents(token);
       return {
         beforeDocumentOverflow,
-        documentOverflowGrowth: document.documentElement.scrollWidth
-          - document.documentElement.clientWidth - beforeDocumentOverflow,
+        fallbackDocumentOverflow,
+        fallbackInternalOverflow,
+        afterDocumentOverflow: document.documentElement.scrollWidth
+          - document.documentElement.clientWidth,
+        ownerPastViewport: ownerBox.right - document.documentElement.clientWidth,
+        ownerBeforeViewport: -ownerBox.left,
+        valuePastOwner: valueBox.right - ownerBox.right,
+        valueBeforeOwner: ownerBox.left - valueBox.left,
         summaryPastValue: summaryBox.right - valueBox.right,
-        chipPastOwner: chipBox.right - ownerBox.right,
+        chipPastValue: chipBox.right - valueBox.right,
         restChipPastValue: restChipBox.right - valueBox.right,
         summaryBeforeValue: valueBox.left - summaryBox.left,
+        chipBeforeValue: valueBox.left - chipBox.left,
+        restChipBeforeValue: valueBox.left - restChipBox.left,
+        chipInternalOverflow: chip.scrollWidth - chip.clientWidth,
+        restChipInternalOverflow: restChip.scrollWidth - restChip.clientWidth,
         chipHeight: chipBox.height,
         restChipHeight: restChipBox.height,
+        fallbackLines,
+        tokenLines: tokenRange.getClientRects().length,
+        viewportWidth: document.documentElement.clientWidth,
       };
     }""")
     if metrics is None:
         raise Fail(f"{name}/{layout_id}: track containment fixture did not find an Audio row")
     leaks = {
         key: value for key, value in metrics.items()
-        if key not in {"beforeDocumentOverflow", "chipHeight", "restChipHeight"}
+        if key not in {"chipHeight", "restChipHeight", "fallbackLines", "tokenLines", "viewportWidth"}
         and value > 1
     }
     if leaks:
@@ -1268,6 +1292,55 @@ def stress_long_track_containment(page, name, layout_id):
         raise Fail(f"{name}/{layout_id}: long track escaped its owner ({rendered})")
     if metrics["chipHeight"] <= 0 or metrics["restChipHeight"] <= 0:
         raise Fail(f"{name}/{layout_id}: long track stress fixture did not render")
+    if metrics["viewportWidth"] <= 720 and metrics["tokenLines"] < 2:
+        raise Fail(f"{name}/{layout_id}: unbroken track token did not wrap at the narrow viewport")
+    if metrics["viewportWidth"] <= 720 and metrics["fallbackLines"] < 2:
+        raise Fail(f"{name}/{layout_id}: unbroken fallback audio text did not wrap at the narrow viewport")
+
+
+def stress_cluster_metric_containment(page, name, layout_id):
+    """Exercise a dynamic hostname in the zero-floored cluster health grid."""
+    if name != "item":
+        return
+    metrics = page.evaluate("""() => {
+      const fixture = document.createElement("div");
+      fixture.className = "cluster-health";
+      fixture.style.cssText = "grid-template-columns:repeat(3,minmax(0,1fr));max-width:700px";
+      fixture.innerHTML = `<div class="clmetric"><strong>ClusterLeaderHostnameWithoutAnyNaturalBreakOpportunity0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ</strong><span>Current leader</span></div>
+        <div class="clmetric"><strong>3 / 3</strong><span>Fresh heartbeats</span></div>
+        <div class="clmetric"><strong>3 · q2</strong><span>Voters · quorum</span></div>`;
+      document.querySelector("main").append(fixture);
+      const metric = fixture.querySelector(".clmetric");
+      const value = metric.querySelector("strong");
+      const fixtureBox = fixture.getBoundingClientRect();
+      const metricBox = metric.getBoundingClientRect();
+      const valueBox = value.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(value);
+      return {
+        documentOverflow: document.documentElement.scrollWidth
+          - document.documentElement.clientWidth,
+        fixturePastViewport: fixtureBox.right - document.documentElement.clientWidth,
+        metricPastFixture: metricBox.right - fixtureBox.right,
+        valuePastMetric: valueBox.right - metricBox.right,
+        valueBeforeMetric: metricBox.left - valueBox.left,
+        valueInternalOverflow: value.scrollWidth - value.clientWidth,
+        valueHeight: valueBox.height,
+        valueLines: range.getClientRects().length,
+        viewportWidth: document.documentElement.clientWidth,
+      };
+    }""")
+    leaks = {
+        key: value for key, value in metrics.items()
+        if key not in {"valueHeight", "valueLines", "viewportWidth"} and value > 1
+    }
+    if leaks:
+        rendered = ", ".join(f"{key}={value:.1f}px" for key, value in leaks.items())
+        raise Fail(f"{name}/{layout_id}: cluster metric escaped its owner ({rendered})")
+    if metrics["valueHeight"] <= 0:
+        raise Fail(f"{name}/{layout_id}: cluster metric stress fixture did not render")
+    if metrics["viewportWidth"] <= 720 and metrics["valueLines"] < 2:
+        raise Fail(f"{name}/{layout_id}: cluster hostname did not wrap at the narrow viewport")
 
 
 def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
@@ -1497,6 +1570,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         page.screenshot(path=str(shot), full_page=not args.viewport_only)
         stress_classic_header(page, name, layout_id)
         stress_long_track_containment(page, name, layout_id)
+        stress_cluster_metric_containment(page, name, layout_id)
         # Refusals annotate a capture that is already failing; they never
         # fail one on their own. Some fetches are non-ok by design — the
         # segment-playlist probe, the subtitle sidecar, the reader search —

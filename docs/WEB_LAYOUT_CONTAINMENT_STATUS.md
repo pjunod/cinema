@@ -1,6 +1,7 @@
 # Web layout containment — live delivery status
 
-**Status:** fast validation complete; pull request assembly in progress ·
+**Status:** live delivery state is recorded on authoritative
+[Forgejo PR #4](http://192.168.4.7:3000/noirr/plurx/pulls/4) ·
 **Updated:** 2026-09-04
 
 This page tracks the systemic fix for intrinsic-width content escaping its
@@ -10,35 +11,41 @@ track, including reader and responsive layouts.
 
 ## Outcome — content, not labels, owns the failure boundary
 
-Every fractional content column now has an explicit zero minimum. Long track
-chips may wrap, but they may not resize the grid, card, or document. The rule
-is retained by a source-wide static contract and a Chromium stress assertion
-that injects both an ordinary long label and an unbroken token.
+Every formerly bare fractional content track now has an explicit zero minimum.
+All shipped fractional tracks must declare a non-intrinsic minimum; deliberate
+poster and card grids retain their positive design minimums. Long dynamic text
+may wrap, but it may not resize its grid, card, or document. The rule is
+retained by a source-wide static contract and Chromium stress assertions that
+inject both an ordinary long label and genuinely unbroken track and hostname
+tokens.
 
 ## Delivery — one ordinary main-bound pull request
 
 | Stage | State | Evidence |
 |---|---|---|
 | Root cause | Complete | Bare `1fr` resolved to an intrinsic `auto` minimum |
-| Systemic implementation | Complete | Main UI, responsive grids, and both readers use zero-floor content tracks |
+| Systemic implementation | Complete | Every fraction declares a non-intrinsic floor; shrinkable content tracks use zero |
 | Focused regression | Complete | Static contract plus post-capture Chromium containment stress |
-| Fast validation | Complete | Six local checks green; 2,761 unit tests green on pinned Linux |
-| Adversarial review | Pending | Independent correctness, test, and maintainability reviews |
-| Full PR qualification | Pending | One full run after every review finding is resolved |
-| Merge | Pending | Only after the current PR candidate is green |
+| Fast development proof | Historical | Pre-review checks green; final tree is re-qualified once after review |
+| Adversarial review | Live on PR | Three independent reviews; every finding is blocking until resolved |
+| Full PR qualification | Live on PR | One full run after every review finding is resolved |
+| Merge | Live on PR | Forbidden until the current candidate is green |
 
 ## Decisions — defaults taken without blocking delivery
 
 - Use one ordinary `codex/web-layout-containment` branch targeting `main`.
   This is one independently shippable correction, not a multi-task effort.
-- Enforce the zero-floor rule across all shipped CSS instead of patching only
-  the visible audio row. This prevents the same intrinsic sizing defect from
+- Enforce explicit non-intrinsic fractional floors across all shipped CSS,
+  using zero for shrinkable content tracks, instead of patching only the
+  visible audio row. This prevents the same intrinsic sizing defect from
   moving to another page or breakpoint.
 - Keep adversarial content out of image goldens. The browser assertion runs
   after capture, so it adds containment evidence without meaningless visual
   baseline churn.
-- Build from a fresh GitHub clone. No existing developer checkout is used for
-  commits, validation artifacts, pushes, or merge operations.
+- Build from a fresh independent clone, initially fetched from the GitHub
+  mirror and then rebased on and pushed to the Forgejo authority. No existing
+  developer checkout is used for commits, validation artifacts, pushes, or
+  merge operations.
 - Run Rust with the installed 1.97.1 toolchain explicitly. The Mac default is
   1.95.0 and is not valid evidence for this repository.
 - Move only the unit execution to a source-only Linux container. The Mac's
@@ -56,19 +63,21 @@ CARGO='rustup run 1.97.1 cargo' make validate-staged
 cargo test --workspace --exclude plurx-cluster-check --no-fail-fast
 ```
 
-The selected local lane passed its validation, history, operations, input,
-static web, and membership checks. Its browser checks declared the missing
-Python Playwright prerequisite and deferred to the PR runner. The local Rust
-gate passed formatting and Clippy before fixture execution found the broken
-host FFmpeg and denied socket binds. The exact staged source tree was archived
-without `.git`, SHA-256 verified after transfer, and its unit lane completed
-on Rust 1.97.1 with 2,761 passed, zero failed, and three intentionally ignored.
+The pre-review candidate passed its selected validation, history, operations,
+input, static web, and membership checks. Its browser checks declared the
+missing Python Playwright prerequisite and deferred to the PR runner. The local
+Rust gate passed formatting and Clippy before fixture execution found the
+broken host FFmpeg and denied socket binds. That source snapshot was archived
+without `.git`, SHA-256 verified after transfer, and its unit lane completed on
+Rust 1.97.1 with 2,761 passed, zero failed, and three intentionally ignored.
+It is historical development evidence only: the exact post-review tree is
+re-qualified after the final rebase and is the only evidence used for merge.
 
 Final qualification runs once after review findings are fixed:
 
 ```bash
-make validate-full
-gh pr checks <number> --watch
+CARGO='rustup run 1.97.1 cargo' make validate-full
+# Then watch Forgejo PR #4 → Actions → Main promotion gate.
 ```
 
 If either command exposes a defect, the failing focused check becomes the
