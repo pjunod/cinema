@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record recent GitHub Actions job outcomes and durations as a small ledger."""
+"""Record recent Forgejo Actions job outcomes as a small ledger."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 
 
-API_VERSION = "2022-11-28"
+TERMINAL_STATUSES = {"success", "failure", "cancelled", "skipped", "blocked"}
 
 
 def parse_time(value: str | None) -> dt.datetime | None:
@@ -31,22 +31,21 @@ def percentile(values: list[float], percentile_value: float) -> float | None:
     return round(ordered[index], 3)
 
 
-class GitHub:
+class Forgejo:
     def __init__(self, api_root: str) -> None:
         self.api_root = api_root.rstrip("/")
-        self.token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        self.token = os.environ.get("FORGEJO_TOKEN")
 
     def get(self, path: str, query: dict[str, str] | None = None) -> dict[str, object]:
         url = f"{self.api_root}/{path.lstrip('/')}"
         if query:
             url += "?" + urllib.parse.urlencode(query)
         headers = {
-            "Accept": "application/vnd.github+json",
+            "Accept": "application/json",
             "User-Agent": "plurx-ci-flake-report",
-            "X-GitHub-Api-Version": API_VERSION,
         }
         if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+            headers["Authorization"] = f"token {self.token}"
         request = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.load(response)
@@ -62,11 +61,11 @@ def job_record(run: dict[str, object], job: dict[str, object]) -> dict[str, obje
     seconds = max(0.0, raw_seconds) if raw_seconds is not None else None
     return {
         "run_id": run["id"],
-        "run_attempt": run.get("run_attempt"),
-        "head_sha": run.get("head_sha"),
+        "run_attempt": job.get("attempt"),
+        "head_sha": run.get("commit_sha"),
         "job_id": job["id"],
         "name": job.get("name"),
-        "conclusion": job.get("conclusion"),
+        "conclusion": job.get("status"),
         "duration_seconds": seconds,
         "timestamp_anomaly": timestamp_anomaly,
     }
@@ -107,23 +106,36 @@ def summarize(records: list[dict[str, object]]) -> list[dict[str, object]]:
     return summary
 
 
+def completed_runs(
+    forgejo: Forgejo, repo: str, workflow: str, requested_runs: int
+) -> list[dict[str, object]]:
+    runs: list[dict[str, object]] = []
+    page = 1
+    while len(runs) < requested_runs:
+        runs_payload = forgejo.get(
+            f"repos/{repo}/actions/runs",
+            {"workflow_id": workflow, "page": str(page), "limit": "50"},
+        )
+        page_runs = list(runs_payload.get("workflow_runs", []))
+        runs.extend(run for run in page_runs if run.get("status") in TERMINAL_STATUSES)
+        if len(page_runs) < 50:
+            break
+        page += 1
+    return runs[:requested_runs]
+
+
 def build_ledger(
-    github: GitHub, repo: str, workflow: str, requested_runs: int
+    forgejo: Forgejo, repo: str, workflow: str, requested_runs: int
 ) -> dict[str, object]:
-    runs_payload = github.get(
-        f"repos/{repo}/actions/workflows/{workflow}/runs",
-        {"status": "completed", "per_page": str(requested_runs)},
-    )
-    runs = list(runs_payload.get("workflow_runs", []))
+    runs = completed_runs(forgejo, repo, workflow, requested_runs)
     records: list[dict[str, object]] = []
     for run in runs:
-        jobs_payload = github.get(
+        jobs_payload = forgejo.get(
             f"repos/{repo}/actions/runs/{run['id']}/jobs",
-            {"filter": "all", "per_page": "100"},
         )
-        records.extend(job_record(run, job) for job in jobs_payload.get("jobs", []))
+        records.extend(job_record(run, job) for job in jobs_payload)
 
-    created = [str(run["created_at"]) for run in runs if run.get("created_at")]
+    created = [str(run["created"]) for run in runs if run.get("created")]
     return {
         "schema": 1,
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -171,16 +183,16 @@ def encode_ledger(ledger: dict[str, object]) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", default="pjunod/plurx")
+    parser.add_argument("--repo", default="noirr/plurx")
     parser.add_argument("--workflow", default="ci.yml")
     parser.add_argument("--runs", type=int, default=30)
     parser.add_argument("--output", type=Path, default=Path("validation/ci-flake-ledger.json"))
-    parser.add_argument("--api-root", default="https://api.github.com")
+    parser.add_argument("--api-root", default="http://192.168.4.7:3000/api/v1")
     args = parser.parse_args()
     if not 1 <= args.runs <= 100:
         parser.error("--runs must be between 1 and 100")
 
-    ledger = build_ledger(GitHub(args.api_root), args.repo, args.workflow, args.runs)
+    ledger = build_ledger(Forgejo(args.api_root), args.repo, args.workflow, args.runs)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(encode_ledger(ledger), encoding="utf-8")
     print(

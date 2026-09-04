@@ -637,7 +637,14 @@ pattern = "media_session_route_for_playback"
 # prove the staged row is usable rather than merely present. The pointer
 # assertions are what say `prepare_media_session` is the entry point rather
 # than `activate_media_session`, which would have advanced it.
-expected_occurrences = 11
+# 11 -> 12 with M6 §3.4c's Prepare announcement: the integration assertion
+# reads the pointer after the action is emitted to prove it still names the
+# predecessor. Test-only; it witnesses the existing pointer authority and
+# neither writes nor competes with it.
+# 12 -> 13 after adversarial review replaced helper-only coverage with the
+# actual accepted selection-change seam. Its final assertion proves that the
+# detached stage and later announcement still did not move the pointer.
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -717,7 +724,11 @@ pattern = "publication_ready_at_ms"
 # 77 -> 78 with M6 §3.4: one test-only activation standing up a live route for
 # the staging fixture. It confirms to zero like any ordinary first activation
 # and moves no shipped fence.
-expected_occurrences = 78
+# 78 -> 79 with M6 §3.4c's staged-row reader: the shipped read checks that the
+# proposed successor is still held at the blocked publication fence before
+# asking the existing actor slot to authorize its announcement. It writes no
+# fence and creates no publication authority.
+expected_occurrences = 79
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -744,7 +755,10 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # `m4-activation-publication-handoff-fence` above.
 # 23 -> 24 with the relay-gate harness: its shared activation helper names the
 # blocked sentinel once, the way every other activation fixture does.
-expected_occurrences = 24
+# 24 -> 25 with M6 §3.4c's staged-row reader, for the same read-only validation
+# described in `m4-activation-publication-handoff-fence` above. The actor slot
+# remains the sole authority that decides whether the row may be announced.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -1094,18 +1108,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # process: the actor answers on its own mailbox and the sender is dropped when
 # that arm returns, so a retired actor closes the channel rather than leaving a
 # waiter detached. Reviewed as part of the M6 preparation slot's executor.
-# 381 -> 382 with M6's shadow measurement, and this one is a *production*
-# detached task rather than a test actor, so it is worth the words. It owns no
-# producer, no process and no timer; it does one store read and increments an
-# atomic. It is detached deliberately: the control exchange is under an
-# absolute deadline it has already spent by the time this runs, the response is
-# fully built, and awaiting a store read there could turn a completed exchange
-# into a 503 *after* its accepted metric had been recorded — so a measurement
-# would corrupt the metrics it sits beside. It holds no lock (the VOD
-# lifecycle guard is dropped before the response is built), and the fan-out is
-# bounded at 32 in flight by `PREPARATION_SHADOWS_IN_FLIGHT`, because the gate
-# fires per selection change and a client alternating between two selections
-# would otherwise spawn one per exchange.
+# 381 -> 382 with M6's production preparation candidate. This is a detached
+# task rather than a test actor, so it is worth the words. It owns no producer,
+# process, or timer. It reads the source, resolves the candidate, records the
+# decision, and can claim the actor slot plus durably stage an admitted
+# successor. It is detached deliberately: the control exchange is under an
+# absolute deadline it has already spent, the response is fully built, and
+# awaiting candidate Store work there could turn a completed transaction into
+# a 503. It holds no lifecycle lock, and fan-out is bounded at 32 by
+# `PREPARATION_CANDIDATES_IN_FLIGHT`; a client alternating selections would
+# otherwise schedule one candidate per accepted exchange.
 # 378 -> 379 with the executor's own tests: `preparation_fixture` spawns one
 # `RollingControlHandle` per test, which is the ordinary test-actor shape
 # already counted a dozen times over. It is owned by the handle the fixture
@@ -1227,7 +1239,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # count is both deltas rather than either one.
 # 549 -> 550 with M6 §3.4: the `Duration::from_millis` that timer sleeps for.
 # It is the preparation deadline, not a playback-progress watchdog.
-expected_occurrences = 550
+# 550 -> 555 with M6 §3.4c review regressions: four short sleeps cross the
+# control exchange floor, and one two-second timeout bounds observation of the
+# detached production stage. Every timer is test-only and awaited; none owns a
+# process, recipe, or recovery decision.
+# 555 -> 557 after adversarial review: the incapable-client production-seam
+# regression adds one exchange-floor sleep and one bounded wait for its
+# detached decision to finish. Both are test-only and awaited.
+expected_occurrences = 557
 
 [[module_structures]]
 id = "bare-time-constructor"

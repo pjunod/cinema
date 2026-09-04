@@ -20,16 +20,16 @@ jobs:
     # The deep tier is the gate's own evidence run one level further, so it uses
     # the gate's pinned ffmpeg. `ffmpeg8-pacing` below is where the other major
     # gets covered. See .github/actions/ffmpeg.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
@@ -54,7 +54,7 @@ jobs:
       # days ago.
       - name: Upload deep-validation evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: nightly-deep-validation-evidence
           path: target/validation
@@ -62,7 +62,7 @@ jobs:
           retention-days: 14
       - name: Upload deep-validation captures
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: nightly-deep-validation-captures
           path: |
@@ -73,18 +73,18 @@ jobs:
 
   pgs-fuzz:
     name: bounded PGS parser fuzz campaign
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
       # Every other Rust job here installs its toolchain through this action.
       # This one assumed `rustup` was already on the box — true of a hosted
       # runner image, not of a self-hosted one — and died with
       # `rustup: command not found` before running a single fuzz case.
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
       # `cargo install cargo-fuzz` is twenty minutes of compiling that does not
       # change between nights.
-      - uses: Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: nightly-pgs-fuzz
       - name: Install the PGS fuzz runner
@@ -107,7 +107,7 @@ jobs:
             -- -max_total_time=900 2>&1 | tee target/validation/pgs-fuzz.log
       - name: Upload PGS fuzz evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: nightly-pgs-fuzz-evidence
           path: |
@@ -136,10 +136,9 @@ jobs:
   ffmpeg8-pacing:
     name: pacing capability contract on ffmpeg 8
     # The container tag is the pin here — `ubuntu:26.04` is where ffmpeg 8 comes
-    # from, and it moves only when this line does. The outer VM is deliberately
-    # disposable: job containers run as root, so a persistent self-hosted
-    # workspace would retain root-owned Cargo artifacts after this job exits.
-    runs-on: ubuntu-24.04
+    # from, and it moves only when this line does. The final step restores the
+    # persistent runner's ownership after the root job container exits.
+    runs-on: [self-hosted, Linux, X64, lab, general]
     container: ubuntu:26.04
     timeout-minutes: 45
     steps:
@@ -154,9 +153,9 @@ jobs:
           apt-get -o Acquire::Retries=3 update
           apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
             build-essential ca-certificates cmake curl git pkg-config
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: nightly-ffmpeg8
       - uses: ./.github/actions/ffmpeg
@@ -170,19 +169,24 @@ jobs:
           cargo test --locked -p plurxd \
             ffmpeg::tests::nightly_runner_has_ffmpeg_readrate \
             -- --exact --ignored --nocapture
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   mutation:
     name: report-only weekly mutation spot-check
     # Mutants are judged by whether the suite kills them, and the suite spawns
     # ffmpeg, so this needs the same pinned build. See .github/actions/ffmpeg.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: nightly-mutation
       - uses: ./.github/actions/ffmpeg
@@ -227,7 +231,7 @@ jobs:
           exit 0
       - name: Upload mutation evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: nightly-mutation-evidence
           path: target/mutants

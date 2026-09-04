@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "web.composed-playback-and-attachment-intent"
+commits = ["ca0913c1"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "function beginPlaybackMediaAttachment(p)"
+test = "tests/playback/web-control.test.js"
+test_anchor = "a seek during manifest loading cannot suppress playback startup"
+
+[[fixes]]
 id = "apple.requested-and-attached-recipe"
 commits = ["96065b89"]
 source = "clients/apple/Sources/PlayerController.swift"

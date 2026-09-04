@@ -50,7 +50,7 @@ const RETRY_RESOURCE_ACTION: &str = "retry_resource";
 /// `abort_replacement`, and this is the first of them. A client that has not
 /// declared it is never sent one, which is what makes shipping the server half
 /// ahead of the client half safe.
-const PREPARE_REPLACEMENT_ACTION: &str = "prepare_replacement";
+pub(crate) const PREPARE_REPLACEMENT_ACTION: &str = "prepare_replacement";
 /// An `action_id` is minted by this server as a UUID; the bound exists for the
 /// relayed case, where it arrives from a peer.
 const MAX_ACTION_ID_LEN: usize = 64;
@@ -608,16 +608,7 @@ impl ControlResponseV1 {
             && self.delivery.owner_node_hash[2..]
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            && (0..=crate::transcode::MAX_HEIGHT).contains(&self.effective_selection.height)
-            && matches!(
-                self.effective_selection.codec.as_str(),
-                "source" | "server_selected"
-            )
-            && self
-                .effective_selection
-                .dynamic_range
-                .as_deref()
-                .is_none_or(|value| matches!(value, "dolby_vision" | "hdr10" | "hlg" | "sdr"))
+            && self.effective_selection.is_valid()
             && self.action_is_believable(request)
     }
 
@@ -682,14 +673,14 @@ impl ControlResponseV1 {
                     session_id,
                     playlist_url,
                     media_origin_ms,
-                    ..
-                } => {
-                    !action_id.is_empty()
-                        && action_id.len() <= MAX_ACTION_ID_LEN
-                        && uuid::Uuid::parse_str(session_id).is_ok()
-                        && is_node_relative_playlist(playlist_url, session_id)
-                        && *media_origin_ms >= 0
-                }
+                    effective_selection,
+                } => prepared_payload_is_valid(
+                    Some(action_id),
+                    session_id,
+                    playlist_url,
+                    *media_origin_ms,
+                    effective_selection,
+                ),
             }
     }
 }
@@ -881,6 +872,22 @@ pub(crate) struct EffectiveSelection {
 }
 
 impl EffectiveSelection {
+    fn is_valid(&self) -> bool {
+        (0..=crate::transcode::MAX_HEIGHT).contains(&self.height)
+            && self
+                .audio_track
+                .is_none_or(|index| (0..=1_024).contains(&index))
+            && self
+                .subtitle_burn
+                .is_none_or(|index| (0..=1_024).contains(&index))
+            && (-15_000..=15_000).contains(&self.audio_offset_ms)
+            && matches!(self.codec.as_str(), "source" | "server_selected")
+            && self
+                .dynamic_range
+                .as_deref()
+                .is_none_or(|value| matches!(value, "dolby_vision" | "hdr10" | "hlg" | "sdr"))
+    }
+
     pub(crate) fn from_recipe(
         recipe: &crate::media_sessions::RemoteStartRequest,
         delivered_height: i64,
@@ -1436,10 +1443,10 @@ pub(crate) fn decide_preparation(
 
 /// The same decision with the client capability **assumed satisfied**.
 ///
-/// Shadow-only, and it exists because of what the fleet actually measured:
-/// with both shipped clients' `dual_player_preparation` literal hardcoded
-/// `false`, `client_cannot_prepare` is checked before the axis and the
-/// throughput and therefore absorbs *every* single-axis transition. The first
+/// Counterfactual only, retained because web and Android still report
+/// `dual_player_preparation=false`. For those clients,
+/// `client_cannot_prepare` is checked before the axis and throughput and
+/// therefore absorbs *every* single-axis transition. The first
 /// production datapoint (m6, 2026-09-02, one `resolution_or_bitrate` change)
 /// read `client_cannot_prepare`, and so would every datapoint after it — so
 /// the shadow as first shipped can report which axes viewers cross, but cannot
@@ -1679,6 +1686,40 @@ pub(crate) enum ControlAction {
     },
 }
 
+/// The durable successor an exchange may announce to its client.
+///
+/// Kept separate from [`ControlAction`] because `action_id` is not a property
+/// of the stored route. The first accepted exchange that sees this exact
+/// staged successor mints the id inside [`ControlState`]; later accepted
+/// exchanges and exact-sequence replays reuse it while the same preparation
+/// slot remains occupied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedSuccessorAction {
+    /// The actor-slot identity. Never sent to the client; the public session
+    /// id and the action id are its capabilities on the wire.
+    pub staged_incarnation_id: String,
+    /// The durable preparation deadline. Checked again at the owner-local
+    /// acceptance point so a Store read that began in time cannot publish an
+    /// action after the preparation expired.
+    pub deadline_ms: i64,
+    pub session_id: String,
+    pub playlist_url: String,
+    pub media_origin_ms: i64,
+    pub effective_selection: EffectiveSelection,
+}
+
+impl PreparedSuccessorAction {
+    fn into_action(self) -> ControlAction {
+        ControlAction::Prepare {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            session_id: self.session_id,
+            playlist_url: self.playlist_url,
+            media_origin_ms: self.media_origin_ms,
+            effective_selection: self.effective_selection,
+        }
+    }
+}
+
 impl ControlAction {
     /// The one action a passive client is always safe to receive.
     pub(crate) fn is_passive(&self) -> bool {
@@ -1700,64 +1741,61 @@ impl ControlAction {
 /// Resolve the action this response carries.
 ///
 /// Two sources, deliberately ordered. An action the actor decided is a
-/// transaction: it has identity, it is fenced by `prior_action`, and it
-/// replays exactly. It always wins. Only when the actor has nothing to say
-/// does the advisory hold get derived from the delivery the response is
-/// already carrying, so the action and `delivery.hold_reason` can never
-/// disagree — they are the same fact read once.
-/// Whether a relayed playlist URL addresses this node and this session.
+/// transaction: it has identity, it is fenced by `prior_action`, has already
+/// been vocabulary-resolved at acceptance, and replays exactly. It always
+/// wins. Only when the actor has nothing to say does
+/// the advisory hold get derived from the delivery the response is already
+/// carrying, so the action and `delivery.hold_reason` can never disagree —
+/// they are the same fact read once.
+/// Whether a prepared playlist URL is one of this node's exact HLS entry
+/// routes for the session the action names.
 ///
-/// Three separate things, and each has a way to be wrong on its own:
-///
-/// * **This node.** A leading `/` is not enough — `//host/x` and `/\host/x`
-///   are protocol-relative and resolve against another origin, and browsers
-///   and AVFoundation both honour them. So the second character must be a
-///   normal path character.
-/// * **This session.** The id must appear as a whole path segment, not
-///   anywhere in the string: `/x?s=<id>` and `/legit#<id>` both contain it
-///   while pointing elsewhere, and a query or fragment cannot be part of the
-///   identity that makes a URL safe.
-/// * **No traversal.** A `..` segment climbs out of the session's own path,
-///   which is the same escape by another spelling.
-///
-/// Bounded, because unlike `action_id` and `session_id` a URL has no natural
-/// length and this one arrives from a peer.
-fn is_node_relative_playlist(playlist_url: &str, session_id: &str) -> bool {
+/// Comparing the complete path is intentional. Segment-presence checks leave
+/// room for arbitrary same-origin endpoints, encoded dot segments, and
+/// backslashes that a WHATWG URL consumer normalizes only after validation.
+/// The producer emits `index.m3u8`; `master.m3u8` remains valid for the relay
+/// contract and older peers. A query or fragment may carry bounded playback
+/// parameters, but never contributes to route identity.
+pub(crate) fn is_node_relative_playlist(playlist_url: &str, session_id: &str) -> bool {
     if playlist_url.len() > MAX_PLAYLIST_URL_LEN {
         return false;
     }
-    // A query or fragment cannot carry identity, so the check is made against
-    // the path alone and anything after it is ignored for identity purposes.
     let path = playlist_url
         .split(['?', '#'])
         .next()
         .unwrap_or(playlist_url);
-    let Some(rest) = path.strip_prefix('/') else {
-        return false;
-    };
-    if rest.starts_with('/') || rest.starts_with('\\') {
-        return false;
-    }
-    let mut names_the_session = false;
-    for segment in rest.split('/') {
-        if segment == ".." {
-            return false;
-        }
-        if segment == session_id {
-            names_the_session = true;
-        }
-    }
-    names_the_session
+    path == format!("/api/v1/hls/{session_id}/index.m3u8")
+        || path == format!("/api/v1/hls/{session_id}/master.m3u8")
+}
+
+/// Validate the complete client-visible payload of a prepared handoff.
+///
+/// `action_id` is absent while validating a durable row because the actor
+/// mints it only after accepting the staging. Relayed actions must provide the
+/// UUID that later acknowledgements use as their transaction fence.
+pub(crate) fn prepared_payload_is_valid(
+    action_id: Option<&str>,
+    session_id: &str,
+    playlist_url: &str,
+    media_origin_ms: i64,
+    effective_selection: &EffectiveSelection,
+) -> bool {
+    action_id.is_none_or(|value| {
+        value.len() <= MAX_ACTION_ID_LEN && uuid::Uuid::parse_str(value).is_ok()
+    }) && uuid::Uuid::parse_str(session_id).is_ok()
+        && is_node_relative_playlist(playlist_url, session_id)
+        && (0..=MAX_MEDIA_MILLIS).contains(&media_origin_ms)
+        && effective_selection.is_valid()
 }
 
 /// Which metric slots one resolved response occupies.
 ///
 /// Separated from the counters so the classification can be tested. The
-/// interesting field is `suppressed`: production was held, and the client
-/// could not be told because it had not declared the action. That number is
-/// the size of the problem the vocabulary rollout exists to close, and it is
-/// the one an operator should watch fall to zero before recovery authority
-/// moves off the clients.
+/// interesting field is `suppressed`: an action transaction was available,
+/// and the client could not be told because it had not declared that
+/// vocabulary. That number is the size of the rollout gap, and it is the one
+/// an operator should watch fall to zero before recovery authority moves off
+/// the clients.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ActionMetrics {
     pub action: ActionKind,
@@ -1787,6 +1825,7 @@ pub(crate) fn action_metrics(
     action: &ControlAction,
     delivery: &DeliveryView,
     request: &ControlRequestV1,
+    transaction_suppressed: bool,
 ) -> ActionMetrics {
     match action {
         ControlAction::Hold { reason } => ActionMetrics {
@@ -1842,14 +1881,15 @@ pub(crate) fn action_metrics(
                 // gap with responses no vocabulary rollout would change.
                 // A producer decision the server could have named outranks a
                 // hold, so it is the thing withheld when the client is passive.
-                suppressed: match decision {
-                    Some(decision) => !request.accepts(if decision.is_permanent() {
-                        TERMINAL_ACTION
-                    } else {
-                        RETRY_RESOURCE_ACTION
-                    }),
-                    None => !request.accepts_hold() && hold.is_some(),
-                },
+                suppressed: transaction_suppressed
+                    || match decision {
+                        Some(decision) => !request.accepts(if decision.is_permanent() {
+                            TERMINAL_ACTION
+                        } else {
+                            RETRY_RESOURCE_ACTION
+                        }),
+                        None => !request.accepts_hold() && hold.is_some(),
+                    },
                 recovery_withheld,
             }
         }
@@ -2138,6 +2178,9 @@ pub(crate) struct LocalControlResult {
     pub disposition: ControlDisposition,
     pub accepted_sequence: u64,
     pub action: ControlAction,
+    /// A transaction existed but the accepted request did not declare its
+    /// vocabulary. Frozen with `action` for exact replay and metrics.
+    pub action_suppressed: bool,
     pub lease_expires_at_unix_ms: i64,
     pub lease_timeout_ms: u32,
     pub lease_state: &'static str,
@@ -2432,6 +2475,7 @@ pub(crate) trait PreparationGate: Send + Sync {
         &'a self,
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
+        deadline_ms: i64,
     ) -> GateAnswer<'a>;
 
     /// Whether this exact successor may still be committed. Asked immediately
@@ -2452,11 +2496,13 @@ impl PreparationGate for RollingControlHandle {
         &'a self,
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
+        deadline_ms: i64,
     ) -> GateAnswer<'a> {
         Box::pin(RollingControlHandle::stage_preparation(
             self,
             staged_incarnation_id,
             predecessor_incarnation_id,
+            deadline_ms,
         ))
     }
 
@@ -2599,6 +2645,28 @@ pub(crate) struct LocalControlRequest<'a> {
     pub client_instance_id: &'a str,
     pub sequence: u64,
     pub snapshot: PlaybackDemandSnapshot,
+    /// A staged successor already present when this exchange began. The
+    /// owner-local control state still checks its own slot before announcing
+    /// it, so a durable row is evidence, not a second preparation authority.
+    pub prepared_successor: PreparedSuccessorObservation,
+}
+
+/// What the HTTP authority lookup established for this exchange.
+///
+/// `NotRequested` is distinct from `Absent`: clients that cannot consume a
+/// preparation do not spend a quorum read, and that skipped read must not
+/// erase a transaction identity already bound to the actor's slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PreparedSuccessorObservation {
+    /// This exchange may not carry a preparation at all, for example `End`.
+    Inactive,
+    NotRequested,
+    /// The client requested the vocabulary, but the authority read failed.
+    /// A cached exact replay remains safe; a new sequence must fail without
+    /// advancing until authority can be established again.
+    Unavailable,
+    Absent,
+    Ready(PreparedSuccessorAction),
 }
 
 /// The bounded client facts accepted with one control sequence.
@@ -2778,7 +2846,14 @@ pub(crate) struct ControlState {
     client_platform: Option<ClientPlatform>,
     last_sequence: u64,
     last_accepted_at: Option<Instant>,
+    /// The vocabulary-resolved transaction returned for `last_sequence`.
+    /// A valid retry returns both fields exactly. Reusing the sequence after
+    /// removing the vocabulary that admitted a `Prepare` is rejected.
     prior_action: ControlAction,
+    prior_action_suppressed: bool,
+    /// Stable identity and immutable payload for the preparation occupying
+    /// the slot. This outlives any one sequence; `prior_action` does not.
+    prepared_action: Option<PreparedActionBinding>,
     /// The selection the last accepted exchange carried.
     ///
     /// Here rather than on the rolling actor because **both delivery engines
@@ -2841,11 +2916,69 @@ impl Default for ControlState {
             last_sequence: 0,
             last_accepted_at: None,
             prior_action: ControlAction::None,
+            prior_action_suppressed: false,
+            prepared_action: None,
             last_selection: None,
             last_capabilities: None,
             preparation: PreparationSlot::Empty,
         }
     }
+}
+
+#[derive(Clone)]
+struct ControlAcceptance {
+    platform: Option<ClientPlatform>,
+    prepared_successor: PreparedSuccessorObservation,
+    now_unix_ms: Option<i64>,
+}
+
+impl ControlAcceptance {
+    #[cfg(test)]
+    fn new(
+        platform: Option<ClientPlatform>,
+        prepared_successor: Option<&PreparedSuccessorAction>,
+    ) -> Self {
+        Self {
+            platform,
+            prepared_successor: prepared_successor
+                .map_or(PreparedSuccessorObservation::NotRequested, |successor| {
+                    PreparedSuccessorObservation::Ready(successor.clone())
+                }),
+            now_unix_ms: None,
+        }
+    }
+
+    fn observed(
+        platform: Option<ClientPlatform>,
+        prepared_successor: &PreparedSuccessorObservation,
+    ) -> Self {
+        Self {
+            platform,
+            prepared_successor: prepared_successor.clone(),
+            now_unix_ms: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn unavailable(platform: Option<ClientPlatform>) -> Self {
+        Self {
+            platform,
+            prepared_successor: PreparedSuccessorObservation::Unavailable,
+            now_unix_ms: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn at_unix_ms(mut self, now_unix_ms: i64) -> Self {
+        self.now_unix_ms = Some(now_unix_ms);
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PreparedActionBinding {
+    successor: PreparedSuccessorAction,
+    action: ControlAction,
 }
 
 impl ControlState {
@@ -2859,14 +2992,16 @@ impl ControlState {
         client_instance_id: &str,
         sequence: u64,
         platform: Option<ClientPlatform>,
-    ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform), ControlStateError> {
+        prepared_successor: &PreparedSuccessorObservation,
+    ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform, bool), ControlStateError>
+    {
         self.accept_at(
             Instant::now(),
             generation,
             owner_epoch,
             client_instance_id,
             sequence,
-            platform,
+            ControlAcceptance::observed(platform, prepared_successor),
         )
     }
 
@@ -2877,8 +3012,15 @@ impl ControlState {
         owner_epoch: u64,
         client_instance_id: &str,
         sequence: u64,
-        platform: Option<ClientPlatform>,
-    ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform), ControlStateError> {
+        acceptance: ControlAcceptance,
+    ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform, bool), ControlStateError>
+    {
+        let ControlAcceptance {
+            platform,
+            prepared_successor,
+            now_unix_ms,
+        } = acceptance;
+        let now_unix_ms = now_unix_ms.unwrap_or_else(crate::media_sessions::unix_ms);
         let client_instance_id = uuid::Uuid::parse_str(client_instance_id)
             .map_err(|_| ControlStateError::StaleClient)?;
         match self.generation.as_deref() {
@@ -2898,6 +3040,10 @@ impl ControlState {
             self.last_sequence = 0;
             self.last_accepted_at = None;
             self.prior_action = ControlAction::None;
+            self.prior_action_suppressed = false;
+            // The preparation slot survives an epoch rollover, so its stable
+            // action identity must survive too. Clearing only the binding
+            // would let the same staged incarnation mint a second action id.
             self.last_selection = None;
             self.last_capabilities = None;
         }
@@ -2923,11 +3069,23 @@ impl ControlState {
             return Err(ControlStateError::StaleSequence);
         }
         if sequence == self.last_sequence {
+            if matches!(
+                prepared_successor,
+                PreparedSuccessorObservation::NotRequested
+            ) && matches!(self.prior_action, ControlAction::Prepare { .. })
+            {
+                // A sequence is the idempotency key for one accepted request,
+                // not permission to change the client's action vocabulary.
+                // Reject this locally so a relayed response is governed by
+                // the same vocabulary check as a local one.
+                return Err(ControlStateError::Unavailable);
+            }
             return Ok((
                 ControlDisposition::Replay,
                 self.last_sequence,
                 self.prior_action.clone(),
                 client_platform,
+                self.prior_action_suppressed,
             ));
         }
         if let Some(accepted_at) = self.last_accepted_at {
@@ -2941,14 +3099,68 @@ impl ControlState {
                 ));
             }
         }
+        let (action, suppressed) = match &prepared_successor {
+            PreparedSuccessorObservation::Ready(successor)
+                if self.preparation.may_announce(
+                    &successor.staged_incarnation_id,
+                    successor.deadline_ms,
+                    now_unix_ms,
+                ) =>
+            {
+                let action = match &self.prepared_action {
+                    Some(binding) if binding.successor == *successor => binding.action.clone(),
+                    Some(binding)
+                        if binding.successor.staged_incarnation_id
+                            == successor.staged_incarnation_id =>
+                    {
+                        // Durable route contents are immutable. A different
+                        // payload under the same staged identity is corruption,
+                        // not authority to rotate the transaction.
+                        return Err(ControlStateError::Unavailable);
+                    }
+                    Some(_) => return Err(ControlStateError::Unavailable),
+                    None => {
+                        let action = successor.clone().into_action();
+                        self.prepared_action = Some(PreparedActionBinding {
+                            successor: successor.clone(),
+                            action: action.clone(),
+                        });
+                        action
+                    }
+                };
+                (action, false)
+            }
+            PreparedSuccessorObservation::Ready(successor) => {
+                if self.prepared_action.as_ref().is_some_and(|binding| {
+                    binding.successor.staged_incarnation_id == successor.staged_incarnation_id
+                }) {
+                    self.prepared_action = None;
+                }
+                (ControlAction::None, false)
+            }
+            PreparedSuccessorObservation::Absent => {
+                self.prepared_action = None;
+                (ControlAction::None, false)
+            }
+            PreparedSuccessorObservation::Unavailable => {
+                return Err(ControlStateError::Unavailable)
+            }
+            PreparedSuccessorObservation::Inactive => (ControlAction::None, false),
+            PreparedSuccessorObservation::NotRequested => (
+                ControlAction::None,
+                request_can_suppress_preparation(&self.preparation, now_unix_ms),
+            ),
+        };
         self.last_sequence = sequence;
         self.last_accepted_at = Some(now);
-        self.prior_action = ControlAction::None;
+        self.prior_action = action;
+        self.prior_action_suppressed = suppressed;
         Ok((
             ControlDisposition::Accepted,
             self.last_sequence,
             self.prior_action.clone(),
             client_platform,
+            self.prior_action_suppressed,
         ))
     }
 
@@ -3006,6 +3218,7 @@ impl ControlState {
         &mut self,
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
+        deadline_ms: i64,
     ) -> bool {
         if !matches!(self.preparation, PreparationSlot::Empty) {
             return false;
@@ -3013,7 +3226,9 @@ impl ControlState {
         self.preparation = PreparationSlot::Staged {
             staged_incarnation_id,
             predecessor_incarnation_id,
+            deadline_ms,
         };
+        self.prepared_action = None;
         true
     }
 
@@ -3032,6 +3247,7 @@ impl ControlState {
         self.preparation = PreparationSlot::Aborting {
             staged_incarnation_id: staged_incarnation_id.to_owned(),
         };
+        self.prepared_action = None;
         !already
     }
 
@@ -3048,6 +3264,7 @@ impl ControlState {
             return false;
         }
         self.preparation = PreparationSlot::Empty;
+        self.prepared_action = None;
         true
     }
 
@@ -3078,7 +3295,7 @@ impl ControlState {
         client_instance_id: &str,
         sequence: u64,
         platform: Option<ClientPlatform>,
-    ) -> Option<(ControlDisposition, u64, ControlAction, ClientPlatform)> {
+    ) -> Option<(ControlDisposition, u64, ControlAction, ClientPlatform, bool)> {
         let client_instance_id = uuid::Uuid::parse_str(client_instance_id).ok()?;
         let client_platform = self.client_platform?;
         (self.generation.as_deref() == Some(generation)
@@ -3092,6 +3309,7 @@ impl ControlState {
                 self.last_sequence,
                 self.prior_action.clone(),
                 client_platform,
+                self.prior_action_suppressed,
             )
         })
     }
@@ -3654,6 +3872,7 @@ impl PreparationExecutor {
             .stage_preparation(
                 preparation.incarnation_id.clone(),
                 preparation.expected_predecessor_incarnation_id.clone(),
+                preparation.deadline_ms,
             )
             .await
         {
@@ -3794,6 +4013,7 @@ pub(crate) enum PreparationSlot {
     Staged {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
+        deadline_ms: i64,
     },
     /// The successor is being torn down. Terminal for this slot: an abort that
     /// is under way cannot become a commit, or a disconnect could publish a
@@ -3832,12 +4052,41 @@ impl PreparationSlot {
         )
     }
 
+    /// Whether this slot can still authorize a client-visible preparation at
+    /// the acceptance linearization point. The deadline must be the one
+    /// recorded when the slot was taken; a later durable payload cannot
+    /// lengthen the actor's authority.
+    fn may_announce(
+        &self,
+        staged_incarnation_id: &str,
+        deadline_ms: i64,
+        now_unix_ms: i64,
+    ) -> bool {
+        matches!(
+            self,
+            Self::Staged {
+                staged_incarnation_id: staged,
+                deadline_ms: staged_deadline,
+                ..
+            } if staged == staged_incarnation_id
+                && *staged_deadline == deadline_ms
+                && now_unix_ms < *staged_deadline
+        )
+    }
+
     /// Whether an abort may be attempted for this exact successor. An abort
     /// already under way is idempotent — an owner retrying after a crash must
     /// read back the same outcome rather than a spurious loss.
     pub(crate) fn may_abort(&self, staged_incarnation_id: &str) -> bool {
         self.staged_incarnation_id() == Some(staged_incarnation_id)
     }
+}
+
+fn request_can_suppress_preparation(slot: &PreparationSlot, now_unix_ms: i64) -> bool {
+    matches!(
+        slot,
+        PreparationSlot::Staged { deadline_ms, .. } if now_unix_ms < *deadline_ms
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -4672,6 +4921,7 @@ pub(crate) struct RollingControlOutcome {
     pub disposition: ControlDisposition,
     pub accepted_sequence: u64,
     pub action: ControlAction,
+    pub action_suppressed: bool,
     pub platform: ClientPlatform,
     pub lease: RollingLeaseSnapshot,
     pub flow_ticket: u64,
@@ -5425,6 +5675,7 @@ struct OwnedLocalControlRequest {
     client_instance_id: String,
     sequence: u64,
     snapshot: PlaybackDemandSnapshot,
+    prepared_successor: PreparedSuccessorObservation,
 }
 
 enum RollingControlCommand {
@@ -5460,6 +5711,7 @@ enum RollingControlCommand {
     StagePreparation {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
+        deadline_ms: i64,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
     /// Ask whether this exact successor may still be committed, immediately
@@ -6999,13 +7251,16 @@ impl RollingControlActor {
                 )
             })
             .flatten();
-            let Some((disposition, accepted_sequence, action, platform)) = replay else {
+            let Some((disposition, accepted_sequence, action, platform, action_suppressed)) =
+                replay
+            else {
                 return Err(ControlStateError::SessionEnded);
             };
             return Ok(RollingControlOutcome {
                 disposition,
                 accepted_sequence,
                 action,
+                action_suppressed,
                 platform,
                 lease: self.snapshot_at(now),
                 flow_ticket: self.last_flow_ticket,
@@ -7013,14 +7268,18 @@ impl RollingControlActor {
                 selection: SelectionObservation::default(),
             });
         }
-        let (disposition, accepted_sequence, action, platform) = self.control.accept_at(
-            now,
-            &request.generation,
-            request.owner_epoch,
-            &request.client_instance_id,
-            request.sequence,
-            request.snapshot.platform(),
-        )?;
+        let (disposition, accepted_sequence, action, platform, action_suppressed) =
+            self.control.accept_at(
+                now,
+                &request.generation,
+                request.owner_epoch,
+                &request.client_instance_id,
+                request.sequence,
+                ControlAcceptance::observed(
+                    request.snapshot.platform(),
+                    &request.prepared_successor,
+                ),
+            )?;
         let accepted_end = disposition == ControlDisposition::Accepted
             && request.snapshot.demand == PlaybackDemand::End;
         // Delegated to `ControlState` rather than compared against
@@ -7080,6 +7339,7 @@ impl RollingControlActor {
             disposition,
             accepted_sequence,
             action,
+            action_suppressed,
             platform,
             lease: self.snapshot_at(now),
             flow_ticket,
@@ -7366,12 +7626,16 @@ impl RollingControlActor {
         &mut self,
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
+        deadline_ms: i64,
     ) -> bool {
         if self.retired || self.terminal.is_some() {
             return false;
         }
-        self.control
-            .stage_preparation(staged_incarnation_id, predecessor_incarnation_id)
+        self.control.stage_preparation(
+            staged_incarnation_id,
+            predecessor_incarnation_id,
+            deadline_ms,
+        )
     }
 
     fn abort_preparation(&mut self, staged_incarnation_id: &str) -> bool {
@@ -8956,10 +9220,14 @@ impl RollingControlActor {
                 RollingControlCommand::StagePreparation {
                     staged_incarnation_id,
                     predecessor_incarnation_id,
+                    deadline_ms,
                     reply,
                 } => {
-                    let staged =
-                        self.stage_preparation(staged_incarnation_id, predecessor_incarnation_id);
+                    let staged = self.stage_preparation(
+                        staged_incarnation_id,
+                        predecessor_incarnation_id,
+                        deadline_ms,
+                    );
                     let _ = reply.send(staged);
                 }
                 RollingControlCommand::MayCommitPreparation {
@@ -10278,6 +10546,7 @@ impl RollingControlHandle {
             client_instance_id: request.client_instance_id.to_owned(),
             sequence: request.sequence,
             snapshot: request.snapshot,
+            prepared_successor: request.prepared_successor,
         };
         let (reply, response) = tokio::sync::oneshot::channel();
         self.enqueue_command(RollingControlCommand::Control {
@@ -10299,12 +10568,14 @@ impl RollingControlHandle {
         &self,
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
+        deadline_ms: i64,
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
             .enqueue_command(RollingControlCommand::StagePreparation {
                 staged_incarnation_id,
                 predecessor_incarnation_id,
+                deadline_ms,
                 reply,
             })
             .await
@@ -10723,12 +10994,9 @@ static ROLLING_LEASE_RENEWALS: [AtomicU64; 3] =
 static CONTROL_ACTIONS: [[AtomicU64; 3]; 5] = [const { [const { AtomicU64::new(0) }; 3] }; 5];
 /// Holds actually sent, by reason.
 static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
-/// What M6 *would* do about a selection change, by platform, axis and outcome.
-///
-/// Shadow: nothing is staged and no behaviour depends on this. The point is
-/// that `PREPARED_AXIS_SETS` and the throughput floor are currently arguments, and
-/// this is what turns them into measurements on real traffic before anything
-/// acts on them.
+/// What M6 decides about a selection change, by platform, axis and outcome.
+/// An admitted `prepare` now drives detached durable staging; fallback values
+/// explain why no successor was staged.
 ///
 /// **Labelled by platform because the three clients are not interchangeable
 /// here.** Only the web client fills `observed_download_bps` at all, so an
@@ -10755,8 +11023,9 @@ static PREPARATION_DECISIONS: [[[AtomicU64; 6]; 5]; 3] =
 /// the value of shipping that release.
 static PREPARATION_COUNTERFACTUAL: [[[AtomicU64; 6]; 5]; 3] =
     [const { [const { [const { AtomicU64::new(0) }; 6] }; 5] }; 3];
-/// Exchanges where production was held and the client had not declared the
-/// action, so it was told nothing. Watch this fall as clients roll out.
+/// Exchanges where an action transaction was available but the client had
+/// not declared its vocabulary, so it was told nothing. Watch this fall as
+/// clients roll out.
 static CONTROL_ACTIONS_SUPPRESSED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 /// Holds withheld by the serving predicate, by reason and platform. A hold the
 /// client would have understood, not sent because the client was stalled with
@@ -10976,8 +11245,9 @@ pub(crate) fn record_action(
     delivery: &DeliveryView,
     request: &ControlRequestV1,
     platform: ClientPlatform,
+    transaction_suppressed: bool,
 ) {
-    let metrics = action_metrics(action, delivery, request);
+    let metrics = action_metrics(action, delivery, request, transaction_suppressed);
     let platform = platform_index(platform);
     CONTROL_ACTIONS[metrics.action as usize][platform].fetch_add(1, Ordering::Relaxed);
     if let Some(reason) = metrics.hold_reason {
@@ -10997,7 +11267,8 @@ pub(crate) fn record_action(
     // called it rolled out would hide that.
     let complete = request.accepts(HOLD_ACTION)
         && request.accepts(TERMINAL_ACTION)
-        && request.accepts(RETRY_RESOURCE_ACTION);
+        && request.accepts(RETRY_RESOURCE_ACTION)
+        && request.accepts(PREPARE_REPLACEMENT_ACTION);
     CONTROL_VOCABULARY[usize::from(complete)][platform].fetch_add(1, Ordering::Relaxed);
 }
 
@@ -11068,7 +11339,7 @@ pub(crate) fn prometheus() -> String {
     for (name, help, counter) in [
         (
             "plurx_playback_preparation_decisions_total",
-            "What M6 would do about a selection change, by platform, axis and outcome. Shadow: nothing is staged.",
+            "What M6 decided about a selection change, by platform, axis and outcome; prepare drives detached durable staging.",
             &PREPARATION_DECISIONS,
         ),
         (
@@ -11154,7 +11425,7 @@ pub(crate) fn prometheus() -> String {
         ));
     }
     output.push_str(
-        "# HELP plurx_playback_control_actions_suppressed_total Exchanges where production was held and the client had not declared the action, so it was told nothing.\n\
+        "# HELP plurx_playback_control_actions_suppressed_total Exchanges where an action transaction was available but the client had not declared its vocabulary, so it was told nothing.\n\
          # TYPE plurx_playback_control_actions_suppressed_total counter\n",
     );
     for (index, platform) in ["web", "apple", "android"].iter().enumerate() {
@@ -11635,7 +11906,7 @@ mod tests {
         let action = resolve_action(&ControlAction::None, &held, &passive);
         assert_eq!(action, ControlAction::None);
         assert_eq!(
-            action_metrics(&action, &held, &passive),
+            action_metrics(&action, &held, &passive, false),
             ActionMetrics {
                 action: ActionKind::None,
                 hold_reason: None,
@@ -11651,6 +11922,7 @@ mod tests {
                 &resolve_action(&ControlAction::None, &flowing, &passive),
                 &flowing,
                 &passive,
+                false,
             )
             .suppressed,
         );
@@ -11664,6 +11936,7 @@ mod tests {
                 &resolve_action(&ControlAction::None, &unknown, &passive),
                 &unknown,
                 &passive,
+                false,
             )
             .suppressed,
         );
@@ -11676,7 +11949,7 @@ mod tests {
         let held = delivery_with_hold(Some("working_set"));
         let action = resolve_action(&ControlAction::None, &held, &accepting);
         assert_eq!(
-            action_metrics(&action, &held, &accepting),
+            action_metrics(&action, &held, &accepting, false),
             ActionMetrics {
                 action: ActionKind::Hold,
                 hold_reason: Some(HoldReason::WorkingSet),
@@ -11920,7 +12193,7 @@ mod tests {
         let action = resolve_action(&ControlAction::None, &delivery, &request);
         assert_eq!(action, ControlAction::None);
         assert_eq!(
-            action_metrics(&action, &delivery, &request),
+            action_metrics(&action, &delivery, &request, false),
             ActionMetrics {
                 action: ActionKind::None,
                 hold_reason: None,
@@ -11938,7 +12211,7 @@ mod tests {
         let (delivery, request) = stalled_starved();
         let action = resolve_action(&ControlAction::None, &delivery, &request);
         assert_eq!(action, ControlAction::None);
-        let metrics = action_metrics(&action, &delivery, &request);
+        let metrics = action_metrics(&action, &delivery, &request, false);
         assert_eq!(
             metrics,
             ActionMetrics {
@@ -11953,7 +12226,7 @@ mod tests {
             CONTROL_RECOVERY_WITHHELD[HoldReason::Time as usize][1].load(Ordering::Relaxed);
         let before_sent = CONTROL_HOLD_REASONS[HoldReason::Time as usize].load(Ordering::Relaxed);
         let before_suppressed = CONTROL_ACTIONS_SUPPRESSED[1].load(Ordering::Relaxed);
-        record_action(&action, &delivery, &request, ClientPlatform::Apple);
+        record_action(&action, &delivery, &request, ClientPlatform::Apple, false);
         assert_eq!(
             CONTROL_RECOVERY_WITHHELD[HoldReason::Time as usize][1].load(Ordering::Relaxed),
             before_withheld + 1,
@@ -12149,6 +12422,7 @@ mod tests {
             HOLD_ACTION.to_owned(),
             TERMINAL_ACTION.to_owned(),
             RETRY_RESOURCE_ACTION.to_owned(),
+            PREPARE_REPLACEMENT_ACTION.to_owned(),
         ]);
         request
     }
@@ -12216,7 +12490,7 @@ mod tests {
             ControlAction::None,
         );
         assert!(
-            action_metrics(&ControlAction::None, &delivery, &hold_only).suppressed,
+            action_metrics(&ControlAction::None, &delivery, &hold_only, false).suppressed,
             "the withheld verdict is what the rollout metric counts",
         );
     }
@@ -12437,9 +12711,18 @@ mod tests {
             "a decided preparation is returned exactly, not recomputed",
         );
         assert_eq!(
-            action_metrics(&prepare, &delivery, &asking).action,
+            action_metrics(&prepare, &delivery, &asking, false).action,
             ActionKind::Prepare,
             "and it occupies its own metric slot rather than another's",
+        );
+        assert_eq!(
+            resolve_action(&prepare, &delivery, &request()),
+            prepare,
+            "the actor already froze the vocabulary-resolved transaction, so response assembly must not re-gate an exact replay",
+        );
+        assert!(
+            action_metrics(&ControlAction::None, &delivery, &request(), true,).suppressed,
+            "an actor-suppressed preparation remains visible to rollout metrics",
         );
     }
 
@@ -12517,6 +12800,16 @@ mod tests {
                 },
             ),
             (
+                "an action id that acknowledgements cannot parse",
+                ControlAction::Prepare {
+                    action_id: "not-a-uuid".to_owned(),
+                    session_id: session_id.clone(),
+                    playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
                 "a backslash-relative URL, which browsers treat as //",
                 ControlAction::Prepare {
                     action_id: action_id.clone(),
@@ -12557,6 +12850,36 @@ mod tests {
                 },
             ),
             (
+                "encoded dot segments normalized after validation",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: session_id.clone(),
+                    playlist_url: format!("/api/v1/hls/{session_id}/%2e%2e/%2e%2e/settings"),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
+                "an internal backslash normalized as a path separator",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: session_id.clone(),
+                    playlist_url: format!("/api/v1/hls/{session_id}\\..\\settings"),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
+                "an arbitrary same-origin route containing the session id",
+                ControlAction::Prepare {
+                    action_id: action_id.clone(),
+                    session_id: session_id.clone(),
+                    playlist_url: format!("/settings/{session_id}/master.m3u8"),
+                    media_origin_ms,
+                    effective_selection: effective_selection.clone(),
+                },
+            ),
+            (
                 "a session id that is not one",
                 ControlAction::Prepare {
                     action_id: action_id.clone(),
@@ -12579,6 +12902,29 @@ mod tests {
         ] {
             assert!(!believable(&action), "{case}");
         }
+
+        let mut invalid_selection = effective_selection;
+        invalid_selection.height = crate::transcode::MAX_HEIGHT + 1;
+        let invalid_nested = ControlAction::Prepare {
+            action_id,
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
+            media_origin_ms,
+            effective_selection: invalid_selection,
+        };
+        assert!(
+            !believable(&invalid_nested),
+            "the nested prepared selection crosses the same trust boundary",
+        );
+
+        let local_selection = prepared_selection();
+        assert!(prepared_payload_is_valid(
+            None,
+            &session_id,
+            &format!("/api/v1/hls/{session_id}/index.m3u8"),
+            media_origin_ms,
+            &local_selection,
+        ));
     }
 
     /// A client that never declared the vocabulary is never handed one.
@@ -12818,13 +13164,14 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                Some(ClientPlatform::Web),
+                ControlAcceptance::new(Some(ClientPlatform::Web), None),
             ),
             Ok((
                 ControlDisposition::Accepted,
                 1,
                 ControlAction::None,
                 ClientPlatform::Web,
+                false,
             ))
         );
         assert_eq!(
@@ -12834,13 +13181,14 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Ok((
                 ControlDisposition::Replay,
                 1,
                 ControlAction::None,
                 ClientPlatform::Web,
+                false,
             ))
         );
         assert_eq!(
@@ -12850,7 +13198,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 0,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Err(ControlStateError::StaleSequence)
         );
@@ -12861,9 +13209,299 @@ mod tests {
                 1,
                 &uuid::Uuid::new_v4().to_string(),
                 2,
-                Some(ClientPlatform::Apple),
+                ControlAcceptance::new(Some(ClientPlatform::Apple), None),
             ),
             Err(ControlStateError::StaleClient)
+        );
+    }
+
+    #[test]
+    fn a_prepared_successor_gets_one_action_identity_and_replays_it_exactly() {
+        let request = request();
+        let mut state = ControlState::default();
+        let started = Instant::now();
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        assert!(state.stage_preparation(
+            staged_incarnation_id.clone(),
+            request.generation.clone(),
+            i64::MAX,
+        ));
+        let prepared_session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id,
+            deadline_ms: i64::MAX,
+            session_id: prepared_session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{prepared_session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+
+        let accepted = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor)),
+            )
+            .expect("accepted preparation action");
+        let ControlAction::Prepare { action_id, .. } = &accepted.2 else {
+            panic!("the occupied preparation slot must announce its successor");
+        };
+        assert!(uuid::Uuid::parse_str(action_id).is_ok());
+
+        let replay = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::unavailable(None),
+            )
+            .expect("exact replay");
+        assert_eq!(replay.0, ControlDisposition::Replay);
+        assert_eq!(
+            replay.2, accepted.2,
+            "a missed row read cannot alter a replay"
+        );
+
+        let next = state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(None, Some(&successor)),
+            )
+            .expect("next accepted exchange");
+        assert_eq!(
+            next.2, accepted.2,
+            "a failed authority lookup never called the actor, so recovery on the next accepted sequence must reuse the staging's action id",
+        );
+
+        let suppressed = state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL * 2,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                3,
+                ControlAcceptance::new(None, None),
+            )
+            .expect("client omits transaction vocabulary");
+        assert_eq!(suppressed.2, ControlAction::None);
+        assert!(suppressed.4);
+
+        let restored = state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL * 3,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                4,
+                ControlAcceptance::new(None, Some(&successor)),
+            )
+            .expect("client declares transaction vocabulary again");
+        assert_eq!(
+            restored.2, accepted.2,
+            "skipping the Store read for an undeclared action must preserve its stable identity",
+        );
+    }
+
+    #[test]
+    fn vocabulary_is_frozen_for_the_sequence_that_was_accepted() {
+        let request = request();
+        let mut state = ControlState::default();
+        let started = Instant::now();
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        assert!(state.stage_preparation(
+            staged_incarnation_id.clone(),
+            request.generation.clone(),
+            i64::MAX,
+        ));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id,
+            deadline_ms: i64::MAX,
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+
+        let unsupported = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), None),
+            )
+            .expect("unsupported request accepted");
+        assert_eq!(unsupported.2, ControlAction::None);
+        assert!(
+            unsupported.4,
+            "the transaction was suppressed by vocabulary"
+        );
+
+        let changed_retry = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(None, Some(&successor)),
+            )
+            .expect("same sequence replays");
+        assert_eq!(changed_retry.0, ControlDisposition::Replay);
+        assert_eq!(changed_retry.2, ControlAction::None);
+        assert!(changed_retry.4);
+    }
+
+    #[test]
+    fn a_changed_payload_cannot_consume_the_next_sequence() {
+        let request = request();
+        let mut state = ControlState::default();
+        let started = Instant::now();
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        assert!(state.stage_preparation(
+            staged_incarnation_id.clone(),
+            request.generation.clone(),
+            i64::MAX,
+        ));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id,
+            deadline_ms: i64::MAX,
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+        let accepted = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor)),
+            )
+            .expect("first action");
+
+        let mut corrupted = successor.clone();
+        corrupted.media_origin_ms += 1;
+        assert_eq!(
+            state.accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(None, Some(&corrupted)),
+            ),
+            Err(ControlStateError::Unavailable),
+        );
+        let recovered = state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(None, Some(&successor)),
+            )
+            .expect("the rejected payload did not consume sequence two");
+        assert_eq!(recovered.0, ControlDisposition::Accepted);
+        assert_eq!(recovered.1, 2);
+        assert_eq!(recovered.2, accepted.2);
+    }
+
+    #[test]
+    fn owner_epoch_rollover_preserves_one_action_id_for_one_staging() {
+        let request = request();
+        let mut state = ControlState::default();
+        let started = Instant::now();
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        assert!(state.stage_preparation(
+            staged_incarnation_id.clone(),
+            request.generation.clone(),
+            i64::MAX,
+        ));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id,
+            deadline_ms: i64::MAX,
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+        let first = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor)),
+            )
+            .expect("epoch-one action");
+        let next_client = uuid::Uuid::new_v4().to_string();
+        let rolled = state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                2,
+                &next_client,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Apple), Some(&successor)),
+            )
+            .expect("epoch-two action");
+        assert_eq!(rolled.2, first.2);
+    }
+
+    #[test]
+    fn an_expired_preparation_cannot_cross_the_acceptance_boundary() {
+        let request = request();
+        let mut state = ControlState::default();
+        let started = Instant::now();
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        assert!(state.stage_preparation(
+            staged_incarnation_id.clone(),
+            request.generation.clone(),
+            10_000,
+        ));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id,
+            deadline_ms: 10_000,
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+
+        let outcome = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    .at_unix_ms(10_000),
+            )
+            .expect("sequence itself is valid");
+        assert_eq!(outcome.2, ControlAction::None);
+        assert!(
+            !outcome.4,
+            "expiry is authority loss, not vocabulary suppression"
         );
     }
 
@@ -12879,7 +13517,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                Some(ClientPlatform::Web),
+                ControlAcceptance::new(Some(ClientPlatform::Web), None),
             )
             .expect("epoch one");
         state
@@ -12889,7 +13527,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 8,
-                None,
+                ControlAcceptance::new(None, None),
             )
             .expect("epoch one advance");
         let successor_client = uuid::Uuid::new_v4().to_string();
@@ -12900,13 +13538,14 @@ mod tests {
                 2,
                 &successor_client,
                 1,
-                Some(ClientPlatform::Apple),
+                ControlAcceptance::new(Some(ClientPlatform::Apple), None),
             ),
             Ok((
                 ControlDisposition::Accepted,
                 1,
                 ControlAction::None,
                 ClientPlatform::Apple,
+                false,
             ))
         );
         assert_eq!(
@@ -12916,7 +13555,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 9,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Err(ControlStateError::OwnerChanged)
         );
@@ -12934,7 +13573,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 2,
-                Some(ClientPlatform::Web),
+                ControlAcceptance::new(Some(ClientPlatform::Web), None),
             ),
             Err(ControlStateError::StaleSequence)
         );
@@ -12945,7 +13584,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                Some(ClientPlatform::Web),
+                ControlAcceptance::new(Some(ClientPlatform::Web), None),
             )
             .expect("first sequence");
         assert!(matches!(
@@ -12955,7 +13594,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 2,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Err(ControlStateError::RateLimited(_))
         ));
@@ -12966,13 +13605,14 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 2,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Ok((
                 ControlDisposition::Accepted,
                 2,
                 ControlAction::None,
                 ClientPlatform::Web,
+                false,
             ))
         );
     }
@@ -12989,7 +13629,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                None,
+                ControlAcceptance::new(None, None),
             ),
             Err(ControlStateError::StaleClient)
         );
@@ -13000,7 +13640,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                Some(ClientPlatform::Web),
+                ControlAcceptance::new(Some(ClientPlatform::Web), None),
             )
             .expect("capability snapshot");
         assert_eq!(
@@ -13010,7 +13650,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 2,
-                Some(ClientPlatform::Apple),
+                ControlAcceptance::new(Some(ClientPlatform::Apple), None),
             ),
             Err(ControlStateError::StaleClient)
         );
@@ -13035,6 +13675,7 @@ mod tests {
             client_instance_id: request.client_instance_id.clone(),
             sequence: request.sequence,
             snapshot: PlaybackDemandSnapshot::from(request),
+            prepared_successor: PreparedSuccessorObservation::NotRequested,
         }
     }
 
@@ -13398,7 +14039,11 @@ mod tests {
         let started = Instant::now();
         let mut actor =
             RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
-        assert!(actor.stage_preparation("successor-1".to_owned(), "current-1".to_owned()));
+        assert!(actor.stage_preparation(
+            "successor-1".to_owned(),
+            "current-1".to_owned(),
+            i64::MAX,
+        ));
         (actor, started)
     }
 
@@ -13410,7 +14055,7 @@ mod tests {
         let handle = RollingControlHandle::spawn("session-start");
         assert!(
             handle
-                .stage_preparation("successor-1".to_owned(), "current-1".to_owned())
+                .stage_preparation("successor-1".to_owned(), "current-1".to_owned(), i64::MAX)
                 .await
         );
         assert!(handle.may_commit_preparation("successor-1").await);
@@ -13418,10 +14063,68 @@ mod tests {
             !handle.may_commit_preparation("successor-2").await,
             "a stale executor must not be told it may commit"
         );
+
+        let request = request();
+        let prepared_session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id: "successor-1".to_owned(),
+            deadline_ms: i64::MAX,
+            session_id: prepared_session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{prepared_session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+        let accepted = handle
+            .control(LocalControlRequest {
+                session_id: "unused",
+                generation: &request.generation,
+                owner_node_id: "node-a",
+                owner_epoch: request.control_epoch,
+                client_instance_id: &request.client_instance_id,
+                sequence: request.sequence,
+                snapshot: PlaybackDemandSnapshot::from(&request),
+                prepared_successor: PreparedSuccessorObservation::Ready(successor),
+            })
+            .await
+            .expect("rolling actor accepts the preparation");
+        assert!(matches!(accepted.action, ControlAction::Prepare { .. }));
+        let replay = handle
+            .control(LocalControlRequest {
+                session_id: "unused",
+                generation: &request.generation,
+                owner_node_id: "node-a",
+                owner_epoch: request.control_epoch,
+                client_instance_id: &request.client_instance_id,
+                sequence: request.sequence,
+                snapshot: PlaybackDemandSnapshot::from(&request),
+                prepared_successor: PreparedSuccessorObservation::Unavailable,
+            })
+            .await
+            .expect("rolling actor replays the preparation");
+        assert_eq!(replay.disposition, ControlDisposition::Replay);
+        assert_eq!(replay.action, accepted.action);
+
+        assert_eq!(
+            handle
+                .control(LocalControlRequest {
+                    session_id: "unused",
+                    generation: &request.generation,
+                    owner_node_id: "node-a",
+                    owner_epoch: request.control_epoch,
+                    client_instance_id: &request.client_instance_id,
+                    sequence: request.sequence,
+                    snapshot: PlaybackDemandSnapshot::from(&request),
+                    prepared_successor: PreparedSuccessorObservation::NotRequested,
+                })
+                .await,
+            Err(ControlStateError::Unavailable),
+            "a retry cannot remove the vocabulary that accepted the transaction",
+        );
+
         assert!(handle.settle_preparation("successor-1", true).await);
         assert!(
             handle
-                .stage_preparation("successor-2".to_owned(), "successor-1".to_owned())
+                .stage_preparation("successor-2".to_owned(), "successor-1".to_owned(), i64::MAX,)
                 .await,
             "a committed successor frees the slot for the next preparation"
         );
@@ -13437,7 +14140,7 @@ mod tests {
         let handle = RollingControlHandle::spawn("session-start");
         assert!(
             handle
-                .stage_preparation("successor-1".to_owned(), "current-1".to_owned())
+                .stage_preparation("successor-1".to_owned(), "current-1".to_owned(), i64::MAX,)
                 .await
         );
         assert!(handle.settle_preparation("successor-1", false).await);
@@ -13447,7 +14150,7 @@ mod tests {
         );
         assert!(
             handle
-                .stage_preparation("successor-2".to_owned(), "current-1".to_owned())
+                .stage_preparation("successor-2".to_owned(), "current-1".to_owned(), i64::MAX,)
                 .await
         );
         handle.abort_actor_for_test();
@@ -13460,7 +14163,7 @@ mod tests {
         let handle = RollingControlHandle::spawn("session-start");
         assert!(
             handle
-                .stage_preparation("successor-1".to_owned(), "current-1".to_owned())
+                .stage_preparation("successor-1".to_owned(), "current-1".to_owned(), i64::MAX,)
                 .await
         );
         assert!(handle.may_commit_preparation("successor-1").await);
@@ -13482,7 +14185,11 @@ mod tests {
     #[test]
     fn the_slot_holds_one_successor_and_refuses_a_competitor() {
         let (mut actor, _) = staged_actor();
-        assert!(!actor.stage_preparation("successor-2".to_owned(), "current-1".to_owned()));
+        assert!(!actor.stage_preparation(
+            "successor-2".to_owned(),
+            "current-1".to_owned(),
+            i64::MAX,
+        ));
         assert_eq!(
             actor.control.preparation.staged_incarnation_id(),
             Some("successor-1")
@@ -13569,7 +14276,11 @@ mod tests {
             }
             assert!(actor.settle_preparation("successor-1"));
             assert_eq!(actor.control.preparation, PreparationSlot::Empty);
-            assert!(actor.stage_preparation("successor-2".to_owned(), "current-1".to_owned()));
+            assert!(actor.stage_preparation(
+                "successor-2".to_owned(),
+                "current-1".to_owned(),
+                i64::MAX,
+            ));
         }
     }
 
@@ -13983,6 +14694,7 @@ mod tests {
             client_instance_id: &end.client_instance_id,
             sequence: end.sequence,
             snapshot: PlaybackDemandSnapshot::from(&end),
+            prepared_successor: PreparedSuccessorObservation::NotRequested,
         };
 
         let accepted = handle.control(local()).await.expect("accepted end");
@@ -14016,6 +14728,7 @@ mod tests {
                     client_instance_id: &active_same_sequence.client_instance_id,
                     sequence: active_same_sequence.sequence,
                     snapshot: PlaybackDemandSnapshot::from(&active_same_sequence),
+                    prepared_successor: PreparedSuccessorObservation::NotRequested,
                 })
                 .await,
             Err(ControlStateError::SessionEnded),
@@ -14034,6 +14747,7 @@ mod tests {
                     client_instance_id: &end.client_instance_id,
                     sequence: end.sequence,
                     snapshot: PlaybackDemandSnapshot::from(&end),
+                    prepared_successor: PreparedSuccessorObservation::NotRequested,
                 })
                 .await,
             Err(ControlStateError::SessionEnded),
@@ -15737,6 +16451,7 @@ mod tests {
                 client_instance_id: &request.client_instance_id,
                 sequence: request.sequence,
                 snapshot: PlaybackDemandSnapshot::from(&request),
+                prepared_successor: PreparedSuccessorObservation::NotRequested,
             })
             .await
             .expect("post-deadline control remains compatibility-passive");
@@ -16494,6 +17209,7 @@ mod tests {
                 client_instance_id: &request.client_instance_id,
                 sequence: request.sequence,
                 snapshot: PlaybackDemandSnapshot::from(&request),
+                prepared_successor: PreparedSuccessorObservation::NotRequested,
             })
             .await
             .expect("explicit mode accepted");
@@ -16614,6 +17330,7 @@ mod tests {
             client_instance_id: &request.client_instance_id,
             sequence: request.sequence,
             snapshot: PlaybackDemandSnapshot::from(&request),
+            prepared_successor: PreparedSuccessorObservation::NotRequested,
         });
         drop(never_polled);
         assert_eq!(
@@ -16643,6 +17360,7 @@ mod tests {
                 client_instance_id: &request.client_instance_id,
                 sequence: request.sequence,
                 snapshot: PlaybackDemandSnapshot::from(&request),
+                prepared_successor: PreparedSuccessorObservation::NotRequested,
             })
             .await
             .expect("request remains admissible");
@@ -16705,6 +17423,7 @@ mod tests {
                 client_instance_id: &end.client_instance_id,
                 sequence: end.sequence,
                 snapshot: PlaybackDemandSnapshot::from(&end),
+                prepared_successor: PreparedSuccessorObservation::NotRequested,
             })
             .await
             .expect("lost terminal response is exactly replayable");
@@ -16991,6 +17710,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn suppressed_action_help_describes_every_action_transaction() {
+        assert!(prometheus().contains(
+            "# HELP plurx_playback_control_actions_suppressed_total Exchanges where an action transaction was available but the client had not declared its vocabulary, so it was told nothing."
+        ));
+    }
+
     /// `Unchanged` is not an outcome, and recording it would put a bar
     /// labelled "nothing to do" beside four that mean something.
     ///
@@ -17053,9 +17779,9 @@ mod tests {
     /// The counterfactual reaches the two rules the client gate hides, and
     /// that is the whole reason it exists.
     ///
-    /// Both shipped clients hardcode `dual_player_preparation` false, so on
-    /// today's fleet every single-axis transition books
-    /// `client_cannot_prepare` — which is true, and says nothing about whether
+    /// Web and Android still report `dual_player_preparation=false`, so their
+    /// single-axis transitions book `client_cannot_prepare` — which is true,
+    /// and says nothing about whether
     /// `PREPARED_AXIS_SETS` and the throughput floor would then refuse anyway. The
     /// first production datapoint (m6, 2026-09-02) read exactly that.
     #[test]
@@ -18593,7 +19319,11 @@ mod tests {
         );
         assert!(
             control
-                .stage_preparation(uuid::Uuid::new_v4().to_string(), successor.clone())
+                .stage_preparation(
+                    uuid::Uuid::new_v4().to_string(),
+                    successor.clone(),
+                    i64::MAX,
+                )
                 .await,
             "the slot is free again, so the next preparation can take it",
         );
@@ -18704,7 +19434,7 @@ mod tests {
         assert_eq!(abandoned.terminal_reason.as_deref(), Some("replaced"));
         assert!(
             control
-                .stage_preparation(uuid::Uuid::new_v4().to_string(), winner)
+                .stage_preparation(uuid::Uuid::new_v4().to_string(), winner, i64::MAX)
                 .await,
             "and the actor's slot with it",
         );
@@ -18763,7 +19493,7 @@ mod tests {
         let replacement = uuid::Uuid::new_v4().to_string();
         assert!(
             control
-                .stage_preparation(replacement.clone(), predecessor)
+                .stage_preparation(replacement.clone(), predecessor, i64::MAX)
                 .await,
             "the slot is free, so the next preparation can take it",
         );
