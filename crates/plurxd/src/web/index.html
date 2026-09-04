@@ -1032,7 +1032,7 @@
   .cluster-health{display:grid;grid-template-columns:minmax(260px,1.7fr) repeat(3,minmax(105px,.55fr));gap:12px;align-items:stretch}
   .cluster-health>.clstate{margin:0}
   .clmetric{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px;display:flex;flex-direction:column;justify-content:center}
-  .clmetric strong{font-size:20px;line-height:1.15;color:var(--text)}
+  .clmetric strong{font-size:20px;line-height:1.15;color:var(--text);min-width:0;overflow-wrap:anywhere}
   .clmetric span{margin-top:5px;color:var(--muted);font-size:11px;line-height:1.35}
   .cluster-main{display:grid;gap:16px}
   /* Two components, two columns. The store never shares a card with the
@@ -1250,7 +1250,7 @@
      "Subtitles" is the longest label, and wrapping it reads as a broken row. */
   .specs{display:grid;grid-template-columns:84px minmax(0,1fr);gap:5px 14px;font-size:13px;margin:8px 0 0}
   .specs dt{color:var(--muted)}
-  .specs dd{margin:0;color:var(--text);min-width:0}
+  .specs dd{margin:0;color:var(--text);min-width:0;overflow-wrap:anywhere}
   .specs .fn{color:var(--muted);font-size:12px;word-break:break-all}
   /* Track facts: one chip per audio/subtitle track, with the track the server
      would select marked. The marker is words and not only a colour — "plays by
