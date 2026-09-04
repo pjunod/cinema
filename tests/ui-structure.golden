@@ -116,7 +116,7 @@ catalog|activity@1280x860|focus|007|a.ghost.sm "Open workspace"
 catalog|activity@1280x860|focus|008|button.ghost.sm "Settings"
 catalog|activity@1280x860|focus|009|a "Settings"
 catalog|activity@1280x860|focus|010|<wrap>
-catalog|activity@1280x860|req|GET /api/v1/activity/detail|2
+catalog|activity@1280x860|req|GET /api/v1/activity/detail|1
 catalog|activity@1280x860|req|GET /api/v1/me|1
 catalog|activity@1280x860|req|GET /api/v1/server|1
 catalog|activity@390x780|dom|^ > div#app|1
@@ -202,7 +202,7 @@ catalog|activity@390x780|focus|008|button.px-tab "Libraries"
 catalog|activity@390x780|focus|009|button.px-tab "Search"
 catalog|activity@390x780|focus|010|a.px-tab.on "Activity"
 catalog|activity@390x780|focus|011|<wrap>
-catalog|activity@390x780|req|GET /api/v1/activity/detail|2
+catalog|activity@390x780|req|GET /api/v1/activity/detail|1
 catalog|activity@390x780|req|GET /api/v1/me|1
 catalog|activity@390x780|req|GET /api/v1/server|1
 catalog|analysis@1280x860|dom|^ > div#app|1
@@ -2262,7 +2262,7 @@ classic|activity@1280x860|focus|007|a.ghost.sm "Open workspace"
 classic|activity@1280x860|focus|008|button.ghost.sm "Settings"
 classic|activity@1280x860|focus|009|a "Settings"
 classic|activity@1280x860|focus|010|<wrap>
-classic|activity@1280x860|req|GET /api/v1/activity/detail|2
+classic|activity@1280x860|req|GET /api/v1/activity/detail|1
 classic|activity@1280x860|req|GET /api/v1/me|1
 classic|activity@1280x860|req|GET /api/v1/server|1
 classic|activity@390x780|dom|^ > div#app|1
@@ -2318,7 +2318,7 @@ classic|activity@390x780|focus|007|a.ghost.sm "Open workspace"
 classic|activity@390x780|focus|008|button.ghost.sm "Settings"
 classic|activity@390x780|focus|009|a "Settings"
 classic|activity@390x780|focus|010|<wrap>
-classic|activity@390x780|req|GET /api/v1/activity/detail|2
+classic|activity@390x780|req|GET /api/v1/activity/detail|1
 classic|activity@390x780|req|GET /api/v1/me|1
 classic|activity@390x780|req|GET /api/v1/server|1
 classic|analysis@1280x860|dom|^ > div#app|1
@@ -3869,7 +3869,7 @@ theater|activity@1280x860|focus|007|a.ghost.sm "Open workspace"
 theater|activity@1280x860|focus|008|button.ghost.sm "Settings"
 theater|activity@1280x860|focus|009|a "Settings"
 theater|activity@1280x860|focus|010|<wrap>
-theater|activity@1280x860|req|GET /api/v1/activity/detail|2
+theater|activity@1280x860|req|GET /api/v1/activity/detail|1
 theater|activity@1280x860|req|GET /api/v1/me|1
 theater|activity@1280x860|req|GET /api/v1/server|1
 theater|activity@390x780|dom|^ > div#app|1
@@ -3928,7 +3928,7 @@ theater|activity@390x780|focus|007|a "Home"
 theater|activity@390x780|focus|008|a.on "Activity"
 theater|activity@390x780|focus|009|a "Settings"
 theater|activity@390x780|focus|010|<wrap>
-theater|activity@390x780|req|GET /api/v1/activity/detail|2
+theater|activity@390x780|req|GET /api/v1/activity/detail|1
 theater|activity@390x780|req|GET /api/v1/me|1
 theater|activity@390x780|req|GET /api/v1/server|1
 theater|analysis@1280x860|dom|^ > div#app|1

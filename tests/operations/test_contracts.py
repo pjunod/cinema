@@ -175,6 +175,37 @@ class OperationsContractCase(unittest.TestCase):
             script.index("page.wait_for_timeout(settle_ms)"),
         )
 
+    def test_ui_baseline_records_periodic_route_reads_as_presence_facts(self):
+        contract = runpy.run_path(
+            str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_request_contract"
+        )
+        counted = contract["counted_api_calls"]
+
+        self.assertEqual(
+            counted(
+                "activity",
+                {},
+                ["GET /api/v1/activity/detail"] * 3
+                + ["GET /api/v1/cluster/nodes"],
+            ),
+            {
+                "GET /api/v1/activity/detail": 1,
+                "GET /api/v1/cluster/nodes": 1,
+            },
+        )
+        self.assertEqual(
+            counted(
+                "analysis",
+                {},
+                ["GET /api/v1/analysis/summary"] * 2
+                + ["GET /api/v1/analysis/jobs"] * 2,
+            ),
+            {
+                "GET /api/v1/analysis/jobs": 2,
+                "GET /api/v1/analysis/summary": 1,
+            },
+        )
+
     def test_ui_baseline_pins_vod_index_status_before_seeding_libraries(self):
         script = read("scripts/ui-baseline")
         seed = script.index("    def seed(self):")
