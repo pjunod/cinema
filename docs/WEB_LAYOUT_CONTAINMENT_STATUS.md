@@ -19,6 +19,11 @@ retained by a source-wide static contract and Chromium stress assertions that
 inject both an ordinary long label and genuinely unbroken track and hostname
 tokens.
 
+The sweep also exposed classic's full-bleed hero retaining desktop negative
+margins inside smaller mobile padding, widening the page by six pixels on
+each side. Main and its hero now share inset variables, so their breakpoint
+spacing cannot drift independently.
+
 ## Delivery — one ordinary main-bound pull request
 
 | Stage | State | Evidence |
@@ -48,10 +53,13 @@ tokens.
   merge operations.
 - Run Rust with the installed 1.97.1 toolchain explicitly. The Mac default is
   1.95.0 and is not valid evidence for this repository.
-- Move only the unit execution to a source-only Linux container. The Mac's
+- Initially move unit execution to a source-only Linux container. The Mac's
   FFmpeg links to a removed `libx265.216` and its sandbox refuses local socket
   binds; changing the developer machine would broaden this correction without
   improving the product.
+- Final local qualification uses isolated FFmpeg launch wrappers and explicit
+  toolchain paths; no Homebrew installation is modified. The PR records the
+  current-tree results separately from the historical Linux snapshot.
 
 ## Evidence — commands that must describe the final tree
 
