@@ -652,7 +652,7 @@ partition/owner-transition two-node relay suite · pinned check/Clippy/rustfmt �
 
 ### 8.4 M3 — web Live TV
 
-Add `#/live`, navigation, accessible channel cards, readiness/unsupported
+Add `#/live-tv`, navigation, accessible channel cards, readiness/unsupported
 states, the live-player adapter, HLS startup/status/keepalive, channel switch,
 and cleanup. Extend the UI golden and browser contract tests.
 Open the task PR to the effort, obtain exact-diff adversarial review, implement
@@ -660,8 +660,9 @@ accepted findings, and re-review to Approve before merge. Record every state
 transition in both status pages.
 
 **Focused acceptance:** Node policy/unit tests · UI structure golden ·
-Playwright live fixture, including zero progress/scrobble calls, exactly one
-DELETE on close/switch, and typed recovery after owner loss, producer stall,
+Playwright live fixture, including zero progress/scrobble calls, one confirmed
+release per capability (bounded idempotent DELETE retries after transport failure),
+and typed recovery after owner loss, producer stall,
 capability expiry, and background idle reap.
 
 ### 8.5 M4 — Apple and Android parity

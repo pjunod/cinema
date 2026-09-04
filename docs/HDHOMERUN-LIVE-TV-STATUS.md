@@ -16,8 +16,8 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 | M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
 | M1 device/settings/lineup | merged | [#906](https://github.com/pjunod/plurx/pull/906) | attack-review findings fixed; re-review approved; effort gate passed; merge `b15d241a` |
 | Forgejo main synchronization | Astra approved; fresh gate pending | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | pushed `c4b66e1d`, incorporating main `4ce33f95`; pinned fmt/check/clippy passed |
-| M2 live HLS and cluster relay | Astra approved; focused qualification passed | pending Forgejo PR | candidate `4baf64bb`: 41 Live TV, 1 signature, 2 route and 2 admission regressions passed on Rust 1.97.1 |
-| M3 web client | implementation under Astra review | — | Developer configuration/enable/recovery card, channel browser and separate live player implemented in own worktree; 7 lifecycle and 14 settings tests pass |
+| M2 live HLS and cluster relay | Astra approved; focused qualification passed; gate pending | [#13](http://192.168.4.7:3000/noirr/plurx/pulls/13) | final `3c911018`: pinned fmt/check/clippy, 41 Live TV, 1 signature, 1 Activity, 2 route and 2 admission tests passed |
+| M3 web client | Astra findings closed; browser acceptance pending | — | Developer enable/recovery card and separate live player implemented; 11 Live TV tests plus the complete web static target passed |
 | M4 Apple and Android | not started | — | — |
 | M5 docs, hardware, promotion | not started | — | — |
 
@@ -75,8 +75,9 @@ Homebrew installation was not modified.
 
 Next are the Forgejo effort gates and task merges, then completion of web and
 native clients. Browser PR controls are temporarily unavailable while the Mac
-is locked; source work and compiler checks continue. No authentication bypass
-or credential extraction was attempted.
+is locked. Forgejo's [documented AGit workflow](https://forgejo.org/docs/latest/user/git-cli/agit-support/)
+opened M2 PR #13 through the existing SSH login. Source work and compiler checks
+continue. No authentication bypass or credential extraction was attempted.
 Forgejo is the only mutable remote after the repository migration. Repository
 access is confirmed through the host SSH agent; the supplied deploy key
 remains scoped to node access.

@@ -976,6 +976,8 @@ def discover_routes(base_url, token, args, preferred_library=None, preferred_ite
         "activity": {"hash": "#/activity"},
         "analysis": {"hash": "#/analysis"},
         "settings": {"hash": "#/settings"},
+        "settings-developer": {"hash": "#/settings/developer"},
+        "live-tv": {"hash": "#/live-tv"},
         # No token in localStorage, so `boot()` falls through to the sign-in
         # card. The only route whose container is #app: there is no #main
         # until somebody is signed in.
@@ -1268,6 +1270,22 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     page.on("console", note_console)
     page.on("pageerror", lambda e: problems.append(f"pageerror: {e}"))
 
+    if name == "live-tv":
+        # Layout captures never lease a household tuner. The browser fixture
+        # separately exercises media and session lifecycle.
+        page.route("**/api/v1/live-tv/channels", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps({
+                "freshness": "fresh", "age_seconds": 0, "last_success_at": FROZEN_EPOCH,
+                "channels": [
+                    {"id": "7.1", "guide_number": "7.1", "guide_name": "Local News",
+                     "favorite": True, "drm": False, "support": "ready"},
+                    {"id": "10.2", "guide_number": "10.2", "guide_name": "Public Television",
+                     "favorite": False, "drm": False, "support": "ready"},
+                    {"id": "107.1", "guide_number": "107.1", "guide_name": "Protected Channel",
+                     "favorite": False, "drm": True, "support": "drm_unsupported"},
+                ],
+            })))
+
     # A bare status names the endpoint but not the layer that answered it, and
     # for a 503 that is the whole question: `cluster_capacity_gate` refuses
     # with `node_maintenance` from one slot and `node_removal_fenced` from the
@@ -1321,7 +1339,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # /scan/status calls. The phase is product state, so synchronizing on it
         # preserves the request-count contract without baking a count or an
         # endpoint into this harness.
-        if name in {"home", "activity", "analysis", "settings"}:
+        if name in {"home", "activity", "analysis", "settings", "settings-developer", "live-tv"}:
             page.wait_for_selector(
                 f'{container}[data-phase="settled"]', timeout=args.timeout)
         if activity_poll_paused:

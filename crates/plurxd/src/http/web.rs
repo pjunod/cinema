@@ -26,6 +26,9 @@ const CLUSTER_PANEL_JS: &str = include_str!("../web/cluster-panel.js");
 /// Passive playback-control reporter. It owns exchange sequencing and
 /// coalescing, but deliberately has no authority over playback recovery.
 const PLAYBACK_CONTROL_JS: &str = include_str!("../web/playback-control.js");
+/// Live-TV channel/session lifecycle policy. It serializes tuner changes and
+/// retains capability ownership until release succeeds, independently of DOM rendering.
+const LIVE_TV_JS: &str = include_str!("../web/live-tv.js");
 /// EPUB pagination, locator, and sandbox-frame policy. Kept out of the app
 /// shell so native WebViews can reuse the same navigator in M3.
 const READER_JS: &str = include_str!("../web/reader.js");
@@ -94,6 +97,19 @@ pub async fn playback_control_js() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         PLAYBACK_CONTROL_JS,
+    )
+        .into_response()
+}
+
+/// Serve the browser's unit-tested Live TV lifecycle controller.
+pub async fn live_tv_js() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        LIVE_TV_JS,
     )
         .into_response()
 }
@@ -261,7 +277,7 @@ pub async fn fallback(uri: axum::http::Uri) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{connection_qr_svg, INDEX_HTML, PLAYBACK_POLICY_JS, READER_JS};
+    use super::{connection_qr_svg, INDEX_HTML, LIVE_TV_JS, PLAYBACK_POLICY_JS, READER_JS};
 
     #[test]
     fn app_shell_shows_the_running_build_to_signed_in_and_signed_out_users() {
@@ -338,6 +354,19 @@ mod tests {
         assert!(asset < route);
         assert!(READER_JS.contains("class FrameNavigator"));
         assert!(READER_JS.contains("stripExecutableMarkup"));
+    }
+
+    #[test]
+    fn app_shell_loads_the_live_tv_controller_before_its_route() {
+        let asset = INDEX_HTML
+            .find("/assets/live-tv.js")
+            .expect("Live TV asset");
+        let route = INDEX_HTML
+            .find("async function viewLiveTv")
+            .expect("Live TV route");
+        assert!(asset < route);
+        assert!(LIVE_TV_JS.contains("class Lease"));
+        assert!(LIVE_TV_JS.contains("await this.requests.release(id)"));
     }
 
     #[test]
