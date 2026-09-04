@@ -42,6 +42,10 @@ use crate::ffmpeg::pacing_caps;
 use crate::media_sessions::SessionSettlementGuard;
 use crate::meter::Meter;
 
+/// Namespace below the transcode work root which is owned by the Live TV
+/// lifecycle rather than `TranscodeManager.sessions`.
+pub(crate) const LIVE_TV_WORK_DIR_NAME: &str = "live-tv";
+
 /// Idle timeout after which a session's ffmpeg is killed and its dir removed.
 const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS as u64 / 1_000;
 /// Stable classification for a start that lost a bounded admission wait.
@@ -19739,7 +19743,9 @@ impl TranscodeManager {
         let mut removed = 0usize;
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if live.contains(&path) || !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
+            if entry.file_name() == LIVE_TV_WORK_DIR_NAME
+                || live.contains(&path)
+                || !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
             {
                 continue;
             }
@@ -21488,6 +21494,38 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn orphan_sweep_never_enters_the_live_tv_owned_namespace() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work root");
+        let live_session = work
+            .path()
+            .join(LIVE_TV_WORK_DIR_NAME)
+            .join("live-tv-active");
+        tokio::fs::create_dir_all(&live_session)
+            .await
+            .expect("active Live TV scratch");
+        tokio::fs::write(live_session.join("index.m3u8"), b"active")
+            .await
+            .expect("active playlist");
+        let ordinary_orphan = work.path().join("orphan-vod");
+        tokio::fs::create_dir(&ordinary_orphan)
+            .await
+            .expect("ordinary orphan");
+        let manager = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+
+        assert!(manager.sweep_orphan_dirs().await >= 1);
+        assert!(live_session.join("index.m3u8").is_file());
+        assert!(!ordinary_orphan.exists());
+    }
 
     #[test]
     fn retired_rolling_marker_prewarm_ambiguity_survives_plan_method_drift() {

@@ -22,6 +22,7 @@ use crate::state::AppState;
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(25);
 const START_EXCHANGE_DEADLINE: Duration = Duration::from_secs(19);
 const CONTROL_EXCHANGE_DEADLINE: Duration = Duration::from_secs(5);
+const DRAIN_EXCHANGE_DEADLINE: Duration = Duration::from_secs(20);
 const RESOURCE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(12);
 const MAX_START_RESPONSE_BYTES: usize = 32 * 1024;
 
@@ -94,6 +95,7 @@ pub(crate) async fn start_session(
         capability: provisional.capability.clone(),
         activation_token: provisional.activation_token.clone(),
         config_generation: config.generation,
+        source_serving_generation: ingress_generation,
     };
     let activated = match owner_activate(&state, &config, &activation).await {
         Ok(activated) => activated,
@@ -431,7 +433,7 @@ async fn owner_activate(
     if config.owner_node_id == state.node_id {
         return state
             .live_tv
-            .activate_local(request)
+            .activate_local(request, &state.node_id)
             .await
             .map_err(api_error);
     }
@@ -504,6 +506,12 @@ async fn owner_resource(
             .map_err(api_error);
     }
     let (node_id, base) = owner_peer(state, &owner).await?;
+    let max_body_bytes = match &request {
+        LiveTvResourceRequest::Playlist { .. } => crate::live_tv::MAX_PLAYLIST_BYTES,
+        LiveTvResourceRequest::Segment { .. } => crate::live_tv::MAX_SEGMENT_BYTES,
+        LiveTvResourceRequest::Status { .. } => 32 * 1024,
+        LiveTvResourceRequest::Keepalive { .. } => 1024,
+    };
     let body =
         serde_json::to_vec(&request).map_err(|error| ApiError::Internal(error.to_string()))?;
     let response = PeerTransport::new(state.membership.clone())
@@ -530,18 +538,23 @@ async fn owner_resource(
             "The tuner owner could not serve this live resource",
         ));
     }
-    crate::media_sessions::relay_response_with_limits_counted(
+    crate::media_sessions::relay_response_with_limits_counted_bounded(
         response,
         Duration::from_secs(60),
         Duration::from_secs(15),
         state.live_tv.relay_counter(),
+        max_body_bytes,
     )
     .map_err(|error| api_error(peer_error(error)))
 }
 
 async fn owner_stop(state: &AppState, owner: &str, capability: &str) -> Result<(), ApiError> {
     if owner == state.node_id {
-        return state.live_tv.stop_local(capability).map_err(api_error);
+        return state
+            .live_tv
+            .stop_local(capability)
+            .await
+            .map_err(api_error);
     }
     let (node_id, base) = owner_peer(state, owner).await?;
     let body = serde_json::to_vec(&LiveTvStopRequest {
@@ -579,8 +592,7 @@ pub(crate) async fn drain_owner(
     keep_generation: i64,
 ) -> Result<(), LiveTvError> {
     if owner == state.node_id {
-        state.live_tv.drain_stale(keep_generation);
-        return Ok(());
+        return state.live_tv.drain_stale(keep_generation).await.map(|_| ());
     }
     let (node_id, base) = owner_peer(state, owner).await.map_err(|_| {
         LiveTvError::OwnerUnavailable("the prior tuner owner is unreachable".into())
@@ -597,7 +609,7 @@ pub(crate) async fn drain_owner(
             reqwest::Method::POST,
             crate::live_tv::DRAIN_PATH,
             body,
-            deadline_after(CONTROL_EXCHANGE_DEADLINE),
+            deadline_after(DRAIN_EXCHANGE_DEADLINE),
             4 * 1024,
             PeerAuthMode::ExactRequest,
         )

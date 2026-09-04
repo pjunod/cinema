@@ -610,7 +610,6 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | crate::media_sessions::CONTROL_PATH
                 | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
-                | crate::live_tv::DRAIN_PATH
         )
     {
         return true;
@@ -1076,6 +1075,16 @@ mod tests {
             (Method::POST, "/api/v1/files/8/decision"),
             (Method::POST, "/api/v1/hls/session-8/control"),
             (Method::DELETE, "/api/v1/hls/session-8"),
+            (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
+            (
+                Method::GET,
+                "/api/v1/live-tv/sessions/cap/segment-000001.ts",
+            ),
+            (Method::GET, "/api/v1/live-tv/sessions/cap/status"),
+            (Method::PUT, "/api/v1/live-tv/sessions/cap/keepalive"),
+            (Method::DELETE, "/api/v1/live-tv/sessions/cap"),
+            (Method::POST, crate::live_tv::RESOURCE_PATH),
+            (Method::POST, crate::live_tv::STOP_PATH),
             (Method::POST, crate::media_sessions::START_PATH),
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
@@ -1131,6 +1140,16 @@ mod tests {
             (Method::DELETE, "/api/v1/hls/session"),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
+            (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
+            (
+                Method::GET,
+                "/api/v1/live-tv/sessions/cap/segment-000001.ts",
+            ),
+            (Method::GET, "/api/v1/live-tv/sessions/cap/status"),
+            (Method::PUT, "/api/v1/live-tv/sessions/cap/keepalive"),
+            (Method::DELETE, "/api/v1/live-tv/sessions/cap"),
+            (Method::POST, crate::live_tv::RESOURCE_PATH),
+            (Method::POST, crate::live_tv::STOP_PATH),
         ] {
             assert!(maintenance_route_eligible(&method, path), "{method} {path}");
         }
@@ -1150,6 +1169,9 @@ mod tests {
             (Method::GET, "/api/v1/live-tv/channels"),
             (Method::POST, "/api/v1/live-tv/readiness/refresh"),
             (Method::POST, crate::live_tv::SNAPSHOT_PATH),
+            (Method::POST, crate::live_tv::START_PATH),
+            (Method::POST, crate::live_tv::ACTIVATE_PATH),
+            (Method::POST, crate::live_tv::DRAIN_PATH),
             (Method::POST, "/api/v1/cluster/join-tokens"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
             (Method::POST, "/api/v1/libraries"),

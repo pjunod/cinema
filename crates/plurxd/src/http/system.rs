@@ -2147,6 +2147,7 @@ pub async fn update_settings(
             values,
             candidate.enabled,
             candidate.owner_node_id,
+            current.owner_node_id,
         ))
     } else if req.live_tv_config_generation.is_some() {
         return Err(ApiError::BadRequest(
@@ -2533,7 +2534,17 @@ pub async fn update_settings(
             .collect::<Vec<_>>();
         state.store.put_settings(&borrowed).await?;
     }
-    if let Some((expected_generation, values, enabling, owner_node_id)) = &live_tv_update {
+    if let Some((expected_generation, values, enabling, owner_node_id, prior_owner_node_id)) =
+        &live_tv_update
+    {
+        // A previous disable whose response was lost may still be settling on
+        // the old owner. Before changing owner/configuration or re-enabling,
+        // prove that every generation except the currently stored one is
+        // physically gone. This is safe before the CAS: current-generation
+        // sessions remain untouched until a disabling commit fences them.
+        super::live_tv::drain_owner(&state, prior_owner_node_id, *expected_generation)
+            .await
+            .map_err(super::live_tv::api_error)?;
         let borrowed = values
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
@@ -2566,15 +2577,14 @@ pub async fn update_settings(
             ));
         }
         let next_generation = expected_generation.saturating_add(1);
-        if let Err(error) =
-            super::live_tv::drain_owner(&state, owner_node_id, next_generation).await
-        {
-            // The committed configuration is already the authoritative fence;
-            // every owner-side worker polls it. This signed drain collapses
-            // the ordinary path to immediate cancellation, while a partition
-            // still fails closed through serving authority and generation.
-            tracing::warn!(%error, owner = %owner_node_id, "live-TV owner drain will converge through its generation fence");
-        }
+        // Do not acknowledge the mutation until the previous owner's tuner,
+        // FFmpeg child, scratch, and admission permits are confirmed released.
+        // If this fails the CAS is already authoritative, but returning an
+        // error prevents an operator or automation from treating the drain as
+        // complete and immediately moving ownership again.
+        super::live_tv::drain_owner(&state, prior_owner_node_id, next_generation)
+            .await
+            .map_err(super::live_tv::api_error)?;
     }
     if let Some(seconds) = req.subtitle_window_secs {
         state

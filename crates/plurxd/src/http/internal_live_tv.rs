@@ -63,12 +63,23 @@ pub(crate) async fn start(
     if let Err(status) = require_start_authority(&state).await {
         return status.into_response();
     }
-    if let Err(status) = authorize(&state, &headers, &body, START_PATH).await {
-        return status.into_response();
-    }
     let request = match serde_json::from_slice::<LiveTvStartRequest>(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if let Err(status) = authorize_voter(
+        &state,
+        &headers,
+        &body,
+        START_PATH,
+        Some(&request.source_node_id),
+    )
+    .await
+    {
+        return status.into_response();
+    }
+    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match state.live_tv.start_local(request).await {
         Ok(response) => Json(response).into_response(),
@@ -84,14 +95,18 @@ pub(crate) async fn activate(
     if let Err(status) = require_start_authority(&state).await {
         return status.into_response();
     }
-    if let Err(status) = authorize(&state, &headers, &body, ACTIVATE_PATH).await {
-        return status.into_response();
-    }
     let request = match serde_json::from_slice::<LiveTvActivateRequest>(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    match state.live_tv.activate_local(&request).await {
+    let signer = match authorize_voter(&state, &headers, &body, ACTIVATE_PATH, None).await {
+        Ok(signer) => signer,
+        Err(status) => return status.into_response(),
+    };
+    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match state.live_tv.activate_local(&request, &signer).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => wire_error(error),
     }
@@ -129,6 +144,7 @@ pub(crate) async fn stop(
     state
         .live_tv
         .stop_local(&request.capability)
+        .await
         .map_err(error_status)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -138,13 +154,17 @@ pub(crate) async fn drain(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    authorize(&state, &headers, &body, DRAIN_PATH).await?;
     let request =
         serde_json::from_slice::<LiveTvDrainRequest>(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    authorize_voter(&state, &headers, &body, DRAIN_PATH, None).await?;
     if request.expected_owner_node_id != state.node_id {
         return Err(StatusCode::CONFLICT);
     }
-    let drained = state.live_tv.drain_stale(request.keep_generation);
+    let drained = state
+        .live_tv
+        .drain_stale(request.keep_generation)
+        .await
+        .map_err(error_status)?;
     Ok(Json(serde_json::json!({ "drained": drained })))
 }
 
@@ -208,6 +228,29 @@ async fn authorize(
         .unwrap_or(false)
     {
         Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+async fn authorize_voter(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &[u8],
+    path: &str,
+    expected_signer: Option<&str>,
+) -> Result<String, StatusCode> {
+    let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    if expected_signer.is_some_and(|expected| expected != auth.node_id) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if state
+        .membership
+        .authorize_internal_peer_voter_request(&auth, "POST", path, body)
+        .await
+        .unwrap_or(false)
+    {
+        Ok(auth.node_id)
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }

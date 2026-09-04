@@ -1,6 +1,6 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** M2 qualified, publishing · **Effort:** `effort/hdhomerun-live-tv` ·
+**Status:** M2 adversarial fixes in qualification · **Effort:** `effort/hdhomerun-live-tv` ·
 **Updated:** 2026-09-04 · **Historical issue:**
 [#902](https://github.com/pjunod/plurx/issues/902)
 
@@ -15,12 +15,12 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 |---|---|---|---|
 | M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
 | M1 device/settings/lineup | merged | [#906](https://github.com/pjunod/plurx/pull/906) | attack-review findings fixed; re-review approved; effort gate passed; merge `b15d241a` |
-| M2 live HLS and cluster relay | qualified; publishing | pending Forgejo PR | Rust 1.97.1 workspace check/clippy, no-default compile, 22 Live TV, 2 route-matrix, and 2 foreground-admission tests pass at `dd528728` |
-| M3 web client | not started | — | — |
+| M2 live HLS and cluster relay | adversarial fixes in qualification | pending Forgejo PR | first review found 11 lifecycle, fencing, relay, and proof gaps; fixes are implemented and 30 focused Live TV tests pass locally |
+| M3 web client | implementation staged | — | controller and browser tests are ready to resume after the M2 review closes |
 | M4 Apple and Android | not started | — | — |
 | M5 docs, hardware, promotion | not started | — | — |
 
-## Current work — qualify and review M2
+## Current work — close the M2 adversarial review
 
 M0 and M1 are merged to the effort. M2 now has the always-compiled foreground
 admission path, one-open tuner-to-FFmpeg pump, bounded six-segment live HLS
@@ -30,11 +30,21 @@ timeouts, activity, and metrics. Playback remains runtime-disabled until an
 administrator follows the safety checklist in Settings → Developer; there is
 no Cargo feature or build variant to unlock.
 
-The exact source-only Rust 1.97.1 loop passes. Next is the Forgejo task PR,
-effort gate, exact-diff adversarial review, fixes, re-review, and merge.
-Forgejo is the only mutable remote after the repository migration; its
-deploy-key authorization is currently the publishing blocker, not an
-implementation blocker.
+The first exact-diff adversarial review rejected M2 with 11 findings. The
+working fix now reserves Live TV's scratch namespace from the finite-media
+sweeper, gives Live TV restart/shutdown/owner-transition drains a confirmed
+physical-cleanup boundary, limits tuner creation to committed voters, binds
+activation to its source and serving generation, publishes playlist bytes and
+their segment inventory atomically, bounds local and relayed resource reads,
+sanitizes transport logs, corrects metrics, and deinterlaces only interlaced
+frames. A new loopback fixture proves one tuner GET through HLS publication,
+activation, byte serving, and process/socket/scratch/registry cleanup.
+
+Next is the exact Rust 1.97.1 source-only loop, focused route/relay tests, an
+exact-head adversarial re-review, and the task merge. Forgejo is the only
+mutable remote after the repository migration. Repository access is now
+confirmed through the host SSH agent; the supplied deploy key remains scoped
+to node access.
 
 ## Evidence — exact commands and trees
 
@@ -54,6 +64,8 @@ implementation blocker.
 | 2026-09-04 | working M2 tree | focused route and foreground-admission tests | 4 passed; maintenance/learner routing and cancellation-safe live admission proved |
 | 2026-09-04 | working M2 tree | default clippy and no-default check | passed; Live TV is present in both builds |
 | 2026-09-04 | `dd528728` archive `a2d9da92…b4304f02` | exact Rust 1.97.1 source-only loop | format, workspace check, workspace clippy `-D warnings`, no-default compile, 22 Live TV, 2 route-matrix, and 2 admission tests passed |
+| 2026-09-04 | M2 adversarial review at `5637efba` | correctness, security, lifecycle, and test attack review | changes requested: 1 critical, 4 high, and 6 medium findings; merge held |
+| 2026-09-04 | current adversarial-fix tree | `cargo test -p plurxd live_tv -- --nocapture` | 30 passed, including the one-GET fake-tuner/fake-FFmpeg lifecycle, source-generation binding, and confirmed cleanup fixture |
 
 ## Decisions made while the owner is away
 

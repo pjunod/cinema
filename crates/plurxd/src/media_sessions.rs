@@ -2623,14 +2623,16 @@ pub(crate) fn relay_response_with_limits(
         None,
         None,
         None,
+        None,
     )
 }
 
-pub(crate) fn relay_response_with_limits_counted(
+pub(crate) fn relay_response_with_limits_counted_bounded(
     response: reqwest::Response,
     max_lifetime: Duration,
     no_progress_timeout: Duration,
     relayed_bytes: Arc<std::sync::atomic::AtomicU64>,
+    max_body_bytes: u64,
 ) -> Result<Response<Body>, PeerTransportError> {
     relay_response_with_limits_observed(
         response,
@@ -2639,6 +2641,7 @@ pub(crate) fn relay_response_with_limits_counted(
         None,
         None,
         Some(relayed_bytes),
+        Some(max_body_bytes),
     )
 }
 
@@ -2694,7 +2697,15 @@ fn relay_response_with_limits_observed(
     completion: Option<tokio::sync::oneshot::Sender<()>>,
     upstream_pulls: Option<Arc<std::sync::atomic::AtomicUsize>>,
     relayed_bytes: Option<Arc<std::sync::atomic::AtomicU64>>,
+    max_body_bytes: Option<u64>,
 ) -> Result<Response<Body>, PeerTransportError> {
+    if max_body_bytes.is_some_and(|limit| {
+        response
+            .content_length()
+            .is_some_and(|declared| declared > limit)
+    }) {
+        return Err(PeerTransportError::InvalidResponse);
+    }
     let status = StatusCode::from_u16(response.status().as_u16())
         .map_err(|_| PeerTransportError::InvalidResponse)?;
     let mut builder = Response::builder().status(status);
@@ -2728,6 +2739,7 @@ fn relay_response_with_limits_observed(
     tokio::spawn(async move {
         let _completion = RelayPumpCompletion(completion);
         let fail = |kind, message: String| pump_terminal.fail(kind, message);
+        let mut body_bytes = 0_u64;
         loop {
             // Reserve bounded downstream capacity before asking reqwest for
             // another chunk. This keeps the complete relay allocation at the
@@ -2788,6 +2800,14 @@ fn relay_response_with_limits_observed(
                 }
                 None => return,
             };
+            body_bytes = body_bytes.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            if max_body_bytes.is_some_and(|limit| body_bytes > limit) {
+                fail(
+                    io::ErrorKind::InvalidData,
+                    "relayed media response exceeded its byte ceiling".to_owned(),
+                );
+                return;
+            }
             if let Some(total) = relayed_bytes.as_ref() {
                 total.fetch_add(
                     u64::try_from(bytes.len()).unwrap_or(u64::MAX),
@@ -7481,6 +7501,7 @@ mod tests {
             Some(settled_tx),
             Some(Arc::clone(&upstream_pulls)),
             None,
+            None,
         )
         .expect("build independently pumped relay");
 
@@ -7507,6 +7528,80 @@ mod tests {
         };
         assert!(chunks <= RELAY_BODY_CHANNEL_CAPACITY);
         assert!(error.to_string().contains("total lifetime"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn bounded_relay_rejects_declared_and_chunked_oversize_bodies() {
+        let app = Router::new()
+            .route(
+                "/declared",
+                get(|| async {
+                    Response::builder()
+                        .header(header::CONTENT_LENGTH, "6")
+                        .body(Body::from("123456"))
+                        .expect("declared response")
+                }),
+            )
+            .route(
+                "/chunked",
+                get(|| async {
+                    Body::from_stream(stream::iter([
+                        Ok::<Bytes, Infallible>(Bytes::from_static(b"123")),
+                        Ok::<Bytes, Infallible>(Bytes::from_static(b"456")),
+                    ]))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind bounded relay fixture");
+        let address = listener.local_addr().expect("bounded relay address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve bounded relay fixture");
+        });
+        let client = reqwest::Client::new();
+        let declared = client
+            .get(format!("http://{address}/declared"))
+            .send()
+            .await
+            .expect("declared peer response");
+        assert!(matches!(
+            relay_response_with_limits_observed(
+                declared,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                None,
+                None,
+                None,
+                Some(5),
+            ),
+            Err(PeerTransportError::InvalidResponse)
+        ));
+
+        let chunked = client
+            .get(format!("http://{address}/chunked"))
+            .send()
+            .await
+            .expect("chunked peer response");
+        let response = relay_response_with_limits_observed(
+            chunked,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            None,
+            None,
+            None,
+            Some(5),
+        )
+        .expect("build bounded chunked relay");
+        // HTTP framing may coalesce the source chunks before reqwest exposes
+        // them. Either way, a body whose running total crosses the ceiling
+        // must terminate with the relay's bounded error.
+        let error = axum::body::to_bytes(response.into_body(), 16)
+            .await
+            .expect_err("chunked body crosses the byte ceiling");
+        assert!(error.to_string().contains("byte ceiling"));
         server.abort();
     }
 
@@ -7542,6 +7637,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
             Some(settled_tx),
+            None,
             None,
             None,
         )

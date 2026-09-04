@@ -1445,6 +1445,8 @@ async fn boot(
 
     let progress = Arc::clone(&state.progress);
     let leave_shutdown = state.shutdown.clone();
+    let live_tv_shutdown = Arc::clone(&state.live_tv);
+    let serving_shutdown = state.serving.clone();
     let app = http::router(state);
     let listener = bind_listener(config.server.bind).await?;
     trigger_shutdown_registration_failpoint("after-listener-bind");
@@ -1458,6 +1460,19 @@ async fn boot(
             () = leave_shutdown.cancelled() => {
                 tracing::info!("cluster leave committed, draining");
             }
+        }
+        // Stop new media starts before waiting for tuner/FFmpeg ownership to
+        // settle. The HTTP server remains alive during this short phase so
+        // existing close/resource requests can finish normally.
+        let expires = crate::media_sessions::unix_ms()
+            .saturating_add(10_000)
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let _ = serving_shutdown
+            .begin_restart_preparation_until(expires)
+            .await;
+        if let Err(error) = live_tv_shutdown.shutdown().await {
+            tracing::warn!(%error, "Live TV shutdown could not confirm complete cleanup");
         }
     })
     .await
@@ -2105,6 +2120,9 @@ fn spawn_background_loops(
     tokio::spawn(crate::http::images::materialize_loop(state.clone()));
     tokio::spawn(std::sync::Arc::clone(&state.transcode).rate_control_refresh_loop());
     tokio::spawn(std::sync::Arc::clone(&state.transcode).scratch_space_loop());
+    tokio::spawn(
+        std::sync::Arc::clone(&state.live_tv).scratch_sweep_loop(background_shutdown.clone()),
+    );
     // Reap idle transcode sessions in the background.
     tokio::spawn(std::sync::Arc::clone(&state.transcode).reap_loop());
     tokio::spawn(std::sync::Arc::clone(&state.transcode).vod_maintain_loop());

@@ -783,7 +783,9 @@ impl AppState {
             runtime_cache,
             renditions,
         } = dirs;
-        let live_tv_scratch = transcode_dir.join("live-tv");
+        // The finite-media orphan sweep reserves this child. Only the Live TV
+        // registry can distinguish active tuner scratch from restart debris.
+        let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
         let system = Arc::new(system);
         let jobs = Arc::new(
             JobManager::new_with_scan_prune_percent(

@@ -52,11 +52,15 @@ const CAPABILITY_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const PROVISIONAL_TIMEOUT: Duration = Duration::from_secs(20);
 const SESSION_TICK: Duration = Duration::from_millis(250);
 const ADMISSION_WAIT: Duration = Duration::from_secs(5);
-const MAX_PLAYLIST_BYTES: u64 = 64 * 1024;
-const MAX_SESSION_BYTES: u64 = 128 * 1024 * 1024;
+pub(crate) const MAX_PLAYLIST_BYTES: u64 = 64 * 1024;
+pub(crate) const MAX_SEGMENT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_SESSION_BYTES: u64 = MAX_SEGMENT_BYTES;
 const MAX_LISTED_SEGMENTS: usize = 6;
 const MAX_DELETION_LAG_SEGMENTS: usize = 1;
 const PUMP_CHANNEL_CAPACITY: usize = 2;
+const LOCAL_RESOURCE_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const SCRATCH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LiveTvConfig {
@@ -295,6 +299,7 @@ pub(crate) struct LiveTvActivateRequest {
     pub(crate) capability: String,
     pub(crate) activation_token: String,
     pub(crate) config_generation: i64,
+    pub(crate) source_serving_generation: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -405,6 +410,7 @@ pub(crate) struct LiveTvActivity {
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct LiveTvRequestKey {
     source_node_id: String,
+    source_serving_generation: u64,
     user_id: i64,
     request_id: String,
 }
@@ -413,6 +419,7 @@ impl From<&LiveTvStartRequest> for LiveTvRequestKey {
     fn from(request: &LiveTvStartRequest) -> Self {
         Self {
             source_node_id: request.source_node_id.clone(),
+            source_serving_generation: request.source_serving_generation,
             user_id: request.user_id,
             request_id: request.request_id.clone(),
         }
@@ -423,10 +430,11 @@ struct LiveTvSessionState {
     phase: LiveTvSessionPhase,
     startup: Option<Result<LiveTvProvisional, LiveTvError>>,
     activated: bool,
+    provisional_at: Option<tokio::time::Instant>,
     last_touch: tokio::time::Instant,
     last_progress: tokio::time::Instant,
     media_sequence: u64,
-    inventory: HashMap<u64, (String, u64)>,
+    publication: Option<ScratchInventory>,
     encoder: String,
     error: Option<String>,
 }
@@ -653,6 +661,8 @@ pub(crate) struct LiveTvManager {
     cache: SnapshotCache,
     graph_cache: tokio::sync::Mutex<Option<CachedGraphProbe>>,
     registry: StdMutex<LiveTvRegistry>,
+    scratch_claims: StdMutex<HashSet<PathBuf>>,
+    scratch_sweep_gate: tokio::sync::Mutex<()>,
     metrics: LiveTvMetrics,
 }
 
@@ -681,6 +691,8 @@ impl LiveTvManager {
             cache: SnapshotCache::default(),
             graph_cache: tokio::sync::Mutex::new(None),
             registry: StdMutex::new(LiveTvRegistry::default()),
+            scratch_claims: StdMutex::new(HashSet::new()),
+            scratch_sweep_gate: tokio::sync::Mutex::new(()),
             metrics: LiveTvMetrics::default(),
         })
     }
@@ -693,6 +705,11 @@ impl LiveTvManager {
         self.metrics
             .enabled
             .store(config.enabled, Ordering::Release);
+        if !config.enabled {
+            self.metrics.device_ready.store(false, Ordering::Release);
+            self.metrics.ready_channels.store(0, Ordering::Release);
+            self.metrics.drm_channels.store(0, Ordering::Release);
+        }
         Ok(config)
     }
 
@@ -711,27 +728,46 @@ impl LiveTvManager {
         let address = config.device_ipv4.ok_or_else(|| {
             LiveTvError::InvalidConfig("an HDHomeRun IPv4 address is required".to_owned())
         })?;
-        let snapshot = self
+        let snapshot = match self
             .cache
             .get_or_refresh(config.generation, force, || {
                 self.fetch_snapshot(address, config)
             })
-            .await?;
-        self.metrics.device_ready.store(true, Ordering::Release);
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.metrics.device_ready.store(false, Ordering::Release);
+                self.metrics.ready_channels.store(0, Ordering::Release);
+                self.metrics.drm_channels.store(0, Ordering::Release);
+                return Err(error);
+            }
+        };
+        let fresh =
+            snapshot.freshness == SnapshotFreshness::Fresh && snapshot.refresh_error.is_none();
+        self.metrics.device_ready.store(fresh, Ordering::Release);
         self.metrics.ready_channels.store(
-            snapshot
-                .channels
-                .iter()
-                .filter(|channel| channel.support == LiveTvChannelSupport::Ready)
-                .count() as u64,
+            if fresh {
+                snapshot
+                    .channels
+                    .iter()
+                    .filter(|channel| channel.support == LiveTvChannelSupport::Ready)
+                    .count() as u64
+            } else {
+                0
+            },
             Ordering::Release,
         );
         self.metrics.drm_channels.store(
-            snapshot
-                .channels
-                .iter()
-                .filter(|channel| channel.drm)
-                .count() as u64,
+            if fresh {
+                snapshot
+                    .channels
+                    .iter()
+                    .filter(|channel| channel.drm)
+                    .count() as u64
+            } else {
+                0
+            },
             Ordering::Release,
         );
         Ok(self
@@ -825,12 +861,17 @@ impl LiveTvManager {
         let probe_dir = self
             .scratch_root
             .join(format!("live-tv-readiness-{}", uuid::Uuid::new_v4()));
+        // Serialize the first directory publication against the orphan scan.
+        // Once created, the retained claim is enough to protect this probe.
+        let scratch_creation = self.scratch_sweep_gate.lock().await;
+        let _scratch_claim = self.claim_scratch(probe_dir.clone());
         if let Err(error) = tokio::fs::create_dir_all(&probe_dir).await {
             return (
                 false,
                 format!("cannot create live-TV probe scratch: {error}"),
             );
         }
+        drop(scratch_creation);
         let result = run_graph_probe(
             &self.system.ffmpeg,
             encoder,
@@ -853,6 +894,17 @@ impl LiveTvManager {
     }
 
     pub(crate) async fn start_local(
+        self: &Arc<Self>,
+        request: LiveTvStartRequest,
+    ) -> Result<LiveTvProvisional, LiveTvError> {
+        let result = self.start_local_inner(request).await;
+        if result.is_err() {
+            self.metrics.starts_failed.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    async fn start_local_inner(
         self: &Arc<Self>,
         request: LiveTvStartRequest,
     ) -> Result<LiveTvProvisional, LiveTvError> {
@@ -932,10 +984,11 @@ impl LiveTvManager {
                 phase: LiveTvSessionPhase::Starting,
                 startup: None,
                 activated: false,
+                provisional_at: None,
                 last_touch: now,
                 last_progress: now,
                 media_sequence: 0,
-                inventory: HashMap::new(),
+                publication: None,
                 encoder: "pending".to_owned(),
                 error: None,
             }),
@@ -955,7 +1008,6 @@ impl LiveTvManager {
                 })?)
             } else {
                 if registry.sessions.len() >= usize::from(config.max_sessions) {
-                    self.metrics.starts_failed.fetch_add(1, Ordering::Relaxed);
                     return Err(LiveTvError::Capacity(format!(
                         "all {} plurx Live TV session slots are in use",
                         config.max_sessions
@@ -1017,6 +1069,7 @@ impl LiveTvManager {
     pub(crate) async fn activate_local(
         &self,
         request: &LiveTvActivateRequest,
+        source_node_id: &str,
     ) -> Result<LiveTvActivated, LiveTvError> {
         if request.expected_owner_node_id != self.node_id {
             return Err(LiveTvError::OwnerUnavailable(
@@ -1025,6 +1078,11 @@ impl LiveTvManager {
         }
         validate_capability_owner(&request.capability, &self.node_id)?;
         let session = self.session(&request.capability)?;
+        if session.request.source_node_id != source_node_id {
+            return Err(LiveTvError::Conflict(
+                "the activation signer does not own this live-TV start".into(),
+            ));
+        }
         if session.activation_token != request.activation_token {
             return Err(LiveTvError::Conflict(
                 "the live-TV activation token does not match".into(),
@@ -1033,6 +1091,11 @@ impl LiveTvManager {
         if session.request.config_generation != request.config_generation {
             return Err(LiveTvError::Conflict(
                 "the live-TV activation generation does not match".into(),
+            ));
+        }
+        if session.request.source_serving_generation != request.source_serving_generation {
+            return Err(LiveTvError::Conflict(
+                "the live-TV source serving generation changed before activation".into(),
             ));
         }
         let config = self.config().await?;
@@ -1097,12 +1160,18 @@ impl LiveTvManager {
         }
         match request {
             LiveTvResourceRequest::Playlist { .. } => {
-                let bytes = read_bounded_regular_file(
-                    &session.directory.join("index.m3u8"),
-                    MAX_PLAYLIST_BYTES,
-                )
-                .await?;
-                parse_playlist_bytes(&bytes)?;
+                let bytes = session
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .publication
+                    .as_ref()
+                    .map(|publication| publication.playlist.clone())
+                    .ok_or_else(|| {
+                        LiveTvError::CapabilityExpired(
+                            "the live-TV playlist is not published".into(),
+                        )
+                    })?;
                 Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
@@ -1116,11 +1185,16 @@ impl LiveTvManager {
                         .state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    state.inventory.get(&sequence).cloned().ok_or_else(|| {
-                        LiveTvError::CapabilityExpired(
-                            "the requested live segment is outside the current window".into(),
-                        )
-                    })?
+                    state
+                        .publication
+                        .as_ref()
+                        .and_then(|publication| publication.segments.get(&sequence))
+                        .cloned()
+                        .ok_or_else(|| {
+                            LiveTvError::CapabilityExpired(
+                                "the requested live segment is outside the current window".into(),
+                            )
+                        })?
                 };
                 let path = session.directory.join(&name);
                 let metadata = tokio::fs::symlink_metadata(&path)
@@ -1135,19 +1209,18 @@ impl LiveTvManager {
                         "live segment failed its bounded inventory check".into(),
                     ));
                 }
-                let file = tokio::fs::File::open(path)
-                    .await
-                    .map_err(|_| LiveTvError::CapabilityExpired("live segment expired".into()))?;
-                let stream = tokio_util::io::ReaderStream::new(tokio::io::AsyncReadExt::take(
-                    file,
-                    expected_len,
-                ));
+                let bytes = read_bounded_regular_file(&path, expected_len).await?;
+                if bytes.len() as u64 != expected_len {
+                    return Err(LiveTvError::CapabilityExpired(
+                        "live segment changed while it was being read".into(),
+                    ));
+                }
                 Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "video/mp2t")
                     .header(header::CACHE_CONTROL, "no-store")
                     .header(header::CONTENT_LENGTH, expected_len)
-                    .body(Body::from_stream(stream))
+                    .body(Body::from(bytes))
                     .map_err(|error| LiveTvError::StreamFailed(error.to_string()))
             }
             LiveTvResourceRequest::Status { .. } => {
@@ -1167,7 +1240,7 @@ impl LiveTvManager {
         }
     }
 
-    pub(crate) fn stop_local(&self, capability: &str) -> Result<(), LiveTvError> {
+    pub(crate) async fn stop_local(&self, capability: &str) -> Result<(), LiveTvError> {
         validate_capability_owner(capability, &self.node_id)?;
         let session = self
             .registry
@@ -1176,13 +1249,13 @@ impl LiveTvManager {
             .sessions
             .get(capability)
             .cloned();
-        if let Some(session) = session {
-            session.cancel.cancel();
-        }
-        Ok(())
+        let Some(session) = session else {
+            return Ok(());
+        };
+        self.cancel_and_wait(vec![session]).await.map(|_| ())
     }
 
-    pub(crate) fn drain_stale(&self, keep_generation: i64) -> usize {
+    pub(crate) async fn drain_stale(&self, keep_generation: i64) -> Result<usize, LiveTvError> {
         let sessions = self
             .registry
             .lock()
@@ -1192,10 +1265,52 @@ impl LiveTvManager {
             .filter(|session| session.request.config_generation != keep_generation)
             .cloned()
             .collect::<Vec<_>>();
+        self.cancel_and_wait(sessions).await
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<usize, LiveTvError> {
+        let sessions = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.cancel_and_wait(sessions).await
+    }
+
+    async fn cancel_and_wait(
+        &self,
+        sessions: Vec<Arc<LiveTvSession>>,
+    ) -> Result<usize, LiveTvError> {
+        let count = sessions.len();
         for session in &sessions {
             session.cancel.cancel();
         }
-        sessions.len()
+        let deadline = tokio::time::Instant::now() + SESSION_DRAIN_TIMEOUT;
+        for session in sessions {
+            loop {
+                let notified = session.changed.notified();
+                let present = self
+                    .registry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .sessions
+                    .contains_key(&session.capability);
+                if !present {
+                    break;
+                }
+                tokio::time::timeout_at(deadline, notified)
+                    .await
+                    .map_err(|_| {
+                        LiveTvError::StreamFailed(
+                            "live-TV cleanup was not confirmed before the drain deadline".into(),
+                        )
+                    })?;
+            }
+        }
+        Ok(count)
     }
 
     pub(crate) fn activities(&self) -> Vec<LiveTvActivity> {
@@ -1222,6 +1337,71 @@ impl LiveTvManager {
                 }
             })
             .collect()
+    }
+
+    fn claim_scratch(&self, path: PathBuf) -> ScratchClaim<'_> {
+        self.scratch_claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(path.clone());
+        ScratchClaim {
+            claims: &self.scratch_claims,
+            path,
+        }
+    }
+
+    pub(crate) async fn sweep_orphan_scratch(&self) -> usize {
+        // A session registers before creating its directory. Holding this gate
+        // across the registry/claim snapshot and directory walk ensures a new
+        // owner cannot publish a directory after our snapshot and have that
+        // directory mistaken for crash garbage.
+        let _sweep = self.scratch_sweep_gate.lock().await;
+        let mut owned = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .values()
+            .map(|session| session.directory.clone())
+            .collect::<HashSet<_>>();
+        owned.extend(
+            self.scratch_claims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .cloned(),
+        );
+        let Ok(mut entries) = tokio::fs::read_dir(&self.scratch_root).await else {
+            return 0;
+        };
+        let mut removed = 0;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if owned.contains(&path) || !entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            match tokio::fs::remove_dir_all(&path).await {
+                Ok(()) => removed += 1,
+                Err(error) => tracing::warn!(
+                    kind = %error.kind(),
+                    "Live TV orphan scratch sweep failed"
+                ),
+            }
+        }
+        removed
+    }
+
+    pub(crate) async fn scratch_sweep_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        loop {
+            let removed = self.sweep_orphan_scratch().await;
+            if removed > 0 {
+                tracing::info!(removed, "swept orphaned Live TV scratch directories");
+            }
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(SCRATCH_SWEEP_INTERVAL) => {}
+            }
+        }
     }
 
     pub(crate) fn prometheus(&self) -> String {
@@ -1299,6 +1479,20 @@ impl LiveTvManager {
     }
 }
 
+struct ScratchClaim<'a> {
+    claims: &'a StdMutex<HashSet<PathBuf>>,
+    path: PathBuf,
+}
+
+impl Drop for ScratchClaim<'_> {
+    fn drop(&mut self) {
+        self.claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.path);
+    }
+}
+
 impl Drop for LiveTvManager {
     fn drop(&mut self) {
         let registry = self
@@ -1311,8 +1505,9 @@ impl Drop for LiveTvManager {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ScratchInventory {
+    playlist: Vec<u8>,
     media_sequence: u64,
     segments: HashMap<u64, (String, u64)>,
 }
@@ -1401,12 +1596,6 @@ async fn run_live_session(
     let result = run_live_session_inner(&manager, &session, &config, stream_url).await;
     session.cancel.cancel();
     if let Err(error) = result {
-        if let Some(manager) = manager.upgrade() {
-            manager
-                .metrics
-                .starts_failed
-                .fetch_add(1, Ordering::Relaxed);
-        }
         let mut state = session
             .state
             .lock()
@@ -1430,6 +1619,8 @@ async fn run_live_session(
             .requests
             .retain(|_, capability| capability != &session.capability);
         manager.metrics.ended.fetch_add(1, Ordering::Relaxed);
+        drop(registry);
+        session.changed.notify_waiters();
     }
 }
 
@@ -1455,9 +1646,11 @@ async fn run_live_session_inner(
         state.encoder = admission.encoder.label().to_owned();
     }
     ensure_session_fence(&owner, session).await?;
+    let scratch_creation = owner.scratch_sweep_gate.lock().await;
     tokio::fs::create_dir_all(&session.directory)
         .await
         .map_err(|error| LiveTvError::StreamFailed(format!("creating live-TV scratch: {error}")))?;
+    drop(scratch_creation);
 
     let client = owner.client.as_ref().map_err(|_| {
         LiveTvError::DeviceUnavailable("the HDHomeRun HTTP client is unavailable".into())
@@ -1516,12 +1709,17 @@ async fn run_live_session_inner(
                         .state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if inventory.media_sequence > state.media_sequence || state.inventory.is_empty()
+                    if inventory.media_sequence > state.media_sequence
+                        || state.publication.is_none()
                     {
                         state.last_progress = now;
                     }
                     state.media_sequence = inventory.media_sequence;
-                    state.inventory = inventory.segments;
+                    // Manifest bytes and their complete current/deletion-lag
+                    // inventory cross the lock together. A client can never
+                    // receive a playlist from one sample and authorization
+                    // from another.
+                    state.publication = Some(inventory);
                 }
                 if !published {
                     let owner = manager.upgrade().ok_or_else(|| {
@@ -1543,6 +1741,7 @@ async fn run_live_session_inner(
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     state.phase = LiveTvSessionPhase::Provisional;
+                    state.provisional_at = Some(now);
                     state.startup = Some(Ok(provisional));
                     drop(state);
                     session.changed.notify_waiters();
@@ -1564,10 +1763,7 @@ async fn run_live_session_inner(
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if published
-                && !state.activated
-                && now.duration_since(session.started) >= PROVISIONAL_TIMEOUT
-            {
+            if published && provisional_expired(&state, now) {
                 break Err(LiveTvError::CapabilityExpired(
                     "the provisional live-TV start was not activated".into(),
                 ));
@@ -1607,6 +1803,13 @@ async fn run_live_session_inner(
     terminal
 }
 
+fn provisional_expired(state: &LiveTvSessionState, now: tokio::time::Instant) -> bool {
+    !state.activated
+        && state
+            .provisional_at
+            .is_some_and(|published_at| now.duration_since(published_at) >= PROVISIONAL_TIMEOUT)
+}
+
 async fn ensure_session_fence(
     manager: &LiveTvManager,
     session: &LiveTvSession,
@@ -1629,7 +1832,10 @@ async fn open_tuner_stream(
         .await
         .map_err(|_| LiveTvError::StartupTimeout("the HDHomeRun stream headers timed out".into()))?
         .map_err(|error| {
-            tracing::warn!(error = %error, "HDHomeRun stream request failed on the tuner owner");
+            tracing::warn!(
+                kind = reqwest_error_kind(&error),
+                "HDHomeRun stream request failed on the tuner owner"
+            );
             LiveTvError::DeviceUnavailable("the HDHomeRun stream request failed".into())
         })?;
     match response.status() {
@@ -1681,11 +1887,7 @@ fn spawn_live_ffmpeg(
             "-sn",
             "-dn",
         ]);
-    let mut filter = format!("bwdif=mode=send_frame,scale=-2:{height}");
-    if let Some(suffix) = encoder.filter_suffix() {
-        filter.push(',');
-        filter.push_str(suffix);
-    }
+    let filter = live_video_filter(encoder, height);
     command.args(["-vf", &filter]);
     command.args(encoder.encode_args(
         if height == 1080 { 8_000 } else { 4_000 },
@@ -1729,6 +1931,16 @@ fn spawn_live_ffmpeg(
         .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
 }
 
+fn live_video_filter(encoder: Encoder, height: u16) -> String {
+    let mut filter =
+        format!("bwdif=mode=send_frame:parity=auto:deint=interlaced,scale=-2:{height}");
+    if let Some(suffix) = encoder.filter_suffix() {
+        filter.push(',');
+        filter.push_str(suffix);
+    }
+    filter
+}
+
 async fn pump_tuner_stream(
     response: reqwest::Response,
     mut stdin: tokio::process::ChildStdin,
@@ -1751,7 +1963,10 @@ async fn pump_tuner_stream(
                     LiveTvError::StreamFailed("the FFmpeg input pump stopped".into())
                 })?,
                 Some(Err(error)) => {
-                    tracing::warn!(error = %error, "HDHomeRun stream body failed on the tuner owner");
+                    tracing::warn!(
+                        kind = reqwest_error_kind(&error),
+                        "HDHomeRun stream body failed on the tuner owner"
+                    );
                     return Err(LiveTvError::StreamFailed(
                         "the HDHomeRun stream body failed".into(),
                     ));
@@ -1809,11 +2024,18 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
         .map_err(|error| LiveTvError::StreamFailed(format!("reading live-TV scratch: {error}")))?
     {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let metadata = tokio::fs::symlink_metadata(entry.path())
-            .await
-            .map_err(|error| {
-                LiveTvError::StreamFailed(format!("checking live-TV scratch: {error}"))
-            })?;
+        let metadata = match tokio::fs::symlink_metadata(entry.path()).await {
+            Ok(metadata) => metadata,
+            // FFmpeg atomically renames temporary output and deletes the
+            // oldest window entry while this bounded scan is walking. That
+            // expected churn means this sample is incomplete, not terminal.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(LiveTvError::StreamFailed(format!(
+                    "checking live-TV scratch: {error}"
+                )))
+            }
+        };
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(LiveTvError::StreamFailed(
                 "live-TV scratch contains a non-regular entry".into(),
@@ -1862,28 +2084,31 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
     if parsed.segments.is_empty() {
         return Ok(None);
     }
-    let mut inventory = HashMap::new();
     for sequence in &parsed.segments {
-        let Some((name, len)) = final_segments.get(sequence).cloned() else {
+        let Some((_, len)) = final_segments.get(sequence) else {
             return Ok(None);
         };
-        if len == 0 {
+        if *len == 0 {
             return Ok(None);
         }
-        inventory.insert(*sequence, (name, len));
     }
     let unlisted = final_segments
         .keys()
-        .filter(|sequence| !inventory.contains_key(sequence))
+        .filter(|sequence| !parsed.segments.contains(sequence))
         .count();
-    if inventory.len() > MAX_LISTED_SEGMENTS || unlisted > MAX_DELETION_LAG_SEGMENTS {
+    if parsed.segments.len() > MAX_LISTED_SEGMENTS || unlisted > MAX_DELETION_LAG_SEGMENTS {
         return Err(LiveTvError::StreamFailed(
             "live-TV scratch exceeded its segment inventory budget".into(),
         ));
     }
     Ok(Some(ScratchInventory {
+        playlist,
         media_sequence: parsed.media_sequence,
-        segments: inventory,
+        // Include FFmpeg's one deletion-lag segment. A browser which received
+        // the immediately previous manifest may still request it after the
+        // current manifest is sampled; discarding it here turned a physically
+        // present, valid segment into a false 410.
+        segments: final_segments,
     }))
 }
 
@@ -2007,8 +2232,9 @@ async fn read_bounded_regular_file(path: &Path, max: u64) -> Result<Vec<u8>, Liv
             "live-TV resource failed its bounded file check".into(),
         ));
     }
-    let bytes = tokio::fs::read(path)
+    let bytes = tokio::time::timeout(LOCAL_RESOURCE_READ_TIMEOUT, tokio::fs::read(path))
         .await
+        .map_err(|_| LiveTvError::StreamFailed("live-TV resource read timed out".into()))?
         .map_err(|_| LiveTvError::CapabilityExpired("live-TV resource expired".into()))?;
     if bytes.len() as u64 > max {
         return Err(LiveTvError::StreamFailed(
@@ -2356,7 +2582,10 @@ pub(crate) async fn fetch_json<T: serde::de::DeserializeOwned>(
         .await
         .map_err(|_| LiveTvError::DeviceUnavailable("HDHomeRun request timed out".to_owned()))?
         .map_err(|error| {
-            tracing::warn!(error = %error, "HDHomeRun document request failed on the tuner owner");
+            tracing::warn!(
+                kind = reqwest_error_kind(&error),
+                "HDHomeRun document request failed on the tuner owner"
+            );
             LiveTvError::DeviceUnavailable("HDHomeRun device request failed".to_owned())
         })?;
     if !response.status().is_success() {
@@ -2379,7 +2608,10 @@ pub(crate) async fn fetch_json<T: serde::de::DeserializeOwned>(
             .await
             .map_err(|_| LiveTvError::DeviceUnavailable("HDHomeRun body timed out".to_owned()))?
             .map_err(|error| {
-                tracing::warn!(error = %error, "HDHomeRun response body failed on the tuner owner");
+                tracing::warn!(
+                    kind = reqwest_error_kind(&error),
+                    "HDHomeRun response body failed on the tuner owner"
+                );
                 LiveTvError::DeviceUnavailable("HDHomeRun response body failed".to_owned())
             })?;
         let Some(chunk) = chunk else { break };
@@ -2418,11 +2650,7 @@ async fn run_graph_probe(
         "-t",
         "4.25",
     ]);
-    let mut filter = format!("bwdif=mode=send_frame,scale=-2:{height}");
-    if let Some(suffix) = encoder.filter_suffix() {
-        filter.push(',');
-        filter.push_str(suffix);
-    }
+    let filter = live_video_filter(encoder, height);
     command.args(["-vf", &filter]);
     command.args(encoder.encode_args(
         if height == 1080 { 8_000 } else { 4_000 },
@@ -2490,6 +2718,22 @@ fn sanitize_error(message: &str) -> String {
     }
 }
 
+fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_request() {
+        "request"
+    } else {
+        "transport"
+    }
+}
+
 fn unix_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2527,6 +2771,383 @@ mod tests {
             .no_proxy()
             .build()
             .expect("test client")
+    }
+
+    fn test_manager(root: &Path) -> Arc<LiveTvManager> {
+        test_manager_with_system(root, SystemInfo::default())
+    }
+
+    fn test_manager_with_system(root: &Path, system: SystemInfo) -> Arc<LiveTvManager> {
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::{EncoderCaps, Pipeline};
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let transcode = Arc::new(crate::transcode::TranscodeManager::new(
+            Arc::clone(&store),
+            root.join("finite"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        LiveTvManager::new(
+            store,
+            Arc::new(system),
+            transcode,
+            crate::serving_fence::ServingAuthority::always_ready(),
+            "node-a".into(),
+            root.join("live-tv"),
+        )
+    }
+
+    fn test_session(directory: PathBuf, generation: i64) -> Arc<LiveTvSession> {
+        let now = tokio::time::Instant::now();
+        Arc::new(LiveTvSession {
+            capability: format!(
+                "ltv1.{}.{}",
+                base64url_encode(b"node-a"),
+                uuid::Uuid::new_v4()
+            ),
+            activation_token: uuid::Uuid::new_v4().to_string(),
+            request: LiveTvStartRequest {
+                expected_owner_node_id: "node-a".into(),
+                source_node_id: "node-a".into(),
+                user_id: 1,
+                user_name: "viewer".into(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                channel_id: "7.1".into(),
+                config_generation: generation,
+                source_serving_generation: 0,
+            },
+            channel: LiveTvChannel {
+                id: "7.1".into(),
+                guide_number: "7.1".into(),
+                guide_name: "Test".into(),
+                favorite: false,
+                drm: false,
+                support: LiveTvChannelSupport::Ready,
+            },
+            output: LiveTvOutput {
+                container: "hls".into(),
+                video: "h264".into(),
+                audio: "aac".into(),
+                height: 720,
+            },
+            owner_serving_generation: 0,
+            started: now,
+            directory,
+            cancel: CancellationToken::new(),
+            changed: tokio::sync::Notify::new(),
+            state: StdMutex::new(LiveTvSessionState {
+                phase: LiveTvSessionPhase::Active,
+                startup: None,
+                activated: true,
+                provisional_at: Some(now),
+                last_touch: now,
+                last_progress: now,
+                media_sequence: 0,
+                publication: None,
+                encoder: "software".into(),
+                error: None,
+            }),
+        })
+    }
+
+    async fn seed_test_config(manager: &LiveTvManager) {
+        manager
+            .store
+            .put_settings(&[
+                (keys::LIVE_TV_ENABLED, "1"),
+                (keys::LIVE_TV_DEVICE_IPV4, "192.168.1.20"),
+                (keys::LIVE_TV_OWNER_NODE_ID, "node-a"),
+                (keys::LIVE_TV_MAX_SESSIONS, "2"),
+                (keys::LIVE_TV_OUTPUT_HEIGHT, "720"),
+                (keys::LIVE_TV_CONFIG_GENERATION, "1"),
+            ])
+            .await
+            .expect("seed live-TV settings");
+    }
+
+    #[tokio::test]
+    async fn live_tv_sweeper_preserves_registered_scratch_and_removes_only_orphans() {
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        tokio::fs::create_dir_all(&manager.scratch_root)
+            .await
+            .expect("Live TV root");
+        let active_path = manager.scratch_root.join("live-tv-active");
+        tokio::fs::create_dir(&active_path)
+            .await
+            .expect("active scratch");
+        tokio::fs::write(active_path.join("index.m3u8"), b"active")
+            .await
+            .expect("active playlist");
+        let session = test_session(active_path.clone(), 1);
+        manager
+            .registry
+            .lock()
+            .expect("registry")
+            .sessions
+            .insert(session.capability.clone(), session);
+        let orphan = manager.scratch_root.join("live-tv-orphan");
+        tokio::fs::create_dir(&orphan)
+            .await
+            .expect("orphan scratch");
+
+        assert_eq!(manager.sweep_orphan_scratch().await, 1);
+        assert!(active_path.join("index.m3u8").is_file());
+        assert!(!orphan.exists());
+    }
+
+    #[tokio::test]
+    async fn drain_acknowledges_only_after_registry_and_scratch_cleanup() {
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        tokio::fs::create_dir_all(&manager.scratch_root)
+            .await
+            .expect("Live TV root");
+        let path = manager.scratch_root.join("live-tv-drain");
+        tokio::fs::create_dir(&path).await.expect("session scratch");
+        let session = test_session(path.clone(), 1);
+        manager
+            .registry
+            .lock()
+            .expect("registry")
+            .sessions
+            .insert(session.capability.clone(), Arc::clone(&session));
+        let task_manager = Arc::clone(&manager);
+        let task_session = Arc::clone(&session);
+        tokio::spawn(async move {
+            task_session.cancel.cancelled().await;
+            tokio::fs::remove_dir_all(&task_session.directory)
+                .await
+                .expect("physical scratch cleanup");
+            task_manager
+                .registry
+                .lock()
+                .expect("registry")
+                .sessions
+                .remove(&task_session.capability);
+            task_session.changed.notify_waiters();
+        });
+
+        assert_eq!(manager.drain_stale(2).await.expect("confirmed drain"), 1);
+        assert!(!path.exists());
+        assert!(manager.activities().is_empty());
+    }
+
+    #[tokio::test]
+    async fn activation_is_bound_to_the_starting_voter_and_serving_generation() {
+        let root = crate::test_tempdir().expect("activation root");
+        let manager = test_manager(root.path());
+        seed_test_config(&manager).await;
+        let session = test_session(manager.scratch_root.join("live-tv-activation"), 1);
+        {
+            let mut state = session.state.lock().expect("session state");
+            state.phase = LiveTvSessionPhase::Provisional;
+            state.activated = false;
+        }
+        manager
+            .registry
+            .lock()
+            .expect("registry")
+            .sessions
+            .insert(session.capability.clone(), Arc::clone(&session));
+        let mut request = LiveTvActivateRequest {
+            expected_owner_node_id: "node-a".into(),
+            capability: session.capability.clone(),
+            activation_token: session.activation_token.clone(),
+            config_generation: 1,
+            source_serving_generation: 0,
+        };
+
+        assert!(matches!(
+            manager.activate_local(&request, "node-b").await,
+            Err(LiveTvError::Conflict(_))
+        ));
+        request.source_serving_generation = 1;
+        assert!(matches!(
+            manager.activate_local(&request, "node-a").await,
+            Err(LiveTvError::Conflict(_))
+        ));
+        request.source_serving_generation = 0;
+        assert!(
+            manager
+                .activate_local(&request, "node-a")
+                .await
+                .expect("matching activation")
+                .live
+        );
+
+        let mut other_generation = session.request.clone();
+        other_generation.source_serving_generation = 1;
+        assert_ne!(
+            LiveTvRequestKey::from(&session.request),
+            LiveTvRequestKey::from(&other_generation),
+            "a request replay cannot cross a source serving generation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn one_tuner_get_runs_the_full_hls_lifecycle_and_stop_waits_for_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::AtomicUsize;
+
+        let root = crate::test_tempdir().expect("lifecycle root");
+        let ffmpeg = root.path().join("fake-ffmpeg");
+        std::fs::write(
+            &ffmpeg,
+            r#"#!/bin/sh
+for output do playlist="$output"; done
+directory=${playlist%/*}
+printf 'transport-stream' > "$directory/segment-000001.ts"
+printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4.000,\nsegment-000001.ts\n' > "$playlist"
+exec /bin/cat >/dev/null
+"#,
+        )
+        .expect("fake FFmpeg");
+        std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755))
+            .expect("executable fake FFmpeg");
+        let system = SystemInfo {
+            ffmpeg: ffmpeg.to_string_lossy().into_owned(),
+            ..SystemInfo::default()
+        };
+        let manager = test_manager_with_system(root.path(), system);
+        seed_test_config(&manager).await;
+        let config = manager.config().await.expect("valid config");
+
+        let get_count = Arc::new(AtomicUsize::new(0));
+        let observed_get_count = Arc::clone(&get_count);
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake tuner");
+        let address = listener.local_addr().expect("fake tuner address");
+        let tuner = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept tuner GET");
+            observed_get_count.fetch_add(1, Ordering::Relaxed);
+            let mut request = [0_u8; 2048];
+            let read = stream.read(&mut request).await.expect("read tuner GET");
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /auto/v7.1 "));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nTransfer-Encoding: chunked\r\n\r\n",
+                )
+                .await
+                .expect("write tuner headers");
+            loop {
+                if stream.write_all(b"4\r\ndata\r\n").await.is_err() {
+                    let _ = closed_tx.send(());
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+
+        let session = test_session(manager.scratch_root.join("live-tv-lifecycle"), 1);
+        {
+            let mut state = session.state.lock().expect("session state");
+            state.phase = LiveTvSessionPhase::Starting;
+            state.activated = false;
+            state.provisional_at = None;
+        }
+        {
+            let mut registry = manager.registry.lock().expect("registry");
+            registry.requests.insert(
+                LiveTvRequestKey::from(&session.request),
+                session.capability.clone(),
+            );
+            registry
+                .sessions
+                .insert(session.capability.clone(), Arc::clone(&session));
+        }
+        let url =
+            reqwest::Url::parse(&format!("http://{address}/auto/v7.1")).expect("fake tuner URL");
+        let lifecycle = tokio::spawn(run_live_session(
+            Arc::downgrade(&manager),
+            Arc::clone(&session),
+            config,
+            url,
+        ));
+
+        let provisional = wait_for_startup(Arc::clone(&session), false)
+            .await
+            .expect("first HLS publication");
+        assert_eq!(provisional.outcome, LiveTvStartOutcome::Created);
+        let activated = manager
+            .activate_local(
+                &LiveTvActivateRequest {
+                    expected_owner_node_id: "node-a".into(),
+                    capability: provisional.capability.clone(),
+                    activation_token: provisional.activation_token,
+                    config_generation: 1,
+                    source_serving_generation: 0,
+                },
+                "node-a",
+            )
+            .await
+            .expect("activate live TV");
+        assert!(activated.live);
+
+        let playlist = manager
+            .resource_local(LiveTvResourceRequest::Playlist {
+                capability: provisional.capability.clone(),
+            })
+            .await
+            .expect("serve playlist");
+        let playlist = axum::body::to_bytes(playlist.into_body(), MAX_PLAYLIST_BYTES as usize)
+            .await
+            .expect("playlist bytes");
+        assert!(playlist.ends_with(b"segment-000001.ts\n"));
+        let segment = manager
+            .resource_local(LiveTvResourceRequest::Segment {
+                capability: provisional.capability.clone(),
+                sequence: 1,
+            })
+            .await
+            .expect("serve segment");
+        let segment = axum::body::to_bytes(segment.into_body(), MAX_SEGMENT_BYTES as usize)
+            .await
+            .expect("segment bytes");
+        assert_eq!(&segment[..], b"transport-stream");
+
+        manager
+            .stop_local(&provisional.capability)
+            .await
+            .expect("confirmed stop");
+        lifecycle.await.expect("lifecycle task");
+        tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .expect("tuner socket close deadline")
+            .expect("tuner socket close signal");
+        assert_eq!(get_count.load(Ordering::Relaxed), 1);
+        assert!(manager.activities().is_empty());
+        assert!(!session.directory.exists());
+        tuner.await.expect("fake tuner");
+    }
+
+    #[test]
+    fn live_filter_deinterlaces_interlaced_frames_only() {
+        let filter = live_video_filter(Encoder::Software, 720);
+        assert!(filter.contains("bwdif=mode=send_frame:parity=auto:deint=interlaced"));
+        assert!(filter.ends_with("scale=-2:720"));
+    }
+
+    #[test]
+    fn provisional_lease_starts_when_first_media_is_published() {
+        let root = crate::test_temp_path(format!("live-tv-{}", uuid::Uuid::new_v4()));
+        let session = test_session(root, 1);
+        let published_at = tokio::time::Instant::now();
+        let mut state = session.state.lock().expect("state");
+        state.activated = false;
+        state.provisional_at = Some(published_at);
+        assert!(!provisional_expired(
+            &state,
+            published_at + PROVISIONAL_TIMEOUT - Duration::from_millis(1)
+        ));
+        assert!(provisional_expired(
+            &state,
+            published_at + PROVISIONAL_TIMEOUT
+        ));
     }
 
     #[test]
@@ -2965,6 +3586,39 @@ mod tests {
             .await
             .expect("second deletion lag");
         assert!(inspect_scratch(directory).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ten_live_windows_publish_manifest_and_bounded_deletion_lag_atomically() {
+        let temp = crate::test_tempdir().expect("scratch root");
+        let directory = temp.path();
+        for first in 1_u64..=10 {
+            let playlist = live_playlist(first, MAX_LISTED_SEGMENTS);
+            tokio::fs::write(directory.join("index.m3u8"), &playlist)
+                .await
+                .expect("playlist");
+            for sequence in first - 1..first + MAX_LISTED_SEGMENTS as u64 {
+                tokio::fs::write(
+                    directory.join(format!("segment-{sequence:06}.ts")),
+                    format!("window-{first}-segment-{sequence}"),
+                )
+                .await
+                .expect("segment");
+            }
+            if first > 1 {
+                let _ =
+                    tokio::fs::remove_file(directory.join(format!("segment-{:06}.ts", first - 2)))
+                        .await;
+            }
+            let publication = inspect_scratch(directory)
+                .await
+                .expect("valid scratch")
+                .expect("published window");
+            assert_eq!(publication.playlist, playlist);
+            assert_eq!(publication.media_sequence, first);
+            assert_eq!(publication.segments.len(), MAX_LISTED_SEGMENTS + 1);
+            assert!(publication.segments.contains_key(&(first - 1)));
+        }
     }
 
     #[cfg(unix)]

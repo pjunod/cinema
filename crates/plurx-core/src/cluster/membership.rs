@@ -5257,6 +5257,31 @@ impl MembershipManager {
             .await
     }
 
+    /// Authenticate an exact internal mutation whose caller and receiver must
+    /// both be committed voters. Live-TV tuner admission is intentionally
+    /// narrower than the general media-worker surface: learners may relay an
+    /// existing capability, but they may not mint one.
+    pub async fn authorize_internal_peer_voter_request(
+        &self,
+        auth: &InternalPeerAuth,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<bool, MembershipError> {
+        if !self
+            .authorize_internal_peer_request(auth, method, path, body)
+            .await?
+        {
+            return Ok(false);
+        }
+        self.verify_live_peer_authority(
+            &auth.node_id,
+            unix_ms()?,
+            PeerAuthorityRole::CommittedVoter,
+        )
+        .await
+    }
+
     /// Authenticate an idempotent read-only relay. Signature verification is
     /// mandatory, globally rate-bounded, and each signed nonce is single-use
     /// for the complete five-second read window. A separate, right-sized
@@ -9224,6 +9249,14 @@ mod tests {
                 "{authorizer} must not reinstate the voter predicate",
             );
         }
+        let voter = source
+            .split_once("pub async fn authorize_internal_peer_voter_request(")
+            .expect("voter authorizer was renamed")
+            .1
+            .split_once("\n    }\n")
+            .expect("voter authorizer never closes at fn indent")
+            .0;
+        assert!(voter.contains("PeerAuthorityRole::CommittedVoter"));
     }
 
     // The route gate answers 503 for `Fenced`, so the cost of an interim
