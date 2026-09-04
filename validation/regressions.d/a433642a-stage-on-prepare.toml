@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a433642a"]
+points = ["playback.pipeline", "core.media", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "web-static"]
+reason = "M6 §3.4's first production caller for PreparationExecutor. the_rolling_slot_answers_the_advisory_read pins that both engines agree what a free slot means, which is what lets the caller refuse before spending an encoder; removing PreparationGate::slot_is_free makes the pre-check impossible to write. the_staging_metric_publishes_every_engine_and_outcome and staging_counts_against_the_engine_that_holds_the_slot pin the engine-labelled counter, without which a caller wired to the rolling actor — which into_request routes almost nothing to — reads identically to one that is not firing, the failure this milestone produced twice. The Developer settings test pins that the switch exists and names its price. Staging is inert until an operator sets playback.prepared_handoff and a client declares prepare_replacement, so the risk this covers is the code path, not fleet behaviour."
