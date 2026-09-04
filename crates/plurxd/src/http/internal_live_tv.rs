@@ -2,13 +2,13 @@
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderName, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use super::peer_transport::exact_auth_from_headers;
 use crate::live_tv::{
-    LiveTvActivateRequest, LiveTvDrainRequest, LiveTvResourceRequest, LiveTvSnapshot,
+    LiveTvActivateRequest, LiveTvDrainAck, LiveTvDrainRequest, LiveTvResourceRequest,
     LiveTvStartRequest, LiveTvStopRequest, SnapshotRequest, ACTIVATE_PATH, DRAIN_PATH,
     RESOURCE_PATH, SNAPSHOT_PATH, START_PATH, STOP_PATH,
 };
@@ -18,7 +18,7 @@ pub(crate) async fn snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<([(HeaderName, &'static str); 1], Json<LiveTvSnapshot>), StatusCode> {
+) -> Result<Response, StatusCode> {
     // This is a process-local atomic read and `/readyz` already exposes the
     // same fact. Put it before signature work so a fenced owner cannot reach
     // configuration, network, or FFmpeg code under any authentication shape.
@@ -49,10 +49,7 @@ pub(crate) async fn snapshot(
         .local_snapshot(&config, request.force, request.probe_graph)
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    Ok((
-        [(header::CACHE_CONTROL, "private, no-store")],
-        Json(snapshot),
-    ))
+    signed_json_response(&state, &headers, SNAPSHOT_PATH, StatusCode::OK, &snapshot)
 }
 
 pub(crate) async fn start(
@@ -82,8 +79,11 @@ pub(crate) async fn start(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match state.live_tv.start_local(request).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => wire_error(error),
+        Ok(response) => {
+            signed_json_response(&state, &headers, START_PATH, StatusCode::OK, &response)
+                .unwrap_or_else(IntoResponse::into_response)
+        }
+        Err(error) => signed_wire_error(&state, &headers, START_PATH, error),
     }
 }
 
@@ -107,8 +107,11 @@ pub(crate) async fn activate(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match state.live_tv.activate_local(&request, &signer).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => wire_error(error),
+        Ok(response) => {
+            signed_json_response(&state, &headers, ACTIVATE_PATH, StatusCode::OK, &response)
+                .unwrap_or_else(IntoResponse::into_response)
+        }
+        Err(error) => signed_wire_error(&state, &headers, ACTIVATE_PATH, error),
     }
 }
 
@@ -123,30 +126,59 @@ pub(crate) async fn resource(
     authorize(&state, &headers, &body, RESOURCE_PATH).await?;
     let request = serde_json::from_slice::<LiveTvResourceRequest>(&body)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    state
-        .live_tv
-        .resource_local(request)
+    let content_type = match &request {
+        LiveTvResourceRequest::Segment { .. } => None,
+        LiveTvResourceRequest::Playlist { .. } => Some("application/vnd.apple.mpegurl"),
+        _ => Some("application/json"),
+    };
+    let response = state.live_tv.resource_local(request).await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return Ok(signed_wire_error(&state, &headers, RESOURCE_PATH, error)),
+    };
+    if let Some(content_type) = content_type {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(
+            response.into_body(),
+            crate::live_tv::MAX_PLAYLIST_BYTES as usize,
+        )
         .await
-        .map_err(error_status)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        signed_bytes_response(
+            &state,
+            &headers,
+            RESOURCE_PATH,
+            status,
+            content_type,
+            bytes.to_vec(),
+        )
+    } else {
+        Ok(response)
+    }
 }
 
 pub(crate) async fn stop(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Response, StatusCode> {
     authorize(&state, &headers, &body, STOP_PATH).await?;
     let request =
         serde_json::from_slice::<LiveTvStopRequest>(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     if request.expected_owner_node_id != state.node_id {
         return Err(StatusCode::CONFLICT);
     }
-    state
-        .live_tv
-        .stop_local(&request.capability)
-        .await
-        .map_err(error_status)?;
-    Ok(StatusCode::NO_CONTENT)
+    if let Err(error) = state.live_tv.stop_local(&request.capability).await {
+        return Ok(signed_wire_error(&state, &headers, STOP_PATH, error));
+    }
+    signed_bytes_response(
+        &state,
+        &headers,
+        STOP_PATH,
+        StatusCode::NO_CONTENT,
+        "application/json",
+        Vec::new(),
+    )
 }
 
 pub(crate) async fn drain(
@@ -156,16 +188,41 @@ pub(crate) async fn drain(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let request =
         serde_json::from_slice::<LiveTvDrainRequest>(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    authorize_voter(&state, &headers, &body, DRAIN_PATH, None).await?;
+    let signer = authorize_voter(&state, &headers, &body, DRAIN_PATH, None).await?;
     if request.expected_owner_node_id != state.node_id {
+        return Err(StatusCode::CONFLICT);
+    }
+    if request.target_node_id != signer
+        || request.drain_before_generation < 0
+        || uuid::Uuid::parse_str(&request.request_nonce).is_err()
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let config = state.live_tv.config().await.map_err(error_status)?;
+    if request.drain_before_generation > config.generation {
         return Err(StatusCode::CONFLICT);
     }
     let drained = state
         .live_tv
-        .drain_stale(request.keep_generation)
+        .drain_before(request.drain_before_generation)
         .await
         .map_err(error_status)?;
-    Ok(Json(serde_json::json!({ "drained": drained })))
+    let mut ack = LiveTvDrainAck {
+        owner_node_id: state.node_id.clone(),
+        target_node_id: signer.clone(),
+        request_nonce: request.request_nonce,
+        drained_before_generation: request.drain_before_generation,
+        drained,
+        signature: String::new(),
+    };
+    let payload = ack.signing_payload().map_err(error_status)?;
+    ack.signature = state
+        .membership
+        .sign_internal_peer_response(&signer, &ack.request_nonce, DRAIN_PATH, &payload)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(Json(
+        serde_json::to_value(ack).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ))
 }
 
 async fn require_start_authority(state: &AppState) -> Result<(), StatusCode> {
@@ -202,16 +259,58 @@ fn error_status(error: crate::live_tv::LiveTvError) -> StatusCode {
     }
 }
 
-fn wire_error(error: crate::live_tv::LiveTvError) -> Response {
+fn signed_wire_error(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+    error: crate::live_tv::LiveTvError,
+) -> Response {
     let status = error_status(error.clone());
-    (
+    signed_json_response(
+        state,
+        headers,
+        path,
         status,
-        Json(serde_json::json!({
+        &serde_json::json!({
             "code": error.code(),
             "message": error.to_string(),
-        })),
+        }),
     )
-        .into_response()
+    .unwrap_or_else(IntoResponse::into_response)
+}
+
+fn signed_json_response<T: serde::Serialize>(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+    status: StatusCode,
+    value: &T,
+) -> Result<Response, StatusCode> {
+    let body = serde_json::to_vec(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    signed_bytes_response(state, headers, path, status, "application/json", body)
+}
+
+fn signed_bytes_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+    status: StatusCode,
+    content_type: &'static str,
+    body: Vec<u8>,
+) -> Result<Response, StatusCode> {
+    let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let payload = super::peer_transport::signed_response_payload(status.as_u16(), &body);
+    let signature = state
+        .membership
+        .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(super::peer_transport::RESPONSE_SIGNATURE_HEADER, signature)
+        .body(axum::body::Body::from(body))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn authorize(

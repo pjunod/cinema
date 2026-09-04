@@ -1,6 +1,6 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** M2 qualified; re-review and publishing · **Effort:** `effort/hdhomerun-live-tv` ·
+**Status:** M2 Astra findings implemented; final focused verification pending · **Effort:** `effort/hdhomerun-live-tv` ·
 **Updated:** 2026-09-04 · **Historical issue:**
 [#902](https://github.com/pjunod/plurx/issues/902)
 
@@ -15,12 +15,13 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 |---|---|---|---|
 | M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
 | M1 device/settings/lineup | merged | [#906](https://github.com/pjunod/plurx/pull/906) | attack-review findings fixed; re-review approved; effort gate passed; merge `b15d241a` |
-| M2 live HLS and cluster relay | qualified; re-review and publishing | pending Forgejo PR | exact Rust 1.97.1 workspace check/clippy, no-default compile, 30 Live TV, 2 route-matrix, relay-ceiling, voter-role, and 2 foreground-admission tests pass at `80f63b7b` |
+| Forgejo main synchronization | review pending | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | merge `f087f9d8`; later main changes still need incorporation |
+| M2 live HLS and cluster relay | review fixes in progress; merge held | pending Forgejo PR | earlier focused checks passed; second review found unresolved owner recovery, cleanup, response bounds, metrics, and behavioral-test gaps |
 | M3 web client | implementation staged | — | controller and browser tests are ready to resume after the M2 review closes |
 | M4 Apple and Android | not started | — | — |
 | M5 docs, hardware, promotion | not started | — | — |
 
-## Current work — re-review and publish M2
+## Current work — close the remaining M2 review findings
 
 M0 and M1 are merged to the effort. M2 now has the always-compiled foreground
 admission path, one-open tuner-to-FFmpeg pump, bounded six-segment live HLS
@@ -40,8 +41,30 @@ sanitizes transport logs, corrects metrics, and deinterlaces only interlaced
 frames. A new loopback fixture proves one tuner GET through HLS publication,
 activation, byte serving, and process/socket/scratch/registry cleanup.
 
-The exact Rust 1.97.1 source-only loop and focused tests pass. Next is an
-exact-head adversarial re-review, the Forgejo effort gate, and task merge.
+The second M2 review and combined-effort review requested changes. Work now
+covers monotonic signed drain proofs, recovery when the prior owner is lost,
+cancellation during startup, confirmed cleanup failures, bounded file streaming,
+expiring terminal errors, truthful metrics, cluster Activity, and stronger
+behavioral tests. These changes are unqualified until they compile and pass
+focused tests. An explicitly selected Astra agent is independently reviewing
+the owner-transition design. The earlier review labelled “Astra” selected a
+reviewer role without changing its model; it is retained as an additional
+review, not evidence that Astra ran.
+
+The actual Astra whole-M1/M2 review found three further issues: an in-flight
+start could cross shutdown, owner control responses were not authenticated,
+and unsupported source decoders lacked a typed error. The working fix closes
+registry insertion permanently at shutdown, authenticates bounded owner
+control responses (including playlists), constructs activation URLs locally,
+and recognizes missing-decoder diagnostics in bounded stderr capture.
+The latest completed local focused run passed 40 Live TV tests plus the
+cluster Activity aggregation test. The signature-tampering regression passed
+separately. Local lint and policy checks passed; the exact committed tree still
+needs Rust 1.97.1 verification. No current-commit approval
+or merge qualification is claimed.
+
+Next is compilation and tests of the completed fixes, adversarial approval,
+the Forgejo effort gate, and task merge.
 Forgejo is the only mutable remote after the repository migration. Repository
 access is confirmed through the host SSH agent; the supplied deploy key
 remains scoped to node access.
@@ -78,6 +101,7 @@ remains scoped to node access.
 | Default two concurrent sessions | FLEX/CONNECT 4K has only two ATSC 3-capable tuners and other clients may compete | hardware evidence supports a different household policy |
 | H.264/AAC at 720p by default | broad client compatibility and realistic realtime encoding | 1080p/2160p fixtures pass on the selected owner |
 | Runtime enablement only; no code feature gate | one binary must expose the same capability everywhere while unsafe activation stays explicit and reversible | never; this is the product contract |
+| No timeout-only owner recovery | elapsed time cannot prove the old FFmpeg process/tuner socket closed; require authenticated drain or a separate exact admin physical-fencing attestation while disabled | a physically enforced fenced lease mechanism exists |
 | One tuner HTTP GET and one FFmpeg process per session | retries can double-lease physical tuners and split lifecycle ownership | a device-native resumable lease protocol exists |
 | DRM and captions unsupported | plurx has no licensed DRM path; captions lack end-to-end proof | a lawful DRM path or 608/708 fixture exists |
 | All first-party clients are in scope | a living-room feature is not complete as a web-only API | owner explicitly narrows the product surface |
@@ -89,8 +113,8 @@ remains scoped to node access.
   result from the actual device.
 - ATSC 3.0 commonly needs HEVC and AC-4. Device reception does not prove the
   installed FFmpeg can decode either.
-- Owner failure ends the current live session. The next Watch may start after
-  the owner returns or the configured owner changes; automatic takeover is not
-  part of this effort.
+- Owner failure ends the current live session. Reconfiguration remains possible
+  while disabled; re-enable requires confirmed old-owner cleanup or explicit
+  physical fencing, followed by readiness. Automatic takeover is out of scope.
 - An external HDHomeRun client can win a tuner after plurx checks capacity.
   Runtime `503` remains normal and actionable.

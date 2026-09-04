@@ -12,15 +12,16 @@ use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
 use super::peer_transport::{deadline_after, PeerAuthMode, PeerTransport, PeerTransportError};
 use crate::live_tv::{
-    capability_owner, LiveTvActivateRequest, LiveTvActivated, LiveTvConfig, LiveTvError,
-    LiveTvResourceRequest, LiveTvSnapshot, LiveTvStartRequest, LiveTvStopRequest,
+    capability_owner, LiveTvActivateRequest, LiveTvActivated, LiveTvConfig, LiveTvDrainAck,
+    LiveTvError, LiveTvResourceRequest, LiveTvSnapshot, LiveTvStartRequest, LiveTvStopRequest,
     SnapshotFreshness, SnapshotRequest, ACTIVATE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH,
     SNAPSHOT_PATH, START_PATH, STOP_PATH,
 };
 use crate::state::AppState;
 
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(25);
-const START_EXCHANGE_DEADLINE: Duration = Duration::from_secs(19);
+const START_EXCHANGE_ATTEMPT: Duration = Duration::from_secs(17);
+const START_EXCHANGE_TOTAL: Duration = Duration::from_secs(24);
 const CONTROL_EXCHANGE_DEADLINE: Duration = Duration::from_secs(5);
 const DRAIN_EXCHANGE_DEADLINE: Duration = Duration::from_secs(20);
 const RESOURCE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(12);
@@ -226,7 +227,7 @@ pub(crate) async fn readiness_for_config(
     config: &LiveTvConfig,
     force: bool,
 ) -> LiveTvReadiness {
-    let mut checks = Vec::with_capacity(7);
+    let mut checks = Vec::with_capacity(8);
     let static_result = config.validate_static();
     checks.push(LiveTvReadinessCheck {
         id: "configuration",
@@ -265,7 +266,22 @@ pub(crate) async fn readiness_for_config(
         },
     });
 
-    if static_result.is_err() || !serving_ready {
+    let transition_ready = config.admission_ready();
+    checks.push(LiveTvReadinessCheck {
+        id: "owner_transition",
+        ready: transition_ready,
+        message: if transition_ready {
+            "There is no unresolved tuner-owner cleanup"
+                .to_owned()
+        } else {
+            format!(
+                "Prior owner {} must acknowledge cleanup, or an administrator must stop it and confirm recovery in Developer settings",
+                config.transition_from_owner_node_id
+            )
+        },
+    });
+
+    if static_result.is_err() || !serving_ready || !transition_ready {
         return LiveTvReadiness {
             ready: false,
             enabled: config.enabled,
@@ -376,7 +392,9 @@ async fn owner_start(
         serde_json::to_vec(request).map_err(|error| ApiError::Internal(error.to_string()))?;
     let transport = PeerTransport::new(state.membership.clone());
     let mut last_transport = PeerTransportError::Unreachable;
+    let total_deadline = deadline_after(START_EXCHANGE_TOTAL);
     for attempt in 0..2 {
+        let attempt_deadline = total_deadline.min(deadline_after(START_EXCHANGE_ATTEMPT));
         match transport
             .request(
                 &node_id,
@@ -384,9 +402,9 @@ async fn owner_start(
                 reqwest::Method::POST,
                 START_PATH,
                 body.clone(),
-                deadline_after(START_EXCHANGE_DEADLINE),
+                attempt_deadline,
                 MAX_START_RESPONSE_BYTES,
-                PeerAuthMode::ExactRequest,
+                PeerAuthMode::ExactRequestAndResponse,
             )
             .await
         {
@@ -452,13 +470,13 @@ async fn owner_activate(
                 body.clone(),
                 deadline_after(CONTROL_EXCHANGE_DEADLINE),
                 MAX_START_RESPONSE_BYTES,
-                PeerAuthMode::ExactRequest,
+                PeerAuthMode::ExactRequestAndResponse,
             )
             .await
         {
             Ok(response) if response.status.is_success() => {
-                let activated =
-                    serde_json::from_slice::<LiveTvActivated>(&response.body).map_err(|_| {
+                let mut activated = serde_json::from_slice::<LiveTvActivated>(&response.body)
+                    .map_err(|_| {
                         ApiError::typed(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "owner_unavailable",
@@ -472,6 +490,8 @@ async fn owner_activate(
                         "The tuner owner returned a mismatched activation response",
                     ));
                 }
+                activated.playlist_url =
+                    format!("/api/v1/live-tv/sessions/{}/index.m3u8", request.capability);
                 return Ok(activated);
             }
             Ok(response) => return Err(wire_api_error(response.status, &response.body)),
@@ -514,6 +534,35 @@ async fn owner_resource(
     };
     let body =
         serde_json::to_vec(&request).map_err(|error| ApiError::Internal(error.to_string()))?;
+    if !matches!(request, LiveTvResourceRequest::Segment { .. }) {
+        let response = PeerTransport::new(state.membership.clone())
+            .request(
+                &node_id,
+                &base,
+                reqwest::Method::POST,
+                RESOURCE_PATH,
+                body,
+                deadline_after(RESOURCE_EXCHANGE_DEADLINE),
+                max_body_bytes as usize,
+                PeerAuthMode::ExactRequestAndResponse,
+            )
+            .await
+            .map_err(|error| api_error(peer_error(error)))?;
+        if !response.status.is_success() {
+            return Err(wire_api_error(response.status, &response.body));
+        }
+        let content_type = if matches!(request, LiveTvResourceRequest::Playlist { .. }) {
+            "application/vnd.apple.mpegurl"
+        } else {
+            "application/json"
+        };
+        return Response::builder()
+            .status(response.status)
+            .header(axum::http::header::CONTENT_TYPE, content_type)
+            .header(axum::http::header::CACHE_CONTROL, "no-store")
+            .body(Body::from(response.body))
+            .map_err(|error| ApiError::Internal(error.to_string()));
+    }
     let response = PeerTransport::new(state.membership.clone())
         .request_stream(
             &node_id,
@@ -571,7 +620,7 @@ async fn owner_stop(state: &AppState, owner: &str, capability: &str) -> Result<(
             body,
             deadline_after(CONTROL_EXCHANGE_DEADLINE),
             1_024,
-            PeerAuthMode::ExactRequest,
+            PeerAuthMode::ExactRequestAndResponse,
         )
         .await
         .map_err(|error| api_error(peer_error(error)))?;
@@ -589,17 +638,24 @@ async fn owner_stop(state: &AppState, owner: &str, capability: &str) -> Result<(
 pub(crate) async fn drain_owner(
     state: &AppState,
     owner: &str,
-    keep_generation: i64,
+    drain_before_generation: i64,
 ) -> Result<(), LiveTvError> {
     if owner == state.node_id {
-        return state.live_tv.drain_stale(keep_generation).await.map(|_| ());
+        return state
+            .live_tv
+            .drain_before(drain_before_generation)
+            .await
+            .map(|_| ());
     }
     let (node_id, base) = owner_peer(state, owner).await.map_err(|_| {
         LiveTvError::OwnerUnavailable("the prior tuner owner is unreachable".into())
     })?;
+    let request_nonce = uuid::Uuid::new_v4().to_string();
     let body = serde_json::to_vec(&crate::live_tv::LiveTvDrainRequest {
         expected_owner_node_id: owner.to_owned(),
-        keep_generation,
+        target_node_id: state.node_id.clone(),
+        request_nonce: request_nonce.clone(),
+        drain_before_generation,
     })
     .map_err(|error| LiveTvError::InvalidResponse(error.to_string()))?;
     let response = PeerTransport::new(state.membership.clone())
@@ -615,13 +671,44 @@ pub(crate) async fn drain_owner(
         )
         .await
         .map_err(peer_error)?;
-    if response.status.is_success() {
-        Ok(())
-    } else {
-        Err(LiveTvError::OwnerUnavailable(
+    if !response.status.is_success() {
+        return Err(LiveTvError::OwnerUnavailable(
             "the prior tuner owner refused the drain request".into(),
-        ))
+        ));
     }
+    let ack = serde_json::from_slice::<LiveTvDrainAck>(&response.body).map_err(|_| {
+        LiveTvError::OwnerUnavailable(
+            "the prior tuner owner returned an invalid drain proof".into(),
+        )
+    })?;
+    if ack.owner_node_id != owner
+        || ack.target_node_id != state.node_id
+        || ack.request_nonce != request_nonce
+        || ack.drained_before_generation != drain_before_generation
+    {
+        return Err(LiveTvError::OwnerUnavailable(
+            "the prior tuner owner returned a mismatched drain proof".into(),
+        ));
+    }
+    let payload = ack.signing_payload()?;
+    let authorized = state
+        .membership
+        .authorize_internal_peer_response(
+            owner,
+            &state.node_id,
+            &request_nonce,
+            crate::live_tv::DRAIN_PATH,
+            &payload,
+            &ack.signature,
+        )
+        .await
+        .unwrap_or(false);
+    if !authorized {
+        return Err(LiveTvError::OwnerUnavailable(
+            "the prior tuner owner's drain proof could not be authenticated".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn owner_peer(state: &AppState, expected: &str) -> Result<(String, String), ApiError> {
@@ -734,7 +821,7 @@ async fn owner_snapshot(
             body,
             deadline_after(SNAPSHOT_DEADLINE),
             MAX_SNAPSHOT_BYTES,
-            PeerAuthMode::ExactRequest,
+            PeerAuthMode::ExactRequestAndResponse,
         )
         .await
         .map_err(peer_error)?;

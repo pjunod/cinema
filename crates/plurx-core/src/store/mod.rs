@@ -777,7 +777,7 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
-    /// Runtime-only HDHomeRun live-TV configuration. The six values are read
+    /// Runtime-only HDHomeRun live-TV configuration. The values are read
     /// as one snapshot and written with a generation CAS; the enable bit is
     /// deliberately absent/off on upgrade.
     pub const LIVE_TV_ENABLED: &str = "live_tv.enabled";
@@ -786,6 +786,11 @@ pub mod keys {
     pub const LIVE_TV_MAX_SESSIONS: &str = "live_tv.max_sessions";
     pub const LIVE_TV_OUTPUT_HEIGHT: &str = "live_tv.output_height";
     pub const LIVE_TV_CONFIG_GENERATION: &str = "live_tv.config_generation";
+    /// Persisted owner-handoff safety barrier. These are internal state, not
+    /// operator-editable settings: a replacement owner admits only after the
+    /// named prior owner proves a drain or an administrator attests physical fencing.
+    pub const LIVE_TV_TRANSITION_FROM_OWNER_NODE_ID: &str = "live_tv.transition_from_owner_node_id";
+    pub const LIVE_TV_TRANSITION_DRAIN_BEFORE: &str = "live_tv.transition_drain_before";
     /// Opt in to remote media-session placement only after every committed
     /// voter is publishing the current media protocol. Absent is deliberately
     /// off so rolling upgrades keep all starts local.

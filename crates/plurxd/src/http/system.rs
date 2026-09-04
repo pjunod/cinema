@@ -1497,6 +1497,8 @@ pub struct SettingsDto {
     pub live_tv_max_sessions: u8,
     pub live_tv_output_height: u16,
     pub live_tv_config_generation: i64,
+    pub live_tv_transition_from_owner_node_id: String,
+    pub live_tv_transition_drain_before: i64,
     pub tmdb_configured: bool,
     /// The stored TMDB key itself. This endpoint is admin-only and the key is
     /// low-sensitivity (read-only metadata), so the admin who set it can see
@@ -1804,6 +1806,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         live_tv_max_sessions: live_tv.max_sessions,
         live_tv_output_height: live_tv.output_height,
         live_tv_config_generation: live_tv.generation,
+        live_tv_transition_from_owner_node_id: live_tv.transition_from_owner_node_id,
+        live_tv_transition_drain_before: live_tv.transition_drain_before,
         tmdb_configured: !tmdb_api_key.is_empty(),
         tmdb_api_key,
         omdb_configured: !omdb_api_key.is_empty(),
@@ -1888,6 +1892,8 @@ pub struct UpdateSettings {
     pub live_tv_max_sessions: Option<u8>,
     pub live_tv_output_height: Option<u16>,
     pub live_tv_config_generation: Option<i64>,
+    /// Explicit admin attestation, never an automatic timeout override.
+    pub live_tv_fenced_owner: Option<LiveTvFencedOwner>,
     /// Set the TMDB API key. Empty string clears it. Absent leaves it as-is.
     pub tmdb_api_key: Option<String>,
     /// Set the OMDb API key. Empty string clears it. Absent leaves it as-is.
@@ -1965,6 +1971,53 @@ pub struct UpdateSettings {
     pub genre_backfill: Option<bool>,
 }
 
+struct PreparedLiveTvUpdate {
+    expected_generation: i64,
+    candidate: crate::live_tv::LiveTvConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveTvFencedOwner {
+    pub owner_node_id: String,
+    pub drain_before_generation: i64,
+    pub stopped_and_restart_prevented: bool,
+}
+
+fn live_tv_setting_values(config: &crate::live_tv::LiveTvConfig) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            keys::LIVE_TV_ENABLED,
+            if config.enabled { "1" } else { "0" }.to_owned(),
+        ),
+        (
+            keys::LIVE_TV_DEVICE_IPV4,
+            config
+                .device_ipv4
+                .map(|address| address.to_string())
+                .unwrap_or_default(),
+        ),
+        (keys::LIVE_TV_OWNER_NODE_ID, config.owner_node_id.clone()),
+        (keys::LIVE_TV_MAX_SESSIONS, config.max_sessions.to_string()),
+        (
+            keys::LIVE_TV_OUTPUT_HEIGHT,
+            config.output_height.to_string(),
+        ),
+        (
+            keys::LIVE_TV_TRANSITION_FROM_OWNER_NODE_ID,
+            config.transition_from_owner_node_id.clone(),
+        ),
+        (
+            keys::LIVE_TV_TRANSITION_DRAIN_BEFORE,
+            config.transition_drain_before.to_string(),
+        ),
+        (
+            keys::LIVE_TV_CONFIG_GENERATION,
+            config.generation.to_string(),
+        ),
+    ]
+}
+
 impl UpdateSettings {
     /// Live TV is protected by its own generation CAS. Mixing it into the
     /// legacy aggregate PATCH would let an unrelated setting commit before a
@@ -2038,7 +2091,7 @@ where
 
 /// PUT /api/v1/settings (admin)
 pub async fn update_settings(
-    _admin: AdminUser,
+    admin: AdminUser,
     State(state): State<AppState>,
     Json(req): Json<UpdateSettings>,
 ) -> Result<Json<SettingsDto>, ApiError> {
@@ -2051,7 +2104,8 @@ pub async fn update_settings(
         || req.live_tv_device_ipv4.is_some()
         || req.live_tv_owner_node_id.is_some()
         || req.live_tv_max_sessions.is_some()
-        || req.live_tv_output_height.is_some();
+        || req.live_tv_output_height.is_some()
+        || req.live_tv_fenced_owner.is_some();
     if live_tv_requested && req.has_non_live_tv_update() {
         return Err(ApiError::BadRequest(
             "Live TV settings must be saved in a separate request so their generation CAS is atomic"
@@ -2093,15 +2147,63 @@ pub async fn update_settings(
             .map(str::trim)
             .unwrap_or(&current.owner_node_id)
             .to_owned();
+        let mut transition_from_owner_node_id = current.transition_from_owner_node_id.clone();
+        let mut transition_drain_before = current.transition_drain_before;
+        let next_generation = current
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| ApiError::Conflict("Live TV settings generation is exhausted".into()))?;
+
+        if let Some(proof) = req.live_tv_fenced_owner.as_ref() {
+            if current.enabled
+                || req.live_tv_enabled.is_some()
+                || non_enable_change
+                || !proof.stopped_and_restart_prevented
+                || transition_from_owner_node_id.is_empty()
+                || proof.owner_node_id != transition_from_owner_node_id
+                || proof.drain_before_generation != transition_drain_before
+            {
+                return Err(ApiError::Conflict(
+                    "Owner recovery requires a separate request while disabled, the exact current barrier, and confirmation that the old process is stopped and cannot restart before synchronizing".into(),
+                ));
+            }
+            transition_from_owner_node_id.clear();
+            transition_drain_before = 0;
+        }
+
+        // A disabled tuple cannot mint a current-generation session.  If it
+        // carries an earlier unresolved transition, use this save attempt to
+        // obtain a fresh authenticated drain proof before readiness is
+        // evaluated. Failure preserves the original unresolved barrier.
+        if !current.enabled
+            && !transition_from_owner_node_id.is_empty()
+            && super::live_tv::drain_owner(
+                &state,
+                &transition_from_owner_node_id,
+                transition_drain_before,
+            )
+            .await
+            .is_ok()
+        {
+            transition_from_owner_node_id.clear();
+            transition_drain_before = 0;
+        }
+        if current.enabled && req.live_tv_enabled == Some(false) {
+            transition_from_owner_node_id = current.owner_node_id.clone();
+            transition_drain_before = next_generation;
+        }
+
         let candidate = crate::live_tv::LiveTvConfig {
             enabled: req.live_tv_enabled.unwrap_or(current.enabled),
             device_ipv4,
             owner_node_id,
             max_sessions: req.live_tv_max_sessions.unwrap_or(current.max_sessions),
             output_height: req.live_tv_output_height.unwrap_or(current.output_height),
-            // Readiness is against the currently stored generation. The CAS
-            // increments only after every precondition succeeds.
+            // Readiness runs against the still-current owner tuple. The CAS
+            // publishes the increment only after every precondition passes.
             generation: current.generation,
+            transition_from_owner_node_id,
+            transition_drain_before,
         };
         candidate
             .validate_static()
@@ -2115,40 +2217,12 @@ pub async fn update_settings(
                 ));
             }
         }
-        let next_generation = current
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| ApiError::Conflict("Live TV settings generation is exhausted".into()))?;
-        let values = vec![
-            (
-                keys::LIVE_TV_ENABLED,
-                if candidate.enabled { "1" } else { "0" }.to_owned(),
-            ),
-            (
-                keys::LIVE_TV_DEVICE_IPV4,
-                candidate
-                    .device_ipv4
-                    .map(|address| address.to_string())
-                    .unwrap_or_default(),
-            ),
-            (keys::LIVE_TV_OWNER_NODE_ID, candidate.owner_node_id.clone()),
-            (
-                keys::LIVE_TV_MAX_SESSIONS,
-                candidate.max_sessions.to_string(),
-            ),
-            (
-                keys::LIVE_TV_OUTPUT_HEIGHT,
-                candidate.output_height.to_string(),
-            ),
-            (keys::LIVE_TV_CONFIG_GENERATION, next_generation.to_string()),
-        ];
-        Some((
+        let mut candidate = candidate;
+        candidate.generation = next_generation;
+        Some(PreparedLiveTvUpdate {
             expected_generation,
-            values,
-            candidate.enabled,
-            candidate.owner_node_id,
-            current.owner_node_id,
-        ))
+            candidate,
+        })
     } else if req.live_tv_config_generation.is_some() {
         return Err(ApiError::BadRequest(
             "live_tv_config_generation is only valid with a Live TV setting".into(),
@@ -2534,28 +2608,20 @@ pub async fn update_settings(
             .collect::<Vec<_>>();
         state.store.put_settings(&borrowed).await?;
     }
-    if let Some((expected_generation, values, enabling, owner_node_id, prior_owner_node_id)) =
-        &live_tv_update
-    {
-        // A previous disable whose response was lost may still be settling on
-        // the old owner. Before changing owner/configuration or re-enabling,
-        // prove that every generation except the currently stored one is
-        // physically gone. This is safe before the CAS: current-generation
-        // sessions remain untouched until a disabling commit fences them.
-        super::live_tv::drain_owner(&state, prior_owner_node_id, *expected_generation)
-            .await
-            .map_err(super::live_tv::api_error)?;
+    if let Some(update) = &live_tv_update {
+        let candidate = &update.candidate;
+        let values = live_tv_setting_values(candidate);
         let borrowed = values
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
             .collect::<Vec<_>>();
-        let updated = if *enabling && state.membership.is_replicated() {
+        let updated = if candidate.enabled && state.membership.is_replicated() {
             state
                 .membership
                 .activate_live_tv_settings_if_ready(
                     keys::LIVE_TV_CONFIG_GENERATION,
-                    *expected_generation,
-                    owner_node_id,
+                    update.expected_generation,
+                    &candidate.owner_node_id,
                     &borrowed,
                 )
                 .await
@@ -2565,7 +2631,7 @@ pub async fn update_settings(
                 .store
                 .put_settings_if_generation(
                     keys::LIVE_TV_CONFIG_GENERATION,
-                    *expected_generation,
+                    update.expected_generation,
                     &borrowed,
                 )
                 .await?
@@ -2576,15 +2642,27 @@ pub async fn update_settings(
                 .into(),
             ));
         }
-        let next_generation = expected_generation.saturating_add(1);
-        // Do not acknowledge the mutation until the previous owner's tuner,
-        // FFmpeg child, scratch, and admission permits are confirmed released.
-        // If this fails the CAS is already authoritative, but returning an
-        // error prevents an operator or automation from treating the drain as
-        // complete and immediately moving ownership again.
-        super::live_tv::drain_owner(&state, prior_owner_node_id, next_generation)
-            .await
-            .map_err(super::live_tv::api_error)?;
+        state.live_tv.observe_config(candidate);
+        if let Some(proof) = req.live_tv_fenced_owner.as_ref() {
+            tracing::warn!(
+                admin_user_id = admin.0.id,
+                prior_owner = %proof.owner_node_id,
+                drain_before_generation = proof.drain_before_generation,
+                generation = candidate.generation,
+                "Administrator attested physical fencing of the previous Live TV owner; feature remains disabled"
+            );
+        }
+        // Disabled is authoritative even if the former owner is unreachable.
+        // The same transaction retained its admission barrier; a later enable
+        // cannot bypass that barrier merely because this request succeeded.
+        if !candidate.transition_from_owner_node_id.is_empty() {
+            let _ = super::live_tv::drain_owner(
+                &state,
+                &candidate.transition_from_owner_node_id,
+                candidate.transition_drain_before,
+            )
+            .await;
+        }
     }
     if let Some(seconds) = req.subtitle_window_secs {
         state
@@ -3025,6 +3103,27 @@ fn clustered_deliveries(
     out
 }
 
+fn clustered_live_tv(
+    mut local: Vec<crate::live_tv::LiveTvActivity>,
+    peers: &PeerActivityRead,
+) -> Vec<crate::live_tv::LiveTvActivity> {
+    if let PeerActivityRead::Peers(outcomes) = peers {
+        for (_, outcome) in outcomes.iter() {
+            if let PeerActivityOutcome::Answered(snapshot) = outcome {
+                local.extend(snapshot.live_tv.iter().cloned());
+            }
+        }
+    }
+    local.sort_by(|left, right| {
+        left.owner_node_id
+            .cmp(&right.owner_node_id)
+            .then(left.channel_number.cmp(&right.channel_number))
+            .then(left.user.cmp(&right.user))
+            .then(left.age_seconds.cmp(&right.age_seconds))
+    });
+    local
+}
+
 fn clustered_analysis_progress(
     local_node_id: &str,
     local: Vec<crate::state::AnalysisProgress>,
@@ -3218,6 +3317,20 @@ pub async fn activity(
         + state.streams.list().len()
         + state.direct_plays.list().len();
     let streams = local.saturating_add(remote);
+    let live_tv = clustered_live_tv(state.live_tv.activities(), &peers);
+    activities.retain(|activity| activity.kind != "live_tv");
+    if !live_tv.is_empty() {
+        activities.push(Activity {
+            kind: "live_tv",
+            label: format!(
+                "{} active Live TV session{}",
+                live_tv.len(),
+                if live_tv.len() == 1 { "" } else { "s" }
+            ),
+            detail: None,
+            percent: None,
+        });
+    }
 
     // The historical local HLS-only summary would double count clustered
     // streams. Replace it with the complete direct/remux/HLS total while
@@ -3556,6 +3669,7 @@ pub async fn activity_detail(
         )
     };
     let clustered = !matches!(peers, PeerActivityRead::LocalOnly);
+    let live_tv = clustered_live_tv(state.live_tv.activities(), &peers);
     let deliveries = if clustered {
         serde_json::to_value(clustered_deliveries(&state.node_id, deliveries, &peers))
             .map_err(|error| ApiError::Internal(error.to_string()))?
@@ -3610,7 +3724,7 @@ pub async fn activity_detail(
             "syncing": trakt.syncing,
             "note": trakt.note,
         },
-        "live_tv": state.live_tv.activities(),
+        "live_tv": live_tv,
     });
     if clustered {
         response["activity_nodes"] = serde_json::to_value(activity_nodes(&state.node_id, &peers))
@@ -3750,7 +3864,7 @@ pub(crate) struct MetricsState {
     store_metrics: StoreMetricsCache,
     passive_raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
     passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
-    live_tv: Arc<crate::live_tv::LiveTvManager>,
+    live_tv: Arc<crate::live_tv::LiveTvMetrics>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -3765,7 +3879,7 @@ impl FromRef<AppState> for MetricsState {
             store_metrics: state.store_metrics.clone(),
             passive_raft: state.replication.metrics_handle(),
             passive_membership: state.membership.metrics_handle(),
-            live_tv: Arc::clone(&state.live_tv),
+            live_tv: state.live_tv.metrics_handle(),
         }
     }
 }
@@ -4169,6 +4283,7 @@ pub(crate) async fn metrics(
         super::internal_activity::prometheus_cluster_activity(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
+    let live_tv_metrics = state.live_tv.prometheus();
 
     // Integration counters (plan P6). Scans by what asked for them, and how
     // many times another application has called in at all — the pair that
@@ -4206,7 +4321,7 @@ pub(crate) async fn metrics(
         takeover_metrics = crate::media_sessions::prometheus(),
         control_metrics = crate::playback_control::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
-        live_tv_metrics = state.live_tv.prometheus(),
+        live_tv_metrics = live_tv_metrics,
     );
     (
         [(
@@ -4324,6 +4439,16 @@ mod tests {
                                 delivered_bps: None,
                             }],
                             analysis: Vec::new(),
+                            live_tv: vec![crate::live_tv::LiveTvActivity {
+                                channel_number: "7.1".into(),
+                                channel_name: "Remote TV".into(),
+                                user: "viewer".into(),
+                                owner_node_id: "node-b".into(),
+                                encoder: "software".into(),
+                                age_seconds: 1,
+                                output_height: 720,
+                                state: "active".into(),
+                            }],
                         },
                     ),
                 ),
@@ -4340,6 +4465,10 @@ mod tests {
             &peers,
         ))
         .expect("cluster deliveries serialize");
+        let live_tv = clustered_live_tv(Vec::new(), &peers);
+        assert_eq!(live_tv.len(), 1);
+        assert_eq!(live_tv[0].owner_node_id, "node-b");
+        assert_eq!(live_tv[0].channel_name, "Remote TV");
         let rows = rows.as_array().expect("delivery array");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["node_id"], "node-b");

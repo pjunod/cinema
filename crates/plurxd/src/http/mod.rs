@@ -3508,6 +3508,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_tv_dead_owner_disable_preserves_barrier_across_edits_and_exact_recovery() {
+        use plurx_core::store::keys;
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_settings(&[
+                (keys::LIVE_TV_ENABLED, "1"),
+                (keys::LIVE_TV_DEVICE_IPV4, "192.168.4.20"),
+                (keys::LIVE_TV_OWNER_NODE_ID, "lost-owner-a"),
+                (keys::LIVE_TV_CONFIG_GENERATION, "7"),
+            ])
+            .await
+            .expect("seed lost owner");
+        let (status, disabled) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_enabled": false, "live_tv_config_generation": 7
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{disabled}");
+        assert_eq!(disabled["live_tv_enabled"], false);
+        assert_eq!(
+            disabled["live_tv_transition_from_owner_node_id"],
+            "lost-owner-a"
+        );
+        assert_eq!(disabled["live_tv_transition_drain_before"], 8);
+        for (generation, owner) in [(8, "replacement-b"), (9, "replacement-c")] {
+            let (status, saved) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({
+                        "live_tv_owner_node_id": owner, "live_tv_config_generation": generation
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{saved}");
+            assert_eq!(
+                saved["live_tv_transition_from_owner_node_id"],
+                "lost-owner-a"
+            );
+            assert_eq!(saved["live_tv_transition_drain_before"], 8);
+            assert_eq!(saved["live_tv_owner_node_id"], owner);
+        }
+        let proof = json!({"owner_node_id":"lost-owner-a", "drain_before_generation":8, "stopped_and_restart_prevented":true});
+        for invalid in [
+            json!({"live_tv_config_generation":9, "live_tv_fenced_owner":proof}),
+            json!({"live_tv_config_generation":10, "live_tv_fenced_owner":{"owner_node_id":"replacement-b", "drain_before_generation":8, "stopped_and_restart_prevented":true}}),
+            json!({"live_tv_config_generation":10, "live_tv_fenced_owner":{"owner_node_id":"lost-owner-a", "drain_before_generation":10, "stopped_and_restart_prevented":true}}),
+            json!({"live_tv_config_generation":10, "live_tv_fenced_owner":{"owner_node_id":"lost-owner-a", "drain_before_generation":8, "stopped_and_restart_prevented":false}}),
+            json!({"live_tv_config_generation":10, "live_tv_enabled":true, "live_tv_fenced_owner":proof}),
+            json!({"live_tv_config_generation":10, "live_tv_owner_node_id":"replacement-d", "live_tv_fenced_owner":proof}),
+        ] {
+            let (status, body) = call(&app, put("/api/v1/settings", Some(&admin), invalid)).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        }
+        let recovery = json!({"live_tv_config_generation":10, "live_tv_fenced_owner":proof});
+        let (status, _) = call(&app, put("/api/v1/settings", None, recovery.clone())).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // Competing exact-generation recoveries cannot both publish a tuple.
+        let (first, second) = tokio::join!(
+            call(
+                &app,
+                put("/api/v1/settings", Some(&admin), recovery.clone())
+            ),
+            call(&app, put("/api/v1/settings", Some(&admin), recovery)),
+        );
+        let statuses = [first.0, second.0];
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::OK)
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::CONFLICT)
+                .count(),
+            1
+        );
+        let (_, saved) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(saved["live_tv_enabled"], false);
+        assert_eq!(saved["live_tv_owner_node_id"], "replacement-c");
+        assert_eq!(saved["live_tv_config_generation"], 11);
+        assert_eq!(saved["live_tv_transition_from_owner_node_id"], "");
+        assert_eq!(saved["live_tv_transition_drain_before"], 0);
+    }
+
+    #[tokio::test]
     async fn live_tv_quorum_loss_fences_channels_and_stops_readiness_before_device_work() {
         let (app, state) = test_app_with_state();
         let admin = setup_admin(&app).await;
