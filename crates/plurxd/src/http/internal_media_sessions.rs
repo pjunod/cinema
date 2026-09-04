@@ -738,6 +738,22 @@ async fn control_inner(
     if let Err(status) = authorize(&state, &headers, CONTROL_PATH, &body).await {
         return status.into_response();
     }
+    control_authorized(state, request).await
+}
+
+/// The owner side of a relayed control exchange, after the peer signature has
+/// been proved.
+///
+/// Split from the signature check so the refusals below can be driven by a
+/// test. Signing an internal request needs a live replicated membership — a
+/// hiqlite client — which no unit fixture has, so before this split the whole
+/// body was unreachable from `cargo test` and a mutation reverting any of its
+/// gates survived the suite. The one line this leaves untested is the
+/// `authorize` call itself, which is proved by the router's own auth tests.
+async fn control_authorized(
+    state: AppState,
+    request: crate::playback_control::ControlRelayRequest,
+) -> Response {
     let route = match state.store.media_session_route(&request.session_id).await {
         Ok(Some(route)) => route,
         Ok(None) => {
@@ -854,6 +870,248 @@ async fn control_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A durable route this node does not own, already outside its lease.
+    async fn activate_expired_relay_route(
+        state: &AppState,
+        session_id: &str,
+        incarnation_id: &str,
+        user_id: i64,
+        recipe_json: String,
+    ) {
+        let fingerprint = "a".repeat(64);
+        state
+            .store
+            .claim_media_session_request(
+                user_id,
+                incarnation_id,
+                &fingerprint,
+                "relay-player",
+                incarnation_id,
+                1,
+                60_000,
+            )
+            .await
+            .expect("claim relay request");
+        assert!(state
+            .store
+            .assign_media_session_request_owner(
+                user_id,
+                incarnation_id,
+                incarnation_id,
+                &state.node_id,
+                1,
+            )
+            .await
+            .expect("assign relay owner"));
+        let activation = plurx_core::domain::MediaSessionActivation {
+            incarnation_id: incarnation_id.to_owned(),
+            session_id: session_id.to_owned(),
+            user_id,
+            playback_id: "relay-player".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some(incarnation_id.to_owned()),
+            request_fingerprint: fingerprint,
+            owner_node_id: state.node_id.clone(),
+            recipe_json,
+            response_json: relay_start_response(session_id, incarnation_id),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 1,
+            lease_expires_at_ms: 2,
+        };
+        state
+            .store
+            .activate_media_session(&activation)
+            .await
+            .expect("prepare relay route")
+            .expect("relay route preparation accepted");
+        state
+            .store
+            .settle_media_session_activation(
+                &activation,
+                plurx_core::domain::MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                activation.now_ms,
+            )
+            .await
+            .expect("confirm relay route")
+            .expect("relay route confirmation accepted");
+    }
+
+    fn relay_start_response(session_id: &str, incarnation_id: &str) -> String {
+        serde_json::to_string(&crate::http::hls::StartResponse {
+            session_id: session_id.to_owned(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            duration_ms: Some(60_000),
+            start_seconds: 0.0,
+            media_origin_ms: Some(0),
+            height: 720,
+            encoder: "software".to_owned(),
+            vod: false,
+            ladder: vec![],
+            prior_kbps: None,
+            delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
+            control: crate::playback_control::ControlBootstrap::new(
+                session_id,
+                incarnation_id,
+                1,
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            ),
+            plan_notes: Vec::new(),
+        })
+        .expect("relay start response")
+    }
+
+    fn relay_control_request(generation: String) -> crate::playback_control::ControlRequestV1 {
+        crate::playback_control::ControlRequestV1 {
+            protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+            generation,
+            control_epoch: 1,
+            client_instance_id: uuid::Uuid::new_v4().to_string(),
+            sequence: 1,
+            demand: crate::playback_control::PlaybackDemand::Active,
+            position_ms: 1_000,
+            buffered_from_ms: Some(0),
+            buffered_through_ms: 10_000,
+            playback_rate: 1.0,
+            render_state: crate::playback_control::RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: crate::playback_control::ClientSelection {
+                quality: crate::playback_control::QualitySelection::Auto,
+                audio_track: None,
+                subtitle: crate::playback_control::SubtitleSelection {
+                    mode: crate::playback_control::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: crate::playback_control::CodecPolicy::Auto,
+                dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(crate::playback_control::DynamicCapabilities {
+                platform: crate::playback_control::ClientPlatform::Web,
+                max_height: 1080,
+                codecs: vec![crate::playback_control::CodecPolicy::H264],
+                dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+            supported_actions: None,
+        }
+    }
+
+    async fn relay_error_body(response: Response) -> serde_json::Value {
+        use http_body_util::BodyExt as _;
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect relay body")
+            .to_bytes();
+        serde_json::from_slice(&bytes).expect("relay errors are JSON objects")
+    }
+
+    /// The owner side of the relay decides an owner transition on its own —
+    /// it returns before `control_local` ever reaches `verify_authority` — so
+    /// it has to classify rather than assume, or the same binary answers one
+    /// route two ways depending on which node the client happened to reach.
+    ///
+    /// This is the ingress/owner race in the flesh: ingress read a live lease
+    /// and relayed, and by the time the owner re-read its own route the lease
+    /// had run out. An adversarial review found this gate untested and a
+    /// mutation reverting it surviving the suite, because signing an internal
+    /// request needs a live replicated membership no unit fixture has.
+    /// Splitting the signature check off `control_inner` is what makes it
+    /// reachable.
+    #[tokio::test]
+    async fn the_relay_owner_gate_classifies_a_lost_owner_rather_than_asking_for_a_retry() {
+        let (_app, state) = super::super::tests::test_app_with_state();
+        let user = state
+            .store
+            .create_user("relay-owner-loss", "hash", false)
+            .await
+            .expect("relay-owner-loss user");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        // Serving EVENT: a readable recipe nothing can ever take over.
+        let recipe_json =
+            crate::media_sessions::takeover_eligible_route(&session_id, &incarnation_id)
+                .recipe_json
+                .replace("\"typeless_playlist\":true", "\"typeless_playlist\":false")
+                .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
+
+        activate_expired_relay_route(&state, &session_id, &incarnation_id, user.id, recipe_json)
+            .await;
+
+        let response = control_authorized(
+            state.clone(),
+            crate::playback_control::ControlRelayRequest {
+                session_id: session_id.clone(),
+                generation: incarnation_id.clone(),
+                expected_owner_node_id: state.node_id.clone(),
+                expected_owner_epoch: 1,
+                deadline_unix_ms: crate::media_sessions::unix_ms().saturating_add(4_000),
+                control: relay_control_request(incarnation_id.clone()),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::GONE,
+            "the relay's own gate must not answer a retry for an owner nothing can replace"
+        );
+        let body = relay_error_body(response).await;
+        assert_eq!(body["code"], "owner_lost");
+        assert!(
+            body.get("retry_after_ms").is_none(),
+            "a hint is what all three reporters read as an instruction to keep going"
+        );
+    }
+
+    /// Its counterpart through the same gate: a rolling session a survivor
+    /// could still claim keeps the retryable answer and its hint.
+    #[tokio::test]
+    async fn the_relay_owner_gate_keeps_a_claimable_owner_retryable() {
+        let (_app, state) = super::super::tests::test_app_with_state();
+        let user = state
+            .store
+            .create_user("relay-owner-transition", "hash", false)
+            .await
+            .expect("relay-owner-transition user");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let recipe_json =
+            crate::media_sessions::takeover_eligible_route(&session_id, &incarnation_id)
+                .recipe_json
+                .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
+
+        activate_expired_relay_route(&state, &session_id, &incarnation_id, user.id, recipe_json)
+            .await;
+
+        let response = control_authorized(
+            state.clone(),
+            crate::playback_control::ControlRelayRequest {
+                session_id: session_id.clone(),
+                generation: incarnation_id.clone(),
+                expected_owner_node_id: state.node_id.clone(),
+                expected_owner_epoch: 1,
+                deadline_unix_ms: crate::media_sessions::unix_ms().saturating_add(4_000),
+                control: relay_control_request(incarnation_id.clone()),
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_EARLY);
+        let body = relay_error_body(response).await;
+        assert_eq!(body["code"], "owner_transition");
+        assert_eq!(body["retry_after_ms"], 500);
+    }
 
     #[tokio::test]
     async fn remote_start_requires_current_local_serving_authority() {
