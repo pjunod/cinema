@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries eleven compatibility patches for clustered deployments:
+Apache-2.0. Plurx carries twelve compatibility patches for clustered deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -35,6 +35,16 @@ Apache-2.0. Plurx carries eleven compatibility patches for clustered deployments
   duration histograms through `Client::local_db_snapshot_metrics`. Explicit
   RAII start/finish hooks classify build/install success and every error or
   cancelled exit without polling storage or exposing paths and snapshot ids.
+- SQLite and cache snapshot RPC responses preserve peer-side Raft errors as
+  `RemoteError` instead of flattening them into `Unreachable`. OpenRaft uses
+  that type boundary to recognize `SnapshotMismatch`, reset an interrupted
+  chunk stream to offset zero, and let a restarted follower converge. The
+  `sqlite_install_snapshot_preserves_mismatch_for_offset_reset` and
+  `cache_install_snapshot_preserves_mismatch_for_offset_reset` tests drive the
+  production `install_snapshot` methods through a nonzero mismatch and require
+  the exact remote error shape consumed by OpenRaft's retained offset-reset
+  test. Remove this patch only after upstream Hiqlite preserves peer snapshot
+  errors on both transports.
 - Snapshot build, install, read, and asynchronous cleanup share one
   file-ownership boundary. Completed files use fsync plus atomic rename, and a
   separately fsynced pointer publishes the exact current generation (including
@@ -88,9 +98,10 @@ Apache-2.0. Plurx carries eleven compatibility patches for clustered deployments
   is how a contaminating entry is identified down to its SQL. Production
   binaries compile none of it.
 
-Remove this vendor when an upstream Hiqlite release contains all eleven patches
+Remove this vendor when an upstream Hiqlite release contains all twelve patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
-`crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing.
+`crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
+and the interrupted snapshot tests above keep the twelfth patch load-bearing.
 
 Cargo records this package as path-sourced, which means cargo-audit skips it.
 The weekly `rust-audit.yml` job uses `scripts/vendor-audit-lock` to restore this

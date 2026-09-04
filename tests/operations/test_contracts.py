@@ -308,10 +308,44 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}", dockerfile)
         self.assertIn("PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}", compose)
 
-        # Replicated startup can legitimately use 120s for snapshot transfer
-        # and another 45s to prove the quorum watermark. Docker must not fail
-        # the dependent discovery service before that bounded recovery ends.
-        self.assertIn("--start-period=3m", dockerfile)
+        runtime = dockerfile.split("FROM runtime-assets AS runtime", 1)[1]
+        healthcheck = re.search(
+            r'(?m)^HEALTHCHECK --interval=(\S+) --timeout=(\S+) '
+            r'--start-period=(\S+) \\\n'
+            r'    CMD \["plurxd", "healthcheck"\]$',
+            runtime,
+        )
+        self.assertIsNotNone(healthcheck)
+        assert healthcheck is not None
+        interval, timeout, start_period = healthcheck.groups()
+        self.assertEqual((interval, timeout), ("30s", "5s"))
+
+        duration = re.fullmatch(r"(\d+)([smh])", start_period)
+        self.assertIsNotNone(duration)
+        assert duration is not None
+        multiplier = {"s": 1, "m": 60, "h": 3_600}[duration.group(2)]
+        start_period_seconds = int(duration.group(1)) * multiplier
+
+        config_source = read("crates/plurx-core/src/config.rs")
+        max_snapshot = re.search(
+            r"MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = ([\d_]+);",
+            config_source,
+        )
+        migration_source = read("crates/plurx-core/src/cluster/migration.rs")
+        hiqlite_start = re.search(
+            r"HIQLITE_START_TIMEOUT: Duration = Duration::from_secs\((\d+)\);",
+            migration_source,
+        )
+        self.assertIsNotNone(max_snapshot)
+        self.assertIsNotNone(hiqlite_start)
+        assert max_snapshot is not None and hiqlite_start is not None
+
+        # Startup owns three sequential 45s allowances: Hiqlite health,
+        # membership admission, and catch-up after the snapshot deadline.
+        supported_startup_seconds = int(
+            max_snapshot.group(1).replace("_", "")
+        ) + 3 * int(hiqlite_start.group(1))
+        self.assertGreaterEqual(start_period_seconds, supported_startup_seconds)
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")

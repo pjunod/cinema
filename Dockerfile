@@ -140,12 +140,13 @@ EXPOSE 32400
 VOLUME ["/var/lib/plurx"]
 USER plurx
 
-# A recovering replicated store may legitimately spend the configured 120s
-# snapshot-transfer budget plus 45s proving its startup watermark before the
-# HTTP listener exists. Keep Docker from declaring that bounded recovery
-# unhealthy first; once the grace period ends, the ordinary retry cadence
-# still detects a genuinely wedged process.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=3m \
+# A replicated startup may spend 45s reaching Hiqlite health, 45s awaiting
+# membership admission, then the configured snapshot timeout plus another 45s
+# reaching its quorum watermark. The supported maximum is therefore 3,735s;
+# round it up to the existing 65-minute operational bound. Docker ends this
+# grace on the first successful probe, so an ordinary start still becomes
+# healthy immediately and later failures use the normal retry cadence.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=65m \
     CMD ["plurxd", "healthcheck"]
 
 ENTRYPOINT ["plurxd"]

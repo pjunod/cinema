@@ -746,10 +746,33 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
 #[cfg(test)]
 mod tests {
     use openraft::error::{InstallSnapshotError, RaftError, SnapshotMismatch};
-    use openraft::SnapshotSegmentId;
+    use openraft::{SnapshotMeta, SnapshotSegmentId, Vote};
 
     use super::*;
     use tokio::sync::Notify;
+
+    fn test_node() -> Node {
+        Node {
+            id: 7,
+            addr_raft: "127.0.0.1:32401".to_owned(),
+            addr_api: "127.0.0.1:32402".to_owned(),
+        }
+    }
+
+    fn test_snapshot_meta() -> SnapshotMeta<NodeId, Node> {
+        SnapshotMeta {
+            last_log_id: None,
+            last_membership: Default::default(),
+            snapshot_id: "snapshot".to_owned(),
+        }
+    }
+
+    fn mismatch_at(offset: u64) -> RaftError<NodeId, InstallSnapshotError> {
+        RaftError::APIError(InstallSnapshotError::SnapshotMismatch(SnapshotMismatch {
+            expect: SnapshotSegmentId::from(("snapshot", 0)),
+            got: SnapshotSegmentId::from(("snapshot", offset)),
+        }))
+    }
 
     #[tokio::test]
     async fn dropping_connection_allows_handler_to_process_shutdown() {
@@ -806,11 +829,7 @@ mod tests {
 
     #[test]
     fn snapshot_mismatch_remains_a_remote_api_error() {
-        let node = Node {
-            id: 7,
-            addr_raft: "127.0.0.1:32401".to_owned(),
-            addr_api: "127.0.0.1:32402".to_owned(),
-        };
+        let node = test_node();
         let mismatch = SnapshotMismatch {
             expect: SnapshotSegmentId::from(("snapshot", 0)),
             got: SnapshotSegmentId::from(("snapshot", 6_291_456)),
@@ -829,6 +848,112 @@ mod tests {
                 target_node: Some(target_node),
                 source: RaftError::APIError(InstallSnapshotError::SnapshotMismatch(actual)),
             }) if target_node == node && actual == mismatch
+        ));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn sqlite_install_snapshot_preserves_mismatch_for_offset_reset() {
+        let (sender, receiver) = flume::bounded(1);
+        let mut network = NetworkConnectionStreaming {
+            node: test_node(),
+            sender,
+            task: None,
+        };
+        let responder = tokio::spawn(async move {
+            let (ack, request) = match receiver
+                .recv_async()
+                .await
+                .expect("receive SQLite snapshot request")
+            {
+                RaftRequest::SnapshotDB(request) => request,
+                request => panic!("unexpected SQLite Raft request: {request:?}"),
+            };
+            assert_eq!(request.offset, 4);
+            ack.send(Ok(RaftStreamResponsePayload::SnapshotDB(Err(
+                mismatch_at(request.offset),
+            ))))
+            .expect("return SQLite snapshot response");
+        });
+
+        let error = <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::install_snapshot(
+            &mut network,
+            InstallSnapshotRequest {
+                vote: Vote::new_committed(1, 1),
+                meta: test_snapshot_meta(),
+                offset: 4,
+                data: b"efgh".to_vec(),
+                done: true,
+            },
+            RPCOption::new(Duration::from_millis(500)),
+        )
+        .await;
+        responder.await.expect("join SQLite snapshot responder");
+
+        assert!(matches!(
+            error,
+            Err(RPCError::RemoteError(RemoteError {
+                target: 7,
+                target_node: Some(target_node),
+                source: RaftError::APIError(InstallSnapshotError::SnapshotMismatch(
+                    SnapshotMismatch { expect, got },
+                )),
+            })) if target_node == test_node()
+                && expect == SnapshotSegmentId::from(("snapshot", 0))
+                && got == SnapshotSegmentId::from(("snapshot", 4))
+        ));
+    }
+
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn cache_install_snapshot_preserves_mismatch_for_offset_reset() {
+        let (sender, receiver) = flume::bounded(1);
+        let mut network = NetworkConnectionStreaming {
+            node: test_node(),
+            sender,
+            task: None,
+        };
+        let responder = tokio::spawn(async move {
+            let (ack, request) = match receiver
+                .recv_async()
+                .await
+                .expect("receive cache snapshot request")
+            {
+                RaftRequest::SnapshotCache(request) => request,
+                request => panic!("unexpected cache Raft request: {request:?}"),
+            };
+            assert_eq!(request.offset, 4);
+            ack.send(Ok(RaftStreamResponsePayload::SnapshotCache(Err(
+                mismatch_at(request.offset),
+            ))))
+            .expect("return cache snapshot response");
+        });
+
+        let error = <NetworkConnectionStreaming as RaftNetwork<TypeConfigKV>>::install_snapshot(
+            &mut network,
+            InstallSnapshotRequest {
+                vote: Vote::new_committed(1, 1),
+                meta: test_snapshot_meta(),
+                offset: 4,
+                data: b"efgh".to_vec(),
+                done: true,
+            },
+            RPCOption::new(Duration::from_millis(500)),
+        )
+        .await;
+        responder.await.expect("join cache snapshot responder");
+
+        assert!(matches!(
+            error,
+            Err(RPCError::RemoteError(RemoteError {
+                target: 7,
+                target_node: Some(target_node),
+                source: RaftError::APIError(InstallSnapshotError::SnapshotMismatch(
+                    SnapshotMismatch { expect, got },
+                )),
+            })) if target_node == test_node()
+                && expect == SnapshotSegmentId::from(("snapshot", 0))
+                && got == SnapshotSegmentId::from(("snapshot", 4))
         ));
     }
 }
