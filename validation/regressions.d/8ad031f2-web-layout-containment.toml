@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8ad031f2", "844db986"]
+points = ["web.experience"]
+checks = ["web-static", "web-layout"]
+reason = "The shipped `layout-containment.test.js` contract rejects bare fractional columns, intrinsic `minmax()` floors, nested fractional maxima, and bypasses through `grid`, `grid-template`, or implicit-column declarations across the main UI and both readers; the Chromium layout sweep injects plain and disclosed unbroken audio values plus a dynamic cluster hostname at both supported viewports, then requires the document, owner, value, and text boxes to stay bounded without clipping and the narrow variants to wrap onto multiple rendered lines, so restoring either correction fails current retained evidence."

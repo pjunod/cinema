@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c338e703"]
+points = ["web.experience"]
+checks = ["web-static", "web-layout"]
+reason = "The static layout-containment contract requires classic main and its full-bleed hero to consume the same inset variables. The Chromium item-page stress checks document overflow before injecting any long text at both viewports; restoring desktop negative margins inside classic's mobile padding produces the observed six-pixel document overflow and fails the retained browser assertion."
