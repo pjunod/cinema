@@ -40,7 +40,7 @@ jobs:
     # queued every pull request forever the moment this path became required.
     # `validation/runner-fleet.toml` now says what the fleet carries and
     # `make operations-check` rejects a label no rostered runner answers to.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-store"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, ci-store]
     timeout-minutes: 40
     continue-on-error: ${{ inputs.execution-mode == 'shadow' }}
     env:
@@ -69,7 +69,7 @@ jobs:
         # exceeds the number of slots the fleet actually carries.
         shard_index: [0, 1, 2]
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
       - id: buildx-cache
@@ -81,7 +81,7 @@ jobs:
       - name: Build the exact Store test binary
         id: build_store_binary
         continue-on-error: true
-        uses: docker/build-push-action@v6
+        uses: https://github.com/docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.store-shard
@@ -116,7 +116,7 @@ jobs:
           --error "Store test binary build failed"
       - name: Retain the Store shard log and receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/actions/upload-artifact@v4
         with:
           name: cluster-store-shard-${{ matrix.shard_index }}
           path: |
@@ -140,17 +140,17 @@ jobs:
     name: replicated Store shard union
     needs: shard
     if: always()
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 3
     continue-on-error: ${{ inputs.execution-mode == 'shadow' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Download every Store shard receipt
         id: download_store_shards
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: https://data.forgejo.org/actions/download-artifact@v4
         with:
           pattern: cluster-store-shard-*
           path: target/validation/store-shards
@@ -169,7 +169,7 @@ jobs:
             2>&1 | tee target/validation/cluster-store-shard-aggregate.log
       - name: Retain the Store shard aggregate
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/actions/upload-artifact@v4
         with:
           name: cluster-store-shard-aggregate
           path: |
