@@ -647,9 +647,7 @@ SELECT
   + (SELECT COUNT(*) FROM sqlite_master
       WHERE type = 'table' AND name IN
         ('analysis_attempts','cluster_fragment_index_heads',
-         'analysis_lifecycle_counters'))
-  + (SELECT COUNT(*) FROM pragma_table_info('cluster_fragment_index_jobs')
-      WHERE name = 'attempt_errors') AS count
+         'analysis_lifecycle_counters')) AS count
 "#;
 
 /// What [`ANALYSIS_COMPONENT_SCHEMA_CURRENT_SQL`] counts when every part of the
@@ -659,7 +657,16 @@ SELECT
 /// check here, and the v21 stale-marker predicate in `hiqlite.rs` — and they
 /// used to carry the number separately. One of them was then updated and the
 /// other was not.
-pub(super) const ANALYSIS_COMPONENT_SCHEMA_OBJECTS: i64 = 16;
+///
+/// It counts **v22's** objects and nothing later, which is the only thing that
+/// makes it usable as a v21 stale-marker predicate. The attempt-history column
+/// was briefly added here and it was wrong twice over: a tree can be a
+/// perfectly current v22 shape without it, and counting it made every
+/// migration fixture that winds the marker back — but keeps the bootstrapped
+/// current tables — read as "not v22" and replay v22's DDL against tables that
+/// already had it. Later shapes get their own guards; this one stays pinned to
+/// the version it is named for.
+pub(super) const ANALYSIS_COMPONENT_SCHEMA_OBJECTS: i64 = 15;
 
 pub(super) async fn analysis_component_schema_is_current(
     client: &hiqlite::Client,

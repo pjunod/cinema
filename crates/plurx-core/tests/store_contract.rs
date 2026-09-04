@@ -8920,6 +8920,15 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
                 hiqlite::params!(),
             ),
             (
+                // This fixture bootstraps the CURRENT tables and winds the marker
+                // back, so the attempt history is present in a tree that claims to
+                // predate it. Leaving it makes the replayed v26 step fail on a
+                // column that is already there — a fixture defect wearing the
+                // costume of a migration one.
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
+                hiqlite::params!(),
+            ),
+            (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
                 hiqlite::params!(AUTH_SCHEMA_MIGRATION_SOURCE),
             ),
@@ -9038,8 +9047,17 @@ async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {
                 hiqlite::params!(),
             ),
             (
+                // This fixture bootstraps the CURRENT tables and winds the marker
+                // back, so the attempt history is present in a tree that claims to
+                // predate it. Leaving it makes the replayed v26 step fail on a
+                // column that is already there — a fixture defect wearing the
+                // costume of a migration one.
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
+                hiqlite::params!(),
+            ),
+            (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-                hiqlite::params!(AUTH_SCHEMA_VERSION - 2),
+                hiqlite::params!(V23_SCHEMA_VERSION),
             ),
         ])
         .await
@@ -9064,7 +9082,7 @@ async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {
         )
         .await
         .expect("read marker after refused malformed migration");
-    assert_eq!(marker[0].value, AUTH_SCHEMA_VERSION - 2);
+    assert_eq!(marker[0].value, V23_SCHEMA_VERSION);
     client
         .execute("DROP TABLE dv_conversions", hiqlite::params!())
         .await
@@ -9241,6 +9259,16 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
 /// `AUTH_SCHEMA_VERSION`: the point of the test is the v24 → v25 step, and
 /// deriving it moved the fixture every time a later step landed.
 #[cfg(feature = "hiqlite-contract-tests")]
+/// The replicated version each migration fixture rebuilds, written as the
+/// literal it is named for.
+///
+/// Deriving these from `AUTH_SCHEMA_VERSION - N` looks tidy and is a trap: the
+/// head moved to 26 with the attempt history, and every fixture that had
+/// spelled its version as an offset silently started rebuilding a *different*
+/// tree than its own name claims — the v23 test constructing a v24 shape, the
+/// v24 test constructing a v25 one, each then failing on the migration it was
+/// supposed to be proving.
+const V23_SCHEMA_VERSION: i64 = 23;
 const V24_SCHEMA_VERSION: i64 = 24;
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -9553,8 +9581,17 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
                 hiqlite::params!(file_id),
             ),
             (
+                // This fixture bootstraps the CURRENT tables and winds the marker
+                // back, so the attempt history is present in a tree that claims to
+                // predate it. Leaving it makes the replayed v26 step fail on a
+                // column that is already there — a fixture defect wearing the
+                // costume of a migration one.
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
+                hiqlite::params!(),
+            ),
+            (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-                hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+                hiqlite::params!(V24_SCHEMA_VERSION),
             ),
         ])
         .await
@@ -9739,6 +9776,15 @@ async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
             ),
             (
                 "ALTER TABLE files DROP COLUMN dv_rpu_present",
+                hiqlite::params!(),
+            ),
+            (
+                // This fixture bootstraps the CURRENT tables and winds the marker
+                // back, so the attempt history is present in a tree that claims to
+                // predate it. Leaving it makes the replayed v26 step fail on a
+                // column that is already there — a fixture defect wearing the
+                // costume of a migration one.
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
                 hiqlite::params!(),
             ),
             (
@@ -9930,6 +9976,15 @@ async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
                 hiqlite::params!(),
             ),
             (
+                // This fixture bootstraps the CURRENT tables and winds the marker
+                // back, so the attempt history is present in a tree that claims to
+                // predate it. Leaving it makes the replayed v26 step fail on a
+                // column that is already there — a fixture defect wearing the
+                // costume of a migration one.
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
+                hiqlite::params!(),
+            ),
+            (
                 "UPDATE cluster_meta SET schema_version = 7 WHERE singleton = 1",
                 hiqlite::params!(),
             ),
@@ -10101,6 +10156,15 @@ async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
             ),
             (
                 "ALTER TABLE files DROP COLUMN dv_rpu_present",
+                hiqlite::params!(),
+            ),
+            (
+                // This fixture bootstraps the CURRENT tables and winds the marker
+                // back, so the attempt history is present in a tree that claims to
+                // predate it. Leaving it makes the replayed v26 step fail on a
+                // column that is already there — a fixture defect wearing the
+                // costume of a migration one.
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
                 hiqlite::params!(),
             ),
             (
@@ -10279,6 +10343,15 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
             ),
             (
                 "ALTER TABLE files DROP COLUMN dv_rpu_present",
+                hiqlite::params!(),
+            ),
+            (
+                // This fixture bootstraps the CURRENT tables and winds the marker
+                // back, so the attempt history is present in a tree that claims to
+                // predate it. Leaving it makes the replayed v26 step fail on a
+                // column that is already there — a fixture defect wearing the
+                // costume of a migration one.
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
                 hiqlite::params!(),
             ),
             (
@@ -11221,6 +11294,15 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
             ("DROP TABLE dv_recovery_guards", hiqlite::params!()),
             ("DROP TABLE dv_conversions", hiqlite::params!()),
             ("DROP TABLE media_session_preparations", hiqlite::params!()),
+            (
+                // This fixture bootstraps the CURRENT tables and winds the marker
+                // back, so the attempt history is present in a tree that claims to
+                // predate it. Leaving it makes the replayed v26 step fail on a
+                // column that is already there — a fixture defect wearing the
+                // costume of a migration one.
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors",
+                hiqlite::params!(),
+            ),
             (
                 "UPDATE cluster_meta SET schema_version = 21 WHERE singleton = 1",
                 hiqlite::params!(),
