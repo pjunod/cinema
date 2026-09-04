@@ -16,6 +16,7 @@ class PlaybackIntent(
     val playbackId: String = UUID.randomUUID().toString(),
     initialQuality: PlaybackQuality,
 ) {
+    internal val targetPresentationDeadline = PlaybackTargetDeadline()
     data class PendingSeek(
         val sequence: Long,
         val targetMs: Long,
@@ -171,6 +172,7 @@ class PlaybackIntent(
         observedAtMs: Long = monotonicNowMs(),
         playbackActive: Boolean = true,
         playbackRate: Double = 1.0,
+        presentationReady: Boolean = true,
     ): Boolean {
         val pending = pendingSeek ?: return false
         if (sequence != pending.sequence || pending.frameFloor == null) {
@@ -185,7 +187,7 @@ class PlaybackIntent(
         }
         audioWasActive = playbackActive
         audioRate = playbackRate.takeIf { it.isFinite() && it > 0 } ?: 0.0
-        if (!playbackActive || audioRate == 0.0) {
+        if (!playbackActive || audioRate == 0.0 || !presentationReady) {
             lastAudioPositionMs = null
             return false
         }
@@ -254,12 +256,66 @@ class PlaybackIntent(
         pendingSeek = null
         controlSequenceFloor = null
         lastAudioPositionMs = null
+        targetPresentationDeadline.reset()
     }
 
     companion object {
         const val LANDING_TOLERANCE_MS = 250L
         const val AUDIO_PRESENTATION_DEADLINE_MS = 8_000L
     }
+}
+
+/** Immutable command recipe; native selections are distinct from encoded media. */
+internal data class PlaybackMediaRecipe(
+    val quality: PlaybackQuality,
+    val mode: String,
+    val audioIndex: Long?,
+    val subtitleIndex: Long?,
+    val subtitleDelivery: SubtitleDelivery,
+    val audioOffsetMs: Long,
+    val compatibilityTranscode: Boolean = false,
+) {
+    fun hasSameMedia(other: PlaybackMediaRecipe): Boolean =
+        quality == other.quality && mode == other.mode && audioIndex == other.audioIndex &&
+            audioOffsetMs == other.audioOffsetMs && compatibilityTranscode == other.compatibilityTranscode &&
+            mediaSubtitleDelivery == other.mediaSubtitleDelivery &&
+            (subtitleDelivery != SubtitleDelivery.Burn || subtitleIndex == other.subtitleIndex)
+
+    private val mediaSubtitleDelivery: SubtitleDelivery
+        get() = if (subtitleDelivery == SubtitleDelivery.BitmapOverlay) SubtitleDelivery.Plan else subtitleDelivery
+}
+
+/** Only the captured recipe that actually attached can acknowledge a command. */
+internal class PlaybackRecipeOwnership {
+    data class Claim(val revision: Long, val recipe: PlaybackMediaRecipe)
+    private var revision = 0L
+    private var desired: Claim? = null
+    var attached: Claim? = null
+        private set
+    private var appliedSelectionRevision: Long? = null
+
+    fun request(recipe: PlaybackMediaRecipe): Claim {
+        if (desired?.recipe != recipe) desired = Claim(++revision, recipe)
+        return desired!!
+    }
+
+    fun attach(claim: Claim) {
+        attached = claim
+        appliedSelectionRevision = null
+    }
+
+    fun needsMediaReplacement(claim: Claim): Boolean =
+        attached?.recipe?.hasSameMedia(claim.recipe) != true
+
+    fun selectionApplied(claim: Claim): Boolean {
+        if (claim != desired || needsMediaReplacement(claim)) return false
+        attached = claim
+        appliedSelectionRevision = claim.revision
+        return true
+    }
+
+    fun canPresent(claim: Claim): Boolean =
+        claim == desired && attached == claim && appliedSelectionRevision == claim.revision
 }
 
 /**
@@ -350,13 +406,33 @@ internal class PlaybackTargetDeadline(private val timeoutMs: Long = 8_000) {
     private var wasActive = false
     private var recovered = false
     private var fired = false
+    private var owner = 0L
+
+    fun claimOwner(nowMs: Long): Long {
+        suspendOwner(owner, nowMs)
+        owner += 1
+        fired = false
+        return owner
+    }
+
+    fun suspendOwner(expectedOwner: Long, nowMs: Long) {
+        if (owner != expectedOwner) return
+        if (wasActive && !fired) {
+            elapsedActiveMs += (nowMs - observedAtMs).coerceAtLeast(0)
+                .coerceAtMost((timeoutMs - elapsedActiveMs).coerceAtLeast(0))
+        }
+        observedAtMs = maxOf(nowMs, observedAtMs)
+        wasActive = false
+    }
 
     fun sample(
         pending: PlaybackIntent.PendingSeek?,
         playbackRequested: Boolean,
         foreground: Boolean,
         nowMs: Long,
+        expectedOwner: Long? = null,
     ): Event? {
+        if (expectedOwner != null && expectedOwner != owner) return null
         if (pending == null) {
             reset()
             return null
@@ -382,7 +458,8 @@ internal class PlaybackTargetDeadline(private val timeoutMs: Long = 8_000) {
         return Event(pending.sequence, pending.targetMs, terminal = recovered)
     }
 
-    fun recover(event: Event, nowMs: Long): Boolean {
+    fun recover(event: Event, nowMs: Long, expectedOwner: Long? = null): Boolean {
+        if (expectedOwner != null && expectedOwner != owner) return false
         if (generation != event.sequence || !fired || recovered || event.terminal) return false
         recovered = true
         fired = false

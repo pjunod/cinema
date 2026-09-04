@@ -1399,7 +1399,7 @@ private fun PlayerContent(
             PlaybackFailed(
                 message = message,
                 onRetry = {
-                    onReload(controller.positionForPlaybackIntent(), "fallback", playbackIntent.desiredQuality)
+                    onReload(controller.prepareViewerRetry(), "fallback", playbackIntent.desiredQuality)
                 },
                 onExit = onExit,
             )

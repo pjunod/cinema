@@ -111,4 +111,31 @@ class PlaybackTargetDeadlineTest {
         assertTrue("the viewer's destination survives recovery", intent.isCurrent(pending.sequence))
         assertNull(intent.controlSequenceFloor)
     }
+
+    @Test
+    fun controllerReplacementKeepsSpentRetryAndFencesOldDeadlineOwner() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val pending = intent.beginSeek(90_000, 10_000, PlaybackQuality.Q720)
+        val deadline = intent.targetPresentationDeadline
+        val firstController = deadline.claimOwner(0)
+        deadline.sample(pending, true, true, 0, firstController)
+        val first = deadline.sample(pending, true, true, 8_000, firstController)!!
+        assertTrue(deadline.recover(first, 8_000, firstController))
+        deadline.sample(pending, true, true, 10_000, firstController)
+        deadline.suspendOwner(firstController, 10_000)
+
+        val successor = deadline.claimOwner(30_000)
+        assertNull(deadline.sample(pending, true, true, 30_000, successor))
+        deadline.suspendOwner(firstController, 31_000)
+        assertNull("old monitor cannot mutate the transferred deadline", deadline.sample(pending, true, true, 40_000, firstController))
+        assertNull(deadline.sample(pending, true, true, 35_999, successor))
+        val terminal = deadline.sample(pending, true, true, 36_000, successor)!!
+        assertTrue("replacement cannot buy another automatic retry", terminal.terminal)
+        assertFalse(deadline.recover(terminal, 36_000, firstController))
+        assertFalse(deadline.recover(terminal, 36_000, successor))
+
+        val viewerRetry = intent.beginSeek(90_000, 90_000)
+        assertNull(deadline.sample(viewerRetry, true, true, 36_000, successor))
+        assertFalse("explicit Retry is a fresh viewer command", deadline.sample(viewerRetry, true, true, 44_000, successor)!!.terminal)
+    }
 }

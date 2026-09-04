@@ -253,6 +253,33 @@ class Controller(
     /** How that selection is being carried — see `SubtitlePolicy.kt`. */
     private var subtitleDelivery: SubtitleDelivery =
         routeSubtitle(trackFor(selectedSubtitle), SubtitleDelivery.Plan).delivery
+    private val recipeOwnership = PlaybackRecipeOwnership()
+    private var selectionRecipe: PlaybackRecipeOwnership.Claim? = null
+    private data class RecipeExecution(
+        val sequence: Long,
+        val recipe: PlaybackRecipeOwnership.Claim,
+        val inPlace: Boolean,
+    )
+    private var recipeExecution: RecipeExecution? = null
+
+    private fun currentRecipe(): PlaybackRecipeOwnership.Claim = recipeOwnership.request(
+        PlaybackMediaRecipe(
+            quality = playbackIntent.desiredQuality,
+            mode = planMode,
+            audioIndex = selectedAudio,
+            subtitleIndex = selectedSubtitle,
+            subtitleDelivery = subtitleDelivery,
+            audioOffsetMs = audioOffsetMs,
+            compatibilityTranscode = forceCompatibilityTranscode,
+        ),
+    )
+
+    private fun attachRecipe(recipe: PlaybackRecipeOwnership.Claim) {
+        recipeOwnership.attach(recipe)
+        selectionRecipe = recipe
+        textSelectionArmed = true
+        audioSelectionArmed = true
+    }
 
     /**
      * The dynamic range the *current* delivery puts on the wire, as the server
@@ -307,11 +334,15 @@ class Controller(
      * copied; only the playlist gained a subtitle group.
      */
     val deliveryMode: String
-        get() = when (subtitleDelivery) {
-            SubtitleDelivery.Burn -> "transcode"
-            SubtitleDelivery.NativeSession -> if (planMode == "transcode") "transcode" else "remux"
-            SubtitleDelivery.BitmapOverlay,
-            SubtitleDelivery.Plan -> planMode
+        get() {
+            val recipe = recipeOwnership.attached?.recipe
+            val mode = recipe?.mode ?: planMode
+            return when (recipe?.subtitleDelivery ?: subtitleDelivery) {
+                SubtitleDelivery.Burn -> "transcode"
+                SubtitleDelivery.NativeSession -> if (mode == "transcode") "transcode" else "remux"
+                SubtitleDelivery.BitmapOverlay,
+                SubtitleDelivery.Plan -> mode
+            }
         }
 
     val pgsOverlayIsActive: Boolean
@@ -319,11 +350,13 @@ class Controller(
 
     /** True while the original file is being read directly, base timeline = 0. */
     private val directTransport: Boolean
-        get() = subtitleDelivery.usesPlanTransport && planMode == "direct"
+        get() = (recipeOwnership.attached?.recipe?.subtitleDelivery ?: subtitleDelivery).usesPlanTransport &&
+            (recipeOwnership.attached?.recipe?.mode ?: planMode) == "direct"
 
     /** True while Media3 is reading the live progressive remux response. */
     private val progressiveTransport: Boolean
-        get() = subtitleDelivery.usesPlanTransport && planMode == "remux"
+        get() = (recipeOwnership.attached?.recipe?.subtitleDelivery ?: subtitleDelivery).usesPlanTransport &&
+            (recipeOwnership.attached?.recipe?.mode ?: planMode) == "remux"
 
     var encoder: String? = null
         private set
@@ -367,7 +400,8 @@ class Controller(
     )
     private val stallWatchdogJob: Job
     private val targetPresentationWatchdogJob: Job
-    private val targetPresentationDeadline = PlaybackTargetDeadline()
+    private val targetPresentationDeadline = playbackIntent.targetPresentationDeadline
+    private val targetPresentationOwner = targetPresentationDeadline.claimOwner(monotonicNowMs())
     private var presentationForeground = true
     private var mediaMutationEpoch = 0L
     private var statusPollingJob: Job? = null
@@ -594,6 +628,7 @@ class Controller(
         override fun onTracksChanged(tracks: Tracks) {
             applyTextSelection()
             applyAudioSelection()
+            completeRecipeExecution()
         }
 
         override fun onPositionDiscontinuity(
@@ -636,6 +671,7 @@ class Controller(
 
     /** One actual-output listener carrying the exact mutation it can settle. */
     private var presentationListener: Player.Listener? = null
+    private var recipePresentationFrame: Pair<Long, Long>? = null
 
     private fun disarmVideoPresentation() {
         presentationListener?.let(player::removeListener)
@@ -649,6 +685,14 @@ class Controller(
         if (plan.videoCodec == null) return
         val captured = object : Player.Listener {
             override fun onRenderedFirstFrame() {
+                if (!playbackIntent.isCurrent(sequence)) return
+                if (recipeExecution?.sequence == sequence) {
+                    recipePresentationFrame = sequence to realPosition()
+                    completeRecipeExecution()
+                    return
+                }
+                val recipe = selectionRecipe ?: return
+                if (!recipeOwnership.canPresent(recipe)) return
                 if (!playbackIntent.presentedVideoFrame(realPosition(), sequence)) return
                 playbackControl.playerChanged()
                 player.removeListener(this)
@@ -659,14 +703,44 @@ class Controller(
         player.addListener(captured)
     }
 
-    private fun markIntentExecuted(sequence: Long) {
-        if (playbackIntent.markExecuted(
-                sequence,
-                observedAtMs = monotonicNowMs(),
-                playbackActive = player.isPlaying,
-                playbackRate = player.playbackParameters.speed.toDouble(),
-            )
-        ) armVideoPresentation(sequence)
+    private fun markIntentExecuted(
+        sequence: Long,
+        recipe: PlaybackRecipeOwnership.Claim = currentRecipe(),
+        inPlace: Boolean = false,
+    ) {
+        if (recipeOwnership.needsMediaReplacement(recipe) || !playbackIntent.isCurrent(sequence)) return
+        recipeExecution = RecipeExecution(sequence, recipe, inPlace)
+        recipePresentationFrame = null
+        playbackIntent.markExecuted(
+            sequence,
+            observedAtMs = monotonicNowMs(),
+            playbackActive = player.isPlaying,
+            playbackRate = player.playbackParameters.speed.toDouble(),
+        )
+        armVideoPresentation(sequence)
+        completeRecipeExecution()
+    }
+
+    private fun completeRecipeExecution() {
+        if (textSelectionArmed || audioSelectionArmed) return
+        val recipe = selectionRecipe ?: return
+        if (!recipeOwnership.selectionApplied(recipe)) return
+        val execution = recipeExecution ?: return
+        if (execution.recipe != recipe || !recipeOwnership.canPresent(recipe) ||
+            !playbackIntent.isCurrent(execution.sequence)
+        ) return
+        recipeExecution = null
+        val sequence = execution.sequence
+        val presented = if (execution.inPlace) {
+            playbackIntent.presentedInPlace(sequence)
+        } else {
+            recipePresentationFrame?.takeIf { it.first == sequence }
+                ?.let { playbackIntent.presentedVideoFrame(it.second, sequence) } == true
+        }
+        if (presented) {
+            playbackControl.playerChanged()
+            disarmVideoPresentation()
+        }
     }
 
     init {
@@ -736,6 +810,16 @@ class Controller(
     fun positionForPlaybackIntent(): Long =
         playbackIntent.positionForPlaybackIntent(realPosition())
 
+    /** An explicit Retry is a new viewer command, unlike an automatic reopen. */
+    fun prepareViewerRetry(): Long {
+        val target = positionForPlaybackIntent()
+        stallGuard.invalidateForUserAction()
+        playbackControl.clearVerdict()
+        playbackIntent.beginSeek(target, realPosition())
+        sampleTargetPresentationDeadline()
+        return target
+    }
+
     private fun beginPlaybackAttempt(
         reason: String,
         observedAtMs: Long = monotonicNowMs(),
@@ -798,6 +882,12 @@ class Controller(
         if (!playbackControlBootstrapFence.isActive()) return
         mediaMutationEpoch += 1
         if (planReplacement.route(playbackIntent)) return
+        val recipe = currentRecipe()
+        if (recipeOwnership.needsMediaReplacement(recipe)) {
+            restartAt(t, "selection")
+            return
+        }
+        armTrackSelections(recipe)
         when {
             directTransport -> {
                 beginPlaybackAttempt("seek")
@@ -813,7 +903,8 @@ class Controller(
                 activeMediaPath = relativeMediaPath(uri)
                 progressiveMediaOrigin.begin(uri, t)
                 player.setMediaItem(MediaItem.fromUri(uri))
-                markIntentExecuted(sequence)
+                attachRecipe(recipe)
+                markIntentExecuted(sequence, recipe)
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
                 player.playWhenReady = playbackIntent.playbackRequested
@@ -871,7 +962,7 @@ class Controller(
         seekJob?.cancel()
         stallWatchdogJob.cancel()
         targetPresentationWatchdogJob.cancel()
-        targetPresentationDeadline.reset()
+        targetPresentationDeadline.suspendOwner(targetPresentationOwner, monotonicNowMs())
         planReplacement.release()
         clearStatusPolling()
         pgsOverlay.release()
@@ -902,6 +993,7 @@ class Controller(
         playbackControl.clearVerdict()
         selectedAudio = index
         val pending = playbackIntent.beginSeek(position, position)
+        currentRecipe()
         sampleTargetPresentationDeadline()
         val publicationEpoch = mediaMutationEpoch
         scope.launch {
@@ -937,14 +1029,14 @@ class Controller(
         playbackControl.clearVerdict()
         selectedSubtitle = index
         subtitleDelivery = route.delivery
+        val recipe = currentRecipe()
         val pending = playbackIntent.beginSeek(position, position)
         sampleTargetPresentationDeadline()
         val publicationEpoch = mediaMutationEpoch
         scope.launch {
             if (!publishIntent(pending, publicationEpoch = publicationEpoch)) return@launch
             if (planReplacement.route(playbackIntent)) return@launch
-            pgsOverlay.select(index.takeIf { route.delivery == SubtitleDelivery.BitmapOverlay })
-            if (route.reopen) {
+            if (recipeOwnership.needsMediaReplacement(recipe)) {
                 restartAt(position, "quality")
             } else {
                 // A subtitle change supersedes the coalesced seek command, so
@@ -953,12 +1045,8 @@ class Controller(
                 if (inheritedSeek) {
                     executeSeek(position, pending.sequence)
                 } else {
-                    playbackIntent.markExecuted(pending.sequence)
-                }
-                armTrackSelections()
-                applyTextSelection()
-                if (!inheritedSeek && playbackIntent.presentedInPlace(pending.sequence)) {
-                    playbackControl.playerChanged()
+                    armTrackSelections(recipe)
+                    markIntentExecuted(pending.sequence, recipe, inPlace = true)
                 }
             }
         }
@@ -988,6 +1076,7 @@ class Controller(
         subtitleDelivery =
             routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
         val pending = playbackIntent.beginSeek(position, position)
+        currentRecipe()
         sampleTargetPresentationDeadline()
         val publicationEpoch = mediaMutationEpoch
         scope.launch {
@@ -1010,6 +1099,7 @@ class Controller(
 
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
         val executionSequence = playbackIntent.pendingSeek?.sequence
+        val recipe = currentRecipe()
         when {
             !subtitleDelivery.usesPlanTransport ->
                 openSession(positionMs, attempt, executionSequence)
@@ -1017,8 +1107,9 @@ class Controller(
                 leaveSessionPlayback()
                 activeMediaPath = relativeMediaPath(plan.playUrl)
                 player.setMediaItem(MediaItem.fromUri(plan.playUrl), positionMs)
+                attachRecipe(recipe)
                 executionSequence?.let { sequence ->
-                    markIntentExecuted(sequence)
+                    markIntentExecuted(sequence, recipe)
                 }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
@@ -1032,8 +1123,9 @@ class Controller(
                 activeMediaPath = relativeMediaPath(uri)
                 progressiveMediaOrigin.begin(uri, positionMs)
                 player.setMediaItem(MediaItem.fromUri(uri))
+                attachRecipe(recipe)
                 executionSequence?.let { sequence ->
-                    markIntentExecuted(sequence)
+                    markIntentExecuted(sequence, recipe)
                 }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
@@ -1058,6 +1150,8 @@ class Controller(
         executionSequence: Long? = playbackIntent.pendingSeek?.sequence,
     ) {
         val requestVersion = stallGuard.beginRequest()
+        val recipe = currentRecipe()
+        val createBody = sessionBody(ms, recipe = recipe.recipe)
         endPlaybackControl()
         sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
@@ -1067,10 +1161,7 @@ class Controller(
         scope.launch {
             val hls = try {
                 sessionCreateCoordinator.create(
-                    body = sessionBody(
-                        ms,
-                        playbackIntent.orderedControlSequence(playbackControl.controlSequence()),
-                    ),
+                    body = createBody.copy(control_sequence = playbackIntent.orderedControlSequence(playbackControl.controlSequence())),
                     isCurrent = { stallGuard.isCurrent(requestVersion) },
                 ) ?: return@launch
             } catch (cancelled: CancellationException) {
@@ -1123,8 +1214,9 @@ class Controller(
                 MediaItem.fromUri(Session.url(hls.playlist_url)),
                 timeline.attachPositionMs,
             )
+            attachRecipe(recipe)
             executionSequence?.let { sequence ->
-                markIntentExecuted(sequence)
+                markIntentExecuted(sequence, recipe)
             }
             player.prepare()
             playbackTelemetry.prepared(attempt)
@@ -1256,6 +1348,7 @@ class Controller(
         }
         val reason = "stall"
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
+        val recipe = currentRecipe()
         // Use the stall-specific session body that carries the predecessor
         // info. `sessionBody` is also called for seeks and track switches;
         // those paths must NOT carry stall fields.
@@ -1282,14 +1375,14 @@ class Controller(
                         playbackControl.controlSequence(),
                     ),
                     startSeconds = positionMs / 1000.0,
-                    delivery = subtitleDelivery,
-                    subtitleIndex = selectedSubtitle,
-                    copyableVideo = planMode != "transcode",
+                    delivery = recipe.recipe.subtitleDelivery,
+                    subtitleIndex = recipe.recipe.subtitleIndex,
+                    copyableVideo = recipe.recipe.mode != "transcode",
                     aac = plan.aac,
                     preserveDolbyVision = plan.preserveDolbyVision,
-                    audioIndex = selectedAudio,
-                    audioOffsetMs = audioOffsetMs,
-                    quality = activeQuality,
+                    audioIndex = recipe.recipe.audioIndex,
+                    audioOffsetMs = recipe.recipe.audioOffsetMs,
+                    quality = recipe.recipe.quality,
                     sourceHeight = plan.sourceHeight,
                     deliveredDynamicRange = deliveredRange,
                     previousSessionId = prevId,
@@ -1299,8 +1392,8 @@ class Controller(
                 requestHDR10 = sessionHDR10Request(
                     decisionMode = plan.mode,
                     deliveredDynamicRange = plan.deliveredDynamicRange,
-                    compatibilityTranscode = forceCompatibilityTranscode,
-                    delivery = subtitleDelivery,
+                    compatibilityTranscode = recipe.recipe.compatibilityTranscode,
+                    delivery = recipe.recipe.subtitleDelivery,
                 ),
             )
             val hls = try {
@@ -1357,6 +1450,7 @@ class Controller(
                 MediaItem.fromUri(Session.url(hls.playlist_url)),
                 timeline.attachPositionMs,
             )
+            attachRecipe(recipe)
             player.prepare()
             playbackTelemetry.prepared(attempt)
             player.playWhenReady = playbackIntent.playbackRequested
@@ -1364,25 +1458,29 @@ class Controller(
         }
     }
 
-    internal fun sessionBody(ms: Long, controlSequence: Long? = null): CreateSessionReq = bindDecisionPlan(
+    internal fun sessionBody(
+        ms: Long,
+        controlSequence: Long? = null,
+        recipe: PlaybackMediaRecipe = currentRecipe().recipe,
+    ): CreateSessionReq = bindDecisionPlan(
         body = subtitleSessionBody(
             playbackId = playbackIntent.playbackId,
             requestId = UUID.randomUUID().toString(),
             controlSequence = controlSequence,
             startSeconds = ms / 1000.0,
-            delivery = subtitleDelivery,
-            subtitleIndex = selectedSubtitle,
+            delivery = recipe.subtitleDelivery,
+            subtitleIndex = recipe.subtitleIndex,
             // A transcode verdict is the only one that forbids copying the video;
             // direct and remux verdicts both mean the source stream is playable
             // as-is, which is what makes the native-rendition session free. The
             // compatibility rescue turns `planMode` into a transcode precisely so
             // it lands here — the copy is the thing the device just refused.
-            copyableVideo = planMode != "transcode",
+            copyableVideo = recipe.mode != "transcode",
             aac = plan.aac,
             preserveDolbyVision = plan.preserveDolbyVision,
-            audioIndex = selectedAudio,
-            audioOffsetMs = audioOffsetMs,
-            quality = activeQuality,
+            audioIndex = recipe.audioIndex,
+            audioOffsetMs = recipe.audioOffsetMs,
+            quality = recipe.quality,
             sourceHeight = plan.sourceHeight,
             deliveredDynamicRange = deliveredRange,
         ),
@@ -1390,8 +1488,8 @@ class Controller(
         requestHDR10 = sessionHDR10Request(
             decisionMode = plan.mode,
             deliveredDynamicRange = plan.deliveredDynamicRange,
-            compatibilityTranscode = forceCompatibilityTranscode,
-            delivery = subtitleDelivery,
+            compatibilityTranscode = recipe.compatibilityTranscode,
+            delivery = recipe.subtitleDelivery,
         ),
     )
 
@@ -1401,37 +1499,43 @@ class Controller(
     /**
      * Record that the current selections still have to reach the player.
      *
-     * Deliberately does not try to apply them: right after `prepare()` the only
-     * tracks on hand may still be the departing item's, and an override
-     * naming a track group that is about to disappear would be dropped
-     * silently — with the intent already marked as delivered. [listener]
-     * lands them against the tracks that actually arrive.
+     * An in-place switch can use the published tracks immediately. A new
+     * media item keeps each selector armed until its tracks arrive and
+     * Media3 confirms the requested option, rather than acknowledging an
+     * override merely because it was submitted.
      */
-    private fun armTrackSelections() {
+    private fun armTrackSelections(recipe: PlaybackRecipeOwnership.Claim? = recipeOwnership.attached) {
+        if (recipe == null || recipeOwnership.needsMediaReplacement(recipe)) return
+        selectionRecipe = recipe
+        pgsOverlay.select(recipe.recipe.subtitleIndex.takeIf { recipe.recipe.subtitleDelivery == SubtitleDelivery.BitmapOverlay })
         textSelectionArmed = true
         audioSelectionArmed = true
+        applyTextSelection()
+        applyAudioSelection()
+        completeRecipeExecution()
     }
 
     private fun applyTextSelection() {
         if (!textSelectionArmed) return
-        val index = selectedSubtitle
+        val recipe = selectionRecipe?.recipe ?: return
+        val index = recipe.subtitleIndex
         // Off, and a burn, are the same instruction to the renderer: show no
         // text track. A burn's cues are already in the picture, and letting
         // ExoPlayer's own language preference pick something here would put a
         // second subtitle policy in front of the one the server decided.
         if (
             index == null ||
-            subtitleDelivery == SubtitleDelivery.Burn ||
-            subtitleDelivery == SubtitleDelivery.BitmapOverlay
+            recipe.subtitleDelivery == SubtitleDelivery.Burn ||
+            recipe.subtitleDelivery == SubtitleDelivery.BitmapOverlay
         ) {
-            textSelectionArmed = false
+            textSelectionArmed = player.currentTracks.isTypeSelected(C.TRACK_TYPE_TEXT)
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .clearOverridesOfType(C.TRACK_TYPE_TEXT)
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                 .build()
             return
         }
-        val ordinal = if (subtitleDelivery == SubtitleDelivery.NativeSession) {
+        val ordinal = if (recipe.subtitleDelivery == SubtitleDelivery.NativeSession) {
             nativeSubtitleOrdinal(index, plan.subtitles)
         } else {
             embeddedTextTrackIndex(index, plan.subtitles, embeddedTextLanguages())
@@ -1439,7 +1543,9 @@ class Controller(
         // Nothing to select yet — the media is still being prepared, or this
         // source genuinely lacks the track. Stay armed; onTracksChanged retries.
         val target = ordinal?.let(::textTrackAt) ?: return
-        textSelectionArmed = false
+        textSelectionArmed = !player.currentTracks.groups.any {
+            it.mediaTrackGroup == target.first && it.isTrackSelected(target.second)
+        }
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setOverrideForType(TrackSelectionOverride(target.first, target.second))
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
@@ -1464,7 +1570,7 @@ class Controller(
      */
     private fun applyAudioSelection() {
         if (!audioSelectionArmed) return
-        val index = selectedAudio
+        val index = selectionRecipe?.recipe?.audioIndex
         if (index == null || !directTransport) {
             audioSelectionArmed = false
             return
@@ -1475,7 +1581,9 @@ class Controller(
         // onTracksChanged retry; ExoPlayer's own pick is the honest fallback
         // for a track that is genuinely not there.
         val target = ordinal?.let { trackAt(C.TRACK_TYPE_AUDIO, it) } ?: return
-        audioSelectionArmed = false
+        audioSelectionArmed = !player.currentTracks.groups.any {
+            it.mediaTrackGroup == target.first && it.isTrackSelected(target.second)
+        }
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setOverrideForType(TrackSelectionOverride(target.first, target.second))
             .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
@@ -1567,6 +1675,7 @@ class Controller(
         if (!playbackControlBootstrapFence.isActive()) return false
         val path = activeMediaPath ?: return false
         val next = Session.nextMediaFailoverUrl(path) ?: return false
+        val recipe = recipeOwnership.attached ?: currentRecipe()
         val presentationSequence = playbackIntent.executedSequence()
         val attachPosition = if (progressiveTransport) 0L else player.currentPosition.coerceAtLeast(0)
         playbackTelemetry.report(
@@ -1591,8 +1700,9 @@ class Controller(
             progressiveMediaOrigin.begin(next, realPosition())
         }
         player.setMediaItem(MediaItem.fromUri(next), attachPosition)
+        attachRecipe(recipe)
         presentationSequence?.let { sequence ->
-            markIntentExecuted(sequence)
+            markIntentExecuted(sequence, recipe)
         }
         player.prepare()
         player.playWhenReady = playbackIntent.playbackRequested
@@ -1836,6 +1946,8 @@ class Controller(
                 observedAtMs = monotonicNowMs(),
                 playbackActive = player.isPlaying,
                 playbackRate = player.playbackParameters.speed.toDouble(),
+                presentationReady = selectionRecipe?.let(recipeOwnership::canPresent) == true &&
+                    !textSelectionArmed && !audioSelectionArmed,
             )
         ) playbackControl.playerChanged()
     }
@@ -1855,6 +1967,7 @@ class Controller(
             playbackRequested = player.playWhenReady && player.playbackState != Player.STATE_ENDED,
             foreground = presentationForeground,
             nowMs = now,
+            expectedOwner = targetPresentationOwner,
         ) ?: return
         if (!playbackIntent.isCurrent(event.sequence)) return
         // This deadline is about the requested output. Progress on a departed
@@ -1874,7 +1987,7 @@ class Controller(
         )
         if (event.terminal) {
             onError("Playback couldn't reach the requested position after retrying. Your place is saved.")
-        } else if (targetPresentationDeadline.recover(event, now)) {
+        } else if (targetPresentationDeadline.recover(event, now, expectedOwner = targetPresentationOwner)) {
             restartAt(event.targetMs, "presentation-recovery", now)
         }
     }
