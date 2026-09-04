@@ -635,6 +635,33 @@ staged successor and the pointer still names the predecessor.
 
 ### 3.5 The commit trigger
 
+**§3.4 does not ship without this, and that is the finding, not an
+ordering preference.** Four adversarial reviews of the §3.4 branch reached it
+independently: with nothing that commits or aborts, the entire observable
+behaviour of a *successful* stage is to start a real encoder, write a durable
+row, and walk away.
+
+Two things then hold what nobody released:
+
+* **The worker.** The successor's VOD attachment is never fetched — no client
+  knows it exists — so `last_touch` never advances and only the generic
+  `SESSION_IDLE_TTL` sweep reaches it, five minutes later. It is at the
+  publication sentinel, so `owned_media_sessions` excludes it and the lease
+  loop never sees it. For that whole window it competes for
+  `HEAD_REGENERATION_CAPACITY` and the node's working set against real viewers.
+* **The predecessor's slot, permanently.** The idle reap removes the successor
+  *without* a tombstone — deliberately, that is how a reaped session's route
+  gets ended — so `Session::abort_staged_preparation` never runs and nothing
+  else clears `ControlState.preparation`. It stays `Staged` for the rest of the
+  predecessor's life: one preparation per session, forever, good or not.
+
+So this slice needs a **release path**, and §3.4's own reaper is not it: the
+durable half is reaped by maintenance, and the in-memory half is on a node that
+may not be the one maintaining. The commit trigger is what settles the slot on
+the happy path; something has to settle it on the unhappy one — the same
+`settle_preparation(id, false)` the executor already calls, driven by the
+preparation's deadline rather than by an ack that never came.
+
 The client acknowledges readiness and the exchange commits. **No longer
 blocked.** It was frozen because plan §13.6 freezes the three acknowledgements
 from what M5.5 measures, and `first_frame_ready` was the ack whose Apple

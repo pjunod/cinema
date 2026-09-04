@@ -741,6 +741,44 @@ refuses an occupied slot and a terminal playback, `may_commit_preparation`
 still refuses a forgotten successor, and `terminate` still aborts what it
 holds. The exchange proposes; the actor disposes.
 
+### §3.4 is built and not merged — 2026-09-04
+
+The caller exists, on `agent/stage-on-prepare-v2`, and it is not merged because
+staging without committing is a leak rather than a feature. With nothing that
+commits or aborts, the whole observable behaviour of a *successful* stage is to
+start a real encoder, write a durable row, and walk away — and two separate
+things then hold what nobody released. The worker survives until the generic
+300-second idle sweep, invisible to the lease loop because it sits at the
+publication sentinel. The predecessor's slot survives *permanently*: the idle
+reap removes the successor without a tombstone, so `abort_staged_preparation`
+never runs and `ControlState.preparation` stays `Staged` for the rest of that
+session's life. Four adversarial reviews reached this independently.
+[M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.5 names the release path that
+has to exist first.
+
+Three findings changed the design and are worth keeping whatever happens next:
+
+* **The successor was being warmed at the wrong place.** `candidate_request`
+  clones the predecessor's request and never touches `start_seconds`, so a
+  successor for a viewer forty minutes into a film was warmed at the opening
+  credits. It now starts at `buffered_through_ms` — the handoff lands where the
+  predecessor's buffer ends, not at the playhead, because the client keeps
+  playing what it already has.
+* **A speculative warm-up could break the viewer's own recovery.** Sharing the
+  player's cluster replacement gate meant a preparation could hold it for a
+  whole process start while that viewer's stall reopen waited
+  `CLUSTER_REPLACEMENT_GATE_WAIT` and then took a capacity error — an
+  interruption caused by the mechanism whose purpose is removing one. A
+  preparation supersedes nothing and moves no pointer, so it takes a gate of
+  its own; the first version of that split promptly unpaired the *takeover*
+  gate, which is why there is now one `ClusterStartScope::gate_key` builder and
+  a test that watches one gate wait for the other.
+* **`supported_actions` is request body.** The server half is gated on an
+  operator setting — `playback.prepared_handoff`, in Settings → Developer —
+  rather than on the client's declared action, because any authenticated
+  account can declare it and staging spends a real encoder against that user's
+  admission cap.
+
 **What is left, in order** ([M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3,
 with the extraction map in §3.2.1):
 
@@ -755,8 +793,8 @@ with the extraction map in §3.2.1):
    candidate produces a confident wrong measurement;
 3. ~~shadow mode~~ — **done and read**. See §"Shadow mode ran, and the axis
    rule is what limits M6";
-4. stage on `Prepare` — the first behaviour change, which fires on nothing
-   until a client release flips Apple's literal **and reports its throughput**;
+4. stage on `Prepare` — **built, reviewed four times, and deliberately not
+   merged**: see §"§3.4 is built and not merged" below;
 5. the commit trigger — **unblocked**. It was frozen because
    `first_frame_ready`'s Apple instrument could not separate a codec change
    from no change; the corrective pass requires the copied pixel buffer's PTS
