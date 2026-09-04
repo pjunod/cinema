@@ -4,7 +4,7 @@
 
 use axum::body::Body;
 use axum::extract::{Path as AxPath, Query, State};
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use plurx_core::domain::{ItemKind, MediaFile};
@@ -82,10 +82,18 @@ async fn readrate_setting(state: &AppState) -> f64 {
         .get_setting(plurx_core::store::keys::STREAM_READRATE)
         .await
     {
-        Ok(Some(v)) => v.trim().parse::<f64>().ok().filter(|r| *r >= 0.0),
+        Ok(Some(v)) => parse_readrate(&v),
         _ => None,
     }
     .unwrap_or(READRATE_DEFAULT)
+}
+
+fn parse_readrate(value: &str) -> Option<f64> {
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|rate| rate.is_finite() && *rate >= 0.0)
 }
 
 /// Push `-readrate`/`-readrate_initial_burst` for one input, if this build
@@ -2138,23 +2146,28 @@ pub async fn direct(
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
     Query(q): Query<DirectQuery>,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let file = load_file(&state, id).await?;
-    let served = serve_file_range(&file.path, &headers).await;
+    let served = serve_file_range(&file.path, &headers, &method).await;
     match &served {
         // Bytes are going out: this is the moment playback is real. Every
         // request in the storm reports, and the registry collapses them — the
         // repetition is what keeps a live viewer listed, since a direct play
         // has no session to end and a closed tab announces nothing.
-        Ok(_) => crate::playstart::note_playback_started(
-            &state,
-            user.id,
-            &user.username,
-            id,
-            crate::delivery::Method::Direct,
-            q.stream.as_deref(),
-        ),
+        Ok(response) if method == Method::GET && response.status().is_success() => {
+            crate::playstart::note_playback_started(
+                &state,
+                user.id,
+                &user.username,
+                id,
+                crate::delivery::Method::Direct,
+                q.stream.as_deref(),
+            )
+        }
+        // HEAD and rejected ranges carry no media and are not playback.
+        Ok(_) => {}
         // The open failed, so whatever the availability cache believes is
         // wrong — the unmounted-share case, arriving as it actually arrives.
         Err(_) => state.availability.forget(id),
@@ -2170,6 +2183,7 @@ pub async fn book_content(
     _user: AuthUser,
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let file = load_file(&state, id).await?;
@@ -2181,7 +2195,7 @@ pub async fn book_content(
     if item.kind != ItemKind::Book {
         return Err(ApiError::NotFound("book content"));
     }
-    serve_file_range(&file.path, &headers).await
+    serve_file_range(&file.path, &headers, &method).await
 }
 
 // The caps fields are inlined (not `#[serde(flatten)]`ed) because axum's
@@ -2445,34 +2459,81 @@ pub async fn stream_status(
 
 // --- direct-play range serving ---------------------------------------------
 
-/// Parse a single-range `Range: bytes=start-end` header against a known length.
-/// Returns `(start, end_inclusive)`.
-fn parse_range(headers: &HeaderMap, len: u64) -> Option<(u64, u64)> {
-    let raw = headers.get(header::RANGE)?.to_str().ok()?;
-    let spec = raw.strip_prefix("bytes=")?;
-    // Only the first range is honored (browsers send one).
-    let first = spec.split(',').next()?.trim();
-    let (start_s, end_s) = first.split_once('-')?;
-    let (start, end) = if start_s.is_empty() {
-        // Suffix range: bytes=-N → last N bytes.
-        let n: u64 = end_s.parse().ok()?;
-        if n == 0 {
-            return None;
-        }
-        (len.saturating_sub(n), len - 1)
-    } else {
-        let start: u64 = start_s.parse().ok()?;
-        let end = if end_s.is_empty() {
-            len - 1
-        } else {
-            end_s.parse::<u64>().ok()?.min(len - 1)
-        };
-        (start, end)
+/// Parse byte ranges without conflating absence with invalid/unsatisfiable
+/// demand. RFC 9110 permits a response with one requested satisfiable range;
+/// validate the complete bounded list before choosing its first usable member.
+fn parse_range(headers: &HeaderMap, len: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(value) = headers.get(header::RANGE) else {
+        return Ok(None);
     };
-    if start > end || start >= len {
-        return None;
+    // These raw-file routes do not publish a strong representation validator.
+    // An If-Range precondition therefore cannot authorize a partial response.
+    if headers.contains_key(header::IF_RANGE) {
+        return Ok(None);
     }
-    Some((start, end))
+    let raw = value.to_str().map_err(|_| ())?;
+    let (unit, spec) = raw.split_once('=').ok_or(())?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return Ok(None); // An origin must ignore an unknown range unit.
+    }
+    if headers.get_all(header::RANGE).iter().count() != 1 {
+        return Err(());
+    }
+    let mut chosen = None;
+    let mut empty_suffix = false;
+    let mut members = 0;
+    for member in spec.split(',').filter(|member| !member.trim().is_empty()) {
+        members += 1;
+        if members > 16 {
+            return Err(());
+        }
+        let (start, end) = member.trim().split_once('-').ok_or(())?;
+        let range = if start.is_empty() {
+            let suffix = range_decimal(end)?;
+            // A nonzero suffix is satisfiable even for an empty file
+            // (RFC 9110 §14.1.2). Ignore Range rather than inventing -1.
+            empty_suffix |= suffix > 0 && len == 0;
+            (suffix > 0 && len > 0).then(|| (len.saturating_sub(suffix), len - 1))
+        } else {
+            let first = range_decimal(start)?;
+            let last = if end.is_empty() {
+                u64::MAX
+            } else {
+                let last = range_decimal(end)?;
+                // Validate original decimal order before saturating to a
+                // machine offset: two huge numbers can both become MAX.
+                let first_digits = start.trim_start_matches('0');
+                let last_digits = end.trim_start_matches('0');
+                if (first_digits.len(), first_digits) > (last_digits.len(), last_digits) {
+                    return Err(());
+                }
+                last
+            };
+            (first < len).then(|| (first, last.min(len - 1)))
+        };
+        if chosen.is_none() {
+            chosen = range;
+        }
+    }
+    if empty_suffix {
+        Ok(None)
+    } else {
+        chosen.map(Some).ok_or(())
+    }
+}
+
+/// Decimal positions may exceed machine integers. Saturation keeps their
+/// ordering against every representable file length without overflow or
+/// treating a huge suffix/end as an absent request.
+fn range_decimal(value: &str) -> Result<u64, ()> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(());
+    }
+    Ok(value.bytes().fold(0_u64, |number, digit| {
+        number
+            .saturating_mul(10)
+            .saturating_add(u64::from(digit - b'0'))
+    }))
 }
 
 /// HTTP range serving of a file (direct play). Shared by the native part
@@ -2480,6 +2541,7 @@ fn parse_range(headers: &HeaderMap, len: u64) -> Option<(u64, u64)> {
 pub(crate) async fn serve_file_range(
     path: &Path,
     headers: &HeaderMap,
+    method: &Method,
 ) -> Result<Response, ApiError> {
     let mut fh = tokio::fs::File::open(path)
         .await
@@ -2491,8 +2553,23 @@ pub(crate) async fn serve_file_range(
         .len();
     let ctype = content_type(path);
 
-    match parse_range(headers, len) {
-        Some((start, end)) => {
+    let range = if method == Method::GET {
+        parse_range(headers, len)
+    } else {
+        Ok(None)
+    };
+    match range {
+        Err(()) => Ok((
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [
+                (header::CONTENT_RANGE, format!("bytes */{len}")),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (header::CONTENT_LENGTH, "0".to_owned()),
+            ],
+            Body::empty(),
+        )
+            .into_response()),
+        Ok(Some((start, end))) => {
             let count = end - start + 1;
             fh.seek(std::io::SeekFrom::Start(start))
                 .await
@@ -2510,8 +2587,12 @@ pub(crate) async fn serve_file_range(
             )
                 .into_response())
         }
-        None => {
-            let stream = tokio_util::io::ReaderStream::new(fh);
+        Ok(None) => {
+            let body = if method == Method::HEAD {
+                Body::empty()
+            } else {
+                Body::from_stream(tokio_util::io::ReaderStream::new(fh))
+            };
             Ok((
                 StatusCode::OK,
                 [
@@ -2519,7 +2600,7 @@ pub(crate) async fn serve_file_range(
                     (header::ACCEPT_RANGES, "bytes".to_owned()),
                     (header::CONTENT_LENGTH, len.to_string()),
                 ],
-                Body::from_stream(stream),
+                body,
             )
                 .into_response())
         }
@@ -3634,28 +3715,246 @@ mod tests {
         let len = 1000;
         assert_eq!(
             parse_range(&headers_with_range("bytes=0-99"), len),
-            Some((0, 99))
+            Ok(Some((0, 99)))
         );
         assert_eq!(
             parse_range(&headers_with_range("bytes=100-"), len),
-            Some((100, 999))
+            Ok(Some((100, 999)))
         );
         assert_eq!(
             parse_range(&headers_with_range("bytes=-100"), len),
-            Some((900, 999))
+            Ok(Some((900, 999)))
         );
         // Open end clamps to len-1.
         assert_eq!(
             parse_range(&headers_with_range("bytes=0-99999"), len),
-            Some((0, 999))
+            Ok(Some((0, 999)))
         );
         // Invalid / out of range.
         assert_eq!(
             parse_range(&headers_with_range("bytes=2000-3000"), len),
-            None
+            Err(())
         );
-        assert_eq!(parse_range(&headers_with_range("bytes=500-100"), len), None);
-        assert_eq!(parse_range(&HeaderMap::new(), len), None);
+        assert_eq!(
+            parse_range(&headers_with_range("bytes=500-100"), len),
+            Err(())
+        );
+        assert_eq!(parse_range(&HeaderMap::new(), len), Ok(None));
+    }
+
+    #[test]
+    fn direct_range_handles_empty_files_huge_integers_and_complete_lists() {
+        for range in ["bytes=0-", "bytes=0-0", "bytes=-0"] {
+            assert_eq!(
+                parse_range(&headers_with_range(range), 0),
+                Err(()),
+                "{range}"
+            );
+        }
+        for range in [
+            "bytes=",
+            "bytes=, ,",
+            "bytes=+1-2",
+            "bytes=1-+2",
+            "bytes=1 -2",
+            "bytes=0-1,bad",
+            "bytes=0-1,8-7",
+            "bytes=-0",
+            "bytes=99-",
+            "bytes=0-1,18446744073709551617-18446744073709551616",
+        ] {
+            assert_eq!(
+                parse_range(&headers_with_range(range), 10),
+                Err(()),
+                "{range}"
+            );
+        }
+        for (range, expected) in [
+            ("bytes=99-,2-3", (2, 3)),
+            ("bytes=0-1,8-9", (0, 1)),
+            ("bytes=, 2-3,", (2, 3)),
+            ("Bytes=1-2", (1, 2)),
+            ("bytes=00001-00002", (1, 2)),
+            ("bytes=0-99999999999999999999999999999999999", (0, 9)),
+            ("bytes=-99999999999999999999999999999999999", (0, 9)),
+        ] {
+            assert_eq!(
+                parse_range(&headers_with_range(range), 10),
+                Ok(Some(expected)),
+                "{range}"
+            );
+        }
+        assert_eq!(
+            parse_range(&headers_with_range("bytes=999999999999999999999999-"), 10),
+            Err(())
+        );
+        assert_eq!(parse_range(&headers_with_range("items=0-1"), 10), Ok(None));
+        assert_eq!(parse_range(&headers_with_range("bytes=-1"), 0), Ok(None));
+        assert_eq!(
+            parse_range(&headers_with_range("bytes=-1,broken"), 0),
+            Err(())
+        );
+        assert_eq!(
+            parse_range(&headers_with_range("bytes=0-"), u64::MAX),
+            Ok(Some((0, u64::MAX - 1)))
+        );
+        let excessive = format!("bytes={}", vec!["0-1"; 17].join(","));
+        assert_eq!(parse_range(&headers_with_range(&excessive), 10), Err(()));
+        let mut repeated = headers_with_range("bytes=0-1");
+        repeated.append(header::RANGE, HeaderValue::from_static("bytes=2-3"));
+        assert_eq!(parse_range(&repeated, 10), Err(()));
+    }
+
+    #[tokio::test]
+    async fn direct_range_response_has_exact_status_headers_and_bytes() {
+        let directory = tempfile::tempdir().expect("temporary raw file");
+        let path = directory.path().join("movie.mp4");
+        tokio::fs::write(&path, b"0123456789")
+            .await
+            .expect("write raw fixture");
+        for (range, status, content_range, body) in [
+            (None, StatusCode::OK, None, "0123456789"),
+            (
+                Some("bytes=0-1,18446744073709551617-18446744073709551616"),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                Some("bytes */10"),
+                "",
+            ),
+            (
+                Some("bytes=2-4"),
+                StatusCode::PARTIAL_CONTENT,
+                Some("bytes 2-4/10"),
+                "234",
+            ),
+            (
+                Some("bytes=-3"),
+                StatusCode::PARTIAL_CONTENT,
+                Some("bytes 7-9/10"),
+                "789",
+            ),
+            (
+                Some("bytes=99-,3-4"),
+                StatusCode::PARTIAL_CONTENT,
+                Some("bytes 3-4/10"),
+                "34",
+            ),
+            (
+                Some("bytes=10-"),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                Some("bytes */10"),
+                "",
+            ),
+            (
+                Some("bytes=bad"),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                Some("bytes */10"),
+                "",
+            ),
+            (
+                Some("bytes=0-1,bad"),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                Some("bytes */10"),
+                "",
+            ),
+            (Some("items=0-1"), StatusCode::OK, None, "0123456789"),
+        ] {
+            let headers = range.map(headers_with_range).unwrap_or_default();
+            let response = serve_file_range(&path, &headers, &Method::GET)
+                .await
+                .expect("range response");
+            assert_eq!(response.status(), status, "{range:?}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_RANGE)
+                    .map(|value| value.to_str().expect("ASCII Content-Range")),
+                content_range
+            );
+            assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+            assert_eq!(
+                response.headers()[header::CONTENT_LENGTH],
+                body.len().to_string()
+            );
+            let received = axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .expect("read response");
+            assert_eq!(received.as_ref(), body.as_bytes(), "{range:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_range_empty_head_and_unvalidated_if_range_cannot_underflow_or_send_partial_media(
+    ) {
+        let directory = tempfile::tempdir().expect("temporary raw files");
+        let path = directory.path().join("empty.mp4");
+        tokio::fs::write(&path, b"").await.expect("empty fixture");
+        for (headers, status) in [
+            (HeaderMap::new(), StatusCode::OK),
+            (headers_with_range("bytes=-1"), StatusCode::OK),
+            (headers_with_range("bytes=-1,0-"), StatusCode::OK),
+            (
+                headers_with_range("bytes=0-"),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+            ),
+            (
+                headers_with_range("bytes=-1,broken"),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+            ),
+        ] {
+            let response = serve_file_range(&path, &headers, &Method::GET)
+                .await
+                .expect("empty response");
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers()[header::CONTENT_LENGTH], "0");
+            assert!(axum::body::to_bytes(response.into_body(), 1)
+                .await
+                .expect("read empty-file response")
+                .is_empty());
+        }
+        tokio::fs::write(&path, b"0123456789")
+            .await
+            .expect("populated fixture");
+        let response = serve_file_range(&path, &headers_with_range("bytes=99-"), &Method::HEAD)
+            .await
+            .expect("HEAD");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "10");
+        assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+        assert!(axum::body::to_bytes(response.into_body(), 1)
+            .await
+            .expect("read HEAD response")
+            .is_empty());
+        for validator in ["\"unknown\"", "W/\"weak\"", "Fri, 04 Sep 2026 20:00:00 GMT"] {
+            let mut headers = headers_with_range("bytes=2-3");
+            headers.insert(
+                header::IF_RANGE,
+                validator.parse().expect("If-Range fixture"),
+            );
+            let response = serve_file_range(&path, &headers, &Method::GET)
+                .await
+                .expect("If-Range response");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 10)
+                    .await
+                    .expect("read complete If-Range response")
+                    .as_ref(),
+                b"0123456789"
+            );
+        }
+    }
+
+    #[test]
+    fn remux_readrate_accepts_only_finite_nonnegative_values() {
+        for value in [
+            "NaN", "inf", "+inf", "-inf", "Infinity", "1e999", "-1", "bad", "",
+        ] {
+            assert_eq!(parse_readrate(value), None, "{value}");
+        }
+        for (value, expected) in [("0", 0.0), (" 4.0 ", 4.0), ("1.25", 1.25)] {
+            assert_eq!(parse_readrate(value), Some(expected));
+        }
     }
 
     #[test]
