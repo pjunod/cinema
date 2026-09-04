@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["15e5b895"]
+commits = ["c118702a"]
 points = ["playback.pipeline"]
 checks = ["rust-gate"]
 reason = "The current playback-control unit and Store contract regressions exercise deadline-fenced preparation acknowledgement, mutually exclusive commit and abort reservation, durable exact-response replay, owner-epoch rejection, and settlement after a dropped request waiter."
